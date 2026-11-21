@@ -151,3 +151,187 @@ int main(void) {
     let result = Command::new(dir.join("test")).output().unwrap();
     assert!(result.status.success(), "{result:?}");
 }
+
+/// Closed stack memory in `counter-range` (counter_range.h): hand IR for cell
+/// rules no Hirsel lowering reaches. Each function fills or copies an alloca so
+/// that a cell holds a value the rule must not lose, then checks a load of it in
+/// a counted loop; the check must still raise, with its own site. The oracles
+/// come from the constants: a0 reads bytes 00 00 00 ff (-16777216) and
+/// subtracts 2130706433, past i32::MIN; a1 reads o+0 = s+4 = i32::MAX; a2
+/// stores i32::MAX through o + 12k + (2^63 - 8) = o + 8 (mod 2^64) for
+/// k = (2^63 + 16) / 12 and reads +8; a8 reads FLT_MAX's bits 0x7f7fffff at +40
+/// and adds 8388609, past i32::MAX.
+#[test]
+fn closed_cells_keep_admitted_failures() {
+    let source = r#"
+target triple = "x86_64-unknown-linux-gnu"
+declare void @hirsel_core_raise_builtin(ptr, i8, i64)
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
+declare { i32, i1 } @llvm.ssub.with.overflow.i32(i32, i32)
+
+define void @a0(ptr %context, i64 %j, i64 %n) {
+entry:
+  %o = alloca [16 x i8], align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %o, i8 -1, i64 16, i1 false)
+  call void @llvm.memset.p0.i64(ptr align 8 %o, i8 0, i64 3, i1 false)
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %next, %ok ]
+  %more = icmp ult i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %x = add i64 %j, %i
+  %p = getelementptr [16 x i8], ptr %o, i64 %x
+  %v = load i32, ptr %p, align 4
+  %r = call { i32, i1 } @llvm.ssub.with.overflow.i32(i32 %v, i32 2130706433)
+  %f = extractvalue { i32, i1 } %r, 1
+  br i1 %f, label %bad, label %ok
+bad:
+  call void @hirsel_core_raise_builtin(ptr %context, i8 1, i64 10)
+  ret void
+ok:
+  %next = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define void @a1(ptr %context, i64 %j, i64 %k, i64 %n) {
+entry:
+  %s = alloca [24 x i8], align 8
+  %o = alloca [16 x i8], align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %s, i8 0, i64 24, i1 false)
+  call void @llvm.memset.p0.i64(ptr align 8 %o, i8 0, i64 16, i1 false)
+  %sk = getelementptr [8 x i8], ptr %s, i64 %k
+  %sk4 = getelementptr i8, ptr %sk, i64 4
+  store i32 2147483647, ptr %sk4, align 4
+  %s4 = getelementptr i8, ptr %s, i64 4
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %o, ptr align 4 %s4, i64 16, i1 false)
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %next, %ok ]
+  %more = icmp ult i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %x = add i64 %j, %i
+  %p = getelementptr [8 x i8], ptr %o, i64 %x
+  %v = load i32, ptr %p, align 4
+  %r = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %v, i32 1)
+  %f = extractvalue { i32, i1 } %r, 1
+  br i1 %f, label %bad, label %ok
+bad:
+  call void @hirsel_core_raise_builtin(ptr %context, i8 1, i64 11)
+  ret void
+ok:
+  %next = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define void @a2(ptr %context, i64 %j, i64 %k, i64 %n) {
+entry:
+  %o = alloca [48 x i8], align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %o, i8 0, i64 48, i1 false)
+  %ok12 = getelementptr nuw [12 x i8], ptr %o, i64 %k
+  %w = getelementptr i8, ptr %ok12, i64 9223372036854775800
+  store i32 2147483647, ptr %w, align 4
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %next, %ok ]
+  %more = icmp ult i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %x = add i64 %j, %i
+  %e = getelementptr [12 x i8], ptr %o, i64 %x
+  %p = getelementptr i8, ptr %e, i64 8
+  %v = load i32, ptr %p, align 4
+  %r = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %v, i32 1)
+  %f = extractvalue { i32, i1 } %r, 1
+  br i1 %f, label %bad, label %ok
+bad:
+  call void @hirsel_core_raise_builtin(ptr %context, i8 1, i64 12)
+  ret void
+ok:
+  %next = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define void @a8(ptr %context, i64 %j, i64 %k, i64 %n) {
+entry:
+  %o = alloca [48 x i8], align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %o, i8 0, i64 48, i1 false)
+  %ok12 = getelementptr [12 x i8], ptr %o, i64 %k
+  %w = getelementptr i8, ptr %ok12, i64 4
+  store float 0x47EFFFFFE0000000, ptr %w, align 4
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %next, %ok ]
+  %more = icmp ult i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %x = add i64 %j, %i
+  %e = getelementptr [16 x i8], ptr %o, i64 %x
+  %p = getelementptr i8, ptr %e, i64 8
+  %v = load i32, ptr %p, align 4
+  %r = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %v, i32 8388609)
+  %f = extractvalue { i32, i1 } %r, 1
+  br i1 %f, label %bad, label %ok
+bad:
+  call void @hirsel_core_raise_builtin(ptr %context, i8 1, i64 13)
+  ret void
+ok:
+  %next = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+"#;
+    let (_, object) = optimized(source);
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
+    std::fs::write(dir.join("cells.o"), object).unwrap();
+    std::fs::write(
+        dir.join("test.c"),
+        r#"
+#include <stdint.h>
+#include <stdio.h>
+static uint64_t site; static int raised;
+void hirsel_core_raise_builtin(void *context, uint8_t kind, uint64_t s) { site = s; ++raised; }
+extern void a0(void *, uint64_t, uint64_t);
+extern void a1(void *, uint64_t, uint64_t, uint64_t);
+extern void a2(void *, uint64_t, uint64_t, uint64_t);
+extern void a8(void *, uint64_t, uint64_t, uint64_t);
+#define CASE(name, call, want) \
+    raised = 0; site = 0; call; \
+    if (raised != 1 || site != want) { printf(name " raised %d at %llu\n", raised, (unsigned long long)site); failed = 1; }
+int main(void) {
+    int failed = 0;
+    const uint64_t k = 768614336404564652ull;
+    CASE("a0", a0(&raised, 0, 1), 10)
+    CASE("a1", a1(&raised, 0, 0, 1), 11)
+    CASE("a2", a2(&raised, 0, k, 1), 12)
+    CASE("a8", a8(&raised, 2, 3, 1), 13)
+    return failed;
+}
+"#,
+    )
+    .unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let result = Command::new(prefix.join("bin/clang"))
+        .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+        .args(["-std=c11", "-O2", "-no-pie"])
+        .arg(dir.join("test.c"))
+        .arg(dir.join("cells.o"))
+        .arg("-o")
+        .arg(dir.join("test"))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let result = Command::new(dir.join("test")).output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+}

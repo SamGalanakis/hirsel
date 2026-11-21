@@ -86,7 +86,10 @@ pub(crate) fn load(
     let Some(root) = decode::<Root>(&bytes) else {
         return Ok(None);
     };
-    if root.schema != SCHEMA || root.object.address != object_name(key) {
+    if root.schema != SCHEMA
+        || root.object.address != object_name(key)
+        || root.debug.is_some_and(|d| d != debug_name(key))
+    {
         return Ok(None);
     }
     let Some((bytes, file)) = store.get_bare(root.object)? else {
@@ -256,6 +259,21 @@ mod tests {
                 assert!(!read, "instance {kind} {key:?}");
             }
         }
+        // An object record naming another key's debug rows, each stored
+        // soundly under its own name, links rows of another object.
+        let (_dir, store) = fresh();
+        let (object_a, _) = publish(&store, a, &object(b"a")).unwrap();
+        publish(&store, b, &object(b"b")).unwrap();
+        let foreign = Root {
+            schema: SCHEMA,
+            object: object_a,
+            debug: Some(debug_name(b)),
+        };
+        store.put_keyed(a, &encode(&foreign).unwrap()).unwrap();
+        assert!(
+            load(&store, a).unwrap().is_none(),
+            "object a naming b's debug rows"
+        );
     }
     #[test]
     fn native_object_caches_unchanged_code_and_optional_rows_atomically() {

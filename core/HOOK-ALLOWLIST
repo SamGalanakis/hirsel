@@ -259,6 +259,8 @@ core@1/list/push
 core@1/list/put_word_be
 core@1/list/put_word_le
 core@1/list/reserve
+# MEM-21 / R1 (3d1bbe30): reserve with the same inline refusal as before R1.
+core@1/list/try_reserve
 core@1/list/set
 core@1/list/slice
 core@1/list/slots_empty
@@ -300,7 +302,6 @@ core@1/map/kill
 core@1/map/len
 core@1/map/make_room
 core@1/map/new
-core@1/map/pop_entry
 # DECISIONS.md 2026-11-18 (memory model, MEM-31): in-place map insertion.
 core@1/map/probe_insert
 core@1/map/push_entry
@@ -315,7 +316,8 @@ core@1/map/slot_value
 core@1/map/slots
 core@1/map/swap_value
 core@1/map/take_entry
-core@1/map/undo_clone
+# MEM-21 / R1 (3d1bbe30): reserve with the same inline refusal as before R1.
+core@1/map/try_reserve
 core@1/map/update
 core@1/map/with_value
 core@1/option/unwrap
@@ -373,6 +375,8 @@ core@1/task/cancel
 core@1/task/check_cancel
 core@1/task/join
 core@1/task/spawn
+# MEM-21 / R1 (3d1bbe30): spawn with the same refusal and input handback as before R1.
+core@1/task/try_spawn
 core@1/text/as_string
 core@1/text/copy_in
 core@1/text/len

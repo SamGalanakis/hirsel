@@ -39,6 +39,70 @@ one nonblocking attempt to send it ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stre
 The last owner closes the descriptor once. Dropping an unsplit socket or a
 listener closes it once. No finalizer waits or enables positive linger.
 
+```hirsel unbuilt
+pub type Unjoined = Unjoined(ReadHalf, WriteHalf)
+pub fn join(take r: ReadHalf, take w: WriteHalf) -> Result[Socket, Unjoined]
+```
+
+`net.join` is `split` undone: it consumes the two halves of one plain socket and gives back
+that socket, with the record `split` divided. It is how a client upgrades an established
+TCP connection to TLS in place (STARTTLS): the program exchanges plaintext over the
+halves, joins them, and passes the socket to `tls.connect`
+([TLS-1](tls.md#tls-1-client-handshake)). The joined socket is the same connection: same
+descriptor, peer, issuing provider and object ordinal, with nothing sent, received, shut
+down or buffered by the join. Like `split`, it allocates and admits nothing, takes one step,
+does not wait, passes no replay point, and on a socket of `provide.net` asks the server
+nothing ([core](core.md#provide)).
+
+These checks run in order. The first that fails returns `Error(Unjoined(r, w))` with both
+halves unchanged and still usable, and nothing else happens:
+
+1. `r` and `w` are not the two halves of one socket.
+2. The socket is a TLS stream. Its halves stay halves; there is no TLS inside TLS.
+3. The socket was not made by `host.connect` (TLS-1's check 1). A socket from `accept` is
+   never the client side of a handshake, and joining it has no other use.
+
+A STARTTLS client must read the server's go-ahead with `max_receive` equal to the go-ahead's
+length, so that no byte past it reaches program memory as plaintext. Bytes the program
+buffered before TLS starts but treats as arriving after it are the classic STARTTLS
+injection hole: an attacker on the path appends plaintext to the go-ahead, and the client
+reads it as if the server had sent it under TLS (CVE-2021-23222 in libpq, CVE-2011-0411 in
+Postfix). Bytes that the host has received but nobody has read are TLS-1's to refuse: a
+handshake fails with `Tls(Protocol(0))` and sends nothing when such bytes are present
+([TLS-1](tls.md#tls-1-client-handshake)).
+
+For PostgreSQL before 17, the go-ahead is one byte. The client sends the 8-byte
+`SSLRequest`, `00 00 00 08 04 D2 16 2F` (length 8, then request code 80877103), and the
+server answers `S` to proceed with TLS or `N` to refuse it:
+
+```hirsel unbuilt
+pub type StartTls = Secured(ReadHalf, WriteHalf, Handshake) | Declined(ReadHalf, WriteHalf, u8) | Ended() | NotClient()
+
+fn pg_starttls(n: Net, take s: Socket, name: String, trust: Trust, until: Until) -> Result[StartTls, NetError] waits {
+  let (mut r, mut w) = net.split(take s)
+  let req: Bytes = b"\x00\x00\x00\x08\x04\xD2\x16\x2F"
+  let mut sent: u64 = 0
+  while sent < 8 { sent += host.send_pair(mut w, list.slice(req, sent, 8), list.slice(req, 8, 8), until)? }
+  let mut reply: Bytes = list.with_capacity(1)
+  if host.recv_bounded(mut r, mut reply, 1, until)? == 0 { return Ok(Ended()) }
+  match list.get(reply, 0) {
+    Some(0x53) => {},                                                     // `S`: go ahead
+    Some(b) => return Ok(Declined(take r, take w, b)),                     // `N`, or anything else
+    None => return Ok(Ended()),
+  }
+  match net.join(take r, take w) {
+    Ok(s) => match tls.connect(n, take s, name, trust, list.new(), until) {
+      Ok((r, w, h)) => Ok(Secured(take r, take w, h)),
+      Error(e) => Error(e),
+    },
+    Error(_) => Ok(NotClient()),
+  }
+}
+```
+
+`max_receive` 1 is the bound: the receive cannot append a second byte, whatever the server
+or an attacker sent.
+
 ### NET-6: Network rules
 
 `net.narrow(n: Net, r: Rule) -> Result[Net, RuleError]` intersects each parent

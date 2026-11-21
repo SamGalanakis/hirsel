@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""S3 journal laws, real W2 cuts, named I/O failures and W4 schedules."""
+"""S3 journal evaluator laws, real W2 cuts, named I/O failures and W4 schedules.
+
+The journal tests themselves run with the rest of the store package under
+`hirsel test core/programs/store` (store_tests.py).
+"""
 import argparse
 import contextlib
 import json
@@ -8,7 +12,6 @@ from pathlib import Path
 import re
 import tempfile
 
-from case_progress import run_case
 from std_native import ROOT, Evaluator
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
@@ -29,11 +32,6 @@ LAW_GROUPS = {
     'triggers': TRIGGER_LAWS,
     'runner': ('trigger_transact', 'trigger_granted', 'trigger_cancel'),
     'steps': STEP_LAWS,
-}
-NATIVE_GROUPS = {
-    module: {f'store@1/{module}/journal_test_{name}' for name in group
-             if name not in ('frame_size_boundary', 'frame_oversize')}
-    for module, group in LAW_GROUPS.items()
 }
 SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place', 'journal-place-split', 'journal-place-idle')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut',
@@ -129,49 +127,6 @@ def main():
                 continue
             if args.compiler is None or args.runtime is None or args.bridge is None:
                 parser.error('native backends require compiler, runtime and bridge')
-            host = work / (engine + '-host')
-            host.mkdir()
-            command = [str(args.compiler.resolve()), 'test', '--inputs', str(manifest),
-                       '--source-core', '--source-std', '--backend', 'llvm' if engine == 'llvm-release' else engine,
-                       '--runtime', str(args.runtime.resolve()), '--store', str(work / engine), '--json',
-                       '--filter', 'store@1/store/journal_test_', '--dir', str(host), '--limit', str(64 * 1024 * 1024)]
-            for grant in ('Clock', 'Random', 'Tasks'):
-                command += ['--grant', grant]
-            if engine == 'llvm-release':
-                command.append('--release')
-            if args.cc:
-                command += ['--cc', str(args.cc.resolve())]
-            for module, expected in NATIVE_GROUPS.items():
-                prefix = f'store@1/{module}/journal_test_'
-                selected = list(command)
-                selected[selected.index('--filter') + 1] = prefix
-                result = run_case(prefix, engine, selected, capture_output=True, text=True, env=env)
-                try:
-                    report = json.loads(result.stdout)
-                except ValueError:
-                    report = dict(stdout=result.stdout, stderr=result.stderr)
-                tests = report.get('tests', [])
-                good = (result.returncode == 0 and len(tests) == len(expected)
-                        and {test['definition'] for test in tests} == expected
-                        and all(test.get('passed') for test in tests))
-                rows.append(dict(engine=engine, module=module, passed=good, result=report))
-                print(f'{engine} {module}: {sum(bool(t.get("passed")) for t in tests)}/{len(expected)} passed', flush=True)
-            large = list(command)
-            large[large.index('--filter') + 1] = 'store@1/store/journal_frame_'
-            # L29 simultaneously retains sixteen MiB of rows and the maximum
-            # frame, plus replay buffers and the two reserved task roots.
-            large[large.index('--limit') + 1] = str(512 * 1024 * 1024)
-            result = run_case('store@1/store/journal_frame_', engine, large, capture_output=True, text=True, env=env)
-            try:
-                report = json.loads(result.stdout)
-            except ValueError:
-                report = dict(stdout=result.stdout, stderr=result.stderr)
-            tests = report.get('tests', [])
-            good = (result.returncode == 0 and len(tests) == 2
-                    and {t.get('definition') for t in tests} == {'store@1/store/journal_frame_size_boundary', 'store@1/store/journal_frame_oversize'}
-                    and all(t.get('passed') is True for t in tests))
-            rows.append(dict(engine=engine, law='frame_size_boundary', passed=good, result=report))
-            print(f'{engine} frame_size_boundary: {"PASS" if good else "FAIL"}', flush=True)
             try:
                 # run_crashes builds with the same native toolchain, then executes
                 # the immutable binary once at every W2 mutation cut.

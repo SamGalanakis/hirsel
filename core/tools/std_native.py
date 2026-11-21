@@ -65,6 +65,8 @@ class Contract:
     # File-level `// test-env: NAME=VALUE`: each native law of the file runs once
     # more with NAME=VALUE set, e.g. to select a portable runtime path.
     run_env: tuple[tuple[str, str], ...] = ()
+    # Exact Env grant names. None means absent, and byte values can be non-UTF-8.
+    env_fixture: tuple[tuple[str, bytes | None], ...] = ()
 
     @property
     def name(self):
@@ -132,6 +134,32 @@ def matches_filter(root, case, selector):
             or str(case.file.relative_to(root)).startswith(selector))
 
 
+def env_fixture(file, source):
+    # // test-env-fixture: {"MISSING": null, "TEXT": "value", "RAW": [255]}
+    fixtures = re.findall(r'^// test-env-fixture: (.+)$', source, re.M)
+    if not fixtures:
+        return ()
+    if len(fixtures) != 1:
+        raise ValueError(f'{file}: expected one Env fixture')
+    entries = json.loads(fixtures[0])
+    if not isinstance(entries, dict) or not entries:
+        raise ValueError(f'{file}: Env fixture must name at least one key')
+    result = []
+    for name, value in entries.items():
+        if not re.fullmatch(r'[A-Z0-9_]+', name):
+            raise ValueError(f'{file}: invalid Env fixture key {name!r}')
+        if isinstance(value, str):
+            value = value.encode()
+        elif isinstance(value, list):
+            value = bytes(value)
+        elif value is not None:
+            raise ValueError(f'{file}: invalid Env fixture value for {name}')
+        if value is not None and b'\0' in value:
+            raise ValueError(f'{file}: NUL in Env fixture value for {name}')
+        result.append((name, value))
+    return tuple(result)
+
+
 def discover(root, filters):
     contracts = []
     files = [p for package in ['core', 'std'] for p in (root / 'core' / package / 'tests').glob('*.hirsel')]
@@ -147,6 +175,7 @@ def discover(root, filters):
             raise ValueError(f'{file}: evaluator-only law needs // test-reason:')
         evaluator_only = reason[1] if backend else None
         run_env = tuple(tuple(pair) for pair in re.findall(r'^// test-env: ([A-Z0-9_]+)=(\S+)$', source, re.M))
+        fixture = env_fixture(file, source)
         stdout = stderr = b""
         first_write = None
         host_op = 0
@@ -186,6 +215,8 @@ def discover(root, filters):
                     raise ValueError(f'{file}:{line}: unreadable run oracle')
                 continue
             call, expected = match.groups()
+            if '(env)' in call and not fixture:
+                raise ValueError(f'{file}:{line}: Env law needs a fixture')
             if expected.startswith('fault ') and not evaluator_only:
                 raise ValueError(f'{file}:{line}: fault oracle requires // test-backend: evaluator')
             if expected.startswith('fault '):
@@ -198,7 +229,7 @@ def discover(root, filters):
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
             package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture)
             schedule = None
             root_limit = 64 << 20
             evaluator_instructions = 1_000_000_000
@@ -218,7 +249,9 @@ def host_parameter(case):
         return 'native_net:Net,native_clock:Clock,token:Secret,native_out:Stdout,native_err:Stderr', ''
     if model_network(case):
         return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
-    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks')]:
+    if '(dir, tasks)' in case.call:  # A host Dir as the oracle beside served ports.
+        return 'native_dir:Dir,native_tasks:Tasks', ''
+    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks'), ('env', 'Env')]:
         if '(' + argument + ')' in case.call:
             name = 'native_' + argument
             return name + ':' + kind, name
@@ -364,7 +397,7 @@ class Evaluator:
 def wrapper(case, port=None):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
-    call = call.replace('(network)', '(native_net,native_clock,native_tasks)')
+    call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
     if port is not None:
@@ -649,6 +682,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
                            '--runtime', str(record_runtime or runtime) if https else str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
                            '-o', str(scratch / 'programs')]
+                environment = None
                 if https:
                     tape = scratch / 'https.tape'
                     net = f'Net=Connect 127.0.0.1/32 {port}-{port};Tls alpha.test {port}-{port} System'
@@ -721,8 +755,16 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Stderr'])
                 if '(clock)' in case.call:
                     command.extend(['--grant', 'Clock'])
-                if '(tasks)' in case.call:
+                if '(tasks)' in case.call or '(dir, tasks)' in case.call:
                     command.extend(['--grant', 'Tasks'])
+                if '(env)' in case.call:
+                    command.extend(['--grant', 'Env=' + ','.join(name for name, _ in case.env_fixture)])
+                    environment = os.environb.copy()
+                    for name, value in case.env_fixture:
+                        if value is None:
+                            environment.pop(name.encode(), None)
+                        else:
+                            environment[name.encode()] = value
                 linker = cc
                 scripts = []
                 if model_network(case):
@@ -767,13 +809,15 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])
-                result = progress.run(command, cwd=host, capture_output=True, env=environment if https else None)
+                result = progress.run(command, cwd=host, capture_output=True, env=environment)
                 if https:
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
                 else:
                     row['ran'], row['cause'] = test_observation(case, result, entry)
                     for name, value in case.run_env if row['cause'] is None else ():
-                        again = progress.run(command, cwd=host, capture_output=True, env={**os.environ, name: value})
+                        test_environment = {**(os.environb if environment is None else environment),
+                                            os.fsencode(name): os.fsencode(value)}
+                        again = progress.run(command, cwd=host, capture_output=True, env=test_environment)
                         _, cause = test_observation(case, again, entry)
                         if cause:
                             row['cause'] = f'with {name}={value}: {cause}'

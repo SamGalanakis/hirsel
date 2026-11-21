@@ -96,6 +96,7 @@ pub struct Context {
     /// MEM-30 fast-path window, at the frozen offset CONTEXT_STEPS.
     pub steps: i64,
     pub(crate) run: *const crate::process::Config,
+    pub(crate) map_hash_key: [u8; 16],
     pub(crate) cancel_requested: AtomicBool,
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
@@ -132,6 +133,7 @@ impl Context {
             regions: region::RegionCache::default(),
             heap: std::cell::OnceCell::new(),
             run: std::ptr::null(),
+            map_hash_key: [0; 16],
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
             finalizing: 0,

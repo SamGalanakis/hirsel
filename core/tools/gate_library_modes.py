@@ -53,9 +53,18 @@ def main():
                     new = self.progress.run([str(compiler), 'new', str(app), *(['--lib'] if library else [])],
                                          cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(new.returncode, 0, new.stderr)
-                    check = self.progress.run([str(compiler), 'check', str(app), '--json'], cwd=ROOT, capture_output=True, text=True)
+                    formatted = self.progress.run([str(compiler), 'fmt', '--check', str(app)],
+                                                  cwd=ROOT, capture_output=True, text=True)
+                    self.assertEqual(formatted.returncode, 0, formatted.stdout + formatted.stderr)
+                    check = self.progress.run([str(compiler), 'check', '--libraries', str(ROOT / 'core'), '--json'],
+                                              cwd=app, capture_output=True, text=True)
                     self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
                     self.assertTrue(json.loads(check.stdout)['accepted'])
+                    test = self.progress.run([str(compiler), 'test', '--runtime', str(runtime),
+                                              '--libraries', str(ROOT / 'core')],
+                                             cwd=app, capture_output=True, text=True)
+                    self.assertEqual(test.returncode, 0, test.stdout + test.stderr)
+                    self.assertIn('test_answer' if library else 'test_twice', test.stdout)
                     for engine in ['cranelift', 'llvm']:
                         build = self.progress.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
                                                 '--backend', engine, '-o', str(work / 'program'), '--json'],
@@ -149,7 +158,7 @@ def main():
                     result = self.progress.run([str(executable), *arguments], cwd=work, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     return result
-                invoke(compiler, 'std-product', '--runtime', str(runtime), expected=2)
+                invoke(compiler, 'core-product', '--runtime', str(runtime), expected=2)
                 invoke(compiler, 'core-product', '--target', 'x86_64-unknown-linux-gnu', expected=2)
                 initial = json.loads(invoke(compiler, 'env', '--json').stdout)
                 self.assertIsNone(initial['installed_root'])
@@ -210,7 +219,7 @@ def main():
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     return result
                 app = work / 'app'
-                invoke('new', str(app))
+                app.mkdir()
                 (app / 'main.hirsel').write_text(
                     'pub fn main(d: Dir) -> Result[(), Exit] waits {\n'
                     '    match std.file.read_string(d, "input.txt") {\n'

@@ -32,6 +32,7 @@ struct Run {
     stop: Option<u8>,
     record_truncated: Option<(u64, IoError)>,
     grants: Vec<u64>,
+    replay: Option<ReplayInput>,
     sink: Box<crate::os::OsProvider>,
     launch: Box<Metadata>,
     describe_output: Option<(DescribeOutput, *mut u8)>,
@@ -255,39 +256,34 @@ unsafe fn ending(context: *const Context, failed: u8, result: &MainResult) -> En
         Ending::causes(kind, items)
     }
 }
-unsafe extern "C" fn invoke(
+fn tape_directory<'a>(
+    sink: &mut crate::os::OsProvider,
+    path: &'a [u8],
+) -> Result<(Inner, &'a [u8]), String> {
+    let path = Path::new(OsStr::from_bytes(path));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or("expected a tape file path")?;
+    let handle = sink.grant(parent).map_err(|e| e.to_string())?;
+    Ok((
+        Inner {
+            provider: sink.provider(),
+            handle,
+        },
+        name.as_bytes(),
+    ))
+}
+
+unsafe fn record_header(
     context: *mut Context,
     config: *const Config,
-    result: *mut MainResult,
-) -> u8 {
-    // SAFETY: process startup pins Config, Run, the entry and all borrowed tables.
+    run: &Run,
+    tape_id: [u8; 16],
+) -> Result<Header, Fault> {
+    // SAFETY: startup pins the launch inputs and their owned grants.
     unsafe {
-        let run = &mut *(*config).state.cast::<Run>();
-        let path = Path::new(OsStr::from_bytes(&run.path));
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let Some(name) = path.file_name() else {
-            return stopped(run, "expected a tape file path");
-        };
-        let directory = match run.sink.grant(parent) {
-            Ok(dir) => dir,
-            Err(e) => return stopped(run, e),
-        };
-        let mut tape_id = run.record_id.unwrap_or_default();
-        if run.mode == 0 && run.record_id.is_none() {
-            let n = libc::getrandom(tape_id.as_mut_ptr().cast(), tape_id.len(), 0);
-            if n != tape_id.len() as isize {
-                return stopped(run, std::io::Error::last_os_error());
-            }
-            // mc-units-untied (law 2 only): a fixed tape id, so two runs' tapes
-            // can be compared byte for byte.
-            if let Some(v) = std::env::var_os("HIRSEL_TAPE_ID_FIXED") {
-                tape_id = [0; 16];
-                tape_id[..8].copy_from_slice(&(v.len() as u64 + 0x5eed).to_le_bytes());
-                            }
-        }
         let mut arg = Vec::new();
         put_varint(&mut arg, (*config).args_len as u64);
         for i in 0..(*config).args_len {
@@ -299,20 +295,20 @@ unsafe extern "C" fn invoke(
         }
         write_launch(&mut arg, &*(*config).launch, !run.host.is_null());
         let mut net_rules = vec![];
-        if run.mode == 0 && !(*(*config).launch).is_describe() {
+        if !(*(*config).launch).is_describe() {
             let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
             if net != 0 {
                 let handle = entry::hirsel_core_capability_handle(context, net);
                 for rule in (*(handle as *const crate::net::Rules)).as_slice() {
                     let Some(rule) = rule.decode() else {
-                        return stopped(run, Fault::Corrupt);
+                        return Err(Fault::Corrupt);
                     };
                     net_rules.push(rule);
                 }
             }
         }
         let mut secret_grants = Vec::new();
-        if run.mode == 0 && !(*(*config).launch).is_describe() {
+        if !(*(*config).launch).is_describe() {
             for i in 0..run.requirements_len {
                 let req = &*run.requirements.add(i);
                 if req.kind == entry::SECRET {
@@ -322,7 +318,7 @@ unsafe extern "C" fn invoke(
                 }
             }
         }
-        let env = if run.mode == 0 && !(*(*config).launch).is_describe() {
+        let env = if !(*(*config).launch).is_describe() {
             let source = entry::hirsel_core_entry_grant(config, entry::ENV, 0);
             (source != 0).then(|| {
                 let handle = entry::hirsel_core_capability_handle(context, source);
@@ -331,7 +327,7 @@ unsafe extern "C" fn invoke(
         } else {
             None
         };
-        let header = Header {
+        Ok(Header {
             kind: KIND_RUN,
             tape_id,
             identity: run.identity.clone(),
@@ -344,7 +340,19 @@ unsafe extern "C" fn invoke(
             net_rules,
             secret_grants,
             env,
-        };
+            map_hash_key: format::MapHashKey((*context).map_hash_key),
+        })
+    }
+}
+
+unsafe extern "C" fn invoke(
+    context: *mut Context,
+    config: *const Config,
+    result: *mut MainResult,
+) -> u8 {
+    // SAFETY: process startup pins Config, Run, the entry and all borrowed tables.
+    unsafe {
+        let run = &mut *(*config).state.cast::<Run>();
         let expect = Expect {
             identity: &run.identity,
             charge_policy: 0,
@@ -352,19 +360,39 @@ unsafe extern "C" fn invoke(
             arg: None,
             across: run.mode == 2,
         };
-        let mode = if run.mode == 0 {
-            Mode::Record
+        let opened = if let Some(replay) = run.replay.take() {
+            Tape::open_with_startup(run.revision, TapeInput::Replay(replay), &expect)
         } else {
-            Mode::Replay
+            let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
+                Ok(place) => place,
+                Err(error) => return stopped(run, error),
+            };
+            let mut tape_id = run.record_id.unwrap_or_default();
+            if run.record_id.is_none() {
+                let n = libc::getrandom(tape_id.as_mut_ptr().cast(), tape_id.len(), 0);
+                if n != tape_id.len() as isize {
+                    return stopped(run, std::io::Error::last_os_error());
+                }
+                // The unit recording law uses a fixed tape id.
+                if let Some(v) = std::env::var_os("HIRSEL_TAPE_ID_FIXED") {
+                    tape_id = [0; 16];
+                    tape_id[..8].copy_from_slice(&(v.len() as u64 + 0x5eed).to_le_bytes());
+                }
+            }
+            let header = match record_header(context, config, run, tape_id) {
+                Ok(header) => header,
+                Err(error) => return stopped(run, error),
+            };
+            Tape::open_with_startup(
+                run.revision,
+                TapeInput::Record {
+                    dir,
+                    name,
+                    header: &header,
+                },
+                &expect,
+            )
         };
-        let opened = Tape::open_with_startup(
-            run.revision,
-            (run.sink.provider(), directory),
-            name.as_bytes(),
-            mode,
-            &header,
-            &expect,
-        );
         let (tape, startup) = match opened {
             Ok(t) => t,
             Err(e) => return refused(run, e),
@@ -681,6 +709,7 @@ unsafe fn run_taped(
             describe_tape: (NO_HOST, 0),
             host: ptr::null(),
             record_id,
+            replay: None,
         };
         let opened = if mode == 0 {
             match entry::OsProcess::new(
@@ -738,7 +767,24 @@ unsafe fn run_taped(
         config.describe = Some(describe);
         config.close_grants = None;
         config.describe_output = Some(emit_describe);
-        let status = process::hirsel_core_run(&config, invoke);
+        let status = if mode == 0 {
+            process::hirsel_core_run(&config, invoke)
+        } else {
+            let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
+                Ok(place) => place,
+                Err(error) => return stopped(&mut run, error),
+            };
+            let replay = match ReplayInput::open(dir, name) {
+                Ok(replay) => replay,
+                Err(error) => return refused(&mut run, error),
+            };
+            if replay.stored.kind != KIND_RUN {
+                return refused(&mut run, OpenError::Unreadable(Fault::Corrupt));
+            }
+            let key = replay.stored.map_hash_key.0;
+            run.replay = Some(replay);
+            process::run_with_map_hash_key(&config, invoke, key)
+        };
         if let Some((at, err)) = run.record_truncated {
             report_truncation(run.stderr, at, err);
         }
@@ -748,6 +794,60 @@ unsafe fn run_taped(
 
 #[cfg(test)]
 pub(super) fn check_launch_replay() {
+    // The entropy-denial filter is permanent for its thread.
+    std::thread::spawn(check_launch_replay_without_entropy)
+        .join()
+        .unwrap();
+}
+
+#[cfg(test)]
+fn check_launch_replay_without_entropy() {
+    fn deny_getrandom() {
+        let mut filter = [
+            libc::sock_filter {
+                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_getrandom as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: these calls affect only the fixture thread and the kernel copies the filter.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                0
+            );
+            let mut byte = 0u8;
+            assert_eq!(libc::getrandom((&mut byte as *mut u8).cast(), 1, 0), -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENOSYS)
+            );
+        }
+    }
     #[derive(Debug, PartialEq)]
     struct Snapshot {
         digest: Vec<u8>,
@@ -755,6 +855,7 @@ pub(super) fn check_launch_replay() {
         n_place: u64,
         describe: u64,
         emitted: bool,
+        key: format::MapHashKey,
     }
     thread_local! {
         static OBSERVED: std::cell::RefCell<Vec<Snapshot>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -770,6 +871,7 @@ pub(super) fn check_launch_replay() {
                 target: std::slice::from_raw_parts(target.data, target.len).to_vec(),
                 n_place: word(0, 0),
                 describe: word(5, 0),
+                key: format::MapHashKey((*context).map_hash_key),
                 emitted: process::hirsel_core_describe_emit(
                     context,
                     &Buffer {
@@ -789,6 +891,9 @@ pub(super) fn check_launch_replay() {
     let output = std::fs::File::create(root.join("describe")).unwrap();
     let path = std::ffi::CString::new(root.join("run.tape").as_os_str().as_bytes()).unwrap();
     for mode in [0, 1] {
+        if mode == 1 {
+            deny_getrandom();
+        }
         let (target, arguments): (&[u8], &[&[u8]]) = if mode == 0 {
             (
                 b"record-target",
@@ -856,6 +961,10 @@ pub(super) fn check_launch_replay() {
     assert_eq!(seen[0].n_place, 73);
     assert_eq!(seen[0].describe, 1);
     assert!(seen[0].emitted);
+    let bytes = std::fs::read(root.join("run.tape")).unwrap();
+    let mut data = bytes.as_slice();
+    let (_, header) = Blocks::open(|buf| std::io::Read::read(&mut data, buf)).unwrap();
+    assert_eq!(seen[0].key, header.map_hash_key);
     assert_eq!(seen[1], seen[0]);
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
 }

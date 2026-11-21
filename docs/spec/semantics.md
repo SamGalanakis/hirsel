@@ -103,7 +103,8 @@ no program supplies or replaces them in v1 ([reserved](reserved.md), R11). The h
 by a per-run seed that enters at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); no operation reveals a hash and iteration
 is in insertion order, so no value depends on the seed
-([CAP-6](capabilities.md#cap-6-no-ambient-input)).
+([CAP-6](capabilities.md#cap-6-no-ambient-input)). The key also has no effect on cleanup
+order, admission, refunds or step charges. A Map literal builds its index at run time.
 Views from `map.get` are anchored to the map and freeze it as list views do.
 `map.update` changes a present value in place through a scoped callback
 ([core](core.md)).
@@ -202,7 +203,8 @@ type Q: key { w: f64 }                                     // refused: OWN-4, f6
 
 Given the same program, the same values at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)), the same root limit and the same charge
-policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) behaves
+policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) and whose
+program reaches no foreign function ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)) behaves
 identically on every engine, build and optimisation level. Its **observables** are exactly:
 
 - its values, its output and its outcome;

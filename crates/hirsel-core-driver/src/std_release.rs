@@ -36,6 +36,20 @@ const STD_SCHEMA: u32 = 2;
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
 
+/// Definitions whose callers need the program to lower them and the plain
+/// roots they reach to pass Guard B.
+const ALWAYS_IMPORT: &[&str] = &[
+    "std@1/json/parse",
+    "std@1/json/write",
+    "std@1/regex/next_captures",
+    "std@1/string/next_split",
+];
+
+fn always_imported(definition: &DefPath) -> bool {
+    let path = definition.to_string();
+    ALWAYS_IMPORT.contains(&path.as_str())
+}
+
 /// The release std's publication record, stored under the std key.
 #[derive(Serialize, Deserialize)]
 struct StdRecord {
@@ -89,85 +103,110 @@ impl CheckProduct {
     }
 
     /// The release std of this product's library image under `options`'
-    /// generator: its stored record when one is held, otherwise lowered from
-    /// the image alone and published.
+    /// generator: the record the std product's own prebuild published in the
+    /// image's store, else one an earlier build stored in the shared parts
+    /// cache, else lowered from the image alone and stored there.
     pub(crate) fn std_side(
         &self,
         options: &NativeOptions,
         runtime: ContentHash,
     ) -> Result<StdSide, NativeStop> {
+        let generator = Generator::of(options, runtime);
+        let key = self.std_key(&generator)?;
+        let image = self.image.as_ref().expect("std_key holds an image");
+        let prebuilt = image.store_root().join(PREBUILT);
+        if prebuilt.is_dir() {
+            let store = Store::new(&prebuilt)?;
+            if let Some(record) = load_record(&store, key)? {
+                return side(&store, key, record);
+            }
+        }
+        let shared = Store::new(&options.parts)?;
+        let record = match load_record(&shared, key)? {
+            Some(record) => record,
+            None => {
+                let record = self.lower_std(&generator, key, &shared)?;
+                shared.put_keyed(key, &encode(&record)?)?;
+                record
+            }
+        };
+        side(&shared, key, record)
+    }
+
+    /// Lower and publish the release std of this product's library image for
+    /// a default release build on `target` against the runtime archive whose
+    /// identity is `runtime`, into the image's own store, where every build
+    /// over the image finds it first. A record already there is kept.
+    pub(crate) fn prebuild_release_std(
+        &self,
+        target: &str,
+        runtime: ContentHash,
+    ) -> Result<(), NativeStop> {
+        let generator = Generator {
+            target,
+            debug_lines: false,
+            observe_charge: false,
+            instance_limit: crate::native::DEFAULT_INSTANCE_LIMIT,
+            runtime,
+        };
+        let key = self.std_key(&generator)?;
+        let image = self.image.as_ref().expect("std_key holds an image");
+        let store = Store::new(&image.store_root().join(PREBUILT))?;
+        if load_record(&store, key)?.is_none() {
+            let record = self.lower_std(&generator, key, &store)?;
+            store.put_keyed(key, &encode(&record)?)?;
+        }
+        Ok(())
+    }
+
+    /// The std instance key of this product's library image under `generator`.
+    fn std_key(&self, generator: &Generator<'_>) -> Result<ContentHash, NativeStop> {
         let image = self
             .image
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
         let compiler = crate::reuse::compiler_identity()?;
         let llvm = crate::tool_inputs::llvm_library()?;
-        let key = crate::native::key(
+        Ok(crate::native::key(
             "hirsel.core-std-instance.v1",
             &(
                 STD_SCHEMA,
                 image.identity,
                 compiler,
                 llvm,
-                runtime,
-                &options.target,
-                options.debug_lines,
-                options.logical_charge_report.is_some(),
+                generator.runtime,
+                generator.target,
+                generator.debug_lines,
+                generator.observe_charge,
                 !hirsel_llvm_lazy::core::facts_enabled(),
             ),
-        )?;
-        let shared = Store::new(&options.parts)?;
-        let record = match load_record(&shared, key)? {
-            Some(record) => record,
-            None => {
-                let record = self.lower_std(options, key, &shared)?;
-                shared.put_keyed(key, &encode(&record)?)?;
-                record
-            }
-        };
-        let instance = record
-            .roots
-            .first()
-            .cloned()
-            .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
-        let mut objects = Vec::with_capacity(record.parts.len());
-        for &part in &record.parts {
-            let (bare, object, file) = crate::native_object::load(&shared, part)?
-                .ok_or_else(|| NativeStop::Entry("a release std part is missing".into()))?;
-            objects.push(ObjectProduct {
-                private_variants: 0,
-                instance: instance.clone(),
-                path: crate::native_object::path(&shared, bare.address),
-                identity: bare.address,
-                check: bare.check,
-                held: Some(file),
-                debug: object.debug,
-                debug_record: None,
-                compiled: false,
-            });
-        }
-        let lent = shared
-            .get(record.lent)?
-            .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
-        Ok(StdSide {
-            key,
-            lent,
-            roots: record.roots.into_iter().collect(),
-            summaries: record.summaries.into_iter().collect(),
-            points: record.points,
-            objects,
-        })
+        )?)
     }
 
     /// Walk, prepare, join, specialize and lower the release std, and publish
-    /// its parts. Reads the library image and `options`' generator only.
+    /// its parts into `shared`. Reads the library image and `options` only.
     fn lower_std(
         &self,
-        options: &NativeOptions,
+        options: &Generator<'_>,
         key: ContentHash,
         shared: &Store,
     ) -> Result<StdRecord, NativeStop> {
-        let plain = self.std_plain_roots()?;
+        let mut plain = self.std_plain_roots()?;
+        // What an always-imported entry reaches stays the program's to lower.
+        let mut held = BTreeSet::new();
+        for root in plain
+            .iter()
+            .filter(|root| always_imported(&root.definition))
+        {
+            let mut scratch = crate::instances::InstanceSet::default();
+            if let Ok(walked) =
+                self.instances_into([root.clone()], options.instance_limit, &mut scratch)
+            {
+                held.extend(walked);
+            }
+            held.insert(root.clone());
+        }
+        plain.retain(|root| !held.contains(root));
         let mut materialized = crate::instances::InstanceSet::default();
         let mut reached = BTreeSet::new();
         let mut roots = Vec::new();
@@ -259,7 +298,7 @@ impl CheckProduct {
                 ));
             }
         }
-        let target = hirsel_core_layout::Target::from_triple(&options.target)
+        let target = hirsel_core_layout::Target::from_triple(options.target)
             .expect("supported native target");
         let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
         let emit = |message: String| NativeStop::Emit {
@@ -270,7 +309,7 @@ impl CheckProduct {
             &[hirsel_llvm_lazy::Unit::Core {
                 module: &module,
                 facts: &facts[0],
-                observe_charge: options.logical_charge_report.is_some(),
+                observe_charge: options.observe_charge,
                 debug_lines: options.debug_lines,
             }],
             &exports,
@@ -281,7 +320,7 @@ impl CheckProduct {
         )
         .map_err(emit)?;
         let parts: Vec<ContentHash> = (0..program.parts.len())
-            .map(|i| crate::native::key("hirsel.core-std-part.v1", &(key, i as u64)))
+            .map(|i| part_name(key, i))
             .collect::<io::Result<_>>()?;
         let named = program
             .parts
@@ -338,7 +377,7 @@ impl CheckProduct {
         if body_keys.is_empty() {
             return Err(NativeStop::Entry("the release std holds no body".into()));
         }
-        let lent = crate::native::key("hirsel.core-std-lent.v1", &key)?;
+        let lent = lent_name(key)?;
         shared.put_keyed(lent, &program.lent)?;
         Ok(StdRecord {
             schema: STD_SCHEMA,
@@ -351,9 +390,89 @@ impl CheckProduct {
     }
 }
 
+/// What the release std's lowering reads besides the image: the generator
+/// and runtime its key names, and the instance limit its walk stops at.
+struct Generator<'a> {
+    target: &'a str,
+    debug_lines: bool,
+    observe_charge: bool,
+    instance_limit: usize,
+    runtime: ContentHash,
+}
+
+impl<'a> Generator<'a> {
+    fn of(options: &'a NativeOptions, runtime: ContentHash) -> Self {
+        Self {
+            target: &options.target,
+            debug_lines: options.debug_lines,
+            observe_charge: options.logical_charge_report.is_some(),
+            instance_limit: options.instance_limit,
+            runtime,
+        }
+    }
+}
+
+/// Where the std product's prebuild publishes, inside the image's store.
+const PREBUILT: &str = "release-std";
+
+/// The std side `record`, stored in `store` under `key`, names: its parts and
+/// lent bodies, each checked under the name its own key derives.
+fn side(store: &Store, key: ContentHash, record: StdRecord) -> Result<StdSide, NativeStop> {
+    let instance = record
+        .roots
+        .first()
+        .cloned()
+        .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
+    let mut objects = Vec::with_capacity(record.parts.len());
+    for &part in &record.parts {
+        let (bare, object, file) = crate::native_object::load(store, part)?
+            .ok_or_else(|| NativeStop::Entry("a release std part is missing".into()))?;
+        objects.push(ObjectProduct {
+            private_variants: 0,
+            instance: instance.clone(),
+            path: crate::native_object::path(store, bare.address),
+            identity: bare.address,
+            check: bare.check,
+            held: Some(file),
+            debug: object.debug,
+            debug_record: None,
+            compiled: false,
+        });
+    }
+    let lent = store
+        .get(record.lent)?
+        .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
+    Ok(StdSide {
+        key,
+        lent,
+        roots: record.roots.into_iter().collect(),
+        summaries: record.summaries.into_iter().collect(),
+        points: record.points,
+        objects,
+    })
+}
+
+/// The record stored under `key` when it decodes and names its parts and lent
+/// bodies by the names `key` derives; anything else is a miss.
 fn load_record(shared: &Store, key: ContentHash) -> io::Result<Option<StdRecord>> {
-    Ok(shared
+    let Some(record) = shared
         .get(key)?
         .and_then(|bytes| decode::<StdRecord>(&bytes))
-        .filter(|record| record.schema == STD_SCHEMA && !record.parts.is_empty()))
+    else {
+        return Ok(None);
+    };
+    let mut sound =
+        record.schema == STD_SCHEMA && !record.parts.is_empty() && record.lent == lent_name(key)?;
+    for (i, &part) in record.parts.iter().enumerate() {
+        sound &= part == part_name(key, i)?;
+    }
+    Ok(sound.then_some(record))
+}
+
+fn part_name(key: ContentHash, i: usize) -> io::Result<ContentHash> {
+    crate::native::key("hirsel.core-std-part.v1", &(key, i as u64))
+}
+
+fn lent_name(key: ContentHash) -> io::Result<ContentHash> {
+    crate::native::key("hirsel.core-std-lent.v1", &key)
 }

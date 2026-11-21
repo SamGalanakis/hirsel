@@ -113,6 +113,7 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
                 net_rules: vec![],
                 secret_grants: vec![],
                 env: None,
+                map_hash_key: Default::default(),
             };
             Some(
                 tape::Tape::open(

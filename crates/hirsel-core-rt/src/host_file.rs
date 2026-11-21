@@ -265,7 +265,11 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
     unsafe {
         let mut issued = None;
         let mode = (*request).mode;
-        let close_op = if (*request).operation == ENTRIES {
+        // A port's file or listing is a handle its server issued: dropping it
+        // is a RELEASE the server learns of, never a Close it must answer.
+        let close_op = if crate::provide::owns(&*provider) {
+            RELEASE
+        } else if (*request).operation == ENTRIES {
             CLOSE_ENTRIES
         } else {
             CLOSE

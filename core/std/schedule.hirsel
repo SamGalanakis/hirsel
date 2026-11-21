@@ -1,0 +1,135 @@
+/// How the capped delay is randomized.
+pub type Jitter = None | Full | Equal
+
+/// Retry settings in milliseconds. `doubles` selects exponential growth.
+pub type Policy {
+    base_ms: u64,
+    cap_ms: u64,
+    max_attempts: Option[u64],
+    jitter: Jitter,
+    deadline: Option[u64],
+    doubles: bool
+}
+
+const MAX_MS: u64 = 18446744073709551615
+
+/// Uses the same delay at every attempt. Starts with no jitter or stop limits.
+pub fn fixed(base_ms: u64) -> Policy {
+    Policy(base_ms: base_ms, cap_ms: MAX_MS, max_attempts: None, jitter: None, deadline: None, doubles: false)
+}
+
+/// Doubles the base on each successive attempt up to `cap_ms`.
+/// Starts with no jitter or stop limits.
+pub fn exponential(base_ms: u64, cap_ms: u64) -> Policy {
+    Policy(base_ms: base_ms, cap_ms: cap_ms, max_attempts: None, jitter: None, deadline: None, doubles: true)
+}
+
+/// Returns a copy with a new base delay.
+pub fn with_base_ms(p: Policy, base_ms: u64) -> Policy {
+    let mut updated = p
+    updated.base_ms = base_ms
+    updated
+}
+
+/// Returns a copy with a new upper bound on the delay before jitter.
+pub fn with_cap_ms(p: Policy, cap_ms: u64) -> Policy {
+    let mut updated = p
+    updated.cap_ms = cap_ms
+    updated
+}
+
+/// Returns a copy with a new attempt limit. `None` removes the limit.
+pub fn with_max_attempts(p: Policy, max_attempts: Option[u64]) -> Policy {
+    let mut updated = p
+    updated.max_attempts = max_attempts
+    updated
+}
+
+/// Returns a copy with a new jitter mode.
+pub fn with_jitter(p: Policy, jitter: Jitter) -> Policy {
+    let mut updated = p
+    updated.jitter = jitter
+    updated
+}
+
+/// Returns a copy with a new absolute deadline. `None` removes the deadline.
+pub fn with_deadline(p: Policy, deadline: Option[u64]) -> Policy {
+    let mut updated = p
+    updated.deadline = deadline
+    updated
+}
+
+fn min_ms(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn remaining(p: Policy, attempt: u64, now_ms: u64) -> Option[u64] {
+    match p.max_attempts {
+        Some(limit) => {
+            if attempt >= limit {
+                return None
+            }
+        },
+        None => (),
+    }
+    match p.deadline {
+        Some(deadline) => {
+            if now_ms >= deadline {
+                None
+            } else {
+                Some(deadline - now_ms)
+            }
+        },
+        None => Some(MAX_MS),
+    }
+}
+
+fn backoff(p: Policy, attempt: u64) -> u64 {
+    if !p.doubles {
+        return min_ms(p.base_ms, p.cap_ms)
+    }
+    if p.base_ms == 0 {
+        return 0
+    }
+    if attempt >= 64 || p.base_ms > (p.cap_ms >> attempt) {
+        return p.cap_ms
+    }
+    p.base_ms << attempt
+}
+
+fn jittered(jitter: Jitter, delay: u64, mut rng: rand.Pcg) -> u64 {
+    if delay == 0 {
+        return 0
+    }
+    match jitter {
+        None => delay,
+        Full => {
+            if delay == MAX_MS {
+                rand.next(mut rng)
+            } else {
+                rand.below(mut rng, delay + 1)
+            }
+        },
+        Equal => {
+            let half = delay / 2
+            half + rand.below(mut rng, delay - half + 1)
+        },
+    }
+}
+
+/// Returns the delay for a zero-based attempt, or `None` at a stop limit.
+/// Applies jitter to the capped delay, then clips it to the remaining time.
+pub fn next_delay(p: Policy, attempt: u64, now_ms: u64, mut rng: rand.Pcg) -> Option[u64] {
+    let left = remaining(p, attempt, now_ms)?
+    Some(min_ms(jittered(p.jitter, backoff(p, attempt), mut rng), left))
+}
+
+/// Computes the delay with jitter disabled, for either growth mode.
+pub fn next_delay_fixed(p: Policy, attempt: u64, now_ms: u64) -> Option[u64] {
+    let left = remaining(p, attempt, now_ms)?
+    Some(min_ms(backoff(p, attempt), left))
+}

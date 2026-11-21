@@ -36,6 +36,8 @@ def group_inputs(module):
 
 
 def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
+    if env is None:
+        env = capped_env(out)
     for module, mib in sorted({(group(row["name"]), root_mib(row["name"])) for row in rows}):
         print(f"building {module} at {mib} MiB", flush=True)
         binary = out / f"{module}-{mib}"
@@ -52,8 +54,8 @@ def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
         ]
         if debug_lines:
             command += ["--debug-lines", "on"]
-        provenance = native_provenance(command, manifest)
-        result = subprocess.run([ROOT / "tools/capped", *command], env=env or capped_env(out),
+        provenance = native_provenance(command, manifest, env=env)
+        result = subprocess.run([ROOT / "tools/capped", *command], env=env,
                                 stdout=subprocess.PIPE)
         if result.returncode:
             binary.with_name(f"{binary.name}-build.json").write_bytes(result.stdout)

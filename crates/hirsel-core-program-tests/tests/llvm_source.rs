@@ -3,14 +3,10 @@
 use hirsel_core_ir::eval;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
+use hirsel_core_program_tests::counted_loops::{CollectionShape, SEEDS, choices};
 use hirsel_llvm::core::symbol;
 use hirsel_llvm::core::*;
-use std::{
-    fmt::Write as _,
-    path::PathBuf,
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{collections::HashMap, fmt::Write as _, path::PathBuf, process::Command};
 hirsel_guard::install!();
 #[path = "../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
@@ -651,13 +647,12 @@ fn stride_overflow(budget: u64, end: u8) -> u64 {
     sentinels.push(("must_keep", [15, 9], returned(65536 | 15)));
     sentinels.push(("must_keep", [16, 9], overflow()));
     let mut calls: Vec<_> = sentinels
-        .iter()
+        .into_iter()
         .map(|(name, args, outcome)| (name.to_string(), args.to_vec(), Some(outcome)))
         .collect();
 
     // SplitMix64, with a fixed corpus size and a function name that identifies
     // its seed, width and body. Bounds are literal so release can prove ranges.
-    const SEEDS: [u64; 2] = [0x1543, 0x9e37_79b9_7f4a_7c15];
     for (ty, width) in [("u8", 8i64), ("i8", 8), ("u16", 16)] {
         writeln!(source, "fn keep_{ty}(mut i: {ty}, value: {ty}) {{}}").unwrap();
         writeln!(
@@ -666,14 +661,7 @@ fn stride_overflow(budget: u64, end: u8) -> u64 {
         )
         .unwrap();
         for seed in SEEDS {
-            let mut state = seed ^ ((ty.as_bytes()[0] as u64) << 16) ^ width as u64;
-            let mut choose = |options: u64| {
-                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                let mut x = state;
-                x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                (x ^ (x >> 31)) % options
-            };
+            let mut choose = choices(seed ^ ((ty.as_bytes()[0] as u64) << 16) ^ width as u64);
             let update = format!(
                 "let writer: fn(mut {ty}, {ty}) = if write_now {{ write_{ty} }} else {{ keep_{ty} }}"
             );
@@ -773,7 +761,45 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
         }
     }
 
-    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+    let folds = check_counted_loop_agreement(&source, &calls, None);
+    // Count both compiled functions and their invocations. Budget sweeps
+    // must not let one function supply an entire seed's fold coverage.
+    for seed in SEEDS {
+        let prefix = format!("range_{seed:x}_");
+        let tally = |names: &mut dyn Iterator<Item = &str>| {
+            names
+                .filter(|name| name.starts_with(&prefix))
+                .fold((0, 0), |(removed, total), name| {
+                    (removed + usize::from(folds[name] > 0), total + 1)
+                })
+        };
+        let (shapes_with_folds, shapes) = tally(&mut folds.keys().map(String::as_str));
+        let (cases_with_folds, invocations) =
+            tally(&mut calls.iter().map(|(name, _, _)| name.as_str()));
+        assert_counted_loop_folds(
+            "scalar",
+            seed,
+            25,
+            (shapes_with_folds, shapes),
+            (cases_with_folds, invocations),
+        );
+    }
+    for name in must_fold {
+        let count = folds[name];
+        eprintln!("{name}: {count} checks folded by CounterRangePass");
+        assert!(count > 0, "{name} must fold at least one check on pos");
+    }
+    check_collection_counted_loops();
+}
+
+type CountedLoopCall = (String, Vec<u64>, Option<eval::Outcome>);
+
+fn check_counted_loop_agreement(
+    source: &str,
+    calls: &[CountedLoopCall],
+    failure_expr: Option<&str>,
+) -> HashMap<String, usize> {
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases: Vec<_> = calls
         .iter()
         .map(|(name, args, _)| Case {
@@ -788,11 +814,22 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
     exports.dedup();
     let evaluated: Vec<_> = cases
         .iter()
-        .zip(&calls)
+        .zip(calls)
         .map(|(case, (name, args, expected))| {
             let run = eval::run(&program, case.function, &case.args, case.limit);
             if let Some(expected) = expected {
-                assert_eq!(&run.outcome, *expected, "{name}{args:?}");
+                assert_eq!(&run.outcome, expected, "{name}{args:?}");
+                if let Some(expr) = failure_expr
+                    && matches!(expected, eval::Outcome::Failed(_))
+                {
+                    let start = source.find(&format!("fn {name}(")).unwrap();
+                    let offset = source[start..].find(expr).unwrap() as u32;
+                    let [Some(anchor)] = run.sites.as_slice() else {
+                        panic!("{name}{args:?} must raise at {expr}, got {:?}", run.sites);
+                    };
+                    assert_eq!(program.items[anchor.item.index()].0.name, *name);
+                    assert_eq!(anchor.start, offset, "{name}{args:?} must raise at {expr}");
+                }
             }
             run
         })
@@ -821,47 +858,450 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
             }
         }
     }
-    eprintln!(
-        "counted-loop seeds {SEEDS:x?}, {} cases per engine",
-        cases.len()
-    );
     assert!(differences.is_empty(), "{}", differences.join("\n"));
 
-    let folded = |name: &str| {
-        let symbol = symbol(&program, names[name]);
-        folds.get(symbol.as_bytes()).copied().unwrap_or(0)
-    };
-    // Count both compiled functions and their invocations. Budget sweeps
-    // must not let one function supply an entire seed's fold coverage.
-    const MIN_FOLD_PERCENT: usize = 25;
-    for seed in SEEDS {
-        let prefix = format!("range_{seed:x}_");
-        let tally = |names: &mut dyn Iterator<Item = &str>| {
-            names
-                .filter(|name| name.starts_with(&prefix))
-                .fold((0, 0), |(removed, total), name| {
-                    (removed + usize::from(folded(name) > 0), total + 1)
+    names
+        .into_iter()
+        .filter(|(_, function)| exports.binary_search_by_key(&function.0, |id| id.0).is_ok())
+        .map(|(name, function)| {
+            let symbol = symbol(&program, function);
+            (name, folds.get(symbol.as_bytes()).copied().unwrap_or(0))
+        })
+        .collect()
+}
+
+fn assert_counted_loop_folds(
+    family: &str,
+    seed: u64,
+    minimum_percent: usize,
+    (shapes_with_folds, shapes): (usize, usize),
+    (cases_with_folds, invocations): (usize, usize),
+) {
+    eprintln!(
+        "{family} seed {seed:#x}: {shapes_with_folds}/{shapes} shapes, {cases_with_folds}/{invocations} cases folded by CounterRangePass"
+    );
+    assert!(
+        shapes > 0 && shapes_with_folds * 100 >= shapes * minimum_percent,
+        "{family} seed {seed:#x} requires folds in at least {minimum_percent}% of its shapes"
+    );
+    assert!(
+        invocations > 0 && cases_with_folds * 100 >= invocations * minimum_percent,
+        "{family} seed {seed:#x} requires folds in at least {minimum_percent}% of its cases"
+    );
+}
+
+fn check_collection_counted_loops() {
+    use CollectionShape::*;
+
+    let check =
+        |shape: CollectionShape, name: &str, extent, key, inputs: &[([u64; 4], Option<u64>)]| {
+            let source = shape.source(name, extent, key);
+            let calls: Vec<_> = inputs
+                .iter()
+                .map(|(args, value)| {
+                    let outcome = value.map_or_else(
+                        || eval::Outcome::Failed(vec!["Bounds".into()]),
+                        |value| eval::Outcome::Returned(vec![value]),
+                    );
+                    (name.to_owned(), args.to_vec(), Some(outcome))
                 })
+                .collect();
+            let count =
+                check_counted_loop_agreement(&source, &calls, Some(CollectionShape::CHECK))[name];
+            eprintln!("{name}: {count} checks folded by CounterRangePass");
+            count > 0
         };
-        let (shapes_with_folds, shapes) = tally(&mut names.keys().map(String::as_str));
-        let (cases_with_folds, invocations) =
-            tally(&mut calls.iter().map(|(name, _, _)| name.as_str()));
-        eprintln!(
-            "seed {seed:#x}: {shapes_with_folds}/{shapes} shapes, {cases_with_folds}/{invocations} cases folded by CounterRangePass"
-        );
-        assert!(
-            shapes > 0 && shapes_with_folds * 100 >= shapes * MIN_FOLD_PERCENT,
-            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its shapes"
-        );
-        assert!(
-            invocations > 0 && cases_with_folds * 100 >= invocations * MIN_FOLD_PERCENT,
-            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its cases"
+
+    // Each shape is a separate source program so the repeated fill can become
+    // the initializing memset before counter-range (see the closed-cell law).
+    for seed in SEEDS {
+        let mut choose = choices(seed);
+        let mut shapes_with_folds = 0;
+        let mut cases_with_folds = 0;
+        let mut cases = 0;
+        for shape in CollectionShape::ALL {
+            let extent = 8 << choose(4);
+            let key = 1 + choose(extent - 1);
+            let far = key + extent;
+            let at = 2 + choose(62);
+            let trips = 3 + choose(5);
+            let name = format!("collection_{seed:x}_{}", shape.label());
+            // table[good] is 1 and table[0] is 0. Copy reads the saved row,
+            // the mut call and latch change the next loaded cell, and only
+            // the admitted push reaches the corrective store.
+            let inputs: &[_] = match shape {
+                Store | WholeCopy => &[
+                    ([1, 0, far, 0], Some(1)),
+                    ([2, at, far, 0], Some(0)),
+                    ([trips, trips - 1, 0, 0], Some(1)),
+                ],
+                OffsetCopy => &[
+                    ([1, at, 0, 0], Some(0)),
+                    ([2, at, 0, 0], Some(1)),
+                    ([2, at, 0, 1], Some(0)),
+                    ([1, at, far, 0], None),
+                ],
+                MutCall => &[
+                    ([1, 1, far, 3], Some(0)),
+                    ([2, 1, key, 3], Some(1)),
+                    ([2, 1, far, 3], None),
+                ],
+                BackEdge => &[
+                    ([trips - 1, trips - 1, far, trips - 2], Some(0)),
+                    ([trips, trips - 1, key, trips - 2], Some(1)),
+                    ([trips, trips - 1, far, trips - 2], None),
+                ],
+                Push => &[
+                    ([1, at, far, 0], None),
+                    ([1, at, far, 4096], Some(1)),
+                    ([trips, at, key, 0], Some(1)),
+                ],
+            };
+            let folded = check(shape, &name, extent, key, inputs);
+            shapes_with_folds += usize::from(folded);
+            cases_with_folds += usize::from(folded) * inputs.len();
+            cases += inputs.len();
+        }
+        assert_counted_loop_folds(
+            "collection",
+            seed,
+            25,
+            (shapes_with_folds, CollectionShape::ALL.len()),
+            (cases_with_folds, cases),
         );
     }
-    for name in must_fold {
-        let count = folded(name);
-        eprintln!("{name}: {count} checks folded by CounterRangePass");
-        assert!(count > 0, "{name} must fold at least one check on pos");
+
+    // These counters wrap, and the compiler can bound all indices except
+    // the key read from the cells without any memory facts.
+    for shape in [Store, WholeCopy] {
+        let name = format!("must_fold_{}", shape.label());
+        assert!(
+            check(shape, &name, 8, 7, &[([1, 0, 8, 0], Some(1))]),
+            "{name} must fold the collection bounds check"
+        );
+    }
+    for (shape, args) in [
+        (OffsetCopy, [1, 5, 8, 0]),
+        (MutCall, [2, 1, 8, 3]),
+        (Push, [1, 0, 8, 0]),
+        (BackEdge, [2, 1, 8, 0]),
+    ] {
+        let name = format!("must_keep_{}", shape.label());
+        check(shape, &name, 8, 7, &[(args, None)]);
+    }
+}
+
+// Closed stack memory (counter_range.h): each case is a way a cell summary
+// could miss a value a field really holds, so a check it guards must still
+// fire, at the evaluator's site. Each case is its own program: the release
+// pipeline turns an element-repeat fill into the memset that gives a closed
+// object `init` only in the first looped function it meets, so a case that
+// shares a program with another may never reach the cell rule it pins.
+#[test]
+fn closed_cells_keep_reachable_failures() {
+    const TYPES: &str = r#"
+type Ball { x: i32, y: i32, vx: i32, vy: i32 }
+type Pair { x: i32, y: i32, z: i32, w: i32 }
+type Edit { x: u32, y: u32, z: u32, w: u32 }
+"#;
+    const NEXT_RANDOM: &str = r#"
+fn next_random(mut seed: u32) -> u32 {
+    seed = (seed * 1309 + 13849) & 65535
+    seed
+}
+"#;
+    const STEP: &str = r#"
+fn step(mut ball: Ball) -> bool {
+    let mut bounced = false
+    ball.x += ball.vx
+    ball.y += ball.vy
+    if ball.x > 500 {
+        ball.x = 500
+        ball.vx = 0 - int.abs(ball.vx)
+        bounced = true
+    }
+    if ball.x < 0 {
+        ball.x = 0
+        ball.vx = int.abs(ball.vx)
+        bounced = true
+    }
+    if ball.y > 500 {
+        ball.y = 500
+        ball.vy = 0 - int.abs(ball.vy)
+        bounced = true
+    }
+    if ball.y < 0 {
+        ball.y = 0
+        ball.vy = int.abs(ball.vy)
+        bounced = true
+    }
+    bounced
+}
+"#;
+    const POISON: &str = r#"
+fn poison(mut a: Inline[Pair, 100], d: u64) {
+    if d == 0 { a[0].z = 2147483647 } else { poison(mut a, d - 1u64) }
+}
+"#;
+    const EDIT: &str = r#"
+fn edit(mut p: Edit, i: u64, skip: u64) -> u32 {
+    p.y = 7
+    if i != skip { p.z = 1 }
+    p.z - 1u32
+}
+"#;
+    // Hand-derived. `half_clamped` has no lower clamp: x starts at 250 and
+    // falls by 10^9 per step, so after 2 steps it is -1999999750 and the third
+    // add passes i32::MIN. `two_bases` writes 5 through a[i], then i32::MAX
+    // through a[k]; when i == k the reload through a[i] is i32::MAX and the
+    // add overflows. `poison` writes i32::MAX to a[0].z from a recursive,
+    // non-inlined callee; `escaped` reads it from j = 1, and the copies in
+    // `copied_open` and `copied_chain` carry it from the start. `probe` skips
+    // the write of z = 1 at j = skip, so z stays at its fill 0 and 0 - 1
+    // underflows. `copy_unflushed` copies s with s[k].z = i32::MAX; o[0].z is
+    // i32::MAX when k == 0.
+    let overflow = || Some(eval::Outcome::Failed(vec!["Overflow".into()]));
+    let returned = |x: u64| Some(eval::Outcome::Returned(vec![x]));
+    // Arguments, and the evaluator's outcome (None: must return).
+    type Laws = Vec<(Vec<u64>, Option<eval::Outcome>)>;
+    let programs: [(&str, Vec<&str>, &str, Laws); 8] = [
+        (
+            "bounce",
+            vec![NEXT_RANDOM, STEP],
+            r#"
+fn bounce(steps: u64) -> u32 {
+    let mut seed = 74755u32
+    let mut balls: Inline[Ball, 100] =[Ball(x: 0, y: 0, vx: 0, vy: 0); 100]
+    for i in 0u64 .. 100 {
+        let x: i32 = int.narrow(next_random(mut seed) % 500)
+        let y: i32 = int.narrow(next_random(mut seed) % 500)
+        let vx: i32 = int.narrow(next_random(mut seed) % 300)
+        let vy: i32 = int.narrow(next_random(mut seed) % 300)
+        balls[i] = Ball(x: x, y: y, vx: vx - 150, vy: vy - 150)
+    }
+    let mut count = 0u32
+    for _ in 0 .. steps {
+        for j in 0u64 .. 100 {
+            if step(mut balls[j]) {
+                count += 1
+            }
+        }
+    }
+    count
+}
+"#,
+            vec![(vec![60], None)],
+        ),
+        (
+            "half_clamped",
+            vec![],
+            r#"
+fn half_clamped(n: u64, v: i64) -> u64 {
+    let mut balls: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    for i in 0u64 .. 100 {
+        let c = if v < 0i64 - 1000000000i64 { 0i64 - 1000000000i64 } else if v > 0i64 { 0i64 } else { v }
+        balls[i] = Pair(x: 250, y: int.narrow(c), z: 0, w: 0)
+    }
+    for _ in 0 .. n {
+        for j in 0u64 .. 100 {
+            balls[j].x += balls[j].y
+            if balls[j].x > 500 {
+                balls[j].x = 500
+                balls[j].y = 0 - int.abs(balls[j].y)
+            }
+        }
+    }
+    if balls[0].x < 0 { 1u64 } else { 0u64 }
+}
+"#,
+            vec![
+                (vec![2, (-1_000_000_000i64) as u64], returned(1)),
+                (vec![3, (-1_000_000_000i64) as u64], overflow()),
+            ],
+        ),
+        (
+            "two_bases",
+            vec![NEXT_RANDOM],
+            r#"
+fn two_bases(n: u64, k: u64) -> u64 {
+    let mut a: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        a[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        let i = j % 100u64
+        a[i].z = 5
+        a[k].z = 2147483647
+        if a[i].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![3, 3], returned(3)), (vec![1, 0], overflow())],
+        ),
+        (
+            "escaped",
+            vec![NEXT_RANDOM, POISON],
+            r#"
+fn escaped(n: u64, d: u64) -> u64 {
+    let mut a: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        a[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        if j == 1 { poison(mut a, d) }
+        if a[0].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![1, 3], returned(1)), (vec![2, 3], overflow())],
+        ),
+        (
+            "copied_open",
+            vec![NEXT_RANDOM, POISON],
+            r#"
+fn copied_open(n: u64, d: u64) -> u64 {
+    let mut s: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        s[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    poison(mut s, d)
+    let o: Inline[Pair, 100] = s
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        if o[j % 100u64].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![1, 3], overflow())],
+        ),
+        (
+            "copied_chain",
+            vec![NEXT_RANDOM, POISON],
+            r#"
+fn copied_chain(n: u64, d: u64) -> u64 {
+    let mut s: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        s[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    poison(mut s, d)
+    let m: Inline[Pair, 100] = s
+    let o: Inline[Pair, 100] = m
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        if o[j % 100u64].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![1, 3], overflow())],
+        ),
+        (
+            "probe",
+            vec![NEXT_RANDOM, EDIT],
+            r#"
+fn probe(n: u64, skip: u64) -> u32 {
+    let mut a: Inline[Edit, 100] = [Edit(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: u32 = int.narrow(next_random(mut seed) % 500)
+        a[i] = Edit(x: r, y: 0, z: 0, w: 0)
+    }
+    let mut out = 0u32
+    for j in 0u64 .. n {
+        out = edit(mut a[j], j, skip)
+    }
+    out
+}
+"#,
+            vec![(vec![2, 7], returned(0)), (vec![2, 1], overflow())],
+        ),
+        (
+            "copy_unflushed",
+            vec![NEXT_RANDOM],
+            r#"
+fn copy_unflushed(n: u64, k: u64) -> i32 {
+    let mut s: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        s[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    s[k].z = 2147483647
+    let o: Inline[Pair, 100] = s
+    let mut acc = 0i32
+    for j in 0u64 .. n { acc = o[j % 100u64].z + 1 }
+    acc
+}
+"#,
+            vec![(vec![1, 1], returned(1)), (vec![1, 0], overflow())],
+        ),
+    ];
+    for (name, helpers, body, laws) in programs {
+        let source = format!("{TYPES}{}{body}", helpers.concat());
+        let (program, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+        let cases: Vec<_> = laws
+            .iter()
+            .map(|(args, _)| Case {
+                function: names[name],
+                args: args.clone(),
+                limit: 10_000_000,
+                injection: None,
+            })
+            .collect();
+        let evaluated: Vec<_> = cases
+            .iter()
+            .zip(&laws)
+            .map(|(case, (_, outcome))| {
+                let run = eval::run(&program, case.function, &case.args, case.limit);
+                match outcome {
+                    Some(outcome) => assert_eq!(&run.outcome, outcome, "{name}{:?}", case.args),
+                    None => assert!(
+                        matches!(run.outcome, eval::Outcome::Returned(_)),
+                        "{:?}",
+                        run.outcome
+                    ),
+                }
+                run
+            })
+            .collect();
+        let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+        let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[names[name]]);
+        for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)]
+        {
+            let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+            for ((case, evaluated), native) in cases.iter().zip(&evaluated).zip(reports) {
+                assert_eq!(
+                    native.outcome, evaluated.outcome,
+                    "{name}{:?} {optimization:?}",
+                    case.args
+                );
+                let sites: Vec<_> = evaluated
+                    .sites
+                    .iter()
+                    .map(|anchor| {
+                        anchor.map_or(0, |a| program.sites[a.item.index()] + u64::from(a.start))
+                    })
+                    .collect();
+                assert_eq!(
+                    native.sites, sites,
+                    "{name}{:?} {optimization:?}",
+                    case.args
+                );
+            }
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+// expect: run two_run_keys() = 1140
 // Map contracts: insertion-order storage, linear probing, replacement, removal,
 // regrow/index rebuild, String keys, and the Capacity a refused growth raises.
 // expect: run get_after_insert() = 70
@@ -148,4 +149,16 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         },
         _ => None,
     }
+}
+
+fn two_run_keys() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    map.insert(mut m, 1, 10)
+    map.insert(mut m, 4, 40)
+    map.insert(mut m, 1, 11)
+    let mut order: u64 = 0
+    for (_, v) in m {
+        order = order * 100 + v
+    }
+    order
 }

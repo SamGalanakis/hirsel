@@ -213,7 +213,10 @@ closure is never shareable, so every task that runs entries runs `place` itself.
 Laws and cases: `core/programs/store/runner_laws.hirsel` (R0),
 `core/programs/store/runner_calls.hirsel` (R1) and
 `core/programs/store/runner_crash.hirsel` (R1b, native only), run by
-`core/tools/runner_tests.py` on the evaluator, Cranelift and LLVM: R1 in `//:core-runner-r1`, and R0 and R1b in `//:core-runner-r0`.
+`core/tools/runner_tests.py` on the evaluator: R1 in `//:core-runner-r1`, and R0 and R1b in `//:core-runner-r0`.
+Natively they run with the rest of the store package under
+`hirsel test core/programs/store` (`//:core-store-s1`); `runner_tests.py`
+keeps the native cases that test cannot express.
 The hand-derived `frame_vectors` law and its `tag_order`, `complete_omitted` and
 `refusal_tag_inserted` mutants run with R0, or alone with
 `//:core-runner-wire`. The byte

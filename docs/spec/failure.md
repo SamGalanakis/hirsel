@@ -21,7 +21,7 @@ raised it:
 | `Bounds` | indexing and slicing out of range; `channel.new(0)` |
 | `Division` | integer division or remainder by zero |
 | `Unwrap` | [`option.unwrap`](../../core/core/option.hirsel) of `None`, [`result.unwrap`](../../core/core/result.hirsel) of `Error` ([core](core.md#contracts-the-signatures-do-not-state)) |
-| `Fail(text)` | `fail(msg)`, which has type `Never` |
+| `Fail(text)` | `fail(msg)`, which has type `Never`; a foreign call refused by its handle checks, with one of four fixed texts ([FFI-6](foreign.md#ffi-6-handles)) |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity(c)` | an admission the current limit refuses ([MEM-21](budgets.md#mem-21-admission)), `c` the refused charge ([MEM-22](budgets.md#mem-22-the-capacity-value)) |
 | `OutOfTime` | a step past the current step bound ([MEM-30](budgets.md#mem-30-step-bounds)) |
@@ -229,7 +229,9 @@ Exhausting the stack, a counter that would pass its 64-bit range (a counted valu
 [MEM-16](memory.md#mem-16-counting); a channel's senders, [CONC-4](tasks.md#conc-4-channels); a `Latest` root's handles,
 [CONC-13](tasks.md#conc-13-latest);
 one the engine keeps itself), the host refusing memory or a service the engine needs, a host
-provider that breaks the provider ABI, and termination by the host are run stops. A run stop ends every task without cleanup. It is
+provider that breaks the provider ABI, and termination by the host are run stops. A native
+callee that aborts, overflows its stack or corrupts memory is termination by the host
+([FFI-1](foreign.md#ffi-1-hirsel-trusts-audited-native-code-and-does-not-contain-it)). A run stop ends every task without cleanup. It is
 reported as the run's outcome and is not a failure: no cause chain is formed, no cleanup or
 finalizer runs, and no joiner observes it. In a process it exits with status 102 and
 writes one line to stderr, `run stop: ` and the stop's name
@@ -238,7 +240,7 @@ writes one line to stderr, `run stop: ` and the stop's name
 | stop | name |
 |---|---|
 | the stack is exhausted | `Stack` |
-| every task waits on another task (a join, a channel send or receive, an abandon, or an operation on a virtual provider whose call its server has not answered), no timer is pending and no provider operation is outstanding | `Deadlock` |
+| every task waits on another task (a join, a channel send or receive, an abandon, or an operation on a virtual provider whose call its server has not answered), no timer is pending and no provider operation or issued foreign `waits` call ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)) is outstanding | `Deadlock` |
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |

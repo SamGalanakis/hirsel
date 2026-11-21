@@ -120,7 +120,7 @@ mod spec_tests;
 mod std_seed;
 
 mod source;
-pub use source::SourceProgram;
+pub use source::{SourceProgram, counted_loops};
 
 #[cfg(test)]
 pub(crate) fn checked_inputs(

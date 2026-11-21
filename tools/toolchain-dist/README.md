@@ -77,6 +77,14 @@ a project, compile a std-using program with both native backends, and check
 both executables' stdout. It restores the prefix after both runs pass and
 removes the bundle on failure.
 
+Run `tools/toolchain-dist/build --check-fresh PREFIX` on a host with `bwrap`
+and the system link inputs named by the bundle. The test starts two empty Linux
+roots, mounts the prefix read-only at a new path and puts only that prefix on
+`PATH`. The first root checks the missing CRT diagnostic with the loader and
+shared libraries alone. The second adds the host's link inputs and runs
+`hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build`, then
+executes `./program` and checks the package.
+
 On Rust toolchain or LLVM bumps, run
 `tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit
 to qualify. It builds that commit without PGO in two fresh local checkouts

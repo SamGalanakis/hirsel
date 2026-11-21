@@ -6,7 +6,8 @@ A **package** has a name and a major version and consists of modules; each sourc
 one module, with the module path its package manifest assigns. A definition's identity is
 its package, version, module path and name. Two versions of a package are two packages,
 and their types are distinct. A package names each dependency at one exact version; the
-manifest format is outside the language. A package states the charge policy it was
+manifest format is outside the language, and the `hirsel` tool's is
+[`hirsel.toml`](packages.md). A package states the charge policy it was
 written for ([MEM-24](budgets.md#mem-24-logical-charges)); in v1 that is `charge-v1`.
 
 ### PROG-2: Visibility
@@ -94,7 +95,8 @@ passes the test; `Error(e)` fails it, `e` cleaned as its run ends whatever `E` i
 included; a failure fails it; a run stop fails the test it stops and ends no other test's
 run. A test that takes no parameters has its outcome fixed by its program and its run's
 configuration, so an implementation may report a pass it recorded for the same program and
-configuration in place of the run, and then says that test's pass was reused; it never
+configuration in place of the run, unless its reach holds a foreign function, whose pass is
+never reused ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)), and then says that test's pass was reused; it never
 reuses any other outcome. A test function can be named, called or taken as a value only by
 another test function, and a value so taken may be passed on and called anywhere, as any function value;
 otherwise it is an ordinary function of its module (PROG-2), so it may call that module's
@@ -396,3 +398,6 @@ language switches. The one exception is an implementation's resource refusal: a 
 whose checking exceeds the implementation's resources (for example unbounded generic
 instantiation, or instantiation past a depth or count) may be refused with a message that
 names no rule; such a refusal is not a meaning of the program.
+A package's dependencies are fixed by their library roots before the compiler runs
+([packages](packages.md)), so `--locked` and `--frozen` decide only whether a command
+proceeds.

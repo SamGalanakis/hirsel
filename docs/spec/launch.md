@@ -194,17 +194,21 @@ version and these parts:
   of hash;
 - every body in that closure, as its hash and byte length with its annex's hash and byte
   length, in strictly ascending order of body hash;
+- the **foreign archives** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
+  each admitted archive's SHA-256, byte length and symbol prefix, in strictly ascending order
+  of hash; an archive's bytes are a code-store object named by that SHA-256;
 - the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
   `n_place`, and the **grant bindings**.
 
 The grant bindings follow `main`'s capability parameters in declaration order. Each binding
 gives the parameter's ordinal, its kind, and the values that parameter receives, in order and
-with their count: each directory path a `Dir` parameter takes, or each rule text a `Net`
-parameter takes. So exchanging the paths given to two `Dir` parameters changes R. The
+with their count: each directory path a `Dir` parameter takes, each rule text a `Net`
+parameter takes, or the one interface definition identity a `Foreign` parameter takes. So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
 
-Its root is `R = H("hirsel.release-recipe.v1", recipe)`. A place's `place`, `migrate`, handle
+Its root is `R = H("hirsel.release-recipe.v2", recipe)`; the version is 2, and version 1, which
+had no foreign archives part, is never read or written. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. R does not
 cover the host's toolchain: one R can assemble to different bytes under another toolchain, and
@@ -255,8 +259,9 @@ objects it lacks.
    `Unsolicited(h)` and is not kept. An object whose bytes do not hash to its listed hash is
    `Hash(h)`.
 5. Every group, body and annex of the closure decodes within the limits under PROG-10's
-   encoding rules, each annex against its own body, before any of it is put into a map
-   (`Malformed`).
+   encoding rules, each annex against its own body, before any of it is put into a map.
+   A body in a different normal-form version is `Unsupported`. Republish from source.
+   Invalid frames are `Malformed`.
 6. The closure walked from the entry through the groups' `External` bindings, compared as typed
    sets of groups, bodies and the annex paired with each body, equals the listed objects
    exactly (`Missing`, `Extra`).
@@ -307,8 +312,8 @@ root reaches. The roots are the union of: the assembly record of each retained a
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
 so the store's `releases` rows keep their format, and a recording pin names the assembly record of
-the run it records and is synced before `Pinned` is answered. A retained digest whose image is
-missing gives `Unknown(ImageGone)`.
+the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
+launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
 `hirsel host --record DIRECTORY` assembles with the recording runtime. The host
 assigns each serving process a recording ID and syncs its pin before launching

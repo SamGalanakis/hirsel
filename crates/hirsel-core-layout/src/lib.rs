@@ -21,6 +21,7 @@ pub mod cross;
 pub mod event;
 pub mod flow;
 pub mod isa;
+pub mod map_hash;
 mod recipe;
 mod shape;
 pub mod source_positions;

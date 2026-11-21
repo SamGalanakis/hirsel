@@ -263,20 +263,19 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         .file_stem()
         .is_some_and(|name| name == "map-operations")
     {
-        for function in &module.functions {
-            let key = &module.instances[function.instance.index()];
-            if key.definition.0.modules == ["map"]
-                && let Some(body) = &function.body
-            {
-                eprintln!(
-                    "Map instance {} {:?}: {} instructions, {} terminators",
-                    key.definition,
-                    module.argument_names(key),
-                    body.insts.len(),
-                    body.terminators.len()
-                );
-            }
-        }
+        // SipHasher13 1.0.4 places 1 and 4 in bucket 1 of an eight-word
+        // index with the zero key. With 0x51 repeated, the buckets are 5 and 0.
+        let run = |key| eval::run_map_hash(module, functions["two_run_keys"], &[], 1 << 20, key);
+        let (colliding, steps) = run([0; 16]);
+        let (separate, separate_steps) = run([0x51; 16]);
+        assert_eq!(colliding.outcome, eval::Outcome::Returned(vec![1140]));
+        assert_eq!(colliding.outcome, separate.outcome);
+        assert_eq!(colliding.trace, separate.trace);
+        assert_eq!(colliding.admissions, separate.admissions);
+        assert_eq!(colliding.peak_reserved, separate.peak_reserved);
+        assert_eq!(colliding.used, separate.used);
+        assert!(steps > 0);
+        assert_eq!(steps, separate_steps);
     }
     if path
         .file_stem()
@@ -1221,7 +1220,7 @@ fn recovered_header_cases() -> Vec<String> {
             let mut store: PackageManifest =
                 serde_json::from_value(manifest["packages"][0].clone()).unwrap();
             for source in &mut store.sources {
-                source.file = repo().join(&source.file);
+                source.file = repo().join("core/programs/store").join(&source.file);
             }
             store.sources.push(ModuleSource {
                 file: path,
@@ -1870,6 +1869,14 @@ fn aggregate_callback_cases() {
         );
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn map_key_laws() {
+    for case in ["map-operations", "map-anchored"] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
 }
 
 #[test]

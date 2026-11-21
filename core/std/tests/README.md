@@ -21,7 +21,7 @@ Repeat --filter for several prefixes. The compiler and runtime are Buck targets
 hirsel-core-driver-bin-hirsel and the shipping hirsel-core-rt-archives.
 Use core/tools/measurement_artifacts.py to locate the release compiler and archive.
 
-No-argument scalar tests, f(dir), f(out), f(err), f(clock) and f(tasks) are supported. Dir tests receive
+No-argument scalar tests, f(dir), f(out), f(err), f(clock), f(tasks) and f(dir, tasks) are supported. Dir tests receive
 a fresh empty confined host directory and run locally on a host with openat2,
 Linux >= 5.6 and a seccomp profile permitting the syscall. Expected failure syntax
 is "= fail Bounds" (or Fail, Overflow etc); the cause and process status are checked.

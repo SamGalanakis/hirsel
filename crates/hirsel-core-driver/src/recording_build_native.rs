@@ -2004,10 +2004,10 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     std::fs::write(&file, source).unwrap();
     let runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap());
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-    let command = |name: &str, args: &[&str]| {
+    let command = |name: &str, package: &Path, args: &[&str]| {
         let mut invocation = vec![
             name.into(),
-            app.display().to_string(),
+            package.display().to_string(),
             "--libraries".into(),
             root.join("core").display().to_string(),
             "--source-core".into(),
@@ -2021,7 +2021,7 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
         assert_eq!(output.status.code(), Some(0), "{invocation:?}\n{out}\n{}", String::from_utf8_lossy(&output.stderr));
         out.split_once(process::CHILD_MARK).unwrap().1.to_owned()
     };
-    let inspect = |args| command("inspect", args);
+    let inspect = |args| command("inspect", &app, args);
     let interface: serde_json::Value =
         serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
     assert_eq!(interface, serde_json::json!({
@@ -2048,10 +2048,12 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
 
     let executed = || {
         let clang = llvm.join("bin/clang");
-        let output: serde_json::Value = serde_json::from_str(&command("test", &[
-            "--json", "--limit", "1048576", "--runtime", runtime.to_str().unwrap(),
-            "--cc", clang.to_str().unwrap(),
-        ])).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&command(
+            "test", &app, &[
+                "--json", "--limit", "1048576", "--runtime", runtime.to_str().unwrap(),
+                "--cc", clang.to_str().unwrap(),
+            ],
+        )).unwrap();
         let tests = output["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 3);
         tests.iter()
@@ -2071,6 +2073,60 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     assert_eq!(affected, "app@1/main/from_constant\n");
     std::fs::write(&file, edited.replace("= 11u64", "= 12u64")).unwrap();
     assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
+
+    let manifest_app = dir.path().join("manifest-app");
+    std::fs::create_dir(&manifest_app).unwrap();
+    std::fs::write(
+        manifest_app.join("manifest.json"),
+        r#"{
+            "packages": [{
+                "package": {"name": "counter", "version": "2"},
+                "dependencies": [{"name": "core", "version": "1"}],
+                "sources": [{"file": "app.hirsel", "modules": ["counter"], "signatures": false}]
+            }],
+            "entries": [{"package": {"name": "counter", "version": "2"}, "module": "counter"}],
+            "tests": {
+                "sources": [{"file": "laws.hirsel", "modules": ["counter"], "signatures": false}],
+                "limit": 1048576
+            }
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        manifest_app.join("app.hirsel"),
+        r#"
+pub fn main() -> Result[(), Exit] { Ok(()) }
+pub fn count() -> u64 { start() + 1u64 }
+fn start() -> u64 { 4u64 }
+pub fn spare() -> u64 { 0u64 }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        manifest_app.join("laws.hirsel"),
+        r#"
+@test fn counts() -> Result[(), ()] { if count() == 5u64 { Ok(()) } else { Error(()) } }
+@test fn independent() -> Result[(), ()] { Ok(()) }
+"#,
+    )
+    .unwrap();
+    let inspect = |args| command("inspect", &manifest_app, args);
+    let interface: serde_json::Value =
+        serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
+    assert_eq!(interface, serde_json::json!({
+        "version": 1,
+        "package": {"name": "counter", "version": "2"},
+        "modules": [{"path": ["counter"], "extends_core": false, "items": [
+            {"definition": "counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
+            {"definition": "counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
+            {"definition": "counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
+        ]}],
+    }));
+    assert_eq!(
+        inspect(&["--affected-tests", "counter/start"]),
+        "counter@2/counter/counts\n",
+    );
+    assert_eq!(inspect(&["--unused"]), "counter@2/counter/spare\n");
 }
 
 fn test_pass_cache_cli() {

@@ -32,7 +32,7 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
     let directory = tempfile::tempdir().unwrap();
     let runner = include_str!("../../../core/programs/store/runner.hirsel");
     let source = format!(
-        "{runner}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = result.unwrap(launch_target(a))\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
+        "{runner}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = launch_target(a)\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
     );
     let path = directory.path().join("runner.hirsel");
     std::fs::write(&path, source).unwrap();
@@ -63,7 +63,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
     )
     .unwrap();
     for source in packages.iter_mut().flat_map(|package| &mut package.sources) {
-        source.file = root.join(&source.file);
+        source.file = root.join("core/programs/store").join(&source.file);
     }
     let store = packages
         .iter_mut()

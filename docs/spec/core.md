@@ -37,6 +37,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
 | `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](#provide) |
+| `foreign` | unbuilt: the type `Ptr` | FFI-4 to FFI-7 |
 | `args`, `env`, `host`, `stdin`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [env](../../core/core/env.hirsel), [host](../../core/core/host.hirsel), [stdin](../../core/core/stdin.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5, CAP-7 |
 
 A library module may extend a core module by name (LANG-7).
@@ -99,6 +100,8 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Socket`, `ReadHalf`, `WriteHalf`, `Listener` | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
 | `Secret` | plain | `shareable`, `send` | 8 | capability |
+| `Foreign[I]` (unbuilt, [FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
+| `foreign.Ptr` (unbuilt, [FFI-6](foreign.md#ffi-6-handles)) | plain | `send` | 8 | a handle-table ordinal |
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |
@@ -418,7 +421,14 @@ operations it names; nothing else about them may be inferred from an implementat
   reaches it there and `TimedOut` when `until` passes, in both cases having appended
   nothing. Bytes the host supplies afterwards go to the next read. The provider never
   changes the flags of the inherited descriptor
-  ([stdin](../../core/std/api/stdin.md)). An `Env` designates name patterns over a
+  ([stdin](../../core/std/api/stdin.md)). `stdin.is_terminal(i)`, `stdout.is_terminal(o)`
+  and `stderr.is_terminal(e)` return the stream's **terminal bit**: whether its descriptor
+  referred to a terminal when the run started. The launcher takes the bit once per granted
+  stream, before `main`, and it enters with the entry's grants
+  ([CAP-8](capabilities.md#cap-8-the-replay-point)), so these calls are not provider
+  operations, never wait or fail, admit nothing and take one step. The bit never changes
+  during the run, whatever happens to the descriptor
+  ([stdin](../../core/std/api/stdin.md#terminals)). An `Env` designates name patterns over a
   snapshot of the environment that the launcher takes before `main`. The snapshot holds
   the covered variables whose names are UTF-8, lives outside every limit and never
   changes. `env.get` gives `Denied` for a name no pattern covers, `None` for a covered
@@ -501,6 +511,13 @@ pub fn trigger(take t: StopTrigger)
 ```
 
 `advance_to`, `set_wall` and `idle` are in module `clock`, and `trigger` in module `process`.
+The two stream constructors take the stream's terminal bit as well (below); this replaces
+their declarations above:
+
+```hirsel unbuilt
+pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
+pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
+```
 
 - **Served ports.** `provide.dir`, `net`, `stdout` and `stderr` admit the port's room of `n`
   bytes, with a cell's 32, from the current limit and raise `Capacity` when it is refused;
@@ -519,9 +536,15 @@ pub fn trigger(take t: StopTrigger)
   `Socket`, `Listener`). The caller receives a fresh handle of the ordinary type bound to
   the port, the kind and the id, so it reaches only that port's object of that kind, and a
   handle of another provider or another port given to an operation is refused before it
-  reaches the server (`Denied`). A reply that issues id 0, an id already live for its kind,
-  or a variant that does not answer the call's operation fails the server with `Fail`, and
-  the call is settled as for a sealed port. `net.split` divides a socket in the caller
+  reaches the server (`Denied`). A port's ids are one space, since `Released(id)` names no
+  kind. Each issued id holds 32 bytes of the port's room until the server receives its
+  `Released`; a `Dir` id, plain like the capability, holds them until the run ends. A reply
+  that issues id 0, an id already live, or a variant that does not answer the call's
+  operation fails the server with `Fail`, and a reply that issues an id when the room is
+  short raises `Capacity` in the server; either way the call is settled as for a sealed
+  port. `Close(file)` ends the caller's handle at issue, and its id once the server has
+  taken the call; a `Close` cancelled before then queues `Released(file)` as a drop does.
+  `NextEntries` bytes are whole records in `host.next_entries`'s format. `net.split` divides a socket in the caller
   and asks the server nothing; dropping a half queues `Released(id, Read)` or
   `Released(id, Write)` (FAIL-13).
 - **Reply.** `provide.reply` is the commit point of the call: it copies the staged bytes into
@@ -535,9 +558,18 @@ pub fn trigger(take t: StopTrigger)
   queued and later call completes with `Closed` (`Dir`, `Stdout`, `Stderr`) or `Reset`
   (`Net`), and drops of its handles still succeed. `provide.next` returns `None` only at
   quiescence ([FAIL-15](failure.md#fail-15-run-stops)).
+- **Terminal bit.** `provide.stdout` and `provide.stderr` take the stream's terminal bit
+  explicitly, and `stdout.is_terminal` and `stderr.is_terminal` on the result return it for
+  the stream's whole life. It is answered by the capability itself, never queued on the port,
+  and a sealed port still answers it. There is no virtual `Stdin`; a model-world stream
+  answers `false`.
 - **Net authority.** A `provide.net` `Net` permits every address, name and TLS name, and
   `net.narrow` narrows it. Its TLS handshakes are answered by its server, so it never
-  authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)).
+  authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)). `net.join` reunites a
+  virtual socket's halves in the caller and asks the server nothing
+  ([NET-7](net.md#net-7-owned-connections)). `secret.scram_sha256` on a virtual TLS half
+  reaches its server only as `Send` calls, and only for a sealed `Secret`
+  ([TLS-6](tls.md#tls-6-scram-sha-256)).
 - **Cells.** `host.mono_ns`, `host.wall_ms`, `host.random` and `host.stopped` on a cell's
   capability answer at issue from the cell, never switch task and never allocate.
   `provide.clock` starts at the given times. `clock.advance_to(mut h, t)` raises monotonic

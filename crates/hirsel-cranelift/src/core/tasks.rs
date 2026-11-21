@@ -326,6 +326,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::CallWord
                     | HostOp::CallPayload
                     | HostOp::PortReply
+                    | HostOp::ProvideDir
+                    | HostOp::PortFill
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -365,6 +367,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::CallWord
                     | HostOp::CallPayload
                     | HostOp::PortReply
+                    | HostOp::ProvideDir
+                    | HostOp::PortFill
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();
@@ -449,8 +453,48 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
-            RtOp::HashBytes => {
-                outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args[..2])?[0];
+            RtOp::MapHashBytes => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_map_hash_bytes",
+                    &[P, P, U],
+                    &[U],
+                    &[self.context, args[0], args[1]],
+                )?[0];
+                1
+            }
+            RtOp::MapHashWord => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_map_hash_word",
+                    &[P, U],
+                    &[U],
+                    &[self.context, args[0]],
+                )?[0];
+                1
+            }
+            RtOp::MapHashStart => {
+                self.c_call(
+                    "hirsel_core_map_hash_start",
+                    &[P, P],
+                    &[],
+                    &[self.context, args[0]],
+                )?;
+                0
+            }
+            RtOp::MapHashAddWord => {
+                self.c_call("hirsel_core_map_hash_add_word", &[P, U], &[], &args[..2])?;
+                0
+            }
+            RtOp::MapHashAddBytes => {
+                self.c_call(
+                    "hirsel_core_map_hash_add_bytes",
+                    &[P, P, U],
+                    &[],
+                    &args[..3],
+                )?;
+                0
+            }
+            RtOp::MapHashFinish => {
+                outputs[0] = self.c_call("hirsel_core_map_hash_finish", &[P], &[U], &args[..1])?[0];
                 1
             }
             RtOp::Xxh3Short => {

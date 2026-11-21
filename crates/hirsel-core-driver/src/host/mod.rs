@@ -441,7 +441,10 @@ impl Host {
         if bytes.len() as u64 > max || Recipe::hash(&bytes) != root {
             return Err("stored recipe hash or length".into());
         }
-        Ok(Recipe::decode(&bytes, &mut DecodeBudget::unlimited())?)
+        Ok(Recipe::decode_retained(
+            &bytes,
+            &mut DecodeBudget::unlimited(),
+        )?)
     }
 
     fn initial(

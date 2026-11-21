@@ -1,8 +1,9 @@
 // The release std (std-reuse-1520 S1, S2). Two laws over the image-backed std:
 //
 // Independence: the std's parts, and the bodies it lends, are a function of
-// the std product. Two programs over the same image, each lowering the std
-// cold into its own parts store, hold equal record and part bytes. Mutant: the
+// the std product. The std product's own prebuild, and a program's build over
+// the same image lowering the std cold into its own parts store, hold equal
+// record and part bytes. Mutant: the
 // std's roots less the definitions a program reaches, red on "the std's record".
 //
 // Semantic differential: a program assembled over the separately lowered std,
@@ -166,14 +167,23 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
 fn a_separate_std_is_the_std_products_alone() {
     let dir = tempfile::tempdir().unwrap();
     let mut parts = Vec::new();
-    for (name, source) in [UNIT_PROGRAMS[0], UNIT_PROGRAMS[2]] {
-        let product = std_checked(dir.path(), name, source, "cache");
+    // The first program's std comes from the std product's own prebuild in
+    // its image; the second's image holds none, so its build lowers the std.
+    for ((name, source), cache) in [(UNIT_PROGRAMS[0], "cache"), (UNIT_PROGRAMS[2], "cache-b")] {
+        let product = std_checked(dir.path(), name, source, cache);
         let mut options = native_options(Backend::Llvm, &dir.path().join(name));
         options.optimize = true;
         options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+        let image = product.image.as_ref().unwrap().store_root().join("release-std");
+        if cache == "cache" {
+            let runtime = crate::tool_inputs::runtime_identity(hirsel_core_ids::ContentHash::of_bytes(
+                &std::fs::read(&options.runtime).unwrap(),
+            ));
+            product.prebuild_release_std(&options.target, runtime).unwrap();
+        }
         let std = std_of(&product, &options);
-        let shared = Store::new(&options.parts).unwrap();
-        let record = shared.get(std.key).unwrap().expect("the std record");
+        let store = Store::new(if cache == "cache" { &image } else { &options.parts }).unwrap();
+        let record = store.get(std.key).unwrap().expect("the std record");
         let bytes: Vec<Vec<u8>> =
             std.objects.iter().map(|object| std::fs::read(&object.path).unwrap()).collect();
         assert!(!std.lent.is_empty(), "the std lends bodies");

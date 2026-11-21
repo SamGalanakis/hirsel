@@ -1,0 +1,193 @@
+/// A startup configuration reader with room for up to max_errors failed reads.
+pub opaque type Reader {
+    source: Env,
+    errors: List[ConfigError],
+    max_errors: u64,
+    omitted: u64
+}
+
+/// A failed read with its key, or the number of additional failures.
+pub type ConfigError = KeyError(String, ConfigProblem) | More(u64)
+
+/// Why a read failed. Invalid describes the expected format without including the value.
+pub type ConfigProblem = Missing | Denied | NonUtf8 | Invalid(String)
+
+/// Starts a reader. Pass the number of planned getter calls to retain every key error.
+/// Further errors are counted for the final report.
+pub fn new(source: Env, max_errors: u64) -> Reader {
+    Reader(source, errors: list.new(), max_errors, omitted: 0)
+}
+
+fn read[T](source: Env, key: String, parse: scoped fn(String) -> Result[T, ConfigProblem]) -> Result[Option[T], ConfigProblem] {
+    match env.get(source, key) {
+        Ok(Some(value)) => Ok(Some(parse(value)?)),
+        Ok(None) => Ok(None),
+        Error(Denied) => Error(Denied),
+        Error(NotUtf8) => Error(NonUtf8),
+    }
+}
+
+fn get[T](mut r: Reader, key: String, take fallback: Option[T], take placeholder: T, parse: scoped fn(String) -> Result[T, ConfigProblem]) -> T {
+    let reading = read(r.source, key, parse)
+    let problem = match take reading {
+        Ok(Some(take value)) => return take value,
+        Ok(None) => match take fallback {
+            Some(take value) => return take value,
+            None => Missing,
+        },
+        Error(take problem) => take problem,
+    }
+    if list.len(r.errors) == r.max_errors {
+        r.omitted += 1
+    } else {
+        list.push(mut r.errors, KeyError(string.from(key), take problem))
+    }
+    take placeholder
+}
+
+fn parse_string(s: String) -> Result[String, ConfigProblem] {
+    Ok(string.from(s))
+}
+
+fn parse_u64(s: String) -> Result[u64, ConfigProblem] {
+    match (int.parse(s) : Result[u64, ParseError]) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Invalid("expected an unsigned 64-bit decimal integer")),
+    }
+}
+
+fn parse_i64(s: String) -> Result[i64, ConfigProblem] {
+    match (int.parse(s) : Result[i64, ParseError]) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Invalid("expected a signed 64-bit decimal integer")),
+    }
+}
+
+fn parse_bool(s: String) -> Result[bool, ConfigProblem] {
+    if s == "true" {
+        Ok(true)
+    } else if s == "false" {
+        Ok(false)
+    } else {
+        Error(Invalid("expected true or false"))
+    }
+}
+
+fn parse_port(s: String) -> Result[u16, ConfigProblem] {
+    if let Ok(n) = (int.parse(s) : Result[u16, ParseError]) {
+        if n != 0 {
+            return Ok(n)
+        }
+    }
+    Error(Invalid("expected a decimal port in 1..65535"))
+}
+
+fn parse_duration_ms(s: String) -> Result[u64, ConfigProblem] {
+    match (int.parse(s) : Result[u64, ParseError]) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Invalid("expected a decimal millisecond count")),
+    }
+}
+
+/// Returns an owned UTF-8 value, or an empty placeholder on error.
+pub fn string(mut r: Reader, key: String) -> String {
+    get(mut r, key, None, string.new(), parse_string)
+}
+
+/// Uses fallback when the key is absent. Other read errors return an empty placeholder.
+pub fn string_or(mut r: Reader, key: String, take fallback: String) -> String {
+    get(mut r, key, Some(take fallback), string.new(), parse_string)
+}
+
+/// Reads an unsigned decimal integer, or returns zero on error.
+pub fn u64(mut r: Reader, key: String) -> u64 {
+    get(mut r, key, None, 0, parse_u64)
+}
+
+/// Reads an unsigned decimal integer, with fallback for an absent key.
+pub fn u64_or(mut r: Reader, key: String, fallback: u64) -> u64 {
+    get(mut r, key, Some(fallback), 0, parse_u64)
+}
+
+/// Reads a signed decimal integer, or returns zero on error.
+pub fn i64(mut r: Reader, key: String) -> i64 {
+    get(mut r, key, None, 0, parse_i64)
+}
+
+/// Reads a signed decimal integer, with fallback for an absent key.
+pub fn i64_or(mut r: Reader, key: String, fallback: i64) -> i64 {
+    get(mut r, key, Some(fallback), 0, parse_i64)
+}
+
+/// Reads exactly "true" or "false", or returns false on error.
+pub fn bool(mut r: Reader, key: String) -> bool {
+    get(mut r, key, None, false, parse_bool)
+}
+
+/// Reads a boolean, with fallback for an absent key.
+pub fn bool_or(mut r: Reader, key: String, fallback: bool) -> bool {
+    get(mut r, key, Some(fallback), false, parse_bool)
+}
+
+/// Reads a decimal port in 1..65535, or returns zero on error.
+pub fn port(mut r: Reader, key: String) -> u16 {
+    get(mut r, key, None, 0, parse_port)
+}
+
+/// Reads a port, with the caller's u16 fallback for an absent key.
+pub fn port_or(mut r: Reader, key: String, fallback: u16) -> u16 {
+    get(mut r, key, Some(fallback), 0, parse_port)
+}
+
+/// Reads an unsigned decimal millisecond count, or returns zero on error.
+pub fn duration_ms(mut r: Reader, key: String) -> u64 {
+    get(mut r, key, None, 0, parse_duration_ms)
+}
+
+/// Reads a millisecond count, with fallback for an absent key.
+pub fn duration_ms_or(mut r: Reader, key: String, fallback: u64) -> u64 {
+    get(mut r, key, Some(fallback), 0, parse_duration_ms)
+}
+
+/// Consumes the reader. Returns retained errors in getter call order, followed
+/// by More if needed. Returns Ok(()) when every read succeeded.
+pub fn finish(take r: Reader) -> Result[(), List[ConfigError]] {
+    let Reader(errors: take saved, omitted, ..) = take r
+    let mut errors = take saved
+    if omitted != 0 {
+        list.push(mut errors, More(omitted))
+    }
+    if list.len(errors) == 0 {
+        Ok(())
+    } else {
+        Error(take errors)
+    }
+}
+
+/// Formats the errors in list order with a newline between entries.
+pub fn format_errors(errors: List[ConfigError]) -> String {
+    let mut text = string.new()
+    for i in 0 .. list.len(errors) {
+        if i != 0 {
+            string.push(mut text, "\n")
+        }
+        match errors[i] {
+            KeyError(key, problem) => {
+                string.push(mut text, key)
+                string.push(mut text, ": ")
+                match problem {
+                    Missing => string.push(mut text, "missing"),
+                    Denied => string.push(mut text, "read denied"),
+                    NonUtf8 => string.push(mut text, "not UTF-8"),
+                    Invalid(reason) => string.push(mut text, reason),
+                }
+            },
+            More(n) => {
+                string.push(mut text, "and ")
+                string.push_u64(mut text, n)
+                string.push(mut text, " more")
+            },
+        }
+    }
+    take text
+}

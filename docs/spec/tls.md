@@ -16,7 +16,7 @@ The declarations for later slices use `hirsel unbuilt` fences.
 ## Types
 
 Module `tls` declares `connect` and `send_secret`. Module `secret` declares `seal`,
-`narrow` and `render`.
+`narrow`, `render`, the MAC sink and the SCRAM sink (TLS-6).
 
 ```hirsel
 pub type Trust = System | Roots(Bytes)
@@ -63,11 +63,21 @@ pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[St
   certificate, split into four big-endian `u64` words. The chain itself is never returned.
 - **No resumption.** There are no session tickets, no resumption and no early data, so a
   handshake does not depend on earlier runs or earlier connections.
+- **Channel binding.** The provider also computes the stream's **binding value**, RFC 5929
+  §4.1's `tls-server-end-point`: the hash of the leaf's DER encoding with the hash function
+  of the leaf's signature algorithm, where MD5 and SHA-1 are replaced by SHA-256. A leaf
+  signed with SHA-256, SHA-384 or SHA-512 gives 32, 48 or 64 bytes. A leaf whose signature
+  algorithm names no single hash, such as Ed25519, gives no binding value. The runtime keeps
+  it on the socket record for TLS-6; no operation returns it.
+- **STARTTLS.** `s` may be a socket that `net.join` rebuilt after a plaintext exchange
+  ([NET-7](net.md#net-7-owned-connections)). The handshake treats it as it treats any
+  socket from `host.connect`.
 
 The following checks run in order, before issue. Each refuses with no host effect.
 
 1. `s` was not made by `host.connect`: `Denied`. A socket from `accept` cannot be the
-   client side of a handshake.
+   client side of a handshake. A socket that `net.join` rebuilt keeps the origin of the
+   socket it was split from.
 2. `name` is invalid: `Tls(Name)`.
 3. `alpn` breaks its limits: `Tls(Alpn)`.
 4. `Roots(b)` holds no certificate, or holds malformed PEM: `Tls(Roots)`.
@@ -83,6 +93,7 @@ When the provider is asked to perform the handshake, these failures are possible
 | a malformed or unacceptable certificate, including a bad signature or a disallowed key usage | `Tls(Certificate(Invalid))` |
 | the peer sent a fatal alert | `Tls(Protocol(d))`, where `d` is the alert's description code (RFC 8446 §6). Example: 120 is `no_application_protocol`.
 | the client detected a protocol violation | `Tls(Protocol(0))`. 0 means no alert code was reported. Hirsel does not report the alert rustls sends in this case. |
+| the host had already received bytes on the socket that nobody had read, when the handshake was issued | `Tls(Protocol(0))`, and no byte is sent. The provider checks with one nonblocking `MSG_PEEK` before it writes the ClientHello. A server never speaks first in a TLS handshake, so such bytes are plaintext injected before TLS started ([NET-7](net.md#net-7-owned-connections)). |
 | the transport ended before the handshake finished | `Tls(Closed)` |
 | a transport error | `Reset`, `Unreachable` or `Other(errno)`, as for a plain receive |
 | `until` passed | `TimedOut` |
@@ -166,13 +177,16 @@ is how `tls.send_secret` checks it (TLS-5).
 
 ### TLS-4: Provider calls
 
-Two operation tags are added. Everything else on a TLS stream uses the existing socket
+Two operation tags are added for the handshake and the secret sink, and two more for the
+SCRAM sink (TLS-6), which takes the next two free codes in `hirsel-core-ids`'s `host_op`. Everything else on a TLS stream uses the existing socket
 operations.
 
 | tag | operation | states |
 |---|---|---|
 | 22 | `TLS_CONNECT` | C, I, D |
 | 23 | `SEND_SECRET` | C, I, D |
+| next free | `SCRAM` (`secret.scram_sha256`) | C, I, D |
+| next free | `SCRAM_VERIFY` (`secret.scram_verify`) | C, D |
 | 27 | `RECV_BOUNDED` on a TLS half | C, I, D, unchanged |
 | 26 | `SEND_PAIR` on a TLS half | C, I, D, unchanged |
 
@@ -194,7 +208,9 @@ operations already use, followed by these fields, which an external provider can
 - `roots`, a borrowed buffer that is empty for System;
 - `alpn`, a pointer to a run of length-prefixed entries, and its length;
 - `protocol_out`, a caller buffer of capacity 255;
-- `peer_out`, 32 bytes.
+- `peer_out`, 32 bytes;
+- `binding_out`, a caller buffer of capacity 64, whose length stays 0 when the leaf gives
+  no binding value (TLS-1).
 
 All of these stay pinned until delivery.
 
@@ -207,7 +223,7 @@ The callbacks work like the other socket operations:
 - `abort(Cancel)` gives `Aborted` and `abort(Deadline)` gives `TimedOut`. Both close the
   socket and free the session inside the callback.
 - On success, `Outcome.value` is the TLS stream's key. Its two halves get the direction
-  bits that `net.split` uses. `protocol_out.len` and `peer_out` are written.
+  bits that `net.split` uses. `protocol_out.len`, `peer_out` and `binding_out` are written.
 
 `hirsel_core_host_tls_connect` is the C entry. It takes the context, the `Net`
 designation, the socket key, the extension fields above and the `Until` triple, and
@@ -278,7 +294,8 @@ is `Invalid`.
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
-verdict are the only values computed from them. Because `Secret` is not `codec`, no
+verdict, and the SCRAM sink's verdict, are the only values computed from them that reach the
+program. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
 store or JSON codec encodes one. `secret.render` returns the fixed marker
 `[secret]` for every secret. Every std function that renders, logs or describes a value
 holding a secret writes this marker in the secret's place. This includes the HTTP
@@ -331,6 +348,169 @@ use, the result is `Denied` before issue, with no effect. A tag over chosen data
 signing oracle wherever it is sent, which is why the use must be granted. A signature
 sink with another algorithm follows the same rule.
 
+### TLS-6: SCRAM-SHA-256
+
+```hirsel unbuilt
+pub opaque resource type Scram
+pub type ScramError = Denied | Transcript | Iterations | Binding | Net(NetError)
+pub fn scram_sha256(mut w: WriteHalf, s: Secret, client_first: Bytes, server_first: Bytes, before: Bytes, after: Bytes, until: Until) -> Result[Scram, ScramError] waits
+pub fn scram_final_len(w: WriteHalf, client_first: Bytes, server_first: Bytes) -> Result[u64, ScramError]
+pub fn scram_verify(take c: Scram, server_final: Bytes) -> bool
+```
+
+These three are in module `secret`. They authenticate with a `Secret` password by
+SCRAM-SHA-256 (RFC 5802 with RFC 7677's hash), as PostgreSQL's `scram-sha-256` method
+needs, without the password or any key derived from it reaching program memory.
+
+**What must stay inside.** RFC 5802 §3 derives, from the password and the server's salt and
+iteration count:
+
+- `SaltedPassword = Hi(Normalize(password), salt, i)`, which is PBKDF2-HMAC-SHA256 with a
+  32-byte output;
+- `ClientKey = HMAC(SaltedPassword, "Client Key")`, `StoredKey = H(ClientKey)` and
+  `ServerKey = HMAC(SaltedPassword, "Server Key")`;
+- `ClientProof = ClientKey XOR HMAC(StoredKey, AuthMessage)` and
+  `ServerSignature = HMAC(ServerKey, AuthMessage)`.
+
+Every one of these except the proof the server receives must stay with the run's secret
+bytes. `SaltedPassword` reproduces both keys, so it is as good as the password against
+that server. `ClientKey` authenticates as the client. `StoredKey` together with any captured
+proof gives `ClientKey`, by computing the client signature from the transcript and XORing it
+out. `ServerKey` impersonates the server. So Hirsel has no general PBKDF2 or SCRAM-key
+operation over a `Secret`. An HMAC tag with `SaltedPassword` as key over `"Client Key"` would
+be `ClientKey` itself. The one SCRAM operation takes the exact transcript bytes, emits the
+proof only onto the authorized connection, and keeps the expected server signature in a
+host-held `Scram` that answers only with a verdict.
+
+**Flow.** The program builds `client-first-message` itself, taking the nonce from
+`host.random` (18 random bytes in base64, as libpq and pgx use, is enough), and sends it.
+It receives `server-first-message`. It then calls `scram_sha256`, which sends
+`before ‖ client-final-message ‖ after` on `w`, and later passes the server's
+`server-final-message` to `scram_verify`. `before` and `after` carry the framing the
+protocol wraps around the message. For PostgreSQL, `before` is the `SASLResponse` header
+`p` with its 4-byte length, and `after` is empty. The program learns the message's length
+from `scram_final_len`, which runs the same checks as `scram_sha256` (below) except the
+two checks on the secret, and returns the exact byte length of the `client-final-message`
+that `scram_sha256` would send for these arguments.
+
+**Checks.** These run in order before issue. Each refuses with no host effect and no step
+beyond the call's own:
+
+1. `w` is not a TLS half: `Denied`. SCRAM over plain TCP gives an attacker on the path
+   material for offline password guessing, and channel binding needs TLS.
+2. No pattern of `s` covers the verified name of `w`'s stream: `Denied`. On a TLS half of a
+   `provide.net` `Net`, a `Secret` from an entry grant also gives `Denied`, as for
+   `send_secret` ([TLS-5](#tls-5-secrets)). No use word is needed. The operation sends a
+   value computed from the password only to a host the password itself may be sent to,
+   and that value tells the host less than the password does.
+3. The transcript is malformed: `Transcript`. `client_first` must be a GS2 header followed
+   by `client-first-message-bare` (RFC 5802 §7):
+   - The GS2 header is exactly `n,,`, `y,,` or `p=<cb-name>,,`. An authorization identity
+     (`a=`) is refused.
+   - The bare part is `n=<saslname>,r=<c-nonce>` and nothing after it. The `saslname` may be
+     empty, as PostgreSQL sends it.
+   - The nonce is one or more printable ASCII bytes other than `,` (0x21–0x7E without 0x2C).
+
+   `server_first` must be `r=<nonce>,s=<salt>,i=<count>`, optionally followed by `,` and
+   extensions:
+   - It must not start with `m=`.
+   - `<nonce>` must start with the exact `c-nonce` bytes and be strictly longer, with the
+     same byte rule.
+   - `<salt>` is padded standard base64 that decodes to at least one byte.
+   - `<count>` is 1 to 10 decimal digits with no leading zero.
+4. `<count>` is outside 4096 to 1,000,000 inclusive: `Iterations`. RFC 7677 §4 sets
+   4096 as the minimum, and it is PostgreSQL's default. A lower count chosen by a server
+   or by an attacker makes a captured exchange cheap to guess offline. The ceiling bounds
+   the work an untrusted server can demand, which is about a second of one core at
+   1,000,000. It is above the 600,000 that OWASP recommends for stored PBKDF2-HMAC-SHA256.
+5. The GS2 header is `p=` with a `cb-name` other than `tls-server-end-point`, or `w`'s
+   stream has no binding value (TLS-1): `Binding`. `tls-unique` is undefined for TLS 1.3,
+   and PostgreSQL offers only `tls-server-end-point`.
+
+**Charge.** When the checks pass, the call takes one more step for each admitted
+iteration, `<count>` steps in all, at the call and before issue
+([MEM-30](budgets.md#mem-30-step-bounds)). If the current bound has fewer left, it raises
+`OutOfTime` there, having derived and sent nothing. With no bound current, the steps use
+nothing, as every step does. Slice ends among them fall at the call, before the
+derivation. The call then admits 32 bytes of run-owned storage for the `Scram` from the
+current limit, and a refusal raises `Capacity` with nothing sent. The storage is refunded
+when the `Scram` is consumed or dropped, or at once when the operation fails, since no
+`Scram` then exists. Nothing else is admitted.
+
+**Issue.** From the run-owned bytes of `s`, the runtime computes:
+
+- **Normalize.** The password is prepared with SASLprep (RFC 4013) as PostgreSQL's
+  `pg_saslprep` does. If the bytes are not UTF-8, or they contain a code point SASLprep
+  prohibits, the raw bytes are used unchanged, so a password set through PostgreSQL works
+  either way.
+- **Message.** `client-final-message-without-proof` is
+  `c=<base64(gs2-header ‖ cbind-data)>,r=<nonce>`. `gs2-header` is the exact prefix of
+  `client_first`. `cbind-data` is the stream's binding value for `p=`, and empty for `n` and
+  `y`. `AuthMessage` is `client-first-message-bare ‖ "," ‖ server_first ‖ "," ‖
+  client-final-message-without-proof`.
+- **Proof and signature.** The runtime computes `ClientProof` and `ServerSignature`, keeps
+  `ServerSignature` in the `Scram`'s storage, and drops everything else. Hirsel makes no
+  promise that the memory is wiped. It then sends `before ‖ client-final-message-without-proof
+  ‖ ",p=" ‖ base64(ClientProof) ‖ after` on `w`.
+- **Sending.** The send works as for `send_secret`: every byte is sent or the operation
+  fails with `Net(e)`. If it fails after committing some bytes, the half is spent. The
+  derivation runs at issue, before the first send attempt, and is not a cancellation point.
+
+`client-final-message` is
+`2 + len(base64(gs2-header ‖ cbind-data)) + 3 + len(nonce) + 3 + 44` bytes long, and that is
+what `scram_final_len` returns.
+
+**Verdict.** `scram_verify` consumes `c` and returns `true` exactly when `server_final` is
+`v=` followed by 44 base64 characters that decode to the kept `ServerSignature`, then either
+the end or `,` and extensions. The comparison runs in constant time. `e=<error>`, a wrong
+signature, a wrong length or anything else gives `false`. It never waits or fails, and it
+refunds the `Scram`'s storage. A client accepts the server, as RFC 5802 §5 requires, only
+after `true`. Dropping a `Scram` unverified refunds it and reveals nothing.
+
+**Virtual streams.** A SCRAM exchange on a TLS half of `provide.net` with a sealed `Secret`
+runs the checks and the derivation above in the runtime, which holds the sealed bytes. The
+bytes go to the server as ordinary `Send` calls on the half: the first one offers the whole
+message as `prefix` with an empty `tail`, and each later one offers the bytes after the
+committed count, until all are committed or a reply fails ([core](core.md#provide)). A
+virtual stream has no binding value, so `p=` gives `Binding`. The program already held
+the sealed bytes, so the server's view of the proof adds nothing. The scripted provider
+plays the client-final message as plaintext the peer expects, and its handshake result may
+state a binding value.
+
+**Replay.** On a host TLS half, `scram_sha256` and `scram_verify` are provider operations
+([CAP-5](capabilities.md#cap-5-provider-operations)) under the run-owned secret sink, and
+they pass the replay point at issue and at delivery
+([CAP-8](capabilities.md#cap-8-the-replay-point)):
+
+- The issue of `scram_sha256` holds the half's ordinal, the secret's designation, the
+  canonical bytes of `client_first`, `server_first`, `before` and `after`, and `until`. Its
+  delivery holds the outcome, and the committed count on failure.
+- The issue of `scram_verify` holds the `Scram`'s ordinal and the canonical bytes of
+  `server_final`. Its delivery holds the verdict.
+- `scram_final_len` is computed from its arguments and the stream's record, and adds no
+  frame.
+
+On a TLS half of `provide.net`, both are computed by the run, as every virtual provider's
+results are ([core](core.md#provide)). They pass no replay point. A replay recomputes the
+proof from the sealed bytes, which it recomputes from the deliveries they came from
+([recording](../recording.md#credentials)), and sends the same `Send` calls to the server.
+It recomputes the verdict of a `Scram` made there too.
+
+A recording never holds the password, its normalized bytes, `SaltedPassword`, `ClientKey`,
+`StoredKey`, `ServerKey`, the proof or the expected signature. A replay delivers the
+recorded outcome and verdict from a `Scram` with no bytes behind it
+([recording](../recording.md#credentials)).
+
+The server's `v=` is also received plaintext in program memory, since the program reads it
+before passing it to `scram_verify`. So guessing material is in the program as it is on the
+wire; the sink keeps out only what would let the program authenticate without the server.
+What a tape does hold is the received plaintext, which includes the salt, the iteration
+count, the server's nonce and the server's `v=`. With the client-first message that the
+same tape's sends describe, that is enough to test password guesses offline at `<count>`
+PBKDF2 iterations per guess. A proof with its transcript would be the same. That is why
+the proof is never stored and the tape is credential-bearing: it is readable only by its
+owner, created at a fresh path, and exported only with `--include-credentials`.
+
 ## Laws
 
 Each law names the bug it catches and the oracle its expected value comes from. Where a
@@ -352,9 +532,22 @@ computes.
 | **TL10** a secret never renders | the bytes reaching a render, log line or diagnostic | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. Search stdout, stderr and the run's diagnostics for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value, and the server does not echo it. |
 | **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret `to alpha.test`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |
 | **TL13** spent half | a resumed send that splits a secret | Make `send_secret` time out after it has committed a prefix (the scripted peer stops reading). The next `send_pair` on that half gives `Reset`. The scripted peer's received bytes are a prefix of `before ‖ secret ‖ after` and contain nothing after it. |
+| **TL14** STARTTLS in place | `join` shutting down, rebuffering or losing the connection, or `tls.connect` refusing a joined socket | A loopback fixture server reads 8 bytes and checks they equal `00 00 00 08 04 D2 16 2F` (PostgreSQL's `SSLRequest`, from the protocol documentation's code 80877103). It answers `S`, then runs TLS as `alpha.test`. NET-7's `pg_starttls` succeeds, `Handshake.peer` equals the `openssl` digest of the alpha leaf, and `hello` sent on the TLS half reaches the server as plaintext. When the server answers `N`, the result is `Declined` with byte `0x4E`, and `hello` sent on the returned half reaches the server unencrypted. |
+| **TL15** injected plaintext before TLS | bytes after the go-ahead read as the server's (CVE-2021-23222) | The fixture server writes `S` followed by `R\x00\x00\x00\x08\x00\x00\x00\x00` (a fake `AuthenticationOk`) in one write, then waits. The client reads one byte, joins, and `tls.connect` gives `Tls(Protocol(0))`. The server receives no byte after the 8-byte request, and the open descriptor count is back to its value before `connect` (TL7's check). The oracle is TLS-1's peek rule and RFC 8446 §4.1.2, under which the client speaks first. |
+| **TL16** join refusals | halves of different sockets merged, or a refusal that loses a half | Using a counting provider: halves of two different loopback sockets, the halves of a TLS stream, and the halves of an accepted socket each give `Unjoined` with zero provider calls. Afterwards, one byte sent on each returned write half reaches that half's own peer, and no other. |
+| **SC1** RFC 7677 vector | a wrong derivation, AuthMessage or base64 | Use secret `pencil` `to alpha.test`, over a loopback TLS stream verified as `alpha.test`. `client_first` is `n,,n=user,r=rOprNGfwEbeRWgbNEkqO`. `server_first` is `r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096`. `before` and `after` are empty. The server receives exactly `c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=`, and `scram_final_len` gives 106. `scram_verify` with `v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=` gives `true`. With the first signature character changed to `7`, with `e=invalid-proof`, and with the right `v=` on a `Scram` made from a different server nonce, it gives `false`. The oracle is RFC 7677 §3. |
+| **SC2** normalization and raw fallback | skipping SASLprep, or failing where PostgreSQL falls back | Use SC1's transcript with three passwords. `pen\u{AD}cil` (U+00AD, which RFC 4013 table B.1 maps to nothing) sends SC1's proof. The bytes `70 65 6E FF 63 69 6C` are not UTF-8 and are used raw, so the proof is `p=udNjQvoDM/dE+e/v63Vs504VHmXCmsAHQp5FC38JZcU=`. `pen\u{E000}cil` holds a private-use code point, which RFC 4013 §5 prohibits, so its raw UTF-8 bytes `70 65 6E EE 80 80 63 69 6C` are used and the proof is `p=S0CJLeozN1oaedLBR16sXAg8qzxE/6wMKY16FfthmYo=`. The last two proofs come from Python's `hashlib.pbkdf2_hmac` and `hmac` over those raw bytes. |
+| **SC3** iteration range before work | a check after the derivation, or an off-by-one at either end | With SC1's transcript, `i=4096` succeeds (SC1), and `i=1000000` succeeds, with the server accepting the proof by its own reference computation. `i=4095`, `i=1000001` and `i=0` give `Iterations`. `i=04096` and a missing `i=` give `Transcript`. In each refused case the server receives no byte after the handshake, and the call takes exactly 1 step: `bound steps 1 { let mut h = take w; secret.scram_sha256(mut h, ...) }` returns `Ok` holding the refusal. The half is moved into the scope, since MEM-30 refuses a body that lends `mut` a place declared outside it, and a `let` with a move takes no step. |
+| **SC4** per-iteration charge | the derivation counted as one step | With the other arguments in locals bound outside the scope, `bound steps 4097 { let mut h = take w; secret.scram_sha256(mut h, ...) }` returns `Ok`, and the same body under `bound steps 4096` returns `Error(OutOfTime(steps: 4096))`, with no byte reaching the server. By hand, that is 1 step for the call and 4096 for its iterations, and the `let` takes none (MEM-30). |
+| **SC5** transcript checks | accepting a server nonce that does not extend the client's, or a mandatory extension | Each of these gives `Transcript` with no byte after the handshake: a server nonce that does not start with the client nonce, a server nonce equal to the client nonce, a `server_first` starting with `m=`, a `client_first` of `n,a=admin,n=,r=abc`, and a salt that is not base64. The oracle is RFC 5802 §5.1 and §7. |
+| **SC6** authority | a proof emitted to a host the secret may not reach | Each of these gives `Denied`, and the server receives zero bytes after the handshake: a secret `to beta.test` on an `alpha.test` stream, any secret on a plain-TCP half, and a granted secret on a TLS half of `provide.net`, where the server's `provide.next` sees no `Send`. |
+| **SC7** channel binding | the identity digest used where the signature's hash is required, or binding over a missing value | `client_first` `p=tls-server-end-point,,n=,r=abc` over the `alpha.test` leaf, signed with SHA-256, sends `c=` the base64 of `p=tls-server-end-point,,` followed by the leaf's `openssl x509 -outform der \| sha256sum` digest. Over a leaf signed with SHA-384 (an added fixture), it sends the base64 of the header followed by the leaf's `sha384sum` digest, and `scram_final_len` counts its 48 bytes. An Ed25519 leaf, and `p=tls-unique,,`, give `Binding` before issue. The oracle is RFC 5929 §4.1. |
+| **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
+| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, `secret.seal("pencil", "alpha.test")` with SC1's transcript: the server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
 
-TL1 to TL8, TL10 and TL11 run against the OS provider over loopback. TL5, TL7 and TL13
-also have scripted-provider cases, so that the evaluator is covered. The recording laws of
+TL1 to TL8, TL10, TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
+loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
+evaluator is covered. SC9 runs on both engines. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 
 ## Build slices
@@ -369,6 +562,8 @@ and L (more than three).
 | **T3** evaluator and scripted provider | M | T1 | the evaluator's call form for tag 22; peer scripts in the scripted provider (`model_net`) with handshake results and plaintext steps | scripted TL5, TL7 |
 | **T4** Secret | M | T1, T2 | the `Secret` core type and grant kind 11, launcher sources `env:` and `file:`, `seal`, `narrow`, `render`, `SEND_SECRET` in the OS and scripted providers, its designation and grant record in a recording, the spent-half rule | TL10–TL13 |
 | **T5** HTTPS client | S | T1, T4, http-client-1439 | std `tls` api page; `https` connect = `host.connect`, then `tls.connect` offering `http/1.1`, then the plain client's reader and writer over the halves; `Secret` header values written through `send_secret`; `[secret]` in request and error renders | TL10 (the client's case), and one HTTPS round trip in the existing http client harness |
+| **T6** STARTTLS | S | T1, T3 | `net.join` and `Unjoined` (NET-7) on both engines and in the evaluator's virtual sockets; TLS-1's unread-bytes peek in the OS provider, and a pre-handshake bytes step in peer scripts | TL14–TL16 |
+| **T7** SCRAM | M | T4, T6 | TLS-1's binding value (`binding_out`, the recording's `TLS_CONNECT` delivery); `Scram`, `ScramError`, `scram_sha256`, `scram_final_len`, `scram_verify`; SASLprep with raw fallback; the per-iteration charge; `SCRAM` and `SCRAM_VERIFY` in the OS, scripted and virtual paths and in a recording | SC1–SC9 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
-recording is part of its contract. T5 is last.
+recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

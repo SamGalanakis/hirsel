@@ -1,0 +1,57 @@
+fn growth() -> bool {
+    let p = schedule.exponential(3, 100)
+    let wide = schedule.exponential(3, 18446744073709551615)
+    let fixed = schedule.with_cap_ms(schedule.with_base_ms(schedule.fixed(7), 11), 20)
+    schedule.next_delay_fixed(p, 0, 0) == Some(3) && schedule.next_delay_fixed(p, 5, 0) == Some(96) && schedule.next_delay_fixed(p, 6, 0) == Some(100) && schedule.next_delay_fixed(p, 64, 0) == Some(100) && schedule.next_delay_fixed(p, 1000, 0) == Some(100) && schedule.next_delay_fixed(wide, 63, 0) == Some(18446744073709551615) && schedule.next_delay_fixed(schedule.exponential(0, 100), 1000, 0) == Some(0) && schedule.next_delay_fixed(fixed, 64, 0) == Some(11) && schedule.next_delay_fixed(schedule.with_cap_ms(fixed, 9), 0, 0) == Some(9)
+}
+
+fn stop_limits() -> bool {
+    let p = schedule.with_deadline(schedule.with_max_attempts(schedule.fixed(15), Some(3)), Some(100))
+    let mut rng = rand.new(1, 2)
+    let full = schedule.with_jitter(p, Full)
+    schedule.next_delay_fixed(p, 2, 97) == Some(3) && schedule.next_delay_fixed(p, 2, 99) == Some(1) && schedule.next_delay_fixed(p, 2, 100) == None && schedule.next_delay(full, 2, 101, mut rng) == None && schedule.next_delay(full, 3, 97, mut rng) == None && schedule.next_delay_fixed(schedule.with_max_attempts(p, Some(0)), 0, 97) == None && schedule.next_delay_fixed(schedule.with_deadline(schedule.with_max_attempts(p, None), None), 3, 101) == Some(15) && rand.state(rng) == (1u64, 2u64)
+}
+
+fn deterministic_jitter() -> bool {
+    let p = schedule.with_jitter(schedule.exponential(9, 15), Full)
+    let mut a = rand.new(1, 2)
+    let mut b = rand.new(1, 2)
+    let mut c = rand.new(1, 2)
+    // Full on [0, 15] uses the low nibble. The first two PCG reference words end in 0 and c.
+    let first = schedule.next_delay(p, 1, 0, mut a)
+    let second = schedule.next_delay(p, 2, 0, mut a)
+    let clipped = schedule.with_deadline(p, Some(3))
+    first == Some(0) && second == Some(12) && schedule.next_delay(p, 1, 0, mut b) == first && schedule.next_delay(p, 2, 0, mut b) == second && schedule.next_delay(clipped, 1, 0, mut c) == first && schedule.next_delay(clipped, 2, 0, mut c) == Some(3) && rand.state(a) == rand.state(c) && schedule.next_delay_fixed(p, 1, 0) == Some(15)
+}
+
+fn jitter_ranges() -> bool {
+    let full = schedule.with_jitter(schedule.fixed(15), Full)
+    let equal = schedule.with_jitter(schedule.fixed(15), Equal)
+    let mut reached_full_top = false
+    let mut reached_equal_bottom = false
+    let mut reached_equal_top = false
+    for seed in 0u64 .. 128u64 {
+        let mut rng = rand.new(seed, 2)
+        let f = option.unwrap(schedule.next_delay(full, 0, 0, mut rng))
+        let e = option.unwrap(schedule.next_delay(equal, 0, 0, mut rng))
+        if f > 15 || e < 7 || e > 15 {
+            return false
+        }
+        reached_full_top = reached_full_top || f == 15
+        reached_equal_bottom = reached_equal_bottom || e == 7
+        reached_equal_top = reached_equal_top || e == 15
+    }
+    reached_full_top && reached_equal_bottom && reached_equal_top
+}
+
+fn jitter_edges() -> bool {
+    let max = schedule.with_jitter(schedule.fixed(18446744073709551615), Full)
+    let zero = schedule.with_jitter(schedule.fixed(0), Equal)
+    let mut rng = rand.new(1, 2)
+    schedule.next_delay(zero, 0, 0, mut rng) == Some(0) && schedule.next_delay(schedule.fixed(15), 0, 0, mut rng) == Some(15) && rand.state(rng) == (1u64, 2u64) && schedule.next_delay(max, 0, 0, mut rng) == Some(0xc4f5a58656eef510)
+}
+
+// expect: run policy_laws() = true
+fn policy_laws() -> bool {
+    growth() && stop_limits() && deterministic_jitter() && jitter_ranges() && jitter_edges()
+}

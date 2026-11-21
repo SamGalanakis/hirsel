@@ -51,7 +51,9 @@ pub(crate) fn decoded_closure_hash(
     ))
 }
 
-const BODY_MAGIC: &[u8] = b"HIRBODY\0\x01\x00";
+pub const VERSION: u16 = 2;
+const BODY_MAGIC: &[u8] = b"HIRBODY\0\x02\x00";
+pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v2";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
@@ -124,7 +126,7 @@ impl Slot {
 
 impl EncodedBody {
     pub fn hash(&self) -> ContentHash {
-        ContentHash::of_parts("hirsel.code-body.v1", [self.bytes.as_slice()])
+        ContentHash::of_parts(BODY_HASH_DOMAIN, [self.bytes.as_slice()])
     }
 }
 

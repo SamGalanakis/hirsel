@@ -330,7 +330,6 @@ tags!(RtOp {
     13 => LatestRead,
     14 => DestId,
     15 => CompareBytes,
-    16 => HashBytes,
     17 => Sha256Blocks,
     18 => CauseNext,
     19 => CauseValue,
@@ -351,13 +350,19 @@ tags!(RtOp {
     38 => Xxh3Short,
     39 => Xxh3Stripes,
     40 => LaunchHandle,
-    41 => ConnNew { item },
-    42 => ConnClient,
-    43 => ConnSend { item },
-    44 => ConnTrySend { item },
-    45 => ConnReceive { item },
-    46 => ConnTryReceive { item },
-    47 => SpawnUnit { x, r },
+    41 => MapHashBytes,
+    42 => MapHashWord,
+    43 => MapHashStart,
+    44 => MapHashAddWord,
+    45 => MapHashAddBytes,
+    46 => MapHashFinish,
+    47 => ConnNew { item },
+    48 => ConnClient,
+    49 => ConnSend { item },
+    50 => ConnTrySend { item },
+    51 => ConnReceive { item },
+    52 => ConnTryReceive { item },
+    53 => SpawnUnit { x, r },
 });
 
 tags!(HostOp {
@@ -422,6 +427,8 @@ tags!(HostOp {
     58 => CallWord,
     59 => CallPayload,
     60 => PortReply,
+    61 => ProvideDir,
+    62 => PortFill,
 });
 
 tags!(RaiseCause {

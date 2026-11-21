@@ -219,6 +219,10 @@ pub(super) enum Value {
     Metadata(Vec<usize>),
 }
 pub(super) const CONTEXT: Value = Value::Local(Local::CONTEXT);
+
+/// Identifies the task-context parameter through LLVM signature rewrites.
+const TASK_CONTEXT_ATTRIBUTE: &str = "hirsel-task-context";
+
 impl Value {
     pub fn global(name: impl Into<Name>) -> Self {
         Self::Global(name.into())
@@ -1007,6 +1011,9 @@ impl Sink for TextSink {
                 out.push_str(", ");
             }
             parameter(out, p);
+            if *local == Local::CONTEXT {
+                write!(out, " \"{TASK_CONTEXT_ATTRIBUTE}\"").unwrap();
+            }
             write!(out, " {local}").unwrap();
         }
         out.push(')');

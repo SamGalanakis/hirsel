@@ -461,3 +461,126 @@ fn g_second_writer(dir: Dir, clock: Clock) -> Result[(), ()] waits { write_share
     };
     assert_eq!(run("1"), run("4"));
 }
+
+/// PROG-4: a package's manifest declares each test's run, and a test's run is
+/// its own. From prog4_runs, `allocation` needs a 296-byte root limit and
+/// `good` 288. A configuration change re-executes only the tests whose run it
+/// changes; a name that is not one of the package's tests is refused.
+#[test]
+fn manifest_test_runs_key_each_test_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("app");
+    std::fs::create_dir(&package).unwrap();
+    std::fs::write(
+        package.join("main.hirsel"),
+        r#"
+fn private_answer() -> u64 { 7u64 }
+@test
+fn good() -> Result[(), ()] { if private_answer() == 7u64 { Ok(()) } else { Error(()) } }
+@test
+fn allocation() -> Result[(), Capacity] {
+    let mut values: Bytes = list.new()
+    list.try_reserve(mut values, 8u64)
+}
+"#,
+    )
+    .unwrap();
+    let configure = |tests: serde_json::Value| {
+        let manifest = serde_json::json!({
+            "packages": [{
+                "package": {"name": "app", "version": "1"},
+                "dependencies": [{"name": "core", "version": "1"}],
+                "sources": [{"file": "main.hirsel", "modules": ["main"], "signatures": false}],
+            }],
+            "tests": tests,
+        });
+        std::fs::write(package.join("manifest.json"), manifest.to_string()).unwrap();
+    };
+    let options = native_options(Backend::Cranelift, dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let runtime = options
+        .runtime
+        .canonicalize()
+        .expect("test runtime archive");
+    let cc = cc.canonicalize().expect("test link driver");
+    let store = dir.path().join("store");
+    let args = |extra: &[&str]| {
+        [
+            "test",
+            package.to_str().unwrap(),
+            "--runtime",
+            runtime.to_str().unwrap(),
+            "--cc",
+            cc.to_str().unwrap(),
+            "--store",
+            store.to_str().unwrap(),
+            "--json",
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    // The pass cache lives under the cache home; a private one keeps the
+    // first run's `executed` independent of earlier runs on this host.
+    let cache_home = dir.path().join("cache");
+    let request = |args: &[String]| {
+        let output = process::tape_request_command(args, dir.path())
+            .env("XDG_CACHE_HOME", &cache_home)
+            .output()
+            .unwrap();
+        let after = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes);
+            let at = text.find(process::CHILD_MARK).expect("request child started")
+                + process::CHILD_MARK.len();
+            text[at..].to_owned()
+        };
+        (output.status.code(), after(&output.stdout), after(&output.stderr))
+    };
+    let run = |expected: [(&str, &str); 2]| {
+        let (status, stdout, stderr) = request(&args(&[]));
+        assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+        let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let rows: Vec<_> = result["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                assert_eq!(row["passed"], true, "{row}");
+                (
+                    row["definition"].as_str().unwrap().to_owned(),
+                    row["source"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(name, source)| (format!("app@1/main/{name}"), (*source).to_owned()))
+            .collect();
+        assert_eq!(rows, expected);
+    };
+    configure(serde_json::json!({"limit": 288, "runs": {"app@1/main/allocation": {"limit": 296}}}));
+    run([("allocation", "executed"), ("good", "executed")]);
+    run([("allocation", "cached"), ("good", "cached")]);
+    configure(
+        serde_json::json!({"limit": 288, "runs": {"app@1/main/allocation": {"limit": 4096}}}),
+    );
+    run([("allocation", "executed"), ("good", "cached")]);
+    configure(
+        serde_json::json!({"limit": 289, "runs": {"app@1/main/allocation": {"limit": 4096}}}),
+    );
+    run([("allocation", "cached"), ("good", "executed")]);
+
+    let (status, stdout, stderr) = request(&args(&["--limit", "4096"]));
+    assert_ne!(status, Some(0), "{stdout}");
+    assert!(stderr.contains("test takes no --limit"), "{stderr}");
+    configure(serde_json::json!({"limit": 288, "runs": {"app@1/main/missing": {"limit": 296}}}));
+    let (status, stdout, stderr) = request(&args(&[]));
+    assert_ne!(status, Some(0), "{stdout}");
+    assert!(
+        stderr.contains("app@1/main/missing, which is not one of its tests"),
+        "{stderr}"
+    );
+}

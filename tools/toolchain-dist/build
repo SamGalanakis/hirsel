@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -77,6 +78,59 @@ def witness(output):
         raise
 
 
+def fresh_witness(prefix):
+    """Run the installed CLI in an empty root with a read-only prefix."""
+    relocated = '/opt/relocated-hirsel'
+    sandbox = ['bwrap', '--unshare-all', '--die-with-parent', '--clearenv',
+               '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+               '--dir', '/work', '--chdir', '/work',
+               '--ro-bind', '/bin/sh', '/bin/sh', '--ro-bind', str(prefix), relocated,
+               '--setenv', 'PATH', f'{relocated}:{relocated}/bin',
+               '--setenv', 'HOME', '/work', '--setenv', 'XDG_CACHE_HOME', '/work/cache']
+    # Seed only the shared libraries that let the shell and compiler start.
+    # In particular, the first root has no development files or linker scripts.
+    libraries = set()
+    for executable in (Path('/bin/sh'), prefix / 'hirsel'):
+        dependencies = subprocess.check_output(['ldd', executable], text=True)
+        for line in dependencies.splitlines():
+            match = re.match(r'\s*(?:\S+ => )?(/\S+) \(', line)
+            if match and not Path(match[1]).is_relative_to(prefix):
+                libraries.add(match[1])
+    loader_files = [arg for path in sorted(libraries) for arg in ('--ro-bind', path, path)]
+    sequence = 'hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build'
+    refused = subprocess.run([*sandbox, *loader_files, '--', '/bin/sh', '-c', sequence],
+                             capture_output=True, text=True)
+    if (refused.returncode != 1 or 'Created application at demo' not in refused.stdout
+            or 'missing recipe inputs:' not in refused.stdout + refused.stderr
+            or not re.search(r'\b(?:Scrt1|crt1|crti)\.o\b', refused.stdout + refused.stderr)
+            or 'libc6-dev' not in refused.stdout + refused.stderr):
+        raise ValueError(f'fresh root did not diagnose the missing CRT ({refused.returncode})\n'
+                         f'{refused.stdout}{refused.stderr}')
+    print(refused.stdout + refused.stderr, end='', flush=True)
+
+    # Use the build host's system link inputs, still with no compiler or host
+    # linker on PATH. Each sandbox starts with its own empty cache and cwd.
+    system = [arg for directory in ('/usr/lib', '/lib', '/lib64') if Path(directory).is_dir()
+              for arg in ('--ro-bind', directory, directory)]
+    passed = subprocess.run([*sandbox, *system, '--', '/bin/sh', '-c',
+                             f'hirsel --version && {sequence} && ./program && hirsel check'],
+                            capture_output=True, text=True)
+    if passed.returncode or 'pass executed app@1/tests/test_twice' not in passed.stdout:
+        raise ValueError(f'fresh root with system link inputs failed ({passed.returncode})\n'
+                         f'{passed.stdout}{passed.stderr}')
+    lines = passed.stdout.splitlines()
+    registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
+    runtimes = [f'{name} {target} {Path(archive).parent.name}'
+                for field, name in [('runtimes', 'runtime'), ('recording_runtimes', 'recording runtime')]
+                for target, archive in registration[field].items()]
+    if (not re.fullmatch(r'hirsel \d+\.\d+\.\d+\S*', lines[0])
+            or not re.fullmatch(r'compiler [0-9a-f]{64}', lines[1])
+            or not set(runtimes).issubset(lines)):
+        raise ValueError(f'fresh root reported unexpected version identities\n{passed.stdout}')
+    print(passed.stdout + passed.stderr, end='', flush=True)
+    print('dist: fresh-root acceptance passed', flush=True)
+
+
 def manifest(output, mode):
     try:
         notices.collect(output, mode)
@@ -111,7 +165,10 @@ def profile_lock():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, required=True)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument('--output', type=Path)
+    action.add_argument('--check-fresh', type=Path, metavar='PREFIX',
+                        help='run the fresh-machine acceptance test on an existing bundle (requires bwrap)')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', action='store_true')
     parser.add_argument('--cpu', type=int, default=8)
@@ -119,6 +176,9 @@ def main():
     parser.add_argument('--num-threads', type=int, help='Buck2 execution threads')
     parser.add_argument('--profdata', help='LLVM tools matching the pinned rustc')
     args = parser.parse_args()
+    if args.check_fresh is not None:
+        fresh_witness(args.check_fresh.resolve())
+        return
     output = args.output.resolve()
     if output.exists():
         parser.error('output already exists; use a fresh directory')

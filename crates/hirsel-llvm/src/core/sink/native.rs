@@ -500,6 +500,19 @@ impl Sink for NativeSink {
         unsafe { (self.api.begin_body)(self.unit, f) };
         for (i, &local) in params.iter().enumerate() {
             let argument = unsafe { (self.api.parameter)(f, i as u32) };
+            if local == Local::CONTEXT {
+                // SAFETY: the parameter belongs to this function and the key is static.
+                unsafe {
+                    (self.api.string_attribute)(
+                        self.unit,
+                        argument,
+                        TASK_CONTEXT_ATTRIBUTE.as_ptr().cast(),
+                        TASK_CONTEXT_ATTRIBUTE.len(),
+                        c"".as_ptr(),
+                        0,
+                    );
+                }
+            }
             self.define(local, argument);
         }
     }

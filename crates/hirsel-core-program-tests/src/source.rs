@@ -364,3 +364,143 @@ fn sites(checked: &Checked, joined: &Module) -> Vec<u64> {
         .item_sites(&joined.items)
         .unwrap()
 }
+
+pub mod counted_loops {
+    pub const SEEDS: [u64; 2] = [0x1543, 0x9e37_79b9_7f4a_7c15];
+
+    pub fn choices(mut state: u64) -> impl FnMut(u64) -> u64 {
+        move |options| {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut x = state;
+            x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            (x ^ (x >> 31)) % options
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum CollectionShape {
+        Store,
+        WholeCopy,
+        OffsetCopy,
+        MutCall,
+        Push,
+        BackEdge,
+    }
+
+    impl CollectionShape {
+        pub const ALL: [Self; 6] = [
+            Self::Store,
+            Self::WholeCopy,
+            Self::OffsetCopy,
+            Self::MutCall,
+            Self::Push,
+            Self::BackEdge,
+        ];
+
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::Store => "store",
+                Self::WholeCopy => "whole_copy",
+                Self::OffsetCopy => "offset_copy",
+                Self::MutCall => "mut_call",
+                Self::Push => "refused_push",
+                Self::BackEdge => "back_edge",
+            }
+        }
+
+        pub const CHECK: &str = "table[key]";
+
+        pub fn source(self, name: &str, extent: u64, key: u64) -> String {
+            let (helper, seed_key, before_load, load_key, after_load) = match self {
+                Self::Store => (
+                    "",
+                    "",
+                    "cells[at & 63].key = good",
+                    "cells[j % 100].key",
+                    "",
+                ),
+                Self::WholeCopy => (
+                    "",
+                    "cells[at & 63].key = good\n    let copied: Inline[Cell, 100] = cells",
+                    "",
+                    "copied[j % 100].key",
+                    "",
+                ),
+                Self::OffsetCopy => (
+                    "",
+                    r#"let mut rows: Inline[Inline[Cell, 100], 2] = [cells; 2]
+    rows[1][at & 63].key = value
+    let copied: Inline[Cell, 100] = rows[1]
+    rows[1][at & 63].key = good"#,
+                    "",
+                    "if j % 2 == 0 { copied[at & 63].key } else { rows[1 ^ (depth & 1)][at & 63].key }",
+                    "",
+                ),
+                Self::MutCall => (
+                    r#"fn revise(mut cells: Inline[Cell, 100], at: u64, value: u64, depth: u64) {
+    if depth == 0 { cells[at].key = value }
+    else { revise(mut cells, at, value, depth - 1) }
+}"#,
+                    "cells[at & 63].key = good",
+                    "if j == 1 { revise(mut cells, at & 63, value, depth) }",
+                    "cells[j % 100].key",
+                    "",
+                ),
+                Self::Push => (
+                    "",
+                    "",
+                    r#"cells[j % 100].key = value
+        let attempt = isolate(scoped fn() -> Result[(), Capacity] {
+            let mut queue: List[u64] = list.new()
+            bound bytes depth { list.push(mut queue, j) }
+        })
+        match take attempt {
+            Ok(Ok(Ok(()))) => { cells[j % 100].key = good },
+            Ok(Error(take causes)) => {
+                let mut refused = false
+                for cause in causes {
+                    match cause.kind { Capacity(_) => { refused = true }, _ => { return 2 } }
+                }
+                if !refused { return 2 }
+            },
+            _ => { return 2 },
+        }"#,
+                    "cells[j % 100].key",
+                    "",
+                ),
+                Self::BackEdge => (
+                    "",
+                    "cells[at & 63].key = good",
+                    "",
+                    "cells[j % 100].key",
+                    "if j == depth { cells[at & 63].key = value }",
+                ),
+            };
+            let check = Self::CHECK;
+            format!(
+                r#"type Cell {{ key: u64, pad: u64 }}
+{helper}
+fn {name}(trips: u64, at: u64, value: u64, depth: u64) -> u64 {{
+    let good = {key}u64
+    let mut cells: Inline[Cell, 100] = [Cell(key: 0, pad: 0); 100]
+    for i in 0u64 .. 100 {{
+        cells[i].pad = i ^ value
+    }}
+    let mut table: Inline[u64, {extent}] = [0u64; {extent}]
+    table[good] = 1
+    {seed_key}
+    let mut out = 0u64
+    for j in 0u64 .. trips {{
+        {before_load}
+        let key = {load_key}
+        out = {check}
+        {after_load}
+    }}
+    out
+}}
+"#
+            )
+        }
+    }
+}

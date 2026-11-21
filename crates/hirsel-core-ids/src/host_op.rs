@@ -60,3 +60,8 @@ pub const CALL_PAYLOAD: u8 = 61;
 pub const PORT_REPLY: u8 = 62;
 pub const CLOSE_SERVED: u8 = 63;
 pub const CLOSE_CALL: u8 = 64;
+// A Dir port (PROVIDE_DIR); RELEASE is a derived handle's cleanup, which
+// queues its Released notice and never waits; PORT_FILL stages reply bytes.
+pub const PROVIDE_DIR: u8 = 65;
+pub const RELEASE: u8 = 66;
+pub const PORT_FILL: u8 = 67;

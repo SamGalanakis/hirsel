@@ -1,6 +1,7 @@
 //! Mechanical `key` glue. Generic calls retain a type recipe until the ordinary
 //! instance materializer substitutes it; no source body is checked again.
 use super::*;
+use hirsel_core_ir::RtOp;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -57,7 +58,7 @@ impl KeyOp {
                 };
             }
             Self::Hash => {}
-            Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
+            Self::Fold => params.push(Param::Value(Ty::Ptr)),
             Self::Equal | Self::Order | Self::Ordered(_) => params.push(view(ty)),
             Self::Clone | Self::Encode => {
                 if self == Self::Clone {
@@ -75,11 +76,12 @@ impl KeyOp {
         }
         Signature {
             params,
-            results: vec![Ty::Scalar(match self {
-                Self::Equal | Self::Ordered(_) => Scalar::Bool,
-                Self::Order => Scalar::I8,
-                _ => Scalar::U64,
-            })],
+            results: match self {
+                Self::Fold => vec![],
+                Self::Equal | Self::Ordered(_) => vec![Ty::Scalar(Scalar::Bool)],
+                Self::Order => vec![Ty::Scalar(Scalar::I8)],
+                _ => vec![Ty::Scalar(Scalar::U64)],
+            },
             dest: None,
             never: false,
         }
@@ -250,7 +252,8 @@ impl KeyOp {
             Self::NeedsDrop => (vec![], true),
             Self::Encode => (vec![false; 3], false),
             Self::Equal | Self::Order | Self::Ordered(_) => (vec![true; 2], true),
-            Self::Hash | Self::Fold => (vec![true], true),
+            Self::Hash => (vec![true], true),
+            Self::Fold => (vec![true], false),
         };
         scalar_abi::SignatureAbi { params, result }
     }
@@ -361,7 +364,7 @@ fn word_with_field(module: &Module, key: &InstanceKey) -> bool {
 }
 
 /// Scalar key operations need no generated call after substitution. Predicates
-/// retain their typed loads and Compare; a u64 hash retains the fixed FORM mix.
+/// retain their typed loads and Compare. A u64 hash keeps its keyed runtime operation.
 pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
     if !body.calls.iter().any(|call| {
         let Callee::Direct(f) = call.callee else { return false; };
@@ -430,17 +433,18 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                 let args = call.args.get(&body.pools.args).unwrap();
                 let addresses = match (op, args) {
                     (Some(_), [a, b]) => [*a, *b],
-                    (None, [a]) if scalar == Scalar::U64 => [*a, *a],
+                    (None, [a @ Arg::Value(_)]) if scalar == Scalar::U64 => [*a, *a],
                     _ => return None,
                 };
                 Some((
                     op,
                     scalar,
                     addresses,
+                    call.signature,
                     call.results.get(&body.pools.values).unwrap()[0],
                 ))
             })();
-            if let Some((op, scalar, args, result)) = scalar_call {
+            if let Some((op, scalar, args, signature, result)) = scalar_call {
                 changed = true;
                 let mut values = [ValueId(0); 2];
                 for (i, arg) in args
@@ -487,12 +491,19 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                     });
                     body.inst_anchors.push(anchors[index]);
                 } else {
-                    let start = body.insts.len();
-                    inline_word_hash(body, values[0], result);
-                    body.inst_anchors.extend(std::iter::repeat_n(
-                        anchors[index],
-                        body.insts.len() - start,
-                    ));
+                    let args = PoolRange::push(&mut body.pools.args, [Arg::Value(values[0])]);
+                    let results = PoolRange::push(&mut body.pools.values, [result]);
+                    let call = CallId(body.calls.len() as u32);
+                    body.calls.push(CallSite {
+                        callee: Callee::Runtime(RtOp::MapHashWord),
+                        signature,
+                        args,
+                        results,
+                        fail: None,
+                        cold: false,
+                    });
+                    body.insts.push(Inst::Call { call });
+                    body.inst_anchors.push(anchors[index]);
                 }
             } else {
                 body.insts.push(inst.clone());
@@ -502,52 +513,6 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
         body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
     changed
-}
-
-/// The fixed FORM hash of one u64 key, in the caller's ordinary instruction stream.
-/// Keeping the load typed preserves the generic recipe and needs no runtime adapter.
-fn inline_word_hash(body: &mut Body, word: ValueId, result: ValueId) {
-    fn value(body: &mut Body, inst: impl FnOnce(ValueId) -> Inst) -> ValueId {
-        let id = ValueId(body.values.len() as u32);
-        body.values.push(Ty::Scalar(Scalar::U64));
-        body.insts.push(inst(id));
-        id
-    }
-    let factor = value(body, |result| Inst::Const {
-        result,
-        bits: 0x9e3779b97f4a7c15,
-    });
-    let product = value(body, |result| Inst::IntArith {
-        result,
-        flag: None,
-        op: ArithOp::Mul,
-        mode: ArithMode::Wrapping,
-        left: word,
-        right: factor,
-    });
-    let count = value(body, |result| Inst::Const { result, bits: 26 });
-    let hash = value(body, |result| Inst::Binary {
-        result,
-        op: BinaryOp::Rotl,
-        left: product,
-        right: count,
-        fail: None,
-    });
-    let shift = value(body, |result| Inst::Const { result, bits: 32 });
-    let top = value(body, |result| Inst::Binary {
-        result,
-        op: BinaryOp::Shr,
-        left: hash,
-        right: shift,
-        fail: None,
-    });
-    body.insts.push(Inst::Binary {
-        result,
-        op: BinaryOp::BitXor,
-        left: hash,
-        right: top,
-        fail: None,
-    });
 }
 
 pub(super) struct Derive<'a> {
@@ -604,7 +569,7 @@ impl Derive<'_> {
         } else if op == KeyOp::Hash {
             &[Ty::Ptr]
         } else if op == KeyOp::Fold {
-            &[Ty::Ptr, Ty::Scalar(Scalar::U64)]
+            &[Ty::Ptr, Ty::Ptr]
         } else if op == KeyOp::Encode {
             &[Ty::Ptr, Ty::Ptr, Ty::Scalar(Scalar::U64)]
         } else {
@@ -657,16 +622,11 @@ impl Derive<'_> {
         }
         let result = match op {
             KeyOp::NeedsDrop => unreachable!("cleanup properties return above"),
-            KeyOp::Hash => {
-                let zero = c.constant(0);
-                let fold = self.function(ty, KeyOp::Fold)?;
-                let at = c.address(ps[0], PlaceTy::Declared(ty));
-                let h = self.call(&mut c, fold, &[Arg::Address(at), Arg::Value(zero)]);
-                let shift = c.constant(32);
-                let top = c.binary(BinaryOp::Shr, h, shift);
-                c.binary(BinaryOp::BitXor, h, top)
+            KeyOp::Hash => Some(self.hash_type(&mut c, ty, ps[0])?),
+            KeyOp::Fold => {
+                self.fold_type(&mut c, ty, ps[0], ps[1])?;
+                None
             }
-            KeyOp::Fold => self.fold_type(&mut c, ty, ps[0], ps[1])?,
             KeyOp::Equal => {
                 let no = c.block(&[]);
                 self.equal_type(&mut c, ty, ps[0], ps[1], no)?;
@@ -674,13 +634,13 @@ impl Derive<'_> {
                 let returns = PoolRange::push(&mut c.body.pools.values, [yes]);
                 c.end(Terminator::Return(returns));
                 c.start(no);
-                c.boolean(false)
+                Some(c.boolean(false))
             }
             KeyOp::Ordered(op) if scalar_row(self.module, ty).is_some() => {
                 let scalar = scalar_row(self.module, ty).unwrap();
                 let a = c.read(ps[0], Ty::Scalar(scalar));
                 let b = c.read(ps[1], Ty::Scalar(scalar));
-                c.compare(op, a, b)
+                Some(c.compare(op, a, b))
             }
             KeyOp::Clone | KeyOp::Encode => {
                 unreachable!("clones and encodings return above")
@@ -694,13 +654,13 @@ impl Derive<'_> {
                 let order = c.params(different)[0];
                 if let KeyOp::Ordered(op) = op {
                     let zero = c.typed_constant(Scalar::I8, 0);
-                    c.compare(op, order, zero)
+                    Some(c.compare(op, order, zero))
                 } else {
-                    order
+                    Some(order)
                 }
             }
         };
-        let returns = PoolRange::push(&mut c.body.pools.values, [result]);
+        let returns = PoolRange::push(&mut c.body.pools.values, result);
         c.end(Terminator::Return(returns));
         order_instructions(&mut c.body);
         let mut sig = self.module.signatures[old.index()].clone();
@@ -728,8 +688,15 @@ impl Derive<'_> {
         Ok(row)
     }
     pub(super) fn call(&self, c: &mut Code, f: FuncId, args: &[Arg]) -> ValueId {
+        self.emit_call(c, f, args).unwrap()
+    }
+
+    fn emit_call(&self, c: &mut Code, f: FuncId, args: &[Arg]) -> Option<ValueId> {
         let signature = self.module.functions[f.index()].signature;
-        let result = c.value(self.module.signatures[signature.index()].results[0]);
+        let result = self.module.signatures[signature.index()]
+            .results
+            .first()
+            .map(|&ty| c.value(ty));
         let mut passed = [Arg::Value(ValueId(0)); 2];
         let mut count = 0;
         for &arg in args {
@@ -749,7 +716,7 @@ impl Derive<'_> {
             count += 1;
         }
         let args = PoolRange::push(&mut c.body.pools.args, passed[..count].iter().copied());
-        let results = PoolRange::push(&mut c.body.pools.values, [result]);
+        let results = PoolRange::push(&mut c.body.pools.values, result);
         let call = CallId(c.body.calls.len() as u32);
         c.body.calls.push(CallSite {
             callee: Callee::Direct(f),
@@ -762,18 +729,12 @@ impl Derive<'_> {
         c.inst(Inst::Call { call });
         result
     }
-    fn runtime(&mut self, c: &mut Code, op: hirsel_core_ir::RtOp, args: &[ValueId]) -> ValueId {
+    fn runtime(&mut self, c: &mut Code, op: RtOp, args: &[ValueId]) -> Option<ValueId> {
         let sig = op.signature();
-        let signature = if let Some(i) = self.module.signatures.iter().position(|s| *s == sig) {
-            SigId(i as u32)
-        } else {
-            let id = SigId(self.module.signatures.len() as u32);
-            self.module.signatures.push(sig);
-            id
-        };
-        let result = c.value(self.module.signatures[signature.index()].results[0]);
+        let result = sig.results.first().map(|&ty| c.value(ty));
+        let signature = signature_id(self.module, sig);
         let args = PoolRange::push(&mut c.body.pools.args, args.iter().copied().map(Arg::Value));
-        let results = PoolRange::push(&mut c.body.pools.values, [result]);
+        let results = PoolRange::push(&mut c.body.pools.values, result);
         let call = CallId(c.body.calls.len() as u32);
         c.body.calls.push(CallSite {
             callee: Callee::Runtime(op),
@@ -949,11 +910,13 @@ impl Derive<'_> {
                     ps[i] = c.offset_value(blobs[i], ats[i]);
                     ats[i] = c.binary(BinaryOp::Add, ats[i], lengths[i]);
                 }
-                let result = self.runtime(
-                    c,
-                    hirsel_core_ir::RtOp::CompareBytes,
-                    &[ps[0], lengths[0], ps[1], lengths[1]],
-                );
+                let result = self
+                    .runtime(
+                        c,
+                        hirsel_core_ir::RtOp::CompareBytes,
+                        &[ps[0], lengths[0], ps[1], lengths[1]],
+                    )
+                    .unwrap();
                 self.order_result(c, result, different);
             }
             FieldTy::Array(item, count) => {
@@ -1162,7 +1125,7 @@ impl Derive<'_> {
                     let at = c.offset(p, 8);
                     args[2 * i + 1] = c.read(at, Ty::Scalar(Scalar::U64));
                 }
-                let order = self.runtime(c, hirsel_core_ir::RtOp::CompareBytes, &args);
+                let order = self.runtime(c, RtOp::CompareBytes, &args).unwrap();
                 self.order_result(c, order, different);
             }
             FieldTy::Seq(item) => {
@@ -1230,18 +1193,103 @@ impl Derive<'_> {
         self.order_scalars(c, len[0], len[1], different);
         Ok(())
     }
+    fn hash_type(
+        &mut self,
+        c: &mut Code,
+        ty: TypeId,
+        place: ValueId,
+    ) -> Result<ValueId, &'static str> {
+        if let Some(scalar) = scalar_row(self.module, ty) {
+            let word = c.scalar_word(place, scalar);
+            return Ok(self.runtime(c, RtOp::MapHashWord, &[word]).unwrap());
+        }
+        let shape = &self.module.types[ty.index()];
+        if !matches!(shape.repr, LRepr::Region)
+            && let ShapeBody::Record(fields) = &shape.body
+            && let [field] = fields.as_slice()
+            && matches!(&field.ty, FieldTy::Seq(item) if **item == FieldTy::Scalar(Scalar::U8))
+        {
+            let p = c.field_pointer(self.module, place, ty, None, 0);
+            let data = c.read(p, Ty::Ptr);
+            let len = c.offset(p, 8);
+            let len = c.read(len, Ty::Scalar(Scalar::U64));
+            return Ok(self.runtime(c, RtOp::MapHashBytes, &[data, len]).unwrap());
+        }
+        let state_ty = self.hash_state_type()?;
+        let slot = SlotId(c.body.slots.len() as u32);
+        let ty_of_slot = PlaceTy::Declared(state_ty);
+        c.body.slots.push(ty_of_slot);
+        c.inst(Inst::StorageLive { slot });
+        let address = AddressId(c.body.addresses.len() as u32);
+        c.body.addresses.push(AddressInfo {
+            base: AddressBase::Slot(slot),
+            steps: PoolRange::EMPTY,
+            ty: ty_of_slot,
+        });
+        c.inst(Inst::Address {
+            address,
+            fail: None,
+        });
+        let state = c.value(Ty::Ptr);
+        c.inst(Inst::Pointer {
+            result: state,
+            address,
+        });
+        self.runtime(c, RtOp::MapHashStart, &[state]);
+        let fold = self.function(ty, KeyOp::Fold)?;
+        let at = c.address(place, PlaceTy::Declared(ty));
+        self.emit_call(c, fold, &[Arg::Address(at), Arg::Value(state)]);
+        let hash = self.runtime(c, RtOp::MapHashFinish, &[state]).unwrap();
+        c.inst(Inst::StorageDead { slot });
+        Ok(hash)
+    }
+
+    fn hash_state_type(&mut self) -> Result<TypeId, &'static str> {
+        const NAME: &str = "core@1/map/$hash_state";
+        if let Some(i) = self
+            .module
+            .types
+            .iter()
+            .position(|shape| shape.name == NAME)
+        {
+            return Ok(TypeId(i as u32));
+        }
+        let state = TypeId(self.module.types.len() as u32);
+        self.module.types.push(hirsel_core_layout::Shape {
+            name: NAME.into(),
+            repr: LRepr::Scoped,
+            carried: Carried::Address,
+            body: ShapeBody::Record(vec![hirsel_core_layout::Field {
+                name: "words".into(),
+                ty: FieldTy::Array(
+                    Box::new(FieldTy::Scalar(Scalar::U64)),
+                    hirsel_core_layout::map_hash::STATE_WORDS as u64,
+                ),
+            }]),
+            finalizer: None,
+            clone: None,
+            codec: None,
+            grant: 0,
+            send: false,
+            held: None,
+        });
+        hirsel_core_layout::extend(&self.module.types, &mut self.recipes)
+            .map_err(|_| "map hash scratch layout is not built")?;
+        Ok(state)
+    }
+
     fn fold_type(
         &mut self,
         c: &mut Code,
         ty: TypeId,
         p: ValueId,
-        mut h: ValueId,
-    ) -> Result<ValueId, &'static str> {
+        state: ValueId,
+    ) -> Result<(), &'static str> {
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.into_iter().enumerate() {
                     let at = c.field_pointer(self.module, p, ty, None, i as u32);
-                    h = self.fold_field(c, &f.ty, at, h)?;
+                    self.fold_field(c, &f.ty, at, state)?;
                 }
             }
             ShapeBody::Variant(cs) => {
@@ -1252,8 +1300,8 @@ impl Derive<'_> {
                     address: at,
                 });
                 let word = c.widen(tag);
-                h = c.mix(h, word);
-                let done = c.block(&[Ty::Scalar(Scalar::U64)]);
+                self.runtime(c, RtOp::MapHashAddWord, &[state, word]);
+                let done = c.block(&[]);
                 let mut arms = vec![];
                 for (i, _) in cs.iter().enumerate() {
                     let b = c.block(&[]);
@@ -1274,52 +1322,49 @@ impl Derive<'_> {
                 });
                 for (i, case) in cs.into_iter().enumerate() {
                     c.start(c.body.edges[arms[i].edge.index()].target);
-                    let mut current = h;
                     for (j, f) in case.fields.into_iter().enumerate() {
                         let at = c.field_pointer(self.module, p, ty, Some(i as u32), j as u32);
-                        current = self.fold_field(c, &f.ty, at, current)?;
+                        self.fold_field(c, &f.ty, at, state)?;
                     }
-                    c.jump(done, &[current]);
+                    c.jump(done, &[]);
                 }
                 c.start(done);
-                h = c.params(done)[0];
             }
         }
-        Ok(h)
+        Ok(())
     }
     fn fold_field(
         &mut self,
         c: &mut Code,
         field: &FieldTy,
         p: ValueId,
-        h: ValueId,
-    ) -> Result<ValueId, &'static str> {
-        Ok(match field {
+        state: ValueId,
+    ) -> Result<(), &'static str> {
+        match field {
             FieldTy::Scalar(s) if !matches!(s, Scalar::F32 | Scalar::F64) => {
                 let word = c.scalar_word(p, *s);
-                c.mix(h, word)
+                self.runtime(c, RtOp::MapHashAddWord, &[state, word]);
             }
             FieldTy::Inline(t) => {
                 let f = self.function(TypeId(t.0), KeyOp::Fold)?;
                 let at = c.address(p, PlaceTy::Declared(TypeId(t.0)));
-                self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
+                self.emit_call(c, f, &[Arg::Address(at), Arg::Value(state)]);
             }
             FieldTy::Seq(item) if **item == FieldTy::Scalar(Scalar::U8) => {
                 let data = c.read(p, Ty::Ptr);
                 let at = c.offset(p, 8);
                 let len = c.read(at, Ty::Scalar(Scalar::U64));
-                let word = self.runtime(c, hirsel_core_ir::RtOp::HashBytes, &[data, len]);
-                c.mix(h, word)
+                self.runtime(c, RtOp::MapHashAddBytes, &[state, data, len]);
             }
             FieldTy::Seq(item) => {
                 let data = c.read(p, Ty::Ptr);
                 let at = c.offset(p, 8);
                 let len = c.read(at, Ty::Scalar(Scalar::U64));
-                self.fold_sequence(c, item, data, len, h)?
+                self.fold_sequence(c, item, data, len, state)?
             }
             FieldTy::Array(item, len) => {
                 let len = c.constant(*len);
-                self.fold_sequence(c, item, p, len, h)?
+                self.fold_sequence(c, item, p, len, state)?
             }
             FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let mut data = c.read(p, Ty::Ptr);
@@ -1328,15 +1373,15 @@ impl Derive<'_> {
                 }
                 let f = self.function(TypeId(t.0), KeyOp::Fold)?;
                 let at = c.address(data, PlaceTy::Declared(TypeId(t.0)));
-                self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
+                self.emit_call(c, f, &[Arg::Address(at), Arg::Value(state)]);
             }
             // The field is the region value's place; its Fold reads the block pointer.
             FieldTy::RegionRef(t) => {
                 let f = self.function(TypeId(t.0), KeyOp::Fold)?;
                 let at = c.address(p, PlaceTy::Declared(TypeId(t.0)));
-                self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
+                self.emit_call(c, f, &[Arg::Address(at), Arg::Value(state)]);
             }
-            FieldTy::View(inner) => self.fold_field(c, inner, p, h)?,
+            FieldTy::View(inner) => self.fold_field(c, inner, p, state)?,
             // A located value hashes its packed encoding's values, as order and
             // equality read them (FORM #63, #65), never the locator.
             FieldTy::Locator(target) => {
@@ -1345,13 +1390,13 @@ impl Derive<'_> {
                 let at = c.read(at, Ty::Scalar(Scalar::U64));
                 let w = c.offset(blob, 8);
                 let width = c.read(w, Ty::Scalar(Scalar::U64));
-                self.fold_packed(c, target, blob, at, width, h)?.0
+                self.fold_packed(c, target, blob, at, width, state)?;
             }
             _ => return Err("hashing this key recipe is not built"),
-        })
+        }
+        Ok(())
     }
-    /// Fold the packed value at byte `at` of `blob` into `h`; returns the hash and the
-    /// cursor after the value. Mirrors [`Self::order_packed`].
+    /// Append the packed value at byte `at` of `blob` and return its end cursor.
     fn fold_packed(
         &mut self,
         c: &mut Code,
@@ -1359,11 +1404,11 @@ impl Derive<'_> {
         blob: ValueId,
         mut at: ValueId,
         width: ValueId,
-        mut h: ValueId,
-    ) -> Result<(ValueId, ValueId), &'static str> {
+        state: ValueId,
+    ) -> Result<ValueId, &'static str> {
         match field {
             FieldTy::Scalar(s) if !matches!(s, Scalar::F32 | Scalar::F64) => {
-                // The word's bits at its width, unsigned, as `Code::word` folds them.
+                // The word's bits at its width, unsigned, as the unpacked scalar uses them.
                 let bits = match s.size() {
                     1 => Scalar::U8,
                     2 => Scalar::U16,
@@ -1372,7 +1417,7 @@ impl Derive<'_> {
                 };
                 let word = Self::packed_word(c, blob, at, bits);
                 let word = c.widen(word);
-                h = c.mix(h, word);
+                self.runtime(c, RtOp::MapHashAddWord, &[state, word]);
                 let size = c.constant(s.size());
                 at = c.binary(BinaryOp::Add, at, size);
             }
@@ -1381,12 +1426,11 @@ impl Derive<'_> {
                 at = c.binary(BinaryOp::Add, at, width);
                 let bytes = c.offset_value(blob, at);
                 at = c.binary(BinaryOp::Add, at, len);
-                let word = self.runtime(c, hirsel_core_ir::RtOp::HashBytes, &[bytes, len]);
-                h = c.mix(h, word);
+                self.runtime(c, RtOp::MapHashAddBytes, &[state, bytes, len]);
             }
             FieldTy::Array(item, count) => {
                 let len = c.constant(*count);
-                (h, at) = self.fold_packed_sequence(c, item, blob, at, width, len, h)?;
+                at = self.fold_packed_sequence(c, item, blob, at, width, len, state)?;
             }
             FieldTy::FixedSpan(item) | FieldTy::SeqSpan(item) | FieldTy::IndexedSpan(item) => {
                 let len = Self::packed_count(c, blob, at, width);
@@ -1395,14 +1439,13 @@ impl Derive<'_> {
                     at = c.binary(BinaryOp::Add, at, width);
                 }
                 // Match List[e], including its Bytes specialization for e = u8.
-                // Counts and index trailers describe the encoding, not key components.
+                // The logical count is a key component. Packed offsets are private.
                 if **item == FieldTy::Scalar(Scalar::U8) {
                     let bytes = c.offset_value(blob, at);
-                    let word = self.runtime(c, hirsel_core_ir::RtOp::HashBytes, &[bytes, len]);
-                    h = c.mix(h, word);
+                    self.runtime(c, RtOp::MapHashAddBytes, &[state, bytes, len]);
                     at = c.binary(BinaryOp::Add, at, len);
                 } else {
-                    (h, at) = self.fold_packed_sequence(c, item, blob, at, width, len, h)?;
+                    at = self.fold_packed_sequence(c, item, blob, at, width, len, state)?;
                 }
                 if matches!(field, FieldTy::IndexedSpan(_)) {
                     let trailer = c.mul(len, width);
@@ -1426,7 +1469,7 @@ impl Derive<'_> {
                 match self.module.types[ty.index()].body.clone() {
                     ShapeBody::Record(fields) => {
                         for f in &fields {
-                            (h, at) = self.fold_packed(c, &f.ty, blob, at, width, h)?;
+                            at = self.fold_packed(c, &f.ty, blob, at, width, state)?;
                         }
                     }
                     ShapeBody::Variant(cases) => {
@@ -1443,10 +1486,10 @@ impl Derive<'_> {
                         };
                         let tag = Self::packed_word(c, blob, at, scalar);
                         let word = c.widen(tag);
-                        let mixed = c.mix(h, word);
+                        self.runtime(c, RtOp::MapHashAddWord, &[state, word]);
                         let tag_size = c.constant(tag_width);
                         let start = c.binary(BinaryOp::Add, at, tag_size);
-                        let done = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+                        let done = c.block(&[Ty::Scalar(Scalar::U64)]);
                         let mut arms = vec![];
                         for i in 0..cases.len() {
                             let block = c.block(&[]);
@@ -1467,9 +1510,9 @@ impl Derive<'_> {
                         });
                         for (i, case) in cases.iter().enumerate() {
                             c.start(c.body.edges[arms[i].edge.index()].target);
-                            let (mut hash, mut end) = (mixed, start);
+                            let mut end = start;
                             for f in &case.fields {
-                                (hash, end) = self.fold_packed(c, &f.ty, blob, end, width, hash)?;
+                                end = self.fold_packed(c, &f.ty, blob, end, width, state)?;
                             }
                             if !compact {
                                 let stride = c.constant(
@@ -1479,16 +1522,16 @@ impl Derive<'_> {
                                 );
                                 end = c.binary(BinaryOp::Add, at, stride);
                             }
-                            c.jump(done, &[hash, end]);
+                            c.jump(done, &[end]);
                         }
                         c.start(done);
-                        [h, at] = c.params(done);
+                        at = c.params(done)[0];
                     }
                 }
             }
             _ => return Err("hashing this packed recipe field is not built"),
         }
-        Ok((h, at))
+        Ok(at)
     }
     #[allow(clippy::too_many_arguments)]
     fn fold_packed_sequence(
@@ -1499,28 +1542,25 @@ impl Derive<'_> {
         at: ValueId,
         width: ValueId,
         len: ValueId,
-        h: ValueId,
-    ) -> Result<(ValueId, ValueId), &'static str> {
-        let head = c.block(&[Ty::Scalar(Scalar::U64); 3]);
+        state: ValueId,
+    ) -> Result<ValueId, &'static str> {
+        self.runtime(c, RtOp::MapHashAddWord, &[state, len]);
+        let head = c.block(&[Ty::Scalar(Scalar::U64); 2]);
         let body = c.block(&[]);
         let done = c.block(&[]);
         let zero = c.constant(0);
-        c.jump(head, &[zero, at, h]);
+        c.jump(head, &[zero, at]);
         c.start(head);
-        let params = c.body.blocks[head.index()]
-            .params
-            .get(&c.body.pools.values)
-            .unwrap();
-        let (i, cursor, hash) = (params[0], params[1], params[2]);
+        let [i, cursor] = c.params(head);
         let on = c.compare(CompareOp::Lt, i, len);
         c.branch(on, body, done);
         c.start(body);
-        let (next_hash, next) = self.fold_packed(c, item, blob, cursor, width, hash)?;
+        let next = self.fold_packed(c, item, blob, cursor, width, state)?;
         let one = c.constant(1);
         let i = c.binary(BinaryOp::Add, i, one);
-        c.jump(head, &[i, next, next_hash]);
+        c.jump(head, &[i, next]);
         c.start(done);
-        Ok((hash, cursor))
+        Ok(cursor)
     }
     fn fold_sequence(
         &mut self,
@@ -1528,13 +1568,14 @@ impl Derive<'_> {
         item: &FieldTy,
         data: ValueId,
         len: ValueId,
-        h: ValueId,
-    ) -> Result<ValueId, &'static str> {
+        state: ValueId,
+    ) -> Result<(), &'static str> {
+        self.runtime(c, RtOp::MapHashAddWord, &[state, len]);
         let zero = c.constant(0);
-        let head = c.block(&[Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)]);
+        let head = c.block(&[Ty::Scalar(Scalar::U64)]);
         let body = c.block(&[]);
         let done = c.block(&[]);
-        c.jump(head, &[zero, h]);
+        c.jump(head, &[zero]);
         c.start(head);
         let ps = c.params(head);
         let on = c.compare(CompareOp::Lt, ps[0], len);
@@ -1543,12 +1584,12 @@ impl Derive<'_> {
         let stride = c.field_size(item);
         let offset = c.mul(ps[0], stride);
         let p = c.offset_value(data, offset);
-        let h = self.fold_field(c, item, p, ps[1])?;
+        self.fold_field(c, item, p, state)?;
         let one = c.constant(1);
         let next = c.binary(BinaryOp::Add, ps[0], one);
-        c.jump(head, &[next, h]);
+        c.jump(head, &[next]);
         c.start(done);
-        Ok(ps[1])
+        Ok(())
     }
     /// Write the plain row `ty` at native `p` packed at byte `at` of `blob` (MEM-9:
     /// fields in order, no padding; a variant is its u64 case and then its fields,
@@ -1800,7 +1841,7 @@ impl Derive<'_> {
                     let at = c.offset(p, 8);
                     args.push(c.read(at, Ty::Scalar(Scalar::U64)));
                 }
-                let ord = self.runtime(c, hirsel_core_ir::RtOp::CompareBytes, &args);
+                let ord = self.runtime(c, RtOp::CompareBytes, &args).unwrap();
                 let zero = c.value(Ty::Scalar(Scalar::I8));
                 c.inst(Inst::Const {
                     result: zero,
@@ -2205,13 +2246,6 @@ impl Code {
         }
         self.widen(value)
     }
-    fn mix(&mut self, h: ValueId, w: ValueId) -> ValueId {
-        let x = self.binary(BinaryOp::BitXor, h, w);
-        let factor = self.constant(0x9e3779b97f4a7c15);
-        let x = self.mul(x, factor);
-        let count = self.constant(26);
-        self.binary(BinaryOp::Rotl, x, count)
-    }
 }
 
 #[cfg(test)]
@@ -2222,12 +2256,12 @@ mod tests {
     #[test]
     fn scalar_carriers_hash_their_logical_bits() {
         for (name, ty, bits, want) in [
-            ("signed8", "i8", 255, 0x172cc663b949ce9cu64),
-            ("signed16", "i16", 65535, 0x43f32a0fec9d2219),
-            ("signed64", "i64", u64::MAX, 0x1a02d60fb785f416),
-            ("codepoint", "char", 955, 0xf76b7389ab88bfd2),
-            ("truth", "bool", 1, 0xe5fd29f0b385f416),
-            ("falsehood", "bool", 0, 0),
+            ("signed8", "i8", 255, 0xfdac8a698572a86du64),
+            ("signed16", "i16", 65535, 0x31f9a4fb3b59a544),
+            ("signed64", "i64", u64::MAX, 0x2f205be2fec8e38d),
+            ("codepoint", "char", 955, 0xd05f312899da5ec7),
+            ("truth", "bool", 1, 0x1e9f734161d62dd9),
+            ("falsehood", "bool", 0, 0xbd60acb658c79e45),
         ] {
             let mut m = text::parse(&format!(
                 "core v1\ntype t0 = own \"{name}\" value {ty} {{ n:{ty} }}\n"
@@ -2281,41 +2315,38 @@ mod tests {
     }
 
     #[test]
-    fn fixed_hash_fold_oracles() {
-        // Constants derived from wrapping multiplication by 9e3779b97f4a7c15,
-        // a left rotation by26 per word, and one final h^(h>>32). A nested
-        // record streams its fields into h, rather than finishing a child hash.
-        // Located Text matches String. Spans at W2/4/8 match List[7,9],
-        // without count/trailer components; a trailing i8(-1) pins cursor advance.
-        // Native region references stream their payload, never their address.
+    fn siphash_structural_encoding_oracles() {
+        // siphasher 1.0.4 under the all-zero test key over the specified words.
+        // Packed widths and index trailers give the same stream as native values.
+        // The trailing signed byte also tests cursor advance over the trailer.
         let vectors = [
             (
                 "type t0 = own \"word\" { n:u64 }",
                 "",
                 vec![(0, "u64", "const 7")],
                 None,
-                0x49ec259204a234c2,
+                0x6634b0bda4fe8a7b,
             ),
             (
                 "type t0 = own \"signed\" { n:i8 }",
                 "",
                 vec![(0, "u8", "const 255")],
                 None,
-                0x172cc663b949ce9c,
+                0xfdac8a698572a86d,
             ),
             (
                 "type t0 = own \"outer\" { a:t1, b:u8 }\ntype t1 = own \"inner\" { a:u64 }",
                 "",
                 vec![(0, "u64", "const 7"), (8, "u8", "const 9")],
                 None,
-                0xbd4a22218871e85e,
+                0x2a14c8b24e26fd21,
             ),
             (
                 "type t0 = own \"variant\" | Empty { } | Value { n:u64 }",
                 "",
                 vec![(8, "u64", "const 7")],
                 Some(1),
-                0xd595b4bd0195bebd,
+                0x957b376efb4ab749,
             ),
             (
                 "type t0 = own \"String\" { bytes:seq u8 }",
@@ -2326,7 +2357,7 @@ mod tests {
                     (16, "u64", "const 0"),
                 ],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"String\" { bytes:seq u8 }",
@@ -2337,7 +2368,7 @@ mod tests {
                     (16, "u64", "const 0"),
                 ],
                 None,
-                0,
+                0xbd60acb658c79e45,
             ),
             (
                 "type t0 = own \"List\" { items:seq u64 }",
@@ -2348,147 +2379,147 @@ mod tests {
                     (16, "u64", "const 0"),
                 ],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator text }",
                 "static d0 = align 8 hex 050000000000000002000000000000000300616263",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"located\" { at:locator fixed u64 }",
                 "static d0 = align 8 hex 12000000000000000200000000000000020007000000000000000900000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator seqspan u64 }",
                 "static d0 = align 8 hex 140000000000000002000000000000000200100007000000000000000900000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator indexed u64 }",
                 "static d0 = align 8 hex 18000000000000000200000000000000020010000700000000000000090000000000000000000800",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Native\" { a:indexed u64, tail:i8 }",
                 "static d0 = align 8 hex 19000000000000000200000000000000020010000700000000000000090000000000000000000800ff",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0x173f672017fdd65,
+                0x26ae89defe6d5bf4,
             ),
             (
                 "type t0 = own \"located\" { at:locator text }",
                 "static d0 = align 8 hex 0700000000000000040000000000000003000000616263",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"located\" { at:locator fixed u64 }",
                 "static d0 = align 8 hex 140000000000000004000000000000000200000007000000000000000900000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator seqspan u64 }",
                 "static d0 = align 8 hex 18000000000000000400000000000000020000001000000007000000000000000900000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator indexed u64 }",
                 "static d0 = align 8 hex 200000000000000004000000000000000200000010000000070000000000000009000000000000000000000008000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Native\" { a:indexed u64, tail:i8 }",
                 "static d0 = align 8 hex 210000000000000004000000000000000200000010000000070000000000000009000000000000000000000008000000ff",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0x173f672017fdd65,
+                0x26ae89defe6d5bf4,
             ),
             (
                 "type t0 = own \"located\" { at:locator text }",
                 "static d0 = align 8 hex 0b0000000000000008000000000000000300000000000000616263",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"located\" { at:locator fixed u64 }",
                 "static d0 = align 8 hex 18000000000000000800000000000000020000000000000007000000000000000900000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator seqspan u64 }",
                 "static d0 = align 8 hex 200000000000000008000000000000000200000000000000100000000000000007000000000000000900000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator indexed u64 }",
                 "static d0 = align 8 hex 30000000000000000800000000000000020000000000000010000000000000000700000000000000090000000000000000000000000000000800000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xbd4a22218871e85e,
+                0xd5db90606bcd1ba5,
             ),
             (
                 "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Native\" { a:indexed u64, tail:i8 }",
                 "static d0 = align 8 hex 31000000000000000800000000000000020000000000000010000000000000000700000000000000090000000000000000000000000000000800000000000000ff",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0x173f672017fdd65,
+                0x26ae89defe6d5bf4,
             ),
             (
                 "type t0 = own \"reference\" { at:region_ref t1 }\ntype t1 = region \"Native\" { a:u64, b:u64 }",
                 "static d0 = align 8 hex 07000000000000000900000000000000",
                 vec![(0, "ptr", "static d0")],
                 None,
-                0xbd4a22218871e85e,
+                0x2a14c8b24e26fd21,
             ),
             (
                 "type t0 = own \"located\" { at:locator fixed u8 }",
                 "static d0 = align 8 hex 050000000000000002000000000000000300616263",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"located\" { at:locator seqspan u8 }",
                 "static d0 = align 8 hex 0700000000000000020000000000000003000300616263",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"located\" { at:locator indexed u8 }",
                 "static d0 = align 8 hex 0d00000000000000020000000000000003000300616263000001000200",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xfcfedf8da784a013,
+                0xe2e227ca3979c07a,
             ),
             (
                 "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Tag\" | Empty { } | Value { n:u64 }",
                 "static d0 = align 8 hex 09000000000000000200000000000000010700000000000000",
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
-                0xd595b4bd0195bebd,
+                0x957b376efb4ab749,
             ),
         ];
         for (types, statics, fields, case, want) in vectors {
@@ -2521,22 +2552,7 @@ mod tests {
                 hash.0,
                 sig.0
             );
-            let mut m = text::parse(&fixture).unwrap();
-            if types == "type t0 = own \"word\" { n:u64 }" {
-                // A published scalar value row, as the front's u64 row. The source
-                // hash oracle is unchanged, but no helper call remains at its site.
-                m.types[0].carried = hirsel_core_layout::Carried::Value(Ty::Scalar(Scalar::U64));
-                let mut body = m.functions[f].body.take().unwrap();
-                inline_ordered(&m, &mut body);
-                assert_eq!(
-                    body.insts
-                        .iter()
-                        .filter(|i| matches!(i, Inst::Call { .. }))
-                        .count(),
-                    0
-                );
-                m.functions[f].body = Some(body);
-            }
+            let m = text::parse(&fixture).unwrap();
             wf::module(&m).unwrap();
             let run = eval::run(&m, FuncId(f as u32), &[], 0);
             assert_eq!(run.outcome, eval::Outcome::Returned(vec![want]), "{types}");

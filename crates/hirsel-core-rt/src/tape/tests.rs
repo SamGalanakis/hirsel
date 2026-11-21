@@ -445,6 +445,7 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         net_rules: vec![],
         secret_grants: vec![],
         env: None,
+        map_hash_key: Default::default(),
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -580,6 +581,7 @@ fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
         net_rules: vec![],
         secret_grants: vec![],
         env: None,
+        map_hash_key: Default::default(),
     };
     let mono = |v: u64| Frame::Op {
         task: 0,

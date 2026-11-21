@@ -185,10 +185,11 @@ static void attribute(HirselLlvmBuilder *u, LLVMValueRef value, unsigned index, 
     else cast<CallBase>(unwrap(value))->addAttributeAtIndex(index, attr);
 }
 static void string_attribute(HirselLlvmBuilder *, LLVMValueRef value, const char *name, size_t len, const char *text, size_t size) {
-    if (auto *f = dyn_cast<Function>(unwrap(value)))
-        f->addFnAttr(StringRef(name, len), StringRef(text, size));
-    else cast<CallBase>(unwrap(value))->addFnAttr(Attribute::get(
-        unwrap(value)->getContext(), StringRef(name, len), StringRef(text, size)));
+    auto *target = unwrap(value);
+    auto attr = Attribute::get(target->getContext(), StringRef(name, len), StringRef(text, size));
+    if (auto *argument = dyn_cast<Argument>(target)) argument->addAttr(attr);
+    else if (auto *f = dyn_cast<Function>(target)) f->addFnAttr(attr);
+    else cast<CallBase>(target)->addFnAttr(attr);
 }
 static void finish_declaration(LLVMValueRef value) {
     auto *f = cast<Function>(unwrap(value));

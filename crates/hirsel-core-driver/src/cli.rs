@@ -107,7 +107,7 @@ commands! {
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
-    "test", "test [package-dir] --limit BYTES --runtime ARCHIVE [options]", "Run each discovered @test in an independent process.";
+    "test", "test [package-dir] [options]", "Run each discovered @test in an independent process.";
     "inspect", "inspect [package-dir | --std] (--interface [--json] | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
@@ -615,7 +615,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--limit"],
         Some("BYTES"),
         ["build", "publish", "run", "replay", "test", "sdk"],
-        "Set the root limit; mandatory for test."
+        "Set the root limit; test requires it when the manifest does not declare one."
     ),
     option!(
         Output,
@@ -725,6 +725,7 @@ pub struct Invocation {
 }
 pub enum Action {
     Help(String),
+    Version,
     Invoke(Invocation),
 }
 fn named(name: &str) -> Result<&'static CommandSpec, String> {
@@ -752,7 +753,8 @@ pub fn help(command: Option<&CommandSpec>) -> String {
         }
         result
     } else {
-        let mut result = "Usage: hirsel <command> [options]\n\nCommands:\n".to_owned();
+        let mut result =
+            "Usage: hirsel <command> [options]\n       hirsel --version\n\nCommands:\n".to_owned();
         for command in COMMANDS {
             result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
         }
@@ -772,6 +774,13 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
     };
     if is_help(&name) {
         return Ok(Action::Help(help(None)));
+    }
+    if name == "--version" {
+        return if arguments.next().is_none() {
+            Ok(Action::Version)
+        } else {
+            Err("--version takes no arguments".into())
+        };
     }
     let command = named(&name)?;
     if name == "sdk" {
@@ -853,12 +862,27 @@ pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
     }
     std::fs::create_dir(directory)?;
     let main = if library {
-        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 { Ok(()) } else { Error(Exit(status: 1)) }\n}\n"
+        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(Exit(status: 1))\n    }\n}\n"
     } else {
-        "pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n"
+        "pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n\npub fn twice(n: u64) -> u64 {\n    n + n\n}\n"
     };
-    for (name, source) in std::iter::once(("main.hirsel", main))
-        .chain(library.then_some(("lib.hirsel", "pub fn answer() -> u64 {\n    42\n}\n")))
+    let lib = "pub fn answer() -> u64 {\n    42\n}\n";
+    let test = if library {
+        "@test\nfn test_answer() -> Result[(), ()] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
+    } else {
+        "@test\nfn test_twice() -> Result[(), ()] {\n    if main.twice(21) == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
+    };
+    let sources = ["main.hirsel"]
+        .into_iter()
+        .chain(library.then_some("lib.hirsel"));
+    let manifest = crate::package_dir::scaffold_manifest(sources);
+    for (name, source) in [
+        ("main.hirsel", main),
+        ("tests.hirsel", test),
+        ("manifest.json", &manifest),
+    ]
+    .into_iter()
+    .chain(library.then_some(("lib.hirsel", lib)))
     {
         std::fs::OpenOptions::new()
             .write(true)

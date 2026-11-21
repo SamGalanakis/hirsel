@@ -396,7 +396,12 @@ fn neutral_runtime(op: RtOp) -> bool {
         op,
         RtOp::DestId
             | RtOp::CompareBytes
-            | RtOp::HashBytes
+            | RtOp::MapHashBytes
+            | RtOp::MapHashWord
+            | RtOp::MapHashStart
+            | RtOp::MapHashAddWord
+            | RtOp::MapHashAddBytes
+            | RtOp::MapHashFinish
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks

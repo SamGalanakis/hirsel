@@ -29,7 +29,7 @@ impl ObjectKind {
 
     pub(crate) fn domain(self) -> &'static str {
         match self {
-            Self::Body => "hirsel.code-body.v1",
+            Self::Body => hirsel_core_ir::normal::BODY_HASH_DOMAIN,
             Self::Annex => "hirsel.code-annex.v1",
             Self::Group => "hirsel.code-group.v1",
             Self::Recipe => "hirsel.release-recipe.v1",

@@ -75,6 +75,7 @@ impl Marker {
 pub(crate) struct Names {
     interfaces: BTreeMap<DeclId, Site>,
     kinds: BTreeMap<DeclId, Site>,
+    releases: BTreeMap<TyId, usize>,
 }
 
 impl Names {
@@ -107,6 +108,16 @@ struct KindUse {
 }
 
 impl Program<'_> {
+    /// A successful make gives the run a release obligation, including when
+    /// retained source never calls that release explicitly.
+    pub(crate) fn foreign_release_for(&self, make: &FnDecl) -> Option<usize> {
+        if !self.index.modules[make.site.module.0 as usize].foreign {
+            return None;
+        }
+        let kind = self.foreign_result_kind(make.result)?;
+        self.foreign_names().releases.get(&kind).copied()
+    }
+
     pub fn foreign_function_header(&self, function: &FnDecl) -> Option<(DefPath, String)> {
         if !self.index.modules[function.site.module.0 as usize].foreign {
             return None;
@@ -193,7 +204,7 @@ impl Program<'_> {
         }
         let mut interfaces = BTreeMap::new();
         let mut uses = BTreeMap::<(ModuleId, DeclId), KindUse>::new();
-        for fd in self.fns.iter() {
+        for (function, fd) in self.fns.iter().enumerate() {
             let module = fd.site.module;
             if !self.index.modules[module.0 as usize].foreign {
                 continue;
@@ -271,11 +282,11 @@ impl Program<'_> {
                 continue;
             }
             for p in params {
-                if let Some(kind) = Marker::Handle.argument(self, p.ty)
+                if let Some(raw_kind) = Marker::Handle.argument(self, p.ty)
                     && !p.bytes
                     && matches!(p.mode, Mode::View | Mode::Take)
                 {
-                    if let Some(kind) = self.foreign_marker_decl(kind, module) {
+                    if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
                         let site = self.handle_site(fd, p.site);
                         note_kind(
                             &mut names,
@@ -286,6 +297,9 @@ impl Program<'_> {
                             release,
                             &mut refusals,
                         );
+                        if release {
+                            names.releases.insert(raw_kind, function);
+                        }
                     }
                 } else if p.ty != ERROR
                     && (p.bytes

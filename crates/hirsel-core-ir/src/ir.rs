@@ -2179,6 +2179,11 @@ pub struct Module {
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,
     pub functions: Vec<Function>,
+    /// A native assembly with foreign grants passes caller sites to bodyless
+    /// functions. Ordinary bodies keep their own sites. This is a link-time
+    /// condition derived from the launch, outside the checked body encoding.
+    #[serde(skip)]
+    pub external_call_sites: bool,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.
@@ -2198,6 +2203,12 @@ pub struct StepFree {
     pub dispatch: bool,
 }
 impl Module {
+    pub fn passes_caller_site(&self, function: FuncId) -> bool {
+        let function = &self.functions[function.index()];
+        crate::source::inherits_site(&self.instances[function.instance.index()])
+            || (self.external_call_sites && function.body.is_none())
+    }
+
     /// The identity of function `function`'s code: a code variant's, or its
     /// instance's [`Identity::digest`].
     pub fn code_identity(&self, function: FuncId) -> ContentHash {

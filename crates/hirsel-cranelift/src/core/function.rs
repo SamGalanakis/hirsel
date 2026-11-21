@@ -754,13 +754,7 @@ impl Function<'_, '_, '_> {
                     }
                 }
                 let site = match call.callee {
-                    Callee::Direct(f)
-                        if !c::source::inherits_site(
-                            &self.input.instances[self.input.functions[f.index()].instance.index()],
-                        ) =>
-                    {
-                        self.context
-                    }
+                    Callee::Direct(f) if !self.input.passes_caller_site(f) => self.context,
                     _ => self.site()?,
                 };
                 args.push(site);

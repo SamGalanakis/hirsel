@@ -1644,6 +1644,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);
+        if let Some(release) = self.p.foreign_release_for(g) {
+            let (function, _) = match self.instance_row(release, &[]) {
+                Ok(row) => row,
+                Err(what) => {
+                    self.gap(n, what);
+                    return None;
+                }
+            };
+            let result = self.value(Ty::Ptr);
+            self.inst(Inst::FunctionRef { result, function }, n);
+        }
         if result == NEVER {
             // The callee never returns normally; nothing follows the call (FORM v1a).
             self.end(Terminator::Unreachable, Some(n));

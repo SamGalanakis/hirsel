@@ -675,7 +675,12 @@ fn foreign_publication_pins_grants_and_walks_only_reached_functions() {
     let Link::Driver(cc) = options.link else { unreachable!() };
     law.write("app/native.c", r#"
 unsigned long long hfl_value(void) { return 1; }
-#define ABI "hfl_value stack () -> u64\n"
+static unsigned char cell;
+void *hfl_make(void) { return &cell; }
+void hfl_free(void *p) { (void)p; }
+#define ABI "hfl_value stack () -> u64\n" \
+            "hfl_make stack () -> new app@1/main/Obj\n" \
+            "hfl_free waits (take app@1/main/Obj) -> ()\n"
 __attribute__((used, section(".hirsel_abi")))
 static const char abi[sizeof(ABI) - 1] = ABI;
 "#);
@@ -697,9 +702,12 @@ static const char abi[sizeof(ABI) - 1] = ABI;
 symbols = "hfl_"
 archives = [{{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = "{pin_text}" }}]
 "#));
-    law.write("app/native.hirsel", "pub fn value(f: Foreign[main.I]) -> u64\n");
+    law.write("app/native.hirsel", "\
+pub fn value(f: Foreign[main.I]) -> u64\n\
+pub fn make(f: Foreign[main.I]) -> Option[foreign.Ptr[main.Obj]]\n\
+pub fn free(f: Foreign[main.I], take p: foreign.Ptr[main.Obj]) waits\n");
     let main = |body| law.write("app/main.hirsel", format!(
-        "pub opaque type I {{}}\npub fn main(f: Foreign[I]) -> Result[(), Exit] {{ {body} }}\n"
+        "pub opaque type I {{}}\npub opaque type Obj {{}}\npub fn main(f: Foreign[I]) -> Result[(), Exit] {{ {body} }}\n"
     ));
     let store = CodeStore::new(law.path("code-store"));
     let publish = || {
@@ -726,6 +734,16 @@ archives = [{{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = 
     let [reached] = leaf.functions.as_slice() else { panic!("expected one reached function") };
     assert_eq!(reached.identity.definition.definition_identity(), "app@1/native/value");
     assert_eq!(reached.header, "(core@1/core/Foreign[app@1/main/I])->u64");
+    assert!(matches!(
+        admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics),
+        Err(AdmissionError::Unsupported("foreign modules are not enabled yet")),
+    ));
+
+    main("let _ = native.make(f); Ok(())");
+    let (root, made) = publish();
+    let [leaf] = made.foreign_modules.as_slice() else { panic!("expected one reached module") };
+    let functions: BTreeSet<_> = leaf.functions.iter().map(|row| row.identity.definition.0.name.as_str()).collect();
+    assert_eq!(functions, BTreeSet::from(["free", "make"]));
     assert!(matches!(
         admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics),
         Err(AdmissionError::Unsupported("foreign modules are not enabled yet")),

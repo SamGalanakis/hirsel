@@ -238,6 +238,7 @@ pub(super) fn emit_release_image(
         &[u8],
     ),
 ) -> Result<Emitted, NativeStop> {
+    joined.external_call_sites = !options.foreign_grants.is_empty();
     // The bodies a program imports shape its code, so they key its parts.
     let lent_key =
         (!lent.is_empty()).then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [lent]));

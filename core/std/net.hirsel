@@ -1,5 +1,5 @@
 // NET-7 graceful TCP end, composed from existing ownership and host.recv_bounded.
-pub type FinishError: send = Allocation(Capacity) | Network(NetError)
+pub type FinishError: send = Network(NetError)
 
 fn release_write(take w: WriteHalf) {}
 
@@ -24,7 +24,7 @@ pub fn finish(take w: WriteHalf, take r: ReadHalf, c: Clock, deadline_ns: u64) -
     }
 }
 
-pub type LookupError: send = Allocation(Capacity) | Network(NetError) | NoAddress
+pub type LookupError: send = Network(NetError) | NoAddress
 
 /// Look up at most 16 distinct addresses using a Resolve rule on n.
 /// Alloc: room for 16 addresses, refunded on failure. Waits until lookup or until.

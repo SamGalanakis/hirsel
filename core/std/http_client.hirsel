@@ -14,7 +14,7 @@ pub type Request: send {
     body: RequestBody
 }
 
-pub type Error: send = InvalidRequest | State | NoSpace | Allocation(Capacity) | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
+pub type Error: send = InvalidRequest | State | NoSpace | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
 
 fn append(mut out: Bytes, data: Bytes) -> Result[(), Error] {
     if list.len(data) > order.min(8192, list.capacity(out)) - list.len(out) {
@@ -163,7 +163,6 @@ pub fn render_error(mut out: Bytes, error: Error, req: Request) -> Result[(), Er
         InvalidRequest => "InvalidRequest",
         State => "State",
         NoSpace => "NoSpace",
-        Allocation(_) => "Allocation",
         Connect(_) => "Connect",
         Write(_) => "Write",
         Receive(_) => "Receive",

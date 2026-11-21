@@ -11,13 +11,13 @@ content size and checksum.
 
 ```
 pub type ZstdError = Truncated | BadMagic | ReservedBit | Corrupt | BlockOversize | Checksum | ContentSize | WindowTooLarge(u64) | TooLarge | TrailingData(u64)
-pub type Error = Data(ZstdError) | Capacity(Capacity)
+pub type Error = Data(ZstdError)
 pub fn zstd.dictionary(data: Bytes) -> Result[Dictionary, Error]
 pub fn zstd.decode(data: Bytes, max_output: u64, max_window: u64) -> Result[Bytes, Error]
 pub fn zstd.decode_with(d: Dictionary, data: Bytes, max_output: u64, max_window: u64) -> Result[Bytes, Error]
-pub fn zstd.decoder(max_window: u64) -> Result[Decoder, Capacity]
+pub fn zstd.decoder(max_window: u64) -> Decoder
 pub fn zstd.decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes) -> Result[flate.Step, ZstdError]
-pub fn zstd.encode(data: Bytes, level: u8) -> Result[Bytes, Capacity]
+pub fn zstd.encode(data: Bytes, level: u8) -> Bytes
 ```
 
 **Decoding.** `decode` reads one or more concatenated frames, and skips skippable frames,
@@ -42,5 +42,6 @@ faster.
 - **Charging.** A decoder admits its window (at most `max_window`) and its tables, and an
   encoder admits its level's match state. Both are under the current limit. Whole-buffer
   outputs grow by GROWTH and are refunded on failure. The step operations admit nothing.
-- **Failures.** As listed. A failed decoder repeats its error.
+- **Failures.** A refused allocation raises `Capacity`. A decoder that reports a
+  data error returns that error on every later call.
 - **Replay.** These operations pass no replay point and are recomputed on replay.

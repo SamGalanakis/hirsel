@@ -20,11 +20,10 @@ fn io_code(e: IoError) -> u64 {
     }
 }
 
-/// 0 for Ok, an IoError's code, 6 for Capacity, 7 for NotUtf8.
+/// An IoError's code, or 7 for NotUtf8.
 fn read_code(e: file.Error) -> u64 {
     match e {
         Io(x) => io_code(x),
-        Capacity(_) => 6,
         NotUtf8 => 7,
     }
 }

@@ -917,7 +917,6 @@ pub fn finish(take writer: Writer, take reader: Reader, clock: Clock, deadline_n
     let output = write_half(take writer)
     match net.finish(take output, take input, clock, deadline_ns) {
         Ok(_) => Ok(()),
-        Error(Allocation(c)) => Error(Allocation(c)),
         Error(Network(e)) => Error(Network(e))
     }
 }

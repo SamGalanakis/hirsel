@@ -51,10 +51,10 @@ the response head
 and every body read. The owning task can be cancelled with `task.cancel`.
 `close(take connection)` releases both socket halves and may abandon a
 partial request or response. Errors distinguish invalid requests, connection
-state, insufficient output space, allocation, connect, write, read,
+state, insufficient output space, connect, write, read,
 malformed head, protocol switching, body framing, size limits, deadline and
-cancellation. A wire or deadline failure makes the connection unusable.
-Writes can have committed a prefix on failure.
+cancellation. A refused allocation raises `Capacity`. A wire or deadline
+failure makes the connection unusable. Writes can have committed a prefix on failure.
 
 The transport-free `Reader` accepts bounded fragments with `feed` and an
 EOF signal with `end_input`. `parse_head` reports when a final head is

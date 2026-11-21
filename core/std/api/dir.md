@@ -72,8 +72,8 @@ silently shortened.
   nothing below them.
 - **Failures.** `host.entries`: `Denied` when the root can no longer be read, and
   `Other(errno)`. `host.next_entries`: `Other(errno)`, after which `buf` is unchanged.
-  `dir.list` adds `Capacity` and `NotUtf8`, and the entries built so far are cleaned and
-  refunded (FAIL-5).
+  `dir.list` also returns `NotUtf8` for an invalid name. A refused allocation
+  raises `Capacity`. Cleanup closes the listing and refunds its allocations (FAIL-5).
 - **Charging.** The host operations admit nothing. Their bytes land in capacity the caller
   already holds. `dir.list` admits its record buffer (4096 bytes), the list and each name
   under the current limit, and refunds the buffer before it returns.

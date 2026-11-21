@@ -6,7 +6,7 @@ pub type Format: key = Raw | Zlib | Gzip
 
 pub type FlateError: key = Truncated | Corrupt(u64) | Header | Checksum | TooLarge | TrailingData(u64)
 
-pub type Error = Data(FlateError) | Capacity(Capacity)
+pub type Error = Data(FlateError)
 
 pub type Step {
     consumed: u64,
@@ -584,13 +584,6 @@ pub fn decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Byte
         Done() => true,
         _ => false
     }))
-}
-
-fn admit[T](take work: Result[T, Capacity]) -> Result[T, Error] {
-    match take work {
-        Ok(value) => Ok(take value),
-        Error(error) => Error(Capacity(error)),
-    }
 }
 
 /// Decode one stream with a checked output bound. A following byte is

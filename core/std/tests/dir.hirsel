@@ -89,9 +89,9 @@ fn remove_tree_keeps_completed_prefix(d: Dir) -> bool waits {
 fn list_small_batches(d: Dir) -> bool waits {
     result.unwrap(dir.create_dir(d, "scan"))
     let scan = result.unwrap(dir.narrow(d, "scan"))
-    let b = result.unwrap(string.repeat("b", 255))
-    let a = result.unwrap(string.repeat("a", 254))
-    let c = result.unwrap(string.repeat("C", 253))
+    let b = string.repeat("b", 255)
+    let a = string.repeat("a", 254)
+    let c = string.repeat("C", 253)
     result.unwrap(dir.create_dir(scan, b))
     result.unwrap(file.write(scan, a, string.as_bytes("a")))
     result.unwrap(file.write(scan, c, string.as_bytes("C")))

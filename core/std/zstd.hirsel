@@ -3,7 +3,7 @@
 // Block payloads are buffered before reverse-bit decoding.
 pub type ZstdError: key = Truncated | BadMagic | ReservedBit | Corrupt | BlockOversize | Checksum | ContentSize | WindowTooLarge(u64) | TooLarge | TrailingData(u64)
 
-pub type Error = Data(ZstdError) | Capacity(Capacity)
+pub type Error = Data(ZstdError)
 
 const BLOCK_LIMIT: u64 = 131072
 
@@ -605,13 +605,6 @@ fn offset(value: u64, literal_length: u64, mut t: Tables) -> Result[u64, ZstdErr
         return Error(Corrupt())
     }
     Ok(distance)
-}
-
-fn admit[T](take v: Result[T, Capacity]) -> Result[T, Error] {
-    match take v {
-        Ok(value) => Ok(take value),
-        Error(error) => Error(Capacity(error)),
-    }
 }
 
 fn data_error(error: ZstdError) -> Error {

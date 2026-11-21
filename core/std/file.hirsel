@@ -13,12 +13,8 @@
 // empties a file for writing; Append creates or opens one for writing at the end;
 // CreateNew creates one for writing and fails with Exists; ReadWrite opens for reading and
 // writing and creates the file when absent.
-//
-// IoError has no arm for Capacity or invalid data, so the operations that allocate
-// return `file.Error`.
-/// IoError plus what the allocating operations add: Capacity from a refused admission,
-/// NotUtf8 from read_string.
-pub type Error = Io(IoError) | Capacity(Capacity) | NotUtf8
+/// A host error or invalid UTF-8 encountered while reading.
+pub type Error = Io(IoError) | NotUtf8
 
 /// Opens p in mode. `host.open`. Fails: Error(NotFound | Denied | Exists | Other(_)).
 /// Prefix: nothing on failure; on success Write and CreateNew may have created p and Write
@@ -68,8 +64,9 @@ pub fn close(take f: HostFile) -> Result[(), IoError] waits {
 
 /// Reads the whole file p: opens it Read, then `list.reserve` and `host.read` until
 /// Ok(0), then closes it. Grows by GROWTH from 4096 bytes.
-/// Fails: Error(Io(_)) from the host, Error(Capacity(c)) when growth is refused; the
-/// bytes read so far are cleaned and refunded (FAIL-5). Alloc: the Bytes, current limit.
+/// Returns Error(Io(_)) on a host error. Refused growth raises Capacity and
+/// cleanup closes the file and refunds the buffer (FAIL-5).
+/// Alloc: the Bytes, current limit.
 /// Prefix: nothing on the host changes. Cost: O(size).
 /// Ex: `let raw = std.file.read(d, "input.txt")?`
 pub fn read(d: Dir, p: String) -> Result[Bytes, Error] waits {

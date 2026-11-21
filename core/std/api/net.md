@@ -6,8 +6,10 @@ SHUT_WR without closing the descriptor while the ReadHalf is alive. It then
 drains raw TCP bytes with an 8192-byte scratch buffer to EOF, Reset or the
 unchanged absolute deadline, and finally releases the ReadHalf.
 
-The result reports Allocation(Capacity) or Network(NetError). Deadline is
-Network(TimedOut), including a continuously ready peer that sends forever.
+`FinishError` reports `Network(NetError)`. If the deadline expires, the
+result is `Network(TimedOut)`, even if the peer keeps sending. A refused
+scratch allocation raises `Capacity` and cleanup releases the read half.
+
 The clock is checked between successful reads, so try-first core operations
 cannot extend the composite deadline. Cancelled task cleanup still releases
 the remaining half. Finishing sends no application protocol frame and does
@@ -24,7 +26,7 @@ Goose's hypothetical socket sketch has no graceful completion operation.
 `std.net.lookup(n: Net, name: String, until: Until) -> Result[List[Ip], LookupError] waits`
 reserves room for 16 addresses under the current limit, calls `host.resolve`
 ([NET-11](../../../docs/spec/net.md#net-11-name-resolution)) and returns the addresses in
-resolver order. `LookupError = Allocation(Capacity) | Network(NetError) | NoAddress`.
+resolver order. `LookupError = Network(NetError) | NoAddress`.
 `NoAddress` is a name with no address, which `host.resolve` reports as `Ok(0)`, so callers
 of `lookup` do not mistake an empty list for success. That is how Go's `LookupIP` reports
 "no such host". Call `host.resolve` directly to choose the bound or to reuse a list.
@@ -36,6 +38,6 @@ of `lookup` do not mistake an empty list for success. That is how Go's `LookupIP
   failure. The host operation admits nothing.
 - **Failures.** `Network(Aborted)` on cancellation while waiting, `Network(TimedOut)` at
   `until`, `Network(Unreachable)` for a temporary resolver failure, and
-  `Network(Other(code))`.
+  `Network(Other(code))`. A refused list allocation raises `Capacity`.
 - **Replay.** One `RESOLVE` issue and delivery. A replay returns the recorded addresses
   without a query.

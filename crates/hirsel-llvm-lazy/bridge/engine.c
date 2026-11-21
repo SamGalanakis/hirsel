@@ -45,7 +45,7 @@ typedef void (*HirselLlvmDeliver)(void *, const uint8_t *, size_t);
 typedef int (*HirselLlvmFindTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t **, size_t *);
 typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
                                    const uint8_t *, size_t);
-extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
+extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmFindTail find, HirselLlvmKeepTail keep, void *context);
 extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
@@ -545,7 +545,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
         if (!e) {
             // Each definition's tail, held per definition by the caller.
-            hirsel_llvm_release_tails(module, machine, export_count ? find : NULL, keep, receiver);
+            hirsel_llvm_release_tails(module, machine, jobs, export_count ? find : NULL, keep, receiver);
             e = hirsel_llvm_sweep_release(module, machine);
         }
         if (!e) {

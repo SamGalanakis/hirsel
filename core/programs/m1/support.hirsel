@@ -59,8 +59,7 @@ pub fn num(mut s: String, n: u64) -> Result[(), Error] {
 }
 
 pub fn number(s: String) -> Result[u64, Error] {
-    let parsed: Result[u64, ParseError] = int.parse(s)
-    match parsed {
+    match (int.parse(s) : Result[u64, ParseError]) {
         Ok(n) => Ok(n),
         Error(_) => Error(error("Parse@number"))
     }

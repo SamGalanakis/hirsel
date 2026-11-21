@@ -1,5 +1,5 @@
-//! RustCrypto sha2 0.10.9 oracle and portable benchmark partner.
-//! Build with sha2's force-soft feature. `vectors` emits the differential corpus;
+//! RustCrypto sha2 0.10.9 oracle and benchmark partner, built with its default
+//! backends (SHA-NI when the CPU has it) by core/tools/sha256_reference.py. `vectors` emits the differential corpus;
 //! otherwise SIZE LOOPS hashes the same evolving byte image as core/programs/sha256/bench.hirsel.
 use sha2::{Digest, Sha256};
 use std::hint::black_box;

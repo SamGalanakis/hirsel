@@ -373,6 +373,7 @@ impl Derive<'_> {
 
     fn of_body(&mut self, c: &mut Code, dest: ValueId) -> Result<(), String> {
         let mut least = c.constant(0);
+        let mut empty = c.boolean(false);
         for i in 0..self.rows.parts.len() {
             let at = self.part_codec(c, i)?;
             let n = Self::address(
@@ -383,6 +384,22 @@ impl Derive<'_> {
             );
             let n = c.read_at(n, Ty::Scalar(Scalar::U64));
             least = c.binary(BinaryOp::Add, least, n);
+            let flag = Self::address(
+                c,
+                AddressBase::Address(at),
+                &[Step::Field(4)],
+                PlaceTy::Value(Ty::Scalar(Scalar::Bool)),
+            );
+            let flag = c.read_at(flag, Ty::Scalar(Scalar::Bool));
+            let combined = c.value(Ty::Scalar(Scalar::Bool));
+            c.inst(Inst::Binary {
+                result: combined,
+                op: BinaryOp::BitOr,
+                left: empty,
+                right: flag,
+                fail: None,
+            });
+            empty = combined;
         }
         let to = Self::address(
             c,
@@ -417,6 +434,16 @@ impl Derive<'_> {
         c.inst(Inst::Store {
             address: at,
             value: least,
+        });
+        let at = Self::address(
+            c,
+            AddressBase::Address(to),
+            &[Step::Field(4)],
+            PlaceTy::Value(Ty::Scalar(Scalar::Bool)),
+        );
+        c.inst(Inst::Store {
+            address: at,
+            value: empty,
         });
         Self::returns(c);
         Ok(())

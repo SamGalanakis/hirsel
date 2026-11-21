@@ -1,0 +1,14 @@
+// Byte checksum kernels. std.check provides the one-shot and streaming APIs.
+// XXH3-64 with seed zero and the default secret. More than 240 bytes raises Bounds.
+pub fn xxh3_short(b: Bytes) -> u64
+
+// The same short hash over the first n bytes of an inline buffer.
+pub fn xxh3_short_inline(b: Inline[u8, 256], n: u64) -> u64
+
+// Accumulate 64-byte stripes without scrambling, starting at offset in the
+// secret and advancing it by eight per stripe. Bounds unless b contains whole
+// stripes and each 64-byte window fits the 192-byte secret. Each call is one step.
+pub fn xxh3_stripes(mut acc: Inline[u64, 8], b: Bytes, key: Inline[u8, 192], offset: u64)
+
+// Accumulate one inline stripe with the same secret window rule.
+pub fn xxh3_stripe(mut acc: Inline[u64, 8], b: Inline[u8, 64], key: Inline[u8, 192], offset: u64)

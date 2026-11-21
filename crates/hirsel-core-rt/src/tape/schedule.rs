@@ -23,7 +23,9 @@ pub(super) struct TapeHooks;
 impl Hooks for TapeHooks {
     fn seal_deadlock(&self, group: Group) -> Result<(), ([u8; 16], Fault)> {
         let id = group.with(|live| live.tape_id).unwrap();
-        finish(group.cell, group.generation, Seal::Deadlock).map_err(|fault| (id, fault))
+        finish(group.cell, group.generation, Seal::Deadlock)
+            .map(|_| ())
+            .map_err(|fault| (id, fault))
     }
 
     fn check(&self, group: Group) -> Result<(), Fault> {
@@ -186,10 +188,12 @@ impl Live {
     pub(super) fn schedule_fault(&mut self) {
         if self.fault.is_none() {
             let at = self.replayer.as_ref().map_or(1, |r| r.taken + 1);
-            self.fault = Some(refuse(Fault::Diverged(Divergence {
+            let f = Fault::Diverged(Divergence {
                 at,
                 kind: Mismatch::Schedule,
-            })));
+            });
+            self.fault = Some(refuse(f));
+            self.abort_replay(f, 0);
         }
     }
 
@@ -228,6 +232,7 @@ impl Live {
             },
             Err(f) => {
                 self.fault = Some(refuse(f));
+                self.abort_replay(f, 0);
                 return Turn::Fifo;
             }
         };
@@ -240,6 +245,7 @@ impl Live {
             }
             None => {
                 self.fault = Some(refuse(Fault::Corrupt));
+                self.abort_replay(Fault::Corrupt, 0);
                 Turn::Fifo
             }
             Some(_) => {
@@ -288,9 +294,7 @@ impl Live {
             _ => unreachable!(),
         }
         self.schedule.last = self.schedule.events;
-        if let Err(e) = self.recorder.as_mut().unwrap().frame(&frame) {
-            self.fault = Some(refuse(Fault::Io(e)));
-        }
+        let _ = self.recorder.as_mut().unwrap().frame(&frame);
     }
 }
 

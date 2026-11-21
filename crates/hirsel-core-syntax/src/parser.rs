@@ -5,6 +5,13 @@ type Nodes = smallvec::SmallVec<[NodeId; 24]>;
 use smallvec::smallvec;
 type Parsed<T> = Result<T, ()>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Header {
+    Function,
+    Callable,
+    Closure,
+}
+
 /// Maximum simultaneously active recursive parser productions, not a language limit.
 pub const PARSER_NESTING_LIMIT: usize = 128;
 
@@ -529,7 +536,7 @@ impl Parser<'_> {
         }
         if self.eat(sym::FN) {
             let name = self.name()?;
-            c.extend(self.header(true)?);
+            c.extend(self.header(Header::Function)?);
             if self.at(sym::LBRACE) {
                 c.push(self.block()?);
             } else if self.mode != ParseMode::Signatures {
@@ -549,7 +556,7 @@ impl Parser<'_> {
         // `clone` is contextual: an item starting `clone [` or `clone (` is a clone body.
         if self.at(sym::CLONE) && matches!(self.word(1), sym::LBRACKET | sym::LPAREN) {
             let name = self.name()?;
-            c.extend(self.header(true)?);
+            c.extend(self.header(Header::Function)?);
             c.push(self.block()?);
             return Ok(self.node(s, NodeKind::CloneHook, Some(name), &c));
         }
@@ -806,14 +813,14 @@ impl Parser<'_> {
         }
         Ok(self.node(s, NodeKind::Bounds, None, &c))
     }
-    fn header(&mut self, top: bool) -> Parsed<Nodes> {
+    fn header(&mut self, kind: Header) -> Parsed<Nodes> {
         let mut c: Nodes = smallvec![];
-        if top && self.at(sym::LBRACKET) {
+        if kind == Header::Function && self.at(sym::LBRACKET) {
             c.push(self.generics()?);
         }
         let s = self.pos;
         self.expect(sym::LPAREN)?;
-        let ps = self.list(sym::RPAREN, |p| p.parameter(top))?;
+        let ps = self.list(sym::RPAREN, |p| p.parameter(kind))?;
         c.push(self.node(s, NodeKind::Parameters, None, &ps));
         if self.eat(sym::ARROW) {
             let st = self.pos - 1;
@@ -823,7 +830,7 @@ impl Parser<'_> {
         if self.eat(sym::WAITS) {
             c.push(self.node(self.pos - 1, NodeKind::Waits, None, &[]));
         }
-        if top && self.eat(sym::WHERE) {
+        if kind == Header::Function && self.eat(sym::WHERE) {
             let st = self.pos - 1;
             let mut cs: Nodes = smallvec![];
             loop {
@@ -838,7 +845,7 @@ impl Parser<'_> {
         }
         Ok(c)
     }
-    fn parameter(&mut self, named: bool) -> Parsed<NodeId> {
+    fn parameter(&mut self, header: Header) -> Parsed<NodeId> {
         let s = self.pos;
         let k = if self.eat(sym::TAKE) {
             NodeKind::TakeParameter
@@ -846,7 +853,10 @@ impl Parser<'_> {
             NodeKind::MutParameter
         } else if self.eat(sym::BYTES) {
             NodeKind::BytesParameter
-        } else if self.at(sym::STEPS) && self.token(1).kind == TokenKind::Ident {
+        } else if header != Header::Closure
+            && self.at(sym::STEPS)
+            && self.token(1).kind == TokenKind::Ident
+        {
             self.bump();
             NodeKind::StepsParameter
         } else {
@@ -855,8 +865,13 @@ impl Parser<'_> {
         if matches!(self.word(0), sym::TAKE | sym::MUT | sym::BYTES) {
             return self.fail("LANG-5", "a parameter has at most one mode");
         }
-        let n = if named || (self.token(0).kind == TokenKind::Ident && self.word(1) == sym::COLON) {
+        let n = if header != Header::Callable
+            || (self.token(0).kind == TokenKind::Ident && self.word(1) == sym::COLON)
+        {
             let n = self.name()?;
+            if header == Header::Closure && !self.at(sym::COLON) {
+                return Ok(self.node(s, k, Some(n), &[]));
+            }
             self.expect(sym::COLON)?;
             Some(n)
         } else {
@@ -888,7 +903,7 @@ impl Parser<'_> {
                 self.expect(sym::RBRACKET)?;
             }
             self.expect(sym::FN)?;
-            c.extend(self.header(false)?);
+            c.extend(self.header(Header::Callable)?);
             self.node(
                 s,
                 if scoped {
@@ -1270,6 +1285,7 @@ impl Parser<'_> {
                     sym::RBRACE
                         | sym::SEMICOLON
                         | sym::COMMA
+                        | sym::COLON
                         | sym::RPAREN
                         | sym::RBRACKET
                         | sym::FATARROW
@@ -1317,15 +1333,10 @@ impl Parser<'_> {
             return result;
         }
         if self.eat(sym::LPAREN) {
-            let c = self.list(sym::RPAREN, |p| p.expr(0))?;
-            let k = if c.is_empty() {
-                NodeKind::Unit
-            } else if c.len() == 1 && self.word_token_before() != sym::COMMA {
-                NodeKind::Group
-            } else {
-                NodeKind::Tuple
-            };
-            return Ok(self.node(s, k, None, &c));
+            self.whitespace += 1;
+            let result = self.parenthesized(s);
+            self.whitespace -= 1;
+            return result;
         }
         if self.eat(sym::IF) {
             let condition = self.condition()?;
@@ -1409,7 +1420,7 @@ impl Parser<'_> {
         if self.at(sym::FN) || self.at(sym::SCOPED) {
             let scoped = self.eat(sym::SCOPED);
             self.expect(sym::FN)?;
-            let mut c = self.header(false)?;
+            let mut c = self.header(Header::Closure)?;
             c.push(self.block()?);
             return Ok(self.node(
                 s,
@@ -1423,6 +1434,25 @@ impl Parser<'_> {
             ));
         }
         self.path(NodeKind::Path)
+    }
+    fn parenthesized(&mut self, start: usize) -> Parsed<NodeId> {
+        if self.eat(sym::RPAREN) {
+            return Ok(self.node(start, NodeKind::Unit, None, &[]));
+        }
+        let value = self.expr(0)?;
+        if self.at(sym::COLON) {
+            let colon = self.bump();
+            let ty = self.ty()?;
+            self.expect(sym::RPAREN)?;
+            return Ok(self.node(start, NodeKind::Ascription, Some(colon), &[value, ty]));
+        }
+        if self.eat(sym::RPAREN) {
+            return Ok(self.node(start, NodeKind::Group, None, &[value]));
+        }
+        self.expect(sym::COMMA)?;
+        let mut values = smallvec![value];
+        self.list_into(sym::RPAREN, &mut values, |p| p.expr(0))?;
+        Ok(self.node(start, NodeKind::Tuple, None, &values))
     }
     fn condition(&mut self) -> Parsed<NodeId> {
         if self.eat(sym::LET) {

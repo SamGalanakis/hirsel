@@ -22,21 +22,32 @@ pub type DecodeError = Truncated(u64) | Invalid(u64) | Utf8(u64) | Duplicate(u64
 pub type Stop = Bad(DecodeError) | Full(Capacity)
 
 /// The codec of T: plain, so a store's shape holds it. Generated codecs and the built-in
-/// codecs below are the only makers; `least` is the fewest bytes any T encodes to.
+/// codecs below provide `of`. `least` is a lower bound on encoded length.
 pub opaque type Codec[T] {
     encoder: fn(T, mut Bytes) -> Result[(), Capacity],
     decoder: fn(Bytes, mut u64) -> Result[T, Stop],
     describer: fn(mut Schema, Codec[T]) -> Result[(), Capacity],
-    smallest: u64
+    smallest: u64,
+    empty: bool,
 }
 
 /// A codec from its parts; a generated codec calls this once per type.
 /// Ex: `codec.make(row_encode, row_decode, row_schema, 9)`
 pub fn make[T](e: fn(T, mut Bytes) -> Result[(), Capacity], d: fn(Bytes, mut u64) -> Result[T, Stop], w: fn(mut Schema, Codec[T]) -> Result[(), Capacity], n: u64) -> Codec[T] {
-    Codec(encoder: e, decoder: d, describer: w, smallest: n)
+    make_derived(e, d, w, n, false)
 }
 
-/// The fewest bytes any value of the codec's type encodes to. Cost: O(1).
+/// The maker used by derivation, which knows whether the type has any encodings.
+pub fn make_derived[T](e: fn(T, mut Bytes) -> Result[(), Capacity], d: fn(Bytes, mut u64) -> Result[T, Stop], w: fn(mut Schema, Codec[T]) -> Result[(), Capacity], n: u64, empty: bool) -> Codec[T] {
+    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty)
+}
+
+/// Whether the derived codec has no encodings.
+pub fn is_empty[T](c: Codec[T]) -> bool {
+    c.empty
+}
+
+/// A lower bound on the encoded length of any value of this type. Cost: O(1).
 pub fn least[T](c: Codec[T]) -> u64 {
     c.smallest
 }
@@ -62,7 +73,7 @@ pub fn decode_at[T](c: Codec[T], b: Bytes, start: u64) -> Result[Result[T, Decod
         return Ok(Error(Truncated(list.len(b))))
     }
     let mut at = start
-    match (c.decoder)(b, mut at) {
+    match take_with(b, mut at, c) {
         Ok(x) => {
             if at != list.len(b) {
                 return Ok(Error(Trailing(at)))
@@ -338,6 +349,14 @@ pub fn put_with[T](x: T, c: Codec[T], mut out: Bytes) -> Result[(), Capacity] {
 }
 
 pub fn take_with[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[T, Stop] {
+    let start = at
+    take_payload(b, mut at, c, start)
+}
+
+fn take_payload[T](b: Bytes, mut at: u64, c: Codec[T], start: u64) -> Result[T, Stop] {
+    if c.empty {
+        return Error(Bad(Invalid(start)))
+    }
     (c.decoder)(b, mut at)
 }
 
@@ -376,7 +395,7 @@ pub fn take_list[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[List[T], Stop]
     let mut xs: List[T] = room(n)?
     let mut i: u64 = 0
     while i < n {
-        let x = (c.decoder)(b, mut at)?
+        let x = take_with(b, mut at, c)?
         full(list.push(mut xs, take x))?
         i += 1
     }
@@ -401,11 +420,11 @@ pub fn take_map[K: key, V](b: Bytes, mut at: u64, ck: Codec[K], cv: Codec[V]) ->
     let mut i: u64 = 0
     while i < n {
         let key_at = at
-        let k = (ck.decoder)(b, mut at)?
+        let k = take_with(b, mut at, ck)?
         if map.contains(m, k) {
             return Error(Bad(Duplicate(key_at)))
         }
-        let v = (cv.decoder)(b, mut at)?
+        let v = take_with(b, mut at, cv)?
         full(map.insert(mut m, take k, take v))?
         i += 1
     }
@@ -423,10 +442,11 @@ pub fn put_option[T](x: Option[T], c: Codec[T], mut out: Bytes) -> Result[(), Ca
 }
 
 pub fn take_option[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[Option[T], Stop] {
+    let start = at
     if take_tag(b, mut at, 2)? == 0 {
         return Ok(None)
     }
-    let v = (c.decoder)(b, mut at)?
+    let v = take_payload(b, mut at, c, start)?
     Ok(Some(take v))
 }
 
@@ -444,11 +464,12 @@ pub fn put_result[T, E](x: Result[T, E], ct: Codec[T], ce: Codec[E], mut out: By
 }
 
 pub fn take_result[T, E](b: Bytes, mut at: u64, ct: Codec[T], ce: Codec[E]) -> Result[Result[T, E], Stop] {
+    let start = at
     if take_tag(b, mut at, 2)? == 0 {
-        let v = (ct.decoder)(b, mut at)?
+        let v = take_payload(b, mut at, ct, start)?
         return Ok(Ok(take v))
     }
-    let e = (ce.decoder)(b, mut at)?
+    let e = take_payload(b, mut at, ce, start)?
     Ok(Error(take e))
 }
 
@@ -458,7 +479,7 @@ pub fn take_result[T, E](b: Bytes, mut at: u64, ct: Codec[T], ce: Codec[E]) -> R
 /// callable type holds (LANG-13), so a generated encode is `put_with(to(x), c, mut out)`.
 pub fn take_via[T, R, E](b: Bytes, mut at: u64, c: Codec[R], from: fn(take R) -> Result[T, E]) -> Result[T, Stop] {
     let start = at
-    let r = (c.decoder)(b, mut at)?
+    let r = take_with(b, mut at, c)?
     match from(take r) {
         Ok(x) => Ok(take x),
         Error(_) => Error(Bad(Value(start)))
@@ -523,9 +544,9 @@ fn describe_string(mut s: Schema, _c: Codec[String]) -> Result[(), Capacity] {
 }
 
 /// T's codec. The checker resolves each call by the instance's T (SEM-10): to the built-in
-/// codec below for a scalar, `()` and String, to the structural codec below for List,
-/// Option, Map and Result, and to the codec it generated from T's declaration for a nominal
-/// type. A tuple, or a type holding one, has no codec yet: `of` there is a gap. No instance
+/// codec below for a scalar, `()`, Never and String, to the structural codec for List,
+/// Option, Map and Result, to a componentwise codec for a tuple, and to the codec
+/// generated from T's declaration for a nominal type. No instance
 /// of `of` is ever built, so this body, which only states the signature in checked Hirsel,
 /// never runs.
 pub fn of[T: codec]() -> Codec[T] {
@@ -537,13 +558,13 @@ pub fn of[T: codec]() -> Codec[T] {
 // elements, so a value encodes as the same type does as a field.
 /// The codec of List[E]: the u32 count, then each element. Ex: `let c: Codec[List[u64]] = codec.of()`
 pub fn of_list[E: codec]() -> Codec[List[E]] {
-    Codec(encoder: list_encode, decoder: list_decode, describer: describe_list, smallest: 4)
+    make(list_encode, list_decode, describe_list, 4)
 }
 
 /// The codec of Bytes (List[u8]), which `of` resolves to at List[u8]: the u32 count, then
 /// the bytes, moved in bulk. Its bytes, charges, failures and schema are of_list's at u8.
 pub fn of_bytes() -> Codec[Bytes] {
-    Codec(encoder: put_bytes, decoder: take_bytes, describer: describe_bytes, smallest: 4)
+    make(put_bytes, take_bytes, describe_bytes, 4)
 }
 
 /// The count, then the bytes. out grows as pushing them one by one grows it, by one
@@ -587,17 +608,19 @@ fn describe_bytes(mut s: Schema, _c: Codec[Bytes]) -> Result[(), Capacity] {
 
 /// The codec of Option[E]: tag 0 for None, or tag 1 then the value.
 pub fn of_option[E: codec]() -> Codec[Option[E]] {
-    Codec(encoder: option_encode, decoder: option_decode, describer: describe_option, smallest: 4)
+    make(option_encode, option_decode, describe_option, 4)
 }
 
 /// The codec of Map[K, V]: the u32 count, then key and value per entry in insertion order.
 pub fn of_map[K: key + codec, V: codec]() -> Codec[Map[K, V]] {
-    Codec(encoder: map_encode, decoder: map_decode, describer: describe_map, smallest: 4)
+    make(map_encode, map_decode, describe_map, 4)
 }
 
 /// The codec of Result[T, E]: tag 0 then the Ok value, or tag 1 then the Error value.
 pub fn of_result[T: codec, E: codec]() -> Codec[Result[T, E]] {
-    Codec(encoder: result_encode, decoder: result_decode, describer: describe_result, smallest: 4)
+    let ct: Codec[T] = of()
+    let ce: Codec[E] = of()
+    make_derived(result_encode, result_decode, describe_result, 4, ct.empty && ce.empty)
 }
 
 fn list_encode[E: codec](xs: List[E], mut out: Bytes) -> Result[(), Capacity] {
@@ -662,64 +685,80 @@ fn describe_result[T: codec, E: codec](mut s: Schema, _c: Codec[Result[T, E]]) -
 
 // The built-in codecs: core.md's codec rows. `of` resolves to these at scalar types.
 pub fn of_unit() -> Codec[()] {
-    Codec(encoder: put_unit, decoder: take_unit, describer: describe_unit, smallest: 0)
+    make(put_unit, take_unit, describe_unit, 0)
+}
+
+fn put_never(x: Never, mut out: Bytes) -> Result[(), Capacity] {
+    x
+}
+
+fn take_never(b: Bytes, mut at: u64) -> Result[Never, Stop] {
+    Error(Bad(Invalid(at)))
+}
+
+fn describe_never(mut s: Schema, _c: Codec[Never]) -> Result[(), Capacity] {
+    opcode(mut s, 20)
+}
+
+pub fn of_never() -> Codec[Never] {
+    make_derived(put_never, take_never, describe_never, 0, true)
 }
 
 pub fn of_bool() -> Codec[bool] {
-    Codec(encoder: put_bool, decoder: take_bool, describer: describe_bool, smallest: 1)
+    make(put_bool, take_bool, describe_bool, 1)
 }
 
 pub fn of_char() -> Codec[char] {
-    Codec(encoder: put_char, decoder: take_char, describer: describe_char, smallest: 4)
+    make(put_char, take_char, describe_char, 4)
 }
 
 pub fn of_u8() -> Codec[u8] {
-    Codec(encoder: put_u8, decoder: take_u8, describer: describe_u8, smallest: 1)
+    make(put_u8, take_u8, describe_u8, 1)
 }
 
 pub fn of_u16() -> Codec[u16] {
-    Codec(encoder: put_u16, decoder: take_u16, describer: describe_u16, smallest: 2)
+    make(put_u16, take_u16, describe_u16, 2)
 }
 
 pub fn of_u32() -> Codec[u32] {
-    Codec(encoder: put_u32, decoder: take_u32, describer: describe_u32, smallest: 4)
+    make(put_u32, take_u32, describe_u32, 4)
 }
 
 pub fn of_u64() -> Codec[u64] {
-    Codec(encoder: put_u64, decoder: take_u64, describer: describe_u64, smallest: 8)
+    make(put_u64, take_u64, describe_u64, 8)
 }
 
 pub fn of_i8() -> Codec[i8] {
-    Codec(encoder: put_i8, decoder: take_i8, describer: describe_i8, smallest: 1)
+    make(put_i8, take_i8, describe_i8, 1)
 }
 
 pub fn of_i16() -> Codec[i16] {
-    Codec(encoder: put_i16, decoder: take_i16, describer: describe_i16, smallest: 2)
+    make(put_i16, take_i16, describe_i16, 2)
 }
 
 pub fn of_i32() -> Codec[i32] {
-    Codec(encoder: put_i32, decoder: take_i32, describer: describe_i32, smallest: 4)
+    make(put_i32, take_i32, describe_i32, 4)
 }
 
 pub fn of_i64() -> Codec[i64] {
-    Codec(encoder: put_i64, decoder: take_i64, describer: describe_i64, smallest: 8)
+    make(put_i64, take_i64, describe_i64, 8)
 }
 
 pub fn of_f32() -> Codec[f32] {
-    Codec(encoder: put_f32, decoder: take_f32, describer: describe_f32, smallest: 4)
+    make(put_f32, take_f32, describe_f32, 4)
 }
 
 pub fn of_f64() -> Codec[f64] {
-    Codec(encoder: put_f64, decoder: take_f64, describer: describe_f64, smallest: 8)
+    make(put_f64, take_f64, describe_f64, 8)
 }
 
 pub fn of_string() -> Codec[String] {
-    Codec(encoder: put_string, decoder: take_string, describer: describe_string, smallest: 4)
+    make(put_string, take_string, describe_string, 4)
 }
 
 /// DecodeError's codec, as the derive writes a sum's: a store can keep a refusal.
 pub fn of_decode_error() -> Codec[DecodeError] {
-    Codec(encoder: decode_error_encode, decoder: decode_error_decode, describer: decode_error_schema, smallest: 12)
+    make(decode_error_encode, decode_error_decode, decode_error_schema, 12)
 }
 
 fn decode_error_encode(x: DecodeError, mut out: Bytes) -> Result[(), Capacity] {
@@ -1156,17 +1195,16 @@ pub fn fingerprint[T](c: Codec[T]) -> Result[u64, Capacity] {
     Ok(fingerprint_of(b))
 }
 
-/// CRC-64-AVRO of schema bytes. Cost: O(n), no admission.
+// Apache Avro 1.12.0, SchemaNormalization.FP64. Start each entry with its
+// byte index and apply eight reflected rounds with polynomial 0xc15d213aa4d7a795.
+const FINGERPRINT_TABLE: Inline[u64, 256] =[0x0000000000000000, 0x2cf1cba6b75351fa, 0x59e3974d6ea6a3f4, 0x75125cebd9f5f20e, 0xb3c72e9add4d47e8, 0x9f36e53c6a1e1612, 0xea24b9d7b3ebe41c, 0xc6d5727104b8b5e6, 0xe5341f40f335c0fb, 0xc9c5d4e644669101, 0xbcd7880d9d93630f, 0x902643ab2ac032f5, 0x56f331da2e788713, 0x7a02fa7c992bd6e9, 0x0f10a69740de24e7, 0x23e16d31f78d751d, 0x48d27cf4afc4cedd, 0x6423b75218979f27, 0x1131ebb9c1626d29, 0x3dc0201f76313cd3, 0xfb15526e72898935, 0xd7e499c8c5dad8cf, 0xa2f6c5231c2f2ac1, 0x8e070e85ab7c7b3b, 0xade663b45cf10e26, 0x8117a812eba25fdc, 0xf405f4f93257add2, 0xd8f43f5f8504fc28, 0x1e214d2e81bc49ce, 0x32d0868836ef1834, 0x47c2da63ef1aea3a, 0x6b3311c55849bbc0, 0x91a4f9e95f899dba, 0xbd55324fe8dacc40, 0xc8476ea4312f3e4e, 0xe4b6a502867c6fb4, 0x2263d77382c4da52, 0x0e921cd535978ba8, 0x7b80403eec6279a6, 0x57718b985b31285c, 0x7490e6a9acbc5d41, 0x58612d0f1bef0cbb, 0x2d7371e4c21afeb5, 0x0182ba427549af4f, 0xc757c83371f11aa9, 0xeba60395c6a24b53, 0x9eb45f7e1f57b95d, 0xb24594d8a804e8a7, 0xd976851df04d5367, 0xf5874ebb471e029d, 0x809512509eebf093, 0xac64d9f629b8a169, 0x6ab1ab872d00148f, 0x464060219a534575, 0x33523cca43a6b77b, 0x1fa3f76cf4f5e681, 0x3c429a5d0378939c, 0x10b351fbb42bc266, 0x65a10d106dde3068, 0x4950c6b6da8d6192, 0x8f85b4c7de35d474, 0xa3747f616966858e, 0xd666238ab0937780, 0xfa97e82c07c0267a, 0xa1f3b1a7f6bc745f, 0x8d027a0141ef25a5, 0xf81026ea981ad7ab, 0xd4e1ed4c2f498651, 0x12349f3d2bf133b7, 0x3ec5549b9ca2624d, 0x4bd7087045579043, 0x6726c3d6f204c1b9, 0x44c7aee70589b4a4, 0x68366541b2dae55e, 0x1d2439aa6b2f1750, 0x31d5f20cdc7c46aa, 0xf700807dd8c4f34c, 0xdbf14bdb6f97a2b6, 0xaee31730b66250b8, 0x8212dc9601310142, 0xe921cd535978ba82, 0xc5d006f5ee2beb78, 0xb0c25a1e37de1976, 0x9c3391b8808d488c, 0x5ae6e3c98435fd6a, 0x7617286f3366ac90, 0x03057484ea935e9e, 0x2ff4bf225dc00f64, 0x0c15d213aa4d7a79, 0x20e419b51d1e2b83, 0x55f6455ec4ebd98d, 0x79078ef873b88877, 0xbfd2fc8977003d91, 0x9323372fc0536c6b, 0xe6316bc419a69e65, 0xcac0a062aef5cf9f, 0x3057484ea935e9e5, 0x1ca683e81e66b81f, 0x69b4df03c7934a11, 0x454514a570c01beb, 0x839066d47478ae0d, 0xaf61ad72c32bfff7, 0xda73f1991ade0df9, 0xf6823a3fad8d5c03, 0xd563570e5a00291e, 0xf9929ca8ed5378e4, 0x8c80c04334a68aea, 0xa0710be583f5db10, 0x66a47994874d6ef6, 0x4a55b232301e3f0c, 0x3f47eed9e9ebcd02, 0x13b6257f5eb89cf8, 0x788534ba06f12738, 0x5474ff1cb1a276c2, 0x2166a3f7685784cc, 0x0d976851df04d536, 0xcb421a20dbbc60d0, 0xe7b3d1866cef312a, 0x92a18d6db51ac324, 0xbe5046cb024992de, 0x9db12bfaf5c4e7c3, 0xb140e05c4297b639, 0xc452bcb79b624437, 0xe8a377112c3115cd, 0x2e7605602889a02b, 0x0287cec69fdaf1d1, 0x7795922d462f03df, 0x5b64598bf17c5225, 0xc15d213aa4d7a795, 0xedacea9c1384f66f, 0x98beb677ca710461, 0xb44f7dd17d22559b, 0x729a0fa0799ae07d, 0x5e6bc406cec9b187, 0x2b7998ed173c4389, 0x0788534ba06f1273, 0x24693e7a57e2676e, 0x0898f5dce0b13694, 0x7d8aa9373944c49a, 0x517b62918e179560, 0x97ae10e08aaf2086, 0xbb5fdb463dfc717c, 0xce4d87ade4098372, 0xe2bc4c0b535ad288, 0x898f5dce0b136948, 0xa57e9668bc4038b2, 0xd06cca8365b5cabc, 0xfc9d0125d2e69b46, 0x3a487354d65e2ea0, 0x16b9b8f2610d7f5a, 0x63abe419b8f88d54, 0x4f5a2fbf0fabdcae, 0x6cbb428ef826a9b3, 0x404a89284f75f849, 0x3558d5c396800a47, 0x19a91e6521d35bbd, 0xdf7c6c14256bee5b, 0xf38da7b29238bfa1, 0x869ffb594bcd4daf, 0xaa6e30fffc9e1c55, 0x50f9d8d3fb5e3a2f, 0x7c0813754c0d6bd5, 0x091a4f9e95f899db, 0x25eb843822abc821, 0xe33ef64926137dc7, 0xcfcf3def91402c3d, 0xbadd610448b5de33, 0x962caaa2ffe68fc9, 0xb5cdc793086bfad4, 0x993c0c35bf38ab2e, 0xec2e50de66cd5920, 0xc0df9b78d19e08da, 0x060ae909d526bd3c, 0x2afb22af6275ecc6, 0x5fe97e44bb801ec8, 0x7318b5e20cd34f32, 0x182ba427549af4f2, 0x34da6f81e3c9a508, 0x41c8336a3a3c5706, 0x6d39f8cc8d6f06fc, 0xabec8abd89d7b31a, 0x871d411b3e84e2e0, 0xf20f1df0e77110ee, 0xdefed65650224114, 0xfd1fbb67a7af3409, 0xd1ee70c110fc65f3, 0xa4fc2c2ac90997fd, 0x880de78c7e5ac607, 0x4ed895fd7ae273e1, 0x62295e5bcdb1221b, 0x173b02b01444d015, 0x3bcac916a31781ef, 0x60ae909d526bd3ca, 0x4c5f5b3be5388230, 0x394d07d03ccd703e, 0x15bccc768b9e21c4, 0xd369be078f269422, 0xff9875a13875c5d8, 0x8a8a294ae18037d6, 0xa67be2ec56d3662c, 0x859a8fdda15e1331, 0xa96b447b160d42cb, 0xdc791890cff8b0c5, 0xf088d33678abe13f, 0x365da1477c1354d9, 0x1aac6ae1cb400523, 0x6fbe360a12b5f72d, 0x434ffdaca5e6a6d7, 0x287cec69fdaf1d17, 0x048d27cf4afc4ced, 0x719f7b249309bee3, 0x5d6eb082245aef19, 0x9bbbc2f320e25aff, 0xb74a095597b10b05, 0xc25855be4e44f90b, 0xeea99e18f917a8f1, 0xcd48f3290e9addec, 0xe1b9388fb9c98c16, 0x94ab6464603c7e18, 0xb85aafc2d76f2fe2, 0x7e8fddb3d3d79a04, 0x527e16156484cbfe, 0x276c4afebd7139f0, 0x0b9d81580a22680a, 0xf10a69740de24e70, 0xddfba2d2bab11f8a, 0xa8e9fe396344ed84, 0x8418359fd417bc7e, 0x42cd47eed0af0998, 0x6e3c8c4867fc5862, 0x1b2ed0a3be09aa6c, 0x37df1b05095afb96, 0x143e7634fed78e8b, 0x38cfbd924984df71, 0x4ddde17990712d7f, 0x612c2adf27227c85, 0xa7f958ae239ac963, 0x8b08930894c99899, 0xfe1acfe34d3c6a97, 0xd2eb0445fa6f3b6d, 0xb9d81580a22680ad, 0x9529de261575d157, 0xe03b82cdcc802359, 0xccca496b7bd372a3, 0x0a1f3b1a7f6bc745, 0x26eef0bcc83896bf, 0x53fcac5711cd64b1, 0x7f0d67f1a69e354b, 0x5cec0ac051134056, 0x701dc166e64011ac, 0x050f9d8d3fb5e3a2, 0x29fe562b88e6b258, 0xef2b245a8c5e07be, 0xc3daeffc3b0d5644, 0xb6c8b317e2f8a44a, 0x9a3978b155abf5b0,]
+
+/// CRC-64-AVRO of schema bytes. One lookup per byte in a 256-entry table. No admission.
 pub fn fingerprint_of(b: Bytes) -> u64 {
     let mut fp: u64 = 0xc15d213aa4d7a795
     for x in b {
         let byte: u64 = int.widen(x)
-        fp = fp ^ byte
-        let mut i: u64 = 0
-        while i < 8 {
-            fp = (fp >> 1) ^ (0xc15d213aa4d7a795 & int.wrapping_neg(fp & 1))
-            i += 1
-        }
+        fp = (fp >> 8) ^ FINGERPRINT_TABLE[(fp ^ byte) & 255]
     }
     fp
 }
@@ -1181,7 +1219,7 @@ pub fn fingerprint_of(b: Bytes) -> u64 {
 // 3 Option (inner); 4 Result (ok, error); 5 tuple (n, components); 6 record (identity,
 // writer fields w, w pairs of reader position and node, reader fields r, r sources:
 // writer field or 2^63 + default); 7 sum (variants v, v offsets of: live, n, nodes);
-// 8 via (inner).
+// 8 via (inner). The high bit marks a node or a variant with no encodings.
 /// A codec ready to read bytes written under one writer's schema.
 pub opaque type Reader[T]: shareable + send {
     c: Codec[T],
@@ -1198,12 +1236,15 @@ type Plan {
     ops: List[u64],
     memo: Map[(u64, u64), u64],
     tasks: List[(u64, u64, u64)],
-    defaults: List[Default]
+    defaults: List[Default],
+    has_never: bool
 }
 
 const SKIP: u64 = 0xffffffffffffffff
 
 const DEFAULT: u64 = 0x8000000000000000
+
+const EMPTY_NODE: u64 = 0x8000000000000000
 
 // Four little-endian bytes in a schema whose enclosing bounds were checked.
 fn count_at(b: Bytes, at: u64) -> u64 {
@@ -1260,7 +1301,7 @@ fn type_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
                 owed += n
             }
             i += 4
-        } else if x > 13 {
+        } else if x > 13 && x != 20 {
             return Error(i - 1)
         }
     }
@@ -1450,7 +1491,11 @@ fn type_node(mut p: Plan, w: u64, r: u64) -> Result[Result[u64, u64], Capacity] 
         return Ok(Error(w))
     }
     let index = list.len(p.ops)
-    if x <= 13 {
+    if x == 20 {
+        p.has_never = true
+        emit(mut p, EMPTY_NODE)?
+        emit(mut p, 20)?
+    } else if x <= 13 {
         emit(mut p, 0)?
         emit(mut p, int.widen(x))?
     } else if x == 14 || x == 16 {
@@ -1734,6 +1779,78 @@ fn compile(mut p: Plan, w: u64, r: u64) -> Result[Result[(), u64], Capacity] {
     Ok(Ok(()))
 }
 
+// A product is empty when a required field is empty. Repeat over the compiled
+// graph until no flag changes, because a definition can refer to another node
+// before or after it. The iteration starts with only Never and removed variants.
+fn mark_empty(mut ops: List[u64]) {
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut node: u64 = 0
+        while node < list.len(ops) {
+            let head = ops[node]
+            let kind = head & (EMPTY_NODE - 1)
+            let (end, empty) = match kind {
+                0 => (node + 2, false),
+                1 => (node + 2, false),
+                3 => (node + 2, false),
+                2 => (node + 3, false),
+                4 => (node + 3, ops[ops[node + 1]] >= EMPTY_NODE && ops[ops[node + 2]] >= EMPTY_NODE),
+                5 => {
+                    let n = ops[node + 1]
+                    (node + 2 + n, empty_fields(ops, node + 2, n, 1))
+                },
+                6 => {
+                    let n = ops[node + 2]
+                    let tail = node + 3 + 2 * n
+                    (tail + 1 + ops[tail], empty_fields(ops, node + 4, n, 2))
+                },
+                7 => {
+                    let count = ops[node + 1]
+                    let mut tail = node + 2 + count
+                    let mut all_empty = true
+                    for i in 0u64 .. count {
+                        let v = ops[node + 2 + i]
+                        let state = ops[v]
+                        let live = state & (EMPTY_NODE - 1)
+                        let n_at = v + if live == 1 {
+                            2u64
+                        } else {
+                            1u64
+                        }
+                        let n = ops[n_at]
+                        tail = n_at + 1 + n
+                        if state < EMPTY_NODE && live != 2 {
+                            if empty_fields(ops, n_at + 1, n, 1) {
+                                let _ = list.set(mut ops, v, state | EMPTY_NODE)
+                                changed = true
+                            } else {
+                                all_empty = false
+                            }
+                        }
+                    }
+                    (tail, all_empty)
+                },
+                _ => (node + 2, ops[ops[node + 1]] >= EMPTY_NODE),
+            }
+            if empty && head < EMPTY_NODE {
+                let _ = list.set(mut ops, node, head | EMPTY_NODE)
+                changed = true
+            }
+            node = end
+        }
+    }
+}
+
+fn empty_fields(ops: List[u64], start: u64, count: u64, stride: u64) -> bool {
+    for i in 0u64 .. count {
+        if ops[ops[start + i * stride]] >= EMPTY_NODE {
+            return true
+        }
+    }
+    false
+}
+
 /// Resolves the writer's schema against c's: Ok(Error(Schema(i))) at the writer's part
 /// that does not resolve (SEM-10). Equal schemas read with c's own decode.
 /// Ex: `let r = codec.resolve(rows, stored)??`
@@ -1758,9 +1875,12 @@ pub fn resolve[T](c: Codec[T], writer: Bytes) -> Result[Result[Reader[T], Decode
         Error(e) => return Ok(Error(Schema(e)))
     }
     let defaults = replace(mut s.defaults, list.new())
-    let mut p = Plan(all: take all, wlen: wlen, wdefs: take wdefs, rdefs: take rdefs, ops: list.new(), memo: map.new(), tasks: list.new(), defaults: take defaults)
+    let mut p = Plan(all: take all, wlen: wlen, wdefs: take wdefs, rdefs: take rdefs, ops: list.new(), memo: map.new(), tasks: list.new(), defaults: take defaults, has_never: false)
     if let Error(e) = compile(mut p, wroot, rroot)? {
         return Ok(Error(Schema(e)))
+    }
+    if p.has_never {
+        mark_empty(mut p.ops)
     }
     let ops = replace(mut p.ops, list.new())
     let kept = replace(mut p.defaults, list.new())
@@ -1903,7 +2023,9 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
         if starting {
             starting = false
             let k = ops[next]
-            if k == 0 {
+            if k >= EMPTY_NODE {
+                return Error(Bad(Invalid(at)))
+            } else if k == 0 {
                 let lo = list.len(o.raw)
                 leaf(ops[next + 1], b, mut at, mut o.raw)?
                 grow(mut o, lo)?
@@ -1914,17 +2036,21 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                     push_frame(mut stack, frame(k, next, n, 0))?
                 }
             } else if k == 3 || k == 4 {
+                let tag_at = at
                 let small = take_tag(b, mut at, 2)?
                 let tag: u64 = int.widen(small)
-                tag_word(mut o, small)?
                 if k == 4 || tag == 1 {
                     next = ops[next + 1 + if k == 4 {
                         tag
                     } else {
                         0
                     }]
+                    if ops[next] >= EMPTY_NODE {
+                        return Error(Bad(Invalid(tag_at)))
+                    }
                     starting = true
                 }
+                tag_word(mut o, small)?
             } else if k == 5 {
                 if ops[next + 1] > 0 {
                     push_frame(mut stack, frame(5, next + 2, ops[next + 1], 0))?
@@ -1941,11 +2067,11 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                     return Error(Bad(Invalid(tag_at)))
                 }
                 let v = ops[next + 2 + tag]
+                if ops[v] >= EMPTY_NODE || ops[v] == 2 {
+                    return Error(Bad(Invalid(tag_at)))
+                }
                 if ops[v] == 1 {
                     return Error(Bad(Schema(ops[v + 1])))
-                }
-                if ops[v] != 0 {
-                    return Error(Bad(Invalid(tag_at)))
                 }
                 tag_word(mut o, small)?
                 if ops[v + 1] > 0 {

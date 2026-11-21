@@ -641,7 +641,7 @@ def admission_laws(args, root, work, engines, row):
     store['file'] = str(with_faults)
     selected.write_text(json.dumps(selection))
     durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
-    state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'refused_send_releases_timer')
+    state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'full_head_waits')
     names = args.admission_law or (*state, *durable, 'wire_replacement_generation', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS)
     if 'evaluator' in engines:
         for name in names:
@@ -810,7 +810,7 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
-                   'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
+                   'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     if args.stop_case and args.part != 'deadline':

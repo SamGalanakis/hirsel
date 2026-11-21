@@ -1,0 +1,91 @@
+// The stream is fixed by Go math/rand/v2 at 46b62495. See api/rand.md.
+/// A plain 128-bit generator state. Every state is valid. Copying it forks the stream.
+pub opaque type Pcg {
+    hi: u64,
+    lo: u64
+}
+
+const MUL_HI: u64 = 0x2360ed051fc65da4
+
+const MUL_LO: u64 = 0x4385df649fccf645
+
+const INC_HI: u64 = 0x5851f42d4c957f2d
+
+const INC_LO: u64 = 0x14057b7ef767814f
+
+const DXSM_MUL: u64 = 0xda942042e4dd58b5
+
+/// Sets the high and low state words to seed1 and seed2, as in Go NewPCG.
+/// The first output and every successor are fixed by that pair. Cost: O(1).
+pub fn new(seed1: u64, seed2: u64) -> Pcg {
+    Pcg(hi: seed1, lo: seed2)
+}
+
+/// Returns (hi, lo). Passing those words to new resumes the stream at this point.
+pub fn state(p: Pcg) -> (u64, u64) {
+    (p.hi, p.lo)
+}
+
+/// Advances the state by Go's 128-bit PCG recurrence modulo 2^128 and returns
+/// DXSM of the resulting state. Cost: one wide and two low-word multiplies for
+/// the state advance, followed by two low-word multiplies for DXSM.
+pub fn next(mut p: Pcg) -> u64 {
+    let (hi, lo) = int.mul_wide(p.lo, MUL_LO)
+    let cross = int.wrapping_add(int.wrapping_mul(p.hi, MUL_LO), int.wrapping_mul(p.lo, MUL_HI))
+    let low = int.wrapping_add(lo, INC_LO)
+    let carry: u64 = if low < lo {
+        1
+    } else {
+        0
+    }
+    p.hi = int.wrapping_add(int.wrapping_add(hi, cross), int.wrapping_add(INC_HI, carry))
+    p.lo = low
+    let xored = p.hi ^ (p.hi >> 32)
+    let mixed = int.wrapping_mul(xored, DXSM_MUL)
+    int.wrapping_mul(mixed ^ (mixed >> 48), low | 1)
+}
+
+/// Uniform in [0, n). A power of two masks one draw with n-1. Otherwise each
+/// draw is multiplied by n and rejected when the low word is below 2^64 mod n.
+/// Returns the accepted product's high word. Draw consumption matches Go's
+/// 64-bit Uint64N. Fails: Bounds for n == 0. Cost: expected fewer than two draws.
+/// Ex: `let die = std.rand.below(mut g, 6) + 1`.
+pub fn below(mut p: Pcg, n: u64) -> u64 {
+    if n == 0 {
+        // Use the same checked Bounds failure as an invalid collection index.
+        let empty = string.as_bytes("")
+        return int.widen(empty[0])
+    }
+    let mask = n - 1
+    if (n & mask) == 0 {
+        return next(mut p) & mask
+    }
+    let mut product = int.mul_wide(next(mut p), n)
+    if product.1 < n {
+        let threshold = int.wrapping_neg(n) % n
+        while product.1 < threshold {
+            product = int.mul_wide(next(mut p), n)
+        }
+    }
+    product.0
+}
+
+/// Uniform in [0, 1). Scales the low 53 bits by 2^-53, so each multiple of
+/// 2^-53 below 1 is equally likely. Cost: one draw.
+pub fn float64(mut p: Pcg) -> f64 {
+    let value: f64 = float.from_int(next(mut p) & 0x001fffffffffffff)
+    value * (1.0 / 9007199254740992.0)
+}
+
+/// Fisher-Yates in place. Starting at the end, swaps each item with a uniformly
+/// drawn index in the remaining prefix. Each order is equally likely as far as
+/// the 128-bit stream allows. Cost: max(len - 1, 0) bounded draws.
+/// Ex: `std.rand.shuffle(mut g, mut deck)`.
+pub fn shuffle[T](mut p: Pcg, mut xs: List[T]) {
+    let mut remaining = list.len(xs)
+    while remaining > 1 {
+        let other = below(mut p, remaining)
+        remaining -= 1
+        list.swap(mut xs, remaining, other)
+    }
+}

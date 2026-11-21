@@ -38,84 +38,73 @@ fn main() {
         let source = shared.join(format!("{name}.cpp"));
         println!("cargo:rerun-if-changed={}", source.display());
         let object = out.join(format!("{name}.o"));
-        assert!(Command::new(prefix.join("bin/hirsel-clang++"))
-            .args([
-                "-std=c++17",
-                "-fPIC",
-                "-O2",
-                "-fno-exceptions",
-                "-fno-rtti",
-                "-nostdinc++"
-            ])
-            .arg(format!("--sysroot={}", sysroot.display()))
-            .arg("-isystem")
-            .arg(sysroot.join("usr/include/c++/13"))
-            .arg("-isystem")
-            .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
-            .arg("-I")
-            .arg(prefix.join("include"))
-            .arg("-c")
-            .arg(source)
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new(prefix.join("bin/hirsel-clang++"))
+                .args([
+                    "-std=c++17",
+                    "-fPIC",
+                    "-O2",
+                    "-fno-exceptions",
+                    "-fno-rtti",
+                    "-nostdinc++"
+                ])
+                .arg(format!("--sysroot={}", sysroot.display()))
+                .arg("-isystem")
+                .arg(sysroot.join("usr/include/c++/13"))
+                .arg("-isystem")
+                .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+                .arg("-I")
+                .arg(prefix.join("include"))
+                .arg("-c")
+                .arg(source)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap()
+                .success()
+        );
         object
     });
-    let compose = source.with_file_name("compose.cpp");
-    println!("cargo:rerun-if-changed={}", compose.display());
-    let compose_object = out.join("compose.o");
-    assert!(
-        Command::new(prefix.join("bin/hirsel-clang++"))
-            .args([
-                "-std=c++17",
-                "-O2",
-                "-fPIC",
-                "-fvisibility=hidden",
-                "-fno-exceptions",
-                "-fno-rtti",
-                "-nostdinc++"
-            ])
-            .arg(format!("--sysroot={}", sysroot.display()))
-            .arg("-isystem")
-            .arg(sysroot.join("usr/include/c++/13"))
-            .arg("-isystem")
-            .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
-            .arg("-I")
-            .arg(prefix.join("include"))
-            .arg("-c")
-            .arg(&compose)
-            .arg("-o")
-            .arg(&compose_object)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let builder = source.with_file_name("builder.cpp");
-    println!("cargo:rerun-if-changed={}", builder.display());
-    println!("cargo:rerun-if-changed={}", source.with_file_name("builder.h").display());
-    let builder_object = out.join("builder.o");
-    assert!(Command::new(prefix.join("bin/hirsel-clang++"))
-        .args(["-std=c++17", "-O2", "-fPIC", "-fvisibility=hidden", "-fno-exceptions", "-fno-rtti", "-nostdinc++"])
-        .arg(format!("--sysroot={}", sysroot.display()))
-        .arg("-isystem").arg(sysroot.join("usr/include/c++/13"))
-        .arg("-isystem").arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
-        .arg("-I").arg(prefix.join("include"))
-        .arg("-c").arg(&builder).arg("-o").arg(&builder_object)
-        .status().unwrap().success());
-    let parts = source.with_file_name("parts.cpp");
-    println!("cargo:rerun-if-changed={}", parts.display());
-    let parts_object = out.join("parts.o");
-    assert!(Command::new(prefix.join("bin/hirsel-clang++"))
-        .args(["-std=c++17", "-O2", "-fPIC", "-fvisibility=hidden", "-fno-exceptions", "-fno-rtti", "-nostdinc++"])
-        .arg(format!("--sysroot={}", sysroot.display()))
-        .arg("-isystem").arg(sysroot.join("usr/include/c++/13"))
-        .arg("-isystem").arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
-        .arg("-I").arg(prefix.join("include"))
-        .arg("-I").arg(&shared)
-        .arg("-c").arg(&parts).arg("-o").arg(&parts_object)
-        .status().unwrap().success());
+    for header in ["builder.h", "key.h"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            source.with_file_name(header).display()
+        );
+    }
+    let compose_objects = ["compose", "builder", "parts", "key"].map(|name| {
+        let source = source.with_file_name(format!("{name}.cpp"));
+        println!("cargo:rerun-if-changed={}", source.display());
+        let object = out.join(format!("{name}.o"));
+        assert!(
+            Command::new(prefix.join("bin/hirsel-clang++"))
+                .args([
+                    "-std=c++17",
+                    "-O2",
+                    "-fPIC",
+                    "-fvisibility=hidden",
+                    "-fno-exceptions",
+                    "-fno-rtti",
+                    "-nostdinc++",
+                ])
+                .arg(format!("--sysroot={}", sysroot.display()))
+                .arg("-isystem")
+                .arg(sysroot.join("usr/include/c++/13"))
+                .arg("-isystem")
+                .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+                .arg("-I")
+                .arg(prefix.join("include"))
+                .arg("-I")
+                .arg(&shared)
+                .arg("-c")
+                .arg(source)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap()
+                .success()
+        );
+        object
+    });
     let component = out.join("libhirsel_llvm_engine.so");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang"))
@@ -124,7 +113,8 @@ fn main() {
                 "-fPIC",
                 "-O2",
                 "-fvisibility=hidden",
-                "-Wl,--build-id=sha1"
+                "-Wl,--build-id=sha1",
+                "-Wl,-z,defs"
             ])
             .arg("-I")
             .arg(prefix.join("include"))
@@ -132,9 +122,7 @@ fn main() {
             .arg(&shared)
             .arg(&source)
             .args(&shared_objects)
-            .arg(&compose_object)
-            .arg(&builder_object)
-            .arg(&parts_object)
+            .args(&compose_objects)
             .arg("-l:libstdc++.so.6")
             .arg("-L")
             .arg(prefix.join("lib"))
@@ -145,7 +133,10 @@ fn main() {
             .unwrap()
             .success()
     );
-    let engine = prefix.join("engine/libLLVM.so.23.1").canonicalize().unwrap();
+    let engine = prefix
+        .join("engine/libLLVM.so.23.1")
+        .canonicalize()
+        .unwrap();
     println!("cargo:rerun-if-changed={}", engine.display());
     let notes = Command::new("readelf")
         .arg("-n")
@@ -162,7 +153,12 @@ fn main() {
         .lines()
         .find_map(|line| line.trim().strip_prefix("Build ID: "))
         .expect("pinned LLVM engine has no build ID");
-    let profile = out.ancestors().nth(3).expect("Cargo profile directory").canonicalize().unwrap();
+    let profile = out
+        .ancestors()
+        .nth(3)
+        .expect("Cargo profile directory")
+        .canonicalize()
+        .unwrap();
     std::fs::write(out.join("component.rs"), format!(
         "static COMPONENT: &[u8] = include_bytes!(\"libhirsel_llvm_engine.so\");\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\n",
         profile.to_str().unwrap(), engine.to_str().unwrap(),

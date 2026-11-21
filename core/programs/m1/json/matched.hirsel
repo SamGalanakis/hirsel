@@ -42,8 +42,7 @@ fn query(mut out: String, j: std.json.Json, path: String, at: u64) -> Result[(),
             query(mut out, child, path, end + 1)
         },
         Arr(xs) => {
-            let parsed: Result[u64, ParseError] = int.parse(step)
-            let i: u64 = match parsed {
+            let i: u64 = match (int.parse(step) : Result[u64, ParseError]) {
                 Ok(n) => n,
                 Error(_) => return Error(m1.support.error("WrongKind"))
             }

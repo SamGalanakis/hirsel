@@ -39,6 +39,27 @@ fn catalogue_is_current_spec_with_no_separate_guidance() {
     let json = serde_json::to_value(rule("LANG-7").unwrap()).unwrap();
     assert_eq!(json["spec_file"], "docs/spec/language.md");
 }
+
+#[test]
+fn examples_assert_the_requested_rule() {
+    // The corpus has explicit LANG-11 refusal cases, including body/arity.hirsel.
+    example("LANG-11").expect("checked LANG-11 example");
+    for rule in rules() {
+        let Some(example) = example(rule.id) else {
+            continue;
+        };
+        let mut refused = false;
+        for assertion in example.assertions {
+            let mut words = assertion.split_whitespace();
+            assert_eq!(words.next(), Some("//"));
+            assert_eq!(words.next(), Some("expect:"));
+            refused |= words.next() == Some("refuse");
+            assert_eq!(words.next(), Some(rule.id), "{}", example.path);
+        }
+        assert!(refused, "{} has no refusal for {}", example.path, rule.id);
+    }
+}
+
 #[test]
 fn headings_ignore_examples_and_paragraphs_preserve_spec_words() {
     let entries = source::extract("docs/spec/example.md", "# Intro\n### TEST-1: A `thing`\n\n```hirsel\n### FAKE-9: Not a rule\n```\n\nThe first\nparagraph.\n\nLater detail.\n### TEST-2: More\n\nOther statement.\n").unwrap();

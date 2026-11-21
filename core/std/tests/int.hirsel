@@ -137,16 +137,14 @@ fn int_empty() -> u64 {
 // Core int.parse (core/core/int.hirsel), against core.md "Integers": the grammar is checked
 // to the end before the range.
 fn parsed_u8(s: String) -> u64 {
-    let r: Result[u8, ParseError] = int.parse(s)
-    match r {
+    match (int.parse(s) : Result[u8, ParseError]) {
         Ok(x) => int.widen(x),
         Error(e) => 1000 + unsigned_error(Error(e)),
     }
 }
 
 fn parsed_i8(s: String) -> i64 {
-    let r: Result[i8, ParseError] = int.parse(s)
-    match r {
+    match (int.parse(s) : Result[i8, ParseError]) {
         Ok(x) => int.widen(x),
         Error(e) => {
             let code: i64 = int.narrow(unsigned_error(Error(e)))
@@ -188,8 +186,7 @@ fn parse_i64_min() -> i64 {
 // A numeral that does not fit is still read to the end: the bad byte at 20 wins.
 // expect: run parse_grammar_before_range() = 120
 fn parse_grammar_before_range() -> u64 {
-    let r: Result[u64, ParseError] = int.parse("99999999999999999999x")
-    unsigned_error(r)
+    unsigned_error((int.parse("99999999999999999999x") : Result[u64, ParseError]))
 }
 
 // Both 18446744073709551609 and 18446744073709551610 fit. The last digit of
@@ -215,6 +212,152 @@ fn parse_i64_range_edges() -> bool {
     let high: Result[i64, ParseError] = int.parse("9223372036854775808")
     let one: Result[i64, ParseError] = int.parse("-1")
     signed_error(low) == 3 && signed_error(high) == 3 && result.unwrap(one) == -1
+}
+
+// The all-nines numeral is at each type's fast length. A leading zero takes
+// it to the checked path, including after a sign. The trailing invalid byte
+// wins even after overflow of the u64 accumulator.
+// expect: run parse_u8_decimal_lengths() = true
+fn parse_u8_decimal_lengths() -> bool {
+    let largest: u8 = result.unwrap(int.parse("255"))
+    let past: Result[u8, ParseError] = int.parse("256")
+    let fast: u8 = result.unwrap(int.parse("99"))
+    let long: u8 = result.unwrap(int.parse("099"))
+    let zeros: u8 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[u8, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 255 && fast == 99 && long == 99 && zeros == 42 && at == 21
+}
+
+// expect: run parse_u16_decimal_lengths() = true
+fn parse_u16_decimal_lengths() -> bool {
+    let largest: u16 = result.unwrap(int.parse("65535"))
+    let past: Result[u16, ParseError] = int.parse("65536")
+    let fast: u16 = result.unwrap(int.parse("9999"))
+    let long: u16 = result.unwrap(int.parse("09999"))
+    let zeros: u16 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[u16, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 65535 && fast == 9999 && long == 9999 && zeros == 42 && at == 21
+}
+
+// expect: run parse_u32_decimal_lengths() = true
+fn parse_u32_decimal_lengths() -> bool {
+    let largest: u32 = result.unwrap(int.parse("4294967295"))
+    let past: Result[u32, ParseError] = int.parse("4294967296")
+    let fast: u32 = result.unwrap(int.parse("999999999"))
+    let long: u32 = result.unwrap(int.parse("0999999999"))
+    let zeros: u32 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[u32, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 4294967295 && fast == 999999999 && long == 999999999 && zeros == 42 && at == 21
+}
+
+// expect: run parse_u64_decimal_lengths() = true
+fn parse_u64_decimal_lengths() -> bool {
+    let largest: u64 = result.unwrap(int.parse("18446744073709551615"))
+    let past: Result[u64, ParseError] = int.parse("18446744073709551616")
+    let fast: u64 = result.unwrap(int.parse("9999999999999999999"))
+    let long: u64 = result.unwrap(int.parse("09999999999999999999"))
+    let zeros: u64 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[u64, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 18446744073709551615 && fast == 9999999999999999999 && long == 9999999999999999999 && zeros == 42 && at == 21
+}
+
+// expect: run parse_i8_decimal_lengths() = true
+fn parse_i8_decimal_lengths() -> bool {
+    let largest: i8 = result.unwrap(int.parse("127"))
+    let past: Result[i8, ParseError] = int.parse("128")
+    let fast: i8 = result.unwrap(int.parse("99"))
+    let long: i8 = result.unwrap(int.parse("-099"))
+    let zeros: i8 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[i8, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 127 && fast == 99 && long == -99 && zeros == 42 && at == 21
+}
+
+// expect: run parse_i16_decimal_lengths() = true
+fn parse_i16_decimal_lengths() -> bool {
+    let largest: i16 = result.unwrap(int.parse("32767"))
+    let past: Result[i16, ParseError] = int.parse("32768")
+    let fast: i16 = result.unwrap(int.parse("9999"))
+    let long: i16 = result.unwrap(int.parse("-09999"))
+    let zeros: i16 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[i16, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 32767 && fast == 9999 && long == -9999 && zeros == 42 && at == 21
+}
+
+// expect: run parse_i32_decimal_lengths() = true
+fn parse_i32_decimal_lengths() -> bool {
+    let largest: i32 = result.unwrap(int.parse("2147483647"))
+    let past: Result[i32, ParseError] = int.parse("2147483648")
+    let fast: i32 = result.unwrap(int.parse("999999999"))
+    let long: i32 = result.unwrap(int.parse("-0999999999"))
+    let zeros: i32 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[i32, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 2147483647 && fast == 999999999 && long == -999999999 && zeros == 42 && at == 21
+}
+
+// expect: run parse_i64_decimal_lengths() = true
+fn parse_i64_decimal_lengths() -> bool {
+    let largest: i64 = result.unwrap(int.parse("9223372036854775807"))
+    let past: Result[i64, ParseError] = int.parse("9223372036854775808")
+    let fast: i64 = result.unwrap(int.parse("999999999999999999"))
+    let long: i64 = result.unwrap(int.parse("-0999999999999999999"))
+    let zeros: i64 = result.unwrap(int.parse("00000000000000000000042"))
+    let invalid: Result[i64, ParseError] = int.parse("999999999999999999999x")
+    let (Error(OutOfRange), Error(Invalid(at))) = (past, invalid) else {
+        return false
+    }
+    largest == 9223372036854775807 && fast == 999999999999999999 && long == -999999999999999999 && zeros == 42 && at == 21
+}
+
+// expect: run radix_parser_decimal_lengths() = true
+fn radix_parser_decimal_lengths() -> bool {
+    let fast_u = result.unwrap(int.parse_uint("9999999999999999999", 10))
+    let long_u = result.unwrap(int.parse_uint("09999999999999999999", 10))
+    let zeros_u = result.unwrap(int.parse_uint("00000000000000000000042", 10))
+    let fast_i = result.unwrap(int.parse_int("-999999999999999999", 10))
+    let long_i = result.unwrap(int.parse_int("-0999999999999999999", 10))
+    let zeros_i = result.unwrap(int.parse_int("-00000000000000000000042", 10))
+    fast_u == 9999999999999999999 && long_u == fast_u && zeros_u == 42 && fast_i == -999999999999999999 && long_i == fast_i && zeros_i == -42
+}
+
+// The core parse call takes one step, including its digit loop.
+// expect: run parse_decimal_step_boundary() = true
+fn parse_decimal_step_boundary() -> bool {
+    let short = bound steps 0 {
+        let parsed: Result[u64, ParseError] = int.parse("42")
+        parsed
+    }
+    let exact = bound steps 1 {
+        let parsed: Result[u64, ParseError] = int.parse("42")
+        parsed
+    }
+    let Ok(Ok(value)) = exact else {
+        return false
+    }
+    match short {
+        Error(e) => e.steps == 0 && value == 42,
+        Ok(_) => false,
+    }
 }
 
 // A span counts offsets from the original input. The fifth digit of 65536

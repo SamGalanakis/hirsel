@@ -26,8 +26,7 @@ class InstructionGuard(unittest.TestCase):
         baseline["rows"] = [{
             "key": "arena/CLBG::Mandelbrot",
             "suite": "arena",
-            "mode": "certified",
-            "certified": True,
+            "mode": "release",
             "flags": ["--backend", "llvm", "--release"],
             "argv": ["./clbg-64", "one-iteration.json", "CLBG::Mandelbrot"],
             "affinity": [10],
@@ -85,7 +84,7 @@ class InstructionGuard(unittest.TestCase):
             def record_build(receipt):
                 row, = receipt["rows"]
                 row["build_record"] = build_record({
-                    "accepted": True, "native": {"linked": True, "step_charging_elided": True},
+                    "accepted": True, "native": {"linked": True},
                     "measurement": {key: row[key] for key in ("compiler_sha256", "runtime_archive_sha256",
                                                               *build.MANIFEST_HASHES, "image_sha256", "flags")},
                 })
@@ -255,8 +254,8 @@ class QuietCyclePairs(unittest.TestCase):
             self.assertEqual((len(unfiltered), unfiltered_attempts), (1, 1))
             self.assertEqual([run["smt_busy_percent"] for run in unfiltered[0]], [{23: 100.0}, {23: 100.0}])
 
-    def test_ride_uses_the_median_of_the_paired_cycle_ratios(self):
-        for center, verdict, expected in ((1009, "RIDES", 0), (1011, "FAILS", 1)):
+    def test_guard_b_uses_the_median_of_the_paired_cycle_ratios(self):
+        for center, verdict, expected in ((1029, "PASSES", 0), (1031, "FAILS", 1)):
             with self.subTest(verdict=verdict), redirect_stdout(io.StringIO()) as output:
                 samples = [
                     ({"cycles": 1000 * scale, "instructions": 100, "smt_busy_percent": {}},

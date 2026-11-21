@@ -1041,6 +1041,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         want.and_then(|w| self.payload_argument(lit.unwrap_or(own), f.ty, w))
                     {
                         self.expr_hinted(e, Some(hint))
+                    } else if self.structured_argument_type(f.ty) {
+                        let ty = self.partial(f.ty, &found);
+                        self.expr_hinted(e, expect(ty))
                     } else if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
                         let w = self.partial(f.ty, &found);

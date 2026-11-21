@@ -595,7 +595,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // Wrappers forward their tail's owner without creating a new one.
             // Peel them only when a scoped result actually reaches that owner.
             source = match self.kind(source) {
-                NodeKind::Group | NodeKind::ExpressionStatement => self.kids(source)[0],
+                NodeKind::Group | NodeKind::Ascription | NodeKind::ExpressionStatement => {
+                    self.kids(source)[0]
+                }
                 NodeKind::Block | NodeKind::Region | NodeKind::Bound => {
                     let Some(&tail) = self.kids(source).last() else {
                         break Root::Temporary(n);
@@ -797,7 +799,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.anchor_expression(kids[0])
                     }
                 }
-                NodeKind::Unary | NodeKind::Group => self.anchor_expression(kids[0]),
+                NodeKind::Unary | NodeKind::Group | NodeKind::Ascription => {
+                    self.anchor_expression(kids[0])
+                }
                 NodeKind::Block => kids
                     .last()
                     .filter(|&&k| self.kind(k) == NodeKind::ExpressionStatement)

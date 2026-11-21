@@ -52,7 +52,19 @@ current module, and nothing else. If `a` is a local or a constant, `.b` selects 
 its value; if a module or package, `.b` selects a member, so another module's constant is
 read as `m.ORIGIN.x`. A module wins over a constant of its name. A function is never the
 head of a path: a head that names only a function, or nothing, is refused here, at the
-head, and is never rebound. So a module may
+head, and is never rebound.
+
+A package's **root module** is its module whose path is the package's name: module `store`
+of package `store`, module `core` of the core library. A package name is the head of a path
+into that package, and `.b` after it selects a member of its root module or a module of
+the package: `store.fetch(..)` calls the root module's `fetch`, `store.Tx` names its type, and
+`store.wal.append(..)` calls a member of module `wal`. The root module is reached only that
+way, so `store.store.fetch` names nothing and is refused here, at the second `store`. Inside
+the package the head `store` is the root module itself, as a module of the current package,
+so the same path reads the same member there. A root module member that has the name of a
+module of its package is refused here, at that member, with the module as the causal site,
+so `.b` after a package name is never ambiguous. A package with no root module, as `std`,
+is reached only through its modules (`std.order.compare`). So a module may
 define a function with the name of a module, as an entry point `main` beside a module
 `main`, and in it `main.main(..)` calls the module's `main`. In a type position the last
 name of a path is a type (`path.Path`). So `fn f(c: char)` names the builtin type and `char.digit(c)` a module
@@ -91,6 +103,16 @@ type Point { x: i64, y: i64 }
 const ORIGIN: Point = Point(x: 0, y: 0)
 fn left() -> i64 { ORIGIN.x }
 ```
+```hirsel unbuilt
+// in a package that depends on package store, whose root module is store/store.hirsel
+fn count(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
+  let n = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
+    option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
+  }));
+  n
+}
+fn stutter(db: store.store.Db) -> u64 { 0 }               // refused: LANG-7, at the second store
+```
 ```hirsel
 fn width() -> u64 { 8 }
 fn f() -> u64 { width.bits }                              // refused: LANG-7, width is a function
@@ -110,8 +132,9 @@ The transform-fragment check for a `StaticFn` given to `flow.stage`
 ([CONC-14](tasks.md#conc-14-flows)) also reads each body in the instance set
 [PROG-9](programs.md#prog-9-code-descriptors) defines. Editing a dependency's body
 can therefore refuse that call.
-A closure writes its parameter types; its result type may be omitted when the expected
-type gives it.
+A closure writes its parameter names and modes. It writes every parameter type, or none
+of them when its expected type gives them ([LANG-11](#lang-11-typing-is-local)); its
+result type may be omitted when the expected type gives it.
 
 `waits` says that a call may wait and may observe cancellation
 ([CONC-7](tasks.md#conc-7-cancellation-points)). `main` is always `waits`
@@ -149,7 +172,13 @@ itself and refused by that rule, and a one-variant type named like its variant i
 labelled or all positional. A record is constructed with every field labelled, in
 declaration order, `P(x: 1, y: 2)`, a field with a default
 ([SEM-10](semantics.md#sem-10-codecs)) included; a variant with labels exactly when its payloads are
-labelled; labels appear in no other call. The representation keyword (`resource`,
+labelled; labels appear in no other call. A labelled argument whose expression is a local of
+the same name may be written as that name alone, **punned**: in a call of a record or of a
+labelled variant, a bare name `x` is `x: x`, so with locals `x` and `y`, `Point(x, y)` is
+`Point(x: x, y: y)` and `Point(x, y: 0)` mixes the two. The pun names a field, so the
+declaration-order rule applies to it as written; any other unlabelled argument of a
+labelled constructor, `Point(x + 1, y)`, is refused here, at that argument, and a positional
+payload is never punned. Patterns pun the same way ([LANG-17](#lang-17-match)). The representation keyword (`resource`,
 `scoped`), the `@compact` attribute, or their absence is fixed by the definition
 ([OWN-1](ownership.md#own-1-representation-is-declared-once)). A nominal type's identity is
 its definition path; two definitions with equal fields are different types.
@@ -162,6 +191,14 @@ type Bad = A(x: u64, u64)                                 // refused: LANG-9, mi
 ```
 ```hirsel
 pub type OutOfScope = OutOfScope                          // refused: LANG-9, an alias of itself
+```
+```hirsel unbuilt
+type Point { x: i64, y: i64 }
+fn up(x: i64, y: i64) -> Point { Point(x, y: y + 1) }
+```
+```hirsel unbuilt
+type Point { x: i64, y: i64 }
+fn up(x: i64, y: i64) -> Point { Point(x, y + 1) }      // refused: LANG-9, y + 1 is not a pun
 ```
 
 ### LANG-10: Built-in types
@@ -182,12 +219,15 @@ expected type where one exists, and its type is synthesised otherwise. These are
 arm or exit gives an expression its type.
 
 - a `let` with a written type: its initializer;
+- an ascription `(e : T)` ([LANG-5](syntax.md#lang-5-grammar)): `e`;
 - a call's parameter types and a constructor's declared field types, with what is fixed so
   far filled in, in the order below: each argument or field;
 - the declared type of the place `q` in `q = e` ([OWN-12](ownership.md#own-12-assignment)):
   `e`; a compound assignment `q op= e` types as `q op e`;
 - the function's declared result type: each `return e` and the body's tail; a closure's
   result type, written or expected: its body's tail;
+- a closure's expected callable type ([LANG-13](#lang-13-callables)): the types of
+  parameters the closure writes without one;
 - the expected type of a block: its last expression; of an `if` or `match`: each branch or
   arm; of a loop: each `break` value;
 - with none of those, the type of the first branch, arm or `break` value in source order
@@ -200,6 +240,25 @@ arm or exit gives an expression its type.
 - the expected type of a tuple or an `Inline` array ([SEM-9](semantics.md#sem-9-inline-arrays)):
   each component or element;
 - `bool` for a condition, a guard and each operand of `!`, `&&` and `||`; `u64` for an index.
+
+An ascription has the type it writes, and it is checked as `let t: T = e` checks its
+initializer: the type is complete, a conversion below applies against it, and an `e` that
+does not then have type `T` is refused here, at the innermost expression `T` reached. It is
+not a cast: `(x : u64)` with `x: u8` is refused. It changes nothing else, so `(e : T)` is
+evaluated, moved, viewed and cleaned as `e` is, and an ascribed place is that place. It
+fixes a call's type parameters from its result, the one way to fix them inside an
+expression: type arguments are never written at a call ([LANG-12](#lang-12-generics)), so
+`f.[T](..)` is not syntax.
+
+A closure omits its parameter types all together or not at all: one that writes some and
+omits others is refused here, at the first parameter without a type. It may omit them only
+where its expected type is a callable type whose every parameter type is fixed at that
+point of the forward visit below, with no hole left in any of them; otherwise it is
+refused here, at the first parameter. Each omitted type is the expected parameter type,
+exactly. Modes are never omitted: the closure writes `take`, `mut` or `bytes` as the
+callable type does, and one whose modes differ does not fit (LANG-13). Omitting the types
+changes nothing else: the closure's kind, captures and fit are checked as if it had
+written them. A top-level function still writes its whole signature (LANG-8).
 
 An `if` without `else` has type unit, and an arm of type `Never` constrains nothing. An
 expression whose type, after the conversions below, is not its
@@ -221,8 +280,8 @@ type parameters and regions are found in one forward visit of that call, in this
    transfer)` types the tuple from `transfer`. A tuple or array with any other component is
    checked at step 2.
 
-So `let xs: List[u64] = result.unwrap(list.with_capacity(5))` fixes `unwrap`'s `T`, then
-`with_capacity`'s `T`, then `unwrap`'s `E` as `Capacity`. A parameter determined twice
+So `let n: u16 = result.unwrap(int.parse(s))` fixes `unwrap`'s `T`, then
+`parse`'s `T`, then `unwrap`'s `E` as `ParseError`. A parameter determined twice
 differently is refused at the argument or result that determined it second; a hole still
 open when its call has been visited is refused by
 [LANG-12](#lang-12-generics) at that call. Nothing is inferred across statements, from a
@@ -239,7 +298,8 @@ declared encoding; and a callable to a callable type it fits ([LANG-13](#lang-13
 A conversion applies to an expression whose type is already synthesised, against its
 expected type; it never settles a type parameter, which the steps above fix as written. So
 a holder nested in a generic call whose result type was fixed from outside is refused, at
-the argument that fixes the parameter second: bind the holder with `let` first.
+the argument that fixes the parameter second: bind the holder with `let` first, or ascribe
+it.
 
 ```hirsel
 fn f() -> u64 { let x: u64 = 7; x }
@@ -260,6 +320,28 @@ fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwr
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
 fn f() -> i64 { ev(result.unwrap(box.new(Lit(6i64)))) }  // refused: LANG-11, at box.new: T is N
+```
+```hirsel unbuilt
+fn fits(s: String) -> bool { match (int.parse(s) : Result[u8, ParseError]) { Ok(_) => true, Error(_) => false } }
+fn first(s: String) -> Result[u64, ParseError] { let n = (int.parse(s) : Result[u64, ParseError])?; Ok(n + 1) }
+fn none_first(v: Option[u64]) -> bool { (None : Option[u64]) == v }
+fn empty() -> u64 { list.len((list.new() : List[u64])) }
+```
+```hirsel unbuilt
+fn widen(x: u8) -> u64 { (x : u64) }                      // refused: LANG-11, at x: u8 is not u64
+```
+```hirsel unbuilt
+fn apply(f: fn(u64, take String) -> u64, x: u64, take s: String) -> u64 { f(x, take s) }
+fn g(take s: String) -> u64 { apply(fn(n, take t) { n + string.byte_len(t) }, 1, take s) }
+fn h() -> u64 { let inc: fn(u64) -> u64 = fn(x) { x + 1 }; inc(2) }
+```
+```hirsel unbuilt
+fn apply(f: fn(u64, u64) -> u64, x: u64) -> u64 { f(x, x) }
+fn g() -> u64 { apply(fn(a, b: u64) { a + b }, 1) }      // refused: LANG-11, at a: all or none
+```
+```hirsel unbuilt
+fn fold[A, T](xs: List[T], f: fn(A, T) -> A, take init: A) -> A { init }
+fn total(xs: List[u64]) -> u64 { let sum = fold(xs, fn(acc, x) { acc + x }, 0); sum }   // refused: LANG-11, at acc: A is open
 ```
 ```hirsel
 fn f(c: bool, x: u8) -> u16 { if c { x } else { 0 } }     // refused: LANG-11, at x: u8 is not u16
@@ -286,7 +368,8 @@ own payloads, and one still open when the constructor has been typed is refused 
 constructor. Nothing to its right, in its statement or later, fixes it, so the checker emits
 each expression as it types it. So `let x = None`, `let y = Ok(1u64)`, `let xs =
 list.new()` and `let r = if c { None } else { Some(1u64) }` are refused without a written
-type, and `None == v` is refused where `v == None` is accepted. Each use of a
+type, on the binding or as an ascription ([LANG-11](#lang-11-typing-is-local)), and
+`None == v` is refused where `v == None` and `(None : Option[u64]) == v` are accepted. Each use of a
 generic type writes its arguments.
 
 A type definition is refused when following its recursive references requires infinitely
@@ -403,26 +486,28 @@ active ([OWN-21](ownership.md#own-21-scoped-callbacks)), and it never moves a ca
 closure with captures is an **owning closure**: creating it admits one environment block
 ([MEM-24](budgets.md#mem-24-logical-charges)) and then copies its plain captures into it and
 moves the others, whose slots become moved ([OWN-5](ownership.md#own-5-availability)); its
-literal has type `Result[own fn(..) -> R, (Capacity, F)]`, `own[send]` when every capture is
-`send`, where `F` is its one capture, or the tuple of its captures in environment order. On
-`Capacity` nothing is admitted and the error hands every capture back to the caller
-([T1.2](ownership.md#own-26-the-transition-table)), as `box.new` hands back its value. Its body reads captures as views and
+literal has type `own fn(..) -> R`, `own[send]` when every capture is `send`. A refused
+environment admission raises the failure `Capacity` ([MEM-21](budgets.md#mem-21-admission))
+before any capture is moved, and the captures stay in their slots for the failure's cleanup
+([T1.2](ownership.md#own-26-the-transition-table)). Its body reads captures as views and
 cannot move, assign or lend them `mut`. An owning closure may capture only a value whose
 type holds no resource, no capability, no view, no scoped value and no region reference at
 any depth, as its type
 summary records ([OWN-2](ownership.md#own-2-type-summaries)): plain values other than
 capabilities, own values, counted holders of such values, and nothing whose summary may
-hold a capability, such as a type parameter or `Wrap[T]` for `type Wrap[T: plain] { item: T }`. Resources and capabilities reach a closure as call arguments. The environment
+hold a capability, such as a type parameter or `Wrap[T]` for `type Wrap[T: plain] { item: T }`,
+unless its bounds include `inert` or `codec`, which implies it
+([OWN-4](ownership.md#own-4-bounds)): `T: inert` and `Wrap[T]` for `T: codec` may be captured. Resources and capabilities reach a closure as call arguments. The environment
 holds the captures in the order the body first names them, and cleaning it cleans them in
 reverse.
 
 ```hirsel
-fn counter(take base: List[u64]) -> Result[own fn(u64) -> u64, (Capacity, List[u64])] {
+fn counter(take base: List[u64]) -> own fn(u64) -> u64 {
   fn(x: u64) -> u64 { x + list.len(base) }
 }
 ```
 ```hirsel
-fn counter(base: List[u64]) -> Result[own fn(u64) -> u64, (Capacity, List[u64])] {
+fn counter(base: List[u64]) -> own fn(u64) -> u64 {
   fn(x: u64) -> u64 { x + list.len(base) }                // refused: LANG-14, base is a view
 }
 ```
@@ -476,18 +561,30 @@ fn scalars(s: String) -> u64 {
 => e` is a `bool` expression that may not move, assign or lend `mut`, and a guarded arm
 never counts toward exhaustiveness. Patterns are literals, closed ranges `a..=b` of
 integers or `char`, names, `_`, tuples and variants with labelled or positional fields, and
-`..` for remaining fields. A literal pattern matches exactly when `scrutinee == literal` is
+`..` for remaining fields. A labelled field's pattern may be its label alone, punned as in
+construction ([LANG-9](#lang-9-nominal-types)): `Rect(w, h)` is `Rect(w: w, h: h)` and binds
+`w` and `h`, and `Point(x, ..)` binds only `x`. A bare name among labelled fields that is not a
+field's label is refused here, at that name. A literal pattern matches exactly when `scrutinee == literal` is
 true, and is refused here wherever that `==` would be refused
 ([LANG-21](#lang-21-operators)). Floats are not `key`, so a float literal is never a
 pattern. Use `float.total_order` for total ordering, or `float.eq`, `float.lt`, `float.le`,
 `float.gt` and `float.ge` for IEEE 754 comparisons. `let p = e` needs an irrefutable pattern; `let p = e else { .. }`
 takes a refutable one, and its `else` block has type `Never`. `if let` and `while let` take
 refutable patterns. Arms of an owned scrutinee bind by
-[OWN-15](ownership.md#own-15-match-on-an-owned-value).
+[OWN-15](ownership.md#own-15-match-on-an-owned-value). Inside a constructor or tuple
+pattern of a `match` arm, an `if let` or a `while let`, a name may be marked `take`
+(`Some(take s)`) or `mut` (`File(mut f)`); `mut x` names the matched place of a writable
+scrutinee rather than binding a value (OWN-15). A `mut` binding that is an arm's whole
+pattern, or that is in a `let`, `let .. else` or `for` pattern, is refused here, at the
+binding.
 
 ```hirsel
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w: w, h: h) => w * h } }
+```
+```hirsel unbuilt
+type Shape = Circle(f64) | Rect(w: f64, h: f64)
+fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w, h) => w * h } }
 ```
 ```hirsel
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
@@ -499,20 +596,52 @@ fn zero(x: f64) -> u64 { match float.total_order(x, 0.0) { Equal => 1, _ => 2 } 
 ```hirsel
 fn zero(x: f64) -> u64 { match x { 0.0 => 1, _ => 2 } }   // refused: LANG-17, f64 is not key
 ```
+```hirsel unbuilt
+fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError] {
+  match input { Some(mut f) => host.read(mut f, mut buf), None => Ok(0) }
+}
+```
+```hirsel unbuilt
+fn whole(mut s: String) { match s { mut t => {} } }      // refused: LANG-17, a mut binding is a payload
+```
+```hirsel unbuilt
+fn unpack(mut o: Option[String]) { let Some(mut s) = o else { return } }   // refused: LANG-17
+```
 
 ### LANG-18: Errors
 
 Expected failures are `Result[T, E]` values. `e?` on `Result[T, E]` consumes `e` and
 evaluates to the `Ok` payload, or exits the function with `Error` of the same payload; the
-function's error type must be exactly `E`. A different error type is converted explicitly,
-with `match`. `e?` on `Option[T]` in a function returning `Option` exits with `None`. Inside
-a bound scope of the same function, `?` on an error of type exactly `Capacity` exits the
-scope instead ([MEM-25](budgets.md#mem-25-the-bound-scope)). Which exit `?` takes is chosen
-from its operand's type, so nothing gives the operand an expected error type: an expected
+function's error type must be exactly `E`. `e?` on `Option[T]` in a function returning
+`Option` exits with `None`. `?` always exits the innermost enclosing function or closure
+body; no bound or region scope stops it.
+
+A different error type is converted at the exit with a **mapping propagate**, `e ?=> m`,
+or with `match`. `e` is a `Result[T, E]` and the function returns `Result[_, F]`; `e ?=> m`
+consumes `e` and evaluates to the `Ok` payload, or, on `Error(x)`, evaluates `m` applied
+to `x` and exits the function with `Error` of that value. The **mapper** `m` is one of:
+
+- a path naming a variant of `F` whose one payload has type `E`, as `?=> Io`;
+- a path naming a callable, a function or a local, that applied as `m(take x)` has result
+  type `F`, as `?=> json.wrap`;
+- an inline arm `|p| v`: `p` an irrefutable pattern over `E`, binding `x` as `let p =
+  take x` would, and `v` an expression of type `F`, as `?=> |(c, _)| Full(c)` or
+  `?=> |_| Invalid`. The arm is code of the enclosing function, not a closure: it captures
+  nothing, may name the function's locals, and its own `?` exits that function.
+
+`m` is checked against the expected type `fn(take E) -> F`, which a variant, callable or arm
+must fit; nothing global converts errors, and there is no conversion trait. The mapper runs
+on the error edge before it leaves any scope, so an arm sees the locals `e` could see; the
+exit then stages `Error(m(x))` as its pending result and cleans the exited scopes
+([FAIL-9](failure.md#fail-9-pending-results)). `?=>` applies to a `Result` only, in a
+function whose result is a `Result`; on an `Option` it is refused.
+
+Which exit `?` or `?=>` takes is chosen from its operand's type, so nothing gives the operand an expected error type: an expected
 type `T` of `e?` reaches `e` only as its payload; whether `e` is a `Result` or an `Option`,
-and its error type, are found from `e` alone, and neither the function's result type nor an enclosing bound is an expected type of `e`.
+and its error type, are found from `e` alone, and neither the function's result type nor a mapper is an expected type of `e`.
 A type argument that only the error would fix is refused by
-[LANG-12](#lang-12-generics) at its call; the error type is written on a binding. An expression statement whose
+[LANG-12](#lang-12-generics) at its call; the error type is written on a binding or an
+ascription, `(receipt() : Result[u64, ParseError])?`. An expression statement whose
 value is a `Result` is refused; `let _ = e` discards it explicitly.
 
 ```hirsel
@@ -525,11 +654,11 @@ fn quarter(n: u64) -> Result[u64, ParseError] { half(n); Ok(0) }   // refused: L
 ```
 ```hirsel
 fn receipt[E]() -> Result[u64, E] { loop {} }
-fn f() -> Result[u64, Capacity] { bound bytes 0 { let r: Result[u64, Capacity] = receipt(); let n = r?; n } }
+fn f() -> Result[u64, ParseError] { let r: Result[u64, ParseError] = receipt(); let n = r?; Ok(n) }
 ```
 ```hirsel
 fn receipt[E]() -> Result[u64, E] { loop {} }
-fn f() -> Result[u64, Capacity] { bound bytes 0 { let n: u64 = receipt()?; n } }   // refused: LANG-12, at receipt(): E is open
+fn f() -> Result[u64, ParseError] { let n: u64 = receipt()?; Ok(n) }   // refused: LANG-12, at receipt(): E is open
 ```
 
 ### LANG-19: Recursion
@@ -541,10 +670,16 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 
 ### LANG-20: Constants
 
-`const N: T = e` declares a plain constant. `e` may use literals, operators, tuple, plain and
-`Inline` array constructions, and other constants; it calls no function. Constants are evaluated once, before any body is checked, in
+`const N: T = e` declares a plain constant or a static string. For a plain `T`, `e` may use
+literals, operators, tuple, plain and `Inline` array constructions, and other constants; it
+calls no function. Constants are evaluated once, before any body is checked, in
 dependency order, by the rules of [semantics](semantics.md); a constant that would fail, or whose
-constants reach itself, is refused. A string literal is not a constant.
+constants reach itself, is refused. A **static string** is a constant of type `String` whose
+`e` is a string literal or another static string, `const NAME: String = "hirsel"`, and
+nothing else: never a concatenation, a call or a byte string. Each use of it is its literal,
+under the literal's contract ([core](core.md)): static, allocating nothing and never
+charged. A `String` appears in no other constant's type, so `(String, u64)` and a record
+with a `String` field are refused here, at the type, and so is every other non-plain type.
 
 ```hirsel
 const WORDS: u64 = 64
@@ -552,6 +687,14 @@ const BYTES: u64 = WORDS * 8
 ```
 ```hirsel
 const BIG: u8 = 200 + 100                                 // refused: LANG-20, Overflow
+```
+```hirsel unbuilt
+const NAME: String = "hirsel"
+const TITLE: String = NAME
+fn title() -> String { TITLE }
+```
+```hirsel unbuilt
+const PAIR: (String, u64) = ("a", 1)                      // refused: LANG-20, String in a tuple
 ```
 
 ### LANG-21: Operators

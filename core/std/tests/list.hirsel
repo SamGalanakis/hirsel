@@ -1,3 +1,4 @@
+// test-env: HIRSEL_ISA_CAP=2
 // Contract tests for `list` (core/std/list.hirsel), written to run once an engine runs
 // library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
 // gives the result derived by hand from the contract, or `fail Cause` for the failure the
@@ -37,8 +38,7 @@ fn first_of_five() -> u64 {
 
 // expect: run first_of_empty() = 99
 fn first_of_empty() -> u64 {
-    let xs: List[u64] = list.new()
-    present(list.first(xs))
+    present(list.first((list.new() : List[u64])))
 }
 
 // expect: run last_of_five() = 4
@@ -49,8 +49,7 @@ fn last_of_five() -> u64 {
 
 // expect: run last_of_empty() = 99
 fn last_of_empty() -> u64 {
-    let xs: List[u64] = list.new()
-    present(list.last(xs))
+    present(list.last((list.new() : List[u64])))
 }
 
 // Removes 6 and keeps the order of the rest: 6, then 5789.
@@ -279,6 +278,166 @@ fn sort_many_equal() -> u64 {
     placed
 }
 
+type SortLawItem {
+    id: u64,
+    key: u64,
+    payload: String
+}
+
+fn sort_law_key(i: u64, n: u64, shape: u64) -> u64 {
+    if shape == 0 {
+        0
+    } else if shape == 1 {
+        i % 2
+    } else if shape == 2 {
+        i
+    } else if shape == 3 {
+        n - i
+    } else if shape == 4 {
+        if i < n / 2 {
+            i
+        } else {
+            n - i
+        }
+    } else {
+        int.wrapping_mul(i ^ 0x9e3779b9, 0xbf58476d1ce4e5b9) >> 57
+    }
+}
+
+fn sort_law_input(n: u64, shape: u64) -> List[SortLawItem] {
+    let mut xs: List[SortLawItem] = result.unwrap(list.with_capacity(n))
+    for i in 0u64 .. n {
+        let payload = result.unwrap(string.from("live"))
+        result.unwrap(list.push(mut xs, SortLawItem(id: i, key: sort_law_key(i, n, shape), payload: take payload)))
+    }
+    take xs
+}
+
+// The IDs must be exactly 0..n, each with its original key and payload.
+fn sort_law_permutation(xs: List[SortLawItem], n: u64, shape: u64) -> bool {
+    if list.len(xs) != n {
+        return false
+    }
+    let mut seen: Inline[bool, 129] =[false; 129]
+    for item in xs {
+        if item.id >= n || seen[item.id] || item.key != sort_law_key(item.id, n, shape) || item.payload != "live" {
+            return false
+        }
+        seen[item.id] = true
+    }
+    true
+}
+
+// expect: run sort_run_and_duplicate_law() = true
+fn sort_run_and_duplicate_law() -> bool {
+    let sizes: Inline[u64, 13] =[0, 1, 2, 15, 16, 17, 31, 32, 63, 64, 65, 128, 129]
+    for n in sizes {
+        for shape in 0u64 .. 6 {
+            let mut xs = sort_law_input(n, shape)
+            list.sort(mut xs, fn(a: SortLawItem, b: SortLawItem) -> Order {
+                order.compare(a.key, b.key)
+            })
+            if !sort_law_permutation(xs, n, shape) {
+                return false
+            }
+            for i in 1u64 .. n {
+                if xs[i - 1].key > xs[i].key {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+resource type UnstableSortAudit {
+    items: List[SortLawItem],
+    n: u64,
+    shape: u64
+} drop(audit) {
+    if !sort_law_permutation(audit.items, audit.n, audit.shape) {
+        fail("list.sort changed its input permutation")
+    }
+}
+
+fn sort_law_fail_at(n: u64, shape: u64, k: u64) {
+    let mut audit = result.unwrap(UnstableSortAudit(items: sort_law_input(n, shape), n: n, shape: shape))
+    let mut calls: u64 = 0
+    list.sort(mut audit.items, scoped fn(a: SortLawItem, b: SortLawItem) -> Order {
+        calls += 1
+        if calls == k {
+            let missing: Option[u64] = None
+            let _ = option.unwrap(missing)
+        }
+        order.compare(a.key, b.key)
+    })
+}
+
+// The resource finalizer checks the permutation during unwinding. Any
+// finalizer failure must appear as an extra cause alongside the injected one.
+fn sort_law_caught(n: u64, shape: u64, k: u64) -> bool {
+    match result.unwrap(isolate(fn() -> bool {
+        sort_law_fail_at(n, shape, k)
+        true
+    })) {
+        Ok(_) => false,
+        Error(take causes) => {
+            let mut seen = false
+            for cause in causes {
+                if seen {
+                    return false
+                }
+                match cause.kind {
+                    Unwrap => {
+                        seen = true
+                    },
+                    _ => return false,
+                }
+            }
+            seen
+        },
+    }
+}
+
+// expect: run sort_comparator_failure_law() = true
+fn sort_comparator_failure_law() -> bool {
+    let calls: Inline[u64, 6] =[1, 3, 9, 20, 48, 80]
+    for k in calls {
+        for shape in 0u64 .. 5 {
+            let n: u64 = if shape == 3 {
+                16
+            } else {
+                96
+            }
+            if !sort_law_caught(n, shape, k) {
+                return false
+            }
+        }
+    }
+    // A later failure exercises the pass that groups equal keys.
+    sort_law_caught(96, 1, 220)
+}
+
+// A changing answer gives no order. Its calls still see live elements and the
+// result is a permutation.
+// expect: run sort_inconsistent_comparator_law() = true
+fn sort_inconsistent_comparator_law() -> bool {
+    let mut xs = sort_law_input(129, 5)
+    let mut calls: u64 = 0
+    list.sort(mut xs, scoped fn(a: SortLawItem, b: SortLawItem) -> Order {
+        if a.payload != "live" || b.payload != "live" {
+            fail("list.sort compared an invalid element")
+        }
+        calls += 1
+        match calls % 3 {
+            0 => Less,
+            1 => Equal,
+            _ => Greater,
+        }
+    })
+    sort_law_permutation(xs, 129, 5)
+}
+
 // 'a' + 'b' + 'c' = 97 + 98 + 99.
 // expect: run sum_bytes_of_text() = 294
 fn sum_bytes_of_text() -> u64 {
@@ -321,8 +480,7 @@ fn fill_under_bound() -> u64 {
 
 // expect: run sum_empty() = 0
 fn sum_empty() -> u64 {
-    let xs: List[u64] = list.new()
-    list.sum(xs)
+    list.sum((list.new() : List[u64]))
 }
 
 // 250 + 5 is u8's maximum, 255.
@@ -588,4 +746,176 @@ fn get_or_edges() -> u64 {
     let d = list.get_or(xs, 18446744073709551615, 5)
     let e = list.get_or(none, 0, 5)
     (((a * 10 + b) * 10 + c) * 10 + d) * 10 + e
+}
+
+fn find_byte_ref(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
+    for i in start .. end {
+        if xs[i] == byte {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_byte4_ref(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8, d: u8) -> Option[u64] {
+    for i in start .. end {
+        let x = xs[i]
+        if x == a || x == b || x == c || x == d {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// Every lane of the portable word path (< 160 B) and the SIMD four-vector group
+// plus leftovers and overlapping tail (>= 160 B) can hold the first hit.
+// The second adjacent hit must lose even when it sits in the next word or vector.
+// expect: run find_byte_order_and_range() = true
+fn find_byte_order_and_range() -> bool {
+    let sizes: Inline[u64, 2] =[75, 360]
+    for n in sizes {
+        let mut xs: Bytes = result.unwrap(list.with_capacity(n))
+        result.unwrap(list.fill(mut xs, n, 1))
+        for at in 0u64 .. n - 1 {
+            xs[at] = 255
+            xs[at + 1] = 255
+            let matched = bound bytes 0 {
+                list.find_byte(xs, 0, n, 255) == Some(at) && list.find_byte(xs, 0, at, 255) == None && list.find_byte(xs, at + 1, n, 255) == Some(at + 1)
+            }
+            match matched {
+                Ok(true) => (),
+                _ => return false,
+            }
+            xs[at] = 1
+            xs[at + 1] = 1
+        }
+        if list.find_byte(xs, 1, n, 0) != None {
+            return false
+        }
+    }
+    true
+}
+
+// Differential check against an independent scalar scan across short and long
+// spans, alignments, hits, and misses.
+// expect: run find_byte_matches_scalar() = true
+fn find_byte_matches_scalar() -> bool {
+    let len: u64 = 389
+    let mut xs: Bytes = result.unwrap(list.with_capacity(len))
+    let mut state: u32 = 0x8c11d14b
+    for _ in 0u64 .. len {
+        state = int.wrapping_add(int.wrapping_mul(state, 1664525), 1013904223)
+        let byte: u8 = int.narrow(state >> 24)
+        result.unwrap(list.push(mut xs, byte))
+    }
+    for start in 0u64 .. 160 {
+        state = int.wrapping_add(int.wrapping_mul(state, 1664525), 1013904223)
+        let span: u64 = int.widen(state)
+        let end = start + span % (len - start + 1)
+        let byte: u8 = int.narrow(state >> 24)
+        if list.find_byte(xs, start, end, byte) != find_byte_ref(xs, start, end, byte) {
+            return false
+        }
+    }
+    // Exercise misses and late hits right around the 160-byte SIMD crossover.
+    let mut flat: Bytes = result.unwrap(list.with_capacity(200))
+    result.unwrap(list.fill(mut flat, 200, b'z'))
+    for n in 155u64 .. 166 {
+        if list.find_byte(flat, 0, n, b'a') != None {
+            return false
+        }
+        flat[n - 1] = b'a'
+        if list.find_byte(flat, 0, n, b'a') != Some(n - 1) {
+            return false
+        }
+        flat[n - 1] = b'z'
+    }
+    true
+}
+
+// Multi-delimiter search (2, 3, and 4 needles) across scalar, 16-byte SIMD,
+// 32-byte SIMD, 128-byte four-vector group, leftover, and overlapping tail.
+// expect: run find_byte4_order_and_range() = true
+fn find_byte4_order_and_range() -> bool {
+    let n: u64 = 360
+    let mut xs: Bytes = result.unwrap(list.with_capacity(n))
+    result.unwrap(list.fill(mut xs, n, b'z'))
+    let needles: Inline[u8, 4] =[b'"', b',', 13, 10]
+    for at in 0u64 .. n - 1 {
+        let first_byte = needles[at % 4]
+        let second_byte = needles[(at + 1) % 4]
+        xs[at] = first_byte
+        xs[at + 1] = second_byte
+        let matched = bound bytes 0 {
+            list.find_byte4(xs, 0, n, b'"', b',', 13, 10) == Some(at) && list.find_byte4(xs, 0, at, b'"', b',', 13, 10) == None && list.find_byte4(xs, at + 1, n, b'"', b',', 13, 10) == Some(at + 1)
+        }
+        match matched {
+            Ok(true) => (),
+            _ => return false,
+        }
+        xs[at] = b'z'
+        xs[at + 1] = b'z'
+    }
+    // Check lengths 0..37 (scalar + 16-byte SIMD + 32-byte SIMD boundaries) for find_byte2/3/4.
+    for len in 0u64 .. 38 {
+        if list.find_byte2(xs, 0, len, b',', 10) != None || list.find_byte3(xs, 0, len, b',', 13, 10) != None || list.find_byte4(xs, 0, len, b'"', b',', 13, 10) != None {
+            return false
+        }
+        if len > 0 {
+            xs[len - 1] = 10
+            let ok = list.find_byte2(xs, 0, len, b',', 10) == find_byte4_ref(xs, 0, len, b',', 10, b',', 10) && list.find_byte3(xs, 0, len, b',', 13, 10) == find_byte4_ref(xs, 0, len, b',', 13, 10, 10) && list.find_byte4(xs, 0, len, b'"', b',', 13, 10) == Some(len - 1)
+            xs[len - 1] = b'z'
+            if !ok {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// expect: run find_byte_reversed_range() = fail Bounds
+fn find_byte_reversed_range() -> Option[u64] {
+    list.find_byte(result.unwrap(b"abc"), 2, 1, b'b')
+}
+
+// expect: run find_byte4_past_end() = fail Bounds
+fn find_byte4_past_end() -> Option[u64] {
+    list.find_byte4(result.unwrap(b"abc"), 0, 4, b'"', b',', 13, 10)
+}
+
+// Under a tight step bound, long scans stop with Steps rather than escaping the bound.
+// expect: run find_byte_step_bound() = true
+fn find_byte_step_bound() -> bool {
+    let mut xs: Bytes = result.unwrap(list.with_capacity(512))
+    result.unwrap(list.fill(mut xs, 512, b'z'))
+    xs[511] = b'a'
+    let tight1 = bound steps 1 {
+        list.find_byte(xs, 0, 512, b'a')
+    }
+    let tight4 = bound steps 1 {
+        list.find_byte4(xs, 0, 512, b'"', b',', 13, b'a')
+    }
+    let ample1 = bound steps 10000 {
+        list.find_byte(xs, 0, 512, b'a')
+    }
+    let ample4 = bound steps 10000 {
+        list.find_byte4(xs, 0, 512, b'"', b',', 13, b'a')
+    }
+    let ok_t1 = match tight1 {
+        Error(_) => true,
+        Ok(_) => false,
+    }
+    let ok_t4 = match tight4 {
+        Error(_) => true,
+        Ok(_) => false,
+    }
+    let ok_a1 = match ample1 {
+        Ok(Some(511)) => true,
+        _ => false,
+    }
+    let ok_a4 = match ample4 {
+        Ok(Some(511)) => true,
+        _ => false,
+    }
+    ok_t1 && ok_t4 && ok_a1 && ok_a4
 }

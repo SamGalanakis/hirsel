@@ -25,6 +25,7 @@ def main():
     args = parser.parse_args()
     compiler = args.compiler.resolve()
     runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+    record_runtime = Path(os.environ['HIRSEL_CORE_RT_RECORD_ARCHIVE']).resolve() if 'HIRSEL_CORE_RT_RECORD_ARCHIVE' in os.environ else None
     cc = Path(os.environ['HIRSEL_AARCH64_CC']).resolve()
     emulator = Path(os.environ['HIRSEL_QEMU_AARCH64']).resolve()
     sysroot = Path(os.environ['HIRSEL_AARCH64_SYSROOT']).resolve()
@@ -48,7 +49,8 @@ def main():
                 rows = std_native.run(ROOT, compiler, runtime, contracts, ['llvm'], None, owners,
                                       cc, 30, evaluator, target, emulator, sysroot,
                                       model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
-                                      schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
+                                      schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
+                                      record_runtime=record_runtime)
                 executed += sum(r['ran'] for r in rows if r['engine'] == 'llvm')
                 passed &= all(r['passed'] for r in rows if r['applicable'])
             else:

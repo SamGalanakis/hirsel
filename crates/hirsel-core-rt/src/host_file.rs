@@ -10,7 +10,6 @@ use std::{
 
 #[derive(Clone, Copy)]
 struct File {
-    group: Option<crate::tape::schedule::Group>,
     provider: Provider,
     handle: u64,
 }
@@ -37,7 +36,6 @@ struct Entries {
     next: u64,
     live: Option<Resources<File>>,
     grants: BTreeMap<u64, Arc<File>>,
-    tapes: Option<Resources<Arc<crate::tape::Tape>>>,
     vectors: BTreeMap<u64, Vector>,
 }
 /// Install cleanup together with the first owned resource. A run that never
@@ -91,6 +89,7 @@ pub(crate) struct Files {
     pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
     pub(crate) tls: crate::os_tls::Streams,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    #[cfg(feature = "record")]
     pub(crate) net_tape: Option<crate::net::SocketTape>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
@@ -98,37 +97,6 @@ pub(crate) struct Files {
     pub(crate) registry: Registry,
 }
 impl Registry {
-    pub(crate) fn tape(&self, tape: crate::tape::Tape) -> u64 {
-        let mut registry = self.0.lock().unwrap();
-        let id = registry.id();
-        registry
-            .tapes
-            .get_or_insert_with(|| Resources::new(close_tapes))
-            .values
-            .insert(id, Arc::new(tape));
-        id
-    }
-    /// # Safety
-    /// The caller borrows the sole-owned tape handle for the entire borrow.
-    pub(crate) unsafe fn tape_ref(&self, key: u64) -> &crate::tape::Tape {
-        let tape = Arc::as_ptr(&self.0.lock().unwrap().tapes.as_ref().unwrap().values[&key]);
-        // SAFETY: the Arc stays in the table while this key is borrowed.
-        unsafe { &*tape }
-    }
-    pub(crate) fn untape(&self, key: u64) -> crate::tape::Tape {
-        Arc::into_inner(
-            self.0
-                .lock()
-                .unwrap()
-                .tapes
-                .as_mut()
-                .unwrap()
-                .values
-                .remove(&key)
-                .unwrap(),
-        )
-        .unwrap()
-    }
     /// Pin a substitute Args vector and return its handle.
     pub(crate) fn vector(&self, bytes: Vec<Vec<u8>>) -> u64 {
         let views = bytes
@@ -187,31 +155,7 @@ impl Registry {
         id
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.insert_grant(File {
-            provider,
-            handle,
-            group: None,
-        })
-    }
-    pub(crate) fn taped_grant(
-        &self,
-        provider: Provider,
-        handle: u64,
-        group: crate::tape::schedule::Group,
-    ) -> u64 {
-        self.insert_grant(File {
-            provider,
-            handle,
-            group: Some(group),
-        })
-    }
-    pub(crate) fn grant_group(&self, handle: u64) -> Option<crate::tape::schedule::Group> {
-        self.0
-            .lock()
-            .unwrap()
-            .grants
-            .get(&handle)
-            .and_then(|g| g.group)
+        self.insert_grant(File { provider, handle })
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         let file = Arc::as_ptr(&self.0.lock().unwrap().grants[&handle]);
@@ -224,12 +168,6 @@ impl Registry {
 }
 impl Files {
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
-        // A tape still open writes its buffered frames through its Dir's
-        // provider, which outlives this teardown (section 8: as a crash).
-        if let Some(tapes) = &mut self.registry.0.get_mut().unwrap().tapes {
-            // SAFETY: the run's Context and providers remain pinned.
-            unsafe { tapes.close(context) };
-        }
         self.sockets = hirsel_core_net::Sockets::default();
         self.tls.sessions.clear();
         self.connected.clear();
@@ -239,12 +177,6 @@ impl Files {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };
         }
-    }
-}
-
-fn close_tapes(tapes: &mut BTreeMap<u64, Arc<crate::tape::Tape>>, _: *mut Context) {
-    while let Some((_, tape)) = tapes.pop_last() {
-        drop(tape);
     }
 }
 
@@ -306,7 +238,6 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
         let provider = *provider;
         if result.status == 0 && result.error == IoError::OK {
             result.value = (*(*context).host_files).registry.insert(File {
-                group: None,
                 provider,
                 handle: result.value,
             });
@@ -315,7 +246,6 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
             close(
                 context,
                 File {
-                    group: None,
                     provider,
                     handle: issued.value,
                 },

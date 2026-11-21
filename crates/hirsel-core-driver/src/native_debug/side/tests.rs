@@ -96,6 +96,7 @@ pub(crate) fn binding_case() {
     };
     let neutral = crate::encode(&(&first, &second)).unwrap();
     let mut sources = SourceMap {
+        points: Default::default(),
         files: vec![SourceFile {
             path: "/a/source.hirsel".into(),
             text: "// π\n\nfn f(){\n\tλ + 1\r\n}\n".into(),
@@ -209,6 +210,7 @@ fn indexed_scalar_positions_match_the_source_map() {
     let product = product();
     let text = "// π\n\tλ雪\r\nabc\t🙂\n";
     let map = SourceMap {
+        points: Default::default(),
         files: vec![SourceFile {
             path: "unicode.hirsel".into(),
             text: text.into(),

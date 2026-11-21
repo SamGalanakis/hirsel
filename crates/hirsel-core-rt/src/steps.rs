@@ -3,7 +3,7 @@ use crate::{Context, causes};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const UNBOUNDED: i64 = 1 << 62;
-pub const SLICE: u64 = 65_536;
+pub const SLICE: u64 = crate::abi_layout::STEP_SLICE as u64;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct Bound {

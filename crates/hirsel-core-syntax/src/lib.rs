@@ -186,6 +186,7 @@ pub enum NodeKind {
     RemovedVariant,
     StepsParameter,
     StepsArgument,
+    Ascription,
 }
 /// `token` is the defining name, operator, literal or projection token, according to kind.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

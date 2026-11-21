@@ -8,6 +8,7 @@
 //! memory: a read names no "reaching version", so a producer need not build SSA for
 //! slots or prove liveness before emitting.
 
+use crate::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty, Vector};
 use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, Recipe, TypeRef, cleanup_class};
@@ -763,6 +764,11 @@ pub enum Inst {
         vector: ValueId,
         count: ValueId,
     },
+    /// A symbolic dependency on a compiler-implemented definition lowered in
+    /// this block. Its instructions do the work; this row carries its identity.
+    BuiltinUse {
+        definition: Box<DefPath>,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
@@ -917,6 +923,8 @@ pub enum RtOp {
     CompareBytes,
     /// The fixed byte hash a `Map` key's text components fold (crate docs, "Maps").
     HashBytes,
+    /// The SHA-256 compression of whole blocks into an eight-word state (crate docs, "SHA-256").
+    Sha256Blocks,
     /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
     CauseNext,
     /// A cause cell's `Cause`, in core's layout (crate docs, "Causes").
@@ -927,15 +935,6 @@ pub enum RtOp {
     ArgsGet,
     /// A provider operation of `host`, `stdout` or `stderr` (CAP-5).
     Host(HostOp),
-    /// `tape.open` (CAP-9): open a Run tape in a Dir.
-    TapeOpen,
-    /// `tape.end`: end a tape with its domain's outcome, consuming it.
-    TapeEnd,
-    /// `tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.args`:
-    /// a capability's substitute on a tape.
-    TapeGrant,
-    /// `tape.across`: whether an Across open's revision differs.
-    TapeAcross,
     /// `isolate`'s entry: reserve a cause cell (crate docs, "Isolation").
     IsolateEnter,
     /// `isolate`'s body returned: refund the innermost reservation.
@@ -959,6 +958,12 @@ pub enum RtOp {
     DescribeEmit,
     /// Owner flow operation with pointers to its fixed operand and result words.
     Flow(hirsel_core_layout::flow::Op),
+    /// SHA-1 compression of a byte span and its RFC 3174 padding.
+    Sha1Blocks,
+    /// XXH3-64 over at most 240 bytes with seed zero and the default secret.
+    Xxh3Short,
+    /// Accumulate complete XXH3 stripes in eight words with the given secret.
+    Xxh3Stripes,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1000,6 +1005,8 @@ pub enum HostOp {
     SendSecret = 23,
     SecretSeal = 30,
     SecretNarrow = 31,
+    Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
+    NetNarrowResolve = 41,
 }
 
 impl HostOp {
@@ -1045,6 +1052,8 @@ impl HostOp {
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
+        HostOp::Resolve,
+        HostOp::NetNarrowResolve,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1073,12 +1082,14 @@ impl HostOp {
             HostOp::SyncDir => "host_sync_dir",
             HostOp::Random => "host_random",
             HostOp::Connect => "host_connect",
+            HostOp::Resolve => "host_resolve",
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",
             HostOp::RecvBounded => "host_recv_bounded",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
+            HostOp::NetNarrowResolve => "net_narrow_resolve",
             HostOp::TlsConnect => "tls_connect",
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
@@ -1091,12 +1102,14 @@ impl HostOp {
     pub const fn net_symbol(self) -> &'static str {
         match self {
             Self::Connect => "hirsel_core_host_connect",
+            Self::Resolve => "hirsel_core_host_resolve",
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
+            Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",
             Self::TlsConnect => "hirsel_core_tls_connect",
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
@@ -1114,6 +1127,7 @@ impl HostOp {
                 | HostOp::Random
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
+                | HostOp::NetNarrowResolve
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
                 | HostOp::NetSplit
@@ -1152,6 +1166,10 @@ impl RtOp {
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
     /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
+    /// | `xxh3_short` | `data: ptr`, `len: u64` | `u64`: XXH3-64 (crate docs, "XXH3") |
+    /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
+    /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
+    /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
@@ -1167,10 +1185,6 @@ impl RtOp {
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
     /// | `host_wall_ms`, `host_mono_ns` | `Clock: u64` | `u64` |
     /// | `stdout_write`, `stderr_write` | stream `u64`, string `ptr` | outcome |
-    /// | `tape_open` | `Dir: u64`, name `ptr`, `mode: u8`, identity `ptr`, arg `ptr`, `limit: u64`, `id0: u64`, `id1: u64` | `Tape: u64` (0 unless opened), `code: u64` |
-    /// | `tape_end` | `Tape: u64`, `kind: u8`, operand `ptr` | `code: u64` |
-    /// | `tape_grant` | `Tape: u64`, `kind: u8`, capability `u64` | substitute `u64` |
-    /// | `tape_across` | `Tape: u64` | `bool` |
     /// | `isolate_enter` | | `bool`: reserved; `available: u64` (0 when reserved) |
     /// | `isolate_leave` | | |
     /// | `isolate_catch` | | `Causes` `ptr`: the caught chain's head |
@@ -1179,7 +1193,7 @@ impl RtOp {
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
     /// `Cancelled` when they observe it (CONC-7). `isolate_catch` fails, adding no
     /// cause, when the chain it would catch has the primary cause `Cancelled`. Every
-    /// provider row and `tape_grant` can fail with `Tape` (CAP-9). These are the rows
+    /// provider row can fail (for example `Cancelled` or `Bounds`). These are the rows
     /// that can fail
     /// ([`RtOp::fails`]); the others never do.
     ///
@@ -1229,6 +1243,10 @@ impl RtOp {
                 vec![Ty::Scalar(Scalar::I8)],
             ),
             RtOp::HashBytes => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::Xxh3Short => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
+            RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
@@ -1236,13 +1254,6 @@ impl RtOp {
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
-            RtOp::TapeOpen => (
-                vec![V(u64_), V(p), V(u8_), V(p), V(p), V(u64_), V(u64_), V(u64_)],
-                vec![u64_, u64_],
-            ),
-            RtOp::TapeEnd => (vec![V(u64_), V(u8_), V(p)], vec![u64_]),
-            RtOp::TapeGrant => (vec![V(u64_), V(u8_), V(u64_)], vec![u64_]),
-            RtOp::TapeAcross => (vec![V(u64_)], vec![bool_]),
             RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
             RtOp::StepLeave => (vec![], vec![]),
             RtOp::StepCatch => (vec![], vec![bool_]),
@@ -1302,6 +1313,10 @@ impl RtOp {
                         vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
+                    HostOp::Resolve => {
+                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
+                    HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),
                     HostOp::SendPair => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
@@ -1394,7 +1409,6 @@ impl RtOp {
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
                 | RtOp::IsolateCatch
-                | RtOp::TapeGrant
                 | RtOp::Flow(_)
         ) || matches!(self, RtOp::Host(_))
     }
@@ -1419,6 +1433,10 @@ impl RtOp {
             | RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::HashBytes
+            | RtOp::Xxh3Short
+            | RtOp::Xxh3Stripes
+            | RtOp::Sha1Blocks
+            | RtOp::Sha256Blocks
             | RtOp::CauseNext
             | RtOp::CauseValue
             | RtOp::ArgsLen
@@ -1427,10 +1445,6 @@ impl RtOp {
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)
-            | RtOp::TapeOpen
-            | RtOp::TapeEnd
-            | RtOp::TapeGrant
-            | RtOp::TapeAcross
             | RtOp::IsolateEnter
             | RtOp::IsolateLeave
             | RtOp::IsolateCatch
@@ -1481,6 +1495,45 @@ impl Inst {
             Inst::Call { call } => b.calls.get(call.index()).and_then(|c| c.fail),
             _ => None,
         }
+    }
+}
+
+/// The blocks control leaves `bi` for: its instructions' failure blocks and its
+/// terminator's targets.
+#[cfg(any(test, feature = "wf"))]
+pub(crate) fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
+    let mut successors = Vec::new();
+    for_each_successor(b, bi, |next| successors.push(next));
+    successors
+}
+
+pub(crate) fn for_each_successor(b: &Body, bi: usize, mut visit: impl FnMut(BlockId)) {
+    b.blocks[bi]
+        .insts
+        .get(&b.insts)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i.fail(b))
+        .for_each(&mut visit);
+    let edge = |e: &EdgeId| b.edges[e.index()].target;
+    match &b.terminators[bi] {
+        Terminator::Jump(e) => visit(edge(e)),
+        Terminator::Branch { yes, no, .. } => {
+            visit(edge(yes));
+            visit(edge(no));
+        }
+        Terminator::Switch {
+            arms, otherwise, ..
+        } => {
+            arms.get(&b.pools.arms)
+                .unwrap_or_default()
+                .iter()
+                .map(|a| edge(&a.edge))
+                .for_each(&mut visit);
+            visit(edge(otherwise));
+        }
+        Terminator::Raise { cleanup, .. } => cleanup.iter().copied().for_each(visit),
+        Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
     }
 }
 
@@ -1695,15 +1748,37 @@ pub struct InstanceKey {
 
 /// An instantiation apart from any module: its definition, its ordered dictionaries
 /// and the closure hash of each type argument ([`Closure`]).
-#[derive(
-    serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
-)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Identity {
     pub definition: DefPath,
     pub dictionaries: Vec<String>,
     pub closures: Vec<ContentHash>,
 }
+impl Ord for Identity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order_fields().cmp(&other.order_fields())
+    }
+}
+
+impl PartialOrd for Identity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Identity {
+    fn order_fields(&self) -> (&str, &str, &[String], &str, &[String], &[ContentHash]) {
+        let path = &self.definition.0;
+        (
+            &path.package.name,
+            &path.package.version,
+            &path.modules,
+            &path.name,
+            &self.dictionaries,
+            &self.closures,
+        )
+    }
+
     /// The non-generic definition `definition`.
     pub fn plain(definition: DefPath) -> Self {
         Self {
@@ -1784,52 +1859,9 @@ impl Module {
         }
     }
 }
-/// `revision(root)` (`hirsel.code-revision.v1`) over the instances `row`
-/// describes: each one's body hash and the instances it names. None when an
-/// instance the walk reaches has no row.
-pub fn code_revision(
-    root: &Identity,
-    row: impl FnMut(&Identity) -> Option<(ContentHash, Vec<Identity>)>,
-) -> Option<ContentHash> {
-    let reached = revision_rows(root, row)?;
-    let mut rows: Vec<[u8; 64]> = reached
-        .iter()
-        .map(|(identity, body)| {
-            let mut row = [0; 64];
-            row[..32].copy_from_slice(&identity.digest().0);
-            row[32..].copy_from_slice(&body.0);
-            row
-        })
-        .collect();
-    rows.sort_unstable();
-    let count = (rows.len() as u64).to_le_bytes();
-    Some(ContentHash::of_parts(
-        "hirsel.code-revision.v1",
-        [&root.digest().0[..], &count[..]]
-            .into_iter()
-            .chain(rows.iter().map(|r| &r[..])),
-    ))
-}
-
-fn revision_rows<T>(
-    root: &Identity,
-    mut row: impl FnMut(&Identity) -> Option<(T, Vec<Identity>)>,
-) -> Option<std::collections::BTreeMap<Identity, T>> {
-    let mut reached = std::collections::BTreeMap::new();
-    let mut pending = vec![root.clone()];
-    while let Some(identity) = pending.pop() {
-        if reached.contains_key(&identity) {
-            continue;
-        }
-        let (body, children) = row(&identity)?;
-        pending.extend(children.into_iter().filter(|c| !reached.contains_key(c)));
-        reached.insert(identity, body);
-    }
-    Some(reached)
-}
-/// The code revision of an intrinsic: its one row, with the zero body.
+/// The code revision of a compiler-implemented core definition.
 pub fn intrinsic_revision(root: &Identity) -> ContentHash {
-    code_revision(root, |_| Some((ContentHash::default(), vec![]))).expect("one row")
+    crate::code_revision(crate::builtin_address(root).expect("intrinsic has a semantics number"))
 }
 /// `h` and the 64 hex digits of `digest`.
 pub fn symbol(digest: ContentHash) -> String {
@@ -1890,6 +1922,19 @@ pub struct Module {
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.
     pub code_variants: std::collections::BTreeMap<FuncId, ContentHash>,
+    /// MEM-30 step-free bodies ([`crate::step_contexts`]): `step_free[f]` runs
+    /// `f` while no step bound is current, a time no step can be observed.
+    pub step_free: std::collections::BTreeMap<FuncId, StepFree>,
+}
+/// The body that runs a function while no step bound is current.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct StepFree {
+    /// A private code variant of the same instance and signature.
+    pub body: FuncId,
+    /// Code pointers, finalizers or the launcher may enter the function under a
+    /// bound or without one: its symbol selects this body or the checked one by
+    /// the current step window, and both bodies share one calling convention.
+    pub dispatch: bool,
 }
 impl Module {
     /// The identity of function `function`'s code: a code variant's, or its
@@ -2002,76 +2047,172 @@ impl Closure {
     /// The closure of `rows`, hashed over their encoding (the encoding the store
     /// hashes IR with).
     pub fn new(rows: Vec<ClosureRow>) -> Self {
-        let hash = ContentHash::of_encoded("hirsel.core-closure.v1", &rows);
+        let hash = crate::normal::closure_hash(&rows);
         Self { rows, hash }
     }
+}
+
+pub(crate) enum ClosureKind {
+    Full,
+    Abi,
 }
 
 impl Module {
     /// The closure of row `root` ([`Closure`]).
     pub fn closure(&self, root: TypeId) -> Closure {
+        self.closure_impl(root, ClosureKind::Full, None)
+            .expect("unmetered closure")
+    }
+
+    pub(crate) fn decoded_closure(
+        &self,
+        root: TypeId,
+        budget: &mut DecodeBudget,
+    ) -> DecodeResult<Closure> {
+        self.closure_impl(root, ClosureKind::Full, Some(budget))
+    }
+
+    pub(crate) fn closure_impl(
+        &self,
+        root: TypeId,
+        kind: ClosureKind,
+        mut budget: Option<&mut DecodeBudget>,
+    ) -> DecodeResult<Closure> {
+        use std::collections::hash_map::Entry;
         let mut order = HashMap::<u32, u32>::new();
-        let mut rows: Vec<Option<ClosureRow>> = vec![];
-        let mut pending = vec![root.0];
-        order.insert(root.0, 0);
-        rows.push(None);
+        let mut rows: Vec<Option<ClosureRow>> = Vec::new();
+        let mut pending = Vec::new();
         let visit = |r: u32,
                      order: &mut HashMap<u32, u32>,
                      rows: &mut Vec<Option<ClosureRow>>,
-                     pending: &mut Vec<u32>| {
+                     pending: &mut Vec<u32>,
+                     budget: &mut Option<&mut DecodeBudget>| {
+            if let Some(&number) = order.get(&r) {
+                return Ok(number);
+            }
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.reserve(rows, 1)?;
+                budget.reserve(pending, 1)?;
+                if order.len() == order.capacity() {
+                    // This accounts for the growing hash table, including
+                    // bucket control bytes and unused load-factor capacity.
+                    budget.charge_bytes(order.capacity().max(4).saturating_mul(32))?;
+                    order
+                        .try_reserve(1)
+                        .map_err(|_| DecodeError::Limit(DecodeLimit::Bytes))?;
+                }
+            }
             let next = order.len() as u32;
-            *order.entry(r).or_insert_with(|| {
-                rows.push(None);
-                pending.push(r);
-                next
-            })
+            let Entry::Vacant(entry) = order.entry(r) else {
+                unreachable!()
+            };
+            entry.insert(next);
+            rows.push(None);
+            pending.push(r);
+            Ok(next)
         };
+        visit(root.0, &mut order, &mut rows, &mut pending, &mut budget)?;
         while let Some(t) = pending.pop() {
-            let mut shape = self.types[t as usize].clone();
-            shape.map_refs(&mut |r| TypeRef(visit(r.0, &mut order, &mut rows, &mut pending)));
-            let hook = |f: Option<FuncRef>,
-                        order: &mut HashMap<u32, u32>,
-                        rows: &mut Vec<Option<ClosureRow>>,
-                        pending: &mut Vec<u32>| {
-                let f = &self.functions[f?.0 as usize];
+            let original = &self.types[t as usize];
+            if let Some(budget) = budget.as_deref_mut() {
+                crate::normal::charge_shape(original, budget)?;
+            }
+            let mut shape = original.clone();
+            let mut error = None;
+            shape.map_refs(&mut |r| match visit(
+                r.0,
+                &mut order,
+                &mut rows,
+                &mut pending,
+                &mut budget,
+            ) {
+                Ok(number) => TypeRef(number),
+                Err(refused) => {
+                    error = Some(refused);
+                    r
+                }
+            });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            let mut hook = |f: Option<FuncRef>| -> DecodeResult<Option<ClosureHook>> {
+                let Some(f) = f else { return Ok(None) };
+                let f = &self.functions[f.0 as usize];
                 let key = &self.instances[f.instance.index()];
-                let arguments = key
-                    .arguments
-                    .iter()
-                    .map(|a| visit(a.0, order, rows, pending))
-                    .collect();
-                let mut signature = self.signatures[f.signature.index()].clone();
+                let original = &self.signatures[f.signature.index()];
+                if let Some(budget) = budget.as_deref_mut() {
+                    crate::normal::charge_identity(&key.definition, &key.dictionaries, budget)?;
+                    budget.allocation::<u32>(key.arguments.len())?;
+                    budget.allocation::<Param>(original.params.len())?;
+                    budget.allocation::<Ty>(original.results.len())?;
+                }
+                let mut arguments = Vec::with_capacity(key.arguments.len());
+                for argument in &key.arguments {
+                    arguments.push(visit(
+                        argument.0,
+                        &mut order,
+                        &mut rows,
+                        &mut pending,
+                        &mut budget,
+                    )?);
+                }
+                let mut signature = original.clone();
                 for param in &mut signature.params {
                     if let Param::Address {
                         place: PlaceTy::Declared(id),
                         ..
                     } = param
                     {
-                        *id = TypeId(visit(id.0, order, rows, pending));
+                        *id = TypeId(visit(
+                            id.0,
+                            &mut order,
+                            &mut rows,
+                            &mut pending,
+                            &mut budget,
+                        )?);
                     }
                 }
-                signature.dest = signature
-                    .dest
-                    .map(|id| TypeId(visit(id.0, order, rows, pending)));
-                Some(ClosureHook {
+                if let Some(id) = &mut signature.dest {
+                    *id = TypeId(visit(
+                        id.0,
+                        &mut order,
+                        &mut rows,
+                        &mut pending,
+                        &mut budget,
+                    )?);
+                }
+                Ok(Some(ClosureHook {
                     definition: key.definition.clone(),
                     dictionaries: key.dictionaries.clone(),
                     arguments,
                     signature,
-                })
+                }))
             };
+            // A codec maker is selected by the checking context. It is type
+            // metadata and contributes no layout or calling-convention facts.
+            let codec = shape.codec.take();
             let hooks = [
-                hook(shape.finalizer.take(), &mut order, &mut rows, &mut pending),
-                hook(shape.clone.take(), &mut order, &mut rows, &mut pending),
-                hook(shape.codec.take(), &mut order, &mut rows, &mut pending),
+                hook(shape.finalizer.take())?,
+                hook(shape.clone.take())?,
+                match kind {
+                    ClosureKind::Full => hook(codec)?,
+                    ClosureKind::Abi => None,
+                },
             ];
             rows[order[&t] as usize] = Some(ClosureRow { shape, hooks });
         }
-        Closure::new(
-            rows.into_iter()
-                .map(|r| r.expect("every visited row is filled"))
-                .collect(),
-        )
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.allocation::<ClosureRow>(rows.len())?;
+        }
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|r| r.expect("every visited row is filled"))
+            .collect();
+        let hash = match budget {
+            Some(budget) => crate::normal::decoded_closure_hash(&rows, budget)?,
+            None => crate::normal::closure_hash(&rows),
+        };
+        Ok(Closure { rows, hash })
     }
 }
 

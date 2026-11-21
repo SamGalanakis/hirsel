@@ -648,6 +648,7 @@ impl Function<'_, '_, '_> {
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
+            | Inst::BuiltinUse { .. }
             | Inst::Mark { .. }
             | Inst::Unmark { .. } => {}
             Inst::Address { address, fail } => {

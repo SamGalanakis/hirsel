@@ -18,10 +18,13 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 
 | module | file | rules |
 |---|---|---|
-| `core` (the prelude: every core type, `fail`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |
+| `core` (the prelude: every core type, `fail`, `drop`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
+| `check` | [check](../../core/core/check.hirsel) | SEM-8, SEM-11, MEM-30 |
+| `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
+| `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
@@ -30,11 +33,10 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
-| `tape`, `port` | not yet in the core source | CAP-9 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
-| `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |
+| `args`, `env`, `host`, `stdin`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [env](../../core/core/env.hirsel), [host](../../core/core/host.hirsel), [stdin](../../core/core/stdin.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5, CAP-7 |
 
 A library module may extend a core module by name (LANG-7).
 
@@ -63,7 +65,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered`, `codec` when T | tuple: sum; variant rule (MEM-24) | T's |
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
 | `Simd[T, n]` | plain | `shareable`, `send` | n × size(T) | nothing |
-| `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
+| `Never` | plain | `shareable`, `send`, `key`, `ordered`, `codec` (SEM-10: no valid encoding) | 0 | nothing |
 | `String` | own | `shareable`, `send`, `key`, `ordered`, `codec` | 24 | nothing |
 | `FrozenBytes` | own | `shareable`, `send` | 24 | nothing |
 | `List[T]` | own | `shareable`, `send`, `key`, `ordered`, `codec` when T | 24 | T's |
@@ -98,7 +100,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `StaticFn[F]` | plain | `shareable`, `send`, `key` | 8 | nothing |
 
 Flow endpoints are usable with the flow that created them. `Wire` has cases
-`Foreign`, `Started`, `Zero` and `Refused(Capacity)`. `Push[T]` has cases `Ok`,
+`Foreign`, `Started` and `Zero`. `Push[T]` has cases `Ok`,
 `Ended(T)`, `Order(T)`, `Closed(T)` and `Stalled(T)`. `Pull[T]` has cases
 `Item(key, from, x)`, `Dropped(from, at)`, `End` and `Stalled`. `Halt` has cases
 `OutOfTime` and `Failed`. These types are plain enums. `Failure` is a plain struct
@@ -122,16 +124,27 @@ identity bytes, a revision and a function ([PROG-9](programs.md#prog-9-code-desc
 Each item gives the domain, result, length and capacity, custody and partial effects of the
 operations it names; nothing else about them may be inferred from an implementation.
 
-- **Errors.** An operation that fails with `Capacity` returns in its error every argument it
-  would have taken and leaves its other arguments unchanged. Its error is `(Capacity, X)`,
-  `X` the one such argument or the tuple of them in parameter order, as an owning closure's
-  or a resource literal's error holds its captures or fields, and bare `Capacity` when it
-  takes none. Only the failures named here or
-  by a rule occur: `Bounds`, `Overflow`, `Division` and `Unwrap` are failures
-  ([FAIL-2](failure.md#fail-2-causes)), every other error is a `Result`. `fail(take msg)`
-  takes custody of a message the program already holds and admits nothing, so raising `Fail`
-  cannot be refused ([FAIL-10](failure.md#fail-10-cause-chain)); a built message's
-  `Capacity` is an ordinary error at its own allocation, before `fail`.
+- **Errors.** An allocating operation whose admission is refused raises the failure
+  `Capacity(c)` ([MEM-21](budgets.md#mem-21-admission)) at its commit point: it has taken
+  none of its arguments, which the failure's cleanup drops with the rest of the statement,
+  and it leaves its other arguments unchanged. An operation named `try_` returns the
+  refusal instead: its error is `(Capacity, X)`, `X` the one argument it would have taken
+  or the tuple of them in parameter order, as a resource literal's error holds its fields,
+  and bare `Capacity` when it takes none; it changes nothing else. The `try_` operations
+  that admit are `list.try_reserve`, `map.try_reserve` and `task.try_spawn`. Only the
+  failures named here or by a rule occur: `Bounds`, `Overflow`, `Division`, `Unwrap` and
+  `Capacity` are failures ([FAIL-2](failure.md#fail-2-causes)), every other error is a
+  `Result`. `fail(take msg)` takes custody of a message the program already holds and
+  admits nothing, so raising `Fail` cannot be refused
+  ([FAIL-10](failure.md#fail-10-cause-chain)); a built message's allocation is refused, if
+  at all, at its own admission, before `fail`.
+- **Drop and copied.** `drop[T](take x: T)` ends `x` where it is called, by the implicit drop
+  the end of its scope would perform ([T6.2](ownership.md#own-26-the-transition-table)), a
+  resource's finalizer included ([FAIL-11](failure.md#fail-11-resources)), and returns `()`;
+  a failure of that finalizer is this call's. `option.copied[T: plain](x: Option[View[T]]) -> Option[T]`
+  returns `Some` of a copy of the viewed `T`, or `None`, so `option.copied(list.get(xs, i))`
+  outlives `xs`; it admits nothing. Both are headers of the prelude and of `option`, written
+  once in those files.
 - **Unwrap.** `option.unwrap(take x)` returns the `Some` payload and fails with `Unwrap` on
   `None`. `result.unwrap(take x)` returns the `Ok` payload; on `Error(e)` it fails with
   `Unwrap`, and `e` is cleaned by the failure's cleanup as an ordinary owner.
@@ -141,8 +154,9 @@ operations it names; nothing else about them may be inferred from an implementat
   even when `n` is 0; `text.copy_in` admits its count header even for empty text.
   `build_stream_in` admits `n` bytes once, and `finish_trim` refunds all of them past the
   used bytes, rounded up to 8; `finish` admits nothing and refunds nothing.
-  `list.reserve(mut xs, n)` leaves capacity at least `len + n`; every other allocating
-  operation grows by
+  `list.reserve(mut xs, n)` and `list.try_reserve(mut xs, n)` leave capacity at least
+  `len + n`, `try_reserve` returning `Error(c)` and leaving `xs` unchanged where `reserve`
+  raises; every other allocating operation grows by
   [MEM-24](budgets.md#mem-24-logical-charges). `string.from` copies a literal or a view.
 - **Literals.** A string literal has type `String`, is static, allocates nothing and is never
   charged; it has capacity 0, so the first push onto it grows it into new storage. This is
@@ -150,9 +164,9 @@ operations it names; nothing else about them may be inferred from an implementat
   storage, `truncate` and `clear` only shorten it, and the ASCII case changes copy it first. A `List` has in-place element writes
   (`list.set`, `xs[i] = x`), so an own `List` that has elements always owns its storage:
   capacity 0 means length 0, and no `List` is static. A byte-string literal (`b".."`,
-  `br#".."#`) therefore has type `Result[Bytes, Capacity]`: it admits its length as
-  `List[u8]` storage and copies its bytes. When the expected type is
-  `Result[FrozenBytes, Capacity]`, the literal uses read-only static storage.
+  `br#".."#`) therefore has type `Bytes`: it admits its length as `List[u8]` storage and
+  copies its bytes, and a refusal raises `Capacity`. When the expected type is
+  `FrozenBytes`, the literal uses read-only static storage.
   It admits the same charge, in the same limit, and refunds it when the owner
   drops. `bytebuf.freeze(take b)` transfers the existing charge, length and
   capacity of an owned `Bytes`. `bytebuf.as_bytes(b)` borrows the bytes with
@@ -163,16 +177,15 @@ operations it names; nothing else about them may be inferred from an implementat
   without writing if either check fails. It never grows the destination.
 - **Strings.** `string.into_bytes(take s)` transfers `s`'s owned storage unchanged, with its
   length, capacity and charge; a static `s` is copied into newly admitted storage of capacity
-  equal to its length, and on `Capacity` the error returns `s`. `string.from_utf8` returns its
+  equal to its length; a refused copy has not taken `s`. `string.from_utf8` returns its
   argument when it is not UTF-8. `string.push_u64` appends `n` in ASCII decimal, with no sign
   and no leading zeros (`0` for zero). `string.make_ascii_upper(mut s)` and
   `string.make_ascii_lower(mut s)` change `a`–`z` to `A`–`Z`, or the reverse, in place, and
   leave every other byte as it is, so `s` keeps its length and stays UTF-8 with no second
   check. For an owned `s` they admit nothing and cannot fail. A static `s` is first copied
-  as `into_bytes` copies it, and on that copy's `Capacity` they return the error with `s`
-  unchanged. `string.encode_base64(b)` constructs a new `String` with the standard
+  as `into_bytes` copies it, and a refused copy leaves `s` unchanged. `string.encode_base64(b)` constructs a new `String` with the standard
   RFC 4648 alphabet and `=` padding. `string.append_base64_bytes(b, mut out)` appends
-  the same encoding to a byte list and leaves `out` unchanged on `Capacity`.
+  the same encoding to a byte list and leaves `out` unchanged when its growth is refused.
   `string.next_scalar(s, at)` returns `None` when `at`
   is `byte_len(s)`, and fails with `Bounds` when `at` is greater or falls inside a scalar.
 - **Slices.** `list.slice(xs, lo, hi)` and `string.slice(s, lo, hi)` view the elements or
@@ -192,12 +205,36 @@ operations it names; nothing else about them may be inferred from an implementat
   Without an expected type the result is `u64`. An invalid range, including an overflowing
   end, fails with `Bounds`. `list.put_word_le(mut b, x)` and `list.put_word_be(mut b, x)`
   append the two, four or eight bytes of `x` in the specified order. Growth follows
-  [MEM-24](budgets.md#mem-24-logical-charges). On `Capacity` the list is unchanged.
+  [MEM-24](budgets.md#mem-24-logical-charges). A refused growth leaves the list unchanged.
   `inline.word_le` and `inline.word_be` read the same widths from an Inline byte
   array. Its expected integer type fixes the width and an invalid range fails with `Bounds`.
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
   multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
   integer operations.
+- **XXH3 kernels.** `check.xxh3_short(b)` and `check.xxh3_short_inline(b, n)`
+  return seed-zero XXH3-64 with the default secret over the byte span. Lengths
+  above 240 raise `Bounds`. `check.xxh3_stripes(mut acc, b, key, offset)`
+  updates the eight accumulator words from complete 64-byte stripes. Each
+  stripe reads 64 bytes of `key`, starting at `offset` and advancing eight bytes
+  per stripe. An incomplete stripe or a secret window outside the 192-byte key
+  raises `Bounds` before any write. `check.xxh3_stripe` reads one inline stripe.
+  These calls each take one step and admit no bytes. Vector and portable
+  kernels compute the same words ([SEM-8](semantics.md#sem-8-determinism)).
+- **SHA-1 blocks.** `sha1.blocks(mut h, b)` applies RFC 3174 compression to the
+  64-byte blocks of `b` and its RFC 3174 padding, updating the five state words
+  `h`. This call takes one step and admits no bytes. The engine can use the CPU's
+  SHA-1 instructions with identical state words and accounting on every CPU
+  ([SEM-8](semantics.md#sem-8-determinism), [MEM-30](budgets.md#mem-30-step-bounds)).
+  `std.sha1.hash` supplies the RFC initial state and returns the twenty digest bytes.
+- **SHA-256 blocks.** `sha256.blocks(mut h, b, at, count)` applies the FIPS 180-4
+  SHA-256 compression function to each of the `count` 64-byte blocks of `b` from `at`,
+  in order, updating the eight state words `h`. A range outside `b`, including an end
+  past `u64`, raises `Bounds` before `h` changes. `sha256.block(mut h, b)` compresses
+  the one block of an `Inline[u8, 64]`. Each call admits no bytes and takes one Step
+  whatever `count` is ([MEM-30](budgets.md#mem-30-step-bounds)), as a bulk copy does. An
+  engine may use the CPU's SHA-256 instructions; the state words are the same on every
+  CPU, so by [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
+  `std.sha256` extends this module with the streaming hash.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
   its index place (`xs[i] = x`, or `mut xs[i]` as an argument), including nested places
@@ -214,12 +251,12 @@ operations it names; nothing else about them may be inferred from an implementat
   `Equal`; when `before` is not a total preorder the result is still a permutation of `xs`.
   For two or more elements it admits one scratch block of `len` elements as a `List[T]`
   ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any, and refunds it before it
-  returns; on `Capacity` `xs` is unchanged. A failure inside `before` leaves `xs` holding
+  returns; a refused scratch leaves `xs` unchanged. A failure inside `before` leaves `xs` holding
   every element it had, in an unspecified order, refunds the scratch and propagates. The
   number and order of calls to `before` is unspecified.
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
-  `Deque[T]`, and `heap.push` adds to a `Heap[T]`; on `Capacity` each returns `x` and leaves
-  the collection unchanged. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
+  `Deque[T]`, and `heap.push` adds to a `Heap[T]`; a refused growth leaves the collection
+  unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
   return an element, `None` when empty, and admit nothing; `heap.pop` returns a least element
   by `<` ([SEM-7](semantics.md#sem-7-equality-and-order)), and `heap.peek` views the
   element the next `pop` would return. `new` admits nothing and `len` counts elements. Both
@@ -227,21 +264,21 @@ operations it names; nothing else about them may be inferred from an implementat
   unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
   only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private
   bodiless functions, as `Map` is; no library module provides a deque or a heap.
-- **Maps.** `map.insert` inserts an absent key or replaces a present key's value.
-  It returns its key and value with `Capacity`, as
-  `(Capacity, (K, V))`, and a present key admits nothing. `map.update(mut m, k, f)`, where
+- **Maps.** `map.insert` inserts an absent key or replaces a present key's value; a
+  present key admits nothing, and a refused growth takes neither the key nor the value. `map.update(mut m, k, f)`, where
   `f: scoped fn(mut V) -> R`, runs `f` once on the value of `k` in place and returns
   `Some(r)`, or returns `None` without calling `f` when `k` is absent; it makes one lookup,
   never inserts and admits nothing. `map.update_or_insert(mut m, take k, take initial, f)`
   makes one lookup. It inserts `initial` only if `k` is absent, then calls `f` once on
-  the entry and returns `Ok(r)`. On `Capacity` it returns `(k, initial)` untouched,
-  leaves `m` unchanged and does not call `f`. Both operations lend `m` for the call,
+  the entry and returns `r`. A refused growth takes neither `k` nor `initial`, leaves `m`
+  unchanged and does not call `f`. Both operations lend `m` for the call,
   so `f` cannot name `m` ([OWN-9](ownership.md#own-9-overlap)). `map.remove` drops the stored key
   and returns the value. `map.reserve(mut m, n)` makes room for `n` absent keys: after it
-  returns `Ok`, the next `n` insertions admit nothing, whatever removals, replacements and updates
+  returns, the next `n` insertions admit nothing, whatever removals, replacements and updates
   come between. It grows by [MEM-24](budgets.md#mem-24-logical-charges) from a need of
   `len + n`, admits nothing when the capacity already holds `len + n` (it drops removed
-  entries in place), and on `Capacity` leaves `m` unchanged. A `Map` is cleaned entry by entry in insertion order, each key
+  entries in place), and a refusal leaves `m` unchanged. `map.try_reserve(mut m, n)` does
+  the same and returns a refusal as `Error(c)`. A `Map` is cleaned entry by entry in insertion order, each key
   before its value, and `for take (k, v) in m` consumes one entry by entry
   ([SEM-6](semantics.md#sem-6-iteration)).
 - **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say
@@ -296,7 +333,8 @@ operations it names; nothing else about them may be inferred from an implementat
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and
-  returns `Exists` when one is present. `host.read` appends to `buf` at most its spare
+  returns `Exists` when one is present; `ReadWrite` opens for reading and writing, creating
+  the file when absent and never emptying it. `host.read` appends to `buf` at most its spare
   capacity, never changes its capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
   or when `buf` has no spare capacity; a read that returns an error has appended nothing
   and moved no cursor, so a partial read is delivered as `Ok`. A successful `host.write`
@@ -328,6 +366,19 @@ operations it names; nothing else about them may be inferred from an implementat
   and changes nothing. Its atomicity is visibility only: an `open` of `to` finds the old
   file or the new one, never neither, and `rename` makes nothing durable, so after a host
   crash either name may hold the file unless a later `host.sync_dir(d)` returned `Ok(())`.
+  `host.open_dir(d, p)` returns a `Dir` rooted at the existing directory `p`, with the same
+  confinement ([CAP-7](capabilities.md#cap-7-attenuation)). It gives `Denied` when `p` names
+  anything other than a directory, without following a final symbolic link.
+  `host.entries(d)` opens a listing of `d`'s root as a `HostEntries`, a mechanical resource
+  whose finalizer closes it. `host.next_entries(mut h, mut buf)` appends whole records
+  (kind byte, `u16` little-endian name length, name), never `.` or `..`, in host order, and
+  `Ok(0)` when exhausted. It fails with `Bounds` before issue when `buf` has less than 258
+  bytes spare. `host.stat(d, p)` and `host.stat_file(mut f)` report kind, size and
+  modification nanoseconds without following a final symbolic link. `host.read_at` and
+  `host.write_at` read and write at an offset without moving the cursor, with `host.read`'s
+  and `host.write`'s partial results. `read_at` needs a readable handle and `write_at` a
+  writable one that is not `Append`, or they give `Denied` with no host effect
+  ([dir](../../core/std/api/dir.md), [file](../../core/std/api/file.md)).
   `host.sync(mut f)` and `host.sync_dir(d)` are the two sync barriers. `host.sync(f)` returns `Ok(())` once every byte of `f`'s file written
   before its issue, through any handle, survives a host crash, with the file's length and
   whatever else reading those bytes back needs; it makes no name durable. `host.sync_dir(d)`
@@ -341,8 +392,8 @@ operations it names; nothing else about them may be inferred from an implementat
   `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
   `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
   cancellation point at its entry and while it waits
-  ([CONC-7](tasks.md#conc-7-cancellation-points)), and replay delivers its completion
-  without waiting ([CAP-8](capabilities.md#cap-8-the-replay-point)). A relative sleep is
+  ([CONC-7](tasks.md#conc-7-cancellation-points)), and its completion passes the replay
+  point ([CAP-8](capabilities.md#cap-8-the-replay-point)). A relative sleep is
   library code over it. No host operation admits; every byte it returns
   lands in capacity the caller already holds. `HostFile` is a mechanical resource
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
@@ -350,10 +401,26 @@ operations it names; nothing else about them may be inferred from an implementat
   changes its capacity, and never waits or fails. The bytes are unpredictable and
   independent of every other value the run observes; like every provider result they pass
   the replay point at issue and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)),
-  so a replay delivers the recorded bytes and a simulation supplies its own.
+  and a simulation supplies its own.
   `host.stopped(p: Process) waits` observes the first SIGTERM or SIGINT
-  ([CAP-5](capabilities.md#cap-5-provider-operations)). `Stdin` and `Env` have no
-  operations in v1.
+  ([CAP-5](capabilities.md#cap-5-provider-operations)).
+  `stdin.read(i, mut buf, until)` appends at most the spare capacity of `buf` from the
+  run's standard input and returns the count, `Ok(0)` at end of input or when `buf` has no
+  spare capacity. Each byte the host supplies is delivered by exactly one read, whichever
+  copy of `Stdin` issued it. Like the socket operations of [NET-1](net.md#net-1-socket-operation-declarations), it
+  waits after issue for readiness: it is a cancellation point at issue and while it waits, and gives `Aborted` when cancellation
+  reaches it there and `TimedOut` when `until` passes, in both cases having appended
+  nothing. Bytes the host supplies afterwards go to the next read. The provider never
+  changes the flags of the inherited descriptor
+  ([stdin](../../core/std/api/stdin.md)). An `Env` designates name patterns over a
+  snapshot of the environment that the launcher takes before `main`. The snapshot holds
+  the covered variables whose names are UTF-8, lives outside every limit and never
+  changes. `env.get` gives `Denied` for a name no pattern covers, `None` for a covered
+  name that is not set, and `NotUtf8` for a value that is not UTF-8. `env.len` and
+  `env.name` list the covered names bytewise, and `env.narrow` intersects patterns
+  ([CAP-7](capabilities.md#cap-7-attenuation), [env](../../core/std/api/env.md)). They
+  are not provider operations: the snapshot enters with the entry's grants
+  ([CAP-8](capabilities.md#cap-8-the-replay-point)).
 - **Other results.** `box.unbox` returns the payload and refunds the node. `ParseError`'s
   `Invalid` holds a byte position. A
   `Box`, `Rc` or `Arc` is read through its payload where its own type does not fit

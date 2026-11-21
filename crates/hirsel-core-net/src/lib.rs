@@ -5,7 +5,7 @@ hirsel_guard::install!();
 use std::net::IpAddr;
 
 /// The public grant spelling, also used in configuration diagnostics.
-pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>>";
+pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names>";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -114,8 +114,10 @@ impl Rule {
     }
 }
 
+mod ip;
+pub use ip::Ip;
 mod grant;
-pub use grant::{GrantRule, RuleView};
+pub use grant::{GrantRule, ResolveRule, RuleView};
 mod reactor;
 pub use reactor::{Crossing, Poller, SHARED_UNIT_SHIFT, Sockets, share_poller};
 /// mc-units-untied: epoll_wait calls made by run reactors.
@@ -218,6 +220,37 @@ mod tests {
         assert!(root.intersect(&roots).is_none());
         let outside = TlsRule::parse("Tls *.a.test 1-1 System").unwrap();
         assert!(rules[0].0.intersect(&outside).is_none());
+    }
+
+    #[test]
+    fn resolve_narrow_only_keeps_the_shared_names() {
+        let parent = GrantRule::parse("Resolve *.a.test,127.0.0.1").unwrap();
+        let requested = GrantRule::parse("Resolve *.test,127.0.0.2,127.0.0.1").unwrap();
+        for (a, b) in [(&parent, &requested), (&requested, &parent)] {
+            let GrantRule::Resolve(result) = a.intersect(b).unwrap() else {
+                panic!("NET-11 intersection must be a Resolve rule");
+            };
+            for (name, shared) in [
+                ("x.a.test", true),
+                ("X.A.TEST.", true),
+                ("deep.x.a.test", true),
+                ("a.test", false),
+                ("xa.test", false),
+                ("x.test", false),
+                ("127.0.0.1", true),
+                ("127.0.0.2", false),
+            ] {
+                assert_eq!(
+                    result.permits(&Name::parse(name).unwrap()),
+                    shared,
+                    "resolve_narrow_label_and_literal_authority: {name}"
+                );
+            }
+        }
+        let outside = GrantRule::parse("Resolve xa.test").unwrap();
+        assert!(parent.intersect(&outside).is_none());
+        let tls = GrantRule::parse("Tls *.a.test 0-65535 System").unwrap();
+        assert!(parent.intersect(&tls).is_none());
     }
 
     #[test]

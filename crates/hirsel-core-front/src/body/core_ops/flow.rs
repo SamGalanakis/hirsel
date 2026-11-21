@@ -76,11 +76,7 @@ impl Cx<'_, '_, '_> {
             never: false,
         };
         let mut fd = self.fd.as_ref().clone();
-        fd.path.0.name = format!(
-            "{}$flow_transform{}",
-            fd.path.0.name,
-            n.0 - self.item.range.nodes.start
-        );
+        fd.path.0.name = self.generated_name(GeneratedKind::FlowTransform, n);
         fd.params.clear();
         fd.result = UNIT;
         fd.drop_of = None;

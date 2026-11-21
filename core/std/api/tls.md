@@ -23,5 +23,7 @@ Failure after a partial commit spends the write half. Later sends on it give
 The launcher can grant a `Secret` from the environment or a file. Use
 `secret.seal` to transfer owned bytes into secret storage and `secret.narrow`
 to restrict the permitted names. `secret.render` always returns `[secret]`.
+A grant or seal whose `to` text ends in `mac` or `verify` also lets the secret key an
+HMAC-SHA256 ([HMAC](hmac.md#secret-keys)).
 
 For HTTP/1.1 over TLS, use [the HTTP client](http_client.md).

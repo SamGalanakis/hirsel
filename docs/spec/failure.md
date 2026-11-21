@@ -23,11 +23,12 @@ raised it:
 | `Unwrap` | [`option.unwrap`](../../core/core/option.hirsel) of `None`, [`result.unwrap`](../../core/core/result.hirsel) of `Error` ([core](core.md#contracts-the-signatures-do-not-state)) |
 | `Fail(text)` | `fail(msg)`, which has type `Never` |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
-| `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
+| `Capacity(c)` | an admission the current limit refuses ([MEM-21](budgets.md#mem-21-admission)), `c` the refused charge ([MEM-22](budgets.md#mem-22-the-capacity-value)) |
 | `OutOfTime` | a step past the current step bound ([MEM-30](budgets.md#mem-30-step-bounds)) |
-| `Tape` | a provider operation whose tape refuses it before issue ([CAP-9](capabilities.md#cap-9-tapes)) |
 
-`Capacity` outside a finalizer is an error, never a failure.
+The admissions that return their refusal as a value instead (a bound scope's or an
+`isolate`'s entry, a resource literal, a `try_` operation) raise nothing
+([MEM-21](budgets.md#mem-21-admission)).
 
 A failure raised inside a core function has as its site the call that reached it from the
 nearest non-core caller. When that call is through a function value, the site is the call
@@ -51,8 +52,8 @@ value's finalizer, a callee's own failure), and what it did is not undone: a cal
 effects on its `mut` arguments stand, and so does an installed value.
 
 ```hirsel
-fn put(mut q: List[HostFile], take f: HostFile) -> Result[(), (Capacity, HostFile)] {
-  list.push(mut q, take f)              // on Capacity the error owns f
+fn put(mut q: List[HostFile], take f: HostFile) {
+  list.push(mut q, take f)              // refused: q unchanged, f dropped by the failure's cleanup
 }
 ```
 
@@ -76,7 +77,8 @@ fn pair(d: Dir) -> Result[Pair, IoError] waits {
 ### FAIL-5: Multi-step operations
 
 An operation that allocates in several steps, such as `clone`, `clone_in` and map
-insertion that grows, undoes its own partial results before it returns its error, as
+insertion that grows, undoes its own partial results before it raises its failure or
+returns its error, as
 [T1.5](ownership.md#own-26-the-transition-table) states. A callback's effects inside such an
 operation are never undone.
 
@@ -147,7 +149,7 @@ finalizer takes its cell and storage from the finalizer's grant
 ([MEM-27](budgets.md#mem-27-finalizer-grants)). A cause raised by a finalizer goes into its
 resource's cell, and any other cause into the task's primary cell. If a finalizer cannot
 admit an obligation while a failure is active, its grant being exhausted, that is its own
-failure with cause `Capacity`, recorded in its resource's cell, and cleanup continues; an
+failure with cause `Capacity(c)`, recorded in its resource's cell, and cleanup continues; an
 `isolate`'s refused cell is a value instead ([FAIL-16](#fail-16-isolation)). So
 code that makes no resources performs no cause admission beyond task startup, the chain has no depth limit and
 is never truncated, and recording, linking and delivering causes never admit. An unused
@@ -232,7 +234,6 @@ writes one line to stderr, `run stop: ` and the stop's name
 |---|---|
 | the stack is exhausted | `Stack` |
 | every task waits on another task (a join, a channel send or receive, an abandon), no timer is pending and no provider operation is outstanding | `Deadlock` |
-| at whole-run quiescence a replay tape diverges or its reader reports a fault | `Replay tape` with the tape id and verdict |
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |
@@ -271,8 +272,8 @@ recovery boundary and undoes nothing:
   its place, so the code after `isolate` has an unused cell to fail into; when it did not,
   every caught cause having gone into resources' cells, the reserved cell is refunded. A
   failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
-  `Bounds`, `Division`, `Unwrap`, `Fail`, `Tape`, a finalizer's `Capacity`
-  ([MEM-27](budgets.md#mem-27-finalizer-grants)), and `OutOfTime` at an `isolate` where the
+  `Bounds`, `Division`, `Unwrap`, `Fail`, `Capacity`
+  ([MEM-21](budgets.md#mem-21-admission)), and `OutOfTime` at an `isolate` where the
   step bound that ran out is no longer current.
 - A failure whose primary cause is `Cancelled` is not caught, and neither is one whose
   primary cause is `OutOfTime` at an `isolate` where the step bound that ran out is still
@@ -280,8 +281,7 @@ recovery boundary and undoes nothing:
   ([MEM-30](budgets.md#mem-30-step-bounds)): after the
   same cleanup the reserved cell is refunded, the chain set aside is restored with the failure's causes
   after it, and the failure goes on past `isolate`. A run stop (FAIL-15)
-  is not caught, and nothing resumes at the operation that failed. `Capacity` outside a
-  finalizer is an error that `body` handles as a value (FAIL-2), never a failure.
+  is not caught, and nothing resumes at the operation that failed.
 
 `body`'s type is not `waits`, so nothing in it waits ([LANG-8](language.md#lang-8-signatures)),
 and it takes no parameter, so it has no `mut` or `take` parameter; a callable that does
@@ -317,6 +317,14 @@ fn run(db: Map[u64, u64], step: own fn(Map[u64, u64], mut Map[u64, u64])) -> Res
     step(db, mut writes)                          // a failure here cleans writes; db is unchanged
     writes
   })
+}
+```
+```hirsel
+fn copy_or_empty(s: String) -> String {
+  match isolate(fn() -> String { string.from(s) }) {   // a refused copy is caught here
+    Ok(Ok(t)) => t,
+    _ => string.new(),
+  }
 }
 ```
 ```hirsel

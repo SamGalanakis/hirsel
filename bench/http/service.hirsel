@@ -16,24 +16,24 @@ type PlaceJob: send {
 type CounterSource {
     listener: Listener,
     clock: Clock,
-    table: store.store.Table[u64, u64],
-    shape: store.store.Shape[u64, u64],
+    table: store.Table[u64, u64],
+    shape: store.Shape[u64, u64],
     buffer: Bytes
 }
 
-fn put_counter(mut db: store.store.Db, table: store.store.Table[u64, u64], value: u64) waits {
-    let written = result.unwrap(store.store.run(mut db, None, fn(mut tx: store.store.Tx) -> Result[(), store.store.Error] {
-        store.store.put(mut tx, table, 1u64, value)
+fn put_counter(mut db: store.Db, table: store.Table[u64, u64], value: u64) waits {
+    let written = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, table, 1u64, value)
     }))
     match take written {
-        Committed(take done) => result.unwrap(store.store.durable(mut db, done.ticket)),
+        Committed(take done) => result.unwrap(store.durable(mut db, done.ticket)),
         _ => fail("counter transaction did not commit"),
     }
 }
 
-fn get_counter(db: store.store.Db, shape: store.store.Shape[u64, u64]) -> u64 {
-    let read = result.unwrap(store.store.look(store.store.snapshot(db), None, fn(tx: store.store.Tx) -> u64 {
-        option.unwrap(result.unwrap(store.store.fetch(tx, shape, 1u64)))
+fn get_counter(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
+    let read = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
+        option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
     }))
     match take read {
         Seen(take row) => row.value,
@@ -41,7 +41,7 @@ fn get_counter(db: store.store.Db, shape: store.store.Shape[u64, u64]) -> u64 {
     }
 }
 
-fn receive_counter(db: store.store.Db, mut source: CounterSource, wait: bool) -> Option[(Socket, u64)] waits {
+fn receive_counter(db: store.Db, mut source: CounterSource, wait: bool) -> Option[(Socket, u64)] waits {
     let until = if wait { Never } else { At(source.clock, host.mono_ns(source.clock)) }
     match host.accept(mut source.listener, until) {
         Ok((take socket, _)) => Some((take socket, get_counter(db, source.shape) + 1)),
@@ -49,13 +49,13 @@ fn receive_counter(db: store.store.Db, mut source: CounterSource, wait: bool) ->
     }
 }
 
-fn increment_counter(mut tx: store.store.Tx, source: CounterSource, request: (Socket, u64)) -> Result[u64, store.store.Error] {
+fn increment_counter(mut tx: store.Tx, source: CounterSource, request: (Socket, u64)) -> Result[u64, store.Error] {
     let value = request.1
-    store.store.put(mut tx, source.table, 1u64, value)?
+    store.put(mut tx, source.table, 1u64, value)?
     Ok(value)
 }
 
-fn deliver_counter(mut source: CounterSource, take request: (Socket, u64), take outcome: Result[store.store.Outcome[u64, store.store.Error], store.store.Error]) waits {
+fn deliver_counter(mut source: CounterSource, take request: (Socket, u64), take outcome: Result[store.Outcome[u64, store.Error], store.Error]) waits {
     if let Ok(Committed(done)) = outcome {
         let (take socket, _) = take request
         let value = done.value
@@ -81,17 +81,17 @@ fn deliver_counter(mut source: CounterSource, take request: (Socket, u64), take 
 
 fn place_writer(take job: PlaceJob) waits {
     let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready) = take job
-    let mut db = result.unwrap(store.store.open(tasks, dir, clock, random, store.store.defaults()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
     let codec: std.codec.Codec[u64] = std.codec.of()
-    let ticket = result.unwrap(store.store.create_table(mut db, store.store.spec("counter", std.codec.key_u64(), codec)))
-    result.unwrap(store.store.durable(mut db, ticket))
-    let table = result.unwrap(store.store.table(mut db, "counter", std.codec.key_u64(), codec))
-    let shape = store.store.shape(table)
+    let ticket = result.unwrap(store.create_table(mut db, store.spec("counter", std.codec.key_u64(), codec)))
+    result.unwrap(store.durable(mut db, ticket))
+    let table = result.unwrap(store.table(mut db, "counter", std.codec.key_u64(), codec))
+    let shape = store.shape(table)
     put_counter(mut db, table, 0)
     let mut source = CounterSource(listener: take listener, clock: clock, table: table, shape: shape, buffer: result.unwrap(list.with_capacity(8)))
     result.unwrap(channel.send(ready, ()))
-    let written = store.store.write_place(mut db, mut source, receive_counter, increment_counter, deliver_counter)
-    let closed = store.store.close(take db)
+    let written = store.write_place(mut db, mut source, receive_counter, increment_counter, deliver_counter)
+    let closed = store.close(take db)
     result.unwrap(take written)
     result.unwrap(take closed)
 }

@@ -26,6 +26,153 @@ pub fn get_or[T: plain](xs: List[T], i: u64, x: T) -> T {
     }
 }
 
+// ADAPTED from memchr 2.8.3 src/arch/generic/memchr.rs:143-230.
+// Long-span SIMD search: check the first 32-byte vector, scan 128-byte
+// four-vector groups, finish remaining 32-byte vectors, and guard the tail
+// with one in-range overlapping 32-byte load. Requires len(hay) - from >= 32.
+fn find_byte_lanes(hay: Bytes, from: u64, byte: u8) -> Option[u64] {
+    let end = list.len(hay)
+    let needle: Simd[u8, 32] = simd.splat(byte)
+    let head: Simd[u8, 32] = list.lanes(hay, from)
+    let first_mask = simd.bitmask(simd.eq(head, needle))
+    if first_mask != 0 {
+        let offset: u64 = int.widen(int.trailing_zeros(first_mask))
+        return Some(from + offset)
+    }
+    let mut i = from + 32
+    if end - i >= 128 {
+        let last_group = end - 128
+        while i <= last_group {
+            let block = list.slice(hay, i, i + 128)
+            let a: Simd[u8, 32] = list.lanes(block, 0)
+            let b: Simd[u8, 32] = list.lanes(block, 32)
+            let c: Simd[u8, 32] = list.lanes(block, 64)
+            let d: Simd[u8, 32] = list.lanes(block, 96)
+            let ma = simd.eq(a, needle)
+            let mb = simd.eq(b, needle)
+            let mc = simd.eq(c, needle)
+            let md = simd.eq(d, needle)
+            if simd.any((ma | mb) | (mc | md)) {
+                let low = simd.bitmask(ma) | (simd.bitmask(mb) << 32)
+                if low != 0 {
+                    let offset: u64 = int.widen(int.trailing_zeros(low))
+                    return Some(i + offset)
+                }
+                let high = simd.bitmask(mc) | (simd.bitmask(md) << 32)
+                let offset: u64 = int.widen(int.trailing_zeros(high))
+                return Some(i + 64 + offset)
+            }
+            i += 128
+        }
+    }
+    while end - i >= 32 {
+        let block: Simd[u8, 32] = list.lanes(hay, i)
+        let mask = simd.bitmask(simd.eq(block, needle))
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(i + offset)
+        }
+        i += 32
+    }
+    if i < end {
+        let at = end - 32
+        let tail: Simd[u8, 32] = list.lanes(hay, at)
+        let mask = simd.bitmask(simd.eq(tail, needle))
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(at + offset)
+        }
+    }
+    None
+}
+
+// ADAPTED from memchr 2.8.3 src/arch/generic/memchr.rs:143-230.
+// Shared long-span vector search for two to four delimiter bytes.
+// Requires len(hay) - from >= 32.
+fn find_byte4_lanes(hay: Bytes, from: u64, n0: u8, n1: u8, n2: u8, n3: u8) -> Option[u64] {
+    let end = list.len(hay)
+    let v0: Simd[u8, 32] = simd.splat(n0)
+    let v1: Simd[u8, 32] = simd.splat(n1)
+    let v2: Simd[u8, 32] = simd.splat(n2)
+    let v3: Simd[u8, 32] = simd.splat(n3)
+    let head: Simd[u8, 32] = list.lanes(hay, from)
+    let first_mask = simd.bitmask((simd.eq(head, v0) | simd.eq(head, v1)) | (simd.eq(head, v2) | simd.eq(head, v3)))
+    if first_mask != 0 {
+        let offset: u64 = int.widen(int.trailing_zeros(first_mask))
+        return Some(from + offset)
+    }
+    let mut i = from + 32
+    if end - i >= 128 {
+        let last_group = end - 128
+        while i <= last_group {
+            let block = list.slice(hay, i, i + 128)
+            let a: Simd[u8, 32] = list.lanes(block, 0)
+            let b: Simd[u8, 32] = list.lanes(block, 32)
+            let c: Simd[u8, 32] = list.lanes(block, 64)
+            let d: Simd[u8, 32] = list.lanes(block, 96)
+            let ma = (simd.eq(a, v0) | simd.eq(a, v1)) | (simd.eq(a, v2) | simd.eq(a, v3))
+            let mb = (simd.eq(b, v0) | simd.eq(b, v1)) | (simd.eq(b, v2) | simd.eq(b, v3))
+            let mc = (simd.eq(c, v0) | simd.eq(c, v1)) | (simd.eq(c, v2) | simd.eq(c, v3))
+            let md = (simd.eq(d, v0) | simd.eq(d, v1)) | (simd.eq(d, v2) | simd.eq(d, v3))
+            if simd.any((ma | mb) | (mc | md)) {
+                let low = simd.bitmask(ma) | (simd.bitmask(mb) << 32)
+                if low != 0 {
+                    let offset: u64 = int.widen(int.trailing_zeros(low))
+                    return Some(i + offset)
+                }
+                let high = simd.bitmask(mc) | (simd.bitmask(md) << 32)
+                let offset: u64 = int.widen(int.trailing_zeros(high))
+                return Some(i + 64 + offset)
+            }
+            i += 128
+        }
+    }
+    while end - i >= 32 {
+        let block: Simd[u8, 32] = list.lanes(hay, i)
+        let mask = simd.bitmask((simd.eq(block, v0) | simd.eq(block, v1)) | (simd.eq(block, v2) | simd.eq(block, v3)))
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(i + offset)
+        }
+        i += 32
+    }
+    if i < end {
+        let at = end - 32
+        let tail: Simd[u8, 32] = list.lanes(hay, at)
+        let mask = simd.bitmask((simd.eq(tail, v0) | simd.eq(tail, v1)) | (simd.eq(tail, v2) | simd.eq(tail, v3)))
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(at + offset)
+        }
+    }
+    None
+}
+
+// Short-span 16-byte SIMD search for two to four delimiter bytes (16 <= len < 32).
+fn find_byte4_lanes16(hay: Bytes, n0: u8, n1: u8, n2: u8, n3: u8) -> Option[u64] {
+    let n = list.len(hay)
+    let v0: Simd[u8, 16] = simd.splat(n0)
+    let v1: Simd[u8, 16] = simd.splat(n1)
+    let v2: Simd[u8, 16] = simd.splat(n2)
+    let v3: Simd[u8, 16] = simd.splat(n3)
+    let head: Simd[u8, 16] = list.lanes(hay, 0)
+    let mask = simd.bitmask((simd.eq(head, v0) | simd.eq(head, v1)) | (simd.eq(head, v2) | simd.eq(head, v3)))
+    if mask != 0 {
+        let offset: u64 = int.widen(int.trailing_zeros(mask))
+        return Some(offset)
+    }
+    if n > 16 {
+        let at = n - 16
+        let tail: Simd[u8, 16] = list.lanes(hay, at)
+        let tail_mask = simd.bitmask((simd.eq(tail, v0) | simd.eq(tail, v1)) | (simd.eq(tail, v2) | simd.eq(tail, v3)))
+        if tail_mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(tail_mask))
+            return Some(at + offset)
+        }
+    }
+    None
+}
+
 /// The first absolute index of byte in xs[start..end], or None (Rust memchr).
 /// Fails: Bounds for an invalid range. Alloc: nothing. Cost: O(end - start).
 pub fn find_byte(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
@@ -34,6 +181,27 @@ pub fn find_byte(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
     let one: u64 = int.widen(byte)
     let spread = one * 0x0101010101010101
     let mut at: u64 = 0
+    if n >= 160 {
+        // Check the first 32 bytes with scalar words so nearby matches avoid SIMD dispatch.
+        while at < 32 {
+            let low = int.zero_byte_marks(list.word_le(b, at) ^ spread)
+            let high = int.zero_byte_marks(list.word_le(b, at + 8) ^ spread)
+            if low | high != 0 {
+                let low_bit: u64 = int.widen(int.trailing_zeros(low))
+                let high_bit: u64 = int.widen(int.trailing_zeros(high))
+                return Some(if low != 0 {
+                    start + at + (low_bit >> 3)
+                } else {
+                    start + at + 8 + (high_bit >> 3)
+                })
+            }
+            at += 16
+        }
+        return match find_byte_lanes(b, 32, byte) {
+            Some(found) => Some(start + found),
+            None => None,
+        }
+    }
     if n >= 16 {
         let last_block = n - 16
         while at <= last_block {
@@ -82,36 +250,19 @@ pub fn find_byte3(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8) -> Optio
 pub fn find_byte4(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8, d: u8) -> Option[u64] {
     let hay = list.slice(xs, start, end)
     let n = list.len(hay)
-    let mut i: u64 = 0
+    if n >= 32 {
+        return match find_byte4_lanes(hay, 0, a, b, c, d) {
+            Some(found) => Some(start + found),
+            None => None,
+        }
+    }
     if n >= 16 {
-        let block: Simd[u8, 16] = list.lanes(hay, 0)
-        let va: Simd[u8, 16] = simd.splat(a)
-        let vb: Simd[u8, 16] = simd.splat(b)
-        let vc: Simd[u8, 16] = simd.splat(c)
-        let vd: Simd[u8, 16] = simd.splat(d)
-        let marks = simd.bitmask(simd.eq(block, va) | simd.eq(block, vb) | simd.eq(block, vc) | simd.eq(block, vd))
-        if marks != 0 {
-            let offset: u64 = int.widen(int.trailing_zeros(marks))
-            return Some(start + offset)
-        }
-        i = 16
-    }
-    if n - i >= 32 {
-        let va: Simd[u8, 32] = simd.splat(a)
-        let vb: Simd[u8, 32] = simd.splat(b)
-        let vc: Simd[u8, 32] = simd.splat(c)
-        let vd: Simd[u8, 32] = simd.splat(d)
-        let last_block = n - 32
-        while i <= last_block {
-            let block: Simd[u8, 32] = list.lanes(hay, i)
-            let marks = simd.bitmask(simd.eq(block, va) | simd.eq(block, vb) | simd.eq(block, vc) | simd.eq(block, vd))
-            if marks != 0 {
-                let offset: u64 = int.widen(int.trailing_zeros(marks))
-                return Some(start + i + offset)
-            }
-            i += 32
+        return match find_byte4_lanes16(hay, a, b, c, d) {
+            Some(found) => Some(start + found),
+            None => None,
         }
     }
+    let mut i: u64 = 0
     while i < n {
         let byte = hay[i]
         if byte == a || byte == b || byte == c || byte == d {
@@ -230,16 +381,30 @@ pub fn reverse[T](mut xs: List[T]) {
 }
 
 /// Sorts in place; `before(a, b)` returns Less when a goes first. Not stable.
-/// Introsort: quicksort with a median-of-three pivot, insertion sort below 17 elements and
-/// heapsort past 2 log2(len) partition levels (Rust's sort_unstable is pdqsort, which adds
-/// pattern detection on top of the same three parts).
+/// Introsort detects ordered runs and partitions out equal keys. It uses a median-of-three
+/// pivot, insertion sort below 17 elements and heapsort past 2 log2(len) partition levels.
 /// `before` is a `scoped fn` (OWN-21): it may view the caller's locals and does not wait;
 /// it does not escape the call. If it is not a total order, xs still holds each element exactly once, in an unspecified
 /// order. A failure inside `before` propagates with the same guarantee.
-/// Alloc: nothing. Cost: O(len log len) worst case.
+/// Alloc: nothing. Cost: O(len) on ordered inputs, O(len log len) worst case.
 /// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a, b) })`
 pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order) {
     let n = list.len(xs)
+    if n <= 16 {
+        insertion_sort(mut xs, 0, n, before)
+        return
+    }
+    let descending = less(xs, 1, 0, before)
+    let mut run: u64 = 2
+    while run < n && less(xs, run, run - 1, before) == descending {
+        run += 1
+    }
+    if run == n {
+        if descending {
+            reverse(mut xs)
+        }
+        return
+    }
     let mut limit: u64 = 0
     let mut m = n
     while m > 1 {
@@ -318,7 +483,11 @@ fn sort_range[T](mut xs: List[T], start: u64, end: u64, limit: u64, before: scop
             return
         }
         depth -= 1
-        let p = partition(mut xs, a, b, before)
+        let (p, grouped_equals) = partition(mut xs, a, b, before)
+        if grouped_equals {
+            a = p + 1
+            continue
+        }
         if p - a < b - p {
             sort_range(mut xs, a, p, depth, before)
             a = p + 1
@@ -330,9 +499,9 @@ fn sort_range[T](mut xs: List[T], start: u64, end: u64, limit: u64, before: scop
     insertion_sort(mut xs, a, b, before)
 }
 
-/// Lomuto partition of xs[a..b] (b - a >= 3) around the median of its first, middle and
-/// last elements; returns the pivot's final index.
-fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) -> u64 {
+// Median-of-three Lomuto partition. Returns the pivot's final index and
+// whether the elements to its left are already done.
+fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) -> (u64, bool) {
     let mid = a + (b - a) / 2
     let hi = b - 1
     if less(xs, mid, a, before) {
@@ -344,9 +513,35 @@ fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Orde
     if less(xs, mid, hi, before) {
         list.swap(mut xs, mid, hi)
     }
+    // As in ipnsort, the preceding partition leaves xs[a - 1] as a
+    // lower bound for this range. If the pivot equals it, finish all
+    // equal keys in one pass.
+    if a > 0 && equal_at(xs, a - 1, hi, before) {
+        return (partition_equal(mut xs, a, hi, before), true)
+    }
     let mut store = a
     for i in a .. hi {
         if less(xs, i, hi, before) {
+            list.swap(mut xs, i, store)
+            store += 1
+        }
+    }
+    list.swap(mut xs, store, hi)
+    (store, false)
+}
+
+fn equal_at[T](xs: List[T], i: u64, j: u64, before: scoped fn(T, T) -> Order) -> bool {
+    match before(xs[i], xs[j]) {
+        Equal => true,
+        _ => false,
+    }
+}
+
+// The pivot is a lower bound for the range. Move its equals to the front.
+fn partition_equal[T](mut xs: List[T], a: u64, hi: u64, before: scoped fn(T, T) -> Order) -> u64 {
+    let mut store = a
+    for i in a .. hi {
+        if equal_at(xs, i, hi, before) {
             list.swap(mut xs, i, store)
             store += 1
         }

@@ -4,7 +4,7 @@
 /* Provider operations: Open 0, Read 1, Write 2, Close 3, TryLock 4, Unlock 5,
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
-   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
+   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28, Resolve 40.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
 /* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code).
@@ -136,9 +136,10 @@ uint64_t hirsel_core_entry_grant(const HirselCoreProcessConfig *, uint8_t kind, 
 bool hirsel_core_entry_grants_present(const HirselCoreProcessConfig *, const HirselCoreEntryRequirement *, size_t);
 const HirselCoreProvider *hirsel_core_capability_provider(const HirselCoreContext *, uint64_t);
 uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
-/* NET-6 configuration. dir: 0 Connect, 1 Listen, 2 Tls. Address rules use
-   family (0 V4, 1 V6), hi, lo and bits. TLS rules use comma-separated patterns
-   and trust (0 System, 1 Roots); roots holds the SHA-256 pin for Roots. */
+/* NET-6 configuration. dir: 0 Connect, 1 Listen, 2 Tls, 3 Resolve. Address
+   rules use family (0 V4, 1 V6), hi, lo and bits. Tls and Resolve use
+   comma-separated patterns. Tls also uses trust (0 System, 1 Roots) and
+   roots for the SHA-256 pin. Resolve uses only patterns and patterns_len. */
 typedef struct {
     uint8_t dir, family;
     uint64_t hi, lo;
@@ -156,6 +157,8 @@ typedef struct HirselCoreProcessOperations HirselCoreProcessOperations;
 extern const HirselCoreProcessOperations hirsel_core_os_process_ops;
 typedef struct HirselCoreSocketActivation HirselCoreSocketActivation;
 extern const HirselCoreSocketActivation hirsel_core_os_socket_activation;
+typedef struct HirselCoreSecretOperations HirselCoreSecretOperations;
+extern const HirselCoreSecretOperations hirsel_core_os_secret_ops;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -177,6 +180,8 @@ typedef struct {
     const HirselCoreSocketActivation *socket_activation;
     const HirselCoreView (*secret_grants)[3]; /* parameter, source label, patterns */
     size_t secret_grants_len;
+    /* Set to &hirsel_core_os_secret_ops for a sourced launch with Secrets. */
+    const HirselCoreSecretOperations *secret_ops;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
@@ -198,6 +203,10 @@ const HirselCoreProcessConfig *hirsel_core_os_process_config(const HirselCoreOsP
 void hirsel_core_os_process_free(HirselCoreOsProcess *);
 #include "hirsel_core_rt_sites.h"
 
+/* Resolve appends Ip elements (tag@0, payload@8, stride 24). The result
+   counts appended elements; the request buffer counts elements rather than bytes. */
+HirselCoreHostOutcome hirsel_core_host_resolve(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow_resolve(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 /* Until is lowered to kind (0 Never, 1 At), Clock capability, absolute ns.
    Listen/accept append normalized address scalars. Split has no replay point. */
 typedef struct {

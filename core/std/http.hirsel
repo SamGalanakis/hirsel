@@ -1665,11 +1665,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         Ok(take b) => take b,
         Error(_) => return 0
     }
-    let scratch_alloc: Result[Bytes, Capacity] = list.with_capacity(8192)
-    let mut scratch = match take scratch_alloc {
-        Ok(take b) => take b,
-        Error(_) => return 0
-    }
+    let mut scratch: Bytes = list.new()
     let mut first = true
     let mut start = accepted
     let mut batch: u64 = 0
@@ -1736,6 +1732,19 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 }
                 break
             },
+        }
+        let need_scratch = match frame {
+            Empty => false,
+            ContentLength(n) => n != 0 && n > list.len(input) - head.end,
+            Chunked => true,
+            CloseDelimited => true,
+        }
+        if need_scratch && list.capacity(scratch) == 0 {
+            let scratch_alloc: Result[Bytes, Capacity] = list.with_capacity(8192)
+            scratch = match take scratch_alloc {
+                Ok(take b) => take b,
+                Error(_) => break,
+            }
         }
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at, offer) = {

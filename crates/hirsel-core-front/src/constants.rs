@@ -102,7 +102,12 @@ impl Program<'_> {
                 self.const_refuse(at, expr, "a constant must have a plain type");
                 None
             } else {
-                ConstCx { p: self, at }.expr(expr, Some(ty), true)
+                ConstCx {
+                    p: self,
+                    at,
+                    ascribing: false,
+                }
+                .expr(expr, Some(ty), true)
             };
             self.constants[i].value = value;
             done[i - base] = true;
@@ -198,11 +203,22 @@ impl Program<'_> {
 struct ConstCx<'p, 'a> {
     p: &'p mut Program<'a>,
     at: ItemRef,
+    ascribing: bool,
 }
 impl ConstCx<'_, '_> {
     fn fail(&mut self, n: NodeId, message: &str) -> Option<ConstValue> {
         self.p.const_refuse(self.at, n, message);
         None
+    }
+    fn mismatch(&mut self, n: NodeId, message: &str) -> Option<ConstValue> {
+        if self.ascribing {
+            self.p
+                .refusals
+                .push(refusal("LANG-11", self.p.site(self.at, n), message));
+            None
+        } else {
+            self.fail(n, message)
+        }
     }
     fn project(&mut self, n: NodeId, value: ConstValue, name: &str) -> Option<ConstValue> {
         match self
@@ -236,6 +252,16 @@ impl ConstCx<'_, '_> {
             .unwrap_or("");
         let value = match node.kind {
             NodeKind::Group => return self.expr(kids[0], want, active),
+            NodeKind::Ascription => {
+                let ty = self.p.lower_ty(self.at, kids[1], &[]);
+                if ty == ERROR {
+                    return None;
+                }
+                let outer = std::mem::replace(&mut self.ascribing, true);
+                let value = self.expr(kids[0], Some(ty), active);
+                self.ascribing = outer;
+                value?
+            }
             NodeKind::Unit => ConstValue {
                 ty: UNIT,
                 data: ConstData::Unit,
@@ -317,7 +343,7 @@ impl ConstCx<'_, '_> {
             _ => return self.fail(n, "this expression is not permitted in a constant"),
         };
         if want.is_some_and(|want| value.ty != want) {
-            return self.fail(n, "constant type differs from its annotation");
+            return self.mismatch(n, "constant type differs from its annotation");
         }
         Some(value)
     }
@@ -442,7 +468,7 @@ impl ConstCx<'_, '_> {
                 let text = self.p.index.symbols.text(name);
                 let (d, ty) = if let Some(ty) = want {
                     let TyKind::Adt(d, _) = *self.p.types.kind(ty) else {
-                        return self.fail(n, "constant constructor has another type");
+                        return self.mismatch(n, "constant constructor has another type");
                     };
                     (d, Some(ty))
                 } else {
@@ -475,7 +501,7 @@ impl ConstCx<'_, '_> {
                     _ => None,
                 };
                 if case.is_none() {
-                    return self.fail(n, "constant constructor has another type");
+                    return self.mismatch(n, "constant constructor has another type");
                 }
                 (d, case, ty)
             }
@@ -551,7 +577,7 @@ impl ConstCx<'_, '_> {
             });
             let child = self.expr(child, hint, active)?;
             if hint.is_none() && !bind(&self.p.types, field.ty, child.ty, &mut type_args) {
-                return self.fail(arg, "constant payload has another type");
+                return self.mismatch(arg, "constant payload has another type");
             }
             self.set_field(value, i, child);
         }
@@ -597,7 +623,7 @@ impl ConstCx<'_, '_> {
                     return self.fail(n, "a constant number needs an expected type");
                 };
                 let Some((signed, width)) = Ty::Scalar(s).int() else {
-                    return self.fail(n, "an integer token requires an integer type");
+                    return self.mismatch(n, "an integer token requires an integer type");
                 };
                 let Some(magnitude) = crate::body::int_magnitude(digits) else {
                     return self.fail(n, "constant literal is outside its type");
@@ -620,7 +646,7 @@ impl ConstCx<'_, '_> {
             TokenKind::Float => {
                 let (digits, suffix) = crate::body::float_suffix(text);
                 let Some(s @ (Scalar::F32 | Scalar::F64)) = suffix.or(expected) else {
-                    return self.fail(n, "a float token requires a float type");
+                    return self.mismatch(n, "a float token requires a float type");
                 };
                 let Some(bits) = crate::body::parse_float_bits(s, digits, negative) else {
                     return self.fail(n, "invalid constant float literal");
@@ -630,7 +656,7 @@ impl ConstCx<'_, '_> {
             _ => return self.fail(n, "this literal is not a constant"),
         };
         if expected.is_some_and(|expected| expected != s) {
-            return self.fail(n, "constant literal has another type");
+            return self.mismatch(n, "constant literal has another type");
         }
         Some(self.bits(s, bits))
     }

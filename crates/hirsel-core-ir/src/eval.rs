@@ -151,7 +151,7 @@ struct Cause {
     site: Option<Anchor>,
 }
 /// `CauseKind` in declaration order, its case ordinals.
-const CAUSE_KINDS: [&str; 9] = [
+const CAUSE_KINDS: [&str; 8] = [
     "Overflow",
     "Bounds",
     "Division",
@@ -159,7 +159,6 @@ const CAUSE_KINDS: [&str; 9] = [
     "Fail",
     "Cancelled",
     "Capacity",
-    "Tape",
     "OutOfTime",
 ];
 /// A cause cell: core's `Cause` (32 bytes: the `Fail` carrier at 0, `Site` at 24),
@@ -170,9 +169,6 @@ const CAUSE_CAPACITY: u64 = 16;
 const CAUSE_SITE: u64 = 24;
 
 const CAUSE_KIND_START: u64 = 1 << 63;
-
-/// The evaluator's gap for every tape row (D-B3): a run stop by name.
-const NO_TAPE: &str = "tape.open: no tape provider on the evaluator (S2)";
 
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
 #[derive(Debug)]
@@ -1879,6 +1875,40 @@ impl Machine<'_> {
         }
         Ok(result)
     }
+    fn network_resolve(&mut self, a: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::{GrantRule, Ip, Name};
+        let Some(name) = std::str::from_utf8(self.carrier_bytes(a[1]))
+            .ok()
+            .and_then(Name::parse)
+        else {
+            return vec![0, 1, 0, 0];
+        };
+        if !self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
+        }) {
+            return vec![0, 1, 0, 0];
+        }
+        if a[3] != 0 && a[5] <= self.world.clock {
+            return vec![0, 6, 0, 0];
+        }
+        let (data, len, cap) = (
+            self.load(a[2], 8),
+            self.load(a[2] + 8, 8),
+            self.load(a[2] + 16, 8),
+        );
+        let model = self.world.network.sockets.model().unwrap();
+        let addresses = model.resolve(&name, cap.saturating_sub(len) as usize);
+        let count = addresses.len() as u64;
+        for (index, address) in addresses.into_iter().enumerate() {
+            let offset = (len + index as u64) * Ip::SIZE as u64;
+            self.put(data + offset, &Ip::from(address).layout_bytes());
+        }
+        self.store(a[2] + 8, 8, len + count);
+        vec![count, 0, 0, 0]
+    }
+
     fn network_attempt(
         &mut self,
         t: &Task,
@@ -2127,6 +2157,7 @@ impl Machine<'_> {
                 | HostOp::MonoNs
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
+                | HostOp::NetNarrowResolve
                 | HostOp::NetSplit
         ) {
             self.check_cancel(t)?;
@@ -2141,6 +2172,17 @@ impl Machine<'_> {
             }
             HostOp::TlsConnect | HostOp::SendSecret | HostOp::SecretSeal | HostOp::SecretNarrow => {
                 unreachable!()
+            }
+            HostOp::Resolve => self.network_resolve(a),
+            HostOp::NetNarrowResolve => {
+                use hirsel_core_net::{GrantRule, ResolveRule};
+                match std::str::from_utf8(self.carrier_bytes(a[1]))
+                    .ok()
+                    .and_then(ResolveRule::new)
+                {
+                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Resolve(rule)),
+                    None => error(1),
+                }
             }
             HostOp::NetNarrowTls => {
                 use hirsel_core_net::{GrantRule, TlsRule, TlsTrust};
@@ -2805,9 +2847,6 @@ impl Machine<'_> {
                 }
                 failed
             }
-            // The evaluator has no tape provider (REPLAY-SPEC S2), so no Tape
-            // reaches a drop.
-            FieldTy::Handle(Handle::Tape) => panic!("{NO_TAPE}"),
             FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
                 let h = self.load(at, 8);
@@ -3461,9 +3500,6 @@ impl Machine<'_> {
                 vec![self.dests]
             }
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
-            RtOp::TapeOpen | RtOp::TapeEnd | RtOp::TapeGrant | RtOp::TapeAcross => {
-                panic!("{NO_TAPE}")
-            }
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
             RtOp::DescribeEmit => {
@@ -3498,6 +3534,76 @@ impl Machine<'_> {
                     n => self.get(a[0], n as usize).to_vec(),
                 };
                 vec![crate::hash_bytes(&bytes)]
+            }
+            RtOp::Xxh3Short => {
+                let data = if a[1] == 0 {
+                    &[]
+                } else {
+                    self.get(a[0], a[1] as usize)
+                };
+                vec![twox_hash::XxHash3_64::oneshot(data)]
+            }
+            RtOp::Xxh3Stripes => {
+                let count = a[3] as usize;
+                if count != 0 {
+                    let mut acc = [0u64; 8];
+                    for (lane, bytes) in acc.iter_mut().zip(self.get(a[0], 64).as_chunks::<8>().0) {
+                        *lane = u64::from_le_bytes(*bytes);
+                    }
+                    let data = self.get(a[1], count * 64);
+                    let secret = self.get(a[2], 64 + (count - 1) * 8);
+                    for (i, stripe) in data.as_chunks::<64>().0.iter().enumerate() {
+                        for (j, bytes) in stripe.as_chunks::<8>().0.iter().enumerate() {
+                            let key_at = (i + j) * 8;
+                            let key =
+                                u64::from_le_bytes(secret[key_at..key_at + 8].try_into().unwrap());
+                            let word = u64::from_le_bytes(*bytes);
+                            let keyed = word ^ key;
+                            acc[j ^ 1] = acc[j ^ 1].wrapping_add(word);
+                            acc[j] = acc[j].wrapping_add((keyed & 0xffff_ffff) * (keyed >> 32));
+                        }
+                    }
+                    let mut encoded = [0; 64];
+                    for (word, bytes) in acc.into_iter().zip(encoded.as_chunks_mut::<8>().0) {
+                        *bytes = word.to_le_bytes();
+                    }
+                    self.put(a[0], &encoded);
+                }
+                vec![]
+            }
+            RtOp::Sha1Blocks => {
+                let mut h = [0u32; 5];
+                for (word, bytes) in h.iter_mut().zip(self.get(a[0], 20).as_chunks::<4>().0) {
+                    *word = u32::from_le_bytes(*bytes);
+                }
+                let data = if a[2] == 0 {
+                    &[]
+                } else {
+                    self.get(a[1], a[2] as usize)
+                };
+                sha1_blocks(&mut h, data);
+                let mut encoded = [0; 20];
+                for (word, bytes) in h.into_iter().zip(encoded.as_chunks_mut::<4>().0) {
+                    *bytes = word.to_le_bytes();
+                }
+                self.put(a[0], &encoded);
+                vec![]
+            }
+            RtOp::Sha256Blocks => {
+                let mut h = [0u32; 8];
+                for (word, bytes) in h.iter_mut().zip(self.get(a[0], 32).as_chunks::<4>().0) {
+                    *word = u32::from_le_bytes(*bytes);
+                }
+                let data = match a[2] {
+                    0 => Vec::new(),
+                    n => self.get(a[1], (n * 64) as usize).to_vec(),
+                };
+                sha256_blocks(&mut h, &data);
+                self.put(
+                    a[0],
+                    &h.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),
+                );
+                vec![]
             }
             RtOp::ChannelNew { item } => {
                 let item = TypeRef(item.0);
@@ -3834,6 +3940,9 @@ impl Machine<'_> {
             vectors.unpack(b, &mut vals, &pool(blk.params), &incoming);
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
+                if matches!(inst, Inst::BuiltinUse { .. }) {
+                    continue;
+                }
                 assert!(
                     self.instructions != 0,
                     "evaluator instruction budget exhausted"
@@ -4595,6 +4704,7 @@ impl Machine<'_> {
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
             }
+            Inst::BuiltinUse { .. } => {}
             Inst::LimitExit => {
                 let l = t.limits.pop().unwrap();
                 self.end_limit(l, None);
@@ -4904,6 +5014,94 @@ impl MinimumOrNumber for f64 {
             return if x.is_sign_negative() { x } else { y };
         }
         x.min(y)
+    }
+}
+
+/// The SHA-256 round constants (FIPS 180-4 section 4.2.2).
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// RFC 3174 sections 4 and 6.1. The evaluator always uses scalar rounds.
+fn sha1_blocks(h: &mut [u32; 5], data: &[u8]) {
+    let (blocks, tail) = data.as_chunks::<64>();
+    let mut padding = [0u8; 128];
+    padding[..tail.len()].copy_from_slice(tail);
+    padding[tail.len()] = 0x80;
+    let end = if tail.len() < 56 { 64 } else { 128 };
+    padding[end - 8..end].copy_from_slice(&((data.len() as u64) << 3).to_be_bytes());
+
+    for block in blocks.iter().chain(padding[..end].as_chunks::<64>().0) {
+        let mut w = [0u32; 80];
+        for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*bytes);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = *h;
+        for (i, word) in w.into_iter().enumerate() {
+            let (f, k) = match i {
+                0..20 => ((b & c) | (!b & d), 0x5a827999),
+                20..40 => (b ^ c ^ d, 0x6ed9eba1),
+                40..60 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                _ => (b ^ c ^ d, 0xca62c1d6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            (a, b, c, d, e) = (next, a, b.rotate_left(30), c, d);
+        }
+        for (word, update) in h.iter_mut().zip([a, b, c, d, e]) {
+            *word = word.wrapping_add(update);
+        }
+    }
+}
+
+/// `rt.sha256_blocks` (crate docs, "SHA-256"): FIPS 180-4 section 6.2.2 over
+/// each 64-byte block of `data`, in order. The evaluator's own portable
+/// form; the run time's is `hirsel_core_sha256_blocks`.
+fn sha256_blocks(h: &mut [u32; 8], data: &[u8]) {
+    for block in data.as_chunks::<64>().0 {
+        let mut w = [0u32; 64];
+        for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*bytes);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let mut v = *h;
+        for i in 0..64 {
+            let [a, b, c, d, e, f, g, hh] = v;
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(SHA256_K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let t2 = s0.wrapping_add((a & b) ^ (a & c) ^ (b & c));
+            v = [t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g];
+        }
+        for (x, y) in h.iter_mut().zip(v) {
+            *x = x.wrapping_add(y);
+        }
     }
 }
 

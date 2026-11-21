@@ -30,6 +30,10 @@ export function vectors(c) {
   vector(c.makeCodec([16,[0]]),{tag:'Some',value:undefined},'01000000');
   vector(c.makeCodec([17,[6],[13]]),{tag:'Ok',value:3n},'000000000300000000000000');
   vector(c.makeCodec([17,[6],[13]]),{tag:'Error',value:'e'},'010000000100000065');
+  const neverResult = c.makeCodec([17,[3],[20]]);
+  vector(neverResult,{tag:'Ok',value:7},'0000000007');
+  assert.throws(() => neverResult.decode(from('01000000')),c.Malformed);
+  assert.throws(() => neverResult.encode({tag:'Error',value:undefined}),TypeError);
   vector(c.makeCodec([15,[13],[3]]),new Map([['a',7],['b',8]]),'02000000010000006107010000006208');
   vector(c.makeCodec([18,[[6],[13]]]),[5n,'a'],'05000000000000000100000061');
   const defs = [{kind:0,body:[{name:'x',type:[5]},{name:'gone',type:[6],removed:true},{name:'y',type:[13]}]},{kind:1,body:[{name:'A',fields:[]},{name:'B',fields:[[6]]},{name:'C',fields:[[3],[13]]},{name:'Gone',fields:[],removed:true}]},{kind:2,body:[14,[6]]}];

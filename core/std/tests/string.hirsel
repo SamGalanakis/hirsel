@@ -1,3 +1,4 @@
+// test-env: HIRSEL_ISA_CAP=2
 // Contract tests for `string` (core/std/string.hirsel), written to run once an engine runs
 // library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
 // gives the result derived by hand from the contract, or `fail Cause` for the failure the
@@ -298,6 +299,98 @@ fn find_byte_from_every_start() -> u64 {
 // expect: run find_start_past_end() = fail Bounds
 fn find_start_past_end() -> u64 {
     found(string.find("abc", 4, "a"))
+}
+
+// The first complete bytewise match, checked in order at every possible offset.
+fn find_oracle(s: String, start: u64, pat: String) -> Option[u64] {
+    let hay = string.as_bytes(s)
+    let needle = string.as_bytes(pat)
+    let n = list.len(hay)
+    let m = list.len(needle)
+    if m > n - start {
+        return None
+    }
+    for at in start .. n - m + 1 {
+        let mut matched: u64 = 0
+        while matched < m && hay[at + matched] == needle[matched] {
+            matched += 1
+        }
+        if matched == m {
+            return Some(at)
+        }
+    }
+    None
+}
+
+fn find_binary_text(n: u64, seed: u64) -> String {
+    let mut out = result.unwrap(string.with_capacity(n))
+    let mut x = seed
+    for _ in 0u64 .. n {
+        x = int.wrapping_add(int.wrapping_mul(x, 6364136223846793005), 1)
+        result.unwrap(string.push(mut out, if (x >> 63) == 0 {
+            "a"
+        } else {
+            "b"
+        }))
+    }
+    take out
+}
+
+// Generated two-letter inputs include independent text and a match planted at
+// either end. All-a prefixes also induce repeated false endpoint hits before
+// periodic (aba...) and nonperiodic (aaa...ba) patterns.
+// expect: run find_binary_differential() = true
+fn find_binary_differential() -> bool {
+    for m in 0u64 .. 41 {
+        let pat = find_binary_text(m, m + 1)
+        let s = find_binary_text(67, 2 * m + 3)
+        let mut prefix = result.unwrap(string.from(pat))
+        result.unwrap(string.push(mut prefix, s))
+        let mut suffix = result.unwrap(string.from(s))
+        result.unwrap(string.push(mut suffix, pat))
+        if string.find(prefix, 0, pat) != Some(0) || string.find(suffix, 67, pat) != Some(67) {
+            return false
+        }
+        for start in 0u64 .. 5 {
+            if string.find(s, start, pat) != find_oracle(s, start, pat) || string.find(suffix, start, pat) != find_oracle(suffix, start, pat) {
+                return false
+            }
+        }
+        if string.find("", 0, pat) != find_oracle("", 0, pat) {
+            return false
+        }
+        if m >= 3 {
+            for shape in 0u64 .. 2 {
+                let mut needle = result.unwrap(string.with_capacity(m))
+                for i in 0u64 .. m {
+                    let is_b = if shape == 0 {
+                        i % 3 == 1 && i + 1 < m
+                    } else {
+                        i == m - 2
+                    }
+                    result.unwrap(string.push(mut needle, if is_b {
+                        "b"
+                    } else {
+                        "a"
+                    }))
+                }
+                let mut hay = result.unwrap(string.repeat("a", 67))
+                if string.find(hay, 0, needle) != None {
+                    return false
+                }
+                result.unwrap(string.push(mut hay, needle))
+                if string.find(hay, 0, needle) != find_oracle(hay, 0, needle) {
+                    return false
+                }
+            }
+        }
+    }
+    // The right half matches at 60, while its left half first matches at 63.
+    let periodic = "abaabaabaabaaba"
+    let mut hay = result.unwrap(string.repeat("a", 62))
+    result.unwrap(string.push(mut hay, string.slice(periodic, 2, 15)))
+    result.unwrap(string.push(mut hay, "aba"))
+    string.find(hay, 0, periodic) == find_oracle(hay, 0, periodic)
 }
 
 // expect: run starts_with_prefix() = true
@@ -640,6 +733,103 @@ fn from_utf8_vector_edges() -> bool {
         return false
     }
     utf8_vector_case(255, b"\xF0\x90\x80\x80", 0) && !utf8_vector_case(255, b"\xF0\x90\x80", 0) && !utf8_vector_case(255, b"\xF4\x90\x80\x80", 0)
+}
+
+fn utf8_prefix_buf(pad: u64, multibyte: bool, take bad: Result[Bytes, Capacity], tail_len: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    if multibyte {
+        let mut cur: u64 = 0
+        // Fill with 3-byte '✓' (E2 9C 93) and pad remainder with 'a' to exact length `pad`.
+        while cur + 3 <= pad {
+            result.unwrap(list.push(mut b, 0xE2))
+            result.unwrap(list.push(mut b, 0x9C))
+            result.unwrap(list.push(mut b, 0x93))
+            cur += 3
+        }
+        if cur < pad {
+            result.unwrap(list.fill(mut b, pad - cur, b'a'))
+        }
+    } else {
+        result.unwrap(list.fill(mut b, pad, b'a'))
+    }
+    result.unwrap(list.append(mut b, result.unwrap(take bad)))
+    if tail_len > 0 {
+        result.unwrap(list.fill(mut b, tail_len, b'a'))
+    }
+    take b
+}
+
+// Malformed leads, bad continuation offsets, and truncations across short,
+// vector (64/128/256 B), and page (4096 B) boundaries, after both ASCII and
+// multibyte prefixes. Exact valid_up_to and error_len follow RFC 3629.
+// expect: run from_utf8_malformed_boundaries() = true
+fn from_utf8_malformed_boundaries() -> bool {
+    let pads: Inline[u64, 15] =[0, 3, 31, 63, 64, 65, 126, 127, 128, 254, 255, 256, 4094, 4095, 4096]
+    for pad in pads {
+        for mb in 0u64 .. 2 {
+            let multi = mb == 1
+            // Lone continuation, overlong 2/3/4, surrogate, > U+10FFFF, and invalid lead: error_len Some(1).
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\x80", 80), pad, Some(1)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xC0\x80", 80), pad, Some(1)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xE0\x9F\x80", 80), pad, Some(1)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xED\xA0\x80", 80), pad, Some(1)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xF0\x8F\x80\x80", 80), pad, Some(1)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xF4\x90\x80\x80", 80), pad, Some(1)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xF5\x80\x80\x80", 80), pad, Some(1)) {
+                return false
+            }
+            // Bad 3rd byte of 3-byte scalar (Some(2)) and bad 4th byte of 4-byte scalar (Some(3)).
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xE2\x82A", 80), pad, Some(2)) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xF0\x90\x80A", 80), pad, Some(3)) {
+                return false
+            }
+            // Truncation at EOF: error_len None.
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xC3", 0), pad, None) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xE2\x82", 0), pad, None) {
+                return false
+            }
+            if !utf8_error_at(utf8_prefix_buf(pad, multi, b"\xF0\x90\x80", 0), pad, None) {
+                return false
+            }
+        }
+    }
+    // Multibyte prefix -> incomplete lead right before a 64-byte pure ASCII block.
+    if !utf8_error_at(utf8_prefix_buf(127, true, b"\xE2\x82", 128), 127, Some(2)) {
+        return false
+    }
+    // Step bound stops cleanly on long multibyte validation.
+    let valid_long = utf8_prefix_buf(512, true, b"", 0)
+    let tight = bound steps 1 {
+        utf8.validate(valid_long)
+    }
+    let ample = bound steps 10000 {
+        utf8.validate(valid_long)
+    }
+    let ok_tight = match tight {
+        Error(_) => true,
+        Ok(_) => false,
+    }
+    let ok_ample = match ample {
+        Ok(Ok(())) => true,
+        _ => false,
+    }
+    ok_tight && ok_ample
 }
 
 // pad bytes of 'a', then x, y, k continuation bytes 80 (k = 0, 1, 2), then rest bytes of 'a',

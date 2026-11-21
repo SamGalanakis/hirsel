@@ -63,8 +63,10 @@
 //! expired deadline fires within `BOUND` scheduler steps. A run fails when
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
+#[cfg(feature = "record")]
+use super::LOGS;
 use super::{
-    BASE, Base, LOGS, Memory, NONE, POOL, Pool, ROLE_INITIAL, RUN, RunFn, STATS, TABLE, UNTIED_ON,
+    BASE, Base, Memory, NONE, POOL, Pool, ROLE_INITIAL, RUN, RunFn, STATS, TABLE, UNTIED_ON,
     USTATS, create_unit, cur, maybe_yield, park as unit_park, pool, take_xready, wake_id,
     worker_main,
 };
@@ -1458,6 +1460,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         .push((addr(&STATS), addr(&STATS) + size_of_val(&STATS)));
     st.quiet.push((addr(&UNTIED_ON), addr(&UNTIED_ON) + 1));
     // The per-unit record log is diagnostics, not scheduling state.
+    #[cfg(feature = "record")]
     st.quiet
         .push((addr(&LOGS), addr(&LOGS) + size_of_val(&LOGS)));
     let nthreads = w + case.producers.len();

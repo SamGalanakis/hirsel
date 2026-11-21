@@ -62,6 +62,9 @@ class Contract:
     schedule: tuple[int, int | None] | None = None
     root_limit: int = 64 << 20
     evaluator_instructions: int = 1_000_000_000
+    # File-level `// test-env: NAME=VALUE`: each native law of the file runs once
+    # more with NAME=VALUE set, e.g. to select a portable runtime path.
+    run_env: tuple[tuple[str, str], ...] = ()
 
     @property
     def name(self):
@@ -143,6 +146,7 @@ def discover(root, filters):
         if backend and not reason:
             raise ValueError(f'{file}: evaluator-only law needs // test-reason:')
         evaluator_only = reason[1] if backend else None
+        run_env = tuple(tuple(pair) for pair in re.findall(r'^// test-env: ([A-Z0-9_]+)=(\S+)$', source, re.M))
         stdout = stderr = b""
         first_write = None
         host_op = 0
@@ -194,7 +198,7 @@ def discover(root, filters):
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
             package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env)
             schedule = None
             root_limit = 64 << 20
             evaluator_instructions = 1_000_000_000
@@ -505,7 +509,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None, schedule_runtime=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None, schedule_runtime=None, record_runtime=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -643,7 +647,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
-                           '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
+                           '--runtime', str(record_runtime or runtime) if https else str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
                            '-o', str(scratch / 'programs')]
                 if https:
                     tape = scratch / 'https.tape'
@@ -768,6 +772,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
                 else:
                     row['ran'], row['cause'] = test_observation(case, result, entry)
+                    for name, value in case.run_env if row['cause'] is None else ():
+                        again = progress.run(command, cwd=host, capture_output=True, env={**os.environ, name: value})
+                        _, cause = test_observation(case, again, entry)
+                        if cause:
+                            row['cause'] = f'with {name}={value}: {cause}'
+                            break
                 row['passed'] = row['cause'] is None
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)
@@ -785,6 +795,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
+    parser.add_argument('--record-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_RECORD_ARCHIVE'))
     parser.add_argument('--model-runtime', type=Path)
     parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
@@ -813,7 +824,8 @@ def main():
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
                typescript=args.typescript, node=args.node,
                model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
-               schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
+               schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
+               record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
     ran = {(row['test'], row['file']) for row in rows if row['ran']}
     empty = [selector for selector in args.filter
              if not any(matches_filter(root, case, selector) and

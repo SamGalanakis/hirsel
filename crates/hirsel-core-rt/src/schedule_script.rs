@@ -38,6 +38,9 @@ pub enum PausePoint {
     },
     /// A driver has captured this operation's arm and has yet to apply it.
     ReadinessTaken { token: u64 },
+    /// An idle worker has made its last checks for work and is about to
+    /// wait in the run's poller or park its thread.
+    IdleWait,
     /// The stage has reserved the item but has yet to enter its transform.
     FlowCall { domain: u64, stage: usize },
     /// A flow operation has registered its owner before yielding the worker.

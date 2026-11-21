@@ -51,7 +51,7 @@ CHECKBOX_METRICS = {
 }
 CHECKBOX_CLIENTS = 64
 NOTES = (
-    "Hirsel checks bounds and overflow and admits bytes; Step charging is elided on certified rows; "
+    "Hirsel checks bounds and overflow, admits bytes and charges Steps only where a step bound can be current; "
     "Rust and Goose check bounds only.",
     "Runtime counters count user-space CPU work. Seconds use perf duration_time around the same "
     "whole-process command on each side, including startup, setup, warmups, measured iterations, "
@@ -96,11 +96,10 @@ def release_flags(artifacts):
             "--cc", build.llvm_path() / "bin/clang", "--json"]
 
 
-def native(path):
+def accepted(path):
     result = json.loads(path.read_text())
     if not result.get("accepted") or result.get("stopped"):
         raise ValueError(f"build not accepted: {path}")
-    return result["native"].get("step_charging_elided", False)
 
 
 def ratios(samples, fields):
@@ -152,8 +151,6 @@ def size_changes(reference, candidate):
         if not previous or previous != current_measurement.get(field):
             raise ValueError(f"size identity differs: {field}")
     left, right = (rows_by_label(report)["Size", SIZE_ROW] for report in (reference, candidate))
-    if left["certified"] != right["certified"]:
-        raise ValueError("size identity differs: certification")
     changes = []
     for side in measure.SIDES:
         previous, current = (row["samples"][side] for row in (left, right))
@@ -214,17 +211,16 @@ class Board:
         write_json(self.out / "board.json", self.report)
         lines = ["# Hirsel goal board", "",
                  "Complete" if self.report["complete"] else "Incomplete", "", *NOTES, "",
-                 "| Goal | Row | Metric | H/R | H/G | Certified | Commit |",
-                 "| --- | --- | --- | ---: | ---: | --- | --- |"]
+                 "| Goal | Row | Metric | H/R | H/G | Commit |",
+                 "| --- | --- | --- | ---: | ---: | --- |"]
         for row in self.report["rows"]:
             for metric in row["metrics"]:
                 cells = []
                 for side in ("rust", "goose"):
                     value = row["ratios"][side].get(metric)
                     cells.append(f"{value:.4f}×" if value is not None else "n/a")
-                certified = {True: "yes", False: "no", None: "unknown"}[row["certified"]]
                 lines.append("| " + " | ".join((row["goal"], row["row"], metric, *cells,
-                                                  certified, row["commit"][:8])) + " |")
+                                                  row["commit"][:8])) + " |")
         notes = [f"- {row['goal']}/{row['row']}. {row['notes']}"
                  for row in self.report["rows"] if row.get("notes")]
         if notes:
@@ -335,7 +331,7 @@ class Board:
             return receipt.REFUSED
         return 3 if failed else 0
 
-    def row(self, goal, name, certified, samples, fields, *, notes=None):
+    def row(self, goal, name, samples, fields, *, notes=None):
         label = f"{goal}/{name}"
         if name not in EXPECTED.get(goal, ()) or any(
             (row["goal"], row["row"]) == (goal, name) for row in self.report["rows"]
@@ -360,7 +356,7 @@ class Board:
                     sample["status"] = status
                 self.report["failures"][f"{label}/{side}"] = status
                 complete = False
-        self.report["rows"].append({"goal": goal, "row": name, "certified": certified,
+        self.report["rows"].append({"goal": goal, "row": name,
                                     "status": "ok" if complete else "failed",
                                     "commit": self.report["commit"], "samples": samples,
                                     "metrics": fields, "ratios": ratios(samples, fields), "notes": notes})
@@ -400,8 +396,6 @@ def sample_runtime(row, commands, directory, samples_dir, env, siblings, index, 
                    for line in output):
                 sample["status"] = "wrong-checksum"
         samples[side] = sample
-    if not row["certified"] and samples["hirsel"]["status"] == "ok":
-        samples["hirsel"]["status"] = "step-not-certified"
     return samples
 
 
@@ -438,9 +432,9 @@ def runtime_rows(board, suite, directory, upstream, tools, *, config=None, start
         if all(sample["verified"] for sample in samples.values()):
             verified.append(name)
         metrics = ("seconds",) if startup else ("seconds", "instructions") if suite == "arena" else ("instructions",)
-        board.row(title, label, row["certified"], samples, metrics, notes=matmul_notes(name))
+        board.row(title, label, samples, metrics, notes=matmul_notes(name))
         if suite != "arena" and name == startup_name:
-            board.row("Startup", startup_label, row["certified"],
+            board.row("Startup", startup_label,
                       {side: sample.copy() for side, sample in samples.items()}, ("seconds",))
     return verified
 
@@ -457,7 +451,7 @@ def awfy_rows(board, out, upstream, tools):
             "strip_flags": result["strip_flags"],
             "pins": {peer: PINS[peer] for peer in ("awfy", "resid", "goose")},
         }
-        board.row("Size", SIZE_ROW, result["hirsel_certified"][verified[0]],
+        board.row("Size", SIZE_ROW,
                   {side: {"status": "ok", **image} for side, image in result["images"].items()}, ("bytes",))
     else:
         board.report["failures"]["Size"] = "not all original harness results verified"
@@ -558,7 +552,6 @@ def compile_rows(board, out, prepared, fixture, tools):
             config = out / "fixture-edit.json"
             write_json(config, tasks)
         samples = {}
-        certified = None
         label = f"LangArena {mode}"
         fixture_id = receipt.fixture_identity(out / "inputs.json", config)
         provenance = build.native_provenance(hirsel, out / "inputs.json", cwd=out)
@@ -576,7 +569,7 @@ def compile_rows(board, out, prepared, fixture, tools):
                 continue
             if side == "hirsel":
                 native_path = target / "stdout"
-                certified = native(native_path)
+                accepted(native_path)
                 report = build.write_native_report(executable, native_path.read_bytes(), provenance,
                                                    path=target / "build.json")
                 record = receipt.build_record(report)
@@ -602,13 +595,13 @@ def compile_rows(board, out, prepared, fixture, tools):
                 sample["status"] = "no-parts-compiled" if side == "hirsel" else "crate-not-rebuilt"
             if side == "hirsel":
                 board.report["instruction_receipt"]["rows"].append({
-                    "key": f"compile/{label}", "suite": "compile", "mode": mode, "certified": certified,
+                    "key": f"compile/{label}", "suite": "compile", "mode": mode,
                     "flags": provenance["flags"], "argv": list(map(str, command)),
                     "build_record": record, "image_sha256": record["image_sha256"],
                     "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",
                     "stdout": verify.stdout, "sample": sample, **fixture_id, **tools,
                 })
-        board.row("Compile", label, certified, samples, ("seconds", *COUNTERS))
+        board.row("Compile", label, samples, ("seconds", *COUNTERS))
         if mode == "cold" and not all(sample.get("verified") for sample in samples.values()):
             raise ValueError("cannot measure a warm edit without two verified cold builds")
 
@@ -743,7 +736,8 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
                 if side == "hirsel":
                     (out / "data").rename(directory / "data")
                     (out / "data").mkdir()
-        board.row("Checkbox", f"{mode}, {clients} clients", native(out / "build.json"), samples, (metric,))
+        accepted(out / "build.json")
+        board.row("Checkbox", f"{mode}, {clients} clients", samples, (metric,))
 
 
 def prepare_arena(out, args, compiler, artifacts, env):

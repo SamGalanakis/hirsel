@@ -206,11 +206,8 @@ def verified_sizes(build, names):
     images = {side: stripped_image(build / f"{side}-harness") for side in SIDES}
     sizes = {side: image["bytes"] for side, image in images.items()}
     strip_version = subprocess.check_output(["strip", "--version"], text=True).splitlines()[0]
-    native = json.loads((build / "hirsel-harness-build.json").read_text())["native"]
-    certified = native.get("step_charging_elided", False)
     return {"verified_workloads": names, "stripped_bytes": sizes, "images": images,
             "strip_version": strip_version, "strip_flags": list(STRIP_FLAGS),
-            "hirsel_certified": dict.fromkeys(names, certified),
             "hirsel_over_rust": sizes["hirsel"] / sizes["rust"],
             "hirsel_over_goose": sizes["hirsel"] / sizes["goose"]}
 

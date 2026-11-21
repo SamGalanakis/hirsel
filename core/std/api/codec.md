@@ -3,15 +3,15 @@
 [API overview](../API.md).
 
 `std.codec.Codec[T]` is SEM-10's codec: a plain record of an encoder, a decoder, a schema
-writer and LEAST, the fewest bytes any T encodes to. `of[T]()` is the only way a program
+writer, a lower bound on the encoded length, and whether its encoding set is empty. `of[T]()` is the only way a program
 names one. The checker resolves it per instance:
 
 | T | `of[T]()` is |
 |---|---|
-| a scalar, `()`, String, DecodeError | the built-in `of_u64()` and the like |
+| a scalar, `()`, Never, String | the built-in `of_u64()` and the like |
 | List[E], Option[E], Map[K, V], Result[T, E]; Bytes is List[u8] | `of_list[E]()`, `of_option[E]()`, `of_map[K, V]()`, `of_result[T, E]()` |
 | a nominal type declared `codec` | the codec its derive generates (`via R` included) |
-| a tuple, or a type holding one | the gap "the codec of this type is not built" |
+| a tuple of codec components | a derived codec that reads and writes each component in order |
 
 In a generic body `of[T]()` resolves when T is substituted, so a codec bound needs no
 dictionary. `of` at a type without the codec bound is LANG-12 at the call.
@@ -20,8 +20,9 @@ dictionary. `of` at a type without the codec bound is LANG-12 at the call.
 prefix. `decode(c, b)` and `decode_at(c, b, start)` read exactly the bytes encode writes:
 `Ok(Error(e))` for bytes no value encodes to, `Error(c)` for a refused admission, with
 nothing admitted kept either way. `schema(c)` is the bytes a store keeps beside the data;
-`fingerprint(c)` is its CRC-64-AVRO. `resolve(c, writer)` resolves an older writer's
-schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
+`fingerprint(c)` is its CRC-64-AVRO. `fingerprint_of(b)` folds the bytes through
+Avro's 256-entry Rabin table and allocates nothing. `resolve(c, writer)` resolves
+an older writer's schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
 and `read`/`read_at` decode under it. `key_make`, `encode_key` and `decode_key` are the
 order-preserving key format for u8..i64, bool, Bytes, String and tuples of them.
 
@@ -32,8 +33,10 @@ sum: a u32 tag (None 0, Some 1; Ok 0, Error 1; a sum's declared index), then the
 A record or tuple: its fields in order. LEAST is 4 for String, Bytes, List and Map and 4 for
 Option and Result. A value schema is version 03; a key schema is version 04. Definitions, fields,
 variants, tuple arities, type arguments, definition indices and UTF-8 names use u32
-counts or lengths, all four bytes little-endian. The root type uses opcodes 0-19;
-`codec.hirsel` states it in full. Counts above u32::MAX return
+counts or lengths, all four bytes little-endian. The root type uses opcodes 0-20.
+Opcode 20 is Never, which has no valid encoding. A tag whose payload requires
+a Never fails with Invalid at the start of the tag.
+The full format is in `codec.hirsel`. Counts above u32::MAX return
 `Capacity(requested: count, available: 4294967295)` before writing the count.
 There is no reader for the earlier widths.
 
@@ -54,7 +57,7 @@ u32 decode sample was 66.74M (Rust 55.74M, 1.20x); this encode-only fix leaves d
 unchanged. See
 [the twin measurement](../../twins/codec/MEASURE.md) for the before/after results.
 
-**Writing a codec by hand.** `make(e, d, w, n)` is what the derive calls; `put_X`/`take_X`,
+**Writing a codec by hand.** `make(e, d, w, n)` supplies the parts of a hand-written codec. `put_X`/`take_X`,
 `put_with`/`take_with`, `take_via`, and `define`, `record`, `sum`, `via`, `field`,
 `removed_field`, `variant`, `removed_variant` and `close` for the schema are its protocol.
 `need` checks that bytes remain, `take_count` bounds a count by the bytes left, `room`

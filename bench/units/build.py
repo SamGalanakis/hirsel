@@ -25,7 +25,7 @@ def main():
     cmd = [ROOT / "tools/capped", compiler, "run" if record else "build", "--inputs", inputs,
            "--entry", f"multicore@1/{case}/main", "--backend", "llvm", "--release",
            "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
-           "--dir", os.environ.get("UNITS_DIR", str(out)), "--grant", "Stdout", "--grant", "Tasks", "--grant", "Clock",
+           "--dir", os.environ.get("UNITS_DIR", str(out)), "--grant", "Tasks", "--grant", "Clock",
            "--grant", "Stderr", "--grant", net, "--limit", os.environ.get("UNITS_LIMIT", "1073741824"),
            "--debug-lines", "on", "--json", "-o", out / case]
     for g in grants:

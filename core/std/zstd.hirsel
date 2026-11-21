@@ -1,0 +1,1428 @@
+// RFC 8878 entropy decoding adapted from Zig lib/std/compress/zstd
+// at bff490a23889 and libzstd lib/common/fse_decompress.c:59-160 at 49cf51799ea0.
+// Block payloads are buffered before reverse-bit decoding.
+pub type ZstdError: key = Truncated | BadMagic | ReservedBit | Corrupt | BlockOversize | Checksum | ContentSize | WindowTooLarge(u64) | TooLarge | TrailingData(u64)
+
+pub type Error = Data(ZstdError) | Capacity(Capacity)
+
+const BLOCK_LIMIT: u64 = 131072
+
+type Fse {
+    log: u64,
+    present: bool,
+    entries: Inline[u32, 512]
+}
+
+type Huffman {
+    log: u64,
+    entries: Inline[u16, 2048]
+}
+
+type Tables {
+    literals: Fse,
+    offsets: Fse,
+    matches: Fse,
+    huffman: Huffman,
+    repeats: Inline[u64, 3]
+}
+
+pub opaque type Dictionary {
+    id: u64,
+    content: Bytes,
+    tables: Tables
+}
+
+type Weights {
+    values: Inline[u64, 256],
+    len: u64
+}
+
+fn empty_weights() -> Weights {
+    Weights(values:[0; 256], len: 0)
+}
+
+fn weight_push(mut weights: Weights, n: u64) {
+    weights.values[weights.len] = n
+    weights.len += 1
+}
+
+fn empty_fse() -> Fse {
+    Fse(log: 0, present: false, entries:[0; 512])
+}
+
+fn empty_tables() -> Tables {
+    Tables(literals: empty_fse(), offsets: empty_fse(), matches: empty_fse(), huffman: Huffman(log: 0, entries:[0; 2048]), repeats:[1, 4, 8])
+}
+
+type Cursor {
+    pos: u64,
+}
+
+type Bits {
+    pos: u64,
+    loaded: u64,
+    buffer: u64,
+    valid: u64,
+}
+
+type Reverse {
+    left: u64,
+    pos: u64,
+    buffer: u64,
+    valid: u64,
+}
+
+fn log2(value: u64) -> u64 {
+    let mut v = value
+    let mut n: u64 = 0
+    while v > 1 {
+        v = v >> 1
+        n += 1
+    }
+    n
+}
+
+fn word(data: Bytes, mut c: Cursor, n: u64) -> Result[u64, ZstdError] {
+    if n > list.len(data) - c.pos {
+        return Error(Truncated())
+    }
+    let mut value: u64 = 0
+    let mut i: u64 = 0
+    while i < n {
+        let byte: u64 = int.widen(data[c.pos + i])
+        value = value | (byte << (8 * i))
+        i += 1
+    }
+    c.pos += n
+    Ok(value)
+}
+
+fn section(data: Bytes, mut c: Cursor, n: u64) -> Result[u64, ZstdError] {
+    if n > list.len(data) - c.pos {
+        return Error(Truncated())
+    }
+    let start = c.pos
+    c.pos += n
+    Ok(start)
+}
+
+// Forward normalized-count headers use a low-aligned 64-bit reservoir.
+fn forward(data: Bytes, mut b: Bits, n: u64) -> Result[u64, ZstdError] {
+    if n > list.len(data) * 8 - b.pos {
+        return Error(Truncated())
+    }
+    if b.valid < n {
+        while b.valid <= 56 && b.loaded < list.len(data) {
+            let byte: u64 = int.widen(data[b.loaded])
+            b.buffer = b.buffer | (byte << b.valid)
+            b.loaded += 1
+            b.valid += 8
+        }
+    }
+    let value = b.buffer & ((1u64 << n) - 1)
+    b.buffer = b.buffer >> n
+    b.valid -= n
+    b.pos += n
+    Ok(value)
+}
+
+fn reverse(data: Bytes) -> Result[Reverse, ZstdError] {
+    let len = list.len(data)
+    if len == 0 {
+        return Error(Corrupt())
+    }
+    let last: u64 = int.widen(data[len - 1])
+    if last == 0 {
+        return Error(Corrupt())
+    }
+    let valid = log2(last)
+    let buffer = if valid == 0 {
+        0u64
+    } else {
+        (last & ((1u64 << valid) - 1)) << (64 - valid)
+    }
+    Ok(Reverse(left: (len - 1) * 8 + valid, pos: len - 1, buffer: buffer, valid: valid))
+}
+
+// A high-aligned 64-bit reservoir. Each input byte is loaded only once;
+// the section end and stop bit are checked before any refill, including tails.
+fn refill(data: Bytes, mut b: Reverse) -> () {
+    while b.valid <= 56 && b.pos > 0 {
+        b.pos -= 1
+        let byte: u64 = int.widen(data[b.pos])
+        b.buffer = b.buffer | (byte << (56 - b.valid))
+        b.valid += 8
+    }
+}
+
+fn backward(data: Bytes, mut b: Reverse, n: u64) -> Result[u64, ZstdError] {
+    if n > b.left {
+        return Error(Corrupt())
+    }
+    if n == 0 {
+        return Ok(0)
+    }
+    if b.valid < n {
+        refill(data, mut b)
+    }
+    let value = b.buffer >> (64 - n)
+    b.buffer = b.buffer << n
+    b.valid -= n
+    b.left -= n
+    Ok(value)
+}
+
+// libzstd FSE_buildDTable_internal: -1 counts occupy the table's high end;
+// positive counts spread with the RFC step, then symbolNext builds each state.
+// A single positive count filling the table is valid (all entries use 0 bits).
+// `values` encodes normalized counts plus one (0 = -1, 1 = absent).
+fn build_fse(values: Weights, accuracy: u64) -> Result[Fse, ZstdError] {
+    let size = 1u64 << accuracy
+    let mut symbols: Inline[u64, 512] =[0; 512]
+    let mut high = size
+    let mut next: Inline[u64, 256] =[0; 256]
+    let mut symbol: u64 = 0
+    let mut total: u64 = 0
+    while symbol < values.len {
+        let v = values.values[symbol]
+        if v == 0 {
+            if high == 0 {
+                return Error(Corrupt())
+            }
+            high -= 1
+            symbols[high] = symbol
+            next[symbol] = 1
+            total += 1
+        } else if v > 1 {
+            next[symbol] = v - 1
+            total += v - 1
+        }
+        symbol += 1
+    }
+    if total != size {
+        return Error(Corrupt())
+    }
+    let step = size / 2 + size / 8 + 3
+    let mut position: u64 = 0
+    symbol = 0
+    while symbol < values.len {
+        let v = values.values[symbol]
+        if v > 1 {
+            let mut i: u64 = 0
+            while i < v - 1 {
+                symbols[position] = symbol
+                position = (position + step) & (size - 1)
+                while position >= high {
+                    position = (position + step) & (size - 1)
+                }
+                i += 1
+            }
+        }
+        symbol += 1
+    }
+    if position != 0 {
+        return Error(Corrupt())
+    }
+    let mut entries: Inline[u32, 512] =[0; 512]
+    let mut i: u64 = 0
+    while i < size {
+        let sym = symbols[i]
+        let state = next[sym]
+        next[sym] += 1
+        let bits = accuracy - log2(state)
+        entries[i] = int.narrow(sym | (bits << 8) | (((state << bits) - size) << 12))
+        i += 1
+    }
+    Ok(Fse(log: accuracy, present: true, entries: entries))
+}
+
+// Zig Table.decode: variable-width probabilities, zero runs, then byte align.
+fn read_fse(data: Bytes, mut c: Cursor, max_symbols: u64, max_log: u64) -> Result[Fse, ZstdError] {
+    let chunk = list.slice(data, c.pos, list.len(data))
+    let mut b = Bits(pos: 0, loaded: 0, buffer: 0, valid: 0)
+    let accuracy = forward(chunk, mut b, 4)? + 5
+    if accuracy > max_log {
+        return Error(Corrupt())
+    }
+    let size = 1u64 << accuracy
+    let mut total: u64 = 0
+    let mut values = empty_weights()
+    while total < size {
+        if values.len >= max_symbols {
+            return Error(Corrupt())
+        }
+        let remaining = size - total + 1
+        let width = log2(remaining) + 1
+        let small = forward(chunk, mut b, width - 1)?
+        let cutoff = (1u64 << width) - 1 - remaining
+        let mut value = small
+        if small >= cutoff {
+            value += forward(chunk, mut b, 1)? << (width - 1)
+            if value >= 1u64 << (width - 1) {
+                value -= cutoff
+            }
+        }
+        let probability = if value == 0 {
+            1u64
+        } else {
+            value - 1
+        }
+        if probability > size - total {
+            return Error(Corrupt())
+        }
+        total += probability
+        weight_push(mut values, value)
+        if value == 1 {
+            while true {
+                let count = forward(chunk, mut b, 2)?
+                if count > max_symbols - values.len {
+                    return Error(Corrupt())
+                }
+                let mut i: u64 = 0
+                while i < count {
+                    weight_push(mut values, 1)
+                    i += 1
+                }
+                if count < 3 {
+                    break
+                }
+            }
+        }
+    }
+    c.pos += (b.pos + 7) / 8
+    build_fse(values, accuracy)
+}
+
+// Zig HuffmanTree.assignWeights: two interleaved FSE states. A state update
+// that crosses the bitstream end emits the other state's final symbol too.
+fn fse_weights(data: Bytes) -> Result[Weights, ZstdError] {
+    let mut c = Cursor(pos: 0)
+    let decoding_table = read_fse(data, mut c, 256, 6)?
+    let stream = list.slice(data, c.pos, list.len(data))
+    let mut b = reverse(stream)?
+    let mut state = backward(stream, mut b, decoding_table.log)?
+    let mut other = backward(stream, mut b, decoding_table.log)?
+    let mut weights = empty_weights()
+    while weights.len < 255 {
+        let entry: u64 = int.widen(decoding_table.entries[state])
+        if entry & 255 > 11 {
+            return Error(Corrupt())
+        }
+        weight_push(mut weights, entry & 255)
+        if entry >> 8 & 15 > b.left {
+            let last: u64 = int.widen(decoding_table.entries[other] & 255)
+            if last > 11 || weights.len >= 255 {
+                return Error(Corrupt())
+            }
+            weight_push(mut weights, last)
+            return Ok(weights)
+        }
+        let next = (entry >> 12) + backward(stream, mut b, entry >> 8 & 15)?
+        state = other
+        other = next
+    }
+    Error(Corrupt())
+}
+
+// Zig HuffmanTree.build, with the RFC's exact power-of-two remainder check.
+// Weight ordering puts the longest codes first; each fills 2^(weight-1)
+// contiguous lookup entries. Table entries carry the consumed code length.
+fn build_huffman(initial_weights: Weights) -> Result[Huffman, ZstdError] {
+    let mut weights = initial_weights
+    let mut total: u64 = 0
+    let mut i: u64 = 0
+    while i < weights.len {
+        let w = weights.values[i]
+        if w > 11 {
+            return Error(Corrupt())
+        }
+        if w > 0 {
+            total += 1u64 << (w - 1)
+        }
+        i += 1
+    }
+    if total == 0 || total >= 2048 {
+        return Error(Corrupt())
+    }
+    let accuracy = log2(total) + 1
+    let remainder = (1u64 << accuracy) - total
+    if remainder & (remainder - 1) != 0 {
+        return Error(Corrupt())
+    }
+    weight_push(mut weights, log2(remainder) + 1)
+    let mut count: Inline[u64, 12] =[0; 12]
+    i = 0
+    while i < weights.len {
+        count[weights.values[i]] += 1
+        i += 1
+    }
+    if count[1] < 2 || count[1] % 2 != 0 {
+        return Error(Corrupt())
+    }
+    let mut entries: Inline[u16, 2048] =[0; 2048]
+    let mut at: u64 = 0
+    let mut weight: u64 = 1
+    while weight <= accuracy {
+        i = 0
+        while i < weights.len {
+            if weights.values[i] == weight {
+                let n = 1u64 << (weight - 1)
+                let mut j: u64 = 0
+                while j < n {
+                    entries[at + j] = int.narrow((i << 4) | (accuracy + 1 - weight))
+                    j += 1
+                }
+                at += n
+            }
+            i += 1
+        }
+        weight += 1
+    }
+    Ok(Huffman(log: accuracy, entries: entries))
+}
+
+fn read_huffman(data: Bytes, mut c: Cursor) -> Result[Huffman, ZstdError] {
+    let header = word(data, mut c, 1)?
+    if header < 128 {
+        let start_compressed = section(data, mut c, header)?
+        let compressed = list.slice(data, start_compressed, c.pos)
+        let weights = fse_weights(compressed)?
+        return build_huffman(weights)
+    }
+    let n = header - 127
+    let start_bytes = section(data, mut c, (n + 1) / 2)?
+    let chunk = list.slice(data, start_bytes, c.pos)
+    let mut weights = empty_weights()
+    let mut i: u64 = 0
+    while i < n {
+        let byte: u64 = int.widen(chunk[i / 2])
+        let w = if i % 2 == 0 {
+            byte >> 4
+        } else {
+            byte & 15
+        }
+        weight_push(mut weights, w)
+        i += 1
+    }
+    build_huffman(weights)
+}
+
+fn huffman_stream(data: Bytes, tree: Huffman, n: u64, mut out: List[u8]) -> Result[(), ZstdError] {
+    let mut b = reverse(data)?
+    let mut i: u64 = 0
+    while i < n {
+        if b.valid < tree.log {
+            refill(data, mut b)
+        }
+        let prefix = b.buffer >> (64 - tree.log)
+        let entry: u64 = int.widen(tree.entries[prefix])
+        let bits = entry & 15
+        if bits == 0 || bits > b.left {
+            return Error(Corrupt())
+        }
+        b.left -= bits
+        b.valid -= bits
+        b.buffer = b.buffer << bits
+        let _ = list.push(mut out, int.narrow(entry >> 4))
+        i += 1
+    }
+    if b.left != 0 {
+        return Error(Corrupt())
+    }
+    Ok(())
+}
+
+fn read_literals(data: Bytes, mut c: Cursor, mut tables: Tables, block_limit: u64, output_room: u64, mut out: Bytes) -> Result[(), ZstdError] {
+    let first = word(data, mut c, 1)?
+    let kind = first & 3
+    let format = first >> 2 & 3
+    let mut size: u64 = 0
+    let mut compressed: u64 = 0
+    if kind < 2 {
+        if format == 0 || format == 2 {
+            size = first >> 3
+        } else if format == 1 {
+            size = first >> 4 | word(data, mut c, 1)? << 4
+        } else {
+            size = first >> 4 | word(data, mut c, 2)? << 4
+        }
+    } else {
+        let mut header = first | word(data, mut c, 2)? << 8
+        if format < 2 {
+            size = header >> 4 & 1023
+            compressed = header >> 14
+        } else if format == 2 {
+            header = header | word(data, mut c, 1)? << 24
+            size = header >> 4 & 16383
+            compressed = header >> 18
+        } else {
+            header = header | word(data, mut c, 2)? << 24
+            size = header >> 4 & 262143
+            compressed = header >> 22
+        }
+    }
+    if size > block_limit {
+        return Error(BlockOversize())
+    }
+    if size > output_room {
+        return Error(TooLarge())
+    }
+    list.clear(mut out)
+    if kind == 0 {
+        let start_bytes = section(data, mut c, size)?
+        let chunk = list.slice(data, start_bytes, c.pos)
+        let _ = list.append(mut out, chunk)
+    } else if kind == 1 {
+        let byte: u8 = int.narrow(word(data, mut c, 1)?)
+        if size > 0 {
+            let _ = list.fill(mut out, size, byte)
+        }
+    } else {
+        let start_bytes = section(data, mut c, compressed)?
+        let chunk = list.slice(data, start_bytes, c.pos)
+        let mut at = Cursor(pos: 0)
+        if kind == 2 {
+            tables.huffman = read_huffman(chunk, mut at)?
+        } else if tables.huffman.log == 0 {
+            return Error(Corrupt())
+        }
+        if format == 0 {
+            let stream = list.slice(chunk, at.pos, list.len(chunk))
+            huffman_stream(stream, tables.huffman, size, mut out)?
+        } else {
+            if size < 6 {
+                return Error(Corrupt())
+            }
+            let n1 = word(chunk, mut at, 2)?
+            let n2 = word(chunk, mut at, 2)?
+            let n3 = word(chunk, mut at, 2)?
+            let quarter = (size + 3) / 4
+            let start_s1 = section(chunk, mut at, n1)?
+            let s1 = list.slice(chunk, start_s1, at.pos)
+            let start_s2 = section(chunk, mut at, n2)?
+            let s2 = list.slice(chunk, start_s2, at.pos)
+            let start_s3 = section(chunk, mut at, n3)?
+            let s3 = list.slice(chunk, start_s3, at.pos)
+            let s4 = list.slice(chunk, at.pos, list.len(chunk))
+            huffman_stream(s1, tables.huffman, quarter, mut out)?
+            huffman_stream(s2, tables.huffman, quarter, mut out)?
+            huffman_stream(s3, tables.huffman, quarter, mut out)?
+            huffman_stream(s4, tables.huffman, size - 3 * quarter, mut out)?
+        }
+    }
+    Ok(())
+}
+
+fn predefined(which: u64) -> Result[Fse, ZstdError] {
+    // RFC 8878 default distributions, in Zig's count-plus-one representation.
+    let values: Weights = if which == 0 {
+        Weights(values:[5, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 3, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 36)
+    } else if which == 1 {
+        Weights(values:[2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 29)
+    } else {
+        Weights(values:[2, 5, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 53)
+    }
+    build_fse(values, if which == 1 {
+        5u64
+    } else {
+        6u64
+    })
+}
+
+fn sequence_table(data: Bytes, mut c: Cursor, mode: u64, which: u64, mut decoding_table: Fse) -> Result[(), ZstdError] {
+    let max_symbol = if which == 0 {
+        35u64
+    } else if which == 1 {
+        31u64
+    } else {
+        52u64
+    }
+    if mode == 0 {
+        decoding_table = predefined(which)?
+    } else if mode == 1 {
+        let symbol = word(data, mut c, 1)?
+        if symbol > max_symbol {
+            return Error(Corrupt())
+        }
+        decoding_table.log = 0
+        decoding_table.present = true
+        decoding_table.entries[0] = int.narrow(symbol)
+    } else if mode == 2 {
+        decoding_table = read_fse(data, mut c, max_symbol + 1, if which == 1 {
+            8u64
+        } else {
+            9u64
+        })?
+    } else if !decoding_table.present {
+        return Error(Corrupt())
+    }
+    Ok(())
+}
+
+const LL_BASE: Inline[u64, 36] =[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+
+const LL_BITS: Inline[u64, 36] =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+const ML_BASE: Inline[u64, 53] =[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051, 4099, 8195, 16387, 32771, 65539]
+
+const ML_BITS: Inline[u64, 53] =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+// Zig Decode.nextSequence: zero literals shift repeat codes by one; code 3
+// then means repeat[0]-1. The repeats survive all blocks, including raw/RLE.
+fn offset(value: u64, literal_length: u64, mut t: Tables) -> Result[u64, ZstdError] {
+    let mut distance: u64 = 0
+    if value > 3 {
+        distance = value - 3
+        t.repeats[2] = t.repeats[1]
+        t.repeats[1] = t.repeats[0]
+        t.repeats[0] = distance
+    } else {
+        let index = if literal_length == 0 {
+            value
+        } else {
+            value - 1
+        }
+        if index == 3 {
+            if t.repeats[0] <= 1 {
+                return Error(Corrupt())
+            }
+            distance = t.repeats[0] - 1
+            t.repeats[2] = t.repeats[1]
+            t.repeats[1] = t.repeats[0]
+            t.repeats[0] = distance
+        } else {
+            distance = t.repeats[index]
+            if index == 2 {
+                t.repeats[2] = t.repeats[1]
+            }
+            if index > 0 {
+                t.repeats[1] = t.repeats[0]
+            }
+            t.repeats[0] = distance
+        }
+    }
+    if distance == 0 {
+        return Error(Corrupt())
+    }
+    Ok(distance)
+}
+
+fn admit[T](take v: Result[T, Capacity]) -> Result[T, Error] {
+    match take v {
+        Ok(value) => Ok(take value),
+        Error(error) => Error(Capacity(error)),
+    }
+}
+
+fn data_error(error: ZstdError) -> Error {
+    Data(error)
+}
+
+fn parse_dictionary(data: Bytes, mut c: Cursor, mut t: Tables) -> Result[u64, ZstdError] {
+    let id = word(data, mut c, 4)?
+    if id == 0 {
+        return Error(Corrupt())
+    }
+    t.huffman = read_huffman(data, mut c)?
+    t.offsets = read_fse(data, mut c, 32, 8)?
+    t.matches = read_fse(data, mut c, 53, 9)?
+    t.literals = read_fse(data, mut c, 36, 9)?
+    let r1 = word(data, mut c, 4)?
+    let r2 = word(data, mut c, 4)?
+    let r3 = word(data, mut c, 4)?
+    let size = list.len(data) - c.pos
+    if r1 == 0 || r2 == 0 || r3 == 0 || r1 > size || r2 > size || r3 > size {
+        return Error(Corrupt())
+    }
+    t.repeats =[r1, r2, r3]
+    Ok(id)
+}
+
+/// Validate and own a formatted dictionary or a raw-content prefix.
+pub fn dictionary(data: Bytes) -> Result[Dictionary, Error] {
+    let mut c = Cursor(pos: 0)
+    let mut tables = empty_tables()
+    let mut id: u64 = 0
+    let magic: u32 = if list.len(data) >= 4 {
+        list.word_le(data, 0)
+    } else {
+        0
+    }
+    if magic == 0xec30a437u32 {
+        c.pos = 4
+        id = match parse_dictionary(data, mut c, mut tables) {
+            Ok(value) => value,
+            Error(error) => return Error(data_error(error)),
+        }
+    }
+    let mut content: Bytes = admit(list.with_capacity(list.len(data) - c.pos))?
+    admit(list.append(mut content, list.slice(data, c.pos, list.len(data))))?
+    Ok(Dictionary(id: id, content: take content, tables: tables))
+}
+
+// github.com/cespare/xxhash/v2 @ab37246c889f9db16b606fda1c232d659df9271d
+// xxhash.go:72-109 and xxhash_other.go:64-75 (MIT): XXH64, a fast non-cryptographic hash
+// for checksums, deduplication and hash tables. It is not collision resistant
+// against an adversary. Multiplications wrap at 64 bits.
+type Xxh64 {
+    lanes: Inline[u64, 4],
+    total: u64,
+    mem: Inline[u8, 32],
+    used: u64,
+}
+
+const PRIME1: u64 = 11400714785074694791
+
+const PRIME2: u64 = 14029467366897019727
+
+const PRIME3: u64 = 1609587929392839161
+
+const PRIME4: u64 = 9650029242287828579
+
+const PRIME5: u64 = 2870177450012600261
+
+fn xxh_start() -> Xxh64 {
+    Xxh64(lanes:[int.wrapping_add(PRIME1, PRIME2), PRIME2, 0, int.wrapping_sub(0u64, PRIME1)], total: 0, mem:[0; 32], used: 0)
+}
+
+fn rotl(value: u64, bits: u64) -> u64 {
+    value << bits | value >> (64u64 - bits)
+}
+
+fn mul(a: u64, b: u64) -> u64 {
+    int.wrapping_mul(a, b)
+}
+
+fn round(acc: u64, input: u64) -> u64 {
+    mul(rotl(int.wrapping_add(acc, mul(input, PRIME2)), 31), PRIME1)
+}
+
+fn merge_round(acc: u64, value: u64) -> u64 {
+    int.wrapping_add(mul(acc ^ round(0, value), PRIME1), PRIME4)
+}
+
+// The little-endian word of `count` chunk at `at`.
+fn partial_word(mem: Inline[u8, 32], at: u64, count: u64) -> u64 {
+    let mut value: u64 = 0
+    let mut j = count
+    while j > 0 {
+        j -= 1
+        let byte: u64 = int.widen(mem[at + j])
+        value = value << 8 | byte
+    }
+    value
+}
+
+// cespare/xxhash xxhash_other.go:64-75 (writeBlocks): keep the four
+// accumulators local and read complete stripes directly from the input.
+// Both storage-specific loops use this kernel; only partial stripes use mem.
+fn stripe(lanes: Inline[u64, 4], a: u64, b: u64, c: u64, d: u64) -> Inline[u64, 4] {
+    [round(lanes[0], a), round(lanes[1], b), round(lanes[2], c), round(lanes[3], d)]
+}
+
+fn buffered_stripe(mut state: Xxh64) -> () {
+    state.lanes = stripe(state.lanes, partial_word(state.mem, 0, 8), partial_word(state.mem, 8, 8), partial_word(state.mem, 16, 8), partial_word(state.mem, 24, 8))
+}
+
+fn write_bytes_blocks(mut state: Xxh64, data: Bytes, start: u64, end: u64) -> u64 {
+    let mut lanes = state.lanes
+    let mut at = start
+    while end - at >= 32 {
+        lanes = stripe(lanes, list.word_le(data, at), list.word_le(data, at + 8), list.word_le(data, at + 16), list.word_le(data, at + 24))
+        at += 32
+    }
+    state.lanes = lanes
+    at
+}
+
+// cespare/xxhash xxhash.go:72-109 (Digest.Write): fill, stripes, tail.
+fn xxh_add(mut state: Xxh64, data: Bytes) -> () {
+    let end = list.len(data)
+    let mut at: u64 = 0
+    state.total = int.wrapping_add(state.total, end - at)
+    if end - at < 32 - state.used {
+        while at < end {
+            state.mem[state.used] = data[at]
+            state.used += 1
+            at += 1
+        }
+        return
+    }
+    if state.used > 0 {
+        while state.used < 32 {
+            state.mem[state.used] = data[at]
+            state.used += 1
+            at += 1
+        }
+        buffered_stripe(mut state)
+        state.used = 0
+    }
+    at = write_bytes_blocks(mut state, data, at, end)
+    while at < end {
+        state.mem[state.used] = data[at]
+        state.used += 1
+        at += 1
+    }
+}
+
+fn xxh_finish(state: Xxh64) -> u32 {
+    let mut h: u64 = 0
+    if state.total >= 32 {
+        let v1 = state.lanes[0]
+        let v2 = state.lanes[1]
+        let v3 = state.lanes[2]
+        let v4 = state.lanes[3]
+        h = int.wrapping_add(int.wrapping_add(rotl(v1, 1), rotl(v2, 7)), int.wrapping_add(rotl(v3, 12), rotl(v4, 18)))
+        h = merge_round(h, v1)
+        h = merge_round(h, v2)
+        h = merge_round(h, v3)
+        h = merge_round(h, v4)
+    } else {
+        h = int.wrapping_add(state.lanes[2], PRIME5)
+    }
+    h = int.wrapping_add(h, state.total)
+    let mut at: u64 = 0
+    while at + 8 <= state.used {
+        h = h ^ round(0, partial_word(state.mem, at, 8))
+        h = int.wrapping_add(mul(rotl(h, 27), PRIME1), PRIME4)
+        at += 8
+    }
+    if at + 4 <= state.used {
+        h = h ^ mul(partial_word(state.mem, at, 4), PRIME1)
+        h = int.wrapping_add(mul(rotl(h, 23), PRIME2), PRIME3)
+        at += 4
+    }
+    while at < state.used {
+        let byte: u64 = int.widen(state.mem[at])
+        h = h ^ mul(byte, PRIME5)
+        h = mul(rotl(h, 11), PRIME1)
+        at += 1
+    }
+    h = h ^ h >> 33
+    h = mul(h, PRIME2)
+    h = h ^ h >> 29
+    h = mul(h, PRIME3)
+    int.truncate(h ^ (h >> 32))
+}
+
+type Phase = Magic | SkipSize | Skip(u64) | Header | BlockHeader | Payload(u64, u64, u64) | Flush | Check
+
+type Stop = Continue | Input | Output | Done
+
+type Frame {
+    window: u64,
+    size: u64,
+    declared: Option[u64],
+    checksum: bool,
+    hash: Xxh64,
+    last: bool
+}
+
+type Scratch {
+    history: Bytes,
+    pending: Bytes,
+    literals: Bytes,
+    tables: List[Tables]
+}
+
+pub opaque type Decoder {
+    max_window: u64,
+    max_output: u64,
+    total: u64,
+    phase: Phase,
+    fault: Option[ZstdError],
+    header: Bytes,
+    payload: Bytes,
+    flushed: u64,
+    frame: Frame,
+    scratch: Scratch
+}
+
+fn smaller(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn new_decoder(max_window: u64, max_output: u64) -> Result[Decoder, Capacity] {
+    let block_size = smaller(BLOCK_LIMIT, max_window)
+    let history: Bytes = list.with_capacity(smaller(max_window, max_output))?
+    let pending: Bytes = list.with_capacity(smaller(block_size, max_output))?
+    let literals: Bytes = list.with_capacity(smaller(block_size, max_output))?
+    let header: Bytes = list.with_capacity(14)?
+    let payload: Bytes = list.with_capacity(if block_size == 0 {
+        1
+    } else {
+        block_size
+    })?
+    let mut tables: List[Tables] = list.with_capacity(1)?
+    match list.push(mut tables, empty_tables()) {
+        Ok(()) => (),
+        Error(e) => return Error(e.0),
+    }
+    let frame = Frame(window: 0, size: 0, declared: None(), checksum: false, hash: xxh_start(), last: false)
+    let scratch = Scratch(history: take history, pending: take pending, literals: take literals, tables: take tables)
+    Ok(Decoder(max_window: max_window, max_output: max_output, total: 0, phase: Magic(), fault: None(), header: take header, payload: take payload, flushed: 0, frame: frame, scratch: take scratch))
+}
+
+/// Start a frame decoder. The history and fixed block buffers are admitted
+/// up front, and step calls use only their existing capacity.
+pub fn decoder(max_window: u64) -> Result[Decoder, Capacity] {
+    new_decoder(max_window, 0xffffffffffffffff)
+}
+
+fn emit(mut f: Frame, mut s: Scratch, value: u8) {
+    let _ = list.push(mut s.pending, value)
+    f.size += 1
+}
+
+// Keep the previous block's history while expanding the new block. This
+// lets a match cross from a dictionary into the initial frame prefix even
+// if its distance exceeds the rolling window.
+fn remember(f: Frame, mut s: Scratch) {
+    let n = list.len(s.pending)
+    let start = f.size - n
+    for i in 0u64 .. n {
+        let slot = (start + i) % f.window
+        let value = s.pending[i]
+        if list.len(s.history) == slot {
+            let _ = list.push(mut s.history, value)
+        } else {
+            s.history[slot] = value
+        }
+    }
+}
+
+fn emit_literals(mut f: Frame, mut s: Scratch, lo: u64, hi: u64) {
+    for i in lo .. hi {
+        let value = s.literals[i]
+        emit(mut f, mut s, value)
+    }
+}
+
+fn emit_match(mut f: Frame, mut s: Scratch, distance: u64, n: u64, dict: Bytes) -> Result[(), ZstdError] {
+    let dictionary_size = list.len(dict)
+    if distance > f.size {
+        if f.size > f.window || distance - f.size > dictionary_size {
+            return Error(Corrupt())
+        }
+    } else if distance > f.window {
+        return Error(Corrupt())
+    }
+    let start = f.size - list.len(s.pending)
+    for i in 0u64 .. n {
+        let byte = if distance > f.size {
+            dict[dictionary_size - (distance - f.size)]
+        } else {
+            let source = f.size - distance
+            if source >= start {
+                s.pending[source - start]
+            } else {
+                s.history[source % f.window]
+            }
+        }
+        emit(mut f, mut s, byte)
+    }
+    Ok(())
+}
+
+fn check_room(f: Frame, produced: u64, count: u64, room: u64) -> Result[(), ZstdError] {
+    if count > smaller(f.window, BLOCK_LIMIT) - produced {
+        return Error(BlockOversize())
+    }
+    if count > room - produced {
+        return Error(TooLarge())
+    }
+    if let Some(size) = f.declared {
+        if count > size - f.size {
+            return Error(ContentSize())
+        }
+    }
+    Ok(())
+}
+
+fn compressed_block(data: Bytes, mut f: Frame, mut s: Scratch, dict: Bytes, room: u64) -> Result[(), ZstdError] {
+    let mut c = Cursor(pos: 0)
+    read_literals(data, mut c, mut s.tables[0], smaller(f.window, BLOCK_LIMIT), room, mut s.literals)?
+    let first = word(data, mut c, 1)?
+    let count = if first < 128 {
+        first
+    } else if first < 255 {
+        (first - 128) * 256 + word(data, mut c, 1)?
+    } else {
+        word(data, mut c, 2)? + 0x7f00
+    }
+    let mut used: u64 = 0
+    if count > 0 {
+        let modes = word(data, mut c, 1)?
+        if modes & 3 != 0 {
+            return Error(ReservedBit())
+        }
+        sequence_table(data, mut c, modes >> 6, 0, mut s.tables[0].literals)?
+        sequence_table(data, mut c, (modes >> 4) & 3, 1, mut s.tables[0].offsets)?
+        sequence_table(data, mut c, (modes >> 2) & 3, 2, mut s.tables[0].matches)?
+        let stream = list.slice(data, c.pos, list.len(data))
+        let mut b = reverse(stream)?
+        let mut ll = backward(stream, mut b, s.tables[0].literals.log)?
+        let mut off_state = backward(stream, mut b, s.tables[0].offsets.log)?
+        let mut ml = backward(stream, mut b, s.tables[0].matches.log)?
+        for i in 0u64 .. count {
+            let l: u64 = int.widen(s.tables[0].literals.entries[ll])
+            let o: u64 = int.widen(s.tables[0].offsets.entries[off_state])
+            let m: u64 = int.widen(s.tables[0].matches.entries[ml])
+            let lc = l & 255
+            let oc = o & 255
+            let mc = m & 255
+            if lc > 35 || oc > 31 || mc > 52 {
+                return Error(Corrupt())
+            }
+            let off = (1u64 << oc) + backward(stream, mut b, oc)?
+            let match_length = ML_BASE[mc] + backward(stream, mut b, ML_BITS[mc])?
+            let literal_length = LL_BASE[lc] + backward(stream, mut b, LL_BITS[lc])?
+            let distance = offset(off, literal_length, mut s.tables[0])?
+            if literal_length > list.len(s.literals) - used {
+                return Error(Corrupt())
+            }
+            check_room(f, list.len(s.pending), literal_length + match_length, room)?
+            emit_literals(mut f, mut s, used, used + literal_length)
+            used += literal_length
+            emit_match(mut f, mut s, distance, match_length, dict)?
+            if i + 1 < count {
+                ll = (l >> 12) + backward(stream, mut b, (l >> 8) & 15)?
+                ml = (m >> 12) + backward(stream, mut b, (m >> 8) & 15)?
+                off_state = (o >> 12) + backward(stream, mut b, (o >> 8) & 15)?
+            }
+        }
+        if b.left != 0 {
+            return Error(Corrupt())
+        }
+    } else if c.pos != list.len(data) {
+        return Error(Corrupt())
+    }
+    let end = list.len(s.literals)
+    check_room(f, list.len(s.pending), end - used, room)?
+    emit_literals(mut f, mut s, used, end)
+    Ok(())
+}
+
+fn block(mut d: Decoder, kind: u64, size: u64, dict: Option[View[Dictionary]]) -> Result[(), ZstdError] {
+    let room = d.max_output - d.total
+    if kind == 2 {
+        match dict {
+            Some(saved) => compressed_block(d.payload, mut d.frame, mut d.scratch, saved.content, room)?,
+            None() => compressed_block(d.payload, mut d.frame, mut d.scratch, list.slice(d.payload, 0, 0), room)?,
+        }
+    } else {
+        check_room(d.frame, 0, size, room)?
+        if kind == 0 {
+            for b in d.payload {
+                emit(mut d.frame, mut d.scratch, b)
+            }
+        } else if size != 0 {
+            let byte = d.payload[0]
+            for i in 0u64 .. size {
+                emit(mut d.frame, mut d.scratch, byte)
+            }
+        }
+    }
+    remember(d.frame, mut d.scratch)
+    list.clear(mut d.payload)
+    let n = list.len(d.scratch.pending)
+    d.total += n
+    if d.frame.checksum {
+        xxh_add(mut d.frame.hash, d.scratch.pending)
+    }
+    d.phase = Flush()
+    Ok(())
+}
+
+fn fill_buffer(mut into: Bytes, input: Bytes, mut at: u64, n: u64) -> bool {
+    let amount = smaller(n - list.len(into), list.len(input) - at)
+    let _ = list.append(mut into, list.slice(input, at, at + amount))
+    at += amount
+    list.len(into) == n
+}
+
+fn id_width(descriptor: u64) -> u64 {
+    let flag = descriptor & 3
+    if flag == 3 {
+        4
+    } else {
+        flag
+    }
+}
+
+fn content_width(descriptor: u64) -> u64 {
+    let flag = descriptor >> 6
+    if flag == 0 && descriptor & 32 == 0 {
+        0
+    } else {
+        1u64 << flag
+    }
+}
+
+fn frame_header(mut d: Decoder, dict: Option[View[Dictionary]]) -> Result[(), ZstdError] {
+    let mut c = Cursor(pos: 0)
+    let descriptor = word(d.header, mut c, 1)?
+    if descriptor & 8 != 0 {
+        return Error(ReservedBit())
+    }
+    let single = descriptor & 32 != 0
+    let mut size: u64 = 0
+    if !single {
+        let wd = word(d.header, mut c, 1)?
+        let base = 1u64 << (10 + (wd >> 3))
+        size = base + (base / 8) * (wd & 7)
+    }
+    let id = word(d.header, mut c, id_width(descriptor))?
+    let width = content_width(descriptor)
+    let mut content = word(d.header, mut c, width)?
+    if width == 2 {
+        content += 256
+    }
+    if single {
+        size = content
+    }
+    if size > d.max_window {
+        return Error(WindowTooLarge(size))
+    }
+    if width > 0 && content > d.max_output - d.total {
+        return Error(TooLarge())
+    }
+    match dict {
+        Some(saved) => {
+            if saved.id != id {
+                return Error(Corrupt())
+            }
+            d.scratch.tables[0] = saved.tables
+        },
+        None() => {
+            if id != 0 {
+                return Error(Corrupt())
+            }
+            let t = empty_tables()
+            d.scratch.tables[0] = t
+        },
+    }
+    list.clear(mut d.scratch.history)
+    d.frame.window = size
+    d.frame.size = 0
+    d.frame.declared = if width == 0 {
+        None()
+    } else {
+        Some(content)
+    }
+    d.frame.checksum = descriptor & 4 != 0
+    d.frame.hash = xxh_start()
+    list.clear(mut d.header)
+    d.phase = BlockHeader()
+    Ok(())
+}
+
+fn advance(mut d: Decoder, input: Bytes, mut at: u64, limit: u64, mut out: Bytes, dict: Option[View[Dictionary]]) -> Result[Stop, ZstdError] {
+    let phase = d.phase
+    match phase {
+        Magic() => {
+            if !fill_buffer(mut d.header, input, mut at, 4) {
+                return Ok(Input())
+            }
+            let magic: u32 = list.word_le(d.header, 0)
+            d.phase = if magic == 0xfd2fb528 {
+                Header()
+            } else if magic & 0xfffffff0 == 0x184d2a50 {
+                SkipSize()
+            } else {
+                return Error(BadMagic())
+            }
+            list.clear(mut d.header)
+        },
+        SkipSize() => {
+            if !fill_buffer(mut d.header, input, mut at, 4) {
+                return Ok(Input())
+            }
+            let size: u32 = list.word_le(d.header, 0)
+            d.phase = Skip(int.widen(size))
+            list.clear(mut d.header)
+        },
+        Skip(left) => {
+            let n = smaller(left, list.len(input) - at)
+            at += n
+            if n != left {
+                d.phase = Skip(left - n)
+                return Ok(Input())
+            }
+            d.phase = Magic()
+            return Ok(Done())
+        },
+        Header() => {
+            if list.len(d.header) == 0 && !fill_buffer(mut d.header, input, mut at, 1) {
+                return Ok(Input())
+            }
+            let descriptor: u64 = int.widen(d.header[0])
+            if descriptor & 8 != 0 {
+                return Error(ReservedBit())
+            }
+            let fixed: u64 = if descriptor & 32 == 0 {
+                2
+            } else {
+                1
+            }
+            if !fill_buffer(mut d.header, input, mut at, fixed + id_width(descriptor) + content_width(descriptor)) {
+                return Ok(Input())
+            }
+            frame_header(mut d, dict)?
+        },
+        BlockHeader() => {
+            if !fill_buffer(mut d.header, input, mut at, 3) {
+                return Ok(Input())
+            }
+            let mut c = Cursor(pos: 0)
+            let header = word(d.header, mut c, 3)?
+            let kind = (header >> 1) & 3
+            let size = header >> 3
+            if kind == 3 {
+                return Error(Corrupt())
+            }
+            if size > smaller(d.frame.window, BLOCK_LIMIT) {
+                return Error(BlockOversize())
+            }
+            d.frame.last = header & 1 != 0
+            list.clear(mut d.header)
+            d.phase = Payload(kind, size, if kind == 1 {
+                1
+            } else {
+                size
+            })
+        },
+        Payload(kind, size, chunk) => {
+            if !fill_buffer(mut d.payload, input, mut at, chunk) {
+                return Ok(Input())
+            }
+            block(mut d, kind, size, dict)?
+        },
+        Flush() => {
+            let end = list.len(d.scratch.pending)
+            let n = smaller(end - d.flushed, limit - list.len(out))
+            let _ = list.append(mut out, list.slice(d.scratch.pending, d.flushed, d.flushed + n))
+            d.flushed += n
+            if d.flushed != end {
+                return Ok(Output())
+            }
+            list.clear(mut d.scratch.pending)
+            d.flushed = 0
+            if !d.frame.last {
+                d.phase = BlockHeader()
+            } else {
+                if let Some(size) = d.frame.declared {
+                    if size != d.frame.size {
+                        return Error(ContentSize())
+                    }
+                }
+                if d.frame.checksum {
+                    d.phase = Check()
+                } else {
+                    d.phase = Magic()
+                    return Ok(Done())
+                }
+            }
+        },
+        Check() => {
+            if !fill_buffer(mut d.header, input, mut at, 4) {
+                return Ok(Input())
+            }
+            let expected: u32 = list.word_le(d.header, 0)
+            if expected != xxh_finish(d.frame.hash) {
+                return Error(Checksum())
+            }
+            list.clear(mut d.header)
+            d.phase = Magic()
+            return Ok(Done())
+        },
+    }
+    Ok(Continue())
+}
+
+fn run(mut d: Decoder, input: Bytes, mut at: u64, limit: u64, mut out: Bytes, dict: Option[View[Dictionary]]) -> Result[Stop, ZstdError] {
+    while true {
+        match advance(mut d, input, mut at, limit, mut out, dict) {
+            Ok(Continue()) => (),
+            Ok(stop) => return Ok(stop),
+            Error(error) => {
+                d.fault = Some(error)
+                d.scratch.history = list.new()
+                d.scratch.tables = list.new()
+                d.scratch.pending = list.new()
+                d.scratch.literals = list.new()
+                d.header = list.new()
+                d.payload = list.new()
+                return Error(error)
+            },
+        }
+    }
+    Ok(Input())
+}
+
+/// Append decoded chunk to out and stop after one frame. Supply the next
+/// frame at the returned boundary. Alloc: none.
+pub fn decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes) -> Result[flate.Step, ZstdError] {
+    if let Some(error) = d.fault {
+        return Error(error)
+    }
+    let chunk = list.slice(input, lo, hi)
+    let start = list.len(out)
+    let limit = list.capacity(out)
+    let mut at: u64 = 0
+    let stop = run(mut d, chunk, mut at, limit, mut out, None())?
+    Ok(flate.Step(consumed: at, produced: list.len(out) - start, ended: match stop {
+        Done() => true,
+        _ => false
+    }))
+}
+
+fn frame_prefix(data: Bytes, at: u64) -> bool {
+    let n = smaller(4, list.len(data) - at)
+    let mut standard = true
+    let mut skippable = true
+    for i in 0u64 .. n {
+        let byte: u32 = int.widen(data[at + i])
+        let shift: u32 = int.narrow(8 * i)
+        standard = standard && byte == (0xfd2fb528u32 >> shift) & 255
+        skippable = skippable && (if i == 0 {
+            byte & 240 == 80
+        } else {
+            byte == (0x184d2a50u32 >> shift) & 255
+        })
+    }
+    standard || skippable
+}
+
+fn decode_frames(data: Bytes, max_output: u64, max_window: u64, dict: Option[View[Dictionary]]) -> Result[Bytes, Error] {
+    if list.len(data) == 0 {
+        return Error(Data(Truncated()))
+    }
+    let mut d = admit(new_decoder(max_window, max_output))?
+    let mut out: Bytes = list.new()
+    let mut at: u64 = 0
+    while true {
+        let limit = list.capacity(out)
+        match run(mut d, data, mut at, limit, mut out, dict) {
+            Ok(Done()) => {
+                if at == list.len(data) {
+                    return Ok(take out)
+                }
+                if !frame_prefix(data, at) {
+                    return Error(Data(TrailingData(at)))
+                }
+            },
+            Ok(Input()) => return Error(Data(Truncated())),
+            Ok(Output()) => admit(list.reserve(mut out, 1))?,
+            Ok(Continue()) => (),
+            Error(error) => return Error(data_error(error)),
+        }
+    }
+    Error(Data(Truncated()))
+}
+
+/// Decode every frame, skipping skippable frames and bounding total output.
+pub fn decode(data: Bytes, max_output: u64, max_window: u64) -> Result[Bytes, Error] {
+    decode_frames(data, max_output, max_window, None())
+}
+
+/// Decode frames using a reusable validated dictionary.
+pub fn decode_with(d: Dictionary, data: Bytes, max_output: u64, max_window: u64) -> Result[Bytes, Error] {
+    decode_frames(data, max_output, max_window, Some(view d))
+}
+
+fn block_header(mut out: Bytes, n: u64, kind: u64, last: bool) -> Result[(), Capacity] {
+    let header = (n << 3) | (kind << 1) | (if last {
+        1u64
+    } else {
+        0u64
+    })
+    let lo: u16 = int.truncate(header)
+    let hi: u8 = int.narrow(header >> 16)
+    list.put_word_le(mut out, lo)?
+    put_byte(mut out, hi)
+}
+
+fn put_byte(mut out: Bytes, x: u8) -> Result[(), Capacity] {
+    match list.push(mut out, x) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(e.0),
+    }
+}
+
+fn same_byte(data: Bytes, at: u64, n: u64) -> bool {
+    let first = data[at]
+    for i in (at + 1) .. (at + n) {
+        if data[i] != first {
+            return false
+        }
+    }
+    true
+}
+
+/// Encode an RFC 8878 frame with content size and an XXH64 checksum.
+/// Levels 1 through 19 use the same raw and run-length block writer.
+pub fn encode(data: Bytes, level: u8) -> Result[Bytes, Capacity] {
+    // The API's level domain is 1..19. All supported levels have the
+    // same block limit because this writer has no match search.
+    let levels: Inline[u64, 19] =[131072; 19]
+    let level_index: u64 = int.widen(level)
+    let block_size = levels[level_index - 1]
+    let n = list.len(data)
+    let mut out: Bytes = list.new()
+    list.put_word_le(mut out, 0xfd2fb528u32)?
+    let flag: u8 = if n <= 255 {
+        0
+    } else if n <= 65791 {
+        64
+    } else if n <= 0xffffffff {
+        128
+    } else {
+        192
+    }
+    let single: u8 = if n <= block_size {
+        32
+    } else {
+        0
+    }
+    put_byte(mut out, flag | single | 4)?
+    if single == 0 {
+        // Window descriptor with a 128 KiB base and zero mantissa.
+        put_byte(mut out, 56)?
+    }
+    if flag == 0 {
+        put_byte(mut out, int.narrow(n))?
+    } else if flag == 64 {
+        let size: u16 = int.narrow(n - 256)
+        list.put_word_le(mut out, size)?
+    } else if flag == 128 {
+        let size: u32 = int.narrow(n)
+        list.put_word_le(mut out, size)?
+    } else {
+        list.put_word_le(mut out, n)?
+    }
+    let mut at: u64 = 0
+    while true {
+        let len = smaller(block_size, n - at)
+        let last = at + len == n
+        if len > 1 && same_byte(data, at, len) {
+            block_header(mut out, len, 1, last)?
+            put_byte(mut out, data[at])?
+        } else {
+            block_header(mut out, len, 0, last)?
+            list.append(mut out, list.slice(data, at, at + len))?
+        }
+        if last {
+            break
+        }
+        at += len
+    }
+    let mut hash = xxh_start()
+    xxh_add(mut hash, data)
+    list.put_word_le(mut out, xxh_finish(hash))?
+    Ok(take out)
+}

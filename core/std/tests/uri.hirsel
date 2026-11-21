@@ -25,7 +25,7 @@ fn shift_optional(s: Option[http1.Span], by: u64) -> Option[http1.Span] {
 }
 
 fn shifted(u: uri.Uri, by: u64) -> uri.Uri {
-    let host = match u.host {
+    let host: Option[uri.Host] = match u.host {
         Some(Name(p)) => Some(Name(shift(p, by))),
         Some(Ip6(p)) => Some(Ip6(shift(p, by))),
         None => None

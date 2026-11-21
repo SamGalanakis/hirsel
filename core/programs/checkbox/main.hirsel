@@ -16,37 +16,24 @@ fn bit(take i: u32) -> Result[Bit, ()] {
     }
 }
 
-// Never has no built-in codec. The wire conversion cannot construct this type.
-type NoError: codec via() (to: error_wire, from: no_error) {
-    never: Never
-}
-
-fn error_wire(e: NoError) -> View[()] in e {
-    e.never
-}
-
-fn no_error(take _value: ()) -> Result[NoError, ()] {
-    Error(())
-}
-
 type Handles: send {
-    chunks: store.store.Table[u32, Bytes]
+    chunks: store.Table[u32, Bytes]
 }
 
 type Registry = store.runner.Registry[(), Handles]
 
-fn migrate(mut phase: store.store.Migration) -> Result[(), store.store.Error] {
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     let codec: std.codec.Codec[Bytes] = std.codec.of()
-    match store.store.migration_create_table(mut phase, store.store.spec("chunks", std.codec.key_u32(), codec)) {
+    match store.migration_create_table(mut phase, store.spec("chunks", std.codec.key_u32(), codec)) {
         Ok(()) => Ok(()),
         Error(Exists(_)) => Ok(()),
         Error(take problem) => Error(take problem),
     }
 }
 
-fn handles(catalog: store.store.Schema) -> Result[Handles, store.store.Error] {
+fn handles(catalog: store.Schema) -> Result[Handles, store.Error] {
     let codec: std.codec.Codec[Bytes] = std.codec.of()
-    let chunks = store.store.schema_table(catalog, "chunks", std.codec.key_u32(), codec)?
+    let chunks = store.schema_table(catalog, "chunks", std.codec.key_u32(), codec)?
     Ok(Handles(chunks: chunks))
 }
 
@@ -69,20 +56,20 @@ fn flip(mut data: Bytes, i: Bit) -> bool {
     data[index] & mask != 0u8
 }
 
-fn toggle(mut tx: store.store.Tx, h: Handles, author: store.runner.Caller, take i: Bit) -> Result[bool, NoError] {
+fn toggle(mut tx: store.Tx, h: Handles, author: store.runner.Caller, take i: Bit) -> Result[bool, Never] {
     let key = chunk(i)
-    let old = result.unwrap(store.store.fetch(tx, store.store.shape(h.chunks), key))
+    let old = result.unwrap(store.fetch(tx, store.shape(h.chunks), key))
     let mut data = match take old {
         Some(take value) => take value,
         None => zero_chunk()
     }
     let checked = flip(mut data, i)
-    result.unwrap(store.store.put(mut tx, h.chunks, key, data))
+    result.unwrap(store.put(mut tx, h.chunks, key, data))
     Ok(checked)
 }
 
-fn board(tx: store.store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.Cover, Capacity] {
-    store.runner.cover(store.store.shape(h.chunks), Unbounded, Unbounded)
+fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.Cover, Capacity] {
+    store.runner.cover(store.shape(h.chunks), Unbounded, Unbounded)
 }
 
 fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
@@ -136,8 +123,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             let Some(ip) = std.wsock.parse_ip(address) else {
                 return Error(invalid)
             }
-            let parsed: Result[u16, ParseError] = int.parse(port_text)
-            let Ok(port) = parsed else {
+            let Ok(port) = (int.parse(port_text) : Result[u16, ParseError]) else {
                 return Error(invalid)
             }
             listen = Addr(ip: ip, port: port)
@@ -147,8 +133,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             }
             result.unwrap(list.push(mut proxies, prefix))
         } else {
-            let parsed: Result[u64, ParseError] = int.parse(value)
-            let Ok(n) = parsed else {
+            let Ok(n) = (int.parse(value) : Result[u64, ParseError]) else {
                 return Error(invalid)
             }
             if n == 0u64 || n > 1000000000u64 {
@@ -180,7 +165,7 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
     let (policy, take admission_task) = result.unwrap(store.ingress.start(tasks, c, random, options, 8388608u64))
     let mut session = store.runner.wire_defaults(65536u64, N_PLACE)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    let config: store.runner.PlaceConfig[(), Handles, ()] = store.runner.PlaceConfig(backing: Disk(directory, store.store.defaults()),
+    let config: store.runner.PlaceConfig[(), Handles, ()] = store.runner.PlaceConfig(backing: Disk(directory, store.defaults()),
         selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: session, max_sessions: store.runner.WIRE_OWNER_LIMIT, proxies: take proxies, policy: take policy, n_publisher: 67108864u64,
         listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), triggers: None)
@@ -198,7 +183,7 @@ pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: T
     store.runner.main(a, process, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[(), Exit] waits {
         if let Some(take candidate) = store.runner.launch_prepare_args(a)? {
             let store.runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
-            let setup = store.runner.PrepareConfig(scratch: directory, options: store.store.defaults(),
+            let setup = store.runner.PrepareConfig(scratch: directory, options: store.defaults(),
                 attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
                 place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles))
             return match store.runner.prepare_deploy(setup) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }

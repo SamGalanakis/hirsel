@@ -4,8 +4,8 @@ Hirsel is a systems-level, general-purpose language whose primary user is a codi
 It is procedural with value semantics: loops and local mutation, no raw pointers, no
 methods. Every type declares once how its values are represented: own, region data, a
 resource, or plain data. Values are read through lexical views, shared only
-through explicit `Rc` and `Arc`, and allocated against limits that fail with an ordinary
-`Capacity` value. Tasks share nothing, and every outside effect arrives through a
+through explicit `Rc` and `Arc`, and allocated against limits whose refusal is the ordinary failure
+`Capacity`. Tasks share nothing, and every outside effect arrives through a
 capability parameter.
 
 This specification defines the v1 core language: its syntax, typing, ownership, memory,
@@ -33,7 +33,7 @@ These goals decide between designs. A rule that would break one of them is wrong
    free and no leaked resources.
 4. **Authority is explicit.** Files, network, clocks, randomness, tasks and output are
    values passed as parameters ([capabilities](capabilities.md)).
-5. **Deterministic.** Given the same recorded inputs and limits, every run that no run
+5. **Deterministic.** Given the same outside inputs and limits, every run that no run
    stop ends behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
    including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
@@ -54,7 +54,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Tasks](tasks.md) | CONC-1 to CONC-13 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
-| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 |
+| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9, PROG-10 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
@@ -76,7 +76,7 @@ built `hirsel` does not implement yet; the mark is removed when it does.
 The [Net socket declarations and ownership rules](net.md) define the network
 capability and its explicit grant syntax.
 The [TLS and secrets specification](tls.md) defines the client TLS provider
-operations, `Secret` and what their tapes hold.
+operations and `Secret`.
 The [HTTP specification](http.md) defines std `http`, the runner's HTTP bindings
 and keyed operations. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
@@ -88,11 +88,13 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 |---|---|
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
 | as if, observables | [SEM-8](semantics.md#sem-8-determinism) |
+| authentication: none in Hirsel or the runner; application code binds the Caller | [HTTP §4](http.md#4-keyed-operations), RUNNER-SPEC rule 13 |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
 | codec | [SEM-10](semantics.md#sem-10-codecs) |
 | tombstone | [SEM-10](semantics.md#sem-10-codecs) |
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
+| claim function, keyed operation | [K-2](http.md#k-2-the-principal-and-the-key-come-from-application-code), [K-1](http.md#k-1-the-declaration) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |
 | copyable | [OWN-3](ownership.md#own-3-kinds) |
 | current limit, limit | [MEM-19](budgets.md#mem-19-limits) |
@@ -111,6 +113,7 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
+| recording, recording build | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
 | region data, region value | [MEM-2](memory.md#mem-2-region-data) |
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |
 | reservation | [OWN-11](ownership.md#own-11-call-arguments) |
@@ -118,7 +121,6 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | slice end, step, step bound | [MEM-30](budgets.md#mem-30-step-bounds) |
 | shield | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | sub-view | [OWN-8](ownership.md#own-8-views) |
-| tape, substitute | [CAP-9](capabilities.md#cap-9-tapes) |
 | type summary | [OWN-2](ownership.md#own-2-type-summaries) |
 | writable | [OWN-5](ownership.md#own-5-availability) |
 | writer | [MEM-4](memory.md#mem-4-sized-destinations) |

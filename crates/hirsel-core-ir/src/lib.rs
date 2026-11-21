@@ -393,8 +393,7 @@
 //! of the place holding its carrier, Views). Every `host`, `stdout` and `stderr`
 //! row returns the outcome `value: u64, error: u8, code: u32, written: u64`,
 //! from which the producer builds the `Result`. Every provider row adds the
-//! failure status (Native ABI): it fails with `Tape` when its tape refuses it
-//! before issue (CAP-9); the rows that `wait` also fail with `Cancelled` when
+//! failure status (Native ABI): the rows that `wait` fail with `Cancelled` when
 //! cancellation is pending, `host_mkdtemp` also with `Bounds` when the name has
 //! fewer than 32 spare bytes. `host_wall_ms` and `host_mono_ns` return the `u64`
 //! and `host_random` nothing besides the status. The `args` rows cannot fail. The run time reads and writes the carrier: `host_read` fills spare
@@ -442,6 +441,38 @@
 //! (SEM-5), so no hash is observable. Engines map `rt.hash_bytes` to `uint64_t
 //! hirsel_core_hash_bytes(const uint8_t *, uint64_t)`, with no context or status.
 //!
+//! # XXH3
+//!
+//! `rt.xxh3_short(data, len)` returns seed-zero XXH3-64 of at most 240 bytes
+//! with the default secret. `rt.xxh3_stripes(acc, data, secret, count)` adds
+//! whole 64-byte stripes to eight `u64` words at `acc`. A stripe uses a 64-byte
+//! window of the secret, starting eight bytes past the preceding stripe's
+//! window. The front end checks both ranges. The row does no block scrambling.
+//! Each call takes one step and admits no bytes, with identical updates on
+//! the portable and SIMD paths (MEM-30, SEM-8).
+//!
+//! # SHA-1
+//!
+//! `rt.sha1_blocks(state, data, len)` applies RFC 3174 block compression in
+//! order to `len` readable bytes and their SHA-1 padding. It updates five
+//! `u32` state words in place. An empty span only compresses the padding.
+//! The call admits no bytes and costs one step (MEM-30). The portable and
+//! instruction kernels update the same state (SEM-8). Engines map the row to
+//! `void hirsel_core_sha1_blocks(uint32_t *, const uint8_t *, uint64_t)`.
+//!
+//! # SHA-256
+//!
+//! `rt.sha256_blocks(state, data, blocks)` applies the FIPS 180-4 SHA-256
+//! compression to each of `blocks` 64-byte blocks at `data`, in order, updating
+//! the eight `u32` state words at `state` in place. The front end checks the
+//! range first and calls it only with at least one block, so the row never fails.
+//! `sha256.blocks` and `sha256.block` are each one core call and one step whatever
+//! the block count (MEM-30). The run time chooses the CPU's
+//! SHA-256 instructions when present and its portable code otherwise; the result
+//! is the same bytes, so nothing observable names the choice (SEM-8). Engines map
+//! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
+//! with no context or status.
+//!
 //! # Identities
 //!
 //! `rt.dest_id` is the run's one counter of fresh `u64` identities: a
@@ -457,7 +488,7 @@
 //! The `Cause` is in core's layout (32 bytes): `Fail`'s `String` carrier at 0 and the
 //! `Site` (u64) at 24. `CauseKind` is that carrier's capacity niche (FORM #75): kind
 //! `k` (declaration order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4,
-//! Cancelled 5, Capacity 6, Tape 7, OutOfTime 8) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
+//! Cancelled 5, Capacity 6, OutOfTime 7) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
 //! is that pointer, valid while the `Causes` lives. A `Fail` cause owns its message;
 //! cleaning the `Causes` frees it when its capacity is not 0.
 //!
@@ -1047,6 +1078,8 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+pub mod address;
+pub mod decode;
 /// A test evaluator for the FORM v0 subset, for this crate's samples and its producers'
 /// behaviour cases.
 #[cfg(any(test, feature = "eval"))]
@@ -1055,15 +1088,19 @@ pub mod extent;
 pub mod failure;
 mod ir;
 pub mod native_layout;
+pub mod normal;
 pub mod receive_loops;
+pub mod release_recipe;
 pub mod roles;
 pub mod source;
 mod static_data;
+pub mod step_contexts;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;
 pub mod widths;
 
+pub use address::{CodeRow, builtin_address, code_addresses, code_revision, is_versioned_builtin};
 pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;
 

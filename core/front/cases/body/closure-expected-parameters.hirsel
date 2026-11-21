@@ -1,0 +1,84 @@
+// LANG-11. A callable's fixed parameters guide omitted types. Its result may
+// still be open, and the first typed arm fixes the type of the other arm.
+// expect: accept
+// expect: run bound_closure() = 3
+// expect: run explicit_modes() = 8
+// expect: run from_earlier_argument() = 8
+// expect: run from_result() = 0
+// expect: run open_result(true) = 8
+// expect: run open_result(false) = 9
+// expect: run nested_callback() = 8
+// expect: run array_callback() = 8
+fn bound_closure() -> u64 {
+    let inc: fn(u64) -> u64 = fn(x) {
+        x + 1
+    }
+    inc(2)
+}
+
+fn explicit_modes() -> u64 {
+    let add: fn(mut u64, bytes u64) -> u64 = fn(mut x, bytes by) {
+        x += by
+        x
+    }
+    let mut value = 3u64
+    add(mut value, bytes 5)
+}
+
+fn after[T](value: T, callback: fn(T) -> u64) -> u64 {
+    callback(value)
+}
+
+fn from_earlier_argument() -> u64 {
+    after(7u64, fn(n) {
+        n + 1
+    })
+}
+
+fn fold[A, T](xs: List[T], combine: fn(A, T) -> A, take init: A) -> A {
+    init
+}
+
+fn from_result() -> u64 {
+    fold((list.new() : List[u64]), fn(acc, x) {
+        acc + x
+    }, 0)
+}
+
+fn apply[R](callback: fn(u64) -> R) -> R {
+    callback(7)
+}
+
+fn open_result(pick: bool) -> u64 {
+    let n = apply(if pick {
+        fn(x) -> u64 {
+            x + 1
+        }
+    } else {
+        fn(x) {
+            x + 2
+        }
+    })
+    n
+}
+
+fn apply_pair[V](pair: (fn(u64) -> u64, V)) -> u64 {
+    pair.0(7)
+}
+
+fn nested_callback() -> u64 {
+    apply_pair((fn(x) {
+        x + 1
+    }, true))
+}
+
+fn apply_array[R](callbacks: Inline[fn(u64) -> R, 1]) -> R {
+    callbacks[0](7)
+}
+
+fn array_callback() -> u64 {
+    let n = apply_array([fn(x) -> u64 {
+        x + 1
+    }])
+    n
+}

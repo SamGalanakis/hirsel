@@ -892,7 +892,11 @@ impl<'a> Machine<'a> {
         }
         let c = w.c;
         let mut s = String::new();
-        if shapes.iter().any(|v| v.removed) {
+        let empty: Vec<_> = shapes
+            .iter()
+            .map(|v| w.empty_fields(v.steps.iter().map(|s| s.ty)))
+            .collect();
+        if shapes.iter().any(|v| v.removed) || empty.iter().any(Option::is_some) {
             s += "let start$ = at$\n";
         }
         let _ = writeln!(s, "let tag$ = {c}take_tag(b$, mut at$, {})?", shapes.len());
@@ -902,9 +906,10 @@ impl<'a> Machine<'a> {
                 "return Error(Bad(Invalid(start$)))\n".to_owned()
             } else {
                 let (b, value) = self.seg(w, m, v, 0, "a", "continue");
+                let check = reject_empty(empty[v].as_deref(), "start$");
                 match (self.multi(), value) {
-                    (false, Some(value)) => format!("{b}{value}\n"),
-                    (_, value) => b + &self.finished(m, value, false),
+                    (false, Some(value)) => format!("{check}{b}{value}\n"),
+                    (_, value) => check + &b + &self.finished(m, value, false),
                 }
             });
         }
@@ -1002,11 +1007,14 @@ impl<'a> Machine<'a> {
                     return (s, None);
                 }
                 Edge::Option => {
+                    let inner = w.empty_codec_at(&self.g.members[child].1, step.source);
                     let push = self.push(w, r, saved(k), jump);
+                    let start = format!("{pre}start{k}$");
+                    let check = reject_empty(Some(&inner), &start);
                     let _ = write!(
                         s,
-                        "if {c}take_tag(b$, mut at$, 2)? != 0 {{\n{}}}\nlet {pre}{k}$: {text} = None\n",
-                        indent(&push)
+                        "let {start} = at$\nif {c}take_tag(b$, mut at$, 2)? != 0 {{\n{}}}\nlet {pre}{k}$: {text} = None\n",
+                        indent(&(check + &push))
                     );
                 }
                 Edge::Ok(other) | Edge::Error(other) => {
@@ -1015,11 +1023,16 @@ impl<'a> Machine<'a> {
                         Edge::Ok(_) => ("== 0", "Error"),
                         _ => ("!= 0", "Ok"),
                     };
+                    let inner = w.empty_codec_at(&self.g.members[child].1, step.source);
+                    let direct = w.empty_codec(other);
                     let plain = w.take(&Ty::With(other));
+                    let start = format!("{pre}start{k}$");
+                    let check = reject_empty(Some(&inner), &start);
+                    let other_check = reject_empty(Some(&direct), &start);
                     let _ = write!(
                         s,
-                        "if {c}take_tag(b$, mut at$, 2)? {at} {{\n{}}}\nlet {pre}{k}$: {text} = {side}({plain})\n",
-                        indent(&push)
+                        "let {start} = at$\nif {c}take_tag(b$, mut at$, 2)? {at} {{\n{}}}\n{other_check}let {pre}{k}$: {text} = {side}({plain})\n",
+                        indent(&(check + &push))
                     );
                 }
                 Edge::List => {
@@ -1342,8 +1355,13 @@ impl<'a> Gen<'a> {
         self.function(out, &header, &body);
         let (lets, least) = self.least_body();
         let header = format!("fn {name}$codec{generics}() -> {c}Codec[{ty}]");
-        let body =
-            format!("{lets}    {c}make({name}$encode, {name}$decode, {name}$schema, {least})\n");
+        let empty = self.empty_body();
+        let args = format!("{name}$encode, {name}$decode, {name}$schema, {least}");
+        let make = match empty {
+            Some(empty) => format!("{c}make_derived({args}, {empty})"),
+            None => format!("{c}make({args})"),
+        };
+        let body = format!("{lets}    {make}\n");
         self.function(out, &header, &body);
     }
     fn record_encode(&mut self, entries: &'a [Entry<'a>]) -> String {
@@ -1412,9 +1430,18 @@ impl<'a> Gen<'a> {
     /// as is no value's. `take_tag` refuses a tag past the count, so the last branch has no test.
     fn sum_decode(&mut self, variants: &'a [Variant<'a>]) -> String {
         let c = self.c;
-        let removed = variants.iter().any(|v| v.removed);
+        let empty: Vec<_> = variants
+            .iter()
+            .map(|v| {
+                if v.removed {
+                    None
+                } else {
+                    self.empty_fields(v.payload.iter().map(|p| &p.ty))
+                }
+            })
+            .collect();
         let mut body = String::new();
-        if removed {
+        if variants.iter().any(|v| v.removed) || empty.iter().any(Option::is_some) {
             body.push_str("    let start$ = at$\n");
         }
         let _ = writeln!(
@@ -1441,6 +1468,7 @@ impl<'a> Gen<'a> {
                 format!("Ok({}({}))", v.name, args.join(", "))
             };
             let value = self.mapped.mark(v.source, value);
+            let value = reject_empty(empty[tag].as_deref(), "start$") + &value;
             let _ = match (tag, tag == last) {
                 (0, true) => writeln!(body, "    {value}"),
                 (0, false) => writeln!(body, "    if tag$ == 0 {{\n        {value}"),
@@ -1532,6 +1560,57 @@ impl<'a> Gen<'a> {
         let _ = write!(s, "    {c}close(mut s$)\n    Ok(())\n");
         s
     }
+    // A product is empty if any required field has no encodings. Lists, maps
+    // and Option have an empty value regardless of their arguments.
+    fn empty_fields(&mut self, fields: impl Iterator<Item = &'a Ty<'a>>) -> Option<String> {
+        let tests: Vec<_> = fields
+            .filter_map(|ty| match *ty {
+                Ty::With(t) => Some(self.empty_codec(t)),
+                Ty::Result(ok, err) => Some(format!(
+                    "({} && {})",
+                    self.empty_codec(ok),
+                    self.empty_codec(err)
+                )),
+                _ => None,
+            })
+            .collect();
+        (!tests.is_empty()).then(|| tests.join(" || "))
+    }
+
+    fn empty_codec(&mut self, ty: &'a str) -> String {
+        self.empty_codec_at(ty, ty)
+    }
+
+    fn empty_codec_at(&mut self, ty: &'a str, source: &'a str) -> String {
+        let codec = self.of_at(ty, source);
+        format!("{}is_empty({codec})", self.c)
+    }
+
+    fn empty_body(&mut self) -> Option<String> {
+        if let Some(v) = &self.decl.via {
+            return Some(self.empty_codec(v.wire));
+        }
+        match &self.decl.body {
+            Body::Record(entries) => {
+                self.empty_fields(entries.iter().filter(|e| !e.removed).map(|e| &e.ty))
+            }
+            Body::Sum(variants) => {
+                let mut tests = vec![];
+                for v in variants.iter().filter(|v| !v.removed) {
+                    tests.push(format!(
+                        "({})",
+                        self.empty_fields(v.payload.iter().map(|p| &p.ty))?
+                    ));
+                }
+                Some(if tests.is_empty() {
+                    "true".into()
+                } else {
+                    tests.join(" && ")
+                })
+            }
+        }
+    }
+
     /// The maker's LEAST: the sum over a record's live fields; for a sum, 4 plus the least
     /// over its live variants, a running minimum in lets when a payload's is a call.
     fn least_body(&mut self) -> (String, String) {
@@ -1584,6 +1663,12 @@ impl<'a> Gen<'a> {
             }
         }
     }
+}
+
+fn reject_empty(test: Option<&str>, start: &str) -> String {
+    test.map_or_else(String::new, |test| {
+        format!("if {test} {{ return Error(Bad(Invalid({start}))) }}\n")
+    })
 }
 
 /// A LEAST: a constant plus `least` calls.

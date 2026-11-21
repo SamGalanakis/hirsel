@@ -16,6 +16,7 @@ mod copy_tests;
 mod debug;
 pub use debug::finish_native_object;
 mod split;
+mod step_free;
 pub use split::split_native_object;
 mod empty;
 mod expose;
@@ -276,6 +277,8 @@ fn emit_ir_target_with_role_facts(
 struct Items {
     function_symbols: Vec<String>,
     versioned: Option<Vec<bool>>,
+    /// The free body each selecting entry chooses with no step bound current.
+    step_dispatch: Vec<Option<FuncId>>,
     pending: std::collections::BTreeMap<String, Item>,
     release_sites: Option<ReleaseSites>,
 }
@@ -299,6 +302,7 @@ impl Items {
         Self {
             function_symbols: module.link_symbols(),
             versioned: None,
+            step_dispatch: vec![None; module.functions.len()],
             pending: Default::default(),
             release_sites: None,
         }
@@ -381,7 +385,6 @@ fn release_last_name(t: u32, atomic: bool) -> String {
 struct EmissionFacts<'a> {
     roles: Option<&'a hirsel_core_ir::roles::Facts>,
     neutral: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
-    elide_steps: bool,
     prepay_step_trees: bool,
     release_sites: bool,
     versions: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
@@ -444,7 +447,13 @@ fn emit_module(
         });
     }
     items.release_sites = provided.release_sites.then(ReleaseSites::default);
-    let batch_steps = source.batch_steps && !provided.elide_steps;
+    for (&f, free) in &module.step_free {
+        if free.dispatch && !items.is_versioned(f) {
+            items.step_dispatch[f.index()] = Some(free.body);
+        }
+    }
+    let step_variants = hirsel_core_ir::step_contexts::variants(module);
+    let batch_steps = source.batch_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
         0,
@@ -563,14 +572,14 @@ fn emit_module(
     }
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
-    let step_neutral =
-        (!provided.elide_steps).then(|| steps::neutral_functions(module, provided.neutral));
-    let neutral_functions = step_neutral.as_deref().unwrap_or_default();
+    let step_neutral = steps::neutral_functions(module, provided.neutral);
+    let neutral_functions = step_neutral.as_slice();
     let debug = if source.debug_lines {
         sites::debug_plan(
             module,
             &items.function_symbols,
             items.versioned.as_deref(),
+            &items.step_dispatch,
             &failures,
             &mut next_scope,
             sink,
@@ -646,9 +655,11 @@ fn emit_module(
         let append_fast = definition == "core@1/string/push_char";
         let shadow_callee = append_fast
             .then(|| {
-                module.functions.iter().enumerate().find_map(|(i, callee)| {
-                    let id = FuncId(i as u32);
-                    (module.instances[callee.instance.index()]
+                body.calls.iter().find_map(|call| {
+                    let Callee::Direct(id) = call.callee else {
+                        return None;
+                    };
+                    (module.instances[module.functions[id.index()].instance.index()]
                         .definition
                         .to_string()
                         == "core@1/string/push_scalar"
@@ -711,7 +722,7 @@ fn emit_module(
                 step_labels: Default::default(),
                 unchecked_steps: false,
                 precharge: None,
-                step_neutral: step_neutral.as_deref(),
+                step_neutral: Some(neutral_functions),
                 step_counter: None,
                 neutral_step_call: false,
                 view_invariants: Vec::new(),
@@ -737,10 +748,17 @@ fn emit_module(
                 fixed_point: None,
                 fixed_rank: None,
             };
+            // A selecting entry takes the function's symbol; its checked body
+            // keeps the direct calls.
+            let free_body = e.items.step_dispatch[i];
+            let body_base = match free_body {
+                Some(_) => step_free::checked(&name),
+                None => name.clone(),
+            };
             let body_name = if has_status {
-                name.clone()
+                body_base
             } else {
-                format!("{name}.infallible")
+                format!("{body_base}.infallible")
             };
             let attrs = FnAttrs {
             linkage: if has_status {
@@ -793,7 +811,8 @@ fn emit_module(
                 {
                     Inline::Always
                 }
-                _ if (module.code_variants.contains_key(&FuncId(i as u32))
+                _ if ((module.code_variants.contains_key(&FuncId(i as u32))
+                    && !step_variants.contains_key(&FuncId(i as u32)))
                     || body.calls.len() <= 1)
                     && empty::loop_free(body) =>
                 {
@@ -809,7 +828,7 @@ fn emit_module(
             let signature = e.abi.signature(signature_params);
             e.sink
                 .begin_function(&body_name, &signature, &locals, &attrs);
-            if !provided.elide_steps && body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
+            if body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
                 let counter = Local::Named("hirsel.step.counter");
                 e.sink.alloca(counter, &Type::I64, 8);
                 e.step_counter = Some(counter.into());
@@ -966,9 +985,7 @@ fn emit_module(
                     .collect::<BTreeSet<_>>();
                 for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
                     let index = b.insts.start as usize + offset;
-                    if skipped.contains(&index)
-                        || (provided.elide_steps && matches!(inst, Inst::Step { .. }))
-                    {
+                    if skipped.contains(&index) {
                         continue;
                     }
                     e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
@@ -1020,6 +1037,19 @@ fn emit_module(
             e.sink.end_function();
             e.current = None;
             e.step_counter = None;
+            if let Some(free) = free_body {
+                let suffix = if has_status { "" } else { ".infallible" };
+                let free = format!("{}{suffix}", e.items.function_symbols[free.index()]);
+                step_free::stub(
+                    &mut *e.sink,
+                    &format!("{name}{suffix}"),
+                    &body_name,
+                    &free,
+                    &signature,
+                    &locals,
+                    attrs.linkage,
+                );
+            }
             if !has_status {
                 e.infallible_wrapper(
                     &name,
@@ -1067,7 +1097,7 @@ pub(crate) fn emit_native_module_in_context(
     roles: &hirsel_core_ir::roles::Facts,
     observe_charge: bool,
     debug_lines: bool,
-    neutral: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
+    neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
     versions: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
 ) -> Result<crate::construction::NativeModule> {
     native_module(
@@ -1084,9 +1114,8 @@ pub(crate) fn emit_native_module_in_context(
         },
         EmissionFacts {
             roles: Some(roles),
-            neutral,
-            elide_steps: neutral.is_none(),
-            prepay_step_trees: neutral.is_some(),
+            neutral: Some(neutral),
+            prepay_step_trees: true,
             release_sites: false,
             versions,
         },
@@ -1099,7 +1128,7 @@ pub(crate) fn emit_release_unit(
     context: std::rc::Rc<crate::construction::Context>,
     roles: &hirsel_core_ir::roles::Facts,
     observe_charge: bool,
-    neutral: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
+    neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
 ) -> Result<(crate::construction::NativeModule, Vec<source::ReleaseSite>)> {
     let mut native = sink::native::NativeSink::new(context);
     let versions = versions::program(&[module]);
@@ -1117,9 +1146,8 @@ pub(crate) fn emit_release_unit(
         },
         EmissionFacts {
             roles: Some(roles),
-            neutral,
-            elide_steps: neutral.is_none(),
-            prepay_step_trees: neutral.is_some(),
+            neutral: Some(neutral),
+            prepay_step_trees: true,
             release_sites: true,
             versions: Some(&versions),
         },
@@ -2170,6 +2198,7 @@ impl FunctionEmitter<'_> {
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
+            | Inst::BuiltinUse { .. }
             | Inst::Mark { .. }
             | Inst::Unmark { .. } => {}
             Inst::UpdateMask {

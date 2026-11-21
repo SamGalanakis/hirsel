@@ -3,6 +3,7 @@
 //! types or lowered code, so old and new front ends, storage and native code can
 //! name the same definition without depending on each other.
 
+pub mod host_op;
 pub mod launch;
 pub mod published;
 
@@ -254,6 +255,30 @@ impl DefPath {
             name: item,
         }))
     }
+    /// PROG-9's definition text, shared by PROG-10's instance encoding.
+    pub fn definition_identity(&self) -> String {
+        use std::fmt::Write;
+        fn escape(part: &str, out: &mut String) {
+            for &byte in part.as_bytes() {
+                if byte.is_ascii_alphanumeric() || byte == b'_' {
+                    out.push(byte as char);
+                } else {
+                    write!(out, "%{byte:02X}").expect("writing to a String");
+                }
+            }
+        }
+        let path = &self.0;
+        let mut text = String::new();
+        escape(&path.package.name, &mut text);
+        text.push('@');
+        text.push_str(&path.package.version);
+        for component in path.modules.iter().chain(std::iter::once(&path.name)) {
+            text.push('/');
+            escape(component, &mut text);
+        }
+        text
+    }
+
     pub fn fingerprint(&self) -> ContentHash {
         let p = &self.0;
         let parts = std::iter::once(p.package.name.as_bytes())

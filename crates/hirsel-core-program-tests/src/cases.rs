@@ -9,6 +9,10 @@ use hirsel_core_resolve::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[path = "../../../core/front/support/cases.rs"]
+mod case_source;
+use case_source::DiagnosticExpectation;
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/front")
 }
@@ -422,12 +426,36 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             "CoreIR with shared slots is not well formed: {e:?}"
         ));
     }
-    for line in source.lines() {
-        let Some(e) = line.trim().strip_prefix("// expect: ") else {
-            continue;
-        };
+    for e in case_source::expectations(&source) {
         expects += 1;
         let words: Vec<&str> = e.split_whitespace().collect();
+        if let Some(expectation) = DiagnosticExpectation::parse(e, &words) {
+            match expectation {
+                DiagnosticExpectation::Refuse { rule, at } => {
+                    want_refusals.push(format!("{rule} at {at}"));
+                }
+                DiagnosticExpectation::Cause { rule, at, from } => {
+                    want_causes.push(format!("{rule} at {at} from {from}"));
+                }
+                DiagnosticExpectation::Compared {
+                    head,
+                    declared,
+                    required,
+                } => {
+                    want_compared.push(format!("{head} | {declared} | {required}"));
+                }
+                DiagnosticExpectation::Message { rule, at, text } => {
+                    if !refusals.iter().any(|r| {
+                        r.rule == rule
+                            && line_col(&modules, &r.primary) == at
+                            && r.message.contains(&text)
+                    }) {
+                        failures.push(format!("missing message {rule} at {at}: {text}"));
+                    }
+                }
+            }
+            continue;
+        }
         match words.as_slice() {
             ["accept"] => {}
             ["cached"] => {
@@ -485,27 +513,6 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     failures.push(
                         "cached diagnostic provenance differs from the source request".into(),
                     );
-                }
-            }
-            ["refuse", rule, "at", at] => want_refusals.push(format!("{rule} at {at}")),
-            ["cause", rule, "at", at, "from", from @ ..] => {
-                want_causes.push(format!("{rule} at {at} from {}", from.join(" ")))
-            }
-            ["compared", ..] => match e.split(" | ").collect::<Vec<_>>().as_slice() {
-                [head, declared, required] => want_compared.push(format!(
-                    "{} | {declared} | {required}",
-                    head.trim_start_matches("compared ")
-                )),
-                _ => failures.push(format!("unreadable expectation `{e}`")),
-            },
-            ["message", rule, "at", at, "|", text @ ..] => {
-                let text = text.join(" ");
-                if !refusals.iter().any(|r| {
-                    r.rule == *rule
-                        && line_col(&modules, &r.primary) == *at
-                        && r.message.contains(&text)
-                }) {
-                    failures.push(format!("missing message {rule} at {at}: {text}"));
                 }
             }
             ["gap-cause", "at", at, "from", from @ ..] => {
@@ -965,21 +972,6 @@ pub(super) fn run_expect(
     (got != expected).then(|| format!("run {call}: want {expected:?}, got {got:?}"))
 }
 
-fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .expect("cases dir")
-        .map(|e| e.expect("entry").path())
-        .collect();
-    entries.sort();
-    for e in entries {
-        if e.is_dir() {
-            cases(&e, out);
-        } else if e.extension().is_some_and(|x| x == "hirsel") {
-            out.push(e);
-        }
-    }
-}
-
 #[test]
 fn generic_allocation_layout() {
     let failures = run_case(&root().join("cases/body/generic-allocation-layout.hirsel"));
@@ -1156,6 +1148,7 @@ fn codec_overrides_and_tombstones() {
         "schema-accepted",
         "schema-refused",
         "via-refused",
+        "via-holds-refused",
         "via-generic-owners",
         "via-generic-owner-refused",
     ] {
@@ -1358,9 +1351,103 @@ fn flow_transform_rejects() {
 }
 
 #[test]
+fn package_root_names() {
+    let files = tempfile::tempdir().unwrap();
+    let app = "\
+fn address() -> u64 { dep.inside(dep.Number(value: 2)) + dep.worker.count() }
+fn stutter(n: dep.dep.Number) -> u64 { 0 }
+";
+    let app_path = files.path().join("app.hirsel");
+    std::fs::write(&app_path, app).unwrap();
+    let mut inputs = crate::source_manifest(app, app_path, &core_dir(), "main");
+    inputs
+        .packages
+        .last_mut()
+        .unwrap()
+        .dependencies
+        .push(package("dep"));
+    let dep = "\
+pub type Number { value: u64 }
+pub fn read(n: Number) -> u64 { n.value }
+pub fn inside(n: dep.Number) -> u64 { dep.read(n) }
+pub fn worker() -> u64 { 0 }
+";
+    let sources = [("dep", dep), ("worker", "pub fn count() -> u64 { 1 }\n")]
+        .into_iter()
+        .map(|(module, source)| {
+            let file = files.path().join(format!("{module}.hirsel"));
+            std::fs::write(&file, source).unwrap();
+            ModuleSource {
+                file,
+                modules: vec![module.into()],
+                signatures: false,
+            }
+        })
+        .collect();
+    inputs.packages.push(PackageManifest {
+        package: package("dep"),
+        dependencies: vec![package("core")],
+        sources,
+    });
+
+    // An image overlay can discover the sibling after the root member is indexed.
+    let mut base = inputs.clone();
+    base.packages.last_mut().unwrap().sources.truncate(1);
+    let corpus = base.load().unwrap();
+    let mut index = corpus.index(&corpus.parse());
+    let dep_package = index
+        .package(
+            index.symbols.find("dep").unwrap(),
+            index.symbols.find("1").unwrap(),
+        )
+        .unwrap();
+    let name = index.symbols.find("worker").unwrap();
+    let sibling = index.add_module(dep_package, &[name]);
+    let [refusal] = index.diagnostics.as_slice() else {
+        panic!("expected one root conflict: {:?}", index.diagnostics);
+    };
+    let member = index.definition(refusal.primary.module, name).unwrap();
+    assert_eq!(refusal.rule, "LANG-7");
+    assert_eq!(refusal.primary, index.get(member).site);
+    assert_eq!(refusal.causal[0].module, sibling);
+
+    let checked = Checked::check(inputs, files, None);
+    let product = &checked.product;
+
+    // LANG-7 puts the collision at the declaration and the stutter at the second token.
+    let diagnostics = product.machine_diagnostics().unwrap();
+    assert_eq!(diagnostics.len(), 2, "{:?}", product.diagnostics);
+    for (module, source, marker, token, cause) in [
+        ("dep@1/dep", dep, "worker()", "worker", Some("dep@1/worker")),
+        ("app@1/main", app, "dep.Number) ->", "dep", None),
+    ] {
+        let start = source.find(marker).unwrap() as u32;
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.primary.module == module)
+            .unwrap();
+        assert_eq!(diagnostic.rule, "LANG-7");
+        assert_eq!(diagnostic.primary.span.start, start);
+        assert_eq!(diagnostic.primary.span.end, start + token.len() as u32);
+        assert!(
+            diagnostic
+                .causal
+                .iter()
+                .map(|site| site.module.as_str())
+                .eq(cause)
+        );
+    }
+    let identity = Identity::plain(DefPath::from_full("app@1/main/address").unwrap());
+    let units = product.units([identity.clone()], 65_536).unwrap();
+    let (module, function) =
+        hirsel_core_materialize::join(&units.modules().unwrap(), &identity).unwrap();
+    let report = eval::run(&module, function, &[], u64::MAX);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![3]));
+}
+
+#[test]
 fn corpus() {
-    let mut paths = vec![];
-    cases(&root().join("cases"), &mut paths);
+    let paths = case_source::files(&root().join("cases")).expect("cases dir");
     assert!(!paths.is_empty());
     let mut report = vec![];
     for path in &paths {
@@ -1388,6 +1475,25 @@ fn corpus() {
 fn float_contract() {
     let failures = run_case(&root().join("cases/body/float-unary.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn expression_ascription() {
+    for case in ["expression-ascription", "expression-ascription-refused"] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
+fn closure_expected_parameters() {
+    for case in [
+        "closure-expected-parameters",
+        "closure-expected-parameters-refused",
+    ] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
 }
 
 #[test]

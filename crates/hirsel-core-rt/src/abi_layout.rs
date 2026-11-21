@@ -2,7 +2,8 @@
 // native emitters include these constants without linking runtime semantics.
 pub const CONTEXT_CURRENT_LIMIT: usize = 0;
 // The process C ABI is identical on the two supported 64-bit targets.
-pub const OS_CONFIG_BYTES: u32 = 144;
+pub const OS_CONFIG_BYTES: u32 = 152;
+pub const OS_CONFIG_SECRET_OPS: i32 = 144;
 pub const OS_CONFIG_SECRET_GRANTS: i32 = 128;
 pub const OS_CONFIG_SECRET_GRANTS_LEN: i32 = 136;
 pub const OS_CONFIG_NET_RULES: i32 = 72;
@@ -26,6 +27,10 @@ pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
+// MEM-30: while a step bound is current the window at CONTEXT_STEPS holds at
+// most one slice; with none current it starts at 2^62. A larger word means no
+// bound is current.
+pub const STEP_SLICE: i64 = 65_536;
 pub const TASK_ARC_REPLAY: usize = 0;
 // Nonzero when the task's init/share/release hooks must run whatever its credit:
 // a tape group, an open LATEST pair, an event sink or test schedule, or a

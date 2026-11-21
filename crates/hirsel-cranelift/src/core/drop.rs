@@ -887,14 +887,10 @@ impl Glue<'_, '_, '_> {
                 )?;
             }
             FieldTy::Handle(
-                h @ (hirsel_core_layout::Handle::HostFile
-                | hirsel_core_layout::Handle::Tape
-                | hirsel_core_layout::Handle::Socket),
+                h @ (hirsel_core_layout::Handle::HostFile | hirsel_core_layout::Handle::Socket),
             ) => {
                 let handle = self.load(at, 0);
-                let name = if *h == hirsel_core_layout::Handle::Tape {
-                    "hirsel_core_tape_drop"
-                } else if *h == hirsel_core_layout::Handle::Socket {
+                let name = if *h == hirsel_core_layout::Handle::Socket {
                     "hirsel_core_socket_drop"
                 } else {
                     "hirsel_core_hostfile_drop"

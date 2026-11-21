@@ -330,11 +330,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         let mut fd = self.fd.as_ref().clone();
-        fd.path.0.name = format!(
-            "{}$task_entry{}",
-            fd.path.0.name,
-            n.0 - self.item.range.nodes.start
-        );
+        fd.path.0.name = self.generated_name(GeneratedKind::TaskEntry, n);
         fd.params.clear();
         fd.result = r;
         fd.drop_of = None;

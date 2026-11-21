@@ -363,6 +363,7 @@ impl FunctionEmitter<'_> {
                 let name = self.items.function_symbol(f);
                 let mut name = match self.level {
                     Some(level) if self.items.is_versioned(f) => versions::symbol(name, level),
+                    _ if self.items.step_dispatch[f.index()].is_some() => step_free::checked(name),
                     _ => name.to_owned(),
                 };
                 if !has_status {

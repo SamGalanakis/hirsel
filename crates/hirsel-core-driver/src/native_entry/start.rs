@@ -74,7 +74,7 @@ pub(super) fn emit(
         f.address(operations)
     };
     let process_kind = grant_kind("Process").unwrap();
-    let process_ops = if plan.tape.is_none()
+    let process_ops = if plan.replay.is_none()
         && plan.grant_mask & (1 << process_kind) != 0
         && plan
             .parameters
@@ -90,7 +90,7 @@ pub(super) fn emit(
         f.constant(0)
     };
     let net_kind = grant_kind("Net").unwrap();
-    let socket_activation = if plan.tape.is_none() && plan.grant_mask & (1 << net_kind) != 0 {
+    let socket_activation = if plan.replay.is_none() && plan.grant_mask & (1 << net_kind) != 0 {
         let activation = f
             .object
             .declare_data(
@@ -101,6 +101,15 @@ pub(super) fn emit(
             )
             .map_err(error)?;
         f.address(activation)
+    } else {
+        f.constant(0)
+    };
+    let secret_ops = if plan.replay.is_none() && !plan.secret_grants.is_empty() {
+        let operations = f
+            .object
+            .declare_data("hirsel_core_os_secret_ops", Linkage::Import, false, false)
+            .map_err(error)?;
+        f.address(operations)
     } else {
         f.constant(0)
     };
@@ -126,6 +135,7 @@ pub(super) fn emit(
             abi::OS_CONFIG_SECRET_GRANTS_LEN,
             f.constant(plan.secret_grants.len() as u64),
         ),
+        (abi::OS_CONFIG_SECRET_OPS, secret_ops),
     ] {
         f.store(value, config, offset);
     }
@@ -133,21 +143,33 @@ pub(super) fn emit(
     let sources = f.address(data.sources);
     let entry = f.object.declare_func_in_func(entry, f.b.func);
     let entry = f.b.ins().func_addr(I64, entry);
-    let status = if let Some(tape) = plan.tape {
-        let path = f.string(tape.path.as_bytes())?;
+    let status = if let Some(replay) = plan.replay {
+        let path = f.string(replay.path.as_bytes())?;
         let identity = f.string(plan.identity.as_bytes())?;
-        let mode = f.constant(tape.mode as u64);
+        let mode = f.constant(if replay.diagnose { 2 } else { 1 });
         let revision = f
             .object
             .declare_data("hirsel_code_revision", Linkage::Import, false, false)
             .map_err(error)?;
         let revision = f.address(revision);
         f.value_call(
-            "hirsel_core_os_run_taped",
+            "hirsel_core_os_replay",
             I8,
             &[
                 config, names, sources, entry, path, mode, identity, revision,
             ],
+        )?
+    } else if plan.recording {
+        let identity = f.string(plan.identity.as_bytes())?;
+        let revision = f
+            .object
+            .declare_data("hirsel_code_revision", Linkage::Import, false, false)
+            .map_err(error)?;
+        let revision = f.address(revision);
+        f.value_call(
+            "hirsel_core_os_run_recording",
+            I8,
+            &[config, names, sources, entry, identity, revision],
         )?
     } else {
         let runner = if plan.launch_digest_unused {

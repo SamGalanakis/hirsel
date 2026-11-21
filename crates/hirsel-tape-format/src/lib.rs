@@ -6,7 +6,7 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
-use hirsel_core_net::{GrantRule, Rule, TlsRule, TlsTrust};
+use hirsel_core_net::{GrantRule, ResolveRule, Rule, TlsRule, TlsTrust};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
@@ -271,6 +271,10 @@ fn read_tls_rule(c: &mut Cursor<'_>) -> Result<TlsRule, Corrupt> {
     };
     let first = u16::from_le_bytes(c.fixed()?);
     let last = u16::from_le_bytes(c.fixed()?);
+    TlsRule::new(&read_patterns(c)?, first, last, trust).ok_or(Corrupt)
+}
+
+fn read_patterns(c: &mut Cursor<'_>) -> Result<String, Corrupt> {
     let count = u16::from_le_bytes(c.fixed()?);
     let mut patterns = String::new();
     for i in 0..count {
@@ -284,7 +288,7 @@ fn read_tls_rule(c: &mut Cursor<'_>) -> Result<TlsRule, Corrupt> {
         }
         patterns.push_str(pattern);
     }
-    TlsRule::new(&patterns, first, last, trust).ok_or(Corrupt)
+    Ok(patterns)
 }
 
 fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
@@ -292,15 +296,23 @@ fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
     let count = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
     let mut rules = Vec::new();
     for _ in 0..count {
-        if c.bytes.get(c.at) == Some(&2) {
-            c.u8()?;
-            rules.push(GrantRule::Tls(read_tls_rule(c)?));
-        } else {
-            let rule = read_net_rule(c.take(NET_RULE_LEN)?);
-            if !rule.valid() {
-                return Err(Corrupt);
+        match c.bytes.get(c.at) {
+            Some(2) => {
+                c.u8()?;
+                rules.push(GrantRule::Tls(read_tls_rule(c)?));
             }
-            rules.push(GrantRule::Address(rule));
+            Some(3) => {
+                c.u8()?;
+                let rule = ResolveRule::new(&read_patterns(c)?).ok_or(Corrupt)?;
+                rules.push(GrantRule::Resolve(rule));
+            }
+            _ => {
+                let rule = read_net_rule(c.take(NET_RULE_LEN)?);
+                if !rule.valid() {
+                    return Err(Corrupt);
+                }
+                rules.push(GrantRule::Address(rule));
+            }
         }
     }
     if count == 0 {
@@ -337,17 +349,11 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
                 let (first, last) = rule.ports();
                 out.extend_from_slice(&first.to_le_bytes());
                 out.extend_from_slice(&last.to_le_bytes());
-                let text = rule.pattern_text();
-                let patterns = text.split(',');
-                let count = u16::try_from(patterns.clone().count()).map_err(|_| HeaderTooLarge)?;
-                out.extend_from_slice(&count.to_le_bytes());
-                for pattern in patterns {
-                    out.push(u8::try_from(pattern.len()).map_err(|_| HeaderTooLarge)?);
-                    out.extend_from_slice(pattern.as_bytes());
-                    if out.len() > MAX_LEN {
-                        return Err(HeaderTooLarge);
-                    }
-                }
+                write_patterns(&mut out, &rule.pattern_text())?;
+            }
+            GrantRule::Resolve(rule) => {
+                out.push(3);
+                write_patterns(&mut out, &rule.pattern_text())?;
             }
         }
         if out.len() > MAX_LEN {
@@ -355,6 +361,20 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
         }
     }
     Ok(out)
+}
+
+fn write_patterns(out: &mut Vec<u8>, text: &str) -> Result<(), HeaderTooLarge> {
+    let patterns = text.split(',');
+    let count = u16::try_from(patterns.clone().count()).map_err(|_| HeaderTooLarge)?;
+    out.extend_from_slice(&count.to_le_bytes());
+    for pattern in patterns {
+        out.push(u8::try_from(pattern.len()).map_err(|_| HeaderTooLarge)?);
+        out.extend_from_slice(pattern.as_bytes());
+        if out.len() > MAX_LEN {
+            return Err(HeaderTooLarge);
+        }
+    }
+    Ok(())
 }
 
 fn read_secret_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::SecretGrant>, Corrupt> {
@@ -734,11 +754,14 @@ pub fn writes(op: u8) -> bool {
     use crate::op::*;
     matches!(op, WRITE | STDOUT | STDERR | RANDOM)
 }
+/// One family byte followed by the 16 IP octets.
+pub const RESOLVED_IP_LEN: usize = 17;
+
 pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
     matches!(
         op,
-        READ | MKDTEMP | RANDOM | LISTEN | ACCEPT | RECV_BOUNDED | TLS_CONNECT
+        READ | MKDTEMP | RANDOM | LISTEN | ACCEPT | RECV_BOUNDED | TLS_CONNECT | RESOLVE
     )
 }
 
@@ -751,7 +774,7 @@ pub struct Out {
     /// Error tag and code, present exactly when `status` is ERROR.
     pub error: (u8, u64),
     pub written: u64,
-    /// Input bytes, a temporary-directory suffix, a socket address, or TLS handshake data.
+    /// Input bytes, a temporary-directory suffix, addresses, or TLS handshake data.
     pub payload: Vec<u8>,
 }
 impl Out {
@@ -835,7 +858,12 @@ impl Out {
             op::READ | op::RECV_BOUNDED if self.status == OK => {
                 usize::try_from(self.value).map_err(|_| Corrupt)
             }
-            op::RECV_BOUNDED => Ok(0),
+            op::RESOLVE if self.status == OK => usize::try_from(self.value)
+                .ok()
+                .and_then(|n| n.checked_mul(RESOLVED_IP_LEN))
+                .ok_or(Corrupt),
+            op::RESOLVE if self.value != 0 => Err(Corrupt),
+            op::RECV_BOUNDED | op::RESOLVE => Ok(0),
             op::RANDOM => usize::try_from(self.written).map_err(|_| Corrupt),
             _ => Ok(self.payload.len()),
         }
@@ -1231,33 +1259,4 @@ impl Decoder {
 /// The Args grant kind in the entry ABI.
 pub const ARGS_KIND: u8 = 10;
 
-/// Provider operation codes shared by the runtime ABI and tape codec.
-pub mod op {
-    pub const OPEN: u8 = 0;
-    pub const READ: u8 = 1;
-    pub const WRITE: u8 = 2;
-    pub const CLOSE: u8 = 3;
-    pub const TRY_LOCK: u8 = 4;
-    pub const UNLOCK: u8 = 5;
-    pub const MKDIR: u8 = 6;
-    pub const MKDTEMP: u8 = 7;
-    pub const REMOVE: u8 = 8;
-    pub const REMOVE_TREE: u8 = 9;
-    pub const WALL_MS: u8 = 10;
-    pub const MONO_NS: u8 = 11;
-    pub const STDOUT: u8 = 12;
-    pub const STDERR: u8 = 13;
-    pub const RENAME: u8 = 14;
-    pub const SLEEP_UNTIL: u8 = 15;
-    pub const SYNC: u8 = 16;
-    pub const SYNC_DIR: u8 = 17;
-    pub const RANDOM: u8 = 18;
-    pub const CONNECT: u8 = 19;
-    pub const LISTEN: u8 = 20;
-    pub const ACCEPT: u8 = 21;
-    pub const TLS_CONNECT: u8 = 22;
-    pub const SEND_SECRET: u8 = 23;
-    pub const RECV_BOUNDED: u8 = 27;
-    pub const SEND_PAIR: u8 = 26;
-    pub const STOPPED: u8 = 28;
-}
+pub use hirsel_core_ids::host_op as op;

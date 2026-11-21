@@ -123,7 +123,11 @@ fn code(e: codec.DecodeError) -> u64 {
 }
 
 fn outcome[T](c: codec.Codec[T], b: Bytes) -> u64 {
-    match codec.decode(c, b) {
+    decode_outcome(codec.decode(c, b))
+}
+
+fn decode_outcome[T](r: Result[Result[T, codec.DecodeError], Capacity]) -> u64 {
+    match r {
         Ok(Ok(_)) => 0,
         Ok(Error(e)) => code(e),
         Error(_) => 9999
@@ -698,6 +702,60 @@ fn fingerprint_reference() -> (u64, u64, bool) {
     let e = codec.fingerprint_of(list.new())
     let d = result.unwrap(codec.fingerprint(rows_tomb())) != result.unwrap(codec.fingerprint(rows()))
     (a, e, d)
+}
+
+// Apache Avro 1.12.0, share/test/data/schema-tests.txt. Hash the published
+// canonical JSON bytes, which Avro uses as input to fingerprint64.
+// expect: run fingerprint_avro_vectors() = true
+fn fingerprint_avro_vectors() -> bool {
+    let vectors: Inline[(String, u64), 7] =[("\"null\"", 0x63dd24e7cc258f8a), ("\"boolean\"", 0x9f42fc78a4d4f764), ("\"int\"", 0x7275d51a3f395c8f), ("\"long\"", 0xd054e14493f41db7), ("[\"int\",\"boolean\"]", 0x4ad63578080c1602), ("{\"type\":\"array\",\"items\":\"null\"}", 0xf7d13f2f68170a6d), ("{\"type\":\"map\",\"values\":\"string\"}", 0x86ce965d92864572)]
+    for (form, expected) in vectors {
+        if codec.fingerprint_of(string.as_bytes(form)) != expected {
+            return false
+        }
+    }
+    true
+}
+
+// TestSchemaNormalization.altFingerprint, Apache Avro 1.12.0, on prefixes
+// of byte i = (17*i+3) mod 256.
+// expect: run fingerprint_span_boundaries() = true
+fn fingerprint_span_boundaries() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(4097))
+    for i in 0u64 .. 4097 {
+        result.unwrap(list.push(mut b, int.truncate(i * 17 + 3)))
+    }
+    let vectors: Inline[(u64, u64), 14] =[(0, 0xc15d213aa4d7a795), (1, 0x636ab938825c5af3), (7, 0x2332dd08478ed62a), (8, 0xe902ff8e513f3454), (9, 0x0b7483a78473573e), (63, 0xb40e1cdba1c0c77f), (64, 0xdb4545c7b4366271), (65, 0x804e5715595fc6f1), (255, 0x94522820065f273f), (256, 0x1a3838c9eb465a04), (257, 0xc6cf4a49cd53f3bc), (4095, 0x92849bde69880f9c), (4096, 0x3fd56a423782450d), (4097, 0x0f2f73fd02e9a6a2)]
+    for (size, expected) in vectors {
+        if codec.fingerprint_of(list.slice(b, 0, size)) != expected {
+            return false
+        }
+    }
+    true
+}
+
+// Each byte is the next desired table index XOR the previous fingerprint's
+// low byte. The independent Avro altFingerprint above gives the bytes and digest.
+// expect: run fingerprint_table_walk() = true
+fn fingerprint_table_walk() -> bool {
+    codec.fingerprint_of(unhex("95 a6 2f 02 c0 2f 33 de 44 cf 99 24 42 72 fb 47 2f 79 e1 98 51 95 60 0e 3e b5 e3 5e 38 08 81 3d 75 99 9c 6c fa d7 db 11 b0 3b 6d d0 b6 86 0f b3 db 8d 15 6c a5 61 94 fa ca 41 17 aa cc fc 75 c9 c1 72 03 4f 2f a5 18 21 21 aa fc 41 27 17 9e 22 4a 1c 84 fd 34 f0 05 6b 5b d0 86 3b 5d 6d e4 58 10 fc f9 09 9f b2 be 74 d5 5e 08 b5 d3 e3 6a d6 be e8 70 09 c0 04 f1 9f af 24 72 cf a9 99 10 ac 24 02 d4 4f 8b 3b a7 c3 02 89 df 62 04 34 bd 01 69 3f a7 de 17 d3 26 48 78 f3 a5 18 7e 4e c7 7b 33 df da 2a bc 91 9d 57 f6 7d 2b 96 f0 c0 49 f5 9d cb 53 2a e3 27 d2 bc 8c 07 51 ec 8a ba 33 8f 87 34 45 09 69 e3 5e 67 67 ec ba 07 61 51 d8 64 0c 5a c2 bb 72 b6 43 2d 1d 96 c0 7d 1b 2b a2 1e 56 ba bf 4f d9 f4 f8 32 93 18 4e f3 95 a5 2c 90 f8 ae 36 4f 86 42 b7 d9 e9 62 34 89 ef df 56 ea")) == 0x9a8f7337af6a4562
+}
+
+// MEM-30 gives one call step for fingerprint_of and two per byte, from
+// int.widen and the back edge. The two-byte published Avro vector takes five.
+// expect: run fingerprint_step_bound() = true
+fn fingerprint_step_bound() -> bool {
+    let b = string.as_bytes("[]")
+    let enough = bound steps 5 {
+        codec.fingerprint_of(b)
+    }
+    let short = bound steps 4 {
+        codec.fingerprint_of(b)
+    }
+    match (enough, short) {
+        (Ok(value), Error(out)) => value == 0xeec6e173d23fb9d1 && out.steps == 4,
+        _ => false,
+    }
 }
 
 // Evolution that survives old data. A field added with a default: version 1's bytes read
@@ -2458,4 +2516,55 @@ fn typed_json_codec_admission() -> bool {
         _ => false,
     }
     correct && decoded_row.range.w.lo == 2 && decoded_row.range.w.hi == 9 && decoded_row.score == 7 && reversed && duplicate && refused_option && refused_list && exhausted
+}
+
+// SEM-10: tuple components concatenate in order. The String has a little-endian
+// u32 byte count. A Result's u32 tag 0 precedes the Ok, and tag 1 cannot carry Never.
+type NeverPayload[T]: codec = Live | Dead(String, (u8, T))
+
+// expect: run tuple_never_codec() = ((true, true, true), (true, true, true), (2002, 2002, 2000, 2002, 2002))
+fn tuple_never_codec() -> ((bool, bool, bool), (bool, bool, bool), (u64, u64, u64, u64, u64)) {
+    let left: codec.Codec[(u8, String)] = codec.of()
+    let right: codec.Codec[(String, u8)] = codec.of()
+    let lb = unhex("07 01000000 61")
+    let rb = unhex("01000000 61 07")
+    let ls = result.unwrap(codec.schema(left))
+    let rs = result.unwrap(codec.schema(right))
+    let ordered = enc(left, (7u8, "a")) == lb && again(left, lb) && enc(right, ("a", 7u8)) == rb && again(right, rb)
+    let tuple_schemas = codec.fingerprint_of(ls) != codec.fingerprint_of(rs)
+    let cross = outcome(left, rb) != 0 && outcome(right, lb) != 0 && wrong_writer(left, rs) && wrong_writer(right, ls)
+    let n: codec.Codec[Result[u8, Never]] = codec.of()
+    let u: codec.Codec[Result[u8, ()]] = codec.of()
+    let v: codec.Codec[Result[u8, u8]] = codec.of()
+    let b = unhex("00000000 07")
+    let ok = enc(n, Ok(7)) == b && again(n, b) && enc(u, Ok(7)) == b && enc(v, Ok(7)) == b
+    let ns = result.unwrap(codec.schema(n))
+    let us = result.unwrap(codec.schema(u))
+    let vs = result.unwrap(codec.schema(v))
+    let schema = codec.fingerprint_of(ns) != codec.fingerprint_of(us) && codec.fingerprint_of(ns) != codec.fingerprint_of(vs)
+    let incompatible = wrong_writer(n, us) && wrong_writer(n, vs) && wrong_writer(u, ns) && wrong_writer(v, ns)
+    let never: codec.Codec[Never] = codec.of()
+    let sum: codec.Codec[NeverPayload[Never]] = codec.of()
+    let bad = unhex("ffff 01000000")
+    let nbad = decode_outcome(codec.decode_at(n, bad, 2))
+    let sbad = decode_outcome(codec.decode_at(sum, bad, 2))
+    let r = result.unwrap(result.unwrap(codec.resolve(n, ns)))
+    let via_reader = decode_outcome(codec.read_at(r, bad, 2))
+    // Add an unused empty record definition to force the schema resolution plan.
+    let current = result.unwrap(codec.schema(sum))
+    let end = list.len(current) - 5
+    let mut writer = unhex("03 02000000")
+    result.unwrap(list.append(mut writer, list.slice(current, 5, end)))
+    result.unwrap(list.append(mut writer, unhex("01000000 58 00000000 00 00000000")))
+    result.unwrap(list.append(mut writer, list.slice(current, end, list.len(current))))
+    let evolved = result.unwrap(result.unwrap(codec.resolve(sum, writer)))
+    let via_plan = decode_outcome(codec.read_at(evolved, bad, 2))
+    ((ordered, tuple_schemas, cross), (ok, schema, incompatible), (nbad, sbad, outcome(never, unhex("")), via_reader, via_plan))
+}
+
+fn wrong_writer[T](c: codec.Codec[T], writer: Bytes) -> bool {
+    match result.unwrap(codec.resolve(c, writer)) {
+        Error(Schema(_)) => true,
+        _ => false,
+    }
 }

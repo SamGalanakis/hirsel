@@ -370,13 +370,13 @@ fn repeat(b: Bytes) -> Result[Bytes, Capacity] {
 }
 
 pub fn case_cross_len() -> u64 {
-    lib.lib.len_of(code.describe(repeat))
+    lib.len_of(code.describe(repeat))
 }
 
 pub fn case_cross_same() -> u64 {
     let mut want: Bytes = list.new()
     let _ = list.append(mut want, code.identity(code.describe(repeat)))
-    if lib.lib.same(code.describe(repeat), want) {
+    if lib.same(code.describe(repeat), want) {
         1
     } else {
         0
@@ -384,11 +384,11 @@ pub fn case_cross_same() -> u64 {
 }
 
 pub fn case_cross_sum() -> u64 {
-    lib.lib.sum_of(code.describe(repeat))
+    lib.sum_of(code.describe(repeat))
 }
 
 pub fn case_cross_eq_same() -> u64 {
-    if code.describe(lib.lib.echo) == lib.lib.echo_code() {
+    if code.describe(lib.echo) == lib.echo_code() {
         1
     } else {
         0
@@ -396,7 +396,7 @@ pub fn case_cross_eq_same() -> u64 {
 }
 
 pub fn case_cross_eq_other() -> u64 {
-    if code.describe(lib.lib.mute) == lib.lib.echo_code() {
+    if code.describe(lib.mute) == lib.echo_code() {
         1
     } else {
         0
@@ -413,7 +413,7 @@ fn owned_text(take s: String) -> Result[String, Capacity] {
 
 pub fn case_cross_owned_number() -> u64 {
     let n = 40u64
-    match lib.lib.typed_call(code.describe(owned_number), take n) {
+    match lib.typed_call(code.describe(owned_number), take n) {
         Ok(delivered_value) => delivered_value,
         Error(_) => 0u64
     }
@@ -421,7 +421,7 @@ pub fn case_cross_owned_number() -> u64 {
 
 pub fn case_cross_owned_text() -> u64 {
     let s = "ok"
-    let delivered_text = match lib.lib.typed_call(code.describe(owned_text), take s) {
+    let delivered_text = match lib.typed_call(code.describe(owned_text), take s) {
         Ok(delivered_value) => delivered_value,
         Error(_) => return 0u64
     }
@@ -429,5 +429,5 @@ pub fn case_cross_owned_text() -> u64 {
 }
 
 pub fn case_cross_owned_identity() -> u64 {
-    lib.lib.typed_sum(code.describe(owned_number)) + lib.lib.typed_sum(code.describe(owned_text))
+    lib.typed_sum(code.describe(owned_number)) + lib.typed_sum(code.describe(owned_text))
 }

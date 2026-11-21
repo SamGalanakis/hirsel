@@ -1,69 +1,21 @@
-// Native oracle (tape_build_native.rs, tape_run_*): the first run records
-// run.tape in the granted directory, a run that finds it replays it. A run
-// prints "taped" through the substitute Stdout, then through the real one the
-// substitute Clock's reading and, after `tape.end`, the substitute Args.
-// Its own first argument `x` changes the outcome END compares; `after` reads
-// the substitute Clock after `tape.end`; `force` replays Across, and a run that
-// replays another revision's tape prints "across:" first. Exit 2 open refused or failed,
-// 3 Refused(Revision), 4 a faulted end, 5 Diverged(Outcome).
-pub fn main(d: Dir, c: Clock, out: Stdout, a: Args, ts: Tasks) -> Result[(), Exit] {
-    let first = match args.get(a, 0) {
-        Some(v) => if v == "x" { 1u8 } else if v == "after" { 2u8 } else if v == "force" { 3u8 } else if v == "aftertasks" { 4u8 } else { 0u8 },
-        None => 0u8
-    }
-    let mode = match host.open(d, "run.tape", Read) {
-        Ok(take f) => {
-            result.unwrap(host.close(take f))
-            if first == 3u8 { Across } else { Replay }
-        },
-        Error(NotFound) => Record,
-        _ => return Error(Exit(status: 2))
-    }
-    let arg: Bytes = list.new()
-    let header = tape.Header(id: (7u64, 9u64), identity: "tape-run", arg: arg, limit: 1048576u64)
-    let mut t = match tape.open(d, "run.tape", mode, header) {
-        Ok(take t) => t,
-        Error(Refused(Revision)) => return Error(Exit(status: 3)),
-        Error(_) => return Error(Exit(status: 2))
-    }
-    let differs = tape.across(t)
-    let scheduler = tape.tasks(mut t, ts)
-    let clock = tape.clock(mut t, c)
-    let taped = tape.stdout(mut t, out)
-    let recorded = tape.args(mut t, a)
-    let m = host.mono_ns(clock)
-    result.unwrap(stdout.write(taped, "taped"))
-    let mut status: Bytes = list.new()
-    let _ = list.push(mut status, if first == 1u8 { 1u8 } else { 0u8 })
-    let _ = list.push(mut status, 0u8)
-    let _ = list.push(mut status, 0u8)
-    let _ = list.push(mut status, 0u8)
-    match tape.end(take t, Ok(status)) {
-        Sealed => {},
-        Faulted(Diverged(v)) => match v.kind {
-            Outcome => return Error(Exit(status: 5)),
-            _ => return Error(Exit(status: 4))
-        },
-        Faulted(_) => return Error(Exit(status: 4))
-    }
-    if first == 2u8 {
-        let _ = host.mono_ns(clock)
-    }
-    if first == 4u8 {
-        let _ = task.spawn(scheduler, bytes 64, (), fn(take unit: ()) {})
-    }
-    if differs {
-        result.unwrap(stdout.write(out, "across:"))
-    }
+// Native oracle (tape_build_native.rs, tape_run_*): prints "taped", then
+// the Clock's monotonic reading, "|", and the program's Args. With first arg
+// "x" exits with status 1 instead of 0.
+pub fn main(c: Clock, out: Stdout, a: Args) -> Result[(), Exit] {
+    let m = host.mono_ns(c)
+    result.unwrap(stdout.write(out, "taped"))
     let mut s = string.new()
     result.unwrap(string.push_u64(mut s, m))
     result.unwrap(stdout.write(out, s))
     result.unwrap(stdout.write(out, "|"))
     let mut i = 0u64
-    while i < args.len(recorded) {
-        let v = option.unwrap(args.get(recorded, i))
+    while i < args.len(a) {
+        let v = option.unwrap(args.get(a, i))
         result.unwrap(stdout.write(out, v))
         i = i + 1u64
     }
-    Ok(())
+    match args.get(a, 0) {
+        Some(v) => if v == "x" { Error(Exit(status: 1)) } else { Ok(()) },
+        None => Ok(()),
+    }
 }

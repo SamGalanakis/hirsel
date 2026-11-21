@@ -1,29 +1,29 @@
-type H: send { table: store.store.Table[u64, u32] }
+type H: send { table: store.Table[u64, u32] }
 type Reg = store.runner.Registry[(), H]
 
-fn migrate(mut phase: store.store.Migration) -> Result[(), store.store.Error] {
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     let codec: std.codec.Codec[u32] = std.codec.of()
-    match store.store.migration_create_table(mut phase, store.store.spec("data", std.codec.key_u64(), codec)) {
+    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
         Ok(()) => Ok(()),
         Error(Exists(_)) => Ok(()),
         Error(take problem) => Error(take problem),
     }
 }
 
-fn handles(catalog: store.store.Schema) -> Result[H, store.store.Error] {
+fn handles(catalog: store.Schema) -> Result[H, store.Error] {
     let codec: std.codec.Codec[u32] = std.codec.of()
-    let table = store.store.schema_table(catalog, "data", std.codec.key_u64(), codec)?
+    let table = store.schema_table(catalog, "data", std.codec.key_u64(), codec)?
     Ok(H(table: table))
 }
 
 
-fn put(mut tx: store.store.Tx, h: H, author: store.runner.Caller, take value: u32) -> Result[u64, u32] {
-    if let Error(_) = store.store.put(mut tx, h.table, 0u64, value) { return Error(1u32) }
-    Ok(store.store.info(mut tx).id.version)
+fn put(mut tx: store.Tx, h: H, author: store.runner.Caller, take value: u32) -> Result[u64, u32] {
+    if let Error(_) = store.put(mut tx, h.table, 0u64, value) { return Error(1u32) }
+    Ok(store.info(mut tx).id.version)
 }
 
-fn large(mut tx: store.store.Tx, h: H, author: store.runner.Caller, take count: u32) -> Result[Bytes, u32] {
-    if let Error(_) = store.store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
+fn large(mut tx: store.Tx, h: H, author: store.runner.Caller, take count: u32) -> Result[Bytes, u32] {
+    if let Error(_) = store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
     for _ in 0u64 .. n { if let Error(_) = list.push(mut b, 1u8) { return Error(2u32) } }
@@ -47,8 +47,8 @@ fn shape(take n: u64) -> Result[Shape, Capacity] {
     Ok(Shape(sum: Large(n, Some(m)), nested: Some(None), total: m))
 }
 
-fn read(tx: store.store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capacity] {
-    store.runner.cover(store.store.shape(h.table), Included(0u64), Included(0u64))
+fn read(tx: store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capacity] {
+    store.runner.cover(store.shape(h.table), Included(0u64), Included(0u64))
 }
 
 fn retired() -> Bytes {
@@ -130,9 +130,9 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
         if mode == "faulted_owner_releases_slot" { return fault_listener(n, c, tasks, false) }
         if mode == "wire_control_budget_too_small" { return fault_listener(n, c, tasks, true) }
     }
-    let mut db = store.store.memory(c, random, store.store.defaults())
+    let mut db = store.memory(c, random, store.defaults())
     let codec: std.codec.Codec[u32] = std.codec.of()
-    let _ = result.unwrap(store.store.create_table(mut db, store.store.spec("data", std.codec.key_u64(), codec)))
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), codec)))
     // An admitted, unreplied position on the retained key exercises V5 on resend.
     // The key is the runner's own stream key for the client's fixed token and stream 77.
     let mut token: Bytes = list.new()
@@ -140,7 +140,7 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     for _ in 0u64 .. 16u64 { result.unwrap(list.push(mut token, 0u8)) }
     let caller = option.unwrap(result.unwrap(store.ingress.caller(token)))
     let stream = result.unwrap(store.runner.stream_key(caller, 77u32))
-    let _ = result.unwrap(store.store.admit(mut db, stream, 0u64, store.store.request_digest(retired(), list.new())))
+    let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(retired(), list.new())))
     let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(64u64))
     let mail = result.unwrap(store.runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail))

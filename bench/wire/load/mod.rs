@@ -128,12 +128,21 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
         }
     }
     drop(arrivals);
+    // Keep completed callers subscribed until the observer reaches the final version.
+    let mut idle = JoinSet::new();
     let mut run_error = None;
     while let Some(joined) = tasks.join_next().await {
         let outcome = joined
             .map_err(crate::Error::from)
             .and_then(|outcome| outcome);
-        run_error = run_error.or_else(|| outcome.err());
+        match outcome {
+            Ok(socket) => {
+                idle.spawn(hold_idle(socket));
+            }
+            Err(error) => {
+                run_error.get_or_insert(error);
+            }
+        }
     }
     if run_error.is_none() {
         // A snapshot gives a final-version barrier without changing the observer's cache.
@@ -161,6 +170,11 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
         .map_err(crate::Error::from)
         .and_then(|outcome| outcome);
     run_error = run_error.or_else(|| observation.err());
+    while let Some(ended) = idle.try_join_next() {
+        let reason = ended.unwrap_or_else(|error| error.to_string());
+        run_error.get_or_insert_with(|| reason.into());
+    }
+    idle.shutdown().await;
     drop(events);
     let mut result = collector.await??;
     let cpu = cpu_seconds()? - cpu;
@@ -358,12 +372,12 @@ async fn caller(
     mut client: Client,
     mut jobs: mpsc::Receiver<Job>,
     events: mpsc::Sender<Event>,
-) -> Result<()> {
+) -> Result<Socket> {
     let mut inflight = None;
     loop {
         tokio::select! {
             job = jobs.recv(), if inflight.is_none() => {
-                let Some(job) = job else { client.socket.close(None).await?; return Ok(()); };
+                let Some(job) = job else { return Ok(client.socket); };
                 let socket = client.start_call_timed(0, job.p, job.bit).await?;
                 events.send(Event::Sent { owner, p: job.p, scheduled: job.scheduled, socket }).await?;
                 inflight = Some(job.p);

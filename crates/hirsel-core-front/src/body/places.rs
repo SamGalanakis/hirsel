@@ -337,8 +337,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
     /// `n` is not a place; Err when it was refused or is not built.
     pub(super) fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
+        if self.ascribed_operand.is_some_and(|(source, _)| source == n) {
+            let (_, at) = self.ascribed_operand.take().unwrap();
+            self.anchors.place = Some((n, at));
+            return Ok(Some(at));
+        }
         let result = match self.kind(n) {
             NodeKind::Group => self.place(self.kids(n)[0]),
+            NodeKind::Ascription => {
+                let [value, written] = self.kids(n) else {
+                    unreachable!("an ascription has an operand and a type");
+                };
+                let ty = self.ty(*written);
+                if ty == ERROR {
+                    return Err(());
+                }
+                if let Some(at) = self.place(*value)? {
+                    if at.ty == ty {
+                        Ok(Some(at))
+                    } else {
+                        self.ascribed_operand = Some((*value, at));
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
             NodeKind::Path => {
                 let p: &'c Program<'a> = self.p;
                 let Some(u) = p.resolved(self.at, n) else {
@@ -1151,13 +1175,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse_compared("LANG-11", n, elements(count), elements(required), message);
             return (ERROR, None);
         }
-        if children.is_empty() && expected.is_none() {
+        let complete = expected.filter(|(ty, _, _)| !has_hole(&self.t, *ty));
+        if children.is_empty() && complete.is_none() {
             self.refuse("LANG-11", n, "an empty array needs an expected type");
             return (ERROR, None);
         }
         let parts = self.array_parts.len();
-        let mut elem = expected.map(|(_, elem, _)| elem);
-        let mut result = expected.map(|(ty, _, _)| ty);
+        let element_hint = expected.map(|(_, elem, _)| elem);
+        let mut elem = element_hint.filter(|ty| !has_hole(&self.t, *ty));
+        let mut result = complete.map(|(ty, _, _)| ty);
         let mut to = None;
         let can_place = self.expression_destination(n).is_none() || !self.may_return(n);
         for (i, &child) in children[..if repeat { 1 } else { children.len() }]
@@ -1167,7 +1193,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let field = if !repeat
                 && can_place
                 && self.live()
-                && let Some((array, elem, _)) = expected
+                && let Some((array, elem, _)) = complete
                 && let Ok(Rep::Place(field_ty)) = self.rep(elem)
                 && let Some(place) = self.place_ty(array, n)
                 && let Some(index) = self.konst(Ty::Scalar(Scalar::U64), i as u64, child)
@@ -1186,7 +1212,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let (ty, value) = self.expr_into_field(
                 child,
                 if expected.is_some() {
-                    elem.and_then(expect)
+                    elem.or(element_hint).and_then(expect)
                 } else {
                     None
                 },

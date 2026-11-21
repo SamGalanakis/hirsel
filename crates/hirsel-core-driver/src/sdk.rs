@@ -7,9 +7,9 @@ type Error = Box<dyn std::error::Error>;
 pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
+pub(crate) struct Reader<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) at: usize,
 }
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
@@ -21,20 +21,20 @@ impl<'a> Reader<'a> {
     fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
     }
-    fn count(&mut self) -> Result<usize, Error> {
+    pub(crate) fn count(&mut self) -> Result<usize, Error> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into()?) as usize)
     }
-    fn word(&mut self) -> Result<u64, Error> {
+    pub(crate) fn word(&mut self) -> Result<u64, Error> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into()?))
     }
-    fn bytes(&mut self) -> Result<Vec<u8>, Error> {
+    pub(crate) fn bytes(&mut self) -> Result<Vec<u8>, Error> {
         let n = self.count()?;
         Ok(self.take(n)?.to_vec())
     }
-    fn name(&mut self) -> Result<String, Error> {
+    pub(crate) fn name(&mut self) -> Result<String, Error> {
         Ok(String::from_utf8(self.bytes()?)?)
     }
-    fn done(&self) -> Result<(), Error> {
+    pub(crate) fn done(&self) -> Result<(), Error> {
         if self.at == self.bytes.len() {
             Ok(())
         } else {
@@ -44,7 +44,7 @@ impl<'a> Reader<'a> {
     fn ty(&mut self) -> Result<Value, Error> {
         let op = self.byte()?;
         Ok(match op {
-            0..=13 => json!([op]),
+            0..=13 | 20 => json!([op]),
             14 | 16 => json!([op, self.ty()?]),
             15 | 17 => json!([op, self.ty()?, self.ty()?]),
             18 => {
@@ -218,6 +218,7 @@ impl Schema {
                     .join(", ")
             ),
             19 => format!("{prefix}Def{}", t[1]),
+            20 => "never".into(),
             _ => unreachable!(),
         }
     }
@@ -241,6 +242,12 @@ pub struct Describe {
 impl Describe {
     pub fn read(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader { bytes, at: 0 };
+        let description = Self::read_from(&mut r)?;
+        r.done()?;
+        Ok(description)
+    }
+
+    pub(crate) fn read_from(r: &mut Reader<'_>) -> Result<Self, Error> {
         let digest = r.bytes()?;
         let target = r.name()?;
         let n_place = r.word()?;
@@ -261,7 +268,6 @@ impl Describe {
                 revision: r.bytes()?,
             });
         }
-        r.done()?;
         Ok(Self {
             digest,
             target,
@@ -449,6 +455,7 @@ mod tests {
             (vec![15, 13, 6], "Map<string, bigint>"),
             (vec![16, 16, 5], "Option<Option<number>>"),
             (vec![17, 6, 13], "Result<bigint, string>"),
+            (vec![17, 3, 20], "Result<number, never>"),
             (vec![18, 2, 0, 0, 0, 6, 13], "[bigint, string]"),
         ] {
             let mut bytes = scalar(0);

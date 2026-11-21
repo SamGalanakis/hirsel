@@ -81,13 +81,29 @@ pub fn explain(
         let id = rule.ok_or("explain requires a rule or --list")?;
         let rule = hirsel_core_diag::rule(id)
             .ok_or_else(|| format!("unknown rule `{id}`; use explain --list"))?;
+        let example = hirsel_core_diag::example(rule.id);
         if json {
-            println!("{}", serde_json::to_string(rule)?);
+            #[derive(serde::Serialize)]
+            struct Explanation {
+                #[serde(flatten)]
+                rule: &'static hirsel_core_diag::Rule,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                example: Option<&'static hirsel_core_diag::Example>,
+            }
+            println!("{}", serde_json::to_string(&Explanation { rule, example })?);
         } else {
             println!(
                 "{}: {}\n\n{}\n\n{}#{}",
                 rule.id, rule.title, rule.statement, rule.spec_file, rule.anchor
             );
+            if let Some(example) = example {
+                println!(
+                    "\nOne example ({})\n\n{}",
+                    example.path,
+                    example.source.trim_end()
+                );
+                println!("\nAsserted refusals\n\n{}", example.assertions.join("\n"));
+            }
         }
     }
     Ok(())

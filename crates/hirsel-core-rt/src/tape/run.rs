@@ -30,6 +30,7 @@ struct Run {
     stderr: i32,
     diagnostic: Vec<u8>,
     stop: Option<u8>,
+    record_truncated: Option<(u64, IoError)>,
     grants: Vec<u64>,
     sink: Box<crate::os::OsProvider>,
     launch: Box<Metadata>,
@@ -131,13 +132,69 @@ unsafe extern "C" fn describe(state: *mut u8, cause: *const Cause) -> View {
         }
     }
 }
-fn stopped(run: &mut Run, message: impl std::fmt::Display) -> u8 {
-    let line = format!("tape: {message}\n");
+fn refused(run: &mut Run, error: OpenError) -> u8 {
+    let reason = match error {
+        OpenError::Refused(Refusal::Code) => "code".to_owned(),
+        OpenError::Refused(Refusal::Revision) => "revision".to_owned(),
+        OpenError::Refused(Refusal::Arg) => "arg".to_owned(),
+        OpenError::Refused(Refusal::Limit) => "limit".to_owned(),
+        OpenError::Refused(Refusal::Damaged(block)) => format!("damaged block {block}"),
+        OpenError::Refused(Refusal::HeaderTooLarge) => "header too large".to_owned(),
+        OpenError::Unreadable(Fault::Truncated(at)) => format!("truncated at {at}"),
+        OpenError::Unreadable(Fault::Damaged(block)) => format!("damaged block {block}"),
+        OpenError::Unreadable(Fault::Corrupt) => "corrupt".to_owned(),
+        OpenError::Unreadable(other) => format!("{other}"),
+        OpenError::Io(e) => format_io_error(e),
+    };
+    let line = if run.mode != 0 {
+        format!("replay: refused: {reason}\n")
+    } else {
+        format!("record: refused: {reason}\n")
+    };
     // SAFETY: configured fd is borrowed through this call, line owns its bytes.
     unsafe {
         crate::os::diagnostic(run.stderr, line.as_ptr(), line.len());
     }
-    run.stop = Some(process::NOT_STARTED);
+    run.stop = Some(if run.mode != 0 {
+        2
+    } else {
+        process::NOT_STARTED
+    });
+    1
+}
+
+fn format_io_error(e: IoError) -> String {
+    match e.tag {
+        1 => "not found".to_owned(),
+        2 => "denied".to_owned(),
+        3 => "exists".to_owned(),
+        4 => "closed".to_owned(),
+        _ if e.code != 0 => format!("os error {}", e.code),
+        _ => format!("io ({}, {})", e.tag, e.code),
+    }
+}
+
+fn report_truncation(stderr: i32, at: u64, err: IoError) {
+    let line = format!("record: truncated at {at}: {}\n", format_io_error(err));
+    // SAFETY: the launcher keeps stderr open for the duration of the run.
+    unsafe { crate::os::diagnostic(stderr, line.as_ptr(), line.len()) };
+}
+
+fn stopped(run: &mut Run, message: impl std::fmt::Display) -> u8 {
+    let line = if run.mode != 0 {
+        format!("replay: {message}\n")
+    } else {
+        format!("tape: {message}\n")
+    };
+    // SAFETY: configured fd is borrowed through this call, line owns its bytes.
+    unsafe {
+        crate::os::diagnostic(run.stderr, line.as_ptr(), line.len());
+    }
+    run.stop = Some(if run.mode != 0 {
+        1
+    } else {
+        process::NOT_STARTED
+    });
     1
 }
 unsafe extern "C" fn refuse_wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
@@ -300,8 +357,15 @@ unsafe extern "C" fn invoke(
         );
         let (tape, startup) = match opened {
             Ok(t) => t,
-            Err(e) => return stopped(run, format_args!("{e:?}")),
+            Err(e) => return refused(run, e),
         };
+        if run.mode != 0 {
+            tape.set_replay_abort(ReplayAbort {
+                stderr: run.stderr,
+                sources: run.sources,
+                diagnose: run.mode == 2,
+            });
+        }
         *run.launch = if run.mode == 0 {
             (*(*config).launch).clone()
         } else {
@@ -322,11 +386,7 @@ unsafe extern "C" fn invoke(
             };
             run.describe_tape = match tape.on_tape(entry::STDOUT, (source, 0)) {
                 Ok(p) => p,
-                Err(f) => {
-                    refuse(f);
-                    causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                    return 1;
-                }
+                Err(f) => return stopped(run, f),
             };
         }
         if tape.revision_differs() {
@@ -352,11 +412,7 @@ unsafe extern "C" fn invoke(
                 }
                 match tape.on_tape_args(&argv) {
                     Ok(v) => (*files).registry.vector(v),
-                    Err(f) => {
-                        refuse(f);
-                        causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                        return 1;
-                    }
+                    Err(f) => return stopped(run, f),
                 }
             } else {
                 let (provider, handle) = if run.mode == 0 {
@@ -408,14 +464,10 @@ unsafe extern "C" fn invoke(
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
                             (*files).secrets.lock().unwrap().register(secret)
                         } else {
-                            (*files).registry.taped_grant(p, h, tape.group())
+                            (*files).registry.grant(p, h)
                         }
                     }
-                    Err(f) => {
-                        refuse(f);
-                        causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                        return 1;
-                    }
+                    Err(f) => return stopped(run, f),
                 }
             };
             run.grants.push(value);
@@ -429,28 +481,79 @@ unsafe extern "C" fn invoke(
         substituted.launch = &*run.launch;
         let failed = (run.entry)(context, &substituted, result);
         let outcome = ending(context, failed, &*result);
-        match tape.end(&outcome) {
-            Ok(()) => failed,
-            Err(f) => {
-                refuse(f);
-                if failed == 0 {
-                    causes::record(&mut *context, Cause::new(causes::TAPE, 0));
+        match tape.end_with_truncation(&outcome) {
+            Ok(None) => {
+                if run.mode != 0 {
+                    run.stop = Some(0);
+                    0
+                } else {
+                    failed
                 }
-                1
             }
+            Ok(Some(truncated)) => {
+                run.record_truncated = Some(truncated);
+                failed
+            }
+            Err(f) => stopped(run, f),
         }
     }
 }
 
-/// Typed startup entry used only by a `run --record` or `replay` link plan.
+/// Startup entry for a recording build (`hirsel build --recording` / `hirsel run --record`).
+/// Reads and removes `HIRSEL_RECORD` before any grant snapshot is taken.
+/// With HIRSEL_RECORD unset, forward to the ordinary runtime entry.
+/// # Safety
+/// The generated config, names, source tables, entry and 32-byte revision stay
+/// pinned for the call. Identity is a NUL-terminated native string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_recording(
+    input: *const OsConfig,
+    names: *const View,
+    sources: *const SourceTable,
+    entry: Entry,
+    identity: *const libc::c_char,
+    revision: *const [u8; 32],
+) -> u8 {
+    // SAFETY: process startup is single-threaded before any task or grant snapshot.
+    unsafe {
+        let path = std::env::var_os("HIRSEL_RECORD");
+        std::env::remove_var("HIRSEL_RECORD");
+        let Some(path) = path else {
+            return entry::hirsel_core_os_run_with_sources(input, names, sources, entry);
+        };
+        super::writer::start();
+        let path = path.as_os_str().as_bytes();
+        let status = if let Some(k) = crate::units::count() {
+            // Run one recorder per unit and append the unit id to its file name.
+            struct Shared(*const View, *const SourceTable, *const libc::c_char, *const [u8; 32]);
+            // SAFETY: the caller pins every operand for the whole launch.
+            unsafe impl Sync for Shared {}
+            let shared = Shared(names, sources, identity, revision);
+            crate::units::launch(k, &*input, |config| {
+                let shared = &shared;
+                let mut unit_path = path.to_vec();
+                unit_path.extend_from_slice(format!(".u{}", crate::units::unit()).as_bytes());
+                run_taped(config, shared.0, shared.1, entry, unit_path, 0, shared.2, shared.3)
+            })
+        } else {
+            run_taped(input, names, sources, entry, path.to_vec(), 0, identity, revision)
+        };
+        super::writer::flush();
+        for (at, err) in super::writer::take_failures() {
+            report_truncation((*input).stderr_fd, at, err);
+        }
+        status
+    }
+}
+
+/// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
+/// Replay is never reachable from the program's environment.
 /// # Safety
 /// The generated config, names, source tables, entry and 32-byte revision stay
 /// pinned for the call. Path and identity are NUL-terminated native strings.
-/// Recording with matching socket activation follows the startup and fd
-/// ownership contract of `entry::hirsel_core_os_process_new`.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_os_run_taped(
+pub unsafe extern "C" fn hirsel_core_os_replay(
     input: *const OsConfig,
     names: *const View,
     sources: *const SourceTable,
@@ -460,41 +563,28 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
 ) -> u8 {
-    if mode == 0 {
-        // On the host stack, before any recording task needs it.
-        super::writer::start();
+    // SAFETY: every pointer is a borrowed generated startup operand.
+    unsafe {
+        run_taped(
+            input,
+            names,
+            sources,
+            entry,
+            CStr::from_ptr(path).to_bytes().to_vec(),
+            mode,
+            identity,
+            revision,
+        )
     }
-    // mc-units-proto: under HIRSEL_UNITS a recording launch runs one taped
-    // run per unit, each recording to its own tape, `<path>.u<unit>`.
-    if mode == 0
-        && let Some(k) = crate::units::count()
-    {
-        struct Shared(*const View, *const SourceTable, *const libc::c_char, *const libc::c_char, *const [u8; 32]);
-        // SAFETY: the caller pins every operand for the whole launch.
-        unsafe impl Sync for Shared {}
-        let shared = Shared(names, sources, path, identity, revision);
-        // SAFETY: each unit borrows the pinned operands until its run returns.
-        return crate::units::launch(k, unsafe { &*input }, |config| unsafe {
-            let shared = &shared;
-            let mut unit_path = CStr::from_ptr(shared.2).to_bytes().to_vec();
-            unit_path.extend_from_slice(format!(".u{}", crate::units::unit()).as_bytes());
-            unit_path.push(0);
-            run_taped_one(config, shared.0, shared.1, entry, unit_path.as_ptr().cast(), mode, shared.3, shared.4)
-        });
-    }
-    // SAFETY: forwarded unchanged.
-    let status = unsafe { run_taped_one(input, names, sources, entry, path, mode, identity, revision) };
-    super::writer::flush();
-    status
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn run_taped_one(
+unsafe fn run_taped(
     input: *const OsConfig,
     names: *const View,
     sources: *const SourceTable,
     entry: Entry,
-    path: *const libc::c_char,
+    path: Vec<u8>,
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
@@ -514,7 +604,7 @@ unsafe fn run_taped_one(
             requirements: input.parameters,
             names,
             requirements_len: input.parameters_len,
-            path: CStr::from_ptr(path).to_bytes().to_vec(),
+            path,
             identity: CStr::from_ptr(identity).to_bytes().to_vec(),
             revision: *revision,
             mode,
@@ -522,6 +612,7 @@ unsafe fn run_taped_one(
             stderr: input.stderr_fd,
             diagnostic: vec![],
             stop: None,
+            record_truncated: None,
             grants: vec![],
             sink,
             launch: Box::new(Metadata::source(
@@ -586,6 +677,9 @@ unsafe fn run_taped_one(
         config.close_grants = None;
         config.describe_output = Some(emit_describe);
         let status = process::hirsel_core_run(&config, invoke);
+        if let Some((at, err)) = run.record_truncated {
+            report_truncation(run.stderr, at, err);
+        }
         run.stop.unwrap_or(status)
     }
 }
@@ -673,6 +767,7 @@ pub(super) fn check_launch_replay() {
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            secret_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),
@@ -680,12 +775,12 @@ pub(super) fn check_launch_replay() {
         };
         // SAFETY: all startup tables and names remain pinned until the run ends.
         let status = unsafe {
-            hirsel_core_os_run_taped(
+            run_taped(
                 &input,
                 ptr::null(),
                 ptr::null(),
                 entry,
-                path.as_ptr(),
+                path.as_bytes().to_vec(),
                 mode,
                 c"launch-case".as_ptr(),
                 &[7; 32],

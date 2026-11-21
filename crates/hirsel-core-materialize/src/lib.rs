@@ -11,7 +11,7 @@
 
 use hirsel_core_front::GenericTemplate;
 use hirsel_core_ids::ContentHash;
-use hirsel_core_ir::{Callee, Closure, FuncId, Identity, Inst, Module, TypeId};
+use hirsel_core_ir::{Closure, FuncId, Identity, Module, TypeId};
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -34,6 +34,7 @@ pub struct Materialized {
     pub module: Option<Module>,
     pub function: FuncId,
     pub children: Vec<Child>,
+    pub code: hirsel_core_ir::normal::EncodedBody,
 }
 
 /// An instance a body calls, with its arguments' closures in parameter order.
@@ -88,19 +89,11 @@ pub fn materialize(
         if !identity.closures.is_empty() || !identity.dictionaries.is_empty() {
             return Err("a non-generic body has no type or dictionary arguments".into());
         }
-        return Ok(Materialized {
-            children: children(own.module, own.function),
-            module: None,
-            function: own.function,
-        });
+        return Ok(retained(own.module, own.function));
     };
     let (module, function) =
         hirsel_core_front::materialize(own.module, own.function, template, identity, arguments)?;
-    Ok(Materialized {
-        children: children(&module, function),
-        module: Some(module),
-        function,
-    })
+    Ok(retained(&module, function))
 }
 
 /// The instance `identity` of a glue operation ([`hirsel_core_front::is_glue`]).
@@ -109,20 +102,36 @@ pub fn materialize_glue(
     arguments: &[&Closure],
 ) -> Result<Materialized, String> {
     let (module, function) = hirsel_core_front::materialize_glue(identity, arguments)?;
-    Ok(Materialized {
-        children: children(&module, function),
+    Ok(retained(&module, function))
+}
+
+fn retained(module: &Module, function: FuncId) -> Materialized {
+    let (code, module) = hirsel_core_ir::normal::retain(module, function);
+    let children = children_for_slots(&module, &code.slots);
+    Materialized {
+        children,
+        code,
         module: Some(module),
-        function,
-    })
+        function: FuncId(0),
+    }
 }
 
 /// The instances `module`'s function `root` reaches outside the module: the
 /// signature-only rows its calls, function references and layouts' finalizers reach.
 /// Closures are taken once per row of the module.
 pub fn children(module: &Module, root: FuncId) -> Vec<Child> {
+    let code = hirsel_core_ir::normal::encode(module, root);
+    children_for_slots(module, &code.slots)
+}
+
+fn children_for_slots(module: &Module, slots: &[hirsel_core_ir::normal::Slot]) -> Vec<Child> {
     let mut memo: HashMap<TypeId, Arc<Closure>> = HashMap::default();
-    external_functions(module, root)
-        .into_iter()
+    slots
+        .iter()
+        .filter_map(|slot| match *slot {
+            hirsel_core_ir::normal::Slot::External(f) => Some(f),
+            hirsel_core_ir::normal::Slot::Builtin(_) => None,
+        })
         .map(|f| {
             let instance = module.functions[f.index()].instance;
             let key = &module.instances[instance.index()];
@@ -144,40 +153,15 @@ pub fn children(module: &Module, root: FuncId) -> Vec<Child> {
         .collect()
 }
 
-/// Generated closure bodies share their producer's module; only signature-only rows
-/// require another instance.
+/// Retained external functions, also used to continue reach diagnostics when
+/// materialization stopped before the complete instance graph was built.
 pub fn external_functions(module: &Module, root: FuncId) -> BTreeSet<FuncId> {
-    let mut pending = vec![root];
-    // A unit's layouts generate drop glue, including nested List/Rc fields.
-    // Its finalizers are dependencies even without a Call, FunctionRef or
-    // DescriptorRef.
-    pending.extend(
-        module
-            .types
-            .iter()
-            .filter_map(|shape| shape.finalizer.map(|f| FuncId(f.0))),
-    );
-    let mut visited = BTreeSet::new();
-    let mut external = BTreeSet::new();
-    while let Some(function) = pending.pop() {
-        if !visited.insert(function) {
-            continue;
-        }
-        let Some(body) = &module.functions[function.index()].body else {
-            external.insert(function);
-            continue;
-        };
-        for call in &body.calls {
-            if let Callee::Direct(f) = call.callee {
-                pending.push(f);
-            }
-        }
-        for inst in &body.insts {
-            if let Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } = inst
-            {
-                pending.push(*function);
-            }
-        }
-    }
-    external
+    hirsel_core_ir::normal::encode(module, root)
+        .slots
+        .into_iter()
+        .filter_map(|slot| match slot {
+            hirsel_core_ir::normal::Slot::External(f) => Some(f),
+            hirsel_core_ir::normal::Slot::Builtin(_) => None,
+        })
+        .collect()
 }

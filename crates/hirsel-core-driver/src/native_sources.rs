@@ -86,6 +86,7 @@ impl CheckProduct {
     pub(crate) fn source_map(&self, rows: &[SourceRow<'_>]) -> io::Result<SourceMap> {
         hirsel_core_ids::published::catch_io(|| {
             let mut result = SourceMap {
+                points: Default::default(),
                 files: vec![],
                 items: BTreeMap::new(),
             };

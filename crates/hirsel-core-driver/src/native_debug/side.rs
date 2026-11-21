@@ -70,7 +70,20 @@ impl Sources<'_> {
             );
             FileIndex::new(id, &source.text)
         });
-        Some(index.position(item.file_offset as usize + location.start as usize))
+        let offset = item.file_offset as usize + location.start as usize;
+        if let Some(points) = self
+            .map
+            .points
+            .get(&self.map.files[item.file as usize].path)
+        {
+            let &(line, column) = points.get(offset)?;
+            return Some(Position {
+                file: index.id,
+                line: u64::from(line),
+                column: u64::from(column),
+            });
+        }
+        Some(index.position(offset))
     }
 }
 

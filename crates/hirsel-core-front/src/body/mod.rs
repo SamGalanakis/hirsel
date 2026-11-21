@@ -1141,6 +1141,13 @@ impl ClosedTypeFacts {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GeneratedKind {
+    Closure,
+    TaskEntry,
+    FlowTransform,
+}
+
 struct Cx<'c, 'a, 'e> {
     p: &'c Program<'a>,
     at: ItemRef,
@@ -1202,6 +1209,9 @@ struct Cx<'c, 'a, 'e> {
     /// Freeze and reservation records, and the steps of their places.
     freezes: Vec<Freeze>,
     steps: Vec<PStep>,
+    /// A place already evaluated while testing whether an ascription denotes
+    /// it directly. A conversion reads this place without repeating its indices.
+    ascribed_operand: Option<(NodeId, At)>,
     /// Block depth, and the slots of the open blocks in declaration order.
     depth: u32,
     /// The type the last expression checked synthesised, before its expected type.
@@ -1214,6 +1224,7 @@ struct Cx<'c, 'a, 'e> {
     allocations: Vec<AllocationLayout>,
     numeric_sites: Vec<scalar_abi::NumericSite>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
+    generated_ordinals: [HashMap<NodeId, usize>; 3],
     call_seq: u32,
     /// The call whose copyable view arguments are passed by address rather than
     /// snapshotted, and the arguments so passed.
@@ -1369,6 +1380,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             dead: false,
             freezes: vec![],
             steps: vec![],
+            ascribed_operand: None,
             depth: 0,
             synth_ty: UNIT,
             tail_ty: UNIT,
@@ -1378,6 +1390,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             allocations: vec![],
             numeric_sites: vec![],
             nested: Default::default(),
+            generated_ordinals: Default::default(),
             call_seq: 0,
             direct_call: None,
             direct_args: vec![],
@@ -1436,6 +1449,20 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             frame_binders: None,
             frame_slots: HashMap::default(),
         }
+    }
+
+    fn generated_name(&mut self, kind: GeneratedKind, site: NodeId) -> String {
+        // First visits follow the body's lowering order.
+        // A syntax node is only a key for recognizing a repeat visit.
+        let ordinals = &mut self.generated_ordinals[kind as usize];
+        let next = ordinals.len();
+        let ordinal = ordinals.entry(site).or_insert(next);
+        let suffix = match kind {
+            GeneratedKind::Closure => "$closure",
+            GeneratedKind::TaskEntry => "$task_entry",
+            GeneratedKind::FlowTransform => "$flow_transform",
+        };
+        format!("{}{suffix}{ordinal}", self.fd.path.0.name)
     }
 
     // ---- syntax
@@ -2456,7 +2483,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn can_construct(&self, n: NodeId) -> bool {
         match self.kind(n) {
             NodeKind::Call | NodeKind::Tuple | NodeKind::Array | NodeKind::RepeatArray => true,
-            NodeKind::Group => self.can_construct(self.kids(n)[0]),
+            NodeKind::Group | NodeKind::Ascription => self.can_construct(self.kids(n)[0]),
             NodeKind::Block => self
                 .block_tail(n)
                 .is_some_and(|tail| self.can_construct(tail)),
@@ -2620,11 +2647,19 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.expr_into(n, want, self.expression_destination(self.node))
     }
 
+    /// A partial expectation guides the expression's parts. The expression
+    /// and its joins keep the type they find for the enclosing call to unify.
+    fn fixed_want(&self, want: Want) -> bool {
+        want.payload == 0 && !has_hole(&self.t, want.ty)
+    }
+
     /// Check `n` against `want` when given; a construct that passes `want` inward checks
     /// it there and returns `want`'s type, so the outer check here passes.
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
+        let want = want.filter(|w| w.ty != HOLE);
         let (mut t, mut v) = self.checked(n, want);
+        let want = want.filter(|w| w.payload != 0 || self.fixed_want(*w));
         if let Some(w) = want.filter(|w| w.payload == 0)
             && let Some((payload, value)) = self.payload_view_value(t, v, w.ty, n)
         {
@@ -2748,6 +2783,19 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         });
         match self.kind(n) {
             NodeKind::Group => self.result_expr(c[0], want),
+            NodeKind::Ascription => {
+                let ty = self.ty(c[1]);
+                if ty == ERROR {
+                    return (ERROR, None);
+                }
+                let to = self.destination.filter(|&(node, to, _)| {
+                    node == n
+                        && matches!(self.rep(ty), Ok(Rep::Place(id))
+                            if self.b.addresses[to.index()].ty == PlaceTy::Declared(id))
+                });
+                let (address, fresh) = to.map_or((None, false), |(_, to, fresh)| (Some(to), fresh));
+                self.expr_into_field(c[0], expect(ty), address, fresh)
+            }
             NodeKind::Literal => self.literal(n, want, false),
             NodeKind::Unit => (UNIT, None),
             NodeKind::Path => self.path(n, want),

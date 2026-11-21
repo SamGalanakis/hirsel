@@ -92,7 +92,7 @@ a group holds the union of what the group's fields hold directly and what the ot
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
 holding every category its bounds do not exclude: `plain` excludes resource, scoped value,
 region reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
-capability. A generic declaration's summary is stated
+capability; `inert` (OWN-4) excludes every category, and so does `codec`, which implies it. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
 parameter that no field **mentions** contributes nothing to it: a field mentions `T` when its
 type is `T`, or names a type whose summary lets that argument position condition something,
@@ -161,15 +161,24 @@ The bounds are:
   has it only when it declares it. Declaring it lets every module encode the type's fields
   and build its values from decoded bytes, so for an opaque type decoding is a
   construction outside its module that its owner has allowed. With `via`
-  ([SEM-10](semantics.md#sem-10-codecs)) the bound is checked against the type after it
-  instead of the fields, and every decode of the type passes its owner's `from`.
+  ([SEM-10](semantics.md#sem-10-codecs)), the type after it must have `codec` and every
+  decode passes the owner's `from`. `codec` implies `inert`, on the type's own fields,
+  `via` or not: each actual field must hold nothing (OWN-2), including after substituting
+  type arguments, and a `via` type whose field holds anything is refused at that field. So
+  decoding never builds authority, and a body may rely on `inert` for `T: codec`.
+- `inert`: exactly the types whose holds set (OWN-2) is empty: no resource, capability,
+  scoped value, region reference or opaque owner at any depth. It is computed from the
+  summary, like `plain`, and independent of it: `List[u64]` is inert and not plain, and a
+  `Dir` is plain and not inert. On a type parameter it is a bound the argument must have,
+  and a body may rely on it: a value of type `T: inert` carries no authority, so an owning
+  closure may capture it ([LANG-14](language.md#lang-14-captures)).
 - `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
   only on the type parameters of core declarations ([core](core.md)), and are refused
   anywhere else: numeric generics are not in v1
   ([reserved](reserved.md#not-in-v1)). Each implies every bound that all the types it admits
   have, so a body may rely on those and an instance needs no further check: `T: integer` is
-  also `plain`, `shareable`, `send`, `key`, `ordered`, `codec`, `packed` and `streamable`, and `T:
-  float` is `plain`, `shareable`, `send`, `codec`, `packed` and `streamable` but neither
+  also `plain`, `shareable`, `send`, `key`, `ordered`, `codec`, `inert`, `packed` and `streamable`, and `T:
+  float` is `plain`, `shareable`, `send`, `codec`, `inert`, `packed` and `streamable` but neither
   `key` nor `ordered`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
   }` copies and compares, and `fn same[T: float](a: T, b: T) -> bool { a == b }` is refused
   by [LANG-21](language.md#lang-21-operators).
@@ -189,7 +198,9 @@ instance has a declared bound exactly when each type argument that the fields me
 same rule gives the built-in rows of [core](core.md#built-in-types) their "when T", and an
 opaque type's published summary carries which parameters condition each bound, without
 its fields. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key`, `ordered` or `codec` does
-not have it, plain types' `shareable` and `send` excepted. `plain`, `packed` and `streamable` are never declared.
+not have it, plain types' `shareable` and `send` excepted. `plain`, `inert`, `packed` and `streamable` are never
+declared on a type: they are computed, and one written after a type's name is refused here, at
+that bound.
 
 ```hirsel
 type Leaf: shareable + send { n: List[u64] }
@@ -222,6 +233,19 @@ resource type Lease: codec { n: u64 }                 // refused: OWN-4, a resou
 ```
 ```hirsel
 fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, integer outside core
+```
+```hirsel unbuilt
+fn equals[T: inert + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
+fn same[T: codec + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
+```
+```hirsel unbuilt
+type Tagged: inert { n: u64 }                             // refused: OWN-4, inert is computed
+```
+```hirsel unbuilt
+type DoorWire: codec { n: u64 }
+pub opaque type Door: codec via DoorWire (to: wire, from: open) { w: DoorWire, dir: Dir }   // refused: OWN-4, at dir: codec implies inert
+fn wire(d: Door) -> View[DoorWire] in d { view d.w }
+fn open(take w: DoorWire) -> Result[Door, ()] { Error(()) }
 ```
 
 ### OWN-5: Availability
@@ -282,9 +306,9 @@ refused here, at the `mut p` or at the move.
 
 ```hirsel
 fn len(xs: List[u64]) -> u64 { list.len(xs) }
-fn add(mut xs: List[u64], x: u64) -> Result[(), (Capacity, u64)] { list.push(mut xs, x) }
+fn add(mut xs: List[u64], x: u64) { list.push(mut xs, x) }
 fn eat(take xs: List[u64]) {}
-fn use_all(take xs: List[u64]) { let n = len(xs); let _ = add(mut xs, n); eat(take xs) }
+fn use_all(take xs: List[u64]) { let n = len(xs); add(mut xs, n); eat(take xs) }
 ```
 ```hirsel
 fn eat(take xs: List[u64]) {}
@@ -360,10 +384,10 @@ fn f(mut m: Inbox) {
 ```hirsel
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
-fn f() -> i64 { let b = result.unwrap(box.new(Lit(6i64))); ev(b) }
+fn f() -> i64 { let b = box.new(Lit(6i64)); ev(b) }
 fn g(b: Box[Option[u64]]) -> u64 { match b { Some(x) => x, None => 0 } }   // Some reads the payload
 fn h(b: Box[u64]) -> u64 { match b { x => x } }                            // x is the Box, read as u64
-fn grow(mut b: Box[List[u64]]) -> Result[(), (Capacity, u64)] { list.push(mut b, 1) }
+fn grow(mut b: Box[List[u64]]) { list.push(mut b, 1) }
 fn deep(b: Box[Box[N]]) -> i64 { ev(b) }                    // reads through both holders
 fn mixed(b: Box[Rc[N]]) -> i64 { match b { Lit(x) => x } }  // Lit reads the N
 ```
@@ -396,8 +420,9 @@ fn last_len(xs: List[String]) -> u64 {
 ### OWN-9: Overlap
 
 Two places overlap when one is a prefix of the other, when they differ first at two
-indexes of the same sequence, or when they differ first at two variant payloads of the
-same value. Two different fields of one record do not overlap. Index operands are
+indexes of the same sequence, or when they differ first at the payloads of two different
+variants of the same value. Two different fields of one record, or of one variant, do not
+overlap. Index operands are
 evaluated left to right into temporaries before the places are compared. This one
 relation governs views, reservations, `mut` loans, moves, assignments, replacements,
 arguments of one call and captures.
@@ -509,7 +534,8 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 ### OWN-12: Assignment
 
 A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
-field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place; nothing
+field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place, or the
+payload of the variant a `mut` pattern binding selected in it ([OWN-15](#own-15-match-on-an-owned-value)); nothing
 reached through a view, a counted value or a region value is one. The one exception is
 an `Rc` or `Arc` payload lent by `rc.with_unique` or `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)): it is
 reached as the callback's `mut` parameter, which is a writable slot, and only after the
@@ -525,7 +551,7 @@ Compound assignment (`+=`) is plain-only: it resolves `q` once, reads its old va
 evaluates the right side, computes, and installs.
 
 ```hirsel
-fn f(mut s: String) -> Result[(), Capacity] { s = string.from("new")?; Ok(()) }  // old s dropped at install
+fn f(mut s: String) { s = string.from("new") }  // old s dropped at install
 ```
 ```hirsel
 fn f(mut xs: List[u64]) { xs[0] = { xs = list.new(); 7 } }  // refused: OWN-12, xs is reserved
@@ -573,6 +599,36 @@ are views, and `take` under a view is refused. An arm that reads through a holde
 binds views of the payload, plain or own, and `take` in it is refused here, at the `take`:
 `box.unbox(take b)` moves a payload out.
 
+A binding written `mut x` under a constructor or tuple pattern of a `match` arm, an `if
+let` or a `while let` names the place it matches in the scrutinee; nothing is moved,
+copied or dropped, and the scrutinee stays its owner. This is the one way to write a variant
+payload in place. The scrutinee must be a writable place (OWN-12), an index or a `Box`
+payload included; a `mut` binding of a temporary or of a place reached through a view, a
+counted value or a region value is refused here, at the binding, as is a `mut` binding that
+is an arm's whole pattern, or that is in a `let`, `let .. else` or `for` pattern
+([LANG-17](language.md#lang-17-match)). The scrutinee's place, its indexes evaluated, is
+resolved once. Patterns and guards are tested through views as above, and a guard sees `x`
+as a view; once the arm is chosen and its guard has succeeded, those views end and the arm
+lends each `mut` place to its binding until the arm ends. A chosen pattern that both takes
+and lends is refused here, at the later binding.
+
+While the arm lasts, `x` is held as a `mut` parameter is (OWN-11): through it the arm reads,
+assigns, replaces and lends `mut`, and `take` of `x` or of a place under it is refused there.
+Every other read, view, loan, move, assignment, replacement or drop of a place that
+overlaps the lent one (OWN-9) is refused at OWN-9, as a `mut` argument's later siblings
+are: assigning a new variant to the scrutinee or to a place above it, or pushing to the
+`List` that holds it. A place that does not overlap it, such as another field of the record
+that holds the scrutinee, stays usable. A view or loan of `x` is a view or loan of the
+lent place, so a scoped result anchored to `mut x` freezes that place, which stays frozen
+after the arm while the result lives (OWN-20).
+
+The loan is checked, not run: it adds no allocation, step, cancellation point, replay event
+or drop flag (OWN-18), and `x` owns nothing. When the arm ends, by its value, an exit, a
+failure or a cancellation, the loan ends, and the payload place holds whatever value was
+last installed through `x`; the scrutinee's owner cleans it as usual
+([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). Rust's `match &mut e { V(x) => .. }` is
+the nearest precedent; Swift's `inout` exclusivity is the same rule for a parameter.
+
 ```hirsel
 fn unwrap_or_empty(take o: Option[String]) -> String {
   match o { Some(take s) => s, None => string.new() }
@@ -586,6 +642,68 @@ fn k(take b: Box[Option[String]]) -> String {
 ```hirsel
 fn f(take o: Option[String]) -> String {
   match o { Some(s) if string.byte_len(s) > 0 => take s, _ => string.new() }  // refused: OWN-15
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn bump(mut src: Source) {
+  match src { Text(mut s) => string.push(mut s, "!"), Count(mut n) => n += 1 }
+}
+fn first_text(mut xs: List[Source]) {
+  if let Text(mut s) = xs[0] { s = string.from("first") }
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn long(src: Source) -> bool { match src { Text(s) => string.byte_len(s) > 3, Count(_) => false } }
+fn bump_long(mut src: Source) {
+  match src { Text(mut s) if long(src) && string.byte_len(s) > 3 => string.push(mut s, "!"), _ => {} }
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grew(mut s: String) -> bool { string.push(mut s, "!"); true }
+fn lend_early(mut src: Source) {
+  match src { Text(mut s) if grew(mut s) => {}, _ => {} }   // refused: LANG-17, a guard lends mut
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn bump_view(src: Source) {
+  match src { Text(mut s) => string.push(mut s, "!"), Count(_) => {} }   // refused: OWN-5, src is a view
+}
+```
+```hirsel unbuilt
+type Pair = Both(String, Option[String])
+fn mixed(mut p: Pair) {
+  match p { Both(mut a, Some(take b)) => {}, _ => {} }   // refused: OWN-15, takes and lends
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+type Lines { input: Source, buffer: String }
+fn retag(mut l: Lines) {
+  match l.input {
+    Text(mut s) => { string.push(mut l.buffer, "x"); l.input = Count(0) }   // refused: OWN-9, at l.input
+    Count(_) => {}
+  }
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grow_list(mut xs: List[Source]) {
+  match xs[0] { Text(mut s) => list.push(mut xs, Count(0)), Count(_) => {} }   // refused: OWN-9
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn steal(mut src: Source) -> String {
+  match src { Text(mut s) => take s, Count(_) => string.new() }   // refused: OWN-11
+}
+```
+```hirsel unbuilt
+fn keep(mut o: Option[String]) -> String {
+  match o { Some(mut s) => replace(mut s, string.new()), None => string.new() }
 }
 ```
 
@@ -762,7 +880,11 @@ actual already has; a projected actual such as `mut x.f` freezes `x.f`. It is a 
 value and copies as OWN-3 says. No anchor is inferred from a body. A missing or wrong anchor
 is refused at the written result type. While the result lives, its anchored argument may
 still be read and viewed, as any frozen place may, and nothing writes, moves or frees what
-the result exposes (OWN-8).
+the result exposes (OWN-8). An actual `mut x` for a `mut` pattern binding `x` (OWN-15)
+is the payload place it names: the freeze lands on that place of the scrutinee and lasts
+for the result's extent, past the arm when the result leaves it, so the scrutinee and the
+places above it are not assigned, moved or dropped until the result ends. A call that fails
+delivers no result and leaves no freeze.
 
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
@@ -775,14 +897,13 @@ fn show(mut xs: List[String]) {
 fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }  // refused: OWN-20
 ```
 ```hirsel
-fn grow(mut s: String) -> Result[View[String], Capacity] in s {
-  string.push(mut s, "x")?
-  Ok(string.slice(s, 0, 1))
+fn grow(mut s: String) -> View[String] in s {
+  string.push(mut s, "x")
+  string.slice(s, 0, 1)
 }
-fn use_it(mut s: String) -> Result[u64, Capacity] {
-  let v = grow(mut s)?
-  let n = string.byte_len(v) + string.byte_len(s)     // reading s while v lives is accepted
-  Ok(n)
+fn use_it(mut s: String) -> u64 {
+  let v = grow(mut s)
+  string.byte_len(v) + string.byte_len(s)             // reading s while v lives is accepted
 }
 ```
 ```hirsel
@@ -792,12 +913,30 @@ fn last(mut xs: List[String]) -> Option[View[String]] in xs {
   v
 }
 ```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
+fn escape(mut src: Source) -> u64 {
+  let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+  let n = string.byte_len(v)
+  n
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
+fn escape_then_retag(mut src: Source) -> u64 {
+  let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+  src = Count(1)                                      // refused: OWN-10, v freezes src's payload
+  string.byte_len(v)
+}
+```
 ```hirsel
-fn grow(mut s: String) -> Result[View[String], Capacity] in s { Ok(string.slice(s, 0, 0)) }
-fn twice(mut s: String) -> Result[u64, Capacity] {
-  let a = grow(mut s)?
-  let b = grow(mut s)?                                // refused: OWN-10, a freezes s
-  Ok(string.byte_len(a) + string.byte_len(b))
+fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
+fn twice(mut s: String) -> u64 {
+  let a = grow(mut s)
+  let b = grow(mut s)                                 // refused: OWN-10, a freezes s
+  string.byte_len(a) + string.byte_len(b)
 }
 ```
 
@@ -978,15 +1117,16 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T1.1 | `T(a: take a, b: e)` | fields evaluated left to right into temporaries; value L, stored inline; nothing admitted | `e` fails | earlier temporaries dropped in reverse by statement cleanup; prop |
-| T1.2 | a resource literal, an owning closure | as T1.1, then `chg` (commit) | `e` fails; `Capacity` at `chg` | `e`: as T1.1. `Capacity`: nothing admitted, cleaned or run. A resource literal's error is `(Capacity, F)`, owning `F`: its one field, or the tuple of all its fields in declaration order; with no fields, bare `Capacity`. An owning closure's is `(Capacity, F)`, `F` its one capture or the tuple of its captures in environment order |
-| T1.3 | `box.new(take x)`, `rc.new(take x)` | as T1.2, then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `Capacity` | the error owns `x` |
-| T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
-| T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `Capacity` at block k | own blocks copied so far dropped and shares released in reverse, each `ref`; region bytes stay charged until close; `x` untouched |
-| T1.6 | `span.push(mut b, x)` | value moved into the builder | `Capacity` | the error owns the value; the builder unchanged; region bytes stay charged |
+| T1.2 | a resource literal | as T1.1, then `chg` (commit) | `e` fails; `chg` refused | `e`: as T1.1. Refused: nothing admitted, cleaned or run; the value `Error((c, F))` owns `F`: its one field, or the tuple of all its fields in declaration order; with no fields, `Error(c)` |
+| T1.2a | an owning closure | as T1.1, then `chg` (commit), then captures moved into the environment | `e` fails; `chg` refused | `e`: as T1.1. Refused: failure `Capacity` before any capture moves; the captures stay in their slots for the cleanup; prop |
+| T1.3 | `box.new(take x)`, `rc.new(take x)` | `chg` (commit), then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `chg` refused: failure `Capacity` | `x` a statement temporary, dropped by the cleanup; prop |
+| T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | as T1.3, recorded | as T1.3 |
+| T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `chg` refused at block k: failure `Capacity` | own blocks copied so far dropped and shares released in reverse, each `ref`, before the failure is raised; region bytes stay charged until close; `x` untouched; prop |
+| T1.6 | `span.push(mut b, x)` | value moved into the builder | `chg` refused: failure `Capacity` | the value a statement temporary, dropped by the cleanup; the builder unchanged; region bytes stay charged; prop |
 | T1.7 | `finish(take b)` | region value L | cannot fail | |
-| T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Overflow` or `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
+| T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Error(Overflow())` or failure `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
 | T1.9 | `finish_trim(take b)` | region value L; `ref(round8(n) − round8(used))` at the allocation's record | cannot fail | |
-| T1.10 | `seq.index_in(r, s)` | `chg` (commit), then the table | `Capacity` | nothing allocated; the source unchanged |
+| T1.10 | `seq.index_in(r, s)` | `chg` (commit), then the table | failure `Capacity` | nothing allocated; the source unchanged; prop |
 
 **T2 Bindings and views**
 
@@ -1026,11 +1166,11 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T5.1 | `region r { .. }` enter | `r` open | cannot fail | |
-| T5.2 | region allocation of n bytes | `chg(n)` | `Capacity` before any write | nothing allocated; earlier bytes stay charged |
+| T5.2 | region allocation of n bytes | `chg(n)` | failure `Capacity` before any write | nothing allocated; earlier bytes stay charged; prop |
 | T5.3 | region close, any exit edge | views end; owners drop; all bytes `ref` | cannot fail | |
-| T5.4 | `bound bytes n { .. }` enter | `chg(n)` to the current limit; a new limit of n is current | `Capacity`: the body does not run | `Error(c)` |
+| T5.4 | `bound bytes n { .. }` enter | `chg(n)` to the current limit; a new limit of n is current | `chg` refused: the body does not run | the value `Error(c)`; nothing moved |
 | T5.5 | bound exit, any edge | views end; owners drop; the unused part `ref`; surviving blocks handed to the parent ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)) | cannot fail | |
-| T5.6 | admission of n | used + n ≤ size: used += n | `Capacity` | per the operation's row |
+| T5.6 | admission of n | used + n ≤ size: used += n | refused, with `Capacity(requested: n, available: size − used)`; an event ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)) | per the operation's row: the failure `Capacity`, or the value `Error` of T1.2, T5.4, T7.1a and the `try_` operations |
 | T5.7 | refund of n | used −= n at the block's limit | cannot fail | |
 | T5.8 | `bound steps n { .. }` enter | n reserved from the current step bound, if any; a new step bound of n is current ([MEM-30](budgets.md#mem-30-step-bounds)) | n exceeds what is left: the body does not run | `Error(OutOfTime)`; nothing moved |
 | T5.9 | a step | one step of the current step bound used | past the bound: failure `OutOfTime` at the step | per FAIL-7 |
@@ -1049,7 +1189,8 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
-| T7.1 | `task.spawn(.., take x, f)` | `chg` (commit); the child owns `x` | `Capacity` | the error owns `x` |
+| T7.1 | `task.spawn(.., take x, f)` | `chg` (commit); the child owns `x` | `chg` refused: failure `Capacity` | `x` a statement temporary, dropped by the cleanup; prop |
+| T7.1a | `task.try_spawn(.., take x, f)` | as T7.1 | `chg` refused | the value `Error((c, x))` owns `x` |
 | T7.2 | `send(tx, take x)` | recorded publication (commit); the queue owns `x` | `Closed` | the error owns `x` |
 | T7.3 | cancelled before publication | | `Cancelled` | the sender's cleanup drops `x` |
 | T7.4 | `receive(rx)` | the receiver owns the item | `Closed` | |

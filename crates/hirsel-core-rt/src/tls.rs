@@ -151,11 +151,15 @@ unsafe fn connect(
                 return error;
             }
         };
+        #[cfg(feature = "record")]
         let tape = (*files).net_tape;
+        #[cfg(feature = "record")]
         let source = match tape {
             Some(tape) => crate::tape::source(&provider, tape.handle(key)).map(|(p, _)| p),
             None => Some(provider),
         };
+        #[cfg(not(feature = "record"))]
+        let source = Some(provider);
         if state.roots.is_none() && source.as_ref().is_some_and(crate::os::owns) {
             if crate::tasks::check_cancel(context, site) != 0 {
                 net::hirsel_core_socket_drop(context, key);
@@ -199,18 +203,24 @@ unsafe fn connect(
             peer_out,
             state: (&raw mut state).cast(),
         };
+        #[cfg(feature = "record")]
+        let handle = tape.map_or(key, |tape| tape.handle(key));
+        #[cfg(not(feature = "record"))]
+        let handle = key;
         let mut request = Request {
             operation: TLS_CONNECT,
             mode: 0,
-            handle: tape.map_or(key, |tape| tape.handle(key)),
+            handle,
             path: (&raw mut tls).cast(),
             path_len: size_of::<TlsRequest>(),
             buffer: net::empty_buffer(),
             site,
         };
+        #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut outcome = hirsel_core_host(context, &provider, &mut request);
         if outcome.status == 0 && outcome.error == IoError::OK {
             let _commit = crate::sequencer::enter();
+            #[cfg(feature = "record")]
             if let Some(tape) = tape {
                 outcome = tape.carrier(outcome);
             }
@@ -257,12 +267,17 @@ unsafe fn prepare(
         let pem = if trust == 1 { bytes(roots) } else { &[] };
         let (pin, store) = tls::trust(trust, pem).ok_or_else(|| tls_failure(3, 0))?;
         let grant = hirsel_core_capability_handle(context, n);
-        let grant_provider = &*hirsel_core_capability_provider(context, n);
-        let rules = if crate::tape::owns(grant_provider) {
-            crate::tape::net_rules(grant_provider, grant)
-        } else {
-            grant
+        #[cfg(feature = "record")]
+        let rules = {
+            let grant_provider = &*hirsel_core_capability_provider(context, n);
+            if crate::tape::owns(grant_provider) {
+                crate::tape::net_rules(grant_provider, grant)
+            } else {
+                grant
+            }
         };
+        #[cfg(not(feature = "record"))]
+        let rules = grant;
         let rules = &*(rules as *const Rules);
         if !rules.as_slice().iter().filter(|rule| rule.address.dir == 2).any(|rule| {
             matches!(rule.decode(), Some(GrantRule::Tls(rule)) if rule.permits(&name, address.port, pin))

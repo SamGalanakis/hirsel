@@ -67,8 +67,8 @@ fn http_absolute_authority() -> bool {
         None => return false,
     }
     let spans_match = part(raw, auth) == string.as_bytes("[2001:0DB8::7]:65535") && part(raw, meta.path) == string.as_bytes("/a") && part(raw, meta.query) == string.as_bytes("raw=%ff")
-    let names_valid = authority(string.as_bytes("LocalHost:80")) && authority(string.as_bytes("abcdefgh%20.example"))
-    let bad_names_refused = !authority(result.unwrap(b"abcdefg\xc1.example")) && !authority(string.as_bytes("abcdefgh%2G.example"))
+    let names_valid = valid_authority(string.as_bytes("LocalHost:80")) && valid_authority(string.as_bytes("abcdefgh%20.example"))
+    let bad_names_refused = !valid_authority(result.unwrap(b"abcdefg\xc1.example")) && !valid_authority(string.as_bytes("abcdefgh%2G.example"))
     spans_match && names_valid && bad_names_refused
 }
 

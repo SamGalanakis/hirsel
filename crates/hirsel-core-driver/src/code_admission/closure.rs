@@ -1,0 +1,487 @@
+use super::{AdmissionError, BackendSemantics, Body, EngineTag, Limit, SlotContract, charge_rows};
+use hirsel_core_ids::ContentHash;
+use hirsel_core_ir::Identity;
+use hirsel_core_ir::address::{Binding, Group};
+use hirsel_core_ir::decode::DecodeBudget;
+use hirsel_core_ir::normal::DecodedBody;
+use hirsel_core_ir::release_recipe::{Backend, Recipe};
+use std::collections::HashMap;
+
+#[derive(Clone, Copy)]
+struct MemberIndex {
+    group: usize,
+    member: usize,
+}
+
+struct Member {
+    address: ContentHash,
+    body: Option<usize>,
+}
+
+struct GroupIndex {
+    members: Vec<Vec<Member>>,
+    addresses: HashMap<ContentHash, MemberIndex>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BoundIdentity {
+    Member(ContentHash),
+    Builtin(u32),
+}
+
+pub(super) fn check(
+    recipe: &Recipe,
+    groups: &[Group],
+    bodies: &[Body],
+    semantics: &impl BackendSemantics,
+    budget: &mut DecodeBudget,
+) -> Result<(), AdmissionError> {
+    let GroupIndex { members, addresses } = index(recipe, groups, budget)?;
+    let entry = *addresses
+        .get(&recipe.address)
+        .ok_or(AdmissionError::Missing(recipe.address))?;
+
+    charge_rows::<bool>(budget, groups.len() + bodies.len())?;
+    charge_rows::<usize>(budget, groups.len() * 3)?;
+    charge_rows::<Vec<usize>>(budget, groups.len())?;
+    let mut reached_groups = vec![false; groups.len()];
+    let mut reached_bodies = vec![false; bodies.len()];
+    let mut pending = Vec::with_capacity(groups.len());
+    let mut out = vec![Vec::new(); groups.len()];
+    let mut indegree = vec![0; groups.len()];
+    let member_count = addresses.len();
+    charge_map::<&Identity, BoundIdentity>(budget, member_count)?;
+    let mut identities = HashMap::with_capacity(member_count);
+    reached_groups[entry.group] = true;
+    pending.push(entry.group);
+    let mut binding = None;
+    let mut conflict = None;
+    let mut unsupported = None;
+
+    if let Some(body) = members[entry.group][entry.member].body
+        && bodies[body].identity != recipe.entry
+    {
+        binding = Some("entry identity differs from its body");
+    }
+
+    while let Some(group) = pending.pop() {
+        let rows = &groups[group].members;
+        let mut graph = InternalEdges::new(rows.len(), budget)?;
+        let mut previous = None;
+        for (member, row) in rows.iter().enumerate() {
+            budget.check()?;
+            let indexed = &members[group][member];
+            let body = indexed.body.ok_or(AdmissionError::Missing(row.body))?;
+            let decoded = &bodies[body];
+            reached_bodies[body] = true;
+            let identity = &decoded.identity;
+            if previous.is_some_and(|prev| prev >= identity) {
+                binding.get_or_insert("group members are not in ascending identity order");
+            }
+            previous = Some(identity);
+            record_identity(
+                &mut identities,
+                identity,
+                BoundIdentity::Member(indexed.address),
+                &mut conflict,
+                budget,
+            )?;
+            if row.slots.len() != decoded.slots.len() {
+                binding.get_or_insert("group binding count differs from the body slots");
+            }
+
+            for (slot, target) in row.slots.iter().enumerate() {
+                budget.check()?;
+                let slot = decoded.slots.get(slot);
+                let target = match *target {
+                    Binding::Internal(target) => {
+                        let target = target as usize;
+                        if target >= rows.len() {
+                            binding.get_or_insert("internal member index is out of range");
+                            continue;
+                        }
+                        graph.push(member, target, budget)?;
+                        MemberIndex {
+                            group,
+                            member: target,
+                        }
+                    }
+                    Binding::External(address) => {
+                        let &target = addresses
+                            .get(&address)
+                            .ok_or(AdmissionError::Missing(address))?;
+                        if target.group == group {
+                            binding.get_or_insert("external binding stays within the group");
+                        } else {
+                            push_row(&mut out[group], target.group, budget)?;
+                            indegree[target.group] += 1;
+                        }
+                        if !std::mem::replace(&mut reached_groups[target.group], true) {
+                            pending.push(target.group);
+                        }
+                        target
+                    }
+                    Binding::Builtin(version) => {
+                        if let Some(slot) = slot {
+                            record_identity(
+                                &mut identities,
+                                &slot.identity,
+                                BoundIdentity::Builtin(version),
+                                &mut conflict,
+                                budget,
+                            )?;
+                            if slot.signature.is_some() {
+                                binding.get_or_insert("callable slot must bind to a member");
+                            } else if !semantics.supports_builtin(
+                                recipe.launch.backend,
+                                &slot.identity,
+                                version,
+                            ) {
+                                unsupported.get_or_insert("builtin identity and version");
+                            }
+                        }
+                        continue;
+                    }
+                };
+                if let (Some(slot), Some(body)) = (slot, members[target.group][target.member].body)
+                {
+                    check_member(slot, &bodies[body], &mut binding, &mut conflict);
+                }
+            }
+        }
+        if !graph.strongly_connected(budget)? {
+            binding.get_or_insert("group is not strongly connected");
+        }
+    }
+
+    if let Some(n) = reached_groups.iter().position(|&seen| !seen) {
+        return Err(AdmissionError::Extra(recipe.groups[n].hash));
+    }
+    if let Some(n) = reached_bodies.iter().position(|&seen| !seen) {
+        return Err(AdmissionError::Extra(recipe.bodies[n].body.hash));
+    }
+    if let Some(reason) = binding {
+        return Err(AdmissionError::Binding(reason));
+    }
+    if !acyclic(&out, indegree, pending, budget, |_| {})? {
+        return Err(AdmissionError::Binding(
+            "external group bindings form a cycle",
+        ));
+    }
+    if let Some(identity) = conflict {
+        return Err(AdmissionError::Conflict(Box::new(identity.clone())));
+    }
+    let entry_body = members[entry.group][entry.member]
+        .body
+        .expect("walked entry body");
+    check_launch(recipe, entry_body, bodies, budget)?;
+    let backend = recipe.launch.backend;
+    if !semantics.supports_target(backend, &recipe.launch.target) {
+        return Err(AdmissionError::Unsupported("native backend target"));
+    }
+    if let Some(reason) = unsupported {
+        return Err(AdmissionError::Unsupported(reason));
+    }
+    for body in bodies {
+        check_engine_tags(&body.decoded, backend, semantics, budget)?;
+    }
+    Ok(())
+}
+
+fn index(
+    recipe: &Recipe,
+    groups: &[Group],
+    budget: &mut DecodeBudget,
+) -> Result<GroupIndex, AdmissionError> {
+    charge_rows::<Vec<Member>>(budget, groups.len())?;
+    let count = groups.iter().try_fold(0_usize, |count, group| {
+        count
+            .checked_add(group.members.len())
+            .ok_or(AdmissionError::Limit(Limit::Members))
+    })?;
+    charge_rows::<Member>(budget, count)?;
+    charge_map::<ContentHash, MemberIndex>(budget, count)?;
+    let mut addresses = HashMap::with_capacity(count);
+    let mut members = Vec::with_capacity(groups.len());
+    for (group, rows) in groups.iter().enumerate() {
+        let group_hash = recipe.groups[group].hash;
+        let mut indexed = Vec::with_capacity(rows.members.len());
+        for (member, row) in rows.members.iter().enumerate() {
+            budget.check()?;
+            let ordinal =
+                u32::try_from(member).map_err(|_| AdmissionError::Limit(Limit::Members))?;
+            let address = Group::member_address(group_hash, ordinal);
+            if addresses
+                .insert(address, MemberIndex { group, member })
+                .is_some()
+            {
+                return Err(AdmissionError::Binding("duplicate member address"));
+            }
+            let body = recipe
+                .bodies
+                .binary_search_by_key(&row.body, |body| body.body.hash)
+                .ok();
+            indexed.push(Member { address, body });
+        }
+        members.push(indexed);
+    }
+    Ok(GroupIndex { members, addresses })
+}
+
+fn record_identity<'a>(
+    identities: &mut HashMap<&'a Identity, BoundIdentity>,
+    identity: &'a Identity,
+    target: BoundIdentity,
+    conflict: &mut Option<&'a Identity>,
+    budget: &mut DecodeBudget,
+) -> Result<(), AdmissionError> {
+    if matches!(target, BoundIdentity::Builtin(_)) {
+        charge_map::<&Identity, BoundIdentity>(budget, 1)?;
+    }
+    if let Some(previous) = identities.insert(identity, target)
+        && previous != target
+    {
+        conflict.get_or_insert(identity);
+    }
+    Ok(())
+}
+
+fn check_member<'a>(
+    slot: &'a SlotContract,
+    target: &Body,
+    binding: &mut Option<&'static str>,
+    conflict: &mut Option<&'a Identity>,
+) {
+    if slot.identity != target.identity || slot.signature.is_none() {
+        binding.get_or_insert("slot identity differs from its bound member");
+    } else if slot.signature != Some(target.signature) {
+        conflict.get_or_insert(&slot.identity);
+    }
+}
+
+fn check_launch(
+    recipe: &Recipe,
+    entry: usize,
+    bodies: &[Body],
+    budget: &DecodeBudget,
+) -> Result<(), AdmissionError> {
+    for (i, body) in bodies.iter().enumerate() {
+        budget.check()?;
+        if body.annex.1.is_some() != (i == entry) {
+            return Err(AdmissionError::Binding(
+                "startup parameter names belong to the entry annex",
+            ));
+        }
+    }
+    let body = &bodies[entry];
+    let module = &body.decoded.module;
+    let signature = &module.signatures[module.functions[0].signature.index()];
+    if recipe.launch.grants.len() != signature.params.len()
+        || recipe
+            .launch
+            .grants
+            .iter()
+            .enumerate()
+            .any(|(i, grant)| grant.ordinal as usize != i)
+    {
+        return Err(AdmissionError::Binding(
+            "launch grant ordinals differ from entry parameters",
+        ));
+    }
+    let exit = signature.dest.is_some_and(|dest| {
+        use hirsel_core_layout::{Body, FieldTy};
+        let Body::Variant(cases) = &module.types[dest.index()].body else {
+            return false;
+        };
+        let Some(error) = cases.get(1) else {
+            return false;
+        };
+        matches!(
+            error.fields.as_slice(),
+            [field] if matches!(field.ty, FieldTy::Inline(row)
+                if module.types[row.index()].name == "core@1/core/Exit")
+        )
+    });
+    if recipe.launch.exit_status != exit {
+        return Err(AdmissionError::Binding(
+            "entry exit status differs from its result shape",
+        ));
+    }
+    Ok(())
+}
+
+fn check_engine_tags(
+    body: &DecodedBody,
+    backend: Backend,
+    semantics: &impl BackendSemantics,
+    budget: &DecodeBudget,
+) -> Result<(), AdmissionError> {
+    use hirsel_core_ir::normal;
+    use hirsel_core_ir::{Callee, RtOp};
+
+    let check = |tag| {
+        budget.check()?;
+        if semantics.supports_tag(backend, tag) {
+            Ok(())
+        } else {
+            Err(AdmissionError::Unsupported("engine operation tag"))
+        }
+    };
+    for body in body.module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            check(EngineTag::Instruction(normal::instruction_tag(inst)))?;
+        }
+        for term in &body.terminators {
+            check(EngineTag::Terminator(normal::terminator_tag(term)))?;
+        }
+        for call in &body.calls {
+            if let Callee::Runtime(operation) = &call.callee {
+                check(EngineTag::Runtime(normal::runtime_tag(operation)))?;
+                match operation {
+                    RtOp::Host(host) => check(EngineTag::Host(normal::host_tag(host)))?,
+                    RtOp::Flow(flow) => check(EngineTag::Flow(normal::flow_tag(flow)))?,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn charge_map<K, V>(budget: &mut DecodeBudget, count: usize) -> Result<(), AdmissionError> {
+    // Bound hash-table growth and its control bytes as well as the entries.
+    charge_rows::<(K, V, u8)>(budget, count.saturating_mul(4))
+}
+
+// Record each internal edge when resolving the member's slots. The forward and
+// reverse searches then prove strong connectivity without decoding an edge again.
+struct InternalEdges {
+    forward: Vec<Vec<usize>>,
+    reverse: Vec<Vec<usize>>,
+}
+
+impl InternalEdges {
+    fn new(members: usize, budget: &mut DecodeBudget) -> Result<Self, AdmissionError> {
+        charge_rows::<Vec<usize>>(budget, members.saturating_mul(2))?;
+        Ok(Self {
+            forward: vec![Vec::new(); members],
+            reverse: vec![Vec::new(); members],
+        })
+    }
+
+    fn push(
+        &mut self,
+        source: usize,
+        target: usize,
+        budget: &mut DecodeBudget,
+    ) -> Result<(), AdmissionError> {
+        push_row(&mut self.forward[source], target, budget)?;
+        push_row(&mut self.reverse[target], source, budget)?;
+        Ok(())
+    }
+
+    fn strongly_connected(&self, budget: &mut DecodeBudget) -> Result<bool, AdmissionError> {
+        let n = self.forward.len();
+        if n <= 1 {
+            return Ok(n == 1);
+        }
+        charge_rows::<bool>(budget, n)?;
+        charge_rows::<usize>(budget, n)?;
+        let mut seen = vec![false; n];
+        let mut pending = Vec::with_capacity(n);
+        for graph in [&self.forward, &self.reverse] {
+            seen.fill(false);
+            seen[0] = true;
+            pending.push(0);
+            let mut reached = 0;
+            while let Some(node) = pending.pop() {
+                reached += 1;
+                for &target in &graph[node] {
+                    budget.check()?;
+                    if !std::mem::replace(&mut seen[target], true) {
+                        pending.push(target);
+                    }
+                }
+            }
+            if reached != n {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn push_row<T>(rows: &mut Vec<T>, row: T, budget: &mut DecodeBudget) -> Result<(), AdmissionError> {
+    if rows.len() == rows.capacity() {
+        let additional = rows.capacity().max(1);
+        charge_rows::<T>(budget, rows.len().saturating_add(additional))?;
+        rows.try_reserve_exact(additional)
+            .map_err(|_| AdmissionError::Limit(Limit::DecodeBytes))?;
+    }
+    rows.push(row);
+    Ok(())
+}
+
+/// Only requested groups need to be ordered. An external address outside
+/// this subset either already lives with the receiver or is its refusal.
+pub(super) fn send_order(
+    recipe: &Recipe,
+    groups: &[Group],
+    budget: &mut DecodeBudget,
+) -> Result<Vec<usize>, AdmissionError> {
+    let GroupIndex { addresses, .. } = index(recipe, groups, budget)?;
+    let count = groups.len();
+    charge_rows::<Vec<usize>>(budget, count)?;
+    charge_rows::<usize>(budget, count.saturating_mul(3))?;
+    let mut graph = vec![Vec::new(); count];
+    let mut indegree = vec![0; count];
+    for (group, rows) in groups.iter().enumerate() {
+        for binding in rows.members.iter().flat_map(|row| &row.slots) {
+            budget.check()?;
+            if let Binding::External(address) = binding
+                && let Some(target) = addresses.get(address)
+            {
+                push_row(&mut graph[target.group], group, budget)?;
+                indegree[group] += 1;
+            }
+        }
+    }
+    let mut order = Vec::with_capacity(count);
+    if !acyclic(&graph, indegree, Vec::with_capacity(count), budget, |i| {
+        order.push(i)
+    })? {
+        return Err(AdmissionError::Binding(
+            "external group bindings form a cycle",
+        ));
+    }
+    Ok(order)
+}
+
+fn acyclic(
+    graph: &[Vec<usize>],
+    mut indegree: Vec<usize>,
+    mut pending: Vec<usize>,
+    budget: &DecodeBudget,
+    mut visit: impl FnMut(usize),
+) -> Result<bool, AdmissionError> {
+    pending.extend(
+        indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &n)| (n == 0).then_some(i)),
+    );
+    let mut removed = 0;
+    while let Some(node) = pending.pop() {
+        budget.check()?;
+        removed += 1;
+        visit(node);
+        for &target in &graph[node] {
+            budget.check()?;
+            indegree[target] -= 1;
+            if indegree[target] == 0 {
+                pending.push(target);
+            }
+        }
+    }
+    Ok(removed == graph.len())
+}

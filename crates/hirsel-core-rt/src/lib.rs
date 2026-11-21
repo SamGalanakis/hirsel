@@ -29,6 +29,7 @@ pub mod model_net;
 pub mod net;
 pub mod os;
 mod os_net;
+mod os_resolve;
 mod os_sync;
 mod os_tls;
 #[cfg(any(test, feature = "charge-observation"))]
@@ -36,15 +37,19 @@ pub mod peak;
 pub mod process;
 pub mod provider;
 pub mod region;
+mod resolve;
 mod retention;
 #[cfg(any(test, feature = "testing"))]
 pub mod schedule_script;
 pub mod secret;
 mod sequencer;
+mod sha1;
+mod sha256;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 pub mod steps;
 mod stop_signals;
+#[cfg(feature = "record")]
 pub mod tape;
 mod task_heap;
 pub mod tasks;
@@ -52,6 +57,7 @@ pub mod tasks;
 pub mod test_provider;
 pub mod tls;
 mod units;
+mod xxh3;
 
 mod frame_list;
 

@@ -1183,6 +1183,27 @@ fn no_trigger_grant(seed: (), take unused: runner.TriggerContext) -> Result[(), 
     fail("an empty trigger list cannot start a trigger")
 }
 
+fn probe_ready(network: Net, address: Addr, clock: Clock) -> () waits {
+    let until: Until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 1000u64))
+    let socket = result.unwrap(host.connect(network, address, until))
+    let (take rx, take tx) = net.split(take socket)
+    let mut reader = take rx
+    let mut writer = take tx
+    let request = string.as_bytes("GET /hirsel/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    let mut sent = 0u64
+    while sent < list.len(request) {
+        sent += result.unwrap(host.send_pair(mut writer, list.slice(request, sent, list.len(request)), string.as_bytes(""), until))
+    }
+    let mut response: Bytes = result.unwrap(list.with_capacity(1024u64))
+    while list.len(response) < 1024u64 {
+        let remaining = 1024u64 - list.len(response)
+        if result.unwrap(host.recv_bounded(mut reader, mut response, remaining, until)) == 0u64 { break }
+    }
+    let prefix = string.as_bytes("HTTP/1.1 200 OK\r\n")
+    want(list.len(response) > list.len(prefix) && list.slice(response, 0u64, list.len(prefix)) == prefix,
+        "ready: unauthenticated status probe did not return 200")
+}
+
 pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
     let mut name = result.unwrap(string.with_capacity(32u64))
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
@@ -1200,6 +1221,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     if let Ok(Ready) = channel.receive(phases) {} else { fail("expected Ready") }
     if port == 0u16 || managed_address(latest.read(status)).port != port { fail("wrong bound address") }
     let address = managed_address(latest.read(status))
+    probe_ready(net, address, clock)
     result.unwrap(channel.send(stop_to, ()))
     if let Ok(Draining) = channel.receive(phases) {} else { fail("expected Draining") }
     match task.join(take running) {

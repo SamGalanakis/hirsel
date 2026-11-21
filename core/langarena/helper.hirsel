@@ -69,8 +69,7 @@ fn own_fields[in a](fields: IndexedSpan[std.json.Member] in a) -> Result[Setting
         let key = mem(string.from(text.as_string(field.key)))?
         let value = match field.value {
             Num(t) => {
-                let parsed: Result[i64, ParseError] = int.parse(text.as_string(t))
-                match parsed {
+                match (int.parse(text.as_string(t)) : Result[i64, ParseError]) {
                     Ok(n) => Integer(n),
                     Error(_) => Invalid
                 }

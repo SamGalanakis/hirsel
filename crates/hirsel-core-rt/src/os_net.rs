@@ -2,7 +2,7 @@
 //! spurious writable connect events; combined interests live in core-net.
 use crate::{
     entry::SocketActivation,
-    net::{Address, NetworkRequest},
+    net::{Address, NetworkRequest, RulesStorage},
     provider::*,
     tls::{HandshakeState, TlsRequest},
 };
@@ -38,6 +38,7 @@ pub(crate) static TLS_OPERATIONS: Operations = Operations {
 #[unsafe(no_mangle)]
 pub static hirsel_core_os_socket_activation: SocketActivation = SocketActivation {
     receive: receive_listener,
+    rules: RulesStorage::from_views,
 };
 
 pub(crate) const LISTEN_FD: i32 = 3;
@@ -650,10 +651,11 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome
 /// clock it is the program deadline plus the provider's epoch, as `sleep_wait`
 /// converts it, with no clock read; the caller's fresh read decides expiry. A
 /// substituted clock translates by its own reading, saturating at now.
-unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
+pub(crate) unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
     unsafe {
         n.until.and_then(|(p, clock, at)| {
             // This translation is host scheduling, outside the program's clock reads.
+            #[cfg(feature = "record")]
             let (p, clock) = if crate::tape::owns(&p) {
                 crate::tape::source(&p, clock)?
             } else {

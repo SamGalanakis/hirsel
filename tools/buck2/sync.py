@@ -75,11 +75,11 @@ READS = generated.Reads(ROOT)
 
 # What each build script reads besides its own file, as repository paths.
 BUILD_SCRIPT_SOURCES = {
-    "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs"],
+    "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs", "core/front/support/cases.rs"],
 }
 
 BUILD_SCRIPT_INPUTS = {
-    "hirsel-core-diag": ["docs/spec/*.md"],
+    "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
     "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel"],
 }
 
@@ -453,12 +453,18 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
                               library=f'//:{name}-standalone',
                               archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-standalone-record',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'record']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-record-archives',
+                              library=f'//:{name}-standalone-record',
+                              archive_name=f"lib{attrs['crate']}.a")
                 + '\n' + call('hirsel_library', name=f'{name}-test-pool',
-                               deps=declared_deps(package, packages),
-                               **{**attrs, 'features': ['standalone', 'testing']})
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'testing']})
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-test-pool-archives',
-                               library=f'//:{name}-test-pool',
-                               archive_name=f"lib{attrs['crate']}.a"))
+                              library=f'//:{name}-test-pool',
+                              archive_name=f"lib{attrs['crate']}.a"))
     return call('hirsel_core_runtime_archives', name=f'{name}-archives',
                 library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
 
@@ -535,7 +541,10 @@ def first_party(meta: dict) -> str:
                           "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                           "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if arm else
                          {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
-                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"} if binary == "hirsel-core-driver-unittest"
+                          else {
+                              "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                              "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+                          } if binary == "hirsel-core-driver-unittest"
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" or program_llvm else None)
             return dict(data=test_data(binary, name, package_dir, src),
                         files_env=files_env,
@@ -602,7 +611,11 @@ def first_party(meta: dict) -> str:
                     out.append("\n" + call("hirsel_test", name=f"{name}-bin-{target['name']}-unittest", deps=own + test_deps,
                                              **test_attrs(f"{name}-bin-{target['name']}-unittest", src), **attrs))
             elif kind == "example":
-                out.append("\n" + call("hirsel_binary", name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=own + test_deps, **attrs))
+                example_lib = own
+                if name == "hirsel-core-rt" and target["name"] == "tape_cost":
+                    example_lib = ["//:hirsel-core-rt-record"]
+                    attrs["features"] = sorted(set(features) | {"record"})
+                out.append("\n" + call("hirsel_binary", name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=example_lib + test_deps, **attrs))
             else:
                 binaries = {
                     t["name"]: f"//:{name}-bin-{t['name']}"
@@ -681,9 +694,12 @@ def first_party(meta: dict) -> str:
                           "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
                           "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"]
         tls = ' + glob(["crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"])' if phase == "std" else ""
+        env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"}
+        if phase == "std":
+            env["HIRSEL_CORE_RT_RECORD_ARCHIVE"] = "//:hirsel-core-rt-record-archives[aarch64]"
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/aarch64.py",
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
-            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"},
+            files_env=env,
             data=Raw('glob(["core/core/**", "core/std/**", "core/front/runtime/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/aarch64.py", "core/tools/front_native.py", "core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]' + tls)))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
@@ -706,17 +722,26 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py",
         files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_REPORT_EVALUATOR": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))
+    rt_deps = declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages)
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
-        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=rt_deps,
+        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_library", name="hirsel-core-rt-record-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation", "record"], deps=rt_deps,
+        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_library", name="hirsel-core-rt-record", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["record"], deps=rt_deps,
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_library", name="core-llvm-runtime-fixture",
         crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
         srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt-native-fixture"],
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-runtime-pic", library=":hirsel-core-rt-native-fixture"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-record-runtime-pic", library=":hirsel-core-rt-record-native-fixture"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-scripted-runtime-archives", library=":hirsel-core-rt-native-fixture", archive_name="libhirsel_core_rt.a"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-record-runtime-pic", library=":hirsel-core-rt-record"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
     if unguarded:
         raise SystemExit("these binary and test roots do not install the memory guard; add "
@@ -726,7 +751,9 @@ def first_party(meta: dict) -> str:
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            runtimes="//:hirsel-core-rt-archives", visibility=["PUBLIC"]))
+                            runtimes="//:hirsel-core-rt-archives",
+                            recording_runtimes="//:hirsel-core-rt-record-archives",
+                            visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present()],
                             data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock", "//third-party:NOTICES.md",
@@ -853,7 +880,8 @@ def first_party(meta: dict) -> str:
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
                                           "node": "//tools/buck2:sdk-node[bin/node]", "model-runtime.a": "//:core-native-runtime-fixture-pic",
                                           "schedule-runtime.a": "//:core-scripted-runtime-pic"},
-                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                                           "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c", "core/tools/case_progress.py", "crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel", "core/programs/store/triggers.hirsel"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py",
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py", "core/tools/case_progress.py"]))

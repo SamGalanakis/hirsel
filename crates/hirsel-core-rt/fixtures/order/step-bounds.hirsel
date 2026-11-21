@@ -358,3 +358,129 @@ fn partial_sweep() -> bool {
     }
     true
 }
+
+// MEM-30 step contexts. Each shared routine first runs with no bound current
+// and then under one, reached from the bounded code by a route other than a
+// direct call. Each case returns 100 * the unbounded sends + the sends the
+// bound admits. The bounded count is the charged prefix: a body taken without
+// its Steps would send all 20.
+fn burst(tx: Sender[u64], n: u64) -> u64 {
+    let mut sent = 0u64
+    while sent < n {
+        let _ = channel.try_send(tx, 1u64)
+        sent += 1
+    }
+    sent
+}
+fn drain(rx: Receiver[u64]) -> u64 {
+    let mut count = 0u64
+    while let Ok(_) = channel.try_receive(rx) { count += 1 }
+    count
+}
+fn burst_task(take tx: Sender[u64]) { let _ = burst(tx, 20) }
+// A loop trip is a send and a latch, so r Steps left at burst's loop send
+// ceil(r/2) times. The sender copy and the spawn take two of eleven, so the
+// child copies nine. Its entry and the call to burst leave seven: four sends.
+// expect: run route_spawn(0) = 2004
+fn route_spawn(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let a = channel.sender(tx)
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, take a, burst_task))
+    let _ = task.join(take h)
+    let first = drain(rx)
+    let _ = bound steps 11 {
+        let b = channel.sender(tx)
+        let second = result.unwrap(task.spawn(tasks, bytes 4096, take b, burst_task))
+        let _ = task.join(take second)
+    }
+    first * 100 + drain(rx)
+}
+// The call by function value and the call to burst leave seven of nine.
+// expect: run route_closure(0) = 2004
+fn route_closure(seed: u64) -> u64 {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let f = fn(t: Sender[u64], n: u64) -> u64 { burst(t, n) }
+    let _ = f(tx, 20 + seed)
+    let first = drain(rx)
+    let _ = bound steps 9 { f(tx, 20 + seed) }
+    first * 100 + drain(rx)
+}
+// Sorting two values compares them once. One sort instance and comparator
+// run in both contexts.
+fn sort_bursts(tx: Sender[u64], seed: u64) {
+    let mut xs: List[u64] = list.new()
+    let _ = list.push(mut xs, 2u64)
+    let _ = list.push(mut xs, 1u64)
+    let _ = list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { let _ = burst(tx, 20 + seed); Equal })
+}
+// The call to sort_bursts, its four core calls, the comparator's entry and
+// the call to burst leave nine of sixteen: five sends.
+// expect: run route_callback(0) = 2005
+fn route_callback(seed: u64) -> u64 {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    sort_bursts(tx, seed)
+    let first = drain(rx)
+    let _ = bound steps 16 { sort_bursts(tx, seed) }
+    first * 100 + drain(rx)
+}
+resource type Burst { tx: Sender[u64] } drop(b) { let _ = burst(b.tx, 20) }
+// The constructor's unwrap, the finalizer's entry and its call to burst leave
+// six of nine: three sends.
+// expect: run route_finalizer(0) = 2003
+fn route_finalizer(seed: u64) -> u64 {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let a = channel.sender(tx)
+    let _ = { let held = result.unwrap(Burst(tx: take a)); seed }
+    let first = drain(rx)
+    let b = channel.sender(tx)
+    let _ = bound steps 9 { let held = result.unwrap(Burst(tx: take b)); seed }
+    first * 100 + drain(rx)
+}
+type Gate: send { tx: Sender[u64], ready: Sender[u64], go: Receiver[u64] }
+// The child blocks on go and resumes when the parent sends.
+fn gated(take g: Gate) waits {
+    let _ = channel.try_send(g.ready, 1u64)
+    let _ = channel.receive(g.go)
+    let _ = burst(g.tx, 20)
+}
+fn gate_round(tasks: Tasks, tx: Sender[u64]) waits {
+    let (ready, ready_rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (go, go_rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let g = Gate(tx: channel.sender(tx), ready: take ready, go: take go_rx)
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, take g, gated))
+    let _ = channel.receive(ready_rx)
+    let _ = channel.try_send(go, 1u64)
+    let _ = task.join(take h)
+}
+// The call to gate_round, its five core calls and the spawn take seven of
+// sixteen. The child's entry, ready send, receive and call to burst leave five
+// of its nine: three sends after it resumes.
+// expect: run route_resumed(0) = 2003
+fn route_resumed(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    gate_round(tasks, tx)
+    let first = drain(rx)
+    let _ = bound steps 16 { gate_round(tasks, tx) }
+    first * 100 + drain(rx)
+}
+fn spin_to(n: u64) -> u64 {
+    let mut i = 0u64
+    while i < n { i += 1 }
+    i
+}
+// The call by function value and 70,000 latches take 70,001 Steps, past a
+// slice end: a bound of 70,001 fits them and one of 70,000 stops at its last.
+// expect: run route_slice(70000) = 11
+fn route_slice(n: u64) -> u64 {
+    let f = code.callable(code.describe(spin_to))
+    let _ = f(n)
+    let fits = match (bound steps (n + 1) { f(n) }) { Ok(v) => if v == n { 1u64 } else { 0 }, Error(_) => 0 }
+    let stops = match (bound steps n { f(n) }) { Error(e) => if e.steps == n { 10u64 } else { 0 }, Ok(_) => 0 }
+    fits + stops
+}
+fn routes_hold(tasks: Tasks) -> bool waits {
+    route_spawn(tasks) == 2004 && route_closure(0) == 2004 && route_callback(0) == 2005 && route_finalizer(0) == 2003 && route_resumed(tasks) == 2003 && route_slice(70000) == 11
+}
+pub fn routes(tasks: Tasks) -> Result[(), Exit] waits {
+    if routes_hold(tasks) { Ok(()) } else { Error(Exit(status: 1)) }
+}

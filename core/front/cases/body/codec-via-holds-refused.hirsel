@@ -1,0 +1,38 @@
+// OWN-2 and OWN-4: the live fields' holds set still constrains a via codec.
+type Wrapped { clock: Clock }
+type Reading: codec via u64(to: reading_wire, from: read_from) {
+    n: u64,
+    stored: Wrapped
+}
+
+fn reading_wire(x: Reading) -> View[u64] in x {
+    view x.n
+}
+
+fn read_from(take n: u64) -> Result[Reading, ()] {
+    Error(())
+}
+
+type Hidden[T]: codec via u64(to: hidden_wire, from: hidden_from) {
+    n: u64,
+    stored: T
+}
+
+fn hidden_wire[T](x: Hidden[T]) -> View[u64] in x {
+    view x.n
+}
+
+fn hidden_from[T](take n: u64) -> Result[Hidden[T], ()] {
+    Error(())
+}
+
+fn require_codec[T: codec](x: T) {}
+
+fn hidden_grant(x: Hidden[Clock]) {
+    require_codec(x)
+}
+
+// expect: refuse OWN-4 at 5:5
+// expect: refuse LANG-12 at 32:19
+// expect: compared OWN-4 at 5:5 | app@1/main/Wrapped | empty holds set
+// expect: compared LANG-12 at 32:19 | app@1/main/Hidden[core@1/core/Clock] | codec

@@ -1,0 +1,10 @@
+// Module `sha256`: the FIPS 180-4 SHA-256 compression function. std.sha256
+// extends this module with the streaming hash.
+
+// Compress count 64-byte blocks of b, from at, into the state h, in order.
+// A range outside b, including an overflowing end, fails with Bounds before
+// any write. Alloc: nothing.
+pub fn blocks(mut h: Inline[u32, 8], b: Bytes, at: u64, count: u64)
+
+// Compress one 64-byte block into h. Alloc: nothing.
+pub fn block(mut h: Inline[u32, 8], b: Inline[u8, 64])

@@ -82,14 +82,15 @@ impl Request {
         })
     }
     pub(crate) fn key(&self, snapshot: ContentHash) -> ContentHash {
-        ContentHash::of_parts("hirsel.request-record.v1", [&snapshot.0[..], &self.tuple])
+        ContentHash::of_parts("hirsel.request-record.v2", [&snapshot.0[..], &self.tuple])
     }
 }
 /// Every native option, by name: those that change the executable enter the
 /// key, and those that do not say why.
 fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
     let NativeOptions {
-        tape,
+        recording,
+        replay,
         backend,
         optimize,
         debug_lines,
@@ -131,7 +132,8 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
             grant_mask,
             net_rules,
             secret_grants,
-            tape,
+            recording,
+            replay,
             toolchain.image,
             toolchain.environment,
         ))?,
@@ -179,10 +181,9 @@ pub(crate) struct Reach {
 pub(crate) struct Native {
     private_variants: usize,
     identity: ContentHash,
-    revision: ContentHash,
+    address: ContentHash,
     observation_mode: bool,
     debug_lines: bool,
-    step_charging_elided: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Value {
@@ -364,10 +365,9 @@ impl Value {
             native: answer.native.map(|n| Native {
                 private_variants: n.private_variants,
                 identity: n.identity,
-                revision: n.revision,
+                address: n.address,
                 observation_mode: n.observation_mode,
                 debug_lines: n.debug_lines,
-                step_charging_elided: n.step_charging_elided,
             }),
         }
     }
@@ -457,12 +457,14 @@ impl Hit {
             private_variants: n.private_variants,
             executable: output.to_owned(),
             identity: n.identity,
-            revision: n.revision,
+            address: n.address,
+            recipe: None,
+            assembly: None,
+            revision: hirsel_core_ir::code_revision(n.address),
             compiled: 0,
             linked: false,
             observation_mode: n.observation_mode,
             debug_lines: n.debug_lines,
-            step_charging_elided: n.step_charging_elided,
             reach: Default::default(),
         })
     }

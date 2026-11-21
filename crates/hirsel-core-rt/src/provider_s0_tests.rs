@@ -115,6 +115,7 @@ struct Rec {
     /// check_cancel's answer right after the operation).
     results: Vec<(u64, Outcome, u8)>,
     stacks: Vec<Option<usize>>,
+    timer_scenario: Option<TimerScenario>,
 }
 const ABORTED: u64 = 0xab07;
 const TIMED_OUT: u64 = 0x7173;
@@ -155,6 +156,7 @@ impl Rec {
             resume,
             results: vec![],
             stacks: vec![],
+            timer_scenario: None,
         }
     }
     fn note(&mut self, cb: Cb, request: *mut Request, token: u64) -> usize {
@@ -953,6 +955,120 @@ fn s0_equal_deadlines_wake_together() {
         assert_eq!(rec.count(site, Cb::Deliver), 1);
     }
 }
+struct TimerScenario {
+    seed: u64,
+    deadline: u64,
+    expected_expiry: Vec<u64>,
+}
+
+#[test]
+fn s0_expiry_follows_deadlines_and_fifo_arm_order_after_rearms_and_cancels() {
+    #[derive(Default)]
+    struct Clock(AtomicU64);
+
+    impl ModelClock for Clock {
+        fn now(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+
+        fn poll(&self, _: Option<u64>, _: bool) -> Vec<u64> {
+            Vec::new()
+        }
+    }
+
+    fn arm(rec: &mut Rec, _: u64, _: u64, _: usize) -> Step {
+        pending(rec.timer_scenario.as_ref().unwrap().deadline)
+    }
+
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        // SAFETY: the root owns every handle, and Rec is pinned for callbacks.
+        unsafe {
+            const SLOTS: usize = 256;
+            const STEPS: usize = 2048;
+            let clock = Arc::new(Clock::default());
+            attach_model(clock.clone());
+            let mut now = 0;
+            let mut slots = [None; SLOTS];
+            let mut armed = Vec::<(usize, u64)>::new();
+            let mut next_site = 1;
+            let mut random = (*rec).timer_scenario.as_ref().unwrap().seed;
+
+            for step in 0..=STEPS {
+                random = random
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let slot = (random >> 32) as usize % SLOTS;
+                let action = (random >> 40) % 32;
+                if step == STEPS || (step >= SLOTS && action == 31) {
+                    now = if step == STEPS { u64::MAX } else { now + 2 };
+                    let mut due: Vec<_> = armed
+                        .iter()
+                        .copied()
+                        .filter(|&(_, deadline)| deadline <= now)
+                        .collect();
+                    armed.retain(|&(_, deadline)| deadline > now);
+                    // Iteration starts in arm order. Stable sort preserves
+                    // that order for ties without sharing the runtime key.
+                    due.sort_by_key(|&(_, deadline)| deadline);
+                    clock.0.store(now, Ordering::Relaxed);
+                    checkpoint();
+                    for (slot, _) in due {
+                        let (task, site) = slots[slot].take().unwrap();
+                        (*rec)
+                            .timer_scenario
+                            .as_mut()
+                            .unwrap()
+                            .expected_expiry
+                            .push(site);
+                        assert!(!join(context, task));
+                    }
+                } else if step >= SLOTS && action >= 28 {
+                    if let Some((task, _)) = slots[slot].take() {
+                        armed.retain(|&(other, _)| other != slot);
+                        hirsel_core_cancel(context, task);
+                        assert!(join(context, task));
+                    }
+                } else {
+                    let slot = if step < SLOTS { step } else { slot };
+                    let deadline = now + 1 + (random >> 45) % 8;
+                    (*rec).timer_scenario.as_mut().unwrap().deadline = deadline;
+                    if let Some((_, site)) = slots[slot] {
+                        armed.retain(|&(other, _)| other != slot);
+                        hirsel_core_ready((*rec).token(site));
+                    } else {
+                        let task = spawn(context, rec, next_site, READ);
+                        slots[slot] = Some((task, next_site));
+                        next_site += 1;
+                    }
+                    armed.push((slot, deadline));
+                    checkpoint();
+                }
+            }
+        }
+    }
+
+    for seed in [1, 23, 4567] {
+        let mut rec = Rec::new(ready, arm, arm);
+        rec.timer_scenario = Some(TimerScenario {
+            seed,
+            deadline: 0,
+            expected_expiry: Vec::new(),
+        });
+        run(&mut rec, false, body);
+        let expected = &rec.timer_scenario.as_ref().unwrap().expected_expiry;
+        let actual: Vec<_> = rec
+            .calls
+            .iter()
+            .filter(|call| call.cb == Cb::Abort(ABORT_DEADLINE))
+            .map(|call| call.site)
+            .collect();
+        assert_eq!(actual.len(), expected.len(), "seed {seed}");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(actual, expected, "seed {seed}, expiry {index}");
+        }
+    }
+}
+
 /// Readiness and a deadline due in the same turn: readiness wins (the turn
 /// takes readies, then requests, then timers), so resume runs and abort never.
 #[test]

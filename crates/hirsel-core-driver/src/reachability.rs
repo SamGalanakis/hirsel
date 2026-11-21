@@ -34,22 +34,22 @@ pub struct Reachable<'a> {
     pub(crate) reach: Option<crate::reach::Use>,
 }
 impl Reachable<'_> {
-    /// `entry`'s code revision over this walk's instances. A hit's instances
-    /// are its record's, so the record's head holds it.
-    pub(crate) fn revision(&self, entry: &DefPath) -> Result<ContentHash, NativeStop> {
+    /// The entry's code address. A complete reach hit holds it in the record head.
+    pub(crate) fn address(&self, entry: &DefPath) -> Result<ContentHash, NativeStop> {
         if let Some(crate::reach::Use {
             hit: true,
             prior: Some(prior),
             ..
         }) = &self.reach
         {
-            return Ok(prior.head.revision);
+            return Ok(prior.head.address);
         }
         let prior = self.reach.as_ref().and_then(|r| r.prior.as_ref());
         self.materialized
-            .revision(&Identity::plain(entry.clone()), prior)
+            .addresses(self.require()?, prior)
+            .and_then(|addresses| addresses.get(&Identity::plain(entry.clone())).copied())
             .ok_or_else(|| {
-                NativeStop::Entry(format!("{entry}: a reached instance has no revision row"))
+                NativeStop::Entry(format!("{entry}: a reached instance has no code address"))
             })
     }
     /// The code revision of each instance this walk's instances describe:

@@ -1,0 +1,33 @@
+// sha256.blocks range laws (core.md, "SHA-256 blocks"): a range outside b,
+// including an end past u64, fails with Bounds before the state changes. The
+// std.sha256 laws cover the compression itself; std never passes a bad range.
+
+// 2^58 blocks is 2^64 bytes, which wraps to 0: an unchecked product would admit
+// the range and read past the empty list.
+// expect: run blocks_overflow() = fail Bounds
+fn blocks_overflow() -> bool {
+    let mut h: Inline[u32, 8] =[0; 8]
+    let b: Bytes = list.new()
+    sha256.blocks(mut h, b, 0, 288230376151711744)
+    h[0] == 0
+}
+
+// One byte short of a block.
+// expect: run blocks_past_end() = fail Bounds
+fn blocks_past_end() -> bool {
+    let mut h: Inline[u32, 8] =[0; 8]
+    let mut b: Bytes = list.new()
+    result.unwrap(list.fill(mut b, 64, 0))
+    sha256.blocks(mut h, b, 1, 1)
+    h[0] == 0
+}
+
+// A start past the end: len - at would wrap and admit the block.
+// expect: run blocks_start_past_end() = fail Bounds
+fn blocks_start_past_end() -> bool {
+    let mut h: Inline[u32, 8] =[0; 8]
+    let mut b: Bytes = list.new()
+    result.unwrap(list.fill(mut b, 64, 0))
+    sha256.blocks(mut h, b, 128, 1)
+    h[0] == 0
+}

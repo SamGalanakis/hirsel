@@ -206,7 +206,7 @@ pub fn sleep(mut j: Journal, c: Clock, ns: u64) -> Result[(), Diverged] waits {
     record(mut j, Sleep(s), arg, list.new())
 }
 
-// A failure's outcome bytes: tag 2 and its primary cause's kind (core ordinal + 1, preserving Tape 8),
+// A failure's outcome bytes: tag 2 and its primary cause's kind (byte 8 retired),
 // with the text of a `Fail`. `for` over a `Causes` yields the primary cause first (SEM-6).
 // The site is left out: it names an operation in this build, not a value to compare.
 fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
@@ -224,7 +224,6 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
             },
             Cancelled => put_u8(mut b, 6)?,
             Capacity => put_u8(mut b, 7)?,
-            Tape => put_u8(mut b, 8)?,
             OutOfTime => put_u8(mut b, 9)?,
         }
         break

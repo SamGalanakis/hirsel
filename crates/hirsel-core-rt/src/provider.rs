@@ -1,7 +1,7 @@
 //! CAP-8 issue/delivery seam. Host adapters and scripted adapters use the same ABI.
 use crate::{Context, causes};
 
-pub use hirsel_tape_format::op::*;
+pub use hirsel_core_ids::host_op::*;
 
 /// IoError tags. Other carries the host error number.
 #[repr(C)]
@@ -167,11 +167,6 @@ pub(crate) unsafe fn clock(
     }
 }
 
-/// `Outcome.status` of an operation its provider refused before issue: a tape
-/// that has ended or faulted (CAP-9). `drive` records the cause `Tape` at the
-/// operation's site and fails it with status 1.
-pub const STATUS_REFUSED: u8 = 2;
-
 /// The failure of an operation that ended before issue.
 pub(crate) const CANCELLED: Outcome = Outcome {
     value: 0,
@@ -230,12 +225,7 @@ unsafe fn drive_with(
         if !authorize(&*provider, &mut *request) {
             return crate::net::DENIED;
         }
-        let outcome = crate::tasks::provider_operation(context, &*provider, request, issued);
-        if outcome.status == STATUS_REFUSED {
-            causes::record(&mut *context, causes::Cause::new(causes::TAPE, site));
-            return CANCELLED;
-        }
-        outcome
+        crate::tasks::provider_operation(context, &*provider, request, issued)
     }
 }
 

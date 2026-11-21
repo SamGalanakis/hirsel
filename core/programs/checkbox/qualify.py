@@ -21,9 +21,9 @@ SDK_MUTANTS = {"resend_new_p", "skip_resubscribe_after_reset", "clear_on_first_b
 SERVER_EDITS = {
     "bit_order_msb": ("main", "1u8 << int.narrow(i.index & 7u32)", "128u8 >> int.narrow(i.index & 7u32)"),
     "unchecked_u32_arg": ("main", "if i < 1000000 {", "if true {"),
-    "range_in_board": ("main", "    store.runner.cover(store.store.shape(h.chunks), Unbounded, Unbounded)",
-                      "    let _ = result.unwrap(store.store.range(tx, store.store.shape(h.chunks), Unbounded, Unbounded))\n"
-                      "    store.runner.cover(store.store.shape(h.chunks), Unbounded, Unbounded)"),
+    "range_in_board": ("main", "    store.runner.cover(store.shape(h.chunks), Unbounded, Unbounded)",
+                      "    let _ = result.unwrap(store.range(tx, store.shape(h.chunks), Unbounded, Unbounded))\n"
+                      "    store.runner.cover(store.shape(h.chunks), Unbounded, Unbounded)"),
     "no_publish_to_others": ("runner", "        let has_content = next.reset",
                              "        if list.len(rows) == 0u64 && list.len(next.complete) == 0u64 { next.rows = list.new() }\n"
                              "        let has_content = next.reset"),

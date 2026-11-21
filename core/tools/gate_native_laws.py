@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--model-runtime', type=Path)
     parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
+    parser.add_argument('--record-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_RECORD_ARCHIVE'))
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang')
                         if 'LLVM_SYS_231_PREFIX' in os.environ else None)
     parser.add_argument('--backend', action='append', choices=['cranelift', 'llvm'])
@@ -40,7 +41,8 @@ def main():
                        args.cc.resolve() if args.cc else None,
                        evaluator=args.evaluator.resolve(), node=args.node.resolve(),
                        model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
-                       schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
+                       schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
+                       record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
             findings = [f"{row['engine']} {row['file']}:{row['line']} {row['test']}: {row['cause']}"
                         for row in rows if row['applicable'] and not row['passed']]
             # tools/sweep counts this line: one body per law and engine.

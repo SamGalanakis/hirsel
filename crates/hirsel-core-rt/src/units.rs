@@ -18,7 +18,7 @@
 //! wait. Each endpoint's eventfd sits in the unit's own epoll registry, so
 //! the receiving unit orders the delivery among its own events.
 //!
-//! Recording: `HIRSEL_XTAPE_DIR=d` makes unit u write `d/unit-u.xtape`:
+//! With the `record` feature, recording: `HIRSEL_XTAPE_DIR=d` makes unit u write `d/unit-u.xtape`:
 //! every accepted port and every delivered message with its sender unit,
 //! per-port sequence number, unit-local delivery number and bytes.
 //! Replay: `HIRSEL_XREPLAY=file` (with K=1) answers accepts and receives from
@@ -38,10 +38,13 @@ pub(crate) mod sync;
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
-    fs::File,
-    io::{BufWriter, Read, Write},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, OnceLock, atomic::Ordering},
+};
+#[cfg(feature = "record")]
+use std::{
+    fs::File,
+    io::{BufWriter, Read, Write},
 };
 use sync::{AtomicU64, Mutex};
 
@@ -108,9 +111,12 @@ fn notify(fd: &OwnedFd) {
 
 // ---------------------------------------------------------------- recording
 
+#[cfg(feature = "record")]
 struct Log(Mutex<BufWriter<File>>);
+#[cfg(feature = "record")]
 static LOGS: Mutex<Vec<(u32, Arc<Log>)>> = Mutex::new(Vec::new());
 
+#[cfg(feature = "record")]
 fn log_for(unit: u32) -> Option<Arc<Log>> {
     let dir = std::env::var_os("HIRSEL_XTAPE_DIR")?;
     let mut logs = LOGS.lock().unwrap();
@@ -123,9 +129,12 @@ fn log_for(unit: u32) -> Option<Arc<Log>> {
     logs.push((unit, log.clone()));
     Some(log)
 }
+#[cfg(feature = "record")]
 const REC_ACCEPT: u8 = 1;
+#[cfg(feature = "record")]
 const REC_MSG: u8 = 2;
 
+#[cfg(feature = "record")]
 pub(crate) fn finish_unit(unit: u32) {
     let logs = LOGS.lock().unwrap();
     for (u, l) in logs.iter() {
@@ -137,10 +146,12 @@ pub(crate) fn finish_unit(unit: u32) {
 
 // ------------------------------------------------------------------- replay
 
+#[cfg(feature = "record")]
 struct ReplayMsg {
     delivery: u64,
     bytes: Vec<u8>,
 }
+#[cfg(feature = "record")]
 struct Replay {
     accepts: Mutex<VecDeque<(u32, u32, u16)>>, // local index, peer unit, listener port
     queues: Mutex<HashMap<u32, VecDeque<ReplayMsg>>>,
@@ -149,6 +160,7 @@ struct Replay {
     waiters: Mutex<HashMap<u32, OwnedFd>>,
     sent: AtomicU64,
 }
+#[cfg(feature = "record")]
 fn replay() -> Option<&'static Replay> {
     static R: OnceLock<Option<Replay>> = OnceLock::new();
     R.get_or_init(|| {
@@ -205,6 +217,7 @@ enum Pend {
 struct Listener {
     queue: Mutex<VecDeque<Pend>>,
     notify: OwnedFd,
+    #[cfg(feature = "record")]
     port: u16,
     /// Untied: the listening unit and its key's reactor identity (0 before listen).
     target: Mutex<(u32, u64)>,
@@ -228,6 +241,7 @@ fn listener_for(unit: u32, port: u16) -> Arc<Listener> {
             Arc::new(Listener {
                 queue: Mutex::new(VecDeque::new()),
                 notify: eventfd(),
+                #[cfg(feature = "record")]
                 port,
                 target: Mutex::new((NONE, 0)),
             })
@@ -256,9 +270,12 @@ fn wake_side(link: &Link, s: usize) {
 }
 
 struct Msg {
+    #[cfg(feature = "record")]
     seq: u64,
+    #[cfg(feature = "record")]
     len: u32,
     left: u32,
+    #[cfg(feature = "record")]
     recorded: bool,
 }
 #[derive(Default)]
@@ -268,6 +285,7 @@ struct Ring {
     rx_waiting: bool,
     tx_waiting: bool,
     closed: bool,
+    #[cfg(feature = "record")]
     seq: u64,
 }
 struct Link {
@@ -283,35 +301,45 @@ struct Link {
 }
 
 struct Endpoint {
+    #[cfg(feature = "record")]
     link: Option<Arc<Link>>,
+    #[cfg(not(feature = "record"))]
+    link: Arc<Link>,
     side: usize,
+    #[cfg(feature = "record")]
     local: u32,
     unit: u32,
+    #[cfg(feature = "record")]
     log: Option<Arc<Log>>,
+    #[cfg(feature = "record")]
     deliveries: Arc<AtomicU64>,
 }
 impl Crossing for Endpoint {
     fn shutdown_write(&self) {
-        if let Some(link) = &self.link {
-            let mut ring = link.dirs[self.side].lock().unwrap();
-            ring.closed = true;
-            let wake = std::mem::take(&mut ring.rx_waiting);
-            drop(ring);
-            if wake {
-                wake_side(link, 1 - self.side);
-            }
+        #[cfg(feature = "record")]
+        let Some(link) = &self.link else { return };
+        #[cfg(not(feature = "record"))]
+        let link = &self.link;
+        let mut ring = link.dirs[self.side].lock().unwrap();
+        ring.closed = true;
+        let wake = std::mem::take(&mut ring.rx_waiting);
+        drop(ring);
+        if wake {
+            wake_side(link, 1 - self.side);
         }
     }
     fn close(&self) {
         self.shutdown_write();
-        if let Some(link) = &self.link {
-            let mut ring = link.dirs[1 - self.side].lock().unwrap();
-            ring.closed = true;
-            let wake = std::mem::take(&mut ring.tx_waiting);
-            drop(ring);
-            if wake {
-                wake_side(link, 1 - self.side);
-            }
+        #[cfg(feature = "record")]
+        let Some(link) = &self.link else { return };
+        #[cfg(not(feature = "record"))]
+        let link = &self.link;
+        let mut ring = link.dirs[1 - self.side].lock().unwrap();
+        ring.closed = true;
+        let wake = std::mem::take(&mut ring.tx_waiting);
+        drop(ring);
+        if wake {
+            wake_side(link, 1 - self.side);
         }
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -320,13 +348,16 @@ impl Crossing for Endpoint {
 }
 
 /// Per-registry state: the next local endpoint index and delivery counter.
+#[cfg(feature = "record")]
 struct UnitState {
     next_local: u32,
     deliveries: Arc<AtomicU64>,
 }
+#[cfg(feature = "record")]
 thread_local! {
     static STATE: std::cell::RefCell<Option<UnitState>> = const { std::cell::RefCell::new(None) };
 }
+#[cfg(feature = "record")]
 fn next_local() -> (u32, Arc<AtomicU64>) {
     if untied() {
         // SAFETY: only the unit's own (single) running worker touches these.
@@ -369,13 +400,18 @@ fn listen(sockets: &mut Sockets, a: Address, unit: u32) -> crate::provider::Outc
     let listener = Arc::new(Listener {
         queue: Mutex::new(VecDeque::new()),
         notify: dup(&fd),
+        #[cfg(feature = "record")]
         port: a.port,
         target: Mutex::new((NONE, 0)),
     });
     let key = sockets
         .insert(fd)
         .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-    if replay().is_none() {
+    #[cfg(feature = "record")]
+    let publish = replay().is_none();
+    #[cfg(not(feature = "record"))]
+    let publish = true;
+    if publish {
         LISTENERS
             .lock()
             .unwrap()
@@ -388,66 +424,80 @@ fn listen(sockets: &mut Sockets, a: Address, unit: u32) -> crate::provider::Outc
 fn connect(sockets: &mut Sockets, a: Address, unit: u32) -> crate::provider::Outcome {
     let me = sockets.unit.unwrap_or_else(current);
     let fd = eventfd();
+    #[cfg(feature = "record")]
     let (local, deliveries) = next_local();
-    let link = if let Some(r) = replay() {
-        r.waiters.lock().unwrap().insert(local, dup(&fd));
-        None
-    } else if untied() {
-        // Unit 0xffff: make a child unit now; it serves port `a.port`.
-        let unit = if unit == SPAWN { spawn_child(me) } else { unit };
-        let listener = listener_for(unit, a.port);
-        let peer = eventfd();
-        let link = Arc::new(Link {
-            dirs: [Mutex::new(Ring::default()), Mutex::new(Ring::default())],
-            notify: [dup(&fd), dup(&peer)],
-            units: [me, unit],
-            idents: [AtomicU64::new(0), AtomicU64::new(0)],
-            pending: Mutex::new(Some(peer)),
-        });
-        // Queued once this side's key exists, below.
-        Some((listener, link))
-    } else {
-        let listener = LISTENERS
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| *k == (unit, a.port))
-            .map(|(_, l)| l.clone());
-        let Some(listener) = listener else {
-            return crate::os_net::error(libc::ECONNREFUSED);
+    let key;
+    let link = 'connect: {
+        #[cfg(feature = "record")]
+        if let Some(r) = replay() {
+            r.waiters.lock().unwrap().insert(local, dup(&fd));
+            key = sockets
+                .insert(fd)
+                .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
+            break 'connect None;
+        }
+        let (listener, link) = if untied() {
+            // Unit 0xffff: make a child unit now; it serves port `a.port`.
+            let unit = if unit == SPAWN { spawn_child(me) } else { unit };
+            let listener = listener_for(unit, a.port);
+            let peer = eventfd();
+            let link = Arc::new(Link {
+                dirs: [Mutex::new(Ring::default()), Mutex::new(Ring::default())],
+                notify: [dup(&fd), dup(&peer)],
+                units: [me, unit],
+                idents: [AtomicU64::new(0), AtomicU64::new(0)],
+                pending: Mutex::new(Some(peer)),
+            });
+            // Queued once this side's key exists, below.
+            (listener, link)
+        } else {
+            let listener = LISTENERS
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(k, _)| *k == (unit, a.port))
+                .map(|(_, l)| l.clone());
+            let Some(listener) = listener else {
+                return crate::os_net::error(libc::ECONNREFUSED);
+            };
+            let peer = eventfd();
+            let link = Arc::new(Link {
+                dirs: [Mutex::new(Ring::default()), Mutex::new(Ring::default())],
+                notify: [dup(&fd), dup(&peer)],
+                units: [me, unit],
+                idents: [AtomicU64::new(0), AtomicU64::new(0)],
+                pending: Mutex::new(Some(peer)),
+            });
+            listener.queue.lock().unwrap().push_back(Pend::Link(link.clone()));
+            notify(&listener.notify);
+            (listener, link)
         };
-        let peer = eventfd();
-        let link = Arc::new(Link {
-            dirs: [Mutex::new(Ring::default()), Mutex::new(Ring::default())],
-            notify: [dup(&fd), dup(&peer)],
-            units: [me, unit],
-            idents: [AtomicU64::new(0), AtomicU64::new(0)],
-            pending: Mutex::new(Some(peer)),
-        });
-        listener.queue.lock().unwrap().push_back(Pend::Link(link.clone()));
-        notify(&listener.notify);
-        Some((listener, link))
-    };
-    let key = sockets
-        .insert(fd)
-        .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-    let link = link.map(|(listener, link)| {
+        key = sockets
+            .insert(fd)
+            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
         link.idents[0].store(ident(key), Ordering::Release);
         if untied() {
             listener.queue.lock().unwrap().push_back(Pend::Link(link.clone()));
             wake_listener(&listener);
         }
-        link
-    });
+        #[cfg(feature = "record")]
+        break 'connect Some(link);
+        #[cfg(not(feature = "record"))]
+        break 'connect link;
+    };
+    #[cfg(feature = "record")]
     let log = log_for(me);
     sockets.attach_crossing(
         key,
         Arc::new(Endpoint {
             link,
             side: 0,
+            #[cfg(feature = "record")]
             local,
             unit: me,
+            #[cfg(feature = "record")]
             log,
+            #[cfg(feature = "record")]
             deliveries,
         }),
     );
@@ -461,6 +511,7 @@ fn accept(
     peer_address: &mut Address,
 ) -> Option<crate::provider::Outcome> {
     let me = sockets.unit.unwrap_or_else(current);
+    #[cfg(feature = "record")]
     if let Some(r) = replay() {
         let mut accepts = r.accepts.lock().unwrap();
         let (local, peer, _port) = *accepts.front()?;
@@ -500,8 +551,11 @@ fn accept(
         }
     };
     let fd = link.pending.lock().unwrap().take().unwrap();
+    #[cfg(feature = "record")]
     let (local, deliveries) = next_local();
+    #[cfg(feature = "record")]
     let log = log_for(me);
+    #[cfg(feature = "record")]
     if let Some(log) = &log {
         let mut w = log.0.lock().unwrap();
         let mut rec = [0u8; 11];
@@ -522,11 +576,17 @@ fn accept(
     sockets.attach_crossing(
         key,
         Arc::new(Endpoint {
+            #[cfg(feature = "record")]
             link: Some(link),
+            #[cfg(not(feature = "record"))]
+            link,
             side: 1,
+            #[cfg(feature = "record")]
             local,
             unit: me,
+            #[cfg(feature = "record")]
             log,
+            #[cfg(feature = "record")]
             deliveries,
         }),
     );
@@ -536,10 +596,13 @@ fn accept(
 /// SEND_PAIR on a crossing endpoint: one whole message, or None to wait.
 fn send(e: &Endpoint, prefix: &[u8], tail: &[u8]) -> Option<crate::provider::Outcome> {
     let len = prefix.len() + tail.len();
+    #[cfg(feature = "record")]
     let Some(link) = &e.link else {
         replay().unwrap().sent.fetch_add(len as u64, Ordering::Relaxed);
         return Some(ok(len as u64));
     };
+    #[cfg(not(feature = "record"))]
+    let link = &e.link;
     if len == 0 {
         return Some(ok(0));
     }
@@ -562,12 +625,19 @@ fn send(e: &Endpoint, prefix: &[u8], tail: &[u8]) -> Option<crate::provider::Out
     CHARGED[receiver].fetch_add(len as u64, Ordering::Relaxed);
     ring.bytes.extend(prefix);
     ring.bytes.extend(tail);
-    let seq = ring.seq;
-    ring.seq += 1;
+    #[cfg(feature = "record")]
+    let seq = {
+        let seq = ring.seq;
+        ring.seq += 1;
+        seq
+    };
     ring.msgs.push_back(Msg {
+        #[cfg(feature = "record")]
         seq,
+        #[cfg(feature = "record")]
         len: len as u32,
         left: len as u32,
+        #[cfg(feature = "record")]
         recorded: false,
     });
     let wake = std::mem::take(&mut ring.rx_waiting);
@@ -582,14 +652,17 @@ fn send(e: &Endpoint, prefix: &[u8], tail: &[u8]) -> Option<crate::provider::Out
 
 /// RECV_BOUNDED: at most the rest of the front message, 0 at end, None to wait.
 /// A delivery consumed by a scheduler retry, stamped when its task resumes.
+#[cfg(feature = "record")]
 enum Unobserved {
     Record { log: Arc<Log>, deliveries: Arc<AtomicU64>, head: [u8; 29], bytes: Vec<u8> },
     Replay { next: u64 },
 }
+#[cfg(feature = "record")]
 thread_local! {
     static UNOBSERVED: std::cell::RefCell<Vec<(usize, Unobserved)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(feature = "record")]
 fn push_unobserved(request: usize, pending: Unobserved) {
     if untied() {
         // SAFETY: the running unit's record; only its worker touches it.
@@ -599,6 +672,7 @@ fn push_unobserved(request: usize, pending: Unobserved) {
     }
 }
 
+#[cfg(feature = "record")]
 fn stamp(log: &Log, deliveries: &AtomicU64, mut head: [u8; 29], bytes: &[u8]) {
     let delivery = deliveries.fetch_add(1, Ordering::Relaxed);
     head[17..25].copy_from_slice(&delivery.to_le_bytes());
@@ -607,6 +681,7 @@ fn stamp(log: &Log, deliveries: &AtomicU64, mut head: [u8; 29], bytes: &[u8]) {
     let _ = w.write_all(bytes);
 }
 
+#[cfg(feature = "record")]
 fn replay_advance(next: u64) {
     let r = replay().unwrap();
     r.next_delivery.store(next + 1, Ordering::Relaxed);
@@ -622,6 +697,7 @@ fn replay_advance(next: u64) {
 }
 
 /// The task that issued `request` resumed: it observes its delivery now.
+#[cfg(feature = "record")]
 pub(crate) fn observed(request: usize) {
     let take = |u: &mut Vec<(usize, Unobserved)>| {
         let i = u.iter().position(|(r, _)| *r == request)?;
@@ -640,11 +716,17 @@ pub(crate) fn observed(request: usize) {
     }
 }
 
-fn recv(e: &Endpoint, b: &mut Buffer, request: usize, in_task: bool) -> Option<crate::provider::Outcome> {
+fn recv(
+    e: &Endpoint,
+    b: &mut Buffer,
+    #[cfg(feature = "record")] request: usize,
+    #[cfg(feature = "record")] in_task: bool,
+) -> Option<crate::provider::Outcome> {
     let spare = b.capacity.saturating_sub(b.len);
     if spare == 0 {
         return Some(ok(0));
     }
+    #[cfg(feature = "record")]
     let Some(link) = &e.link else {
         let r = replay().unwrap();
         let mut queues = r.queues.lock().unwrap();
@@ -685,6 +767,8 @@ fn recv(e: &Endpoint, b: &mut Buffer, request: usize, in_task: bool) -> Option<c
         }
         return Some(ok(n as u64));
     };
+    #[cfg(not(feature = "record"))]
+    let link = &e.link;
     let from = 1 - e.side;
     let mut ring = link.dirs[from].lock().unwrap();
     let Some(front) = ring.msgs.front_mut() else {
@@ -695,11 +779,15 @@ fn recv(e: &Endpoint, b: &mut Buffer, request: usize, in_task: bool) -> Option<c
         return None;
     };
     let n = spare.min(front.left as usize);
-    let first = !front.recorded;
-    front.recorded = true;
-    let (seq, len) = (front.seq, front.len as usize);
+    #[cfg(feature = "record")]
+    let (first, seq, len) = (
+        !std::mem::replace(&mut front.recorded, true),
+        front.seq,
+        front.len as usize,
+    );
     front.left -= n as u32;
     let done = front.left == 0;
+    #[cfg(feature = "record")]
     if first && let Some(log) = &e.log {
         let mut head = [0u8; 29];
         head[0] = REC_MSG;
@@ -758,6 +846,7 @@ pub(crate) unsafe fn attempt(
     in_task: bool,
 ) -> Option<Option<crate::provider::Outcome>> {
     use crate::provider::{ACCEPT, CONNECT, LISTEN, RECV_BOUNDED, SEND_PAIR};
+    #[cfg(feature = "record")]
     let request_id = request as *mut crate::provider::Request as usize;
     unsafe {
         let sockets = &mut *n.sockets;
@@ -795,7 +884,14 @@ pub(crate) unsafe fn attempt(
                 let c = sockets.crossing(key)?.clone();
                 let e = c.as_any().downcast_ref::<Endpoint>()?;
                 if request.operation == RECV_BOUNDED {
-                    Some(recv(e, &mut request.buffer, request_id, in_task))
+                    Some(recv(
+                        e,
+                        &mut request.buffer,
+                        #[cfg(feature = "record")]
+                        request_id,
+                        #[cfg(feature = "record")]
+                        in_task,
+                    ))
                 } else {
                     let b = &request.buffer;
                     let t = &*n.send_tail;
@@ -816,6 +912,7 @@ pub(crate) unsafe fn attempt(
 // ------------------------------------------------------------------ launch
 
 /// The calling unit's id (0 outside units).
+#[cfg(feature = "record")]
 pub(crate) fn unit() -> u32 {
     current()
 }
@@ -907,6 +1004,7 @@ pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&cra
                             ..*input
                         };
                         let status = run(&config);
+                        #[cfg(feature = "record")]
                         finish_unit(unit);
                         status
                     })
@@ -916,14 +1014,16 @@ pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&cra
         handles.into_iter().map(|h| h.join().unwrap_or(101)).collect()
     });
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
-        let r = replay().map_or(0, |r| r.sent.load(Ordering::Relaxed));
+        #[cfg(feature = "record")]
+        let replay_stats = format!(" replay_sent={}", replay().map_or(0, |r| r.sent.load(Ordering::Relaxed)));
+        #[cfg(not(feature = "record"))]
+        let replay_stats = "";
         eprintln!(
-            "crossing-stats msgs={} bytes={} wakes={} full_waits={} replay_sent={}",
+            "crossing-stats msgs={} bytes={} wakes={} full_waits={}{replay_stats}",
             STATS[0].load(Ordering::Relaxed),
             STATS[1].load(Ordering::Relaxed),
             STATS[2].load(Ordering::Relaxed),
             STATS[3].load(Ordering::Relaxed),
-            r
         );
     }
     statuses.into_iter().max().unwrap_or(0)
@@ -1063,8 +1163,11 @@ pub(crate) struct Unit {
     state: AtomicU8,
     inside: AtomicBool,
     after: Cell<After>,
+    #[cfg(feature = "record")]
     next_local: Cell<u32>,
+    #[cfg(feature = "record")]
     deliveries: Arc<AtomicU64>,
+    #[cfg(feature = "record")]
     unobserved: URefCell<Vec<(usize, Unobserved)>>,
     sync_cells: URefCell<Vec<*mut crate::os_sync::SyncCell>>,
     children: Cell<u32>,
@@ -1276,8 +1379,11 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),
         after: Cell::new(After::Run),
+        #[cfg(feature = "record")]
         next_local: Cell::new(0),
+        #[cfg(feature = "record")]
         deliveries: Arc::new(AtomicU64::new(0)),
+        #[cfg(feature = "record")]
         unobserved: URefCell::new(Vec::new()),
         sync_cells: URefCell::new(Vec::new()),
         children: Cell::new(0),
@@ -1353,6 +1459,7 @@ unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
         let u = &*(a as *const Unit);
         let run = RUN.get().unwrap().0;
         let status = run(&u.config);
+        #[cfg(feature = "record")]
         finish_unit(u.id);
         u.status.store(status, Ordering::Relaxed);
         u.after.set(After::Done);
@@ -2097,6 +2204,7 @@ fn launch_untied(
     });
     drop(memory_thread);
     // Every recording block is in its file before the run reports.
+    #[cfg(feature = "record")]
     crate::tape::writer::flush();
     if let Some(waits) = &p.queue_waits {
         waits.report();
@@ -2104,8 +2212,23 @@ fn launch_untied(
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
         p.memory.report();
         let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
+        #[cfg(feature = "record")]
+        let tape_stats = format!(
+            " tape_writes={} tape_bytes={} tape_payload={} tape_skipped={} tape_worker_ns={} tape_truncated={} tape_writer_ns={} tape_writer_calls={} tape_write_failed={}",
+            crate::tape::TAPE_COUNTS[0].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[1].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[2].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[3].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[4].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[5].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[6].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[7].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[8].load(Ordering::Relaxed),
+        );
+        #[cfg(not(feature = "record"))]
+        let tape_stats = "";
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={} tape_writes={} tape_bytes={} tape_payload={} tape_skipped={} tape_worker_ns={} tape_truncated={} tape_writer_ns={} tape_writer_calls={} tape_write_failed={}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={}{tape_stats}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -2127,15 +2250,6 @@ fn launch_untied(
             STATS[3].load(Ordering::Relaxed),
             hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
             g(S_LIFO),
-            crate::tape::TAPE_COUNTS[0].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[1].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[2].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[3].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[4].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[5].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[6].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[7].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[8].load(Ordering::Relaxed),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

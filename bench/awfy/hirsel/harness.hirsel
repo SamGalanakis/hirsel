@@ -25,13 +25,11 @@ pub fn iterations(argv: Args) -> Result[(u64, u64), Exit] {
     let Some(inner_arg) = args.get(argv, 2) else {
         return Error(Exit(status: 2))
     }
-    let parsed_outer: Result[u64, ParseError] = int.parse(outer_arg)
-    let outer = match parsed_outer {
+    let outer = match (int.parse(outer_arg) : Result[u64, ParseError]) {
         Ok(n) => n,
         Error(_) => return Error(Exit(status: 2)),
     }
-    let parsed_inner: Result[u64, ParseError] = int.parse(inner_arg)
-    let inner = match parsed_inner {
+    let inner = match (int.parse(inner_arg) : Result[u64, ParseError]) {
         Ok(n) => n,
         Error(_) => return Error(Exit(status: 2)),
     }

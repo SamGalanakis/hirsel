@@ -252,12 +252,11 @@ workload's seed interval. A wrong receipt fails the sample.
 
 Use the release compiler and testing archive from the build below. The same
 archive runs untaped at all widths and reports pool counters when width exceeds
-one. Recorded pairs, fan-in, pipeline and spawn cases use the public
-`tape.open` and `tape.tasks` path. With the testing archive, width 1 writes
-chooser 0 and widths above 1 write chooser 2. The runner uses the same
-executable and checks the same receipt on replay at width 1. The Tokio
-comparison remains untaped. The checkout's checkbox entry has no graceful
-completion for sealing a recording, so the service row runs untaped.
+one. Recorded pairs, fan-in, pipeline and spawn cases use a recording build
+(`hirsel build --recording` / `hirsel run --record` and `hirsel replay`). With
+the recording build, width 1 writes chooser 0 and widths above 1 write chooser
+2. The Tokio comparison remains untaped. The checkout's checkbox entry has no
+graceful completion for sealing a recording, so the service row runs untaped.
 
 ```sh
 taskset -c "$build_cpus" python3 tools/buck2/prepare.py

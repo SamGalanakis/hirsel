@@ -22,10 +22,10 @@
 //! reports and exits.
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use super::TAPE_COUNTS;
+use super::{IoError, TAPE_COUNTS};
 
 /// Queued bytes at most: 128 MiB, or `HIRSEL_TAPE_QUEUE_MB` (0 truncates
 /// every recording right after its header block, for testing the policy).
@@ -46,19 +46,27 @@ const SPARE: usize = 64;
 pub(crate) struct Stream {
     fd: OwnedFd,
     failed: AtomicBool,
+    written_frames: AtomicU64,
 }
 impl Stream {
     pub(crate) fn new(fd: OwnedFd) -> Arc<Self> {
         Arc::new(Self {
             fd,
             failed: AtomicBool::new(false),
+            written_frames: AtomicU64::new(0),
         })
     }
 }
 
+struct Block {
+    bytes: Vec<u8>,
+    frames: u64,
+}
+
 #[derive(Default)]
 struct Queue {
-    jobs: VecDeque<(Arc<Stream>, Vec<u8>)>,
+    jobs: VecDeque<(Arc<Stream>, Block)>,
+    failures: Vec<(u64, IoError)>,
     bytes: usize,
     writing: bool,
     sleeping: bool,
@@ -66,6 +74,7 @@ struct Queue {
 }
 static QUEUE: Mutex<Queue> = Mutex::new(Queue {
     jobs: VecDeque::new(),
+    failures: Vec::new(),
     bytes: 0,
     writing: false,
     sleeping: false,
@@ -88,19 +97,19 @@ pub(crate) fn spare() -> Vec<u8> {
 /// then truncates its recording with `mark`. A recording's first block (its
 /// header) is always queued, so even a recording cut at once reads back as
 /// truncated rather than as a damaged file.
-pub(crate) fn push(stream: &Arc<Stream>, block: Vec<u8>, first: bool) -> bool {
+pub(crate) fn push(stream: &Arc<Stream>, block: Vec<u8>, frames: u64, first: bool) -> bool {
     let q = lock(&QUEUE);
     if !first && q.bytes + block.len() > bound() {
         return false;
     }
-    enqueue(q, stream, block);
+    enqueue(q, stream, Block { bytes: block, frames });
     true
 }
 
 /// Queue a recording's TRUNCATED marker, past the bound.
 pub(crate) fn mark(stream: &Arc<Stream>, marker: Vec<u8>) {
     TAPE_COUNTS[super::C_TRUNCATED].fetch_add(1, Relaxed);
-    enqueue(lock(&QUEUE), stream, marker);
+    enqueue(lock(&QUEUE), stream, Block { bytes: marker, frames: 0 });
 }
 
 /// Start the writer thread, once. A recording launch calls it on the host
@@ -120,8 +129,8 @@ pub(crate) fn start() {
     }
 }
 
-fn enqueue(mut q: MutexGuard<'static, Queue>, stream: &Arc<Stream>, block: Vec<u8>) {
-    q.bytes += block.len();
+fn enqueue(mut q: MutexGuard<'static, Queue>, stream: &Arc<Stream>, block: Block) {
+    q.bytes += block.bytes.len();
     q.jobs.push_back((stream.clone(), block));
     if !q.started {
         drop(q);
@@ -138,6 +147,10 @@ pub(crate) fn flush() {
     while !q.jobs.is_empty() || q.writing {
         q = IDLE.wait(q).unwrap_or_else(|e| e.into_inner());
     }
+}
+
+pub(crate) fn take_failures() -> Vec<(u64, IoError)> {
+    std::mem::take(&mut lock(&QUEUE).failures)
 }
 
 fn run() {
@@ -172,7 +185,7 @@ fn run() {
 
 /// Write the leading run of blocks that share one file with one `writev`
 /// (or as few as it takes), then recycle their buffers. Returns their bytes.
-fn write_run(batch: &mut VecDeque<(Arc<Stream>, Vec<u8>)>) -> usize {
+fn write_run(batch: &mut VecDeque<(Arc<Stream>, Block)>) -> usize {
     const MAX_IOV: usize = 64;
     let stream = batch[0].0.clone();
     let n = batch
@@ -181,14 +194,23 @@ fn write_run(batch: &mut VecDeque<(Arc<Stream>, Vec<u8>)>) -> usize {
         .take_while(|(s, _)| Arc::ptr_eq(s, &stream))
         .count();
     let run: Vec<_> = batch.drain(..n).map(|(_, b)| b).collect();
-    let total: usize = run.iter().map(Vec::len).sum();
-    if !stream.failed.load(Relaxed) && !write_all(stream.fd.as_raw_fd(), &run) {
-        stream.failed.store(true, Relaxed);
-        TAPE_COUNTS[super::C_WRITE_FAILED].fetch_add(1, Relaxed);
+    let total = run.iter().map(|block| block.bytes.len()).sum();
+    if !stream.failed.load(Relaxed) {
+        let (written, error) = match write_all(stream.fd.as_raw_fd(), &run) {
+            Ok(()) => (run.len(), None),
+            Err((written, error)) => (written, Some(error)),
+        };
+        let frames = run[..written].iter().map(|block| block.frames).sum::<u64>();
+        let previous = stream.written_frames.fetch_add(frames, Relaxed);
+        if let Some(error) = error {
+            stream.failed.store(true, Relaxed);
+            lock(&QUEUE).failures.push((previous + frames, error));
+            TAPE_COUNTS[super::C_WRITE_FAILED].fetch_add(1, Relaxed);
+        }
     }
     TAPE_COUNTS[super::C_WRITER_CALLS].fetch_add(1, Relaxed);
     let mut spares = lock(&SPARES);
-    for mut b in run {
+    for Block { bytes: mut b, .. } in run {
         if spares.len() < SPARE && b.capacity() <= 4 * super::format::CLOSE_AT {
             b.clear();
             spares.push(b);
@@ -197,9 +219,10 @@ fn write_run(batch: &mut VecDeque<(Arc<Stream>, Vec<u8>)>) -> usize {
     total
 }
 
-fn write_all(fd: i32, bufs: &[Vec<u8>]) -> bool {
-    let mut iov: Vec<libc::iovec> = bufs
+fn write_all(fd: i32, blocks: &[Block]) -> Result<(), (usize, IoError)> {
+    let mut iov: Vec<libc::iovec> = blocks
         .iter()
+        .map(|block| &block.bytes)
         .map(|b| libc::iovec {
             iov_base: b.as_ptr().cast_mut().cast(),
             iov_len: b.len(),
@@ -210,10 +233,14 @@ fn write_all(fd: i32, bufs: &[Vec<u8>]) -> bool {
         // SAFETY: each iovec names live, readable bytes of `bufs`.
         let n = unsafe { libc::writev(fd, iov[at..].as_ptr(), (iov.len() - at) as i32) };
         if n < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if code == libc::EINTR {
                 continue;
             }
-            return false;
+            return Err((at, IoError { tag: 5, code: code as u32 }));
+        }
+        if n == 0 {
+            return Err((at, IoError { tag: 5, code: libc::EIO as u32 }));
         }
         let mut n = n as usize;
         while at < iov.len() && n >= iov[at].iov_len {
@@ -226,5 +253,5 @@ fn write_all(fd: i32, bufs: &[Vec<u8>]) -> bool {
             iov[at].iov_len -= n;
         }
     }
-    true
+    Ok(())
 }

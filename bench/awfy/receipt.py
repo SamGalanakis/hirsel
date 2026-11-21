@@ -24,14 +24,14 @@ import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 
-VERSION = 4
+VERSION = 5
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
-CYCLE_RIDE_RATIO = Decimal("1.01")
+GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256")
-WORKLOAD_IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", "fixture_sha256")
+WORKLOAD_IDENTITY = ("suite", "mode", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
 
 
@@ -40,9 +40,10 @@ def read(path):
 
 
 def write(path, data):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2, default=str) + "\n")
-    temporary.replace(path)
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        temporary = Path(directory) / path.name
+        temporary.write_text(json.dumps(data, indent=2, default=str) + "\n")
+        temporary.replace(path)
 
 
 @contextmanager
@@ -92,7 +93,6 @@ def build_record(report):
         **report["measurement"],
         "accepted": report["accepted"] is True and not report.get("stopped"),
         "linked": native["linked"],
-        "certified": native.get("step_charging_elided", False),
     }
 
 
@@ -104,7 +104,7 @@ def verified_build(row):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
-    return record.get("certified") is row["certified"] and record.get("flags") == row["flags"]
+    return record.get("flags") == row["flags"]
 
 
 def runtime_case(suite, name, directory, command, marker, fixture, tools):
@@ -133,12 +133,10 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
     for field, value in checked.items():
         if provenance[field] != value:
             raise ValueError(f"{path}: {field} differs from the build")
-    certified = native.get("step_charging_elided", False)
     return {
         "key": f"{suite}/{name}",
         "suite": suite,
-        "mode": "certified" if certified else "bounded",
-        "certified": certified,
+        "mode": "release",
         "flags": provenance["flags"],
         "argv": [f"./{binary.name}", *map(str, command[1:])],
         "cwd": str(directory),
@@ -291,13 +289,12 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False):
 
 def validate_row(key, row):
     for field in IDENTITY:
-        if field not in row or row[field] is None or (field != "certified" and not row[field]):
+        if field not in row or row[field] is None or not row[field]:
             raise ValueError(f"missing {field}")
-    suite, mode, certified = row["suite"], row["mode"], row["certified"]
+    suite, mode = row["suite"], row["mode"]
     if (suite not in measure.SUITES or not key.startswith(suite + "/")
-            or type(certified) is not bool
             or (mode not in ("cold", "edit") if suite == "compile"
-                else mode != ("certified" if certified else "bounded"))
+                else mode != "release")
             or any(not re.fullmatch("[a-f0-9]{64}", row[field])
                    for field in (*CANDIDATE_HASHES, "fixture_sha256"))
             or not all(isinstance(row[field], list)
@@ -422,57 +419,83 @@ def verify_runtime_files(row, label):
     return path
 
 
-def receipt_in(directory):
+def receipt_path(directory):
     path = directory / "receipt.json"
-    return instruction_rows(path if path.is_file() else directory / "board.json")
+    return path if path.is_file() else directory / "board.json"
 
 
-def cycle_samples(base, candidate, args, siblings, env):
+def cycle_samples(base, candidate, args, siblings, env, pairs=None):
     kept = []
     limit = args.sibling_busy_threshold
     for attempt in range(1, args.max_attempts + 1):
         sides = [("base", base), ("candidate", candidate)]
         random.shuffle(sides)
+        pair = {"order": [], "kept": False}
+        if pairs is not None:
+            pairs.append(pair)
         samples = {}
         with tempfile.TemporaryDirectory() as temporary:
             for side, row in sides:
-                sample = observe(row.copy(), Path(temporary) / side, env, siblings, cycles=True, quiet_window=True)
+                pair["order"].append(side)
+                run = pair[side] = row.copy()
+                run.pop("sample", None)
+                run.pop("stdout", None)
+                sample = observe(run, Path(temporary) / side, env, siblings, cycles=True, quiet_window=True)
+                sample.pop("directory", None)
                 if sample["status"] != "ok":
                     detail = (Path(temporary) / side / "stderr").read_text().strip()
                     raise ValueError(f"attempt {attempt}, {side}: {sample['status']}\n{detail}")
                 samples[side] = sample
         if limit is None or all((busy := sample["smt_busy_percent"][cpu]) is not None and busy < limit
                                 for sample in samples.values() for cpu in siblings):
+            pair["kept"] = True
             kept.append((samples["base"], samples["candidate"]))
             if len(kept) == args.pairs:
                 break
     return kept, attempt
 
 
-def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True, peer=False):
+def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True, peer=False, summary=None):
     description = "quiet pairs" if filtered else "unfiltered pairs"
     if kept:
         cycles, instructions = (
             [Decimal(right[event]) / left[event] for left, right in kept] for event in ("cycles", "instructions")
         )
         center = median(cycles)
+        statistics = {}
+        for event, ratios in (("cycles", cycles), ("instructions", instructions)):
+            left, right = ([sample[event] for sample in side] for side in zip(*kept))
+            statistics[event] = pair_statistics(left, right) | {
+                "median_ratio": median(ratios), "min_ratio": min(ratios), "max_ratio": max(ratios),
+                "verdict": "",
+            }
+        absolutes = statistics["cycles"]
+        if summary is not None:
+            summary.update(statistics)
+            summary["smt_busy_range_percent"] = {}
         print(f"{key}: {len(kept)}/{attempted} {description}, cycles {center:.6f}x "
-              f"[{min(cycles):.6f}x, {max(cycles):.6f}x], instructions {median(instructions):.6f}x")
+              f"[{min(cycles):.6f}x, {max(cycles):.6f}x], instructions {median(instructions):.6f}x, "
+              f"base median {absolutes['base_median']:,} cycles, candidate median {absolutes['candidate_median']:,} cycles")
         for cpu in kept[0][0]["smt_busy_percent"]:
             rates = [rate for pair in kept for sample in pair
                      if (rate := sample["smt_busy_percent"][cpu]) is not None]
             if rates:
-                print(f"  CPU {cpu} busy {min(rates):.2f}% to {max(rates):.2f}% in kept runs")
+                low, high = min(rates), max(rates)
+                if summary is not None:
+                    summary["smt_busy_range_percent"][cpu] = (low, high)
+                print(f"  CPU {cpu} busy {low:.2f}% to {high:.2f}% in kept runs")
     else:
         print(f"{key}: 0/{attempted} {description}")
     if len(kept) < wanted:
         verdict, status = "TOO FEW QUIET PAIRS", REFUSED
     elif peer:
         return 0
-    elif center > CYCLE_RIDE_RATIO:
+    elif center > GUARD_B_CYCLE_RATIO:
         verdict, status = "FAILS", 1
     else:
-        verdict, status = "RIDES", 0
+        verdict, status = "PASSES", 0
+    if summary is not None:
+        summary.setdefault("cycles", {})["verdict"] = verdict
     print(f"{key} {verdict}", flush=True)
     return status
 
@@ -488,22 +511,24 @@ def cycle_pairs(args):
         raise ValueError("provide two receipts for a Hirsel comparison or use --peer")
     if args.multicore and (not args.peer or args.upstream is not None):
         raise ValueError("--multicore requires --peer and a multicore build directory")
+    target = args.out or (args.candidate or args.baseline) / "pairs.json"
+    inputs = [receipt_path(directory) for directory in (args.baseline, args.candidate) if directory is not None]
+    if target.resolve() in {path.resolve() for path in [args.lock, *inputs]}:
+        raise ValueError("--out must differ from the input receipts and lock")
+    report = pair_report(args, "peer" if args.peer else "A/A" if args.aa else "A/B")
     with measurement_slot(args.lock), tempfile.TemporaryDirectory() as temporary:
         siblings = sibling_cpus((args.cpu,))
         env = build.capped_env(Path(temporary))
         activity = "no busy filter" if limit is None else f"quiet means below {limit}% busy per run"
         print(f"CPU {args.cpu}, SMT siblings {', '.join(map(str, siblings)) or 'none'}, {activity}", flush=True)
-        if args.multicore:
-            os.sched_setaffinity(0, {args.cpu})
-            try:
-                return multicore_peer_pairs(args, siblings, env)
-            finally:
-                os.sched_setaffinity(0, affinity)
-        base, base_refusals = receipt_in(args.baseline)
-        after, after_refusals = receipt_in(args.candidate) if args.candidate else ({}, {})
-        keys = select_pair_rows(args.rows, base)
-        status = 0
         try:
+            if args.multicore:
+                os.sched_setaffinity(0, {args.cpu})
+                return multicore_peer_pairs(args, siblings, env, report)
+            base, base_refusals = instruction_rows(inputs[0])
+            after, after_refusals = instruction_rows(inputs[1]) if args.candidate else ({}, {})
+            keys = select_pair_rows(args.rows, base)
+            status = 0
             os.sched_setaffinity(0, {args.cpu})
             for key in keys:
                 try:
@@ -511,7 +536,7 @@ def cycle_pairs(args):
                         raise ValueError((base_refusals | after_refusals)[key])
                     left = cycle_row(key, base[key], "base", args.cpu)
                     if args.peer:
-                        status = max(status, peer_cycle_pairs(key, left, args, siblings, env))
+                        status = max(status, peer_cycle_pairs(key, left, args, siblings, env, report))
                         continue
                     right = cycle_row(key, after[key], "candidate", args.cpu)
                     match_rows(key, left, right)
@@ -519,14 +544,17 @@ def cycle_pairs(args):
                     if same != args.aa:
                         raise ValueError("--aa requires identical builds and images" if args.aa
                                          else "identical builds and images; pass --aa for a deliberate A/A run")
-                    kept, attempted = cycle_samples(left, right, args, siblings, env)
-                    status = max(status, report_cycle_pairs(key, kept, attempted, args.pairs, filtered=limit is not None))
+                    status = max(status, run_cycle_pairs(key, left, right, args, siblings, env, report))
                 except (*INVALID_RECEIPT, subprocess.SubprocessError) as error:
+                    report["failures"][key] = str(error)
                     print(f"{key} REFUSED ({error})", file=sys.stderr)
                     status = REFUSED
+            return status
         finally:
             os.sched_setaffinity(0, affinity)
-        return status
+            if report["rows"] or report["failures"]:
+                write(target, report)
+                print(target)
 
 
 def cycle_row(key, source, label, cpu):
@@ -537,7 +565,7 @@ def cycle_row(key, source, label, cpu):
     return source | {"affinity": [cpu]}
 
 
-def peer_cycle_pairs(key, hirsel, args, siblings, env):
+def peer_cycle_pairs(key, hirsel, args, siblings, env, report=None):
     suite = hirsel["suite"]
     if suite != "arena" and args.upstream is None:
         raise ValueError("--upstream is required for AWFY and pool peer commands")
@@ -557,17 +585,30 @@ def peer_cycle_pairs(key, hirsel, args, siblings, env):
     for peer in args.peer:
         command, marker = commands[peer]
         row = {"argv": list(map(str, command)), "cwd": str(cwd), "marker": marker.decode(), "line_marker": True}
-        status = max(status, report_peer_pair(f"{key} Hirsel/{peer}", row, hirsel, args, siblings, env))
+        status = max(status, run_cycle_pairs(f"{key} Hirsel/{peer}", row, hirsel, args, siblings, env, report, peer=True))
     return status
 
 
-def report_peer_pair(label, peer, hirsel, args, siblings, env):
-    kept, attempted = cycle_samples(peer, hirsel, args, siblings, env)
+def run_cycle_pairs(label, base, candidate, args, siblings, env, report, *, peer=False):
+    pairs = summary = None
+    if report is not None:
+        key = label
+        repeat = 1
+        while key in report["rows"]:
+            repeat += 1
+            key = f"{label} ({repeat})"
+        pairs = report["rows"][key] = []
+        summary = report["summary"][key] = {}
+        base, candidate = (
+            row if "image_sha256" in row else row | {"image_sha256": sha256(Path(row["cwd"]) / row["argv"][0])}
+            for row in (base, candidate)
+        )
+    kept, attempted = cycle_samples(base, candidate, args, siblings, env, pairs)
     return report_cycle_pairs(label, kept, attempted, args.pairs,
-                              filtered=args.sibling_busy_threshold is not None, peer=True)
+                              filtered=args.sibling_busy_threshold is not None, peer=peer, summary=summary)
 
 
-def multicore_peer_pairs(args, siblings, env):
+def multicore_peer_pairs(args, siblings, env, report):
     sys.path.insert(0, str(build.ROOT))
     from bench.multicore import run as game
 
@@ -590,12 +631,12 @@ def multicore_peer_pairs(args, siblings, env):
         log = bins / f"hirsel-{name}.log"
         report = next((json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")), {})
         native = report.get("native") or {}
-        if not (report.get("accepted") and native.get("linked") and native.get("step_charging_elided")
+        if not (report.get("accepted") and native.get("linked")
                 and Path(native["executable"]).resolve() == Path(hirsel["argv"][0]).resolve()):
-            raise ValueError(f"{key}: expected a certified Hirsel build")
+            raise ValueError(f"{key}: expected a linked Hirsel build")
         for peer in args.peer:
-            status = max(status, report_peer_pair(f"{key} Hirsel/{peer}", command(peer.title()),
-                                                 hirsel, args, siblings, env))
+            status = max(status, run_cycle_pairs(f"{key} Hirsel/{peer}", command(peer.title()),
+                                                hirsel, args, siblings, env, report, peer=True))
     return status
 
 
@@ -621,6 +662,19 @@ def cycle_count(key, row):
 
 def change(before, after):
     return Decimal(100) * (after - before) / before
+
+
+def pair_report(args, comparison, aa=None):
+    return {"comparison": comparison, "cpu": args.cpu, "pairs": args.pairs,
+            "aa": aa, "lock": str(args.lock.resolve()), "command": sys.orig_argv, "cwd": str(Path.cwd()),
+            "rows": {}, "summary": {}, "failures": {}}
+
+
+def pair_statistics(left, right):
+    deltas = [change(a, b) for a, b in zip(left, right)]
+    return {"base_median": median(left), "base_min": min(left), "base_max": max(left),
+            "candidate_median": median(right), "candidate_min": min(right), "candidate_max": max(right),
+            "median_percent": median(deltas), "min_percent": min(deltas), "max_percent": max(deltas)}
 
 
 def aa_spread(key, pairs, baseline, cpu, count):
@@ -656,8 +710,8 @@ def summarize_pairs(key, pairs, noise, limit):
     for event in ("instructions", "cycles"):
         left = [pair["base"]["sample"][event] for pair in pairs]
         right = [pair["candidate"]["sample"][event] for pair in pairs]
-        deltas = [change(a, b) for a, b in zip(left, right)]
-        center, low, high = median(deltas), min(deltas), max(deltas)
+        counts = pair_statistics(left, right)
+        center, low, high = (counts[field] for field in ("median_percent", "min_percent", "max_percent"))
         verdict = ""
         if event == "instructions" and limit is not None and center > limit:
             verdict = "FAIL"
@@ -671,11 +725,9 @@ def summarize_pairs(key, pairs, noise, limit):
                 detail += f" (A/A {noise[0]:+.3f}% to {noise[1]:+.3f}%)"
             if activity:
                 detail += f" | SMT {activity}"
-        print(f"{key} {event}: {median(left):,} -> {median(right):,}, paired median {center:+.3f}% "
+        print(f"{key} {event}: {counts['base_median']:,} -> {counts['candidate_median']:,}, paired median {center:+.3f}% "
               f"[{low:+.3f}%, {high:+.3f}%] {verdict}{detail}", flush=True)
-        summary[event] = {"base_median": median(left), "candidate_median": median(right),
-                          "median_percent": str(center), "min_percent": str(low), "max_percent": str(high),
-                          "verdict": verdict}
+        summary[event] = counts | {"verdict": verdict}
     return summary
 
 
@@ -708,8 +760,7 @@ def pair_samples(args):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     siblings = sibling_cpus((args.cpu,))
     env = build.capped_env(out)
-    report = {"comparison": "A/B" if comparing else "A/A", "cpu": args.cpu, "pairs": args.pairs,
-              "aa": args.aa, "rows": {}, "summary": {}, "failures": {}}
+    report = pair_report(args, "A/B" if comparing else "A/A", args.aa)
     out.mkdir(parents=True)
     target = out / "pairs.json"
     limit = INSTRUCTION_LIMIT if args.threshold is None else args.threshold
@@ -724,10 +775,13 @@ def pair_samples(args):
             row_dir.mkdir(parents=True)
             try:
                 for index in range(args.pairs):
-                    pair = {}
-                    pairs.append(pair)
                     sides = (("base", base[key]), ("candidate", after[key]))
-                    for side, prepared in (sides if index % 2 == 0 else reversed(sides)):
+                    if index % 2 != 0:
+                        sides = sides[::-1]
+                    pair = {"order": []}
+                    pairs.append(pair)
+                    for side, prepared in sides:
+                        pair["order"].append(side)
                         row = pair[side] = prepared.copy()
                         observe(row, row_dir / f"{index + 1}-{side}", env, siblings, cycles=True)
                         cycle_count(key, row)
@@ -846,6 +900,8 @@ def main():
     cycles.add_argument("--sibling-busy-threshold", type=sibling_busy_threshold, metavar="PERCENT",
                         help="each run must be strictly below this SMT sibling busy percentage (default: none)")
     cycles.add_argument("--lock", type=Path, required=True)
+    cycles.add_argument("--out", type=Path, metavar="PATH",
+                        help="paired evidence file (default: pairs.json beside the candidate or only receipt)")
     cycles.add_argument("--aa", action="store_true", help="require identical builds and images")
     profiling = commands.add_parser("profile-diff", help="attribute one matched runtime row with Callgrind")
     profiling.add_argument("row", metavar="SUITE/ROW")

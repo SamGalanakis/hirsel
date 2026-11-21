@@ -77,7 +77,6 @@ impl Function<'_, '_, '_> {
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
             | RtOp::Spawn { .. }
-            | RtOp::TapeGrant
             | RtOp::Flow(_) => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
@@ -130,58 +129,6 @@ impl Function<'_, '_, '_> {
             }
             RtOp::DestId => {
                 outputs[0] = self.c_call("hirsel_core_dest_id", &[], &[U], &[])?[0];
-                1
-            }
-            RtOp::TapeOpen => {
-                let revision = self.code_revision()?;
-                let values = self.c_call(
-                    "hirsel_core_tape_open",
-                    &[P, U, P, K, P, P, U, U, U, P],
-                    &[U, U],
-                    &[
-                        self.context,
-                        args[0],
-                        args[1],
-                        args[2],
-                        args[3],
-                        args[4],
-                        args[5],
-                        args[6],
-                        args[7],
-                        revision,
-                    ],
-                )?;
-                outputs[0] = values[0];
-                outputs[1] = values[1];
-                2
-            }
-            RtOp::TapeEnd => {
-                outputs[0] = self.c_call(
-                    "hirsel_core_tape_end",
-                    &[P, U, K, P],
-                    &[U],
-                    &[self.context, args[0], args[1], args[2]],
-                )?[0];
-                1
-            }
-            RtOp::TapeAcross => {
-                outputs[0] = self.c_call(
-                    "hirsel_core_tape_across",
-                    &[P, U],
-                    &[B],
-                    &[self.context, args[0]],
-                )?[0];
-                1
-            }
-            RtOp::TapeGrant => {
-                let values = self.c_call(
-                    "hirsel_core_tape_grant",
-                    &[P, U, K, U, U],
-                    &[U, K],
-                    &[self.context, args[0], args[1], args[2], site],
-                )?;
-                self.call_failure(values[1], call.fail)?;
-                outputs[0] = values[0];
                 1
             }
             RtOp::ArgsLen => {
@@ -260,6 +207,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
+                    | HostOp::NetNarrowResolve
+                    | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
@@ -277,6 +226,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
+                    | HostOp::NetNarrowResolve
+                    | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
@@ -317,7 +268,7 @@ impl Function<'_, '_, '_> {
                         &[self.context, code, args[0], operand, mode, site],
                     )?,
                 };
-                // Every provider row can fail: a tape refuses it before issue (CAP-9).
+                // Provider rows return a status byte for failures (e.g. Cancelled, Bounds).
                 self.call_failure(values[4], call.fail)?;
                 let n = if matches!(op, HostOp::Random | HostOp::Stopped) {
                     0
@@ -350,6 +301,22 @@ impl Function<'_, '_, '_> {
             RtOp::HashBytes => {
                 outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args[..2])?[0];
                 1
+            }
+            RtOp::Xxh3Short => {
+                outputs[0] = self.c_call("hirsel_core_xxh3_short", &[P, U], &[U], &args[..2])?[0];
+                1
+            }
+            RtOp::Xxh3Stripes => {
+                self.c_call("hirsel_core_xxh3_stripes", &[P, P, P, U], &[], &args[..4])?;
+                0
+            }
+            RtOp::Sha1Blocks => {
+                self.c_call("hirsel_core_sha1_blocks", &[P, P, U], &[], &args[..3])?;
+                0
+            }
+            RtOp::Sha256Blocks => {
+                self.c_call("hirsel_core_sha256_blocks", &[P, P, U], &[], &args[..3])?;
+                0
             }
             RtOp::CauseNext | RtOp::CauseValue => {
                 let name = if op == RtOp::CauseNext {

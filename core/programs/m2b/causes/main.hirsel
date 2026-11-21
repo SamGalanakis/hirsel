@@ -53,8 +53,7 @@ fn attempt(n: u64) -> u64 {
         fail(result.unwrap(string.from("busy")))
     }
     if n == 5 {
-        let none: Option[u64] = None
-        return option.unwrap(none)
+        return option.unwrap((None : Option[u64]))
     }
     n * 10
 }

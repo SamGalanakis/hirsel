@@ -82,6 +82,7 @@ function read(t, defs, r, key) {
   const op = t[0];
   if (integer[op]) return readInteger(op, r, key);
   if (op === 0) return undefined;
+  if (op === 20) throw new Malformed('Never');
   if (op === 1) { const b = r.byte(); if (b > 1) throw new Malformed('bool'); return b === 1; }
   if (op === 2) { const c = r.count(); if (c > 0x10ffff || c >= 0xd800 && c <= 0xdfff) throw new Malformed('char'); return String.fromCodePoint(c); }
   if (op === 11 || op === 12) {
@@ -121,6 +122,7 @@ function write(t, defs, value, w, key) {
   const op = t[0];
   if (integer[op]) { writeInteger(op,value,w,key); return; }
   if (op === 0) { if (value !== undefined) throw new TypeError('expected unit'); return; }
+  if (op === 20) throw new TypeError('Never has no values');
   if (op === 1) { if (typeof value !== 'boolean') throw new TypeError('expected bool'); w.byte(value ? 1 : 0); return; }
   if (op === 2) {
     const bytes = stringBytes(value); const points = Array.from(value);

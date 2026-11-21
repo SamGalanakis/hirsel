@@ -1,4 +1,5 @@
 // test-vectors
+// test-env: HIRSEL_SHA1=portable
 fn digest(b: Bytes, hex: Bytes) -> bool {
     let d = result.unwrap(sha1.hash(b))
     let alphabet = result.unwrap(b"0123456789abcdef")
@@ -10,7 +11,7 @@ fn digest(b: Bytes, hex: Bytes) -> bool {
     true
 }
 
-// RFC 3174 section 7.3 TEST1/TEST2/TEST3/TEST4. Mutant: rotl_wrong.
+// RFC 3174 section 7.3 TEST1/TEST2/TEST3/TEST4.
 // expect: run rfc3174_short() = true
 fn rfc3174_short() -> bool {
     digest(result.unwrap(b"abc"), result.unwrap(b"a9993e364706816aba3e25717850c26c9cd0d89d")) && digest(result.unwrap(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), result.unwrap(b"84983e441c3bd26ebaae4aa1f95129e5e54670f1"))
@@ -42,4 +43,96 @@ fn cavp_sha1() -> bool {
         }
     }
     true
+}
+
+// Python hashlib SHA-1 over byte i = (17*i+3) mod 256. The offset exercises
+// unaligned input, and the lengths straddle both block and padding boundaries.
+// expect: run span_boundaries() = true
+fn span_boundaries() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(4102))
+    result.unwrap(list.fill(mut b, 5, 0))
+    for i in 0u64 .. 4097 {
+        result.unwrap(list.push(mut b, int.truncate(i * 17 + 3)))
+    }
+    if !digest(list.slice(b, 5, 5), string.as_bytes("da39a3ee5e6b4b0d3255bfef95601890afd80709")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 6), string.as_bytes("9842926af7ca0a8cca12604f945414f07b01e13d")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 59), string.as_bytes("d1f3d609829ab7a2c3dd9fbce5a6e2428f34deca")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 60), string.as_bytes("f73c8d6106f507727dfabeca4a33e7be30b1665a")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 61), string.as_bytes("bdf6a95c468c8db7a2df1894a903509d6a9b5a76")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 62), string.as_bytes("6b145d53b322874b5c082ad67e07972ec987b5f2")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 65), string.as_bytes("503356ef8c311bd3a34b29b544a3be77a757b5f6")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 67), string.as_bytes("c1ee0f47dcd76a9268efa2662a67c927d231883c")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 68), string.as_bytes("d1b77ad85ad073ecd8e42a56e591bef12e52e9d1")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 69), string.as_bytes("a7fa1da9f3be3ffb96bbf6c65f23b5287ebb469b")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 70), string.as_bytes("0ef22902614c4f3a5a7b66fe00f7c8184a2bc334")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 124), string.as_bytes("f79a751be156b7c9fc1cc1b5864450fd12dc1b96")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 125), string.as_bytes("f0a7639fcdea69735e07d8930959021a5daeb1cb")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 126), string.as_bytes("bc0ea2eda31dae508397d97206bdae16286b4582")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 132), string.as_bytes("bc73e9308bbd2965fbf8696bd59bb9a7687425f3")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 133), string.as_bytes("947d14079091162b6dd930011da6c57b2471f98e")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 134), string.as_bytes("8b46b91add01677548a73400f02ee398efac378f")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 4100), string.as_bytes("cf06696eb282477d6d5fa7323a3e0c384c01986c")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 4101), string.as_bytes("48e40b64ab9b42d4446d7178621d5db0d37f3db4")) {
+        return false
+    }
+    if !digest(list.slice(b, 5, 4102), string.as_bytes("e3097df86f63a7c49a1ba2bbaa7c2b3f21be2f6f")) {
+        return false
+    }
+    true
+}
+
+// Twenty bytes of RFC 3174 TEST1, split into its five network-order words.
+// expect: run blocks_step_bound() = true
+fn blocks_step_bound() -> bool {
+    let b = string.as_bytes("abc")
+    let work = bound steps 1 {
+        let mut h: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
+        sha1.blocks(mut h, b)
+        h[0] == 0xa9993e36 && h[1] == 0x4706816a && h[2] == 0xba3e2571 && h[3] == 0x7850c26c && h[4] == 0x9cd0d89d
+    }
+    let denied = bound steps 0 {
+        let mut h: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
+        sha1.blocks(mut h, b)
+        h[0]
+    }
+    match (work, denied) {
+        (Ok(true), Error(out)) => out.steps == 0,
+        _ => false,
+    }
 }

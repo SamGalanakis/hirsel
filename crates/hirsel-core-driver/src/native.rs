@@ -10,13 +10,15 @@ use std::process::Command;
 
 #[path = "entry_cleanup.rs"]
 mod cleanup;
+#[path = "recipe_native.rs"]
+pub(crate) mod recipe_build;
 #[path = "release_native.rs"]
 mod release;
 use cleanup::result_cleanup;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 use crate::tool_inputs::SUPPORT_LIBS as DIRECT_LINK_SUPPORT_LIBS;
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum Backend {
     Cranelift,
     Llvm,
@@ -59,24 +61,20 @@ impl Link {
         }
     }
 }
-/// The startup behavior of a Run tape, fixed by the link plan.
-#[derive(Clone, Copy, Debug, Serialize)]
-#[repr(u8)]
-pub enum RunTapeMode {
-    Record = 0,
-    Replay = 1,
-    Diagnose = 2,
-}
-
+/// Replay configuration for the launcher-only `hirsel replay` / `test --replay` path.
 #[derive(Clone, Debug, Serialize)]
-pub struct RunTape {
+pub struct ReplayPlan {
     pub path: String,
-    pub mode: RunTapeMode,
+    pub diagnose: bool,
 }
 
 /// Runtime and linker inputs are explicit, independently produced artifacts.
+#[derive(Clone)]
 pub struct NativeOptions {
-    pub tape: Option<RunTape>,
+    /// Link and enter the recording runtime (`hirsel build --recording`, `run --record`, `replay`, `test --replay`).
+    pub recording: bool,
+    /// Launcher-only replay plan (`hirsel replay`, `test --replay` replay phase).
+    pub replay: Option<ReplayPlan>,
     pub backend: Backend,
     pub optimize: bool,
     /// Source-neutral native line rows; failure positions are always enabled.
@@ -134,7 +132,8 @@ impl NativeOptions {
             output,
             root_limit: 64 * 1024 * 1024,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
-            tape: None,
+            recording: false,
+            replay: None,
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
@@ -253,16 +252,19 @@ pub struct BuildProduct {
     /// The executable's key: its objects' identities, the entry plan, the
     /// sources digest and the link inputs. Its record is stored under it.
     pub identity: ContentHash,
-    /// The entry's code revision (`revision::revision`): its reached
-    /// instances' checked CoreIR, independent of engine, build and layout.
+    /// The entry's PROG-10 code address.
+    pub address: ContentHash,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<ContentHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<recipe_build::AssemblyRecord>,
+    /// The entry's PROG-9 revision.
     pub revision: ContentHash,
     pub compiled: usize,
     pub linked: bool,
     /// True means diagnostic instrumentation; timings are not performance samples.
     pub observation_mode: bool,
     pub debug_lines: bool,
-    /// The closed image cannot install a Step bound, so it emits no Step charging.
-    pub step_charging_elided: bool,
     /// The walk's and the link's work counters.
     pub reach: crate::reach::ReachCounters,
 }
@@ -433,6 +435,9 @@ impl Table {
         object: Bare,
         debug: Option<ContentHash>,
         children: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
+        slots: &[Identity],
+        signatures: &crate::instances::CodeSignatures,
+        adapters: &[crate::instances::Adapter],
         described: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
         items: Vec<DefPath>,
         closures: impl IntoIterator<Item = &'c Arc<hirsel_core_ir::Closure>>,
@@ -465,6 +470,9 @@ impl Table {
             object,
             debug,
             children,
+            slots: slots.to_vec(),
+            signatures: signatures.clone(),
+            adapters: adapters.to_vec(),
             described,
             items,
             closures,
@@ -484,7 +492,9 @@ enum Linked {
 struct Emitted {
     objects: Vec<ObjectProduct>,
     table: Option<Table>,
-    step_charging_elided: bool,
+    /// The image was specialized for the hirsel launcher alone entering it
+    /// (`step_contexts::specialize`): the entry runs with no step bound current.
+    closed_image: bool,
     launch_digest_unused: bool,
     release_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
@@ -534,7 +544,7 @@ impl CheckProduct {
         Ok(Emitted {
             objects,
             table,
-            step_charging_elided: false,
+            closed_image: false,
             launch_digest_unused: false,
             release_sites: Vec::new(),
         })
@@ -600,6 +610,9 @@ impl CheckProduct {
                             e.children
                                 .iter()
                                 .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
+                            &e.slots,
+                            &e.signatures,
+                            &e.adapters,
                             e.described
                                 .iter()
                                 .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
@@ -628,6 +641,9 @@ impl CheckProduct {
                             record.object,
                             record.debug,
                             record.children.iter().map(|c| (None, c)),
+                            &record.slots,
+                            &record.signatures,
+                            &record.adapters,
                             record.described.iter().map(|c| (None, c)),
                             record.items.clone(),
                             &record.closures,
@@ -653,6 +669,9 @@ impl CheckProduct {
                     object: Default::default(),
                     debug: None,
                     children: fields.children.clone(),
+                    slots: fields.slots.clone(),
+                    signatures: fields.signatures.clone(),
+                    adapters: fields.adapters.clone(),
                     described: fields.described.clone(),
                     items: module.items.clone(),
                     closures: fields.closures.clone(),
@@ -669,6 +688,9 @@ impl CheckProduct {
                         bare,
                         debug,
                         fields.children.iter().map(|c| (None, c)),
+                        &fields.slots,
+                        &fields.signatures,
+                        &fields.adapters,
                         fields.described.iter().map(|c| (None, c)),
                         module.items.clone(),
                         &fields.closures,
@@ -804,6 +826,7 @@ impl CheckProduct {
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
         let instances = reached.require()?;
+        let address = reached.address(entry)?;
         let inputs = reached
             .native
             .as_ref()
@@ -843,7 +866,7 @@ impl CheckProduct {
         let Emitted {
             mut objects,
             table,
-            step_charging_elided,
+            closed_image,
             launch_digest_unused,
             release_sites,
         } = self.emit_reached(entry, reached, options, true)?;
@@ -878,7 +901,6 @@ impl CheckProduct {
         };
         objects.extend(cleanup);
         let counters = reached.counters;
-        let revision = reached.revision(entry)?;
         // The record is published once the executable is stored: a walk's
         // draft with its table, or a hit's sections under its current head.
         let record = |executable: ContentHash| -> io::Result<u64> {
@@ -916,7 +938,7 @@ impl CheckProduct {
                     "hirsel.core-entry-policy.v1",
                     &crate::native_entry::policy(options),
                 )?,
-                revision,
+                address,
                 instance_limit: options.instance_limit as u64,
             };
             Ok(crate::reach::publish(&store, reach.selection, prior, &head, content)? as u64)
@@ -947,11 +969,12 @@ impl CheckProduct {
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),
-            step_charging_elided,
+            closed_image,
             counters,
             record,
-            revision,
+            address,
             || reached.revisions(),
+            None,
         )
     }
     /// The entry's declaration part, bound by check.
@@ -1122,16 +1145,27 @@ impl CheckProduct {
             definition: entry.clone(),
             message,
         })?;
+        let code = hirsel_core_ir::normal::encode(
+            &module,
+            hirsel_core_ir::FuncId((module.functions.len() - 1) as u32),
+        );
         let record = crate::native_object::Instance {
             schema: crate::native_object::INSTANCE_SCHEMA,
             identity: identity.clone(),
             own: Some(own),
-            body: crate::revision::body(&module, &mut Vec::new())?,
+            body: code.hash(),
             env: records.digest,
             object: Default::default(),
             debug: None,
             children: vec![],
-            described: crate::revision::described(&module),
+            slots: code
+                .slots
+                .iter()
+                .map(|slot| slot.identity(&module))
+                .collect(),
+            signatures: Default::default(),
+            adapters: vec![],
+            described: code.described,
             items: module.items.clone(),
             closures: vec![],
         };
@@ -1237,32 +1271,54 @@ fn entry_abi(
     product: &DefinitionProduct,
     module: &Module,
 ) -> Result<(EntryAbi, Option<Module>), String> {
+    let function = product
+        .check
+        .function
+        .ok_or("entry body is not fully lowered")?;
+    bound_entry_abi(decl, entry, module, function)
+}
+
+fn bound_entry_abi(
+    decl: &EntryDecl,
+    entry: &DefPath,
+    module: &Module,
+    function: hirsel_core_ir::FuncId,
+) -> Result<(EntryAbi, Option<Module>), String> {
     let binding = (|| {
-        let function = product
-            .check
-            .function
-            .ok_or("entry body is not fully lowered")?;
         let signature = &module.signatures[module.functions[function.index()].signature.index()];
         let dest = signature
             .dest
             .ok_or("entry result has no emitted destination")?;
-        let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
+        let recipes =
+            hirsel_core_layout::compute(&module.types).map_err(|_| "invalid entry layout")?;
         let recipe = recipes[dest.index()].clone();
-        let exit_offset = decl.exit.then(|| {
+        let exit_offset = if decl.exit {
             let hirsel_core_layout::Body::Variant(cases) = &module.types[dest.index()].body else {
-                unreachable!("checked Result has variant shape")
+                return Err("entry Result needs a variant");
             };
-            let hirsel_core_layout::FieldTy::Inline(exit) = cases[1].fields[0].ty else {
-                unreachable!("checked Exit is an inline result payload")
+            let Some(hirsel_core_layout::FieldTy::Inline(exit)) = cases
+                .get(1)
+                .and_then(|case| case.fields.first())
+                .map(|field| &field.ty)
+            else {
+                return Err("entry Exit needs an inline result payload");
             };
             let Layout::Fixed(result) = &recipe.layout else {
-                unreachable!("entry result is fixed")
+                return Err("entry Result is not fixed");
             };
             let Layout::Fixed(exit) = &recipes[exit.index()].layout else {
-                unreachable!("Exit is fixed")
+                return Err("entry Exit is not fixed");
             };
-            result.offsets[1][0] + exit.offsets[0][0]
-        });
+            let offset = result
+                .offsets
+                .get(1)
+                .and_then(|fields| fields.first())
+                .zip(exit.offsets.first().and_then(|fields| fields.first()))
+                .ok_or("entry Exit has no status field")?;
+            Some(offset.0 + offset.1)
+        } else {
+            None
+        };
         let cleanup = (!recipe.plain).then(|| result_cleanup(module, dest, entry));
         Ok((
             EntryAbi {
@@ -1278,13 +1334,7 @@ fn entry_abi(
 
 /// Runtime CAP-4 kind numbers. Args is always supplied by the process constructor.
 pub fn grant_kind(name: &str) -> Option<u8> {
-    [
-        "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-        "Args", "Secret",
-    ]
-    .iter()
-    .position(|kind| *kind == name)
-    .map(|kind| kind as u8)
+    recipe_build::kind(name)
 }
 
 pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
@@ -1474,12 +1524,14 @@ fn link_objects(
     sources: impl FnOnce() -> io::Result<hirsel_core_ir::source::SourceMap>,
     toolchain: ContentHash,
     recipe: crate::tool_inputs::LinkRecipe,
-    step_charging_elided: bool,
+    closed_image: bool,
     mut counters: crate::reach::ReachCounters,
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
-    revision: ContentHash,
+    address: ContentHash,
     revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
+    assembly: Option<(ContentHash, ContentHash)>,
 ) -> Result<Linked, NativeStop> {
+    let revision = hirsel_core_ir::code_revision(address);
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
         "release-link-gc-sections"
@@ -1490,23 +1542,26 @@ fn link_objects(
     // v5: the image objects are linked as their image unit. The source map
     // enters by its digest, and the runtime headers by the compiler identity,
     // which embeds them.
-    let link_key = key(
-        "hirsel.core-executable.v5",
-        &(
-            compiler_identity()?,
-            toolchain,
-            recipe.identity,
-            DIRECT_LINK_SUPPORT_LIBS,
-            entry_plan,
-            &identities,
-            sources_digest,
-            &options.target,
-            options.backend,
-            options.optimize,
-            options.debug_lines,
-            link_mode,
-        ),
-    )?;
+    let link_key = match assembly {
+        Some(assembly) => key("hirsel.recipe-final-link.v1", &assembly)?,
+        None => key(
+            "hirsel.core-executable.v5",
+            &(
+                compiler_identity()?,
+                toolchain,
+                recipe.identity,
+                DIRECT_LINK_SUPPORT_LIBS,
+                entry_plan,
+                &identities,
+                sources_digest,
+                &options.target,
+                options.backend,
+                options.optimize,
+                options.debug_lines,
+                link_mode,
+            ),
+        )?,
+    };
     let store = Store::new(&options.store)?;
     let (bytes, linked) = if let Some(bytes) = cached(&store, link_key)? {
         (bytes, false)
@@ -1555,10 +1610,16 @@ fn link_objects(
         } else {
             None
         };
+        let expected_link = recipe.identity;
         let recapture = || {
             let recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
                 .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
-            if step_charging_elided && !recipe.uses_hirsel_launcher() {
+            if assembly.is_some() && recipe.identity != expected_link {
+                return Err(NativeStop::Link(
+                    "link inputs changed during recipe assembly".into(),
+                ));
+            }
+            if closed_image && !recipe.uses_hirsel_launcher() {
                 return Err(NativeStop::Link(
                     "direct link refused: process entry inputs changed".into(),
                 ));
@@ -1689,12 +1750,15 @@ fn link_objects(
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
         identity: link_key,
+        address,
+        recipe: assembly.map(|(root, _)| root),
+        assembly: assembly
+            .map(|(root, toolchain)| recipe_build::AssemblyRecord::new(root, toolchain, &bytes)),
         revision,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
         observation_mode: options.logical_charge_report.is_some(),
         debug_lines: options.debug_lines,
-        step_charging_elided,
         reach: counters,
     };
     // Copy from integrity-checked bytes even on a hit; a damaged materialized file
@@ -1765,6 +1829,7 @@ mod tests {
     include!("tape_build_native.rs");
     include!("request_sequences.rs");
     include!("revision_native.rs");
+    include!("build_identity.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
@@ -1780,7 +1845,8 @@ mod tests {
     fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,

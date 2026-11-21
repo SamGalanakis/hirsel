@@ -40,6 +40,8 @@ pub fn stopped(p: Process) waits
 
 pub fn connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError] waits
 
+pub fn resolve(n: Net, name: String, mut out: List[Ip], until: Until) -> Result[u64, NetError] waits
+
 pub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError] waits
 
 pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError] waits

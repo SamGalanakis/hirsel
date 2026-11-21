@@ -1,3 +1,4 @@
+// test-env: HIRSEL_ISA_CAP=2
 fn vector(raw: Bytes, coded: Bytes) -> bool {
     let mut out: Bytes = list.new()
     result.unwrap(base64.encode(raw, mut out))
@@ -89,7 +90,7 @@ fn reference_base64(raw: Bytes) -> Bytes {
 // expect: run vector_blocks_match_rfc4648() = true
 fn vector_blocks_match_rfc4648() -> bool {
     let mut random: u64 = 0x5281f625bd4c3315
-    for n in 0u64 .. 97u64 {
+    for n in 0u64 .. 130u64 {
         let mut raw: Bytes = result.unwrap(list.with_capacity(n))
         for _ in 0u64 .. n {
             random ^= random << 13
@@ -137,4 +138,30 @@ fn rust_base64_rejects_bad_quanta() -> bool {
         }
     }
     true
+}
+
+// Capacity refusal leaves an existing output buffer untouched, and a tight step
+// bound stops encoding cleanly on long input.
+// expect: run encode_capacity_and_steps() = true
+fn encode_capacity_and_steps() -> bool {
+    let mut raw: Bytes = result.unwrap(list.with_capacity(256))
+    for i in 0u64 .. 256 {
+        result.unwrap(list.push(mut raw, int.truncate(i * 17 + 3)))
+    }
+    let mut out = result.unwrap(b"keep:")
+    let cap_refused = bound bytes 0 {
+        base64.encode(raw, mut out)
+    }
+    let ok_cap = match cap_refused {
+        Ok(Error(_)) => out == result.unwrap(b"keep:"),
+        _ => false,
+    }
+    let tight = bound steps 1 {
+        base64.encode_string(raw)
+    }
+    let ok_steps = match tight {
+        Error(_) => true,
+        Ok(_) => false,
+    }
+    ok_cap && ok_steps
 }

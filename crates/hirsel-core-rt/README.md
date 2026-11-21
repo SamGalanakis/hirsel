@@ -94,7 +94,9 @@ hirsel_core_run maps that completed outcome to PROG-3's process status.
 Before live or recording entry, an OS Process grant installs SIGTERM and
 SIGINT handlers. The first signal latches the stop and wakes the provider
 through the scheduler's readiness path. A second signal takes the default
-crash action. Replay supplies the stop from the tape and leaves the signal
+crash action. The build's recording switch selects the runtime archive.
+The recording archive includes the `record` feature.
+A replay tool supplies the stop from the recording and leaves the signal
 dispositions alone.
 
 Provider callbacks receive a Request at issue and an Outcome at delivery. A
@@ -200,8 +202,9 @@ caches an owner inbox without applying refunds; successful admission stays uncha
 The no-request cancellation branch
 is inline; observing an actual request, draining and changing turns are cold.
 
-Populated refunds use one intrusive list per task owner, with links prepaid in
-payer slots. Multiple refunds to one slot accumulate in its single dirty entry;
+Populated refunds use one intrusive dirty list per union-find root, with links
+prepaid in payer slots, and each task owner's inbox lists the roots with dirty
+slots. Multiple refunds to one slot accumulate in its single dirty entry;
 owner events drain only their inbox, without scanning clean records or another
 owner's refunds. The bound-inbox pending flag also prevents foreign-growth
 allocation paths from repeatedly scanning someone else's queue. Local worker
@@ -209,7 +212,19 @@ publication notifies only the target owner. A foreign OS thread cannot read
 union records: it queues an unassigned entry and notifies owners; the next owner
 event routes those entries under the table lease. The domain mutex serializes
 publication, flag reset, forwarding and subscription removal. Handover routes
-queued entries to their new owner without delivering them. Live records and the
+queued entries to their new owner without delivering them.
+
+Refund routing v2 (refund-reroute-1465; reversible by restoring the v1
+per-owner list and its whole-inbox walk): every queued slot that is not
+unassigned is on the dirty list of its current root, and a root's list is
+nonempty exactly when the root is listed on one inbox, that of its live
+owner. A union gives the winner the loser's list and puts it on the winner's
+live inbox. A hand-over joins the child's list to the destination root's.
+Reassigning a root's owner (`task_owner`) moves only that root's list. Each
+of these costs O(1) and visits no other root's slots, so a teardown that
+reassigns N grants costs O(N), not O(N²). Delivery is unchanged: only the
+owning task pops its inbox, and an inbox that lists no root and has no
+unassigned entry loses its notification. Live records and the
 bound cache pin inbox metadata; zero-pin inboxes enter an intrusive reap list
 and are removed under the next local mailbox lock. Metadata therefore follows
 live records and task registrations rather than historical task IDs.

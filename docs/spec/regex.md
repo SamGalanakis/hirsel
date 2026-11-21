@@ -19,7 +19,7 @@ pub opaque type Groups: send
 pub opaque type Cursor: key
 pub type Match: key { start: u64, end: u64 }
 pub type SyntaxError: key { at: u64, kind: SyntaxKind }
-pub type Error = Syntax(SyntaxError) | TooBig(u64) | Capacity(Capacity)
+pub type Error = Syntax(SyntaxError) | TooBig(u64)
 ```
 
 - A **`Regex`** is a compiled pattern. Nothing changes it after `new`. It is `shareable`, so many tasks can search with one regex, each with its own cache.
@@ -33,9 +33,9 @@ Each `Regex` holds an identity from `unique.new()` ([MEM-18](memory.md#mem-18-po
 ```hirsel unbuilt
 pub fn new(pattern: String) -> Result[Regex, Error]
 pub fn size(re: Regex) -> u64
-pub fn cache(re: Regex, budget: u64) -> Result[Cache, Capacity]
+pub fn cache(re: Regex, budget: u64) -> Cache
 pub fn cache_bytes(re: Regex, budget: u64) -> u64
-pub fn groups(re: Regex) -> Result[Groups, Capacity]
+pub fn groups(re: Regex) -> Groups
 pub fn group_len(re: Regex) -> u64
 pub fn group_index(re: Regex, name: String) -> Option[u64]
 pub fn is_match(re: Regex, mut c: Cache, s: String, at: u64) -> bool
@@ -48,7 +48,7 @@ pub fn next_captures(re: Regex, mut c: Cache, s: String, mut k: Cursor, mut g: G
 pub fn count(re: Regex, mut c: Cache, s: String) -> u64
 ```
 
-std regex has no replace or split operation. Each is a loop over `next` or `next_captures` and `string.push`, and the caller handles each push's `Capacity`.
+std regex has no replace or split operation. Each is a loop over `next` or `next_captures` and `string.push`, and a refused push raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)).
 
 ### RE-2: Syntax
 
@@ -111,9 +111,9 @@ A search of `s` from `at` gives the crate's `find_at(s, at)` answer: the **leftm
 - `find(re, mut c, s, at)` returns the match, or `None`.
 
 ```hirsel
-fn leftmost_first(re: std.regex.Regex) -> Result[Option[std.regex.Match], Capacity] {   // re from new("ab|abc")
-  let mut c = std.regex.cache(re, 0)?
-  Ok(std.regex.find(re, mut c, "xabc", 0))                                              // Some(Match(start: 1, end: 3))
+fn leftmost_first(re: std.regex.Regex) -> Option[std.regex.Match] {   // re from new("ab|abc")
+  let mut c = std.regex.cache(re, 0)
+  std.regex.find(re, mut c, "xabc", 0)                                 // Some(Match(start: 1, end: 3))
 }
 ```
 
@@ -129,9 +129,9 @@ A `Cursor` walks the non-overlapping matches of `s` in order, as the crate's `fi
 - `count(re, mut c, s)` is the number of matches `next` returns from `cursor(0)`. It is the crate's `find_iter(s).count()`.
 
 ```hirsel
-fn errors(re: std.regex.Regex, log: String) -> Result[u64, Capacity] {   // re from new(" [5][0-9]{2} | [4][0-9]{2} ")
-  let mut c = std.regex.cache(re, 1048576)?
-  Ok(std.regex.count(re, mut c, log))
+fn errors(re: std.regex.Regex, log: String) -> u64 {   // re from new(" [5][0-9]{2} | [4][0-9]{2} ")
+  let mut c = std.regex.cache(re, 1048576)
+  std.regex.count(re, mut c, log)
 }
 ```
 
@@ -147,9 +147,9 @@ A `Groups` holds one span or none for each group of its regex. `groups(re)` make
 - `group(g, i)` is group `i`'s span, or `None` when it is none or `i` is not below `group_len`.
 
 ```hirsel
-fn names(re: std.regex.Regex, t: String) -> Result[u64, Capacity] {   // re from new("\\{\\{(.*?)\\}\\}")
-  let mut c = std.regex.cache(re, 0)?
-  let mut g = std.regex.groups(re)?
+fn names(re: std.regex.Regex, t: String) -> u64 {   // re from new("\\{\\{(.*?)\\}\\}")
+  let mut c = std.regex.cache(re, 0)
+  let mut g = std.regex.groups(re)
   let mut k = std.regex.cursor(0)
   let mut total: u64 = 0
   while std.regex.next_captures(re, mut c, t, mut k, mut g) {
@@ -158,7 +158,7 @@ fn names(re: std.regex.Regex, t: String) -> Result[u64, Capacity] {   // re from
       None => {}
     }
   }
-  Ok(total)
+  total
 }
 ```
 
@@ -174,23 +174,22 @@ std regex is ordinary std code: it has no bodiless function and adds no core fun
   5. after translation, the parse arena is refunded, and a counting pass sums the program's size without admitting anything. It stops as soon as its running total exceeds `SIZE_LIMIT`; then `new` refunds everything and returns `Error(TooBig(SIZE_LIMIT))` (RE-8);
   6. otherwise the program's lists, each in one admission at its exact size; their total is `size(re)`, a function of `p` alone. Then the translation arena, the range pool and the name list are refunded, and `new` returns `Ok(re)`.
 
-  Growth is charged as [MEM-26](budgets.md#mem-26-growth-charges-the-current-limit) says. Steps 1 to 4 are ordinary admissions under the current limit and have no size limit of their own. When the current limit refuses any admission, everything `new` admitted is refunded and it returns `Error(Capacity(c))` with the refused admission's `Capacity`. On `Syntax` everything is refunded too.
-- **`cache(re, budget)`** makes one `List[u32]` of exactly `W` words, every word written, and admits it in one admission: `cache_bytes(re, budget)` = `round8(4 × W)` bytes. On refusal it returns `Error(Capacity(requested: cache_bytes(re, budget), available: a))`, where `a` is what the current limit had, and admits nothing. `W` is the layout for `S` automaton states per direction:
+  Growth is charged as [MEM-26](budgets.md#mem-26-growth-charges-the-current-limit) says. Steps 1 to 4 are ordinary admissions under the current limit and have no size limit of their own. When the current limit refuses any admission, the refusal raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)) and the cleanup refunds everything `new` admitted. On `Syntax` everything is refunded too.
+- **`cache(re, budget)`** makes one `List[u32]` of exactly `W` words, every word written, and admits it in one admission: `cache_bytes(re, budget)` = `round8(4 × W)` bytes. On refusal it raises `Capacity(requested: cache_bytes(re, budget), available: a)`, where `a` is what the current limit had, and admits nothing. `W` is the layout for `S` automaton states per direction:
   - `W(S) = 2 × S × (C + 20) + F`, with `F = 24 + 3 × (Nf + Nr) + 12 × Nf + 8 × G × (Nf + 1)`;
   - `C` is the number of byte classes of `re` plus one, `Nf` and `Nr` the states of its forward and reverse automata, and `G = group_len(re)`;
   - `S` is the largest whole number with `W(S) ≤ budget / 4` (rounded down), but never below 8 and never above `(2^32 − 1) / C`.
 
   So `cache_bytes(re, 0)` is the smallest cache, `W(8)`, and the cache also holds the full two-frontier scratch of the fallback engine, for every group. `cache_bytes` is a pure function, so `budget = 2^64 − 1` gives the largest layout, which a real limit refuses.
-- **`groups(re)`** makes one `List[u64]` of `2 × group_len(re)` words and admits `round8(16 × group_len(re))` bytes in one admission, or returns `Error(c)`.
+- **`groups(re)`** makes one `List[u64]` of `2 × group_len(re)` words and admits `round8(16 × group_len(re))` bytes in one admission, or raises `Capacity`.
 - **Clones.** Every word of a cache's and a groups' list is written, so a list's length is its capacity, and `clone` admits exactly `cache_bytes(re, budget)` or `round8(16 × group_len(re))` again ([MEM-17](memory.md#mem-17-clone)).
 - **Searching admits nothing.** `is_match`, `find`, `captures`, `next`, `next_captures` and `count` call no allocating operation, on any path: clearing, restarting and falling back included. They write only into the `Cache`, `Groups` and `Cursor` they are lent.
-- **In a finalizer**, a refused admission of `new`, `cache` or `groups` is the finalizer failure [MEM-27](budgets.md#mem-27-finalizer-grants) describes, not an error value.
 
 **Answers do not depend on the cache.** When the cache is full, it is cleared and keeps the state the search is in. When a state cannot fit even in a cleared cache, or clearing does not pay (RE-7), or a word boundary meets a non-ASCII byte, the search starts again from its own `at` on the fallback engine. So a completed search returns the same answer whatever the cache's size and whatever it held before. Steps are not covered by this: RE-7 says how they depend on the cache.
 
 ```hirsel
 fn exact(re: std.regex.Regex) -> Result[std.regex.Cache, Capacity] {
-  bound bytes std.regex.cache_bytes(re, 0) { std.regex.cache(re, 0)? }   // Ok; with one byte less, Error
+  bound bytes std.regex.cache_bytes(re, 0) { std.regex.cache(re, 0) }   // fits; with one byte less, cache raises Capacity
 }
 ```
 
@@ -213,18 +212,16 @@ std code is user code to [MEM-30](budgets.md#mem-30-step-bounds): every call and
 - **Failures.** The operations fail only with:
   - `Fail`, for a cache or groups of another regex (RE-1);
   - `Bounds`, for an `at` or a cursor position past the end or inside a scalar (RE-3, RE-4);
+  - `Capacity`, for a refused admission of `new`, `cache` or `groups` (RE-6), the only operations that admit;
   - `OutOfTime`, at a step under an exhausted bound.
 - **Order of checks.** Every search operation checks, in order: the cache's identity, then the groups' identity, then whether the cursor is finished (which ends the call), then `at`. So a cache of another regex is `Fail` even with a bad `at` or a finished cursor.
-- **Sites.** `Fail` and `Bounds` are sited inside the std operation, at the check that raised them: [FAIL-2](failure.md#fail-2-causes) moves sites out of core functions only, and std is not core. `OutOfTime` is sited where MEM-30 puts it. The step of the call into a std regex operation is the caller's call expression, so a bound exhausted there stops at the caller's call, and a bound exhausted inside stops at the call or loop inside std that took it.
-- **Capacity.** Outside a finalizer, `Capacity` is never a failure here: it is an error of `new`, `cache` and `groups` only (RE-6). Inside a finalizer, the failure rules of [FAIL-12](failure.md#fail-12-finalizer-failure) and MEM-27 apply to these operations as to any other.
+- **Sites.** `Fail`, `Bounds` and `Capacity` are sited inside the std operation, at the check or the refused core call that raised them: [FAIL-2](failure.md#fail-2-causes) moves sites out of core functions only, and std is not core. `OutOfTime` is sited where MEM-30 puts it. The step of the call into a std regex operation is the caller's call expression, so a bound exhausted there stops at the caller's call, and a bound exhausted inside stops at the call or loop inside std that took it.
 
 ```hirsel
-fn bounded(re: std.regex.Regex, s: String) -> Result[Result[u64, Capacity], OutOfTime] {
+fn bounded(re: std.regex.Regex, s: String) -> Result[u64, OutOfTime] {
   bound steps 1000000 {
-    match std.regex.cache(re, 0) {
-      Ok(c) => { let mut fresh = c; Ok(std.regex.count(re, mut fresh, s)) },
-      Error(e) => Error(e),
-    }
+    let mut fresh = std.regex.cache(re, 0)
+    std.regex.count(re, mut fresh, s)
   }
 }
 ```

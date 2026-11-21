@@ -114,6 +114,11 @@ each selected native engine, with the reason. Those rows have `passed: null`,
 A missing evaluator backend or empty filter is an error. There is no native skip
 marker and no retry.
 
+A file-level `// test-env: NAME=VALUE` runs each native law of the file a second
+time with that variable set, and the law passes only when both runs do.
+`std/tests/sha256.hirsel` uses `HIRSEL_SHA256=portable`, so its laws cover both the
+CPU's SHA-256 instructions and the runtime's portable compression.
+
 For every ordinary law with no host-capability argument, select the evaluator
 as a third backend. `all` runs evaluator, Cranelift dev and LLVM release; `both`
 continues to mean the two native engines. Evaluator-only selection needs neither

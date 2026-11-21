@@ -65,8 +65,7 @@ results on all three harnesses, then uses GNU `strip --strip-all -R .comment` on
 executable. Report one Hirsel/Rust ratio and one Hirsel/Goose ratio for the
 harnesses. Each ratio uses a single pair of binaries. A per-row size geomean
 requires separately built, matched standalone executables. Report pool and
-index variants separately and state whether the compiler proved that Step
-charging could be elided for each Hirsel image.
+index variants separately.
 
 ## Matched document pools
 
@@ -147,7 +146,7 @@ report Bounce, pool List and LangArena CLBG::Nbody with one iteration and zero
 warmups. LangArena startup and compile verification use the one-iteration
 Rust oracle.
 
-Hirsel checks bounds and overflow and admits bytes; Step charging is elided on certified rows; Rust and Goose check bounds only.
+Hirsel checks bounds and overflow, admits bytes and charges Steps only where a step bound can be current; Rust and Goose check bounds only.
 
 The size row reuses verification of all 14 original workloads. The cold and edit compile rows compare the whole
 LangArena suite against Cargo. The warm build changes Spectralnorm's checksum
@@ -231,7 +230,7 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 
 The guard requires checked stdout, complete row coverage and instruction
 counters with equal enabled and running times. It checks the exact
-execution argv and CPU affinity, as well as certification, build flags and the
+execution argv and CPU affinity, as well as build flags and the
 release compiler, runtime, source and fixture hashes. When the compiler,
 runtime, std/core or workload sources change, both rows must carry verified
 build records. The report names the changed hashes. Identical candidate hashes

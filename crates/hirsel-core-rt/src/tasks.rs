@@ -154,7 +154,9 @@ pub struct Task {
     /// an input recomputes it; the constructors start it set.
     pub(crate) arc_hooks: bool,
     cancel: AtomicBool,
+    #[cfg(feature = "record")]
     replay: bool,
+    #[cfg(feature = "record")]
     latest_pair: bool,
     polls_left: u32,
     context: *mut Context,
@@ -169,13 +171,15 @@ pub struct Task {
     waiting_on: *mut Waiters,
     wait_previous: *mut Task,
     wait_next: *mut Task,
-    timer_next: *mut Task,
-    /// Host CLOCK_MONOTONIC nanoseconds.
-    timer_deadline: Option<u64>,
+    timer: Timer,
     operation: *mut Operation,
+    /// The scheduler's creation list, newest first, linked both ways so a
+    /// retire unlinks in O(1) however many tasks are live.
     all: *mut Task,
+    all_previous: *mut Task,
     state: State,
     id: u64,
+    #[cfg(feature = "record")]
     group: Option<crate::tape::schedule::Group>,
     stack: Option<Stack>,
     sp: *mut u8,
@@ -356,14 +360,17 @@ impl Waiters {
     }
 }
 
+#[cfg(feature = "record")]
 use crate::tape::schedule::Group;
 
+#[cfg(feature = "record")]
 struct LiveTape {
     group: Group,
     opened: u64,
     members: usize,
 }
 
+#[cfg(feature = "record")]
 #[derive(Default)]
 struct Tapes {
     live: Vec<LiveTape>,
@@ -372,6 +379,7 @@ struct Tapes {
     take_inputs: Option<unsafe fn(&mut Scheduler)>,
 }
 
+#[cfg(feature = "record")]
 impl Tapes {
     fn open(&mut self, group: Group) {
         let opened = self.next_open;
@@ -435,7 +443,6 @@ struct Delivery {
     deferred: bool,
 }
 
-#[derive(Default)]
 struct Domain {
     sequencer: crate::sequencer::Sequencer,
     ready: AtomicUsize,
@@ -530,7 +537,14 @@ impl Pool {
     ) -> Self {
         Self {
             registry: Mutex::default(),
-            domains: BTreeMap::from([(RESIDUAL_DOMAIN, Arc::new(Domain::default()))]),
+            domains: BTreeMap::from([(
+                RESIDUAL_DOMAIN,
+                Arc::new(Domain {
+                    sequencer: crate::sequencer::Sequencer::new(workers),
+                    ready: AtomicUsize::new(0),
+                    handoffs: AtomicUsize::new(0),
+                }),
+            )]),
             queues: (0..workers)
                 .map(|_| Mutex::new(WorkerQueue::new()))
                 .collect(),
@@ -1019,6 +1033,20 @@ unsafe fn switch_to_idle(task: *mut Task) {
     }
 }
 
+/// Return what ended tasks left resident: retained task-heap pages, this
+/// thread's surplus stacks and, on a pool worker, the pool's spare surplus.
+fn release_idle(run: *mut Scheduler) {
+    crate::task_heap::purge();
+    let worker = WORKER.get();
+    // SAFETY: as `worker_stock`; the pool outlives its registered workers.
+    unsafe {
+        (*worker_stock(run)).release();
+        if !worker.is_null() {
+            (*(*worker).pool).spare.release();
+        }
+    }
+}
+
 fn worker_stock(run: *mut Scheduler) -> *mut Stock {
     let worker = WORKER.get();
     // SAFETY: both alternatives are pinned and only this OS thread uses
@@ -1032,6 +1060,178 @@ fn worker_stock(run: *mut Scheduler) -> *mut Stock {
     }
 }
 
+#[derive(Default)]
+struct Timer {
+    parent: *mut Task,
+    children: [*mut Task; 2],
+    /// Host CLOCK_MONOTONIC nanoseconds.
+    deadline: u64,
+    /// Zero for a detached timer.
+    arm: u64,
+}
+
+/// Complete binary min-heap over the tasks' prepaid links. The arm sequence
+/// preserves FIFO expiry at equal deadlines, including after a re-arm.
+#[derive(Default)]
+struct TimerHeap {
+    root: *mut Task,
+    len: usize,
+    arm_sequence: u64,
+}
+
+impl TimerHeap {
+    fn deadline(&self) -> Option<u64> {
+        // SAFETY: only pinned operations belong to this heap.
+        NonNull::new(self.root).map(|task| unsafe { (*task.as_ptr()).timer.deadline })
+    }
+
+    unsafe fn precedes(a: *mut Task, b: *mut Task) -> bool {
+        // SAFETY: both pointers name live tasks owned by the scheduler turn.
+        unsafe { ((*a).timer.deadline, (*a).timer.arm) < ((*b).timer.deadline, (*b).timer.arm) }
+    }
+
+    /// Follow a one-based heap index's bits below the leading 1.
+    unsafe fn at(&self, index: usize) -> *mut Task {
+        debug_assert!((1..=self.len).contains(&index));
+        // SAFETY: the complete tree has a node at every index through len.
+        unsafe {
+            let mut bit = (1 << index.ilog2()) >> 1;
+            let mut task = self.root;
+            while bit != 0 {
+                task = (*task).timer.children[usize::from(index & bit != 0)];
+                bit >>= 1;
+            }
+            task
+        }
+    }
+
+    unsafe fn replace(&mut self, old: *mut Task, new: *mut Task) {
+        // SAFETY: old is linked in the heap. A non-null new task is being
+        // moved to its position by the exclusive scheduler turn.
+        unsafe {
+            let parent = (*old).timer.parent;
+            if parent.is_null() {
+                self.root = new;
+            } else {
+                let side = usize::from((*parent).timer.children[1] == old);
+                (*parent).timer.children[side] = new;
+            }
+            if !new.is_null() {
+                (*new).timer.parent = parent;
+            }
+        }
+    }
+
+    unsafe fn set_children(task: *mut Task, children: [*mut Task; 2]) {
+        // SAFETY: all non-null pointers are live tasks in this turn's heap.
+        unsafe {
+            (*task).timer.children = children;
+            for child in children {
+                if !child.is_null() {
+                    (*child).timer.parent = task;
+                }
+            }
+        }
+    }
+
+    /// Exchange two adjacent positions without changing the tree's shape.
+    unsafe fn exchange_with_parent(&mut self, task: *mut Task, parent: *mut Task) {
+        // SAFETY: both tasks are live, and parent is task's current parent.
+        unsafe {
+            let mut children = (*parent).timer.children;
+            let side = usize::from(children[1] == task);
+            children[side] = parent;
+            self.replace(parent, task);
+            Self::set_children(parent, (*task).timer.children);
+            Self::set_children(task, children);
+        }
+    }
+
+    unsafe fn sift_up(&mut self, task: *mut Task) {
+        // SAFETY: task is a live heap node and only its order may be wrong.
+        unsafe {
+            let mut parent = (*task).timer.parent;
+            while !parent.is_null() && Self::precedes(task, parent) {
+                self.exchange_with_parent(task, parent);
+                parent = (*task).timer.parent;
+            }
+        }
+    }
+
+    unsafe fn sift_down(&mut self, task: *mut Task) {
+        // SAFETY: task and its descendants are live nodes in this turn's heap.
+        unsafe {
+            loop {
+                let [left, right] = (*task).timer.children;
+                if left.is_null() {
+                    return;
+                }
+                let child = if !right.is_null() && Self::precedes(right, left) {
+                    right
+                } else {
+                    left
+                };
+                if !Self::precedes(child, task) {
+                    return;
+                }
+                self.exchange_with_parent(child, task);
+            }
+        }
+    }
+
+    unsafe fn insert(&mut self, task: *mut Task, deadline: u64) {
+        // SAFETY: this turn owns the parked task, which is not armed.
+        unsafe {
+            debug_assert_eq!((*task).timer.arm, 0);
+            self.arm_sequence = self
+                .arm_sequence
+                .checked_add(1)
+                .unwrap_or_else(|| crate::process::stop(b"TimerArms"));
+            let index = self.len + 1;
+            let parent = if self.len == 0 {
+                self.root = task;
+                ptr::null_mut()
+            } else {
+                let parent = self.at(index / 2);
+                (*parent).timer.children[index % 2] = task;
+                parent
+            };
+            self.len = index;
+            (*task).timer = Timer {
+                parent,
+                children: [ptr::null_mut(); 2],
+                deadline,
+                arm: self.arm_sequence,
+            };
+            self.sift_up(task);
+        }
+    }
+
+    unsafe fn remove(&mut self, task: *mut Task) {
+        // SAFETY: only this turn mutates the live task's timer. Its links
+        // locate it directly when armed.
+        unsafe {
+            if (*task).timer.arm == 0 {
+                return;
+            }
+            let last = self.at(self.len);
+            self.replace(last, ptr::null_mut());
+            self.len -= 1;
+            if last != task {
+                self.replace(task, last);
+                Self::set_children(last, (*task).timer.children);
+                let parent = (*last).timer.parent;
+                if !parent.is_null() && Self::precedes(last, parent) {
+                    self.sift_up(last);
+                } else {
+                    self.sift_down(last);
+                }
+            }
+            (*task).timer = Timer::default();
+        }
+    }
+}
+
 struct Scheduler {
     pool: Option<NonNull<Pool>>,
     deferred: *mut Task,
@@ -1040,13 +1240,13 @@ struct Scheduler {
     idle: *mut u8,
     head: *mut Task,
     tail: *mut Task,
-    timers: *mut Task,
+    timers: TimerHeap,
     all: *mut Task,
     next: u64,
     provider: SchedulerProvider,
     #[cfg(any(test, feature = "testing"))]
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "record", any(test, feature = "testing")))]
     script_groups: Vec<crate::tape::schedule::Group>,
     readies: Arc<Readies>,
     ready_tokens: Vec<u64>,
@@ -1056,7 +1256,9 @@ struct Scheduler {
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
+    #[cfg(feature = "record")]
     outside_cancels: Vec<*mut Task>,
+    #[cfg(feature = "record")]
     tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
     model: Option<Arc<dyn ModelClock>>,
@@ -1103,11 +1305,15 @@ impl Scheduler {
     /// with no posted credit: its tape records them, an open LATEST pair
     /// closes on them, something else observes them, or a serial run with
     /// sockets checks for readiness at every event.
-    fn arc_hooks(&self, task: &Task) -> bool {
-        task.group.is_some()
-            || task.latest_pair
-            || self.arc_observed()
-            || (self.pool.is_none() && !self.net.is_null())
+    fn arc_hooks(
+        &self,
+        #[cfg_attr(not(feature = "record"), allow(unused_variables))] task: &Task,
+    ) -> bool {
+        #[cfg(feature = "record")]
+        if task.group.is_some() || task.latest_pair {
+            return true;
+        }
+        self.arc_observed() || (self.pool.is_none() && !self.net.is_null())
     }
 
     fn id(&mut self) -> u64 {
@@ -1156,6 +1362,7 @@ impl Scheduler {
     unsafe fn pop(&mut self) -> *mut Task {
         // SAFETY: only the idle scheduler manipulates the ready queues.
         unsafe {
+            #[cfg(feature = "record")]
             for entry in &self.tapes.live {
                 let group = entry.group;
                 use crate::tape::schedule::Turn;
@@ -1196,6 +1403,7 @@ impl Scheduler {
     ) -> *mut Task {
         // SAFETY: pop holds the dispatcher and head is ready.
         unsafe {
+            #[cfg(feature = "record")]
             if let Some(group) = (*self.head).group {
                 if group.replaying() || group.fifo() {
                     return self.head;
@@ -1222,7 +1430,11 @@ impl Scheduler {
             let mut runnable = Vec::new();
             let mut task = self.head;
             while !task.is_null() {
-                if (*task).group.is_none() {
+                #[cfg(feature = "record")]
+                let untaped = (*task).group.is_none();
+                #[cfg(not(feature = "record"))]
+                let untaped = true;
+                if untaped {
                     runnable.push(task);
                 }
                 task = (*task).ready;
@@ -1234,6 +1446,7 @@ impl Scheduler {
         }
     }
 
+    #[cfg(feature = "record")]
     unsafe fn live_group_tasks(
         &self,
         group: crate::tape::schedule::Group,
@@ -1256,6 +1469,7 @@ impl Scheduler {
         live
     }
 
+    #[cfg(feature = "record")]
     unsafe fn group_task(&self, group: crate::tape::schedule::Group, id: u64) -> *mut Task {
         let mut task = self.all;
         // SAFETY: scheduler owns the creation list; retired tasks are unlinked.
@@ -1310,37 +1524,6 @@ impl Scheduler {
         }
     }
 
-    unsafe fn insert_timer(&mut self, task: *mut Task, deadline: u64) {
-        // SAFETY: the task is exclusively parked and is not in the timer list.
-        unsafe {
-            (*task).timer_deadline = Some(deadline);
-            let mut link = &raw mut self.timers;
-            while !(*link).is_null() && (*(*link)).timer_deadline.is_some_and(|at| at <= deadline) {
-                link = &raw mut (**link).timer_next;
-            }
-            (*task).timer_next = *link;
-            *link = task;
-        }
-    }
-
-    unsafe fn remove_timer(&mut self, task: *mut Task) {
-        // SAFETY: only the idle scheduler mutates timer links.
-        unsafe {
-            if (*task).timer_deadline.is_none() {
-                return;
-            }
-            let mut link = &raw mut self.timers;
-            while !(*link).is_null() && *link != task {
-                link = &raw mut (**link).timer_next;
-            }
-            if *link == task {
-                *link = (*task).timer_next;
-            }
-            (*task).timer_next = ptr::null_mut();
-            (*task).timer_deadline = None;
-        }
-    }
-
     /// One scheduler turn's wakes, before any pop: cancellation requests, then
     /// readiness, then expired timers.
     ///
@@ -1357,6 +1540,7 @@ impl Scheduler {
     /// next cancellation point (CONC-7). Readiness before timers is the network
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>, net_timeout: i32) {
+        #[cfg(feature = "record")]
         if let Some(take_inputs) = self.tapes.take_inputs {
             // SAFETY: idle owns every task and operation frame.
             unsafe { take_inputs(self) };
@@ -1389,32 +1573,31 @@ impl Scheduler {
     }
 
     unsafe fn take_timers(&mut self) {
-        // SAFETY: this turn owns the timer list and pinned operation frames.
+        // SAFETY: this turn owns the timer heap and pinned operation frames.
         unsafe {
-            if self.timers.is_null() {
+            if self.timers.root.is_null() {
                 return;
             }
             let now = self.now();
             // Detach every expired timer first: a wait that answers Until(now)
             // again re-arms for the next turn, so the other tasks still run.
+            // Detached timers lend their unused parent link to this wake batch.
             let mut expired = ptr::null_mut::<Task>();
             let mut tail = &raw mut expired;
-            while !self.timers.is_null()
-                && (*self.timers)
-                    .timer_deadline
-                    .is_some_and(|deadline| deadline <= now)
+            while self
+                .timers
+                .deadline()
+                .is_some_and(|deadline| deadline <= now)
             {
-                let task = self.timers;
-                self.timers = (*task).timer_next;
-                (*task).timer_next = ptr::null_mut();
-                (*task).timer_deadline = None;
+                let task = self.timers.root;
+                self.timers.remove(task);
                 *tail = task;
-                tail = &raw mut (*task).timer_next;
+                tail = &raw mut (*task).timer.parent;
             }
             while !expired.is_null() {
                 let task = expired;
-                expired = (*task).timer_next;
-                (*task).timer_next = ptr::null_mut();
+                expired = (*task).timer.parent;
+                (*task).timer.parent = ptr::null_mut();
                 self.wake_operation(task, Wake::Timer);
             }
         }
@@ -1441,6 +1624,7 @@ impl Scheduler {
         }
     }
 
+    #[cfg(feature = "record")]
     unsafe fn take_tape_inputs(&mut self) {
         // SAFETY: idle owns tasks; retirement removes queued requests.
         unsafe {
@@ -1519,36 +1703,33 @@ impl Scheduler {
 
     fn has_outside_wait(&self) -> bool {
         // A queued or running sync's ready is still to come.
-        self.readies.outside()
-            // SAFETY: each entry points to its pinned provider operation.
-            || self.parked.live.values().any(|arm| unsafe {
-            let task = arm.task;
-            !(*task)
-                .group
-                .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
-        })
+        #[cfg(feature = "record")]
+        {
+            self.readies.outside()
+                // SAFETY: each entry points to its pinned provider operation.
+                || self.parked.live.values().any(|arm| unsafe {
+                    let task = arm.task;
+                    !(*task)
+                        .group
+                        .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
+                })
+        }
+        #[cfg(not(feature = "record"))]
+        {
+            self.readies.outside() || !self.parked.live.is_empty()
+        }
     }
 
     fn stop_quiescent(&mut self) -> ! {
-        if let Some((id, fault)) = self.tapes.seal_deadlock() {
-            let tape = u128::from_be_bytes(id);
-            let verdict = match fault {
-                crate::tape::Fault::Diverged(divergence) => {
-                    format!(
-                        "Replay tape {tape:032x}: Diverged({:?}) at {}",
-                        divergence.kind, divergence.at
-                    )
-                }
-                crate::tape::Fault::Truncated(at) => {
-                    format!("Replay tape {tape:032x}: Truncated at {at}")
-                }
-                crate::tape::Fault::Damaged(block) => {
-                    format!("Replay tape {tape:032x}: Damaged block {block}")
-                }
-                crate::tape::Fault::Corrupt => format!("Replay tape {tape:032x}: Corrupt"),
-                fault => format!("Tape {tape:032x}: {fault}"),
-            };
-            crate::process::stop(verdict.as_bytes());
+        #[cfg(feature = "record")]
+        if let Some((_, fault)) = self.tapes.seal_deadlock() {
+            let mut line = crate::tape::format_verdict(fault, 0);
+            line.push('\n');
+            // SAFETY: stderr is fd 2 and `line` is valid for its length.
+            unsafe {
+                let _ = libc::write(2, line.as_ptr().cast(), line.len());
+                libc::_exit(1);
+            }
         }
         crate::process::stop(b"Deadlock");
     }
@@ -1561,7 +1742,7 @@ impl Scheduler {
     fn poll_net(&mut self, timeout: i32) {
         if let Some(model) = &self.model {
             // Readiness is taken before timers by take_wakes, including ties.
-            let deadline = unsafe { self.timers.as_ref().and_then(|t| t.timer_deadline) };
+            let deadline = self.timers.deadline();
             for token in model.poll(deadline, timeout != 0) {
                 self.readies.push(token);
             }
@@ -1599,8 +1780,7 @@ impl Scheduler {
         if self.readies.pending.load(Ordering::Acquire) || !self.cancels.is_empty() {
             return;
         }
-        // SAFETY: no task is running while the idle scheduler waits.
-        let deadline = unsafe { self.timers.as_ref().and_then(|task| task.timer_deadline) };
+        let deadline = self.timers.deadline();
         if crate::units::untied() && self.model.is_none() {
             if deadline.is_none() && !self.has_outside_wait() && !flow_pending {
                 self.stop_quiescent();
@@ -1641,7 +1821,7 @@ impl Scheduler {
                     self.poll_net(timeout);
                     release
                 } else {
-                    crate::task_heap::purge();
+                    release_idle(self);
                     std::thread::park_timeout(Duration::from_nanos(
                         deadline.saturating_sub(crate::os::monotonic_ns()),
                     ));
@@ -1657,14 +1837,14 @@ impl Scheduler {
                     self.poll_net(timeout);
                     release
                 } else {
-                    crate::task_heap::purge();
+                    release_idle(self);
                     std::thread::park();
                     false
                 }
             }
         };
         if release && !self.readies.pending.load(Ordering::Acquire) {
-            crate::task_heap::purge();
+            release_idle(self);
         }
     }
 
@@ -1672,7 +1852,7 @@ impl Scheduler {
         // SAFETY: the task is parked; its operation frame is pinned.
         unsafe {
             self.parked.remove((*(*task).operation).token);
-            self.remove_timer(task);
+            self.timers.remove(task);
             (*(*task).operation).state = state;
             self.ready(task);
         }
@@ -1718,6 +1898,7 @@ impl Scheduler {
                     // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
                     // Cancellation wins even if the callback returns Ready.
                     if wake == Wake::Cancel {
+                        #[cfg(feature = "record")]
                         if let Some(group) = (*task).group {
                             group.cancel_wait(request);
                         }
@@ -1730,6 +1911,7 @@ impl Scheduler {
                             return true;
                         }
                         WAIT_READY => {
+                            #[cfg(feature = "record")]
                             if let Some(group) = (*task).group {
                                 group.wake(request);
                             }
@@ -1737,10 +1919,10 @@ impl Scheduler {
                             return false;
                         }
                         WAIT_UNTIL => {
-                            self.remove_timer(task);
-                            self.insert_timer(task, w.deadline_ns);
+                            self.timers.remove(task);
+                            self.timers.insert(task, w.deadline_ns);
                         }
-                        WAIT_PARK => self.remove_timer(task),
+                        WAIT_PARK => self.timers.remove(task),
                         _ => crate::process::stop(b"Provider"),
                     }
                     self.parked.insert(token, task);
@@ -1783,12 +1965,12 @@ impl Scheduler {
                 }
                 STEP_PENDING => {
                     self.parked.insert((*(*task).operation).token, task);
-                    self.remove_timer(task);
+                    self.timers.remove(task);
                     (*(*task).operation).state = OperationState::Issued {
                         deadline: step.deadline_ns,
                     };
                     if step.deadline_ns != 0 {
-                        self.insert_timer(task, step.deadline_ns);
+                        self.timers.insert(task, step.deadline_ns);
                     }
                 }
                 _ => crate::process::stop(b"Provider"),
@@ -1807,9 +1989,9 @@ impl Scheduler {
             }
             if let OperationState::Issued { deadline } = (*op).state
                 && deadline != 0
-                && (*task).timer_deadline.is_none()
+                && (*task).timer.arm == 0
             {
-                self.insert_timer(task, deadline);
+                self.timers.insert(task, deadline);
             }
         }
     }
@@ -2397,6 +2579,7 @@ unsafe fn parked(
         };
         (*task).operation = ptr::null_mut();
         // mc-units-proto: a crossing delivery a retry consumed is observed now.
+        #[cfg(feature = "record")]
         crate::units::observed(request as usize);
         produced
     }
@@ -2596,7 +2779,9 @@ unsafe fn alone(
 }
 
 /// Replay dispatches before the first read or mutation of shared state.
+#[inline(always)]
 pub(crate) fn before_commit() -> crate::sequencer::Guard {
+    #[cfg(feature = "record")]
     replay_boundary(false);
     crate::sequencer::enter()
 }
@@ -2606,11 +2791,20 @@ pub(crate) fn before_commit() -> crate::sequencer::Guard {
 pub(crate) fn can_fuse_receives() -> bool {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the task while this fiber is executing.
-    unsafe { !task.is_null() && !WORKER.get().is_null() && !(*task).replay }
+    #[cfg(feature = "record")]
+    unsafe {
+        !task.is_null() && !WORKER.get().is_null() && !(*task).replay
+    }
+    #[cfg(not(feature = "record"))]
+    {
+        !task.is_null() && !WORKER.get().is_null()
+    }
 }
 
 /// An Arc count commit, which the sole live unit may keep for its next one.
+#[inline(always)]
 pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
+    #[cfg(feature = "record")]
     replay_boundary(false);
     crate::sequencer::enter_keepable()
 }
@@ -2619,19 +2813,24 @@ pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
 /// Inline: a task that is not replaying pays one field read for the boundary.
 #[inline(always)]
 pub(crate) fn before_provider_entry() -> crate::sequencer::Guard {
-    let task = CURRENT.get();
-    // SAFETY: CURRENT pins this task.
-    if !task.is_null() && unsafe { (*task).replay } {
-        replay_boundary(true);
+    #[cfg(feature = "record")]
+    {
+        let task = CURRENT.get();
+        // SAFETY: CURRENT pins this task.
+        if !task.is_null() && unsafe { (*task).replay } {
+            replay_boundary(true);
+        }
     }
     crate::sequencer::enter()
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn before_tape_frame(group: Group, ending: bool) -> crate::sequencer::Guard {
     tape_boundary(group, ending);
     crate::sequencer::enter()
 }
 
+#[cfg(feature = "record")]
 fn tape_boundary(group: Group, ending: bool) {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the live opener; checkpoint borrows no task fields.
@@ -2655,6 +2854,7 @@ fn tape_boundary(group: Group, ending: bool) {
     }
 }
 
+#[cfg(feature = "record")]
 #[inline(never)]
 fn replay_boundary(provider_entry: bool) {
     let task = CURRENT.get();
@@ -2713,6 +2913,7 @@ fn replay_boundary(provider_entry: bool) {
     }
 }
 
+#[cfg(feature = "record")]
 unsafe fn live_index(task: *mut Task, group: crate::tape::schedule::Group) -> u64 {
     if group.task == 0 {
         return 0;
@@ -2737,6 +2938,7 @@ unsafe fn live_index(task: *mut Task, group: crate::tape::schedule::Group) -> u6
     index
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn group_index() -> u64 {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the task while a provider issues synchronously.
@@ -2812,23 +3014,27 @@ unsafe fn record_folded(task_pointer: *mut Task, kind: u8, object: u64, value: u
                 },
             );
         }
-        let opens_pair = matches!(kind, LATEST_READ | LATEST_PUBLISH);
-        let was_pair = task.latest_pair;
-        if let Some(group) = task.group {
-            if was_pair
-                && task.replay
-                && !matches!(
-                    group.turn(),
-                    crate::tape::schedule::Turn::Fifo | crate::tape::schedule::Turn::Event(Some(_))
-                )
-            {
-                group.fail();
+        #[cfg(feature = "record")]
+        {
+            let opens_pair = matches!(kind, LATEST_READ | LATEST_PUBLISH);
+            let was_pair = task.latest_pair;
+            if let Some(group) = task.group {
+                if was_pair
+                    && task.replay
+                    && !matches!(
+                        group.turn(),
+                        crate::tape::schedule::Turn::Fifo
+                            | crate::tape::schedule::Turn::Event(Some(_))
+                    )
+                {
+                    group.fail();
+                }
+                group.event(|| live_index(task_pointer, group), kind == END);
             }
-            group.event(|| live_index(task_pointer, group), kind == END);
-        }
-        if (*task_pointer).latest_pair != opens_pair {
-            (*task_pointer).latest_pair = opens_pair;
-            (*task_pointer).arc_hooks = (*(*task_pointer).run).arc_hooks(&*task_pointer);
+            if (*task_pointer).latest_pair != opens_pair {
+                (*task_pointer).latest_pair = opens_pair;
+                (*task_pointer).arc_hooks = (*(*task_pointer).run).arc_hooks(&*task_pointer);
+            }
         }
     }
 }
@@ -2887,7 +3093,10 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
         // leaves the processor by its own logic (park, provider wait, poll
         // turn, slice end, end), which replay reaches by itself.
         let preemptible = || match (*run).pool {
+            #[cfg(feature = "record")]
             None => !(*task).group.is_some_and(|group| group.fifo()),
+            #[cfg(not(feature = "record"))]
+            None => true,
             Some(_) => hirsel_core_layout::event::is_poll(kind, value),
         };
         if !(*run).net.is_null() && preemptible() {
@@ -2990,6 +3199,7 @@ pub(crate) fn flow_parallel() -> bool {
     !WORKER.get().is_null()
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn recorded_chooser() -> u8 {
     #[cfg(any(test, feature = "testing"))]
     {
@@ -3006,6 +3216,7 @@ pub(crate) fn recorded_chooser() -> u8 {
 pub(crate) fn has_provider_task() -> bool {
     !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null()
 }
+#[cfg(feature = "record")]
 pub(crate) fn provider_group() -> Option<crate::tape::schedule::Group> {
     let task = if CURRENT.get().is_null() {
         CALLBACK_TASK.get()
@@ -3028,6 +3239,7 @@ pub(crate) fn current_heap() -> *const crate::task_heap::Heap {
     }
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins its task, or is null outside a task.
@@ -3099,6 +3311,7 @@ fn poll_timeout(deadline: Option<u64>) -> i32 {
     })
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn attach_tape(group: Group) {
     let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
@@ -3121,6 +3334,7 @@ pub(crate) fn attach_tape(group: Group) {
     }
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn detach_tape(group: Group) {
     let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
@@ -3151,18 +3365,23 @@ pub(crate) fn flow_script() -> Option<(Arc<crate::schedule_script::ScheduleScrip
     let _commit = crate::sequencer::enter();
     let run = unsafe { &mut *task.run };
     let script = run.script.clone()?;
-    let Some(group) = task.group else {
-        return Some((script, UNTAPED));
-    };
-    let domain = run
-        .script_groups
-        .iter()
-        .position(|g| g.same(group))
-        .unwrap_or_else(|| {
-            run.script_groups.push(group);
-            run.script_groups.len() - 1
-        });
-    Some((script, domain as u64))
+    #[cfg(feature = "record")]
+    {
+        let Some(group) = task.group else {
+            return Some((script, UNTAPED));
+        };
+        let domain = run
+            .script_groups
+            .iter()
+            .position(|g| g.same(group))
+            .unwrap_or_else(|| {
+                run.script_groups.push(group);
+                run.script_groups.len() - 1
+            });
+        Some((script, domain as u64))
+    }
+    #[cfg(not(feature = "record"))]
+    Some((script, UNTAPED))
 }
 /// Whether a task is running on this thread (tests assert where callbacks run).
 #[cfg(test)]
@@ -3294,6 +3513,7 @@ pub(crate) unsafe fn delegate(
         if task.is_null() || WORKER.get().is_null() {
             return Some(crate::sequencer::enter());
         }
+        #[cfg(feature = "record")]
         if (*task).replay {
             return Some(before_commit());
         }
@@ -3328,8 +3548,11 @@ pub(crate) unsafe fn delegable(request: &Delegated) -> bool {
         let task = request.task;
         let run = (*task).run;
         let poll = hirsel_core_layout::event::is_poll(request.kind, 0);
-        !(*task).replay
-            && !cancel_takes_effect(&*request.context, cancel_flag(task))
+        #[cfg(feature = "record")]
+        if (*task).replay {
+            return false;
+        }
+        !cancel_takes_effect(&*request.context, cancel_flag(task))
             && !(*request.pending).load(Ordering::Acquire)
             && !(poll && (*task).polls_left <= 1)
             && ((*run).net.is_null() || ((*run).pool.is_some() && !poll))
@@ -3420,6 +3643,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         let _commit = before_commit();
         record_event(task, END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
+        #[cfg(feature = "record")]
         if let Some(group) = (*task).group
             && let Some(members) = (*(*task).run).tapes.membership(group)
         {
@@ -3511,13 +3735,13 @@ pub unsafe fn run_root(
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
         tail: ptr::null_mut(),
-        timers: ptr::null_mut(),
+        timers: TimerHeap::default(),
         all: ptr::null_mut(),
         next: 1,
         provider,
         #[cfg(any(test, feature = "testing"))]
         script: crate::schedule_script::installed(),
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(all(feature = "record", any(test, feature = "testing")))]
         script_groups: Vec::new(),
         readies: Readies::new(),
         ready_tokens: Vec::new(),
@@ -3525,7 +3749,9 @@ pub unsafe fn run_root(
         #[cfg(feature = "testing")]
         measure: measurement_enabled(),
         cancels: Vec::new(),
+        #[cfg(feature = "record")]
         outside_cancels: Vec::new(),
+        #[cfg(feature = "record")]
         tapes: Tapes::default(),
         net: ptr::null_mut(),
         model: None,
@@ -3561,7 +3787,9 @@ pub unsafe fn run_root(
         arc_runtime: false,
         arc_hooks: true,
         cancel: AtomicBool::new(false),
+        #[cfg(feature = "record")]
         replay: false,
+        #[cfg(feature = "record")]
         latest_pair: false,
         polls_left: POLLS_PER_TURN,
         context,
@@ -3576,12 +3804,13 @@ pub unsafe fn run_root(
         waiting_on: ptr::null_mut(),
         wait_previous: ptr::null_mut(),
         wait_next: ptr::null_mut(),
-        timer_next: ptr::null_mut(),
-        timer_deadline: None,
+        timer: Timer::default(),
         operation: ptr::null_mut(),
         all: ptr::null_mut(),
+        all_previous: ptr::null_mut(),
         state: State::Ready,
         id: 0,
+        #[cfg(feature = "record")]
         group: None,
         stack: Some(run.stacks.take()),
         sp: ptr::null_mut(),
@@ -3777,25 +4006,24 @@ impl RunPtr {
                     // An idle native run can collect readiness in its wait.
                     // Ready tokens are still applied before any expired timer.
                     let run = &mut *run;
+                    #[cfg(feature = "record")]
+                    let no_live_tapes = run.tapes.live.is_empty();
+                    #[cfg(not(feature = "record"))]
+                    let no_live_tapes = true;
                     let wait_for_net = pool.is_none()
                         && !run.net.is_null()
                         && run.model.is_none()
                         && run.head.is_null()
                         && run.deferred.is_null()
-                        && run.tapes.live.is_empty()
+                        && no_live_tapes
                         && run.cancels.is_empty()
                         && !run.readies.pending.load(Ordering::Acquire)
                         && run.has_outside_wait();
                     let untied = crate::units::untied();
                     let (timeout, release) = if wait_for_net && untied {
-                        (
-                            poll_timeout(run.timers.as_ref().and_then(|task| task.timer_deadline)),
-                            false,
-                        )
+                        (poll_timeout(run.timers.deadline()), false)
                     } else if wait_for_net {
-                        crate::task_heap::idle_wait(poll_timeout(
-                            run.timers.as_ref().and_then(|task| task.timer_deadline),
-                        ))
+                        crate::task_heap::idle_wait(poll_timeout(run.timers.deadline()))
                     } else {
                         (0, false)
                     };
@@ -3803,7 +4031,7 @@ impl RunPtr {
                     let timeout = if crate::units::spin() { 0 } else { timeout };
                     if untied && timeout != 0 {
                         // mc-units-untied: the unit parks; any worker resumes it.
-                        crate::units::park(run.timers.as_ref().and_then(|task| task.timer_deadline));
+                        crate::units::park(run.timers.deadline());
                         run.take_wakes(0);
                     } else {
                         if untied {
@@ -3814,7 +4042,7 @@ impl RunPtr {
                     let task = run.pop();
                     if task.is_null() {
                         if release {
-                            crate::task_heap::purge();
+                            release_idle(run);
                         }
                         if !wait_for_net {
                             let flow_pending =
@@ -4020,7 +4248,7 @@ impl RunPtr {
                 pool.wake(index);
                 return;
             }
-            let deadline = run.timers.as_ref().and_then(|task| task.timer_deadline);
+            let deadline = run.timers.deadline();
             if run.readies.pending.load(Ordering::Acquire) {
                 pool.wake(index);
                 return;
@@ -4043,13 +4271,20 @@ impl RunPtr {
         let (timeout, release) = match poller {
             Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline)),
             None => {
-                crate::task_heap::purge();
+                release_idle(self.0);
                 (poll_timeout(deadline), false)
             }
         };
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(script) = &pool.script {
+            script.pause(crate::schedule_script::PausePoint::IdleWait);
+        }
         if let Some(poller) = poller
             && let Some(events) = poller
-                .poll(timeout)
+                .wait(timeout, || {
+                    pool.nudged[index].load(Ordering::Acquire)
+                        || pool.readies.pending.load(Ordering::Acquire)
+                })
                 .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
         {
             let _commit = crate::sequencer::enter();
@@ -4062,7 +4297,7 @@ impl RunPtr {
                 })
             };
             if release && readied == 0 {
-                crate::task_heap::purge();
+                release_idle(self.0);
             }
         } else if let Some(deadline) = deadline {
             std::thread::park_timeout(Duration::from_nanos(
@@ -4102,7 +4337,7 @@ unsafe fn spawn_in(
     input: *mut u8,
     body: Body,
     layout: TaskLayout,
-    group: Option<crate::tape::schedule::Group>,
+    #[cfg(feature = "record")] group: Option<crate::tape::schedule::Group>,
 ) -> Spawned {
     // SAFETY: spawn is invoked by the current parent in its exclusive context.
     unsafe {
@@ -4126,7 +4361,9 @@ unsafe fn spawn_in(
             arc_runtime: false,
             arc_hooks: true,
             cancel: AtomicBool::new(false),
+            #[cfg(feature = "record")]
             replay: false,
+            #[cfg(feature = "record")]
             latest_pair: false,
             polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
@@ -4141,12 +4378,13 @@ unsafe fn spawn_in(
             waiting_on: ptr::null_mut(),
             wait_previous: ptr::null_mut(),
             wait_next: ptr::null_mut(),
-            timer_next: ptr::null_mut(),
-            timer_deadline: None,
+            timer: Timer::default(),
             operation: ptr::null_mut(),
             all: (*run).all,
+            all_previous: ptr::null_mut(),
             state: State::Ready,
             id,
+            #[cfg(feature = "record")]
             group: group.map(|group| group.child()),
             stack: stack.take(),
             sp: ptr::null_mut(),
@@ -4162,14 +4400,21 @@ unsafe fn spawn_in(
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
-        (*task).arc_runtime =
-            (*run).pool.is_some() && ((*task).group.is_some() || (*run).arc_observed());
-        if let Some(group) = (*task).group {
-            (*task).replay = group.replaying();
-            (*task).arc_runtime |= (*task).replay;
-            if let Some(members) = (*run).tapes.membership(group) {
-                *members += 1;
+        #[cfg(feature = "record")]
+        {
+            (*task).arc_runtime =
+                (*run).pool.is_some() && ((*task).group.is_some() || (*run).arc_observed());
+            if let Some(group) = (*task).group {
+                (*task).replay = group.replaying();
+                (*task).arc_runtime |= (*task).replay;
+                if let Some(members) = (*run).tapes.membership(group) {
+                    *members += 1;
+                }
             }
+        }
+        #[cfg(not(feature = "record"))]
+        {
+            (*task).arc_runtime = (*run).pool.is_some() && (*run).arc_observed();
         }
         (*task).arc_hooks = (*run).arc_hooks(&*task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
@@ -4184,6 +4429,9 @@ unsafe fn spawn_in(
             .as_ref()
             .unwrap()
             .prepare(start, task.cast(), ptr::null_mut());
+        if !(*task).all.is_null() {
+            (*(*task).all).all_previous = task;
+        }
         (*run).all = task;
         #[cfg(feature = "testing")]
         if (*run).measure {
@@ -4238,36 +4486,21 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 #[allow(clippy::too_many_arguments)]
 unsafe fn spawn_committed(
     context: *mut Context,
-    tasks: u64,
+    _tasks: u64,
     bytes: u64,
     input: *mut u8,
     body: Body,
     layout: TaskLayout,
-    site: u64,
+    _site: u64,
     stack: &mut Option<Stack>,
 ) -> Spawn {
     // SAFETY: the caller passes its generated operands through unchanged.
     unsafe {
         let _commit = crate::sequencer::enter();
-        let group = if tasks & crate::host_file::DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).registry.grant_group(tasks)
-        } else if tasks == 0 && (*context).run.is_null() {
-            current_group()
-        } else {
-            None
-        };
-        if let Some(group) = group
-            && let Err(f) = group.check()
-        {
-            crate::tape::refuse(f);
-            causes::record(&mut *context, Cause::new(causes::TAPE, site));
-            return Spawn {
-                task: ptr::null_mut(),
-                available: 0,
-                status: 1,
-            };
-        }
-        let spawned = spawn_in(stack, context, bytes, input, body, layout, group);
+        #[cfg(feature = "record")]
+        let spawned = spawn_in(stack, context, bytes, input, body, layout, current_group());
+        #[cfg(not(feature = "record"))]
+        let spawned = spawn_in(stack, context, bytes, input, body, layout);
         Spawn {
             task: spawned.task,
             available: spawned.available,
@@ -4283,6 +4516,7 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
         let _commit = before_commit();
+        #[cfg(feature = "record")]
         if let Some(group) = (*task).group
             && !current_group().is_some_and(|source| source.same(group))
         {
@@ -4311,12 +4545,18 @@ unsafe fn retire(task: *mut Task) {
     // SAFETY: task ended, is not queued, and its sole handle is being consumed.
     unsafe {
         let run = (*task).run;
+        #[cfg(feature = "record")]
         (*run).outside_cancels.retain(|&t| t != task);
-        let mut link = &raw mut (*run).all;
-        while *link != task {
-            link = &raw mut (**link).all;
+        let (previous, next) = ((*task).all_previous, (*task).all);
+        if previous.is_null() {
+            debug_assert!((*run).all == task);
+            (*run).all = next;
+        } else {
+            (*previous).all = next;
         }
-        *link = (*task).all;
+        if !next.is_null() {
+            (*next).all_previous = previous;
+        }
         let mut owner = Box::from_raw(task);
         // Ended context returns unused primary before record/result refunds.
         drop(owner.owned_context.take());
@@ -4587,11 +4827,12 @@ mod ready_routing_laws {
                 idle: ptr::null_mut(),
                 head: ptr::null_mut(),
                 tail: ptr::null_mut(),
-                timers: ptr::null_mut(),
+                timers: TimerHeap::default(),
                 all: ptr::null_mut(),
                 next: 1,
                 provider: SchedulerProvider::default(),
                 script: None,
+                #[cfg(feature = "record")]
                 script_groups: Vec::new(),
                 readies: Readies::new(),
                 ready_tokens: Vec::new(),
@@ -4599,7 +4840,9 @@ mod ready_routing_laws {
                 #[cfg(feature = "testing")]
                 measure: false,
                 cancels: Vec::new(),
+                #[cfg(feature = "record")]
                 outside_cancels: Vec::new(),
+                #[cfg(feature = "record")]
                 tapes: Tapes::default(),
                 net: ptr::null_mut(),
                 model: None,
@@ -4629,7 +4872,9 @@ mod ready_routing_laws {
                         arc_runtime: false,
                         arc_hooks: true,
                         cancel: AtomicBool::new(false),
+                        #[cfg(feature = "record")]
                         replay: false,
+                        #[cfg(feature = "record")]
                         latest_pair: false,
                         polls_left: POLLS_PER_TURN,
                         context: &mut context,
@@ -4644,12 +4889,13 @@ mod ready_routing_laws {
                         waiting_on: ptr::null_mut(),
                         wait_previous: ptr::null_mut(),
                         wait_next: ptr::null_mut(),
-                        timer_next: ptr::null_mut(),
-                        timer_deadline: None,
+                        timer: Timer::default(),
                         operation: &mut operations[i],
                         all: ptr::null_mut(),
+                        all_previous: ptr::null_mut(),
                         state: State::Provider,
                         id: i as u64,
+                        #[cfg(feature = "record")]
                         group: None,
                         stack: Some(Stack::new()),
                         sp: ptr::null_mut(),

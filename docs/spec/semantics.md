@@ -49,7 +49,7 @@ perform the IEEE 754 quiet comparisons described in [core](core.md#contracts-the
 surrogates and values above `0x10FFFF`) convert it. `String` is an opaque own type over
 UTF-8 storage that is always valid; `Text` is the same text as region data, made from a `String` by `text.copy_in`; `Bytes` is `List[u8]`.
 `string.from_utf8` validates a `Bytes` into a `String`, `string.into_bytes` gives its
-owned storage back, copying a static literal into new storage and so returning `Capacity`
+owned storage back, copying a static literal into new storage, which admits
 ([core](core.md)), and `string.as_bytes` views it as bytes. `text.as_string(t)` views a `Text` as a `String`
 anchored to `t`, with no copy, so every reading operation on strings, `==` and `<` against a
 `String` included, reads a `Text`. Length is `byte_len`; scalars are
@@ -67,9 +67,10 @@ strings.
 `List[T]` is own and growable, with the capacity-based layout of
 [MEM-13](memory.md#mem-13-own-layout). `xs[i]` and `list.get(xs, i)` read through a view and
 fail with `Bounds`, or return `None`, when `i` is out of range. `list.push` and the other
-growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow as
-[MEM-24](budgets.md#mem-24-logical-charges) says; `list.capacity` reads the capacity and
-`list.reserve(mut xs, n)` grows it to at least `len + n`. Removing elements never
+growing operations grow as [MEM-24](budgets.md#mem-24-logical-charges) says, and a refused
+growth raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)); `list.capacity` reads the
+capacity and `list.reserve(mut xs, n)` grows it to at least `len + n`, as
+`list.try_reserve` does with the refusal as a value. Removing elements never
 allocates or shrinks. An own `List`'s length is never more than its capacity: growing
 operations admit capacity before they add elements, removing elements only shortens it,
 and a host read fills only spare capacity ([core](core.md#contracts-the-signatures-do-not-state)). A view of a
@@ -78,7 +79,7 @@ list reports that list's length and capacity, and a slice's capacity is its leng
 static storage is 0, below its length ([core](core.md#contracts-the-signatures-do-not-state)). A `List[T]` whose `T` has size 0 ([core](core.md#built-in-types)) has
 no element storage: its capacity is `2^64 − 1` from creation, and creating, reserving and
 growing it admit nothing; only its length is bounded, so a `reserve` past `2^64 − 1`
-elements and a push at that length return `Capacity` with `requested` `2^64 − 1`
+elements and a push at that length are refused with `requested` `2^64 − 1`
 ([MEM-22](budgets.md#mem-22-the-capacity-value)). A view
 returned by `list.get` or indexing is anchored to the list
 ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)) and freezes it until the
@@ -95,8 +96,7 @@ fn units() -> u64 { let xs: List[()] = list.new(); list.capacity(xs) }   // 2^64
 amortised expected constant time apart from hashing and comparing keys, which is linear in
 a key's size, and from cleaning what they drop; removal keeps the order of the remaining entries.
 Inserting an existing key installs the new value in place, keeps the stored key, cleans
-the old value and then drops the incoming key; it admits nothing, so it never returns
-`Capacity`. `map.get(m, k)` returns `Option[View[V]] in m`
+the old value and then drops the incoming key; it admits nothing, so it is never refused. `map.get(m, k)` returns `Option[View[V]] in m`
 ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). Each `key`
 type has exactly one equality, the structural one of SEM-7, and one hash, fixed by the type;
 no program supplies or replaces them in v1 ([reserved](reserved.md), R11). The hash is keyed
@@ -112,9 +112,9 @@ Views from `map.get` are anchored to the map and freeze it as list views do.
 fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) => v, None => 0 } }
 ```
 ```hirsel
-fn tally(mut m: Map[String, u64], take w: String) -> Result[(), (Capacity, (String, u64))] {
+fn tally(mut m: Map[String, u64], take w: String) {
   match map.update(mut m, w, fn(mut n: u64) { n += 1 }) {
-    Some(()) => Ok(()),
+    Some(()) => (),
     None => map.insert(mut m, take w, 1),
   }
 }
@@ -170,8 +170,8 @@ fn again(take m: Map[String, u64]) -> u64 {
 fn letters() { for _ in 'a'..='c' {} }                    // refused: SEM-6, char is not an integer type
 ```
 ```hirsel
-fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
-  for x in xs { list.push(mut xs, x)? }; Ok(())            // refused: OWN-10, xs frozen by the loop
+fn grow(mut xs: List[u64]) {
+  for x in xs { list.push(mut xs, x) }                     // refused: OWN-10, xs frozen by the loop
 }
 ```
 
@@ -209,16 +209,19 @@ identically on every engine, build and optimisation level. Its **observables** a
 - its steps and slice ends ([MEM-30](budgets.md#mem-30-step-bounds));
 - its failures: each cause, its site and its place in the cause chain
   ([FAIL-2](failure.md#fail-2-causes), [FAIL-10](failure.md#fail-10-cause-chain));
-- its charges as limits see them: which operations admit, how much, which return `Capacity`
-  and with what value, and which refunds each admission sees
+- its charges as limits see them: which operations admit, how much, which are refused
+  and with what `Capacity` value, and which refunds each admission sees
   ([MEM-21](budgets.md#mem-21-admission) to [MEM-24](budgets.md#mem-24-logical-charges),
   [MEM-28](budgets.md#mem-28-optimisation-keeps-charges));
 - its finalizer runs and their order ([FAIL-8](failure.md#fail-8-exit-edge-cleanup),
   [FAIL-11](failure.md#fail-11-resources));
 - its events and their order ([CONC-10](tasks.md#conc-10-event-order));
 - its host effects: each provider operation's issue, its arguments and its order
-  ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point));
-- what its tapes record ([CAP-9](capabilities.md#cap-9-tapes)).
+  ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point)).
+
+A build with recording machinery is one of these builds: compiling recording in, and
+switching it on, changes none of the observables
+([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)).
 
 **As if.** An engine may do anything whose effects on the observables are those this
 specification gives. Anything not listed is the engine's choice: layout, addresses (of
@@ -265,8 +268,21 @@ admits nothing, and a call at a type without the bound is refused at that call
 ([LANG-12](language.md#lang-12-generics)), so generic code that needs a codec writes `T:
 codec`. Its `T` is fixed as every type argument is, by the expected type or an earlier
 argument (`let c: codec.Codec[u8] = codec.of()`); `of[T]` names an instance in prose, never a
-call. Each call resolves at its instance's `T`: to the built-in codec of a scalar, `()` or
-`String`, and to the codec generated from the declaration of a nominal type. A nominal type's codec is generated from its declaration as ordinary checked code,
+call. Each call resolves at its instance's `T`: to the built-in codec of a scalar, `()`,
+`String`, `Never` or a tuple, and to the codec generated from the declaration of a nominal
+type.
+
+**Tuples and `Never`.** A tuple's codec is componentwise: it encodes its components in
+order, each with its own codec, decodes them in the same order, and its schema is the
+sequence of theirs, so a tuple is `codec` exactly when each component is, and `(u8, String)`
+and `(String, u8)` are different schemas. `Never` is `codec` with zero valid encodings:
+no bytes decode to a `Never`, and an item that would carry one is `Invalid` at the place it
+begins. Its schema is its own, equal to no other type's, `()` included. So `Result[T,
+Never]` is encoded as every `Result` is: an `Ok` is tag 0 and its `T`, unchanged, and tag 1,
+which would carry the `Never` of an `Error`, decodes as `Invalid(i)`, `i` being where the
+tag begins. Its schema is `Result` over T's and Never's, distinct from that of `Result[T,
+E]` for every other `E`, so bytes written as one never resolve as the other: a changed error
+type is a schema change, as a changed field type is. A nominal type's codec is generated from its declaration as ordinary checked code,
 which visits its fields in declaration order and its variants in declared order. The byte
 format, the framing of a value among others and the encoding of a schema are the library's;
 this rule fixes what every codec does, and how scalars are encoded: integers at their
@@ -288,8 +304,11 @@ never reads a default ([LANG-9](language.md#lang-9-nominal-types)); only decodin
 after its bounds: `pub opaque type Email: codec via String (to: text, from: parse) { text:
 String }`. So only the declaring module can write it, as only it can declare the bound.
 `R`, the type after `via`, must be `codec`, checked as a field's type is against the
-declaration's bounds ([OWN-4](ownership.md#own-4-bounds)); the fields are then not encoded
-and need not be `codec`, though the kinds that never have the bound are still refused.
+declaration's bounds ([OWN-4](ownership.md#own-4-bounds)). A `via` codec encodes only `R`.
+The actual fields need no codec of their own. OWN-4 still governs which types can
+declare `codec` and requires the actual fields to be `inert` (an empty holds set,
+[OWN-2](ownership.md#own-2-type-summaries)), so a decoded value holds no capability or
+other authority.
 `to` and `from` name functions of the declaring module: `to` takes the value as a view and
 returns a view of an `R` it holds, `fn text(e: Email) -> View[String] in e`, and `from` is
 `fn(take R) -> Result[T, E]` for some `E`. Encoding writes `to`'s `R` with R's codec, so a
@@ -338,14 +357,14 @@ writer's tag, and each field the writer lacks or removed has a default. A schema
 tombstones, so data whose writer removed a variant resolves against a reader that still has
 it.
 
-**Decoding.** A decode returns `Result[Result[T, DecodeError], Capacity]`, where
+**Decoding.** A decode returns `Result[T, DecodeError]`, where
 `DecodeError = Truncated(u64) | Invalid(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) |
 Schema(u64) | Value(u64)`. Each `u64` is a byte offset, into the writer's schema for `Schema` and into
 the decoded bytes otherwise:
 
 - `Truncated(i)`: the item that starts at `i` runs past the end of the bytes;
 - `Invalid(i)`: the item at `i` encodes no value of its type: a variant tag or `bool` past
-  its values, a float NaN other than SEM-2's canonical one, or a `u32` that is not a
+  its values, a tag whose variant carries a `Never`, a float NaN other than SEM-2's canonical one, or a `u32` that is not a
   Unicode scalar, so not a `char` (`char.from_u32`);
 - `Utf8(i)`: a `String`'s bytes stop being UTF-8 at `i`, the first byte not part of a
   scalar;
@@ -365,14 +384,15 @@ returns and inverts it; the checker cannot verify that, so it is the owner's obl
 Every decode, whatever its bytes:
 
 - never fails ([FAIL-1](failure.md#fail-1-errors-failures-and-run-stops)) unless an owner's
-  `from` does: every malformed input is a `DecodeError`;
+  `from` does or an admission is refused: every malformed input is a `DecodeError`;
 - has no fixed limit on nesting: it keeps the values still being built on a work stack in
   storage it admits from the current limit ([MEM-21](budgets.md#mem-21-admission)), never
   on the call stack, so depth costs storage and never exhausts the stack
-  ([FAIL-15](failure.md#fail-15-run-stops)), and the one resource failure is `Capacity`;
-- leaves nothing behind on an error: before it returns either `Error`, it has released and
-  refunded every block it admitted, its work stack included, and the bytes, which it only
-  views, are unchanged;
+  ([FAIL-15](failure.md#fail-15-run-stops)), and the one resource failure is `Capacity`
+  ([MEM-21](budgets.md#mem-21-admission));
+- leaves nothing behind on an error or a refusal: before it returns an `Error` or raises
+  `Capacity`, it has released and refunded every block it admitted, its work stack included,
+  and the bytes, which it only views, are unchanged;
 - builds fresh ownership: the value shares no storage with the bytes and, as no codec type
   holds one, no capability, resource, view or region reference.
 
@@ -448,11 +468,11 @@ depends on the engine, the build or the CPU.
   `u64` whose bit k is the top bit of lane k; the bits from `n` upward are 0.
 - **Loads and stores.** `list.lanes(b, at)`, with `b: Bytes`, reads the `n` bytes of `b`
   from `at` as a `Simd[u8, n]`, `n` taken from the expected type, and fails with `Bounds`
-  unless `at + n ≤ len`, checked once for the whole read. `list.put_lanes(mut b, v, k) ->
-  Result[(), Capacity]` appends lanes 0 to `k − 1` of a `Simd[u8, n]`. It fails with
+  unless `at + n ≤ len`, checked once for the whole read. `list.put_lanes(mut b, v, k)`
+  appends lanes 0 to `k − 1` of a `Simd[u8, n]`. It fails with
   `Bounds` when `k > n`, before changing anything; otherwise it grows `b` as
-  [MEM-24](budgets.md#mem-24-logical-charges) says with `needed` = `len + k`, and on
-  `Capacity` leaves `b` unchanged.
+  [MEM-24](budgets.md#mem-24-logical-charges) says with `needed` = `len + k`, and a refused
+  growth leaves `b` unchanged.
 
 Each `simd` and `list` operation is a core call and takes one step, and the operators take
 none ([MEM-30](budgets.md#mem-30-step-bounds)).
@@ -475,8 +495,8 @@ with the operating system's state for them enabled. It builds level k's version 
 exactly those features. The launcher and the code generator use the same level table.
 
 A version has no meaning of its own. By [SEM-8](#sem-8-determinism) every version gives the
-same values, failures and sites, steps and charges, and a replay on a CPU with other levels
-reproduces the run. Nothing a program can observe names a version, and every version has
+same values, failures and sites, steps and charges, so a run on a CPU with other levels
+behaves the same. Nothing a program can observe names a version, and every version has
 the function's revision ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ```hirsel unbuilt

@@ -51,7 +51,7 @@ def position(source, section, text):
     return source.count("\n", 0, start) + 1, start - source.rfind("\n", 0, start)
 
 
-def run(compiler, runtime, evaluator):
+def run(compiler, runtime, recording_runtime, evaluator):
     law = ROOT / "core/std/tests/regex_charges.hirsel"
     case = Contract(law, 0, "rx3_events()", "true", False, test_of="regex")
     with tempfile.TemporaryDirectory(prefix="hirsel-regex-replay-") as tmp:
@@ -67,13 +67,23 @@ def run(compiler, runtime, evaluator):
         source = body.read_text() + law.read_text() + bounded_search + WRAPPER
         body.write_text(source)
 
-        def invoke(command, app, backend, *extra):
+        def invoke(command, app, backend, *extra, recording=False):
+            archive = recording_runtime if recording else runtime
             return subprocess.run([
                 compiler, command, app, "--libraries", libraries, "--source-core",
-                "--runtime", runtime, "--store", work / "store", "--limit", "207000000000",
+                "--runtime", archive, "--store", work / "store", "--limit", "207000000000",
                 "--debug-lines", "on", "--backend", backend, *extra,
                 "-o", app / (command + "-" + backend),
             ], cwd=work, capture_output=True, text=True)
+
+        def runs_and_replays(app, *grants):
+            for backend, other in (("cranelift", "llvm"), ("llvm", "cranelift")):
+                tape = work / f"{app.name}-{backend}.tape"
+                live = invoke("run", app, backend, *grants)
+                recorded = invoke("run", app, backend, *grants, "--record", tape, recording=True)
+                replay = invoke("replay", app, other, "--tape", tape, recording=True)
+                assert replay.returncode == 0 and not replay.stdout, replay
+                yield live, recorded
 
         def application(name, source):
             app = work / name
@@ -113,13 +123,9 @@ def run(compiler, runtime, evaluator):
     std.regex.rx5_main(out)
 }
 """)
-            tape = work / "caught.tape"
-            for backend in ("cranelift", "llvm"):
-                extra = ["--record", tape] if backend == "cranelift" else []
-                result = invoke("run", app, backend, "--grant", "Stdout", *extra)
-                assert result.returncode == 0 and result.stdout == f"RX5 threshold {steps} {capture_steps}\n", result
-                result = invoke("replay", app, backend, "--tape", tape)
-                assert result.returncode == 0, result
+            for live, recorded in runs_and_replays(app, "--grant", "Stdout"):
+                for result in (live, recorded):
+                    assert result.returncode == 0 and result.stdout == f"RX5 threshold {steps} {capture_steps}\n", result
             thresholds = [(steps >> (16 * i)) & 65535 for i in range(4)]
             print(f"RX3 three exact refusals. RX5 caught thresholds {thresholds} and fixed capture "
                   f"{capture_steps} on all engines and replay.", flush=True)
@@ -143,12 +149,10 @@ def run(compiler, runtime, evaluator):
                     assert report["outcome"] == {"kind": "failed", "causes": [kind for kind, *_ in expected]}, report
                     sites = [tuple(site[1:]) if Path(site[0]).name == body.name else None for site in report["cause_sites"]]
                     assert sites == [cause[1:] for cause in expected], (expected, report)
-                    tape = work / (app.name + ".tape")
-                    for backend in ("cranelift", "llvm"):
-                        extra = ["--record", tape] if backend == "cranelift" else []
-                        check_failure(invoke("run", app, backend, *extra), body.name, expected)
-                        check_failure(invoke("replay", app, backend, "--tape", tape), body.name, expected)
-            print("RX5 uncaught: eight cases with exact evaluator, Cranelift, LLVM and replay sites.")
+                    for live, recorded in runs_and_replays(app):
+                        check_failure(live, body.name, expected)
+                        check_failure(recorded, body.name, expected)
+            print("RX5 uncaught: eight cases with exact evaluator and native sites and sealed replays.")
 
 
 def evaluate(engine, config, entry, **options):
@@ -171,10 +175,11 @@ def check_failure(result, module, expected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("compiler", "runtime", "evaluator"):
+    for name in ("compiler", "runtime", "recording-runtime", "evaluator"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args()
-    run(args.compiler.resolve(), args.runtime.resolve(), args.evaluator.resolve())
+    run(args.compiler.resolve(), args.runtime.resolve(), args.recording_runtime.resolve(),
+        args.evaluator.resolve())
 
 
 if __name__ == "__main__":

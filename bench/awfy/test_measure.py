@@ -127,10 +127,10 @@ class BoardCompletion(unittest.TestCase):
                                 samples["rust"]["status"] = sample_status
                             if goal in suites:
                                 suite = suites[goal]
-                                mode = name.split()[-1] if suite == "compile" else "certified"
+                                mode = name.split()[-1] if suite == "compile" else "release"
                                 board.report["instruction_receipt"]["rows"].append({
                                     "key": f"{suite}/{name}", "suite": suite, "mode": mode,
-                                    "certified": True, "flags": ["--release"], "argv": ["./sample"],
+                                    "flags": ["--release"], "argv": ["./sample"],
                                     "affinity": [10], "compiler_sha256": "a" * 64,
                                     "runtime_archive_sha256": "b" * 64, "fixture_sha256": "c" * 64,
                                     "std_sha256": "d" * 64, "workload_sources_sha256": "e" * 64,
@@ -138,7 +138,7 @@ class BoardCompletion(unittest.TestCase):
                                     "marker": "verified\n", "stdout": "verified\n",
                                     "sample": samples["hirsel"],
                                 })
-                            board.row(goal, name, True, samples, fields)
+                            board.row(goal, name, samples, fields)
                     self.assertEqual(board.finish(), exit_code)
                     report = json.loads((out / "board.json").read_text())
                     self.assertEqual(report["complete"], exit_code == 0)
@@ -216,7 +216,7 @@ class PairedSampling(unittest.TestCase):
     def test_cycle_noise_does_not_override_instruction_regression(self):
         key = "awfy/List"
         base = {
-            "key": key, "suite": "awfy", "mode": "certified", "certified": True,
+            "key": key, "suite": "awfy", "mode": "release",
             "flags": ["--release"], "argv": ["./sample", "List"], "marker": "verified\n",
             "compiler_sha256": "a" * 64, "runtime_archive_sha256": "b" * 64,
             "fixture_sha256": "c" * 64, "image_sha256": "d" * 64, "std_sha256": "e" * 64,

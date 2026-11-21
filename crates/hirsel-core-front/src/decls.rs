@@ -163,7 +163,6 @@ pub enum Role {
     Sender,
     Receiver,
     HostFile,
-    Tape,
     FixedSpan,
     SeqSpan,
     IndexedSpan,
@@ -207,7 +206,6 @@ impl Role {
             "Receiver" => Role::Receiver,
             "HostFile" => Role::HostFile,
             "Socket" | "ReadHalf" | "WriteHalf" | "Listener" => Role::Socket,
-            "Tape" => Role::Tape,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,
             "IndexedSpan" => Role::IndexedSpan,
@@ -261,7 +259,6 @@ impl Role {
             | Role::Receiver
             | Role::Socket
             | Role::HostFile
-            | Role::Tape
             | Role::Latest
             | Role::Flow => Kind::Resource,
         }
@@ -2199,7 +2196,6 @@ impl Program<'_> {
                     | Role::Receiver
                     | Role::Socket
                     | Role::HostFile
-                    | Role::Tape
                     | Role::Latest
                     | Role::Flow,
                 ) => H_RESOURCE,
@@ -2283,6 +2279,8 @@ impl Program<'_> {
             }
             let declared = decl.declared & !PLAIN;
             let params: Vec<u16> = decl.generics.iter().map(|g| g.bounds | declared).collect();
+            let via = decl.codec().is_some_and(|c| c.via.is_some());
+            let field_bounds = if via { declared & !CODEC } else { declared };
             let mut out = vec![];
             let forbidden = if decl.repr != Repr::Own { SHAREABLE } else { 0 }
                 | if matches!(decl.repr, Repr::Region | Repr::Scoped) {
@@ -2354,12 +2352,23 @@ impl Program<'_> {
                         "a stored region field names its region",
                     ));
                 }
+                if declared & CODEC != 0
+                    && via
+                    && !holds_nothing(&self.decls, &self.types, f.ty, &params)
+                {
+                    out.push(
+                        refusal(
+                            "OWN-4",
+                            f.site,
+                            format!("field `{}` of a codec type must hold nothing", f.name),
+                        )
+                        .with_comparison(
+                            canonical(&self.decls, &self.types, f.ty),
+                            "empty holds set",
+                        ),
+                    );
+                }
                 let have = has_bounds(&self.decls, &self.types, f.ty, &params);
-                let field_bounds = if decl.codec().is_some_and(|c| c.via.is_some()) {
-                    declared & !CODEC
-                } else {
-                    declared
-                };
                 let missing = field_bounds & !have;
                 if missing != 0 {
                     let b = bound_names(missing);
@@ -2511,6 +2520,21 @@ pub(crate) fn holds_components(
         }
         _ => (0, 0),
     }
+}
+
+fn holds_nothing(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
+    let (fixed, mut parameters) = holds_components(decls, t, ty);
+    if fixed != 0 {
+        return false;
+    }
+    while parameters != 0 {
+        let i = parameters.trailing_zeros() as usize;
+        if param_holds(params.get(i).copied().unwrap_or(0)) != 0 {
+            return false;
+        }
+        parameters &= parameters - 1;
+    }
+    true
 }
 
 fn walk_holds(
@@ -2858,8 +2882,7 @@ fn bounds_inner<const ENCODING: bool>(
     plain_extra
         | match row {
             TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED | CODEC,
-            TyKind::Never => all,
-            TyKind::Unit => all | CODEC,
+            TyKind::Never | TyKind::Unit => all | CODEC,
             TyKind::Scalar(Scalar::F32 | Scalar::F64) => {
                 PLAIN | SHAREABLE | SEND | FLOAT | ENCODED | CODEC
             }
@@ -2882,11 +2905,19 @@ fn bounds_inner<const ENCODING: bool>(
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
                 let decl = &decls[d.index()];
-                nominal_bounds(
+                let mut available = nominal_bounds(
                     decl,
                     || meet(args),
                     |i| bounds_inner::<ENCODING>(decls, t, args[i], params),
-                ) | encoded()
+                );
+                // Wire parameters and the parameters held by the value can differ with via.
+                if available & CODEC != 0
+                    && decl.codec().is_some()
+                    && !holds_nothing(decls, t, ty, params)
+                {
+                    available &= !CODEC;
+                }
+                available | encoded()
             }
         }
 }
@@ -2905,14 +2936,7 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
-        Some(
-            Role::Sender
-            | Role::Receiver
-            | Role::Socket
-            | Role::HostFile
-            | Role::Tape
-            | Role::Latest,
-        ) => SEND,
+        Some(Role::Sender | Role::Receiver | Role::Socket | Role::HostFile | Role::Latest) => SEND,
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
         Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
         Some(_) => 0,

@@ -195,7 +195,6 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Handle(Handle::Causes) => "causes".into(),
         FieldTy::Handle(Handle::HostFile) => "hostfile".into(),
         FieldTy::Handle(Handle::Socket) => "socket".into(),
-        FieldTy::Handle(Handle::Tape) => "tape".into(),
         FieldTy::Handle(Handle::Flow) => "flow".into(),
         FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
         FieldTy::Text => "text".into(),
@@ -287,13 +286,13 @@ fn rt(op: RtOp) -> String {
         RtOp::DestId => "rt.dest_id".into(),
         RtOp::CompareBytes => "rt.compare_bytes".into(),
         RtOp::HashBytes => "rt.hash_bytes".into(),
+        RtOp::Xxh3Short => "rt.xxh3_short".into(),
+        RtOp::Xxh3Stripes => "rt.xxh3_stripes".into(),
+        RtOp::Sha1Blocks => "rt.sha1_blocks".into(),
+        RtOp::Sha256Blocks => "rt.sha256_blocks".into(),
         RtOp::CauseNext => "rt.cause_next".into(),
         RtOp::CauseValue => "rt.cause_value".into(),
         RtOp::ArgsLen => "rt.args_len".into(),
-        RtOp::TapeOpen => "rt.tape_open".into(),
-        RtOp::TapeEnd => "rt.tape_end".into(),
-        RtOp::TapeGrant => "rt.tape_grant".into(),
-        RtOp::TapeAcross => "rt.tape_across".into(),
         RtOp::ArgsGet => "rt.args_get".into(),
         RtOp::LaunchWord => "rt.launch_word".into(),
         RtOp::DescribeEmit => "rt.describe_emit".into(),
@@ -770,6 +769,7 @@ impl Printer {
                         v(bytes)
                     ),
                     Inst::LimitExit => "limit_exit".into(),
+                    Inst::BuiltinUse { definition } => format!("builtin_use {definition}"),
                     Inst::Step { fail: f } => format!("step{}", fail(*f)),
                     Inst::Drop {
                         address,
@@ -1105,7 +1105,6 @@ impl<'a> Line<'a> {
                     "causes" => FieldTy::Handle(Handle::Causes),
                     "hostfile" => FieldTy::Handle(Handle::HostFile),
                     "socket" => FieldTy::Handle(Handle::Socket),
-                    "tape" => FieldTy::Handle(Handle::Tape),
                     "flow" => FieldTy::Handle(Handle::Flow),
                     "text" => FieldTy::Text,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
@@ -1452,6 +1451,13 @@ impl BodyParser {
             Some("step") => {
                 l.next()?;
                 return Ok(Inst::Step { fail: l.fail()? });
+            }
+            Some("builtin_use") => {
+                l.next()?;
+                let definition = DefPath::from_full(l.next()?).ok_or("bad builtin definition")?;
+                return Ok(Inst::BuiltinUse {
+                    definition: Box::new(definition),
+                });
             }
             Some("limit_exit") => {
                 l.next()?;
@@ -1861,13 +1867,13 @@ impl BodyParser {
                 "dest_id" => RtOp::DestId,
                 "compare_bytes" => RtOp::CompareBytes,
                 "hash_bytes" => RtOp::HashBytes,
+                "xxh3_short" => RtOp::Xxh3Short,
+                "xxh3_stripes" => RtOp::Xxh3Stripes,
+                "sha1_blocks" => RtOp::Sha1Blocks,
+                "sha256_blocks" => RtOp::Sha256Blocks,
                 "cause_next" => RtOp::CauseNext,
                 "cause_value" => RtOp::CauseValue,
                 "args_len" => RtOp::ArgsLen,
-                "tape_open" => RtOp::TapeOpen,
-                "tape_end" => RtOp::TapeEnd,
-                "tape_grant" => RtOp::TapeGrant,
-                "tape_across" => RtOp::TapeAcross,
                 "args_get" => RtOp::ArgsGet,
                 "launch_word" => RtOp::LaunchWord,
                 "describe_emit" => RtOp::DescribeEmit,

@@ -100,8 +100,7 @@ fn ensure_source(mut book: Book, key: Bytes, now: u64) -> bool {
     let c = book.config
     if map.len(book.sources) >= c.buckets_max { retire(mut book, now) }
     if map.len(book.sources) >= c.buckets_max { return false }
-    let made: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(c.sessions)
-    let (to, returned) = match take made { Ok(take pair) => take pair, Error(_) => return false }
+    let (to, returned) = match (channel.new(c.sessions) : Result[(Sender[()], Receiver[()]), Capacity]) { Ok(take pair) => take pair, Error(_) => return false }
     let allocated: Result[List[u64], Capacity] = list.with_capacity(c.mint_burst)
     let mints = match take allocated { Ok(take times) => take times, Error(_) => return false }
     let source = Source(mints: take mints, mint_head: 0u64, mint_count: 0u64, free: c.sessions, returned: take returned, to: take to)
@@ -239,8 +238,7 @@ pub fn start(tasks: Tasks, clock: Clock, random: Random, config: Config, n_polic
 }
 
 fn decide(i: Ingress, take kind: Kind) -> Answer waits {
-    let made: Result[(Sender[Answer], Receiver[Answer]), Capacity] = channel.new(1u64)
-    let (reply, from) = match take made { Ok(take pair) => take pair, Error(_) => return RejectedPolicy }
+    let (reply, from) = match (channel.new(1u64) : Result[(Sender[Answer], Receiver[Answer]), Capacity]) { Ok(take pair) => take pair, Error(_) => return RejectedPolicy }
     if let Error(_) = channel.try_send(i.to, Ask(kind: take kind, reply: take reply)) { return RejectedPolicy }
     match channel.receive(from) { Ok(take a) => take a, Error(_) => RejectedPolicy }
 }

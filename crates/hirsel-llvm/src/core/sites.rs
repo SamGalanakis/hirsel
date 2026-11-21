@@ -51,23 +51,6 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    /// The address of the entry's code revision, `hirsel_code_revision`, which
-    /// the driver's entry object defines (REPLAY-SPEC v2.3 R10). Only
-    /// `tape.open` reads it, so a program that opens no tape never references it.
-    pub(super) fn code_revision(&mut self) -> Value {
-        self.items.global(Global {
-            name: "hirsel_code_revision".into(),
-            linkage: Linkage::External,
-            constant: true,
-            externally_initialized: false,
-            ty: Type::I8,
-            init: None,
-            align: 1,
-            absolute_symbol: false,
-        });
-        Value::global("hirsel_code_revision")
-    }
-
     fn absolute_symbol(&mut self, name: String) {
         self.items.global(Global {
             name: name.into(),
@@ -171,6 +154,7 @@ pub(super) fn debug_plan(
     module: &Module,
     function_symbols: &[String],
     versioned: Option<&[bool]>,
+    step_dispatch: &[Option<FuncId>],
     failures: &failure::Failures,
     next: &mut usize,
     sink: &mut dyn Sink,
@@ -243,10 +227,15 @@ pub(super) fn debug_plan(
             ty: signature,
             unit,
         };
-        let linkage = if failures.may_fail[i] {
-            base.to_owned()
+        let body_base = if step_dispatch[i].is_some() {
+            super::step_free::checked(base)
         } else {
-            format!("{base}.infallible")
+            base.to_owned()
+        };
+        let linkage = if failures.may_fail[i] {
+            body_base
+        } else {
+            format!("{body_base}.infallible")
         };
         let scope = node(subprogram(linkage));
         let fallback = node(Metadata::Location {

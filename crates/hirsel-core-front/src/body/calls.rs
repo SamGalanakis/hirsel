@@ -79,6 +79,15 @@ fn slot_push_kind(path: &DefPath) -> Option<slots::SlotPush> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// These shapes give an inner closure its own callable expectation even
+    /// when the enclosing argument still contains a hole elsewhere.
+    pub(super) fn structured_argument_type(&self, ty: TyId) -> bool {
+        matches!(
+            self.t.kind(ty),
+            TyKind::Fn(..) | TyKind::Tuple(_) | TyKind::Array(..)
+        )
+    }
+
     /// LANG-11 step 3 extends the existing literal-operand deferral only to
     /// tuples and arrays whose leaves are all unsuffixed numeric literals.
     /// Mixed aggregates and constructor calls still infer left to right.
@@ -195,9 +204,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         // MEM-4: `emit(take w, x)` writes the literal `x` in place; it is a form.
         if self.is_emit(f) {
+            self.builtin_use(f, n);
             return self.emit_form(n, f, args, want);
         }
         if self.is_put(f) {
+            self.builtin_use(f, n);
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
@@ -369,6 +380,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut slot_push = None;
         let mut map_key_at = None;
         let mut map_insertion = None;
+        let prior_refusals = self.out.refusals.len();
         for (i, &a) in args.iter().enumerate() {
             let a_mode = g.params[i].mode;
             let a = self.step_argument(a, a_mode);
@@ -491,7 +503,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         want.and_then(|w| self.payload_argument(g.result, pt, w))
                     {
                         self.expr_hinted(e, Some(hint))
-                    } else if matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure)
+                    } else if self.structured_argument_type(pt)
+                        || matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure)
                         || self.kind(e) == NodeKind::Path
                             && matches!(self.p.target(self.at, e), Some(Target::Definition(id))
                                 if matches!(self.p.by_definition[id.0 as usize], Some(Def::Fn(_))))
@@ -529,7 +542,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 .result_parts(inferred)
                                 .is_some_and(|(_, ok, _)| self.holder_payload(ok).is_some())
                         {
-                            "a type parameter is determined twice differently; bind the holder with `let` first"
+                            "a type parameter is determined twice differently; ascribe the holder or bind it with a written type first"
                         } else {
                             "a type parameter is determined twice differently"
                         };
@@ -581,16 +594,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
+        // A refused argument could have fixed the type of a deferred literal.
+        let argument_refused = self.out.refusals.len() != prior_refusals;
         for &(i, e) in later.iter() {
             match self.known_rooted(g.params[i].ty, found, roots) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
-                None => {
+                None if !argument_refused => {
                     self.refuse(
                         "LANG-11",
                         e,
                         "a literal argument needs a fixed parameter type; suffix its numbers",
                     );
                 }
+                None => {}
             }
         }
         // Region generics are erased from the instance identity and may remain
@@ -675,17 +691,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.source_step(n);
         let v = if let Some(insertion) = map_insertion {
+            self.builtin_use(f, n);
             self.finish_map_insertion(insertion, map_key_at, f, &[tys[0], tys[1]], vals, result, n)
         } else if let Some(replacement) = replacement {
+            self.builtin_use(f, n);
             self.finish_list_replacement(tys[0], replacement, vals[2], n)
         } else if let Some(prepared) = slot_push
             && let Some(header) = vals[0]
         {
+            self.builtin_use(f, n);
             self.finish_slot_push(prepared, f, tys[0], header, vals[1], result, n)
         } else if let Some((full, to)) = push
             && self.live()
             && let Some(header) = vals[0]
         {
+            self.builtin_use(f, n);
             let direct = vals[1].and_then(|v| self.pointer_address(v)) == Some(to);
             self.list_push(tys[0], header, vals[1], result, n, Some((full, direct)))
         } else if builtin {
@@ -715,7 +735,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn region_argument_path(&self, mut n: NodeId) -> Option<NodeId> {
         loop {
             match self.kind(n) {
-                NodeKind::Group => n = self.kids(n)[0],
+                NodeKind::Group | NodeKind::Ascription => n = self.kids(n)[0],
                 NodeKind::Unary if matches!(self.token_text(n), "take" | "mut") => {
                     n = self.kids(n)[0];
                 }
@@ -964,6 +984,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match self.kind(n) {
             NodeKind::Path | NodeKind::Literal | NodeKind::Unit => true,
             NodeKind::Unary if matches!(self.token_text(n), "mut" | "take") => false,
+            NodeKind::Ascription => self.writes_nothing(self.kids(n)[0]),
             NodeKind::Group
             | NodeKind::Unary
             | NodeKind::Binary
@@ -1502,6 +1523,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
+        self.builtin_use(f, n);
         let g = &self.p.fns[f];
         let codec = is_codec_of(&g.path);
         if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
@@ -1665,6 +1687,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
+        self.builtin_use(f, n);
         let g = &self.p.fns[f];
         if g.path.0.modules == ["core"] && g.path.0.name == "fail" {
             // `fail(msg)` raises with the message it takes (FORM `raise fail`).

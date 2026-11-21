@@ -3,6 +3,8 @@
 pub mod call;
 pub mod cli;
 pub mod cli_tools;
+pub mod code_admission;
+pub mod code_store;
 pub mod describe;
 mod diagnostics;
 mod image;
@@ -28,6 +30,7 @@ mod native_facts;
 mod native_object;
 mod native_sources;
 mod prebuild;
+mod release_manifest;
 pub use prebuild::Prebuilt;
 mod core_inventory;
 mod layers;
@@ -36,13 +39,12 @@ mod reach;
 mod reachability;
 pub mod request;
 mod request_record;
-mod revision;
 mod test_run;
 mod tool_inputs;
 pub use core_inventory::{allowlist, core_declarations, core_inventory};
+pub use native::recipe_build::{AssemblyRecord, Publication};
 pub use native::{
-    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, RunTape, RunTapeMode,
-    grant_kind,
+    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, ReplayPlan, grant_kind,
 };
 pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable};
@@ -398,7 +400,6 @@ pub struct CheckProduct {
     pub snapshot: ContentHash,
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
-    flow_revisions: Option<Arc<BTreeMap<hirsel_core_ir::Identity, ContentHash>>>,
     native_entry: Option<native::EntryBinding>,
     test_entries: BTreeMap<DefPath, Result<native::EntryDecl, String>>,
     headers: Arc<reuse::Headers>,
@@ -418,7 +419,6 @@ impl CheckProduct {
             snapshot: ContentHash::default(),
             image: None,
             library: None,
-            flow_revisions: None,
             native_entry: None,
             test_entries: BTreeMap::new(),
             headers: Arc::default(),

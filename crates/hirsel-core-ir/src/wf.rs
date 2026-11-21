@@ -573,38 +573,6 @@ fn ended(b: &Body) -> R {
     }
 }
 
-/// The blocks control leaves `bi` for: its instructions' failure blocks and its
-/// terminator's targets.
-fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
-    let blk = &b.blocks[bi];
-    let mut out: Vec<BlockId> = blk
-        .insts
-        .get(&b.insts)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|i| i.fail(b))
-        .collect();
-    let edge = |e: &EdgeId| b.edges[e.index()].target;
-    match &b.terminators[bi] {
-        Terminator::Jump(e) => out.push(edge(e)),
-        Terminator::Branch { yes, no, .. } => out.extend([edge(yes), edge(no)]),
-        Terminator::Switch {
-            arms, otherwise, ..
-        } => {
-            out.extend(
-                arms.get(&b.pools.arms)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| edge(&a.edge)),
-            );
-            out.push(edge(otherwise));
-        }
-        Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
-        Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
-    }
-    out
-}
-
 /// Every value and address is defined on every path to each of its uses: an
 /// instruction result or block parameter before a value is read, an `address`
 /// instruction before its address is (crate docs, "Values, slots and addresses").
@@ -1365,6 +1333,11 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(bytes, Ty::Scalar(Scalar::U64))
         }
         Inst::LimitExit => Ok(()),
+        Inst::BuiltinUse { ref definition } => {
+            need(crate::is_versioned_builtin(definition), || {
+                "unknown builtin use".into()
+            })
+        }
         Inst::Step { fail } => c.fail(fail, true),
         Inst::Mark {
             address,

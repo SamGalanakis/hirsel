@@ -23,8 +23,7 @@ pub fn parse_prefix(s: String) -> Option[Prefix] {
     let Some((address, length)) = string.split_once(s, "/") else {
         return None
     }
-    let parsed: Result[u8, ParseError] = int.parse(length)
-    let Ok(bits) = parsed else {
+    let Ok(bits) = (int.parse(length) : Result[u8, ParseError]) else {
         return None
     }
     let Some(ip) = parse_ip(address) else {
@@ -762,10 +761,27 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
     }
 }
 
-/// Serve one request. Static responses close the connection. The source policy
-/// runs after sanitization and before writing 101.
-pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
+/// Serve one request. The raw GET handler runs before the upgrade's source policy.
+/// Raw and static responses close the connection.
+pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
     let request = receive_request(take socket, config, clock, accepted_ns)?
+    let is_get = list.slice(request.input, request.head.method.start, request.head.method.end) == string.as_bytes("GET")
+    if is_get {
+        let response = match raw(list.slice(request.input, request.head.target.start, request.head.target.end)) {
+            Ok(take value) => take value,
+            Error(c) => return Error(Allocation(c)),
+        }
+        if let Some((ready, take body)) = take response {
+            let header = match static_head(ready, "application/json", list.len(string.as_bytes(body))) {
+                Ok(take text) => take text,
+                Error(c) => return Error(Allocation(c)),
+            }
+            let Request(writer: take output, deadline: deadline, ..) = take request
+            let mut writer = take output
+            send_response(mut writer, string.as_bytes(header), string.as_bytes(body), deadline)?
+            return Ok(None)
+        }
+    }
     let use_upgrade = match site {
         None => true,
         Some(_) => list.slice(request.input, request.head.target.start, request.head.target.end) == string.as_bytes("/hirsel"),
@@ -775,7 +791,7 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
         return Ok(Some(take upgraded))
     }
     let web = option.unwrap(site)
-    let asset = if list.slice(request.input, request.head.method.start, request.head.method.end) == string.as_bytes("GET") {
+    let asset = if is_get {
         (web.find)(list.slice(request.input, request.head.target.start, request.head.target.end))
     } else {
         None
@@ -797,7 +813,7 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
             return Ok(None)
         },
     }
-    let built_header = static_head(selected.content_type, list.len(body))
+    let built_header = static_head(true, selected.content_type, list.len(body))
     let header = match take built_header {
         Ok(take text) => take text,
         Error(c) => return Error(Allocation(c))
@@ -806,8 +822,13 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
     Ok(None)
 }
 
-fn static_head(content_type: String, size: u64) -> Result[String, Capacity] {
-    let mut head = string.from("HTTP/1.1 200 OK\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")?
+fn static_head(ready: bool, content_type: String, size: u64) -> Result[String, Capacity] {
+    let mut head = string.from(if ready {
+        "HTTP/1.1 200 OK"
+    } else {
+        "HTTP/1.1 503 Service Unavailable"
+    })?
+    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")?
     string.push(mut head, content_type)?
     string.push(mut head, "\r\nContent-Length: ")?
     string.push_u64(mut head, size)?

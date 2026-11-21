@@ -483,6 +483,7 @@ dependencies = [
  "hirsel-core-net",
  "hirsel-guard",
  "serde",
+ "twox-hash",
  "zeroize",
 ]
 
@@ -572,6 +573,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-native-certs",
+ "twox-hash",
  "zeroize",
 ]
 
@@ -666,6 +668,7 @@ dependencies = [
 name = "hirsel-tape-format"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-ids",
  "hirsel-core-net",
  "twox-hash",
 ]

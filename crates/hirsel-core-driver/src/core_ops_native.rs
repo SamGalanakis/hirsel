@@ -99,7 +99,8 @@ fn core_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -185,7 +186,8 @@ fn counted_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -259,7 +261,8 @@ fn args_operations(backend: Backend, len_only: bool) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -341,7 +344,8 @@ fn stream_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -414,7 +418,8 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
-        tape: None,
+        recording: false,
+        replay: None,
         backend,
         optimize,
         debug_lines: false,
@@ -509,7 +514,8 @@ fn host_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -617,7 +623,8 @@ pub fn proof_clone_run() -> u64 {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
-        tape: None,
+        recording: false,
+        replay: None,
         backend,
         optimize: false,
         debug_lines: false,

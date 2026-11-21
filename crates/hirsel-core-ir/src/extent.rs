@@ -123,6 +123,7 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         Inst::Store { address, value } => uses.extend([a(address), v(value)]),
         Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
+        | Inst::BuiltinUse { .. }
         | Inst::LimitExit
         | Inst::Step { .. } => {}
         Inst::UpdateMask { result, mask, .. } => {

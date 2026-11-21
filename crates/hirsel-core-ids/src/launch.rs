@@ -58,6 +58,7 @@ pub struct Metadata {
     target: String,
     n_place: u64,
     describe: bool,
+    preview: Option<Vec<u8>>,
 }
 
 impl Metadata {
@@ -86,6 +87,7 @@ impl Metadata {
             target: target.into(),
             n_place,
             describe,
+            preview: None,
         }
     }
 
@@ -94,6 +96,7 @@ impl Metadata {
         Self::embedded(Some(hash_bytes(image)), target, n_place, describe)
     }
 
+    /// Embedded launch metadata for a tool that replays such a recording.
     pub fn embedded(digest: Option<[u8; 32]>, target: &str, n_place: u64, describe: bool) -> Self {
         let executable = digest
             .map(Executable::Digest)
@@ -133,6 +136,11 @@ impl Metadata {
     pub fn describe(&self) -> bool {
         self.describe
     }
+    pub fn with_preview(mut self, old: Vec<u8>) -> Self {
+        self.preview = Some(old);
+        self
+    }
+
     pub fn word(&self, field: u64, index: u64) -> u64 {
         let byte = |bytes: &[u8]| {
             usize::try_from(index)
@@ -149,6 +157,9 @@ impl Metadata {
             3 => self.target.len() as u64,
             4 => byte(self.target.as_bytes()),
             5 => u64::from(self.describe()),
+            6 => u64::from(self.preview.is_some()),
+            7 => self.preview.as_ref().map_or(0, |old| old.len() as u64),
+            8 => self.preview.as_deref().map_or(0, byte),
             _ => 0,
         }
     }

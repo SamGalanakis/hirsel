@@ -340,7 +340,7 @@ fn apply(f: fn(u64, u64) -> u64, x: u64) -> u64 { f(x, x) }
 fn g() -> u64 { apply(fn(a, b: u64) { a + b }, 1) }      // refused: LANG-11, at a: all or none
 ```
 ```hirsel unbuilt
-fn fold[A, T](xs: List[T], f: fn(A, T) -> A, init: A) -> A { init }
+fn fold[A, T](xs: List[T], f: fn(A, T) -> A, take init: A) -> A { init }
 fn total(xs: List[u64]) -> u64 { let sum = fold(xs, fn(acc, x) { acc + x }, 0); sum }   // refused: LANG-11, at acc: A is open
 ```
 ```hirsel

@@ -57,6 +57,7 @@ pub mod tasks;
 pub mod test_provider;
 pub mod tls;
 mod units;
+pub mod units_lang;
 /// The unit connection path's round-trip measurement (`examples/units_conn.rs`).
 #[cfg(not(test))]
 #[doc(hidden)]

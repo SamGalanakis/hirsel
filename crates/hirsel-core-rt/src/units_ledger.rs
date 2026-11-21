@@ -182,6 +182,10 @@ struct ValueExtra {
     charges: Charges,
     shared: Vec<Shared>,
     res: Option<Res>,
+    /// The bytes a language item carries across: its inline value, then the
+    /// content of each flat owner in it (units_lang). Empty for every value
+    /// the ledger makes itself.
+    item: Vec<u8>,
 }
 
 /// An owned value with exclusive charges and optional resource or share data.
@@ -253,6 +257,18 @@ impl Value {
     pub(crate) fn bytes(&self) -> u64 {
         self.charges().iter().map(|c| c.size).sum()
     }
+
+    /// A language item's bytes (units_lang); empty for a ledger value.
+    pub(crate) fn item(&self) -> &[u8] {
+        match &self.data {
+            ValueData::Extra(extra) => &extra.item,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn set_item(&mut self, item: Vec<u8>) {
+        self.extra_mut().item = item;
+    }
 }
 
 impl ValueData {
@@ -292,6 +308,9 @@ pub(crate) struct Port {
     fwd: AtomicPtr<Port>,
     /// The pool unit to wake when a publish replaces `WAITING`.
     wake: AtomicU64,
+    /// A language unit's task scheduler to ready instead (units_lang): one
+    /// count of its waiter, released with the port.
+    waker: AtomicPtr<()>,
 }
 
 // SAFETY: the port's fields are atomics; the arrivals it owns are Send.
@@ -304,7 +323,20 @@ impl Port {
             head: AtomicPtr::new(ptr::null_mut()),
             fwd: AtomicPtr::new(ptr::null_mut()),
             wake: AtomicU64::new(0),
+            waker: AtomicPtr::new(ptr::null_mut()),
         })
+    }
+
+    /// Ready this scheduler waiter (one count of it moves into the port)
+    /// when a publish replaces `WAITING`. Set once, before the port is armed.
+    pub(crate) fn set_waker(&self, waker: *mut ()) {
+        let old = self.waker.swap(waker, Ordering::AcqRel);
+        debug_assert!(old.is_null());
+    }
+
+    /// Whether anything is published and not yet drained.
+    pub(crate) fn pending(&self) -> bool {
+        !marker(self.head.load(Ordering::Acquire))
     }
 
     pub(crate) fn set_wake(&self, unit: u32) {
@@ -350,6 +382,11 @@ impl Port {
             {
                 Ok(_) => {
                     if h == WAITING {
+                        let w = self.waker.load(Ordering::Acquire);
+                        if !w.is_null() {
+                            crate::units_lang::port_ready(w);
+                            return;
+                        }
                         let u = self.wake.load(Ordering::Acquire);
                         if u != 0 {
                             super::wake_id((u - 1) as u32);
@@ -433,6 +470,10 @@ impl Drop for Port {
     fn drop(&mut self) {
         let mut rest = VecDeque::new();
         self.close_with(DEAD, &mut rest);
+        let w = self.waker.load(Ordering::Acquire);
+        if !w.is_null() {
+            crate::units_lang::port_waker_drop(w);
+        }
         let f = self.fwd.load(Ordering::Acquire);
         if !f.is_null() {
             // SAFETY: stored from Arc::into_raw in `forward_to`.
@@ -481,7 +522,8 @@ pub(crate) enum Body {
     /// A shared node's or board's last release.
     Credits(Vec<Credit>),
     /// A connection's retirement: its retained header and unused room.
-    LastRelease(Credit),
+    /// The credit, and the identity of the retired connection.
+    LastRelease(Credit, usize),
     /// A helper's end, carrying the whole helper.
     HelperEnd(HelperEnd),
     /// The settlement of a waiting send, to its sender.
@@ -490,6 +532,8 @@ pub(crate) enum Body {
     Close(Arc<ConnCore>),
     /// Made by the owner itself, after the items accepted before the seal.
     SealAnswer(*const ConnCore),
+    /// The owner asks a helper's root to cancel (units_lang).
+    Cancel,
 }
 
 impl Body {
@@ -498,7 +542,7 @@ impl Body {
         let amounts = |cs: &[Credit]| cs.iter().map(|c| c.amount.to_string()).collect::<Vec<_>>().join(",");
         match self {
             Body::Credits(cs) => amounts(cs),
-            Body::LastRelease(c) => c.amount.to_string(),
+            Body::LastRelease(c, _) => c.amount.to_string(),
             // SAFETY: the end arrival owns the ended helper's context.
             Body::HelperEnd(e) => {
                 let h = unsafe { e.0.as_ref() };
@@ -510,13 +554,13 @@ impl Body {
                 format!("{} bytes", v.bytes())
             }
             Body::Item(_, v) => format!("{} bytes tag {}", v.bytes(), v.tag),
-            Body::Close(_) | Body::SealAnswer(_) => String::new(),
+            Body::Close(_) | Body::SealAnswer(_) | Body::Cancel => String::new(),
         }
     }
 
     /// Forwarded from an ended helper to its owner: credits and notices only.
     fn forwarded(&self) -> bool {
-        matches!(self, Body::Credits(_) | Body::LastRelease(_))
+        matches!(self, Body::Credits(_) | Body::LastRelease(..))
     }
 }
 
@@ -757,6 +801,7 @@ pub(crate) enum Took {
     Item,
     Close,
     SealAnswer,
+    Cancel,
 }
 
 /// One unit's runtime state, touched only by the thread running the unit.
@@ -789,8 +834,8 @@ pub(crate) struct UnitCtx {
     /// it dropped them itself.
     pub(crate) fin_made: Vec<Option<Shared>>,
     /// What the last take was about: a settlement's send id, an item's,
-    /// close's or seal answer's connection (`ConnCore` address), or a helper
-    /// end's helper index; 0 otherwise.
+    /// close's, seal answer's or last release's connection (`ConnCore`
+    /// address), or a helper end's helper index; 0 otherwise.
     pub(crate) took_ident: usize,
     #[cfg(test)]
     pub(crate) label: String,
@@ -1074,6 +1119,7 @@ impl UnitCtx {
             charges,
             shared,
             res,
+            ..
         } = v.data.into_parts();
         for s in shared {
             self.drop_shared(s);
@@ -1595,7 +1641,8 @@ impl UnitCtx {
             Body::Close(c) => Arc::as_ptr(c).addr(),
             // SAFETY: the end arrival owns the ended helper's context.
             Body::HelperEnd(e) => unsafe { e.0.as_ref() }.helper.as_ref().unwrap().k,
-            Body::Credits(_) | Body::LastRelease(_) => 0,
+            Body::LastRelease(_, ident) => *ident,
+            Body::Credits(_) | Body::Cancel => 0,
         };
         let t = match body {
             Body::Credits(cs) => {
@@ -1604,7 +1651,7 @@ impl UnitCtx {
                 }
                 Took::Credits
             }
-            Body::LastRelease(c) => {
+            Body::LastRelease(c, _) => {
                 self.apply(c);
                 Took::LastRelease
             }
@@ -1640,6 +1687,7 @@ impl UnitCtx {
                 unsafe { &*c }.side().seal_taken = true;
                 Took::SealAnswer
             }
+            Body::Cancel => Took::Cancel,
         };
         Some((t, info))
     }

@@ -196,6 +196,13 @@ impl ConnCore {
 
 /// The owner's handle: receive, seal, clean.
 pub(crate) struct Inbox(pub(crate) Arc<ConnCore>);
+
+impl Inbox {
+    /// The bytes of the oldest item taken and not yet received.
+    pub(crate) fn front_bytes(&self) -> Option<u64> {
+        self.0.side().taken.front().map(Value::bytes)
+    }
+}
 /// A sender's handle. The ABI boxes it, so alignment keeps the client's
 /// reads off cache lines that the receiver might write.
 #[repr(align(64))]
@@ -582,10 +589,13 @@ impl UnitCtx {
 
     fn last_release(c: &ConnCore, retained: u64) {
         let a = named!(
-            ArrivalRef::boxed(Body::LastRelease(Credit {
-                amount: retained,
-                to: c.admitting,
-            })),
+            ArrivalRef::boxed(Body::LastRelease(
+                Credit {
+                    amount: retained,
+                    to: c.admitting,
+                },
+                c as *const ConnCore as usize,
+            )),
             format!("retire:{}", c.label),
             format!("last_release:{}", c.label)
         );

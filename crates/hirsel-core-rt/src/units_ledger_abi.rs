@@ -39,6 +39,7 @@ pub(crate) const TOOK_WITHDRAWN: u32 = 6;
 pub(crate) const TOOK_ITEM: u32 = 7;
 pub(crate) const TOOK_CLOSE: u32 = 8;
 pub(crate) const TOOK_SEAL_ANSWER: u32 = 9;
+pub(crate) const TOOK_CANCEL: u32 = 10;
 
 /// Send outcomes.
 pub(crate) const SENT_ACCEPTED: u32 = 0;
@@ -88,6 +89,7 @@ fn took_code(u: &UnitCtx, t: &Took, ident: *mut usize) -> u32 {
         Took::Item => TOOK_ITEM,
         Took::Close => TOOK_CLOSE,
         Took::SealAnswer => TOOK_SEAL_ANSWER,
+        Took::Cancel => TOOK_CANCEL,
     };
     if !ident.is_null() {
         // SAFETY: a non-null ident out-pointer is writable.
@@ -139,8 +141,8 @@ pub(crate) unsafe extern "C" fn hirsel_unit_end_root(u: *mut UnitCtx) {
 /// Take the next arrival that has reached the unit and apply it, without
 /// waiting. Returns `TOOK_NONE` if nothing has reached it. Writes to `ident`
 /// what the take was about: the send id for a settlement; the connection
-/// (`hirsel_unit_inbox_ident`) for an item, close or seal answer; the helper
-/// index for a helper end; 0 for credits and last releases, which need no
+/// (`hirsel_unit_inbox_ident`) for an item, close, seal answer or last
+/// release; the helper index for a helper end; 0 for credits, which need no
 /// action by the unit.
 /// # Safety
 /// `u` is live and owned by the calling pool unit; `ident` is null or writable.

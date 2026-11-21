@@ -1265,6 +1265,10 @@ struct Scheduler {
     /// Events left before a live run's next in-task kernel probe.
     probes_left: u32,
     parked: WaitArms<*mut Task>,
+    /// The unit beside this run (units_lang): null until the first unit
+    /// operation; a helper's comes with the run and its thread owns it.
+    lang: *mut crate::units_lang::LangUnit,
+    lang_owned: bool,
 }
 const _: () =
     assert!(std::mem::offset_of!(Task, arc_runtime) == crate::abi_layout::TASK_ARC_REPLAY);
@@ -1546,6 +1550,10 @@ impl Scheduler {
             unsafe { take_inputs(self) };
         }
         self.poll_net(net_timeout);
+        if !self.lang.is_null() {
+            // SAFETY: the run pins its unit; no task runs.
+            unsafe { crate::units_lang::pump(&mut *self.lang) };
+        }
         // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
             if !self.cancels.is_empty() {
@@ -1706,6 +1714,7 @@ impl Scheduler {
         #[cfg(feature = "record")]
         {
             self.readies.outside()
+                || self.lang_waits()
                 // SAFETY: each entry points to its pinned provider operation.
                 || self.parked.live.values().any(|arm| unsafe {
                     let task = arm.task;
@@ -1716,8 +1725,15 @@ impl Scheduler {
         }
         #[cfg(not(feature = "record"))]
         {
-            self.readies.outside() || !self.parked.live.is_empty()
+            self.readies.outside() || !self.parked.live.is_empty() || self.lang_waits()
         }
+    }
+
+    /// A task waits on something another unit settles (units_lang). Such a
+    /// wait is never called a deadlock here: a unit cannot see the others.
+    fn lang_waits(&self) -> bool {
+        // SAFETY: the run pins its unit.
+        !self.lang.is_null() && unsafe { (*self.lang).waits } > 0
     }
 
     fn stop_quiescent(&mut self) -> ! {
@@ -2096,6 +2112,11 @@ impl Readies {
     fn enqueue(&self, token: u64) {
         self.lock().push(token);
         self.pending.store(true, Ordering::Release);
+    }
+    /// A unit's port has an arrival for this run (units_lang). The token is
+    /// no operation's, so only the wake and the pending flag matter.
+    pub(crate) fn ready_port(&self) {
+        self.push(u64::MAX);
     }
     fn push(&self, token: u64) {
         self.enqueue(token);
@@ -3418,6 +3439,29 @@ pub unsafe fn checkpoint() {
     }
 }
 
+/// The running task's unit (units_lang), made at its run's first unit
+/// operation.
+/// # Safety
+/// A task is running and holds the commit.
+pub(crate) unsafe fn lang_unit() -> *mut crate::units_lang::LangUnit {
+    let mut task = CURRENT.get();
+    if task.is_null() {
+        task = CALLBACK_TASK.get();
+    }
+    if task.is_null() {
+        crate::process::stop(b"UnitOutsideTask");
+    }
+    // SAFETY: the running task pins its run.
+    unsafe {
+        let run = (*task).run;
+        if (*run).lang.is_null() {
+            (*run).lang = crate::units_lang::root_unit(&(*run).readies);
+            (*run).lang_owned = true;
+        }
+        (*run).lang
+    }
+}
+
 /// The returned guard keeps the resumed commit through the caller's retry,
 /// so a woken waiter rechecks its condition without a second acquisition.
 /// # Safety
@@ -3757,7 +3801,10 @@ pub unsafe fn run_root(
         model: None,
         probes_left: LIVE_PROBE_INTERVAL,
         parked: WaitArms::default(),
+        lang: ptr::null_mut(),
+        lang_owned: false,
     };
+    run.lang = crate::units_lang::adopt(&run.readies);
     let pool = (workers > 1).then(|| {
         // SAFETY: the caller pins the root context through worker teardown.
         let funding = unsafe { (*context).current.cache_domain() };
@@ -3835,6 +3882,9 @@ pub unsafe fn run_root(
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
+        if !run.lang.is_null() {
+            (*run.lang).root = root_pointer;
+        }
         (*context).events = root_pointer.expose_provenance();
         root.sp = root
             .stack
@@ -3881,6 +3931,9 @@ pub unsafe fn run_root(
             ptr::copy_nonoverlapping(root.result.as_ptr(), destination, result_bytes);
         }
         (*context).events = 0;
+        if run.lang_owned {
+            crate::units_lang::drop_root_unit(run.lang);
+        }
         drop(registered);
         root.failed
     }
@@ -4513,6 +4566,10 @@ unsafe fn spawn_committed(
 /// Live unjoined handle owned by this task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
+    if crate::units_lang::is_helper(task) {
+        // SAFETY: the owner's handle pins the helper.
+        return unsafe { crate::units_lang::cancel(task) };
+    }
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
         let _commit = before_commit();
@@ -4580,6 +4637,10 @@ pub unsafe extern "C" fn hirsel_core_join(
     result: *mut u8,
     site: u64,
 ) -> Join {
+    if crate::units_lang::is_helper(task) {
+        // SAFETY: as below, for a helper's handle.
+        return unsafe { crate::units_lang::join(context, task, result, site) };
+    }
     // SAFETY: parent owns task throughout waits, no references survive switches.
     unsafe {
         let mut _resumed = None;
@@ -4664,6 +4725,10 @@ unsafe fn abandon_step(
 /// Transfer the sole live handle. This cleanup shields cancellation, cancels and
 /// waits, then cleans any result or drops its complete cause chain, without admission.
 pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
+    if crate::units_lang::is_helper(task) {
+        // SAFETY: the caller transfers the helper's handle.
+        return unsafe { crate::units_lang::abandon(context, task) };
+    }
     // SAFETY: as abandon_begin; the drain runs the cleanup to its end.
     unsafe {
         let holder = abandon_begin(context, task);
@@ -4693,6 +4758,11 @@ pub unsafe extern "C" fn hirsel_core_task_release(
     list: *mut crate::counted::Worklist,
     point: u64,
 ) -> bool {
+    if crate::units_lang::is_helper(task) {
+        // SAFETY: as abandon; a helper's result owns no cleanup to stage.
+        unsafe { crate::units_lang::abandon(context, task) };
+        return true;
+    }
     // SAFETY: as abandon.
     unsafe {
         let holder = abandon_begin(context, task);
@@ -4848,6 +4918,8 @@ mod ready_routing_laws {
                 model: None,
                 probes_left: LIVE_PROBE_INTERVAL,
                 parked: WaitArms::default(),
+                lang: ptr::null_mut(),
+                lang_owned: false,
             };
             let mut context = Context::new(1 << 20);
             let layout = ValueLayout {

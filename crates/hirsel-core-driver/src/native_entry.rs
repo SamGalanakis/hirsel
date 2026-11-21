@@ -73,6 +73,7 @@ pub(crate) fn policy(
     &[hirsel_core_net::SecretGrant],
     Option<&hirsel_core_net::EnvPatterns>,
     &[String],
+    &std::collections::BTreeSet<String>,
     Option<&[u8]>,
     bool,
     Option<&crate::native::ReplayPlan>,
@@ -84,6 +85,7 @@ pub(crate) fn policy(
         &options.secret_grants,
         options.env_patterns.as_ref(),
         &options.directories,
+        &options.foreign_grants,
         options
             .logical_charge_report
             .as_ref()

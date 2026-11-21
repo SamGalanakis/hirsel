@@ -107,6 +107,7 @@ pub(crate) struct InstanceSet {
     pub fields: std::collections::BTreeMap<Identity, Fields>,
     summarize_foreign: bool,
     pub(crate) foreign: BTreeSet<Identity>,
+    pub(crate) foreign_addresses: BTreeMap<Identity, ContentHash>,
 }
 /// Which store an instance's object and record live in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -308,7 +309,7 @@ impl InstanceSet {
                     instances,
                     prior,
                     instances.iter().cloned(),
-                    &BTreeMap::new(),
+                    &self.foreign_addresses,
                     |_, _| {},
                 )
             })
@@ -425,6 +426,12 @@ impl InstanceSet {
     }
 }
 impl CheckProduct {
+    fn is_foreign(&self, path: &DefPath) -> bool {
+        self.foreign_inputs
+            .get(&path.0.package)
+            .is_some_and(|modules| modules.contains_key(&path.0.modules))
+    }
+
     /// A body stopped before emission can have only a request-level refusal.
     /// Use the current sites, since a conflicting name can move in another item
     /// without changing this body's record.
@@ -537,11 +544,7 @@ impl CheckProduct {
     ) -> Result<Vec<Identity>, InstanceStop> {
         {
             observe(key, "start");
-            if self
-                .foreign_inputs
-                .get(&key.definition.0.package)
-                .is_some_and(|modules| modules.contains_key(&key.definition.0.modules))
-            {
+            if self.is_foreign(&key.definition) {
                 if instances.summarize_foreign {
                     instances.foreign.insert(key.clone());
                     return Ok(Vec::new());
@@ -563,7 +566,14 @@ impl CheckProduct {
                 return Ok(entry
                     .children
                     .iter()
-                    .map(|&c| prior.entry(c as usize).identity.clone())
+                    .map(|&c| &prior.entry(c as usize).identity)
+                    .chain(
+                        entry
+                            .slots
+                            .iter()
+                            .filter(|slot| self.is_foreign(&slot.definition)),
+                    )
+                    .cloned()
                     .collect());
             }
             let input = |message: String| InstanceStop::Input {

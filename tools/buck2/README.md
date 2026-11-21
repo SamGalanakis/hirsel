@@ -185,9 +185,6 @@ tools/affected                                    # every target the change can 
 python3 tools/buck2/fmt.py                       # format before pushing
 ```
 
-See [contributing](../../docs/contributing.md#testing-and-pushing-to-main)
-for the steps to push a change.
-
 Builds use Buck2's default isolation dir, `v2`: never pass
 `--isolation-dir` (or pass only `--isolation-dir v2`) and leave
 `BUCK_ISOLATION_DIR` unset. Each worktree already has its own `v2` daemon.

@@ -11,8 +11,7 @@ coding agent. Its fixed goals:
 - deterministic behaviour outside capabilities.
 
 The [specification](spec/index.md) defines the language, its tasks and its
-capabilities. To work on the compiler, runtime or libraries, see
-[Contributing to Hirsel](contributing.md); the driver's internals are in
+capabilities. The driver's internals are in
 [its README](../crates/hirsel-core-driver/README.md).
 
 ## The installation

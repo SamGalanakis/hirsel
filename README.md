@@ -13,6 +13,4 @@
   <a href="docs/spec/index.md">Spec</a>
   &nbsp;·&nbsp;
   <a href="docs/building.md">Building</a>
-  &nbsp;·&nbsp;
-  <a href="docs/contributing.md">Contributing</a>
 </p>

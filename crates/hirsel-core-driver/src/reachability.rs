@@ -243,7 +243,11 @@ impl CheckProduct {
                 let instances = (0..held.len())
                     .map(|i| held.entry(i).identity.clone())
                     .collect();
-                let materialized = crate::instances::InstanceSet::default();
+                let mut materialized = crate::instances::InstanceSet::default();
+                materialized
+                    .foreign
+                    .extend(held.foreign().cloned().map(Identity::plain));
+                self.bind_foreign_addresses(&mut materialized)?;
                 return Ok(Reachable {
                     bodies,
                     declarations,
@@ -675,6 +679,13 @@ impl CheckProduct {
             instance_path: materialized.keys.len() as u64,
             ..Default::default()
         };
+        if instances.is_ok()
+            && diagnostics.is_empty()
+            && incomplete.is_empty()
+            && resources.is_empty()
+        {
+            self.bind_foreign_addresses(&mut materialized)?;
+        }
         Ok(Reachable {
             bodies: bodies_len,
             declarations: declarations_len,

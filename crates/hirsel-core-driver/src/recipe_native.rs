@@ -171,8 +171,7 @@ impl CheckProduct {
         let foreign = self.release_foreign(reached, entry, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
         let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
-        let (units, groups, addresses) =
-            self.release_units(&entry, reached, store, Some(names), &foreign.addresses)?;
+        let (units, groups, addresses) = self.release_units(&entry, reached, store, Some(names))?;
         let mut bodies = units.values().map(|unit| unit.code).collect::<Vec<_>>();
         bodies.sort_unstable_by_key(|body| body.body.hash);
         let launch = Launch {
@@ -207,8 +206,7 @@ impl CheckProduct {
 
     /// The units of `entry`'s reached closure, each body and annex put in
     /// `store`, with its groups and each unit's address; `names` are the
-    /// entry's startup parameter names, when it is a program entry, and
-    /// `foreign` the addresses of its reached foreign slots.
+    /// entry's startup parameter names when it is a program entry.
     #[allow(clippy::type_complexity)]
     pub(super) fn release_units(
         &self,
@@ -216,7 +214,6 @@ impl CheckProduct {
         reached: &Reachable<'_>,
         store: &CodeStore,
         names: Option<Vec<String>>,
-        foreign: &BTreeMap<Identity, ContentHash>,
     ) -> Result<
         (
             BTreeMap<Identity, Unit>,
@@ -268,9 +265,13 @@ impl CheckProduct {
         let mut pending = Vec::new();
         let addresses = reached
             .materialized
-            .groups(instances, None, [entry.clone()], foreign, |_, bytes| {
-                pending.push(bytes);
-            })
+            .groups(
+                instances,
+                None,
+                [entry.clone()],
+                &reached.materialized.foreign_addresses,
+                |_, bytes| pending.push(bytes),
+            )
             .ok_or_else(|| NativeStop::Entry("incomplete or inconsistent recipe closure".into()))?;
         for bytes in pending {
             groups.push(store.put(ObjectKind::Group, &bytes)?);
@@ -284,7 +285,6 @@ impl CheckProduct {
 struct ForeignRelease {
     modules: Vec<ForeignLeaf>,
     archives: Vec<ObjectRef>,
-    addresses: BTreeMap<Identity, ContentHash>,
     grants: Vec<GrantBinding>,
     link_archives: LinkArchives,
 }
@@ -355,19 +355,9 @@ impl CheckProduct {
                 .map(|link| (options.runtime.as_path(), link)),
         )?;
         selected.extend(reached_archives);
-        let mut addresses = BTreeMap::new();
         for leaf in modules.values_mut() {
-            let mut rows = Vec::new();
-            leaf.encode_archive_rows(&mut rows);
-            let archive_set = ObjectKind::ForeignArchive.hash(&rows);
             leaf.functions
                 .sort_by_cached_key(|f| normal::encode_identity(&f.identity));
-            addresses.extend(leaf.functions.iter().map(|function| {
-                (
-                    function.identity.clone(),
-                    foreign_address(function, &leaf.symbols, archive_set),
-                )
-            }));
         }
 
         let archives = selected
@@ -387,7 +377,6 @@ impl CheckProduct {
         Ok(ForeignRelease {
             modules,
             archives,
-            addresses,
             grants,
             link_archives,
         })
@@ -397,8 +386,15 @@ impl CheckProduct {
         &self,
         reached: &Reachable<'_>,
     ) -> Result<BTreeMap<String, ForeignLeaf>, NativeStop> {
+        self.foreign_modules(&reached.materialized.foreign)
+    }
+
+    fn foreign_modules(
+        &self,
+        functions: &BTreeSet<Identity>,
+    ) -> Result<BTreeMap<String, ForeignLeaf>, NativeStop> {
         let mut modules = BTreeMap::new();
-        for identity in &reached.materialized.foreign {
+        for identity in functions {
             let function = &identity.definition;
             let (module, capture) = self.foreign_capture(function)?;
             let (_, header) = self.foreign_headers.get(function).ok_or_else(|| {
@@ -425,6 +421,29 @@ impl CheckProduct {
             });
         }
         Ok(modules)
+    }
+
+    pub(crate) fn bind_foreign_addresses(
+        &self,
+        instances: &mut crate::instances::InstanceSet,
+    ) -> io::Result<()> {
+        let modules = self
+            .foreign_modules(&instances.foreign)
+            .map_err(io::Error::other)?;
+        for leaf in modules.values() {
+            let mut rows = Vec::new();
+            leaf.encode_archive_rows(&mut rows);
+            let archive_set = ObjectKind::ForeignArchive.hash(&rows);
+            instances
+                .foreign_addresses
+                .extend(leaf.functions.iter().map(|function| {
+                    (
+                        function.identity.clone(),
+                        foreign_address(function, &leaf.symbols, archive_set),
+                    )
+                }));
+        }
+        Ok(())
     }
 
     fn check_foreign_archives<'a>(

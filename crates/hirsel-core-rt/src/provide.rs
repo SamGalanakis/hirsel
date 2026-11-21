@@ -622,6 +622,49 @@ fn pending() -> Step {
     }
 }
 
+/// NetError TimedOut (tag 6).
+const TIMED_OUT: Outcome = Outcome {
+    value: 0,
+    error: IoError { tag: 6, code: 0 },
+    written: 0,
+    status: 0,
+    kind: 0,
+};
+
+/// A served Net call's deadline (NOTES 35): its adapter's `until`, asked of
+/// the until's own Clock as every Net provider asks it (NOTES 12), so a
+/// virtual deadline is reached only by `clock.advance_to`. Other ports'
+/// calls have none.
+/// # Safety
+/// `request` is a caller's pinned request on this port.
+unsafe fn due(port: &Mutex<Port>, request: &Request, token: u64) -> crate::os_net::Due {
+    if lock(port).vocab != Vocab::Net {
+        return crate::os_net::Due::Never;
+    }
+    // SAFETY: every Net adapter pins its NetworkRequest in `path`.
+    unsafe {
+        let n = &*request.path.cast::<crate::net::NetworkRequest>();
+        crate::os_net::deadline(n.until, token)
+    }
+}
+
+/// Wait for a queued call's answer until its deadline, or time it out.
+/// # Safety
+/// As `due`.
+unsafe fn await_call(port: &Mutex<Port>, request: &Request, token: u64) -> Step {
+    // SAFETY: forwarded.
+    match unsafe { due(port, request, token) } {
+        crate::os_net::Due::Passed => {
+            collect(port, token, Some(TIMED_OUT)).map_or_else(pending, done)
+        }
+        due => Step {
+            kind: STEP_PENDING,
+            deadline_ns: due.host().unwrap_or(0),
+            ..Step::default()
+        },
+    }
+}
+
 fn done(outcome: Outcome) -> Step {
     Step {
         outcome,
@@ -698,23 +741,21 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
     pending()
 }
 
-/// A caller's resume or abort: collect the answer, or with `abort` settle the
-/// unanswered call as cancelled (status 1, which `deliver` records).
-fn collect(port: &Mutex<Port>, token: u64, abort: bool) -> Option<Outcome> {
+/// A caller's resume or abort: collect the answer, or with `end` settle the
+/// unanswered call with it: cancelled (status 1, which `deliver` records) or
+/// timed out. A reply to a call settled so is Withdrawn.
+fn collect(port: &Mutex<Port>, token: u64, end: Option<Outcome>) -> Option<Outcome> {
     let mut port = lock(port);
     let id = port.by_token(token)?;
     let call = port.calls.get_mut(&id).expect("live call");
-    let outcome = match call.answer {
-        Some(answer) => answer,
-        None if abort => {
+    let outcome = match (call.answer, end) {
+        (Some(answer), _) => answer,
+        (None, Some(end)) => {
             port.free_staged(id);
             port.closed_call(id);
-            Outcome {
-                status: 1,
-                ..Outcome::default()
-            }
+            end
         }
-        None => return None,
+        (None, None) => return None,
     };
     port.calls.get_mut(&id).expect("live call").finished = true;
     port.prune(id);
@@ -792,6 +833,8 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             }
         }
         (Cell::Port(port), operation) if operation != CLOSE_CALL && operation != CLOSE_SERVED => {
+            // SAFETY: a caller's operation pins its request through delivery.
+            let passed = unsafe { due(port, request, token) } == crate::os_net::Due::Passed;
             let mut p = lock(port);
             let words = match p.vocab {
                 Vocab::Stream => {
@@ -803,6 +846,9 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             };
             if p.sealed {
                 outcome = p.closed;
+            } else if words.is_some() && passed {
+                // A deadline already reached times out before queueing.
+                outcome = TIMED_OUT;
             } else if let Some(words) = words {
                 // Scalars are copied now; the bytes stay the caller's until
                 // `payload` copies them out of an unsettled call (NOTES 15).
@@ -840,7 +886,8 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 let servers = p.servers.iter().map(|&(t, _)| t).collect();
                 drop(p);
                 ready_all(servers);
-                return pending();
+                // SAFETY: as above.
+                return unsafe { await_call(port, request, token) };
             } else {
                 // Not this port's live object of the operation's kind: Denied
                 // (IoError tag 2, NetError tag 1).
@@ -883,14 +930,24 @@ unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -
     let (cell, request) = unsafe { (cell(state), &*request) };
     match (cell, request.operation) {
         (Cell::Port(port), PORT_NEXT) => next_step(state, port, token),
-        (Cell::Port(port), _) => collect(port, token, false).map_or_else(pending, done),
+        (Cell::Port(port), _) => match collect(port, token, None) {
+            Some(outcome) => done(outcome),
+            // SAFETY: the caller's request stays pinned while it waits.
+            None => unsafe { await_call(port, request, token) },
+        },
         _ => Step::default(),
     }
 }
 
 /// A: an answered call keeps its answer (the reply committed first); an
-/// unanswered one, or a `next`, ends cancelled.
-unsafe extern "C" fn abort(state: *mut u8, request: *mut Request, token: u64, _: u8) -> Outcome {
+/// unanswered one ends timed out at its deadline and cancelled otherwise, and
+/// a `next` ends cancelled.
+unsafe extern "C" fn abort(
+    state: *mut u8,
+    request: *mut Request,
+    token: u64,
+    reason: u8,
+) -> Outcome {
     // SAFETY: as `wait`.
     let (cell, request) = unsafe { (cell(state), &*request) };
     let cancelled = Outcome {
@@ -903,7 +960,15 @@ unsafe extern "C" fn abort(state: *mut u8, request: *mut Request, token: u64, _:
             lock(&SERVERS).remove(&token);
             cancelled
         }
-        (Cell::Port(port), _) => collect(port, token, true).unwrap_or(cancelled),
+        (Cell::Port(port), _) => {
+            // A host deadline that fired times the call out (NOTES 35).
+            let end = if reason == ABORT_DEADLINE {
+                TIMED_OUT
+            } else {
+                cancelled
+            };
+            collect(port, token, Some(end)).unwrap_or(end)
+        }
         _ => Outcome::default(),
     }
 }

@@ -2205,10 +2205,13 @@ impl Machine<'_> {
         out: Option<u64>,
         live: bool,
     ) -> X<Vec<u64>> {
-        self.port_call_with(t, c, words, fields, out, live, None)
+        self.port_call_with(t, c, words, fields, out, live, None, None)
     }
 
-    /// `port_call` for a SendSecret, whose call holds its narrowed Secret.
+    /// `port_call` for a Net call, with its `until` (NOTES 35) and, for a
+    /// SendSecret, its narrowed Secret. A deadline already reached times out
+    /// before queueing; one reached while the call waits settles it TimedOut,
+    /// and a later reply is Withdrawn.
     #[allow(clippy::too_many_arguments)]
     fn port_call_with(
         &mut self,
@@ -2219,17 +2222,9 @@ impl Machine<'_> {
         out: Option<u64>,
         live: bool,
         secret: Option<EvalSecret>,
+        deadline: Option<Due>,
     ) -> X<Vec<u64>> {
-        let VirtualCell::Port {
-            vocab,
-            sealed,
-            next,
-            calls,
-            servers,
-            handles,
-            ..
-        } = &mut self.world.cells[c]
-        else {
+        let VirtualCell::Port { vocab, sealed, .. } = &self.world.cells[c] else {
             unreachable!()
         };
         let vocab = *vocab;
@@ -2242,6 +2237,19 @@ impl Machine<'_> {
             let denied = if vocab == Vocab::Net { 1 } else { DENIED };
             return Ok(port_outcome(vocab, words[0], [0, denied, 0, 0, 0]));
         }
+        if deadline.is_some_and(|due| self.passed(due)) {
+            return Ok(port_outcome(vocab, words[0], [0, 6, 0, 0, 0]));
+        }
+        let VirtualCell::Port {
+            next,
+            calls,
+            servers,
+            handles,
+            ..
+        } = &mut self.world.cells[c]
+        else {
+            unreachable!()
+        };
         if vocab == Vocab::Dir && words[0] == DIR_CLOSE {
             if let Some(h) = handles.get_mut(&words[1]) {
                 h.state = PortState::Closing;
@@ -2276,8 +2284,25 @@ impl Machine<'_> {
                 self.world.cells[c].prune(id);
                 return Ok(answer);
             }
+            if deadline.is_some_and(|due| self.passed(due)) {
+                let cell = &mut self.world.cells[c];
+                let call = cell.port().0.get_mut(&id).unwrap();
+                call.finished = true;
+                cell.free_staged(id);
+                cell.closed_call(id);
+                cell.prune(id);
+                return Ok(port_outcome(vocab, words[0], [0, 6, 0, 0, 0]));
+            }
             self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-            self.park(Some(Wait::Network(None)));
+            let host = match deadline {
+                Some(Due::Host(at)) => Some(at),
+                Some(Due::Cell(clock, at)) => {
+                    self.cell_timer(clock, at, t.k);
+                    None
+                }
+                None => None,
+            };
+            self.park(Some(Wait::Network(host)));
             if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
                 let cell = &mut self.world.cells[c];
                 let call = cell.port().0.get_mut(&id).unwrap();
@@ -3521,7 +3546,14 @@ impl Machine<'_> {
         };
         let mut w = [0; 8];
         w[..words.len()].copy_from_slice(&words);
-        self.port_call(t, c, w, fields, out, live)
+        // Each operation's `until` operand (Listen has none).
+        let deadline = match op {
+            HostOp::Connect => self.until(a, 5),
+            HostOp::Accept => self.until(a, 1),
+            HostOp::Resolve | HostOp::RecvBounded | HostOp::SendPair => self.until(a, 3),
+            _ => None,
+        };
+        self.port_call_with(t, c, w, fields, out, live, None, deadline)
     }
 
     /// `net.join` on a served Net socket's live halves (native
@@ -3912,10 +3944,11 @@ impl Machine<'_> {
             wire.len() as u64,
             u64::from(a[3] == 0),
         ]);
-        let row = match self
-            .check_cancel(t)
-            .and_then(|()| self.port_call(t, c, w, vec![vec![], canonical, wire], None, live))
-        {
+        let row = match self.check_cancel(t).and_then(|()| {
+            let deadline = self.until(a, 6);
+            let fields = vec![vec![], canonical, wire];
+            self.port_call_with(t, c, w, fields, None, live, None, deadline)
+        }) {
             Ok(row) => row,
             Err(stop) => {
                 self.port_socket_part(key, false);
@@ -4068,9 +4101,10 @@ impl Machine<'_> {
             let mut w = [0; 8];
             w[..4].copy_from_slice(&[7, id, before.len() as u64, after.len() as u64]);
             let fields = vec![vec![], before, after];
-            let row = self
-                .check_cancel(t)
-                .and_then(|()| self.port_call_with(t, c, w, fields, None, live, Some(narrowed)));
+            let row = self.check_cancel(t).and_then(|()| {
+                let deadline = self.until(a, 4);
+                self.port_call_with(t, c, w, fields, None, live, Some(narrowed), deadline)
+            });
             if !matches!(&row, Ok(row) if row[1] == 0) {
                 self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
             }
@@ -4143,7 +4177,8 @@ impl Machine<'_> {
                 let mut w = [0; 8];
                 w[..4].copy_from_slice(&[5, id, (joined.len() - at) as u64, 0]);
                 let fields = vec![vec![], joined[at..].to_vec(), vec![]];
-                let row = match self.port_call(t, c, w, fields, None, live) {
+                let deadline = self.until(args, 6);
+                let row = match self.port_call_with(t, c, w, fields, None, live, None, deadline) {
                     Ok(row) => row,
                     Err(stop) => {
                         self.refund(payer, CHARGE);

@@ -45,6 +45,7 @@ type Reuse = unsafe extern "C" fn(
     usize,
 ) -> i32;
 type Deliver = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize);
+type CounterRangeReport = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, libc::c_uint);
 type FindTail = unsafe extern "C" fn(
     *mut libc::c_void,
     *const u8,
@@ -79,6 +80,7 @@ type Program = unsafe extern "C" fn(
     KeepTail,
     Reuse,
     Deliver,
+    Option<CounterRangeReport>,
     *mut libc::c_void,
     *mut Output,
 );
@@ -224,7 +226,7 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v8".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v9".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -309,6 +311,7 @@ pub(crate) fn compile_module(
         target,
         0,
         &mut crate::Unheld,
+        None,
     )?;
     Ok(program
         .objects
@@ -325,13 +328,15 @@ pub(crate) fn program(
     target: hirsel_core_layout::Target,
     jobs: u32,
     held: &mut dyn crate::Held,
+    folds: Option<&mut crate::CounterRangeFolds>,
 ) -> Result<crate::Program, String> {
-    emit(units, exports, true, target, jobs, held)
+    emit(units, exports, true, target, jobs, held, folds)
 }
 
 struct Receiver<'a> {
     held: &'a mut dyn crate::Held,
     program: crate::Program,
+    folds: Option<&'a mut crate::CounterRangeFolds>,
     /// The last tail `find_tail` answered with, borrowed by the engine until
     /// its next call.
     tail: Vec<u8>,
@@ -434,6 +439,23 @@ unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8
     }
 }
 
+unsafe extern "C" fn report_counter_range(
+    receiver: *mut libc::c_void,
+    name: *const u8,
+    len: usize,
+    removed: libc::c_uint,
+) {
+    // SAFETY: the optimizer calls synchronously with this receiver and the
+    // function symbol's bytes borrowed until the callback returns.
+    unsafe {
+        let receiver = &mut *(receiver as *mut Receiver<'_>);
+        if let Some(folds) = &mut receiver.folds {
+            let name = std::slice::from_raw_parts(name, len);
+            *folds.entry(name.to_vec()).or_default() += removed as usize;
+        }
+    }
+}
+
 fn emit(
     mut units: Vec<ProgramUnit<'_>>,
     exports: &[String],
@@ -441,6 +463,7 @@ fn emit(
     target: hirsel_core_layout::Target,
     jobs: u32,
     held: &mut dyn crate::Held,
+    folds: Option<&mut crate::CounterRangeFolds>,
 ) -> Result<crate::Program, String> {
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
@@ -475,9 +498,13 @@ fn emit(
         len: 0,
         failed: 0,
     };
+    let report = folds
+        .as_ref()
+        .map(|_| report_counter_range as CounterRangeReport);
     let mut receiver = Receiver {
         held,
         program: crate::Program::default(),
+        folds,
         tail: Vec::new(),
     };
     // SAFETY: inputs, terminated export names and the receiver stay borrowed
@@ -498,6 +525,7 @@ fn emit(
             keep_tail,
             reuse_part,
             deliver_part,
+            report,
             &mut receiver as *mut Receiver<'_> as *mut libc::c_void,
             &mut output,
         );

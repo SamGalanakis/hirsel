@@ -54,7 +54,13 @@ using namespace llvm;
 // ranges stay sound because they only grow, and the fixed point satisfies
 // every value's equation, so each range covers every value it takes.
 class CounterRangePass : public OptionalPassInfoMixin<CounterRangePass> {
+    using Report = void (*)(void *, const char *, size_t, unsigned);
+    Report report;
+    void *receiver;
+
 public:
+    CounterRangePass(Report report, void *receiver) : report(report), receiver(receiver) {}
+
     PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
         if (f.isDeclaration()) return PreservedAnalyses::all();
         LoopInfo &loops = analyses.getResult<LoopAnalysis>(f);
@@ -62,7 +68,10 @@ public:
         State state(f, analyses.getResult<DominatorTreeAnalysis>(f));
         if (!state.collect(loops)) return PreservedAnalyses::all();
         state.solve();
-        if (!state.fold()) return PreservedAnalyses::all();
+        unsigned removed = 0;
+        if (!state.fold(removed)) return PreservedAnalyses::all();
+        if (report && removed && f.hasName())
+            report(receiver, f.getName().data(), f.getName().size(), removed);
         PreservedAnalyses kept;
         kept.preserveSet<CFGAnalyses>();
         return kept;
@@ -450,13 +459,14 @@ private:
             }
         }
 
-        bool fold() {
+        bool fold(unsigned &removed) {
             bool changed = false;
             for (WithOverflowInst *op : overflows) {
                 if (!neverOverflows(*op)) continue;
                 for (User *user : make_early_inc_range(op->users())) {
                     auto *flag = dyn_cast<ExtractValueInst>(user);
                     if (!flag || flag->getNumIndices() != 1 || flag->getIndices()[0] != 1) continue;
+                    if (!flag->use_empty()) ++removed;
                     flag->replaceAllUsesWith(ConstantInt::getFalse(f.getContext()));
                     flag->eraseFromParent();
                     changed = true;
@@ -473,6 +483,7 @@ private:
                 if (!l.icmp(predicate, r)) continue;
                 guard->setCondition(ConstantInt::getBool(f.getContext(), !fails));
                 if (compare->use_empty()) compare->eraseFromParent();
+                ++removed;
                 changed = true;
             }
             return changed;

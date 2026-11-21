@@ -27,8 +27,9 @@ extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_p
 extern LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
                                        char **message, LLVMMemoryBufferRef *buffer);
 extern void hirsel_llvm_align_release_functions(LLVMModuleRef module);
+typedef void (*HirselLlvmCounterRangeReport)(void *, const char *, size_t, unsigned);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
-                                                LLVMBool prune, LLVMBool prepay_steps);
+    LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, void *receiver);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_sweep_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -449,7 +450,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                           uint8_t speed, const char *triple, const char *cpu,
                           const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
-                          HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
+                          HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
+                          HirselLlvmCounterRangeReport report, void *receiver,
                           HirselLlvmOutput *out) {
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
@@ -534,7 +536,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         hirsel_llvm_inline_snapshot_calls(module);
         LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
         LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
-                                                      refill && LLVMGetFirstUse(refill));
+                                                      refill && LLVMGetFirstUse(refill), report, receiver);
         if (!e) e = hirsel_llvm_specialize_release(module, machine);
         if (!e) {
             hirsel_llvm_inline_recursive_leaves(module);
@@ -597,21 +599,22 @@ done:
 // `jobs` threads, or with `jobs` 0 the one object generated, if any, and `out`
 // is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v8(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v9(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
                           const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
-                          HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
+                          HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
+                          HirselLlvmCounterRangeReport report, void *receiver,
                           HirselLlvmOutput *out) {
     emit_program(units, count, exports, export_count, speed, triple, cpu, features, jobs, find, keep,
-                 reuse, deliver, receiver, out);
+                 reuse, deliver, report, receiver, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v2(const uint8_t *ir, size_t len, uint8_t speed, const char *triple,
                            const char *cpu, const char *features, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, out);
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

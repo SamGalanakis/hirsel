@@ -55,6 +55,34 @@ pub fn emit_program_for_target(
         .expect("an unreused program is generated"))
 }
 
+/// Checked operations folded by CounterRangePass in named functions, keyed by LLVM symbol bytes.
+pub type CounterRangeFolds = std::collections::BTreeMap<Vec<u8>, usize>;
+
+/// The composed release object and folds recorded during that compilation.
+#[doc(hidden)]
+pub fn emit_program_with_counter_range_folds_for_test(
+    units: &[Unit<'_>],
+    exports: &[String],
+    target: hirsel_core_layout::Target,
+) -> Result<(Vec<u8>, CounterRangeFolds), String> {
+    let mut folds = CounterRangeFolds::new();
+    let mut program = loader::program(
+        lower_program_units(units, target)?,
+        exports,
+        target,
+        0,
+        &mut Unheld,
+        Some(&mut folds),
+    )?;
+    Ok((
+        program
+            .objects
+            .pop()
+            .expect("an unreused program is generated"),
+        folds,
+    ))
+}
+
 /// A release program's parts after whole-program optimisation, in order, and
 /// the objects generated for the parts not reused.
 #[derive(Default)]
@@ -140,6 +168,7 @@ impl ReleaseUnit {
             hirsel_core_layout::Target::X86_64Linux,
             jobs,
             held,
+            None,
         )
     }
 }
@@ -156,6 +185,20 @@ pub fn emit_program_parts(
     jobs: u32,
     held: &mut dyn Held,
 ) -> Result<Program, String> {
+    loader::program(
+        lower_program_units(units, target)?,
+        exports,
+        target,
+        jobs,
+        held,
+        None,
+    )
+}
+
+fn lower_program_units<'a>(
+    units: &[Unit<'a>],
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<loader::ProgramUnit<'a>>, String> {
     let context = units
         .iter()
         .any(|unit| matches!(unit, Unit::Core { .. }))
@@ -195,7 +238,7 @@ pub fn emit_program_parts(
             Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text(ir)),
         }
     }
-    loader::program(lowered, exports, target, jobs, held)
+    Ok(lowered)
 }
 
 #[cfg(test)]

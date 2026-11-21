@@ -5,7 +5,7 @@
 //! disposal and no handle outlives its owner. No raw handle leaves this module, and none is
 //! public.
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_uint, c_void};
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -200,6 +200,8 @@ impl<'context> Module<'context> {
                     machine: LLVMTargetMachineRef,
                     prune: LLVMBool,
                     prepay_steps: LLVMBool,
+                    report: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, c_uint)>,
+                    receiver: *mut c_void,
                 ) -> LLVMErrorRef;
                 fn hirsel_llvm_specialize_release(
                     module: LLVMModuleRef,
@@ -216,7 +218,8 @@ impl<'context> Module<'context> {
                 ) -> LLVMErrorRef;
             }
             hirsel_llvm_inline_snapshot_calls(self.raw);
-            let mut error = hirsel_llvm_optimize_release(self.raw, machine.raw, 0, 0);
+            let mut error =
+                hirsel_llvm_optimize_release(self.raw, machine.raw, 0, 0, None, ptr::null_mut());
             if error.is_null() {
                 unsafe extern "C" {
                     fn hirsel_llvm_scalarize_aggregate_phis(

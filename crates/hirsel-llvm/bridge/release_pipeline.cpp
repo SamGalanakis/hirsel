@@ -234,15 +234,17 @@ public:
 };
 
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
-void registerReleasePasses(PassBuilder &builder) {
+using CounterRangeReport = void (*)(void *, const char *, size_t, unsigned);
+
+void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, void *receiver) {
     builder.registerPipelineParsingCallback(
-        [](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+        [report, receiver](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
             if (name == "implied-check-hoist") {
                 passes.addPass(hirsel_llvm::ImpliedCheckHoistPass());
                 return true;
             }
             if (name == "counter-range") {
-                passes.addPass(hirsel_llvm::CounterRangePass());
+                passes.addPass(hirsel_llvm::CounterRangePass(report, receiver));
                 return true;
             }
             if (name == "counted-exit-split") {
@@ -315,11 +317,11 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
 
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
-    LLVMBool prepay_steps) {
+    LLVMBool prepay_steps, CounterRangeReport report, void *receiver) {
     limit_recursive_entry_inlining(*unwrap(raw_module));
     ReleasePipeline release(raw_module, raw_machine);
     PassBuilder &builder = release.builder;
-    registerReleasePasses(builder);
+    registerReleasePasses(builder, report, receiver);
 
     ModulePassManager pipeline;
     // Promote slots before outlining the cold metering path so the inliner

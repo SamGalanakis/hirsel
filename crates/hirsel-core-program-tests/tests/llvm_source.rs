@@ -523,6 +523,50 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
     }
 }
 
+const RESET_COMPARISONS: [(&str, &str, &str, &str); 4] = [
+    ("lt", "0u64", "i < trips", "add"),
+    ("le", "1u64", "i <= trips", "add"),
+    ("gt", "trips", "i > 0u64", "sub"),
+    ("ge", "trips", "i >= 1u64", "sub"),
+];
+
+fn append_reset_loop(
+    source: &mut String,
+    name: &str,
+    ty: &str,
+    width: i64,
+    reset: i64,
+    (start, condition, direction): (&str, &str, &str),
+) {
+    let last = width - 1;
+    let widen = if ty == "i8" {
+        "let low: u8 = int.truncate(bits)\n        let word: u64 = int.widen(low)"
+    } else {
+        "let word: u64 = int.widen(bits)"
+    };
+    writeln!(
+        source,
+        r#"
+fn {name}(budget: u64, trips: u64) -> u64 {{
+    match (bound steps budget {{
+        let mut i = {start}
+        let mut pos = 0{ty}
+        let mut bits = 0{ty}
+        while {condition} {{
+            bits ^= 1{ty} << ({last}{ty} - pos)
+            pos += 1
+            if pos == {reset} {{ pos = 0 }}
+            i = int.wrapping_{direction}(i, 1u64)
+        }}
+        {widen}
+        word
+    }}) {{ Ok(word) => word, Error(e) => 65536u64 | e.steps }}
+}}
+"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn seeded_scalar_counted_loops_agree_across_engines() {
     // SEM-1 and MEM-30: the shift by 7 succeeds, a shift by 8 or -1 fails,
@@ -566,7 +610,7 @@ fn stride_overflow(budget: u64, end: u8) -> u64 {
     );
     let returned = |value| eval::Outcome::Returned(vec![value]);
     let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
-    let sentinels = [
+    let mut sentinels = vec![
         ("last_bit", [1, 6], returned(0)),
         ("last_bit", [1, 7], returned(65537)),
         ("last_bit", [2, 7], returned(128)),
@@ -579,6 +623,31 @@ fn stride_overflow(budget: u64, end: u8) -> u64 {
         ("stride_overflow", [2, 254], returned(255)),
         ("stride_overflow", [1, 255], overflow()),
     ];
+    // At reset 8, pos is 0..7 at the shift and 1..8 after incrementing.
+    // Nine trips XOR all eight bits then the high bit again, yielding 127.
+    // Each trip charges the wrapping call and the back edge, and widening
+    // charges one more. Resetting at 9 instead reaches 7 - 8 on trip nine.
+    let must_fold = [
+        "must_fold_lt",
+        "must_fold_le",
+        "must_fold_gt",
+        "must_fold_ge",
+    ];
+    for (name, (_, start, condition, direction)) in must_fold.into_iter().zip(RESET_COMPARISONS) {
+        append_reset_loop(&mut source, name, "u8", 8, 8, (start, condition, direction));
+        sentinels.push((name, [18, 9], returned(65536 | 18)));
+        sentinels.push((name, [19, 9], returned(127)));
+    }
+    append_reset_loop(
+        &mut source,
+        "must_keep",
+        "u8",
+        8,
+        9,
+        ("1u64", "i <= trips", "add"),
+    );
+    sentinels.push(("must_keep", [15, 9], returned(65536 | 15)));
+    sentinels.push(("must_keep", [16, 9], overflow()));
     let mut calls: Vec<_> = sentinels
         .iter()
         .map(|(name, args, outcome)| (name.to_string(), args.to_vec(), Some(outcome)))
@@ -681,6 +750,24 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
                     }
                 }
             }
+            // The trip bound stays dynamic so an earlier unroller cannot
+            // resolve the recurring reset before CounterRangePass sees it.
+            for (comparison, start, condition, direction) in RESET_COMPARISONS {
+                let name = format!("range_{seed:x}_{ty}_cycle_{comparison}");
+                let reset = width - choose(2) as i64;
+                let trips = 7 + choose(5);
+                append_reset_loop(
+                    &mut source,
+                    &name,
+                    ty,
+                    width,
+                    reset,
+                    (start, condition, direction),
+                );
+                for budget in 0..=24 {
+                    calls.push((name.clone(), vec![budget, trips], None));
+                }
+            }
         }
     }
 
@@ -709,7 +796,8 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
         })
         .collect();
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
-    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    let (llvm, folds) =
+        program.llvm_program_with_counter_range_folds(Target::X86_64Linux, &exports);
     let mut differences = Vec::new();
     for (engine, optimization, object) in [
         ("Cranelift dev", Optimization::None, cranelift),
@@ -736,6 +824,43 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
         cases.len()
     );
     assert!(differences.is_empty(), "{}", differences.join("\n"));
+
+    let folded = |name: &str| {
+        let symbol = symbol(&program, names[name]);
+        folds.get(symbol.as_bytes()).copied().unwrap_or(0)
+    };
+    // Count both compiled functions and their invocations. Budget sweeps
+    // must not let one function supply an entire seed's fold coverage.
+    const MIN_FOLD_PERCENT: usize = 25;
+    for seed in SEEDS {
+        let prefix = format!("range_{seed:x}_");
+        let tally = |names: &mut dyn Iterator<Item = &str>| {
+            names
+                .filter(|name| name.starts_with(&prefix))
+                .fold((0, 0), |(removed, total), name| {
+                    (removed + usize::from(folded(name) > 0), total + 1)
+                })
+        };
+        let (shapes_with_folds, shapes) = tally(&mut names.keys().map(String::as_str));
+        let (cases_with_folds, invocations) =
+            tally(&mut calls.iter().map(|(name, _, _)| name.as_str()));
+        eprintln!(
+            "seed {seed:#x}: {shapes_with_folds}/{shapes} shapes, {cases_with_folds}/{invocations} cases folded by CounterRangePass"
+        );
+        assert!(
+            shapes > 0 && shapes_with_folds * 100 >= shapes * MIN_FOLD_PERCENT,
+            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its shapes"
+        );
+        assert!(
+            invocations > 0 && cases_with_folds * 100 >= invocations * MIN_FOLD_PERCENT,
+            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its cases"
+        );
+    }
+    for name in must_fold {
+        let count = folded(name);
+        eprintln!("{name}: {count} checks folded by CounterRangePass");
+        assert!(count > 0, "{name} must fold at least one check on pos");
+    }
 }
 
 #[test]

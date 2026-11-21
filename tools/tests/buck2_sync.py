@@ -97,11 +97,79 @@ class ProductionFeatures(unittest.TestCase):
 
 
 class CargoUnits(unittest.TestCase):
+    def test_shared_graphs_relocate_and_follow_cargo_inputs(self):
+        from cargo_units import Resolution
+
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            cargo_home = scratch / 'cargo-home'
+            dependency = 'registry/src/dependency-1.0.0'
+            registry = 'registry+https://github.com/rust-lang/crates.io'
+            external = dict(id=f'{registry}#dependency@1.0.0', name='dependency', version='1.0.0',
+                            manifest_path=str(cargo_home / dependency / 'Cargo.toml'), source=registry)
+            roots = [scratch / name for name in ('first', 'second # worktree')]
+            metadata = []
+            for root in roots:
+                (root / 'app/src').mkdir(parents=True)
+                (root / 'third-party').mkdir()
+                for name, contents in {
+                    'Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+                    'Cargo.lock': 'version = 4\n',
+                    'app/Cargo.toml': '[package]\nname = "app"\nversion = "1.0.0"\n',
+                    'rust-toolchain.toml': '[toolchain]\nchannel = "1.99.0"\n',
+                    'third-party/reindeer.toml': ('[platform.linux-x86_64]\n'
+                                                  'target = "x86_64-unknown-linux-gnu"\n'
+                                                  'execution-platform = true\n'),
+                }.items():
+                    (root / name).write_text(contents)
+                member = f'path+{(root / "app").as_uri()}#1.0.0'
+                target = dict(name='app', kind=['lib'], src_path=str(root / 'app/src/lib.rs'))
+                package = dict(id=member, name='app', version='1.0.0', targets=[target],
+                               manifest_path=str(root / 'app/Cargo.toml'), source=None)
+                metadata.append(dict(packages=[package, external], workspace_members=[member],
+                                     workspace_root=str(root), target_directory=str(root / 'target')))
+
+            def cargo(command, cwd, **kwargs):
+                package = metadata[roots.index(cwd)]['packages'][0]
+                registry_source = Path(kwargs['env']['CARGO_HOME']) / dependency / 'src/lib.rs'
+                library = dict(pkg_id=external['id'], mode='build', platform='x86_64-unknown-linux-gnu',
+                               target=dict(name='dependency', kind=['lib'], src_path=str(registry_source)),
+                               features=[], dependencies=[])
+                unit = dict(pkg_id=package['id'], target=package['targets'][0],
+                            mode=command[1], platform='x86_64-unknown-linux-gnu',
+                            features=[], dependencies=[dict(index=0, extern_crate_name='dependency')])
+                return subprocess.CompletedProcess(command, 0, json.dumps(
+                    dict(version=1, roots=[1], units=[library, unit])), '')
+
+            with patch.dict('os.environ', XDG_CACHE_HOME=str(scratch / 'cache')), \
+                 patch('cargo_units.rust_environment.environment', return_value={
+                     'CARGO': 'cargo', 'CARGO_HOME': str(cargo_home)}), \
+                 patch('cargo_units.subprocess.run', side_effect=cargo) as queries:
+                Resolution(roots[0], metadata[0])
+                self.assertEqual(queries.call_count, 2)
+                warm = Resolution(roots[1], metadata[1])
+                self.assertEqual(queries.call_count, 2, 'the second checkout reuses both units')
+                paths = {unit['pkg_id']: unit['target']['src_path'] for unit in warm.units.values()}
+                self.assertEqual(paths, {
+                    metadata[1]['workspace_members'][0]: str(roots[1] / 'app/src/lib.rs'),
+                    external['id']: str(cargo_home / dependency / 'src/lib.rs'),
+                })
+                for name in ('Cargo.lock', 'app/Cargo.toml', 'rust-toolchain.toml'):
+                    with self.subTest(name=name):
+                        path = roots[1] / name
+                        original = path.read_text()
+                        path.write_text(original + '# changed input\n')
+                        queries.reset_mock()
+                        Resolution(roots[1], metadata[1])
+                        self.assertEqual(queries.call_count, 2, f'{name} changes the cache key')
+                        path.write_text(original)
+
     def test_target_graphs_preserve_cross_only_edges_and_native_fixups(self):
         from cargo_units import Resolution, calls, literal, configured
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'Cargo.toml').write_text('[workspace]\n')
+            (root / 'Cargo.lock').write_text('version = 4\n')
             (root / 'rust-toolchain.toml').write_text('[toolchain]\nchannel="stable"\n')
             (root / 'third-party').mkdir()
             (root / 'third-party/reindeer.toml').write_text(
@@ -116,15 +184,19 @@ class CargoUnits(unittest.TestCase):
                     return dict(pkg_id=name, target=dict(name=name, kind=['lib']), mode=mode,
                                 platform=target, features=list(features),
                                 dependencies=[dict(index=i, extern_crate_name=n) for n, i in deps])
-                return json.dumps(dict(version=1, roots=[2], units=[
+                return subprocess.CompletedProcess(command, 0, json.dumps(dict(version=1, roots=[2], units=[
                     unit('system'), unit('probe', [('system', 0)] if arm else []),
                     unit('app', [('probe', 1)] + ([('system', 0)] if arm else []),
                          ['arm'] if arm else [], 'test' if command[1] == 'test' else 'build'),
-                    dict(unit('system'), platform=None)]))
-            meta = dict(packages=[dict(id=n, name=n, version='1.0.0') for n in ('app', 'probe', 'system')],
+                    dict(unit('system'), platform=None)])), '')
+            meta = dict(packages=[dict(id=n, name=n, version='1.0.0',
+                                       manifest_path=str(root / 'Cargo.toml'), source=None)
+                                  for n in ('app', 'probe', 'system')],
                         workspace_members=['app'])
-            with patch('cargo_units.rust_environment.environment', return_value={'CARGO': 'cargo'}), \
-                 patch('cargo_units.subprocess.check_output', side_effect=graph):
+            with patch.dict('os.environ', XDG_CACHE_HOME=str(root / 'cache')), \
+                 patch('cargo_units.rust_environment.environment', return_value={
+                     'CARGO': 'cargo', 'CARGO_HOME': str(root / 'cargo-home')}), \
+                 patch('cargo_units.subprocess.run', side_effect=graph):
                 resolution = Resolution(root, meta)
             systems = [u for u in resolution.units.values() if u['pkg_id'] == 'system']
             self.assertEqual(len(systems), 2)

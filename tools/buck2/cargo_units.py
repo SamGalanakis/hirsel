@@ -8,9 +8,12 @@ Only features, Rust dependency edges and their identities are replaced here.
 from __future__ import annotations
 
 import ast
+from concurrent.futures import ThreadPoolExecutor
 import copy
+import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -80,6 +83,163 @@ def replace(source, statement, fields, render):
     return text + '\n'
 
 
+def relocate(value, package_ids, source, destination):
+    """Translate workspace paths and Cargo's path package IDs in a JSON value."""
+    if isinstance(value, dict):
+        return {key: relocate(item, package_ids, source, destination) for key, item in value.items()}
+    if isinstance(value, list):
+        return [relocate(item, package_ids, source, destination) for item in value]
+    if isinstance(value, str):
+        if value in package_ids:
+            return package_ids[value]
+        if value == source or value.startswith(source + '/'):
+            return destination + value[len(source):]
+    return value
+
+
+def cargo_config(directory):
+    # Cargo prefers the extensionless file when both forms exist.
+    return next((path for name in ('config', 'config.toml')
+                 if (path := directory / name).is_file()), None)
+
+
+def config_inputs(paths):
+    files = {}
+    while paths:
+        path = paths.pop()
+        if path in files:
+            continue
+        contents = path.read_text() if path.is_file() else None
+        files[path] = contents
+        if contents is not None:
+            for include in tomllib.loads(contents).get('include', []):
+                name = include if isinstance(include, str) else include['path']
+                paths.append(Path(os.path.abspath(path.parent / name)))
+    return [[str(path), contents] for path, contents in sorted(files.items())]
+
+
+def query_graphs(root, commands, env, cargo_home, user_config):
+    worker_count = min(4, len(commands))
+    if not worker_count:
+        return []
+
+    def query_batch(home, batch):
+        target_dir = home / 'target'
+        target_dir.mkdir(parents=True)
+        home_prefix = f'{home}/'
+        for name in ('registry', 'git'):
+            (home / name).symlink_to(cargo_home / name, target_is_directory=True)
+        if user_config and user_config.suffix == '.toml':
+            # An include keeps config-relative paths relative to the original file.
+            (home / 'config.toml').write_text(f'include = [{json.dumps(str(user_config), ensure_ascii=False)}]\n')
+        elif user_config:
+            (home / 'config').symlink_to(user_config)
+        # Cargo 1.99 still takes an exclusive .package-cache lock offline.
+        # Each worker owns that lock and the GC database for its private home.
+        offline = env | {'CARGO_HOME': str(home), 'CARGO_NET_OFFLINE': 'true',
+                         'CARGO_CACHE_AUTO_CLEAN_FREQUENCY': 'never', 'RUSTC_BOOTSTRAP': '1'}
+        results = []
+        for index, args in batch:
+            command = [env['CARGO'], *args, '--manifest-path', str(root / 'Cargo.toml'),
+                       '--target-dir', str(target_dir), '--locked', '--unit-graph',
+                       '-Z', 'unstable-options']
+            result = subprocess.run(command, cwd=root, env=offline, capture_output=True, text=True)
+            if result.returncode:
+                error = result.stderr.strip()
+                if 'offline' in error:
+                    error += '\nRun cargo fetch --locked once, then retry sync.'
+                raise SystemExit(f"Cargo unit graph failed ({' '.join(args)})\n{error}")
+            graph = json.loads(result.stdout)
+            if graph['version'] != 1:
+                raise ValueError('unsupported Cargo unit graph version')
+            units = []
+            for unit in graph['units']:
+                projected = {field: unit[field] for field in
+                             ('pkg_id', 'target', 'mode', 'platform', 'features', 'dependencies')}
+                target = projected['target']
+                source = target.get('src_path', '')
+                if source.startswith(home_prefix):
+                    # Cargo names registry sources through the worker's symlink.
+                    target['src_path'] = str(cargo_home / source.removeprefix(home_prefix))
+                units.append(projected)
+            results.append((index, dict(roots=graph['roots'], units=units)))
+        return results
+
+    indexed = list(enumerate(commands))
+    with tempfile.TemporaryDirectory(prefix='hirsel-unit-cargo-') as temporary:
+        with ThreadPoolExecutor(max_workers=worker_count) as workers:
+            batches = workers.map(query_batch, (Path(temporary) / str(i) for i in range(worker_count)),
+                                  (indexed[i::worker_count] for i in range(worker_count)))
+            return [graph for _, graph in sorted(item for batch in batches for item in batch)]
+
+
+def unit_graphs(root, meta, platform_source, commands):
+    cache_home = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'hirsel/cargo-units'
+    env = rust_environment.environment(root)
+    cargo_home = (root / env.get('CARGO_HOME', Path.home() / '.cargo')).resolve()
+    user_config = cargo_config(cargo_home)
+    marker = '<workspace>'
+    package_ids = {}
+    manifests = {root / name for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')}
+    for package in meta['packages']:
+        manifest = Path(package['manifest_path'])
+        if manifest.is_relative_to(root):
+            package_ids[package['id']] = 'path+workspace:' + manifest.relative_to(root).as_posix()
+        if package.get('source') is None:
+            manifests.add(manifest)
+
+    def read_inputs():
+        configs = [path for ancestor in (root, *root.parents)
+                   if (path := cargo_config(ancestor / '.cargo')) is not None]
+        if user_config and user_config not in configs:
+            configs.append(user_config)
+        return ([[str(path), hashlib.sha256(path.read_bytes()).hexdigest()] for path in sorted(manifests)],
+                config_inputs(configs))
+
+    files = read_inputs()
+    overrides = {key: value for key, value in env.items()
+                 if key.startswith(('CARGO_BUILD_', 'CARGO_TARGET_', 'CARGO_PROFILE_', 'CARGO_SOURCE_',
+                                    'CARGO_REGISTRIES_', 'CARGO_RESOLVER_', 'RUSTC'))
+                 or key in ('CARGO_ENCODED_RUSTFLAGS', 'RUSTFLAGS', 'RUSTUP_TOOLCHAIN')}
+    normalized_files = [sorted(relocate(group, package_ids, str(root), marker)) for group in files]
+    inputs = ['target-graphs-v3', platform_source, commands, meta, normalized_files,
+              str(cargo_home), env['CARGO'], overrides]
+    normalized = relocate(inputs, package_ids, str(root), marker)
+    key = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
+    cache = cache_home / f'{key}.json'
+    restore_ids = {relative: original for original, relative in package_ids.items()}
+
+    def read_cache():
+        try:
+            return relocate(json.loads(cache.read_text()), restore_ids, marker, str(root))
+        except (FileNotFoundError, ValueError):
+            return None
+
+    cached = read_cache()
+    if cached is not None:
+        return cached
+    cache_home.mkdir(parents=True, exist_ok=True)
+    # A cold worktree waits only for a producer of exactly the same graphs.
+    with cache.with_suffix('.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cached = read_cache()
+        if cached is not None:
+            return cached
+        graphs = query_graphs(root, commands, env, cargo_home, user_config)
+        if read_inputs() != files:
+            raise SystemExit('Cargo inputs changed during unit graph resolution. Retry sync.')
+        payload = relocate(graphs, package_ids, str(root), marker)
+        with tempfile.NamedTemporaryFile(mode='w', dir=cache_home, prefix=f'.{key}.', delete=False) as output:
+            pending = Path(output.name)
+            try:
+                json.dump(payload, output, separators=(',', ':'))
+                output.close()
+                pending.replace(cache)
+            finally:
+                pending.unlink(missing_ok=True)
+    return graphs
+
+
 class Resolution:
     def __init__(self, root: Path, meta: dict):
         self.root = root
@@ -92,79 +252,53 @@ class Resolution:
         platform_source = (root / 'third-party/reindeer.toml').read_text()
         self.platforms = tomllib.loads(platform_source)['platform']
         self.host_platform = next(name for name, config in self.platforms.items() if config.get('execution-platform'))
-        fingerprint = hashlib.sha256(json.dumps(['target-graphs-v1', platform_source, meta['packages'], meta['workspace_members'], (root / 'Cargo.toml').read_text(), (root / 'rust-toolchain.toml').read_text()], sort_keys=True).encode()).hexdigest()
-        self.cache_path = root / '.buck2/cargo-units.json'
-        try:
-            cached = json.loads(self.cache_path.read_text())
-        except (OSError, ValueError):
-            cached = {}
-        self.graphs = cached.get('graphs', {}) if cached.get('fingerprint') == fingerprint else {}
-        env = rust_environment.environment(root)
-        # --unit-graph is unstable in the pinned Cargo; it executes no compiler.
-        env['RUSTC_BOOTSTRAP'] = '1'
+        builds, commands = [], []
         for member in sorted(self.members, key=lambda i: self.packages[i]['name']):
-            package = self.packages[member]
-            builds = [(False, []), (True, [])]
-            if package['name'] == 'hirsel-core-rt':
+            name = self.packages[member]['name']
+            modes = [(False, []), (True, [])]
+            if name == 'hirsel-core-rt':
                 # The recording archive adds a dependency as well as local cfgs.
-                builds.append((False, ['--features', 'record']))
-            for testing, feature_args in builds:
-                graphs = {}
-                for platform, config in self.platforms.items():
-                    command = [env['CARGO'], 'test' if testing else 'build', '-p', package['name'],
-                               '--manifest-path', str(root / 'Cargo.toml'), '--locked',
-                               '--target', config['target'], '--unit-graph', '-Z', 'unstable-options']
+                modes.append((False, ['--features', 'record']))
+            for testing, feature_args in modes:
+                builds.append((member, testing, feature_args))
+                for config in self.platforms.values():
+                    args = ['test' if testing else 'build', '-p', name, '--target', config['target']]
                     if testing:
-                        command.append('--no-run')
-                    command.extend(feature_args)
-                    graphs[platform] = self.graph(command, env)
-                    if graphs[platform]['version'] != 1:
-                        raise ValueError('unsupported Cargo unit graph version')
-                target_keys = self.add_platforms(graphs)
-                graph = graphs[self.host_platform]
-                keys = target_keys[self.host_platform]
-                if feature_args:
-                    root_index, = graph['roots']
-                    self.record_runtime = keys[root_index]
-                    continue
-                if testing:
-                    binaries = {u['target']['name']: keys[i] for i, u in enumerate(graph['units'])
-                                if u['pkg_id'] == member and u['target']['kind'] == ['bin'] and u['mode'] == 'build'}
-                    for index in graph['roots']:
-                        self.test_binaries[keys[index]] = binaries
+                        args.append('--no-run')
+                    commands.append(args + feature_args)
+        resolved = iter(unit_graphs(root, meta, platform_source, commands))
+        for member, testing, feature_args in builds:
+            graphs = {platform: next(resolved) for platform in self.platforms}
+            target_keys = self.add_platforms(graphs)
+            graph = graphs[self.host_platform]
+            keys = target_keys[self.host_platform]
+            if feature_args:
+                root_index, = graph['roots']
+                self.record_runtime = keys[root_index]
+                continue
+            if testing:
+                binaries = {u['target']['name']: keys[i] for i, u in enumerate(graph['units'])
+                            if u['pkg_id'] == member and u['target']['kind'] == ['bin'] and u['mode'] == 'build'}
                 for index in graph['roots']:
-                    unit = graph['units'][index]
+                    self.test_binaries[keys[index]] = binaries
+            for index in graph['roots']:
+                unit = graph['units'][index]
+                if unit['pkg_id'] == member:
+                    base = self.base(unit)
+                    if base and (not testing or unit['mode'] == 'test' or unit['target']['kind'] == ['example']):
+                        self.preferred.setdefault(base, keys[index])
+            if not testing:
+                for index, unit in enumerate(graph['units']):
                     if unit['pkg_id'] == member:
                         base = self.base(unit)
-                        if base and (not testing or unit['mode'] == 'test' or unit['target']['kind'] == ['example']):
+                        if base:
                             self.preferred.setdefault(base, keys[index])
-                if not testing:
-                    for index, unit in enumerate(graph['units']):
-                        if unit['pkg_id'] == member:
-                            base = self.base(unit)
-                            if base:
-                                self.preferred.setdefault(base, keys[index])
         for key, unit in self.units.items():
             base = self.base(unit)
             if base:
                 self.names[key] = base if self.preferred.get(base) == key else base + '-features-' + key[:12]
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        # Cache only Cargo's answer. A manifest or target-layout change changes
-        # the metadata fingerprint, and bypasses this cache completely.
-        with tempfile.NamedTemporaryFile(mode='w', dir=self.cache_path.parent, delete=False) as pending:
-            json.dump(dict(fingerprint=fingerprint, graphs=self.graphs), pending, separators=(',', ':'))
-        Path(pending.name).replace(self.cache_path)
         if len(set(self.names.values())) != len(self.names):
             raise ValueError('Cargo unit label collision')
-
-    def graph(self, command, env):
-        key = json.dumps(command)
-        if key not in self.graphs:
-            graph = json.loads(subprocess.check_output(command, cwd=self.root, env=env))
-            self.graphs[key] = dict(version=graph['version'], roots=graph['roots'], units=[
-                {field: unit[field] for field in ('pkg_id', 'target', 'mode', 'platform', 'features', 'dependencies')}
-                for unit in graph['units']])
-        return self.graphs[key]
 
     def add(self, graph):
         keys = {}

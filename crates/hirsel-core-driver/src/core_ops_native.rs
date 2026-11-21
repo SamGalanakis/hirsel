@@ -610,15 +610,14 @@ fn clone_body_operations(backend: Backend) {
     text.push_str(
         r#"
 pub type ProofCopy[T] { xs: List[T], n: u64 }
-clone[T](p: ProofCopy[T]) { Ok(ProofCopy(xs: clone(p.xs)?, n: p.n + 1)) }
+clone[T](p: ProofCopy[T]) { ProofCopy(xs: clone(p.xs), n: p.n + 1) }
 pub fn proof_clone_run() -> u64 {
-    let made: Result[List[u64], Capacity] = with_capacity(2)
-    let mut xs: List[u64] = match take made { Ok(take l) => take l, Error(_) => return 0 }
-    match push(mut xs, 7) { Ok(()) => {}, Error(_) => return 0 }
-    match push(mut xs, 9) { Ok(()) => {}, Error(_) => return 0 }
+    let mut xs: List[u64] = with_capacity(2)
+    push(mut xs, 7)
+    push(mut xs, 9)
     let p = ProofCopy(xs: take xs, n: 4)
-    let c: Result[ProofCopy[u64], Capacity] = clone(p)
-    match take c { Ok(take q) => q.n * 100 + len(q.xs) * 10 + len(p.xs), Error(_) => 1 }
+    let q: ProofCopy[u64] = clone(p)
+    q.n * 100 + len(q.xs) * 10 + len(p.xs)
 }
 "#,
     );
@@ -1535,8 +1534,9 @@ fn run_lines_native(backend: Backend, case: &str) {
     });
     for (i, line) in runs.enumerate() {
         let (call, want) = line.split_once(" = ").expect("a run line");
-        // A finalizer trace is the evaluator's to observe; natively the value is checked.
+        // The evaluator checks the trace and held bytes. The native entry compares the value.
         let want = want.split_once(" trace ").map_or(want, |(v, _)| v);
+        let want = want.split_once(" used ").map_or(want, |(v, _)| v);
         if let Some(cause) = want.strip_prefix("fail ") {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let dir = tempfile::tempdir().unwrap();

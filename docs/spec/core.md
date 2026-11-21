@@ -322,7 +322,8 @@ operations it names; nothing else about them may be inferred from an implementat
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and
-  returns `Exists` when one is present. `host.read` appends to `buf` at most its spare
+  returns `Exists` when one is present; `ReadWrite` opens for reading and writing, creating
+  the file when absent and never emptying it. `host.read` appends to `buf` at most its spare
   capacity, never changes its capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
   or when `buf` has no spare capacity; a read that returns an error has appended nothing
   and moved no cursor, so a partial read is delivered as `Ok`. A successful `host.write`
@@ -354,6 +355,19 @@ operations it names; nothing else about them may be inferred from an implementat
   and changes nothing. Its atomicity is visibility only: an `open` of `to` finds the old
   file or the new one, never neither, and `rename` makes nothing durable, so after a host
   crash either name may hold the file unless a later `host.sync_dir(d)` returned `Ok(())`.
+  `host.open_dir(d, p)` returns a `Dir` rooted at the existing directory `p`, with the same
+  confinement ([CAP-7](capabilities.md#cap-7-attenuation)). It gives `Denied` when `p` names
+  anything other than a directory, without following a final symbolic link.
+  `host.entries(d)` opens a listing of `d`'s root as a `HostEntries`, a mechanical resource
+  whose finalizer closes it. `host.next_entries(mut h, mut buf)` appends whole records
+  (kind byte, `u16` little-endian name length, name), never `.` or `..`, in host order, and
+  `Ok(0)` when exhausted. It fails with `Bounds` before issue when `buf` has less than 258
+  bytes spare. `host.stat(d, p)` and `host.stat_file(mut f)` report kind, size and
+  modification nanoseconds without following a final symbolic link. `host.read_at` and
+  `host.write_at` read and write at an offset without moving the cursor, with `host.read`'s
+  and `host.write`'s partial results. `read_at` needs a readable handle and `write_at` a
+  writable one that is not `Append`, or they give `Denied` with no host effect
+  ([dir](../../core/std/api/dir.md), [file](../../core/std/api/file.md)).
   `host.sync(mut f)` and `host.sync_dir(d)` are the two sync barriers. `host.sync(f)` returns `Ok(())` once every byte of `f`'s file written
   before its issue, through any handle, survives a host crash, with the file's length and
   whatever else reading those bytes back needs; it makes no name durable. `host.sync_dir(d)`

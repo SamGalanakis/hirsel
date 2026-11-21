@@ -54,8 +54,8 @@ fn read(tx: store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capaci
 fn retired() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, string.as_bytes("retired"))
-    result.unwrap(std.codec.put_u64(0u64, mut key))
-    result.unwrap(std.codec.put_u64(0u64, mut key))
+    std.codec.put_u64(0u64, mut key)
+    std.codec.put_u64(0u64, mut key)
     key
 }
 

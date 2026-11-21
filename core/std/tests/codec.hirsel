@@ -124,18 +124,17 @@ fn outcome[T](c: codec.Codec[T], b: Bytes) -> u64 {
     decode_outcome(codec.decode(c, b))
 }
 
-fn decode_outcome[T](r: Result[Result[T, codec.DecodeError], Capacity]) -> u64 {
+fn decode_outcome[T](r: Result[T, codec.DecodeError]) -> u64 {
     match r {
-        Ok(Ok(_)) => 0,
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(_) => 0,
+        Error(e) => code(e),
     }
 }
 
 // The same value back, by re-encoding it: equal bytes or not.
 fn again[T](c: codec.Codec[T], b: Bytes) -> bool {
     match codec.decode(c, b) {
-        Ok(Ok(x)) => enc(c, x) == b,
+        Ok(x) => enc(c, x) == b,
         _ => false
     }
 }
@@ -227,7 +226,7 @@ fn bytes_as_list() -> u64 {
             bad += 1
         }
         let back = match (codec.decode(bulk, both), codec.decode(slow, both)) {
-            (Ok(Ok(x)), Ok(Ok(y))) => x == xs && y == xs,
+            (Ok(x), Ok(y)) => x == xs && y == xs,
             _ => false
         }
         if !back {
@@ -255,7 +254,7 @@ fn bytes_as_list() -> u64 {
 // Encodes xs with c into an out holding pre bytes, under a bound of limit: whether it
 // failed, then on success out's length, capacity and bytes.
 fn put_under(c: codec.Codec[Bytes], xs: Bytes, pre: u64, limit: u64) -> (bool, u64, u64, Bytes) {
-    let r = isolate(fn() -> Result[Result[(u64, u64, Bytes), Capacity], Capacity] {
+    let r = isolate(fn() -> Result[Result[(u64, u64, Bytes), codec.EncodeError], Capacity] {
         let mut out: Bytes = list.new()
         let mut i: u64 = 0
         while i < pre {
@@ -315,17 +314,18 @@ type Mix {
     pair: (u8, bool)
 }
 
-fn mix_encode(x: Mix, mut out: Bytes) -> Result[(), Capacity] {
+fn mix_encode(x: Mix, mut out: Bytes) -> Result[(), codec.EncodeError] {
     codec.put_option(x.tag, codec.of_string(), mut out)?
     codec.put_result(x.res, codec.of_u16(), codec.of_string(), mut out)?
     codec.put_map(x.m, codec.of_string(), codec.of_u8(), mut out)?
     codec.put_list(x.xs, codec.of_i32(), mut out)?
     let (p0, p1) = x.pair
-    codec.put_u8(p0, mut out)?
+    codec.put_u8(p0, mut out)
     codec.put_bool(p1, mut out)
+    Ok(())
 }
 
-fn mix_decode(b: Bytes, mut at: u64) -> Result[Mix, codec.Stop] {
+fn mix_decode(b: Bytes, mut at: u64) -> Result[Mix, codec.DecodeError] {
     let tag = codec.take_option(b, mut at, codec.of_string())?
     let res = codec.take_result(b, mut at, codec.of_u16(), codec.of_string())?
     let m = codec.take_map(b, mut at, codec.of_string(), codec.of_u8())?
@@ -335,7 +335,7 @@ fn mix_decode(b: Bytes, mut at: u64) -> Result[Mix, codec.Stop] {
     Ok(Mix(tag: take tag, res: take res, m: take m, xs: take xs, pair: (p0, p1)))
 }
 
-fn mix_schema(mut s: codec.Schema, c: codec.Codec[Mix]) -> Result[(), Capacity] {
+fn mix_schema(mut s: codec.Schema, c: codec.Codec[Mix]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Mix", 0)?
     if codec.record(mut s, 5)? {
         return Ok(())
@@ -350,8 +350,8 @@ fn mix_schema(mut s: codec.Schema, c: codec.Codec[Mix]) -> Result[(), Capacity] 
     codec.schema_list(mut s, codec.of_i32())?
     codec.field(mut s, "pair")?
     codec.schema_tuple(mut s, 2)?
-    codec.schema_u8(mut s)?
-    codec.schema_bool(mut s)?
+    codec.schema_u8(mut s)
+    codec.schema_bool(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -399,13 +399,12 @@ fn flips_are_refused_or_exact() -> bool {
             list.append(mut bad, b)
             let _ = list.set(mut bad, i, b[i] ^ mask)
             match codec.decode(mixes(), bad) {
-                Ok(Ok(x)) => {
+                Ok(x) => {
                     if enc(mixes(), x) != bad {
                         return false
                     }
                 }
-                Ok(Error(_)) => {}
-                Error(_) => return false
+                Error(_) => {}
             }
             j += 1
         }
@@ -440,28 +439,29 @@ type Row {
     score: i64
 }
 
-fn row_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_u64(x.id, mut out)?
+fn row_encode(x: Row, mut out: Bytes) -> Result[(), codec.EncodeError] {
+    codec.put_u64(x.id, mut out)
     codec.put_string(x.name, mut out)?
     codec.put_i64(x.score, mut out)
+    Ok(())
 }
 
-fn row_decode(b: Bytes, mut at: u64) -> Result[Row, codec.Stop] {
+fn row_decode(b: Bytes, mut at: u64) -> Result[Row, codec.DecodeError] {
     let id = codec.take_u64(b, mut at)?
     let name = codec.take_string(b, mut at)?
     let score = codec.take_i64(b, mut at)?
     Ok(Row(id, name: take name, score))
 }
 
-fn row_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn row_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 3)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field_default(mut s, "score", codec.of_i64(), 7)?
     codec.close(mut s)
     Ok(())
@@ -472,20 +472,20 @@ fn rows() -> codec.Codec[Row] {
 }
 
 // Version 1: `{ id: u64, name: String }`.
-fn v1_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_u64(x.id, mut out)?
+fn v1_encode(x: Row, mut out: Bytes) -> Result[(), codec.EncodeError] {
+    codec.put_u64(x.id, mut out)
     codec.put_string(x.name, mut out)
 }
 
-fn v1_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn v1_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -495,20 +495,21 @@ fn rows_v1() -> codec.Codec[Row] {
 }
 
 // `{ name: String, id: u64 }`: the same fields, reordered.
-fn swapped_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
+fn swapped_encode(x: Row, mut out: Bytes) -> Result[(), codec.EncodeError] {
     codec.put_string(x.name, mut out)?
     codec.put_u64(x.id, mut out)
+    Ok(())
 }
 
-fn swapped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn swapped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
     }
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -518,23 +519,23 @@ fn rows_swapped() -> codec.Codec[Row] {
 }
 
 // `{ id: u64, note: String, name: String }`: note is "n" in every value written.
-fn noted_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_u64(x.id, mut out)?
+fn noted_encode(x: Row, mut out: Bytes) -> Result[(), codec.EncodeError] {
+    codec.put_u64(x.id, mut out)
     codec.put_string("n", mut out)?
     codec.put_string(x.name, mut out)
 }
 
-fn noted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn noted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 3)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "note")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -546,34 +547,34 @@ fn rows_noted() -> codec.Codec[Row] {
 // A type with a tombstone: `type Row codec { id: u64, removed note: String,
 // name: String, score: i64 = 7 }`. The encode and decode are row's; only the schema
 // keeps the removed name.
-fn tomb_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn tomb_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 4)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.removed_field(mut s, "note")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field_default(mut s, "score", codec.of_i64(), 7)?
     codec.close(mut s)
     Ok(())
 }
 
 // The tombstone with another type: `removed note: u64`.
-fn tomb_u64_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn tomb_u64_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 4)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.removed_field(mut s, "note")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field_default(mut s, "score", codec.of_i64(), 7)?
     codec.close(mut s)
     Ok(())
@@ -581,17 +582,17 @@ fn tomb_u64_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capac
 
 // The name freed and the field back: `{ id: u64, note: String, name: String, score: i64
 // = 7 }`, note with no default.
-fn renoted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn renoted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 4)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "note")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field_default(mut s, "score", codec.of_i64(), 7)?
     codec.close(mut s)
     Ok(())
@@ -603,46 +604,46 @@ fn rows_tomb() -> codec.Codec[Row] {
 
 // Writers no evolution admits: id retyped to i64; a field `extra: bool` the reader
 // lacks; name missing with no default.
-fn retyped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn retyped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_i64(mut s)?
+    codec.schema_i64(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.close(mut s)
     Ok(())
 }
 
-fn extra_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn extra_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 3)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "name")?
-    codec.schema_string(mut s)?
+    codec.schema_string(mut s)
     codec.field(mut s, "extra")?
-    codec.schema_bool(mut s)?
+    codec.schema_bool(mut s)
     codec.close(mut s)
     Ok(())
 }
 
-fn short_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+fn short_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 1)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.close(mut s)
     Ok(())
 }
 
-fn schema_bytes(w: fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), Capacity]) -> Bytes {
+fn schema_bytes(w: fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), codec.EncodeError]) -> Bytes {
     result.unwrap(codec.schema(codec.make(row_encode, row_decode, w, 20)))
 }
 
@@ -653,13 +654,11 @@ fn row(id: u64, name: String) -> Row {
 // Reads b, written under the schema `writer`, as c's type; the value or the error code.
 fn through[T](c: codec.Codec[T], writer: Bytes, b: Bytes) -> Result[T, u64] {
     match codec.resolve(c, writer) {
-        Ok(Ok(r)) => match codec.read(r, b) {
-            Ok(Ok(x)) => Ok(take x),
-            Ok(Error(e)) => Error(code(e)),
-            Error(_) => Error(9999)
+        Ok(r) => match codec.read(r, b) {
+            Ok(x) => Ok(take x),
+            Error(e) => Error(code(e)),
         },
-        Ok(Error(e)) => Error(code(e)),
-        Error(_) => Error(9999)
+        Error(e) => Error(code(e)),
     }
 }
 
@@ -810,22 +809,23 @@ fn resolution_checks_writer_bytes() -> (u64, u64, u64) {
 // version had Dot and Circle; a later one removed Rect by tombstone.
 type Shape = Dot | Circle(f64) | Rect(u64, u64)
 
-fn shape_encode(x: Shape, mut out: Bytes) -> Result[(), Capacity] {
+fn shape_encode(x: Shape, mut out: Bytes) -> Result[(), codec.EncodeError] {
     match x {
         Dot => codec.put_tag(0, mut out),
         Circle(r) => {
-            codec.put_tag(1, mut out)?
+            codec.put_tag(1, mut out)
             codec.put_f64(r, mut out)
         }
         Rect(w, h) => {
-            codec.put_tag(2, mut out)?
-            codec.put_u64(w, mut out)?
+            codec.put_tag(2, mut out)
+            codec.put_u64(w, mut out)
             codec.put_u64(h, mut out)
         }
     }
+    Ok(())
 }
 
-fn shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
+fn shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.DecodeError] {
     let tag = codec.take_tag(b, mut at, 3)?
     if tag == 0 {
         Ok(Dot)
@@ -839,17 +839,17 @@ fn shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
     }
 }
 
-fn shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
+fn shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 3)? {
         return Ok(())
     }
     codec.variant(mut s, "Dot", 0)?
     codec.variant(mut s, "Circle", 1)?
-    codec.schema_f64(mut s)?
+    codec.schema_f64(mut s)
     codec.variant(mut s, "Rect", 2)?
-    codec.schema_u64(mut s)?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
+    codec.schema_u64(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -858,21 +858,21 @@ fn shapes() -> codec.Codec[Shape] {
     codec.make(shape_encode, shape_decode, shape_schema, 4)
 }
 
-fn old_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
+fn old_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 2)? {
         return Ok(())
     }
     codec.variant(mut s, "Dot", 0)?
     codec.variant(mut s, "Circle", 1)?
-    codec.schema_f64(mut s)?
+    codec.schema_f64(mut s)
     codec.close(mut s)
     Ok(())
 }
 
 // A removed variant's tag is no value of the reader's: its decode refuses it as it
 // refuses a tag past the end.
-fn cut_shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
+fn cut_shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.DecodeError] {
     let start = at
     let tag = codec.take_tag(b, mut at, 3)?
     if tag == 0 {
@@ -881,53 +881,53 @@ fn cut_shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
         let r = codec.take_f64(b, mut at)?
         Ok(Circle(r))
     } else {
-        Error(Bad(Invalid(start)))
+        Error(Invalid(start))
     }
 }
 
-fn cut_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
+fn cut_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 3)? {
         return Ok(())
     }
     codec.variant(mut s, "Dot", 0)?
     codec.variant(mut s, "Circle", 1)?
-    codec.schema_f64(mut s)?
+    codec.schema_f64(mut s)
     codec.removed_variant(mut s, "Rect", 2)?
-    codec.schema_u64(mut s)?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
+    codec.schema_u64(mut s)
     codec.close(mut s)
     Ok(())
 }
 
-fn cut_i64_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
+fn cut_i64_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 3)? {
         return Ok(())
     }
     codec.variant(mut s, "Dot", 0)?
     codec.variant(mut s, "Circle", 1)?
-    codec.schema_f64(mut s)?
+    codec.schema_f64(mut s)
     codec.removed_variant(mut s, "Rect", 2)?
-    codec.schema_u64(mut s)?
-    codec.schema_i64(mut s)?
+    codec.schema_u64(mut s)
+    codec.schema_i64(mut s)
     codec.close(mut s)
     Ok(())
 }
 
-fn renamed_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
+fn renamed_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 2)? {
         return Ok(())
     }
     codec.variant(mut s, "Dot", 0)?
     codec.variant(mut s, "Ring", 1)?
-    codec.schema_f64(mut s)?
+    codec.schema_f64(mut s)
     codec.close(mut s)
     Ok(())
 }
 
-fn shape_schema_bytes(w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), Capacity]) -> Bytes {
+fn shape_schema_bytes(w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), codec.EncodeError]) -> Bytes {
     result.unwrap(codec.schema(codec.make(shape_encode, shape_decode, w, 4)))
 }
 
@@ -939,7 +939,7 @@ fn shape_code(x: Shape) -> u64 {
     }
 }
 
-fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), Capacity], b: Bytes) -> u64 {
+fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), codec.EncodeError], b: Bytes) -> u64 {
     match through(reader, shape_schema_bytes(w), b) {
         Ok(x) => shape_code(x),
         Error(k) => k
@@ -992,18 +992,18 @@ type Pair[T] {
     right: T
 }
 
-fn pair_encode_with[T](x: Pair[T], c: codec.Codec[T], mut out: Bytes) -> Result[(), Capacity] {
+fn pair_encode_with[T](x: Pair[T], c: codec.Codec[T], mut out: Bytes) -> Result[(), codec.EncodeError] {
     codec.put_with(x.left, c, mut out)?
     codec.put_with(x.right, c, mut out)
 }
 
-fn pair_decode_with[T](b: Bytes, mut at: u64, c: codec.Codec[T]) -> Result[Pair[T], codec.Stop] {
+fn pair_decode_with[T](b: Bytes, mut at: u64, c: codec.Codec[T]) -> Result[Pair[T], codec.DecodeError] {
     let left = codec.take_with(b, mut at, c)?
     let right = codec.take_with(b, mut at, c)?
     Ok(Pair(left: take left, right: take right))
 }
 
-fn pair_schema_with[T](mut s: codec.Schema, c: codec.Codec[T]) -> Result[(), Capacity] {
+fn pair_schema_with[T](mut s: codec.Schema, c: codec.Codec[T]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Pair", 1)?
     codec.argument(mut s, c)?
     if codec.record(mut s, 2)? {
@@ -1017,15 +1017,15 @@ fn pair_schema_with[T](mut s: codec.Schema, c: codec.Codec[T]) -> Result[(), Cap
     Ok(())
 }
 
-fn pair_u64_encode(x: Pair[u64], mut out: Bytes) -> Result[(), Capacity] {
+fn pair_u64_encode(x: Pair[u64], mut out: Bytes) -> Result[(), codec.EncodeError] {
     pair_encode_with(x, codec.of_u64(), mut out)
 }
 
-fn pair_u64_decode(b: Bytes, mut at: u64) -> Result[Pair[u64], codec.Stop] {
+fn pair_u64_decode(b: Bytes, mut at: u64) -> Result[Pair[u64], codec.DecodeError] {
     pair_decode_with(b, mut at, codec.of_u64())
 }
 
-fn pair_u64_schema(mut s: codec.Schema, c: codec.Codec[Pair[u64]]) -> Result[(), Capacity] {
+fn pair_u64_schema(mut s: codec.Schema, c: codec.Codec[Pair[u64]]) -> Result[(), codec.EncodeError] {
     pair_schema_with(mut s, codec.of_u64())
 }
 
@@ -1033,15 +1033,15 @@ fn pairs_u64() -> codec.Codec[Pair[u64]] {
     codec.make(pair_u64_encode, pair_u64_decode, pair_u64_schema, 16)
 }
 
-fn pair_string_encode(x: Pair[String], mut out: Bytes) -> Result[(), Capacity] {
+fn pair_string_encode(x: Pair[String], mut out: Bytes) -> Result[(), codec.EncodeError] {
     pair_encode_with(x, codec.of_string(), mut out)
 }
 
-fn pair_string_decode(b: Bytes, mut at: u64) -> Result[Pair[String], codec.Stop] {
+fn pair_string_decode(b: Bytes, mut at: u64) -> Result[Pair[String], codec.DecodeError] {
     pair_decode_with(b, mut at, codec.of_string())
 }
 
-fn pair_string_schema(mut s: codec.Schema, c: codec.Codec[Pair[String]]) -> Result[(), Capacity] {
+fn pair_string_schema(mut s: codec.Schema, c: codec.Codec[Pair[String]]) -> Result[(), codec.EncodeError] {
     pair_schema_with(mut s, codec.of_string())
 }
 
@@ -1075,18 +1075,18 @@ type TreeFrame {
     left: u64
 }
 
-fn tree_encode(x: Tree, mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_u64(x.label, mut out)?
+fn tree_encode(x: Tree, mut out: Bytes) -> Result[(), codec.EncodeError] {
+    codec.put_u64(x.label, mut out)
     codec.put_list(x.kids, trees(), mut out)
 }
 
-fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
+fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.DecodeError] {
     let mut stack: List[TreeFrame] = list.new()
     loop {
         let label = codec.take_u64(b, mut at)?
         let n = codec.take_count(b, mut at, 12)?
         if n > 0 {
-            let kids: List[Tree] = codec.room(n)?
+            let kids: List[Tree] = codec.room(n)
             list.push(mut stack, TreeFrame(label, kids: take kids, left: n))
             continue
         }
@@ -1107,13 +1107,13 @@ fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
     }
 }
 
-fn tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), Capacity] {
+fn tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Tree", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
     }
     codec.field(mut s, "label")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "kids")?
     codec.schema_list(mut s, trees())?
     codec.close(mut s)
@@ -1125,12 +1125,13 @@ fn trees() -> codec.Codec[Tree] {
 }
 
 // An earlier Tree with its fields the other way round, as a writer.
-fn swapped_tree_encode(x: Tree, mut out: Bytes) -> Result[(), Capacity] {
+fn swapped_tree_encode(x: Tree, mut out: Bytes) -> Result[(), codec.EncodeError] {
     codec.put_list(x.kids, swapped_trees(), mut out)?
     codec.put_u64(x.label, mut out)
+    Ok(())
 }
 
-fn swapped_tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), Capacity] {
+fn swapped_tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Tree", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -1138,7 +1139,7 @@ fn swapped_tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), 
     codec.field(mut s, "kids")?
     codec.schema_list(mut s, swapped_trees())?
     codec.field(mut s, "label")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -1176,11 +1177,11 @@ fn recursive_tree() -> (bool, bool, u64, u64) {
     let a = result.unwrap(codec.schema(trees())) == unhex("03 01000000 06000000 742e54726565 00000000 00 02000000 00 05000000 6c6162656c 06 00 04000000 6b696473 0e 13 00000000 13 00000000")
     let b = prefixes(trees(), tree_bytes())
     let c = match codec.decode(trees(), tree_bytes()) {
-        Ok(Ok(t)) => preorder(take t),
+        Ok(t) => preorder(take t),
         _ => 0
     }
     let swapped = match codec.decode(trees(), tree_bytes()) {
-        Ok(Ok(t)) => enc(swapped_trees(), t),
+        Ok(t) => enc(swapped_trees(), t),
         _ => list.new()
     }
     let d = match through(trees(), result.unwrap(codec.schema(swapped_trees())), swapped) {
@@ -1218,10 +1219,10 @@ fn deep(depth: u64) -> (u64, u64) {
     let mut w: Bytes = list.with_capacity(12 * depth + 12)
     let mut i: u64 = 0
     while i < depth {
-        result.unwrap(codec.put_u32(1, mut w))
+        codec.put_u32(1, mut w)
         i += 1
     }
-    result.unwrap(codec.put_u32(0, mut w))
+    codec.put_u32(0, mut w)
     list.put_word_le(mut w, depth)
     while i > 0 {
         i -= 1
@@ -1241,15 +1242,14 @@ fn deep_decode(depth: u64) -> u64 {
     let mut i: u64 = 0
     while i < depth {
         list.put_word_le(mut b, i)
-        result.unwrap(codec.put_u32(1, mut b))
+        codec.put_u32(1, mut b)
         i += 1
     }
     list.put_word_le(mut b, depth)
-    result.unwrap(codec.put_u32(0, mut b))
+    codec.put_u32(0, mut b)
     match codec.decode(trees(), b) {
-        Ok(Ok(t)) => chain(take t),
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(t) => chain(take t),
+        Error(e) => code(e),
     }
 }
 
@@ -1289,24 +1289,24 @@ type Failure {
     why: codec.DecodeError
 }
 
-fn failure_encode(x: Failure, mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_u64(x.at, mut out)?
+fn failure_encode(x: Failure, mut out: Bytes) -> Result[(), codec.EncodeError] {
+    codec.put_u64(x.at, mut out)
     codec.put_with(x.why, codec.of_decode_error(), mut out)
 }
 
-fn failure_decode(b: Bytes, mut at: u64) -> Result[Failure, codec.Stop] {
+fn failure_decode(b: Bytes, mut at: u64) -> Result[Failure, codec.DecodeError] {
     let offset = codec.take_u64(b, mut at)?
     let why = codec.take_with(b, mut at, codec.of_decode_error())?
     Ok(Failure(at: offset, why: take why))
 }
 
-fn failure_schema(mut s: codec.Schema, c: codec.Codec[Failure]) -> Result[(), Capacity] {
+fn failure_schema(mut s: codec.Schema, c: codec.Codec[Failure]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Failure", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
     }
     codec.field(mut s, "at")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "why")?
     codec.schema_of(mut s, codec.of_decode_error())?
     codec.close(mut s)
@@ -1353,26 +1353,27 @@ fn check(take w: RangeWire) -> Result[Range, ()] {
     }
 }
 
-fn range_wire_encode(x: RangeWire, mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_u64(x.lo, mut out)?
+fn range_wire_encode(x: RangeWire, mut out: Bytes) -> Result[(), codec.EncodeError] {
+    codec.put_u64(x.lo, mut out)
     codec.put_u64(x.hi, mut out)
+    Ok(())
 }
 
-fn range_wire_decode(b: Bytes, mut at: u64) -> Result[RangeWire, codec.Stop] {
+fn range_wire_decode(b: Bytes, mut at: u64) -> Result[RangeWire, codec.DecodeError] {
     let lo = codec.take_u64(b, mut at)?
     let hi = codec.take_u64(b, mut at)?
     Ok(RangeWire(lo, hi))
 }
 
-fn range_wire_schema(mut s: codec.Schema, c: codec.Codec[RangeWire]) -> Result[(), Capacity] {
+fn range_wire_schema(mut s: codec.Schema, c: codec.Codec[RangeWire]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.RangeWire", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
     }
     codec.field(mut s, "lo")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.field(mut s, "hi")?
-    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)
     codec.close(mut s)
     Ok(())
 }
@@ -1381,15 +1382,15 @@ fn range_wires() -> codec.Codec[RangeWire] {
     codec.make(range_wire_encode, range_wire_decode, range_wire_schema, 16)
 }
 
-fn range_encode(x: Range, mut out: Bytes) -> Result[(), Capacity] {
+fn range_encode(x: Range, mut out: Bytes) -> Result[(), codec.EncodeError] {
     codec.put_with(wire(x), range_wires(), mut out)
 }
 
-fn range_decode(b: Bytes, mut at: u64) -> Result[Range, codec.Stop] {
+fn range_decode(b: Bytes, mut at: u64) -> Result[Range, codec.DecodeError] {
     codec.take_via(b, mut at, range_wires(), check)
 }
 
-fn range_schema(mut s: codec.Schema, c: codec.Codec[Range]) -> Result[(), Capacity] {
+fn range_schema(mut s: codec.Schema, c: codec.Codec[Range]) -> Result[(), codec.EncodeError] {
     codec.define(mut s, "t.Range", 0)?
     if codec.via(mut s)? {
         return Ok(())
@@ -1405,9 +1406,8 @@ fn ranges() -> codec.Codec[Range] {
 
 fn range_at(b: Bytes, start: u64) -> u64 {
     match codec.decode_at(ranges(), b, start) {
-        Ok(Ok(x)) => x.w.hi - x.w.lo,
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(x) => x.w.hi - x.w.lo,
+        Error(e) => code(e),
     }
 }
 
@@ -1451,15 +1451,14 @@ fn key_format() -> bool {
 
 fn key_enc[T](k: codec.Key[T], x: T) -> Bytes {
     let mut out: Bytes = list.new()
-    result.unwrap(codec.encode_key(k, x, mut out))
+    codec.encode_key(k, x, mut out)
     take out
 }
 
 fn key_outcome[T](k: codec.Key[T], b: Bytes) -> u64 {
     match codec.decode_key(k, b) {
-        Ok(Ok(_)) => 0,
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(_) => 0,
+        Error(e) => code(e),
     }
 }
 
@@ -1527,18 +1526,18 @@ fn random_bytes(mut seed: u64) -> Bytes {
 }
 
 // A tuple key (Bytes, i32), as the derive generates one: the parts concatenated.
-fn tk_put(x: (Bytes, i32), mut out: Bytes) -> Result[(), Capacity] {
-    codec.put_key_with(x.0, codec.key_bytes(), mut out)?
+fn tk_put(x: (Bytes, i32), mut out: Bytes) {
+    codec.put_key_with(x.0, codec.key_bytes(), mut out)
     codec.put_key_with(x.1, codec.key_i32(), mut out)
 }
 
-fn tk_take(b: Bytes, mut at: u64) -> Result[(Bytes, i32), codec.Stop] {
+fn tk_take(b: Bytes, mut at: u64) -> Result[(Bytes, i32), codec.DecodeError] {
     let a = codec.take_key_with(b, mut at, codec.key_bytes())?
     let n = codec.take_key_with(b, mut at, codec.key_i32())?
     Ok((take a, n))
 }
 
-fn tk_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn tk_schema(mut s: codec.Schema) -> Result[(), codec.EncodeError] {
     codec.schema_tuple(mut s, 2)?
     codec.schema_key(mut s, codec.key_bytes())?
     codec.schema_key(mut s, codec.key_i32())
@@ -1576,7 +1575,7 @@ fn key_order_is_value_order() -> u64 {
             wrong += 1
         }
         match codec.decode_key(codec.key_bytes(), ka) {
-            Ok(Ok(back)) => {
+            Ok(back) => {
                 if back != a {
                     wrong += 1
                 }
@@ -1626,7 +1625,7 @@ fn key_near_misses() -> (bool, u64, u64, u64, u64) {
 
 fn again_key[T](k: codec.Key[T], b: Bytes) -> bool {
     match codec.decode_key(k, b) {
-        Ok(Ok(x)) => key_enc(k, x) == b,
+        Ok(x) => key_enc(k, x) == b,
         _ => false
     }
 }
@@ -1646,7 +1645,7 @@ fn errors_return_their_bytes() -> (u64, u64, u64, u64) {
     let swapped = result.unwrap(codec.schema(swapped_trees()))
     let mut written: Bytes = list.new()
     match codec.decode(trees(), whole) {
-        Ok(Ok(t)) => {
+        Ok(t) => {
             written = enc(swapped_trees(), t)
         }
         _ => {}
@@ -1672,7 +1671,7 @@ fn errors_return_their_bytes() -> (u64, u64, u64, u64) {
             k += 1
         }
         let a = match codec.decode(trees(), whole) {
-            Ok(Ok(t)) => chain(take t),
+            Ok(t) => chain(take t),
             _ => 0
         }
         let b = match through(trees(), swapped, written) {
@@ -1688,11 +1687,11 @@ fn chain_bytes(depth: u64) -> Bytes {
     let mut i: u64 = 0
     while i < depth {
         list.put_word_le(mut b, i)
-        result.unwrap(codec.put_u32(1, mut b))
+        codec.put_u32(1, mut b)
         i += 1
     }
     list.put_word_le(mut b, depth)
-    result.unwrap(codec.put_u32(0, mut b))
+    codec.put_u32(0, mut b)
     take b
 }
 
@@ -1716,7 +1715,7 @@ fn shared_reader_reads_in_place() -> ((u64, u64, i64), (u64, u64, i64), (u64, u6
     let e = row_at(tomb, behind(unhex("0500000000000000 01000000 ff 01000000 61")))
     let f = row_at(same, behind(unhex("0900000000000000 02000000 79")))
     let g = match codec.read_at(same, unhex("ab"), 5) {
-        Ok(Error(x)) => code(x),
+        Error(x) => code(x),
         _ => 0
     }
     (a, b, (c.0, d.0, e.0), (f.0, g))
@@ -1727,7 +1726,7 @@ fn sendable[T: shareable + send](take x: T) -> T {
 }
 
 fn resolved_rows(c: codec.Codec[Row], writer: Bytes) -> codec.Reader[Row] {
-    result.unwrap(result.unwrap(codec.resolve(c, writer)))
+    result.unwrap(codec.resolve(c, writer))
 }
 
 fn behind(b: Bytes) -> Bytes {
@@ -1738,9 +1737,8 @@ fn behind(b: Bytes) -> Bytes {
 
 fn row_at(r: codec.Reader[Row], b: Bytes) -> (u64, u64, i64) {
     match codec.read_at(r, b, 2) {
-        Ok(Ok(x)) => (x.id, string.byte_len(x.name), x.score),
-        Ok(Error(e)) => (code(e), 0, 0),
-        Error(_) => (9999, 0, 0)
+        Ok(x) => (x.id, string.byte_len(x.name), x.score),
+        Error(e) => (code(e), 0, 0),
     }
 }
 
@@ -1970,15 +1968,15 @@ fn dchain(depth: u64) -> u64 {
     let mut i: u64 = 0
     while i < depth {
         list.put_word_le(mut b, i)
-        result.unwrap(codec.put_u32(1, mut b))
+        codec.put_u32(1, mut b)
         i += 1
     }
     list.put_word_le(mut b, depth)
-    result.unwrap(codec.put_u32(0, mut b))
+    codec.put_u32(0, mut b)
     let c: codec.Codec[DTree] = codec.of()
     capacity_code(isolate(fn() -> u64 {
         match codec.decode(c, b) {
-            Ok(Ok(t)) => {
+            Ok(t) => {
                 let mut x = take t
                 let mut d: u64 = 0
                 while let Some(k) = list.pop(mut x.kids) {
@@ -1987,8 +1985,7 @@ fn dchain(depth: u64) -> u64 {
                 }
                 d
             }
-            Ok(Error(e)) => code(e),
-            Error(_) => 9999
+            Error(e) => code(e),
         }
     }))
 }
@@ -1998,17 +1995,17 @@ fn dchain(depth: u64) -> u64 {
 // [4 []]] Truncated and the whole read back in preorder; the swapped writer's bytes read
 // through resolution; a count no remaining bytes could hold Truncated at the count
 // (1008); a chain 10^4 deep; and encoding a schema count of u32::MAX + 1
-// returns Capacity(requested: 4294967296, available: 4294967295).
+// returns CountOverflow(4294967296).
 // expect: run derived_tree() = (true, 12, true, 1234, 1234, 1008, 10000, true)
 fn derived_tree() -> (bool, u64, bool, u64, u64, u64, u64, bool) {
     let c: codec.Codec[DTree] = codec.of()
     let schema = same_schema(c, result.unwrap(codec.schema(trees())), "std.tests.codec.DTree")
     let read = match codec.decode(c, tree_bytes()) {
-        Ok(Ok(t)) => dpreorder(take t),
+        Ok(t) => dpreorder(take t),
         _ => 0
     }
     let swapped = match codec.decode(trees(), tree_bytes()) {
-        Ok(Ok(t)) => enc(swapped_trees(), t),
+        Ok(t) => enc(swapped_trees(), t),
         _ => list.new()
     }
     let old = match through(c, at_path(result.unwrap(codec.schema(swapped_trees())), "std.tests.codec.DTree"), swapped) {
@@ -2018,14 +2015,14 @@ fn derived_tree() -> (bool, u64, bool, u64, u64, u64, u64, bool) {
     let lying = outcome(c, unhex("0100000000000000 ffffffff"))
     let oversized = codec.make(tree_encode, tree_decode, oversized_schema, 12)
     let refused = match codec.schema(oversized) {
-        Error(f) => f.requested == 0x100000000 && f.available == 0xffffffff,
+        Error(CountOverflow(n)) => n == 0x100000000,
         Ok(_) => false
     }
     (schema, codec.least(c), prefixes(c, tree_bytes()), read, old, lying, dchain(10000), refused)
 }
 
 // Exercise the same count writer without allocating a list larger than four GiB.
-fn oversized_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), Capacity] {
+fn oversized_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), codec.EncodeError] {
     codec.schema_tuple(mut s, 0x100000000)
 }
 
@@ -2076,9 +2073,8 @@ fn dsum(e: DExpr) -> u64 {
 fn dexpr_sum(b: Bytes) -> u64 {
     let c: codec.Codec[DExpr] = codec.of()
     match codec.decode(c, b) {
-        Ok(Ok(e)) => dsum(e),
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(e) => dsum(e),
+        Error(e) => code(e),
     }
 }
 
@@ -2192,9 +2188,8 @@ fn dnonempty[T](take xs: List[T]) -> Result[DNonEmpty[T], ()] {
 fn drange_at(b: Bytes, start: u64) -> u64 {
     let c: codec.Codec[DRange] = codec.of()
     match codec.decode_at(c, b, start) {
-        Ok(Ok(x)) => x.w.hi - x.w.lo,
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(x) => x.w.hi - x.w.lo,
+        Error(e) => code(e),
     }
 }
 
@@ -2305,9 +2300,8 @@ fn structural_of() -> ((bool, bool, bool, bool, bool, bool, bool), (bool, bool, 
 fn dnonempty_at(b: Bytes) -> u64 {
     let c: codec.Codec[DNonEmpty[u64]] = codec.of()
     match codec.decode(c, b) {
-        Ok(Ok(x)) => list.len(x.items),
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
+        Ok(x) => list.len(x.items),
+        Error(e) => code(e),
     }
 }
 
@@ -2579,7 +2573,7 @@ fn tuple_never_codec() -> ((bool, bool, bool), (bool, bool, bool), (u64, u64, u6
     let bad = unhex("ffff 01000000")
     let nbad = decode_outcome(codec.decode_at(n, bad, 2))
     let sbad = decode_outcome(codec.decode_at(sum, bad, 2))
-    let r = result.unwrap(result.unwrap(codec.resolve(n, ns)))
+    let r = result.unwrap(codec.resolve(n, ns))
     let via_reader = decode_outcome(codec.read_at(r, bad, 2))
     // Add an unused empty record definition to force the schema resolution plan.
     let current = result.unwrap(codec.schema(sum))
@@ -2588,13 +2582,13 @@ fn tuple_never_codec() -> ((bool, bool, bool), (bool, bool, bool), (u64, u64, u6
     list.append(mut writer, list.slice(current, 5, end))
     list.append(mut writer, unhex("01000000 58 00000000 00 00000000"))
     list.append(mut writer, list.slice(current, end, list.len(current)))
-    let evolved = result.unwrap(result.unwrap(codec.resolve(sum, writer)))
+    let evolved = result.unwrap(codec.resolve(sum, writer))
     let via_plan = decode_outcome(codec.read_at(evolved, bad, 2))
     ((ordered, tuple_schemas, cross), (ok, schema, incompatible), (nbad, sbad, outcome(never, unhex("")), via_reader, via_plan))
 }
 
 fn wrong_writer[T](c: codec.Codec[T], writer: Bytes) -> bool {
-    match result.unwrap(codec.resolve(c, writer)) {
+    match codec.resolve(c, writer) {
         Error(Schema(_)) => true,
         _ => false,
     }

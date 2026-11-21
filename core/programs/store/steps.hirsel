@@ -41,10 +41,10 @@ fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
     Ok(Tables(caps: take caps, rows: take rows, triggers: triggers.tables(schema)?))
 }
 
-fn encode[A: codec](a: A) -> Result[Bytes, Capacity] {
+fn encode[A: codec](a: A) -> Result[Bytes, store.Error] {
     let c: std.codec.Codec[A] = std.codec.of()
     let mut raw: Bytes = list.new()
-    std.codec.encode(c, a, mut raw)?
+    std.codec.encode(c, a, mut raw) ?=> |_| Limit(Value)
     Ok(take raw)
 }
 
@@ -55,9 +55,8 @@ fn stored_bytes(take raw: Result[Bytes, Capacity]) -> Result[Bytes, store.Error]
 fn decode[A: codec](raw: Bytes) -> Result[A, store.Error] {
     let c: std.codec.Codec[A] = std.codec.of()
     match std.codec.decode(c, raw) {
-        Ok(Ok(take a)) => Ok(take a),
-        Ok(Error(_)) => Error(Missing("step data")),
-        Error(cap) => Error(Full(cap)),
+        Ok(take a) => Ok(take a),
+        Error(_) => Error(Missing("step data")),
     }
 }
 
@@ -72,11 +71,11 @@ fn fingerprint(kind: u8, raw: Bytes) -> Result[Bytes, Capacity] {
 }
 
 fn run_key(a: triggers.Attempt) -> Result[Bytes, store.Error] {
-    stored_bytes(encode(triggers.run_id(a)))
+    encode(triggers.run_id(a))
 }
 
 fn row_key(a: triggers.Attempt, index: u64) -> Result[Bytes, store.Error] {
-    stored_bytes(encode(StepId(run: triggers.run_id(a), index: index)))
+    encode(StepId(run: triggers.run_id(a), index: index))
 }
 
 fn trigger_write(take changed: Result[(), triggers.Error]) -> Result[(), store.Error] {
@@ -150,8 +149,8 @@ pub fn register[G: send, H: send](mut r: runner.Registry[G, H], encoded: u64, st
     runner.register_attempt(mut r, code.describe(control), take invoke, encoded, steps)
 }
 
-fn must[A](take value: Result[A, Capacity]) -> A {
-    match take value { Ok(take a) => take a, Error(_) => fail("step wrapper: capacity") }
+fn must[A, E](take value: Result[A, E]) -> A {
+    match take value { Ok(take a) => take a, Error(_) => fail("step wrapper: rejected value") }
 }
 
 fn dispatch[F, A: codec, E: codec](route: runner.TriggerContext, f: StaticFn[F], arg: A) -> Result[Reply, StepError[E]] waits {
@@ -181,10 +180,7 @@ pub fn schedule[A](mut tx: store.Tx, entries: triggers.Entries, target: triggers
         Error(take problem) => return Error(Store(take problem)),
     }
     let id = triggers.write(mut tx, t.triggers, entries, target, arg, due)?
-    let raw = match encode(id) {
-        Ok(take raw) => take raw,
-        Error(capacity) => return Error(Store(Full(capacity))),
-    }
+    let raw = encode(id) ?=> Store
     match store.put(mut tx, t.caps, raw, cap) {
         Ok(()) => Ok(id),
         Error(take problem) => Error(Store(take problem)),
@@ -201,7 +197,7 @@ pub fn next_id[G: send](ctx: Ctx[G]) -> StepId {
     StepId(run: triggers.run_id(runner.trigger_attempt(ctx.route)), index: ctx.index)
 }
 
-pub fn outside_key(id: StepId) -> Result[Bytes, Capacity] { encode(id) }
+pub fn outside_key(id: StepId) -> Result[Bytes, store.Error] { encode(id) }
 
 fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) -> Result[R, StepError[E]] {
     match take reply {
@@ -271,7 +267,7 @@ fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.
     let arg: A = decode(request.arg)?
     let body = code.callable(f)
     let result = store.rollback_writes_on_error(mut tx, scoped fn(mut draft: store.Tx) -> Result[R, E] { body(mut draft, arg) })
-    let raw = stored_bytes(encode(result))?
+    let raw = encode(result)?
     let data: Bytes = clone(raw)
     store.put(mut tx, t.rows, row, Finished(take encoded, take raw))?
     Ok(Replay(take data))
@@ -293,7 +289,7 @@ pub fn transaction[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take 
 
 pub fn recorded[R: codec, E: codec](db: store.Db, id: StepId) -> Result[Option[Result[R, E]], store.Error] {
     let t = store.with_schema(db, code.describe(tables))?
-    let index = stored_bytes(encode(id))?
+    let index = encode(id)?
     match store.get(store.snapshot(db), store.shape(t.rows), index)? {
         Some(Finished(_, take raw)) => {
             let result: Result[R, E] = decode(raw)?

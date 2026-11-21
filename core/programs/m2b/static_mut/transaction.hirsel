@@ -16,21 +16,20 @@ fn slot[A, R, E](f: StaticFn[fn(mut Tx, take A) -> Result[R, E]], take ca: std.c
     let made = fn(mut tx: Tx, arg: Bytes) -> Outcome {
         let body = code.callable(f)
         match std.codec.decode(ca, arg) {
-            Ok(Ok(take a)) => {
+            Ok(take a) => {
                 let mut out: Bytes = list.new()
                 match body(mut tx, take a) {
                     Ok(take r) => match std.codec.encode(cr, r, mut out) {
                         Ok(()) => Returned(take out),
-                        Error(c) => Full(c)
+                        Error(_) => fail("transaction: unrepresentable reply count")
                     },
                     Error(take e) => match std.codec.encode(ce, e, mut out) {
                         Ok(()) => Aborted(take out),
-                        Error(c) => Full(c)
+                        Error(_) => fail("transaction: unrepresentable reply count")
                     },
                 }
             },
-            Ok(Error(_)) => Malformed,
-            Error(c) => Full(c),
+            Error(_) => Malformed,
         }
     }
     match made {
@@ -52,7 +51,7 @@ pub fn main() -> Result[(), Exit] {
     let base: Bytes = list.new()
     let mut tx = Tx(base: view base, writes: 0u64)
     let mut arg: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(5u32, mut arg))
+    std.codec.put_u32(5u32, mut arg)
     let Slot(run) = take s
     let o = run(mut tx, arg)
     match o {

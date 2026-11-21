@@ -8,8 +8,8 @@ pub fn entry() -> Bytes {
     let cr: std.codec.Codec[Result[Recorded, u32]] = std.codec.of()
     let mut b: Bytes = list.new()
     list.append(mut b, code.identity(code.describe(record)))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b)
     b
 }
 

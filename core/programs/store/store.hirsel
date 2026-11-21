@@ -2608,7 +2608,7 @@ fn erase[J, V](by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.K
     let made: own[send] fn(V) -> Result[Bytes, Capacity] = fn(v: V) -> Result[Bytes, Capacity] {
         let j = (code.callable(by))(v)?
         let mut raw: Bytes = list.new()
-        std.codec.encode_key(key, j, mut raw)?
+        std.codec.encode_key(key, j, mut raw)
         Ok(take raw)
     }
     Ok(take made)
@@ -2621,7 +2621,7 @@ pub fn with_index[J, K, V](mut s: TableSpec[K, V], name: String, by: StaticFn[fn
             return Error(Exists(take owned))
         }
     }
-    let schema = capacity(std.codec.key_schema(key))?
+    let schema = std.codec.key_schema(key) ?=> |_| Schema(0)
     let extract = erase(by, key)?
     let declared = IndexSpec(name: take owned, by: copied(code.identity(by))?, key: take schema, extract: take extract)
     Ok(list.push(mut s.indexes, take declared))
@@ -2633,7 +2633,7 @@ pub opaque type Rows[K, V]: send {
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
     data: std.omap.OMap[Bytes, Arc[Bytes]],
-    skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop]]
+    skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError]]
 }
 
 // A query only needs the selected incarnation and readers. The copy cannot
@@ -2647,12 +2647,8 @@ pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
     Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers))
 }
 
-fn decoded[T](take r: Result[Result[T, std.codec.DecodeError], Capacity]) -> Result[T, Error] {
-    match take r {
-        Error(c) => Error(Full(c)),
-        Ok(Error(e)) => Error(Decode(e)),
-        Ok(Ok(take x)) => Ok(take x)
-    }
+fn decoded[T](take r: Result[T, std.codec.DecodeError]) -> Result[T, Error] {
+    match take r { Ok(take x) => Ok(take x), Error(e) => Error(Decode(e)) }
 }
 
 fn read_le(raw: Bytes, at: u64, width: u64) -> u64 {
@@ -2691,7 +2687,7 @@ fn row_value[V](r: Readers[V], id: u32, raw: Bytes) -> Result[V, Error] {
 
 fn encode_key[K](k: std.codec.Key[K], value: K) -> Result[Bytes, Error] {
     let mut raw: Bytes = list.new()
-    capacity(std.codec.encode_key(k, value, mut raw))?
+    std.codec.encode_key(k, value, mut raw)
     Ok(take raw)
 }
 
@@ -2745,7 +2741,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Result[(), Er
     let p = physical(t.id, key)?
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
-    capacity(std.codec.encode(t.readers.codec, v, mut raw))?
+    std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
     let replaced = replace_physical(mut tx, take p, take raw)?
     let previous: Option[V] = if list.len(t.indexes) == 0 { None } else {
         match replaced {
@@ -2873,7 +2869,7 @@ pub fn published_value[K, V](t: Shape[K, V], c: Change) -> Result[Option[Bytes],
         return Ok(Some(take out))
     }
     let v = row_value(t.readers, t.id, raw)?
-    capacity(std.codec.encode(t.readers.codec, v, mut out))?
+    std.codec.encode(t.readers.codec, v, mut out) ?=> |_| Limit(Value)
     Ok(Some(take out))
 }
 
@@ -2888,7 +2884,7 @@ pub fn reads_key(r: Read, key: Bytes) -> bool {
 fn indexed_rows[J, K, V](data: std.omap.OMap[Bytes, Arc[Bytes]], ix: Index[J, K, V], take cursor: ByteRows) -> Result[Rows[K, V], Error] {
     let k = ix.key
     let start = 4u64
-    let skip: own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop] = fn(raw: Bytes, mut at: u64) -> Result[(), std.codec.Stop] {
+    let skip: own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError] = fn(raw: Bytes, mut at: u64) -> Result[(), std.codec.DecodeError] {
         at = start
         let _ = std.codec.take_key_with(raw, mut at, k)?
         Ok(())
@@ -3063,8 +3059,7 @@ fn advance_rows[K, V](r: Rows[K, V], physical_key: Bytes, raw: Bytes, remaining:
     if let Some(skip) = r.skip {
         match (skip)(physical_key, mut at) {
             Ok(()) => {},
-            Error(Bad(e)) => return Error(Decode(e)),
-            Error(Full(c)) => return Error(Full(c))
+            Error(e) => return Error(Decode(e))
         }
     }
     let key = list.slice(physical_key, at, list.len(physical_key))
@@ -3348,7 +3343,7 @@ fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> R
     let p = physical(t.id, encode_key(t.key, k)?)?
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
-    capacity(std.codec.encode(t.readers.codec, v, mut raw))?
+    std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
     if list.len(raw) > 1048576 { return Error(Limit(Value)) }
     let mut live = plan.live
     if !plan.retained {
@@ -3416,12 +3411,12 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Re
     if let Some(_) = std.omap.get(plan.roots.catalog, k) {
         return Error(Exists(named(s.name)?))
     }
-    let schema = capacity(std.codec.schema(s.value))?
+    let schema = std.codec.schema(s.value) ?=> |_| Schema(0)
     let mut schemas: List[ValueSchema] = list.new()
     let fp = std.codec.fingerprint_of(schema)
     list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))
     let id = plan.next_table
-    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(s.key))?, schemas: take schemas, next: 1, by: list.new(), revision: list.new())
+    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(s.key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
     let mut live = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
     let base = share_roots(plan.roots)
@@ -3446,10 +3441,9 @@ fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16) -> Result[Arc
         if old.number != current {
             let resolution = std.codec.resolve(value, old.schema)
             let resolved = match take resolution {
-                Error(f) => return Error(Full(f)),
-                Ok(Error(Schema(i))) => return Error(Schema(i)),
-                Ok(Error(e)) => return Error(Decode(e)),
-                Ok(Ok(take reader)) => take reader
+                Error(Schema(i)) => return Error(Schema(i)),
+                Error(e) => return Error(Decode(e)),
+                Ok(take reader) => take reader
             }
             let _ = list.set(mut older, int.widen(old.number), Some(take resolved))
         }
@@ -3491,11 +3485,11 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
-    let key_schema = capacity(std.codec.key_schema(key))?
+    let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
     if key_schema != c.key {
         return Error(Schema(0))
     }
-    let schema = capacity(std.codec.schema(value))?
+    let schema = std.codec.schema(value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
     let mut number = c.next
     let mut found = false
@@ -3533,9 +3527,9 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: std.omap.OMap[Bytes, Arc[Byt
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(take name))
     }
-    let key_schema = capacity(std.codec.key_schema(key))?
+    let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
     if key_schema != c.key { return Error(Schema(0)) }
-    let schema = capacity(std.codec.schema(value))?
+    let schema = std.codec.schema(value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
     for prior in c.schemas {
         if prior.fingerprint == fp && prior.schema == schema {
@@ -3573,7 +3567,7 @@ fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: Strin
         return Error(Stale(t.id))
     }
     let id = plan.next_table
-    let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: list.new())
+    let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: list.new())
     let raw = encode_catalog(c)?
     let mut roots = share_roots(plan.roots)
     let mut live = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
@@ -3626,7 +3620,7 @@ fn catalog_index[J, K, V](store_id: StoreId, catalog: std.omap.OMap[Bytes, Arc[B
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
-    if c.key != capacity(std.codec.key_schema(key))? || c.by != code.identity(by) || c.owner != t.id {
+    if c.key != (std.codec.key_schema(key) ?=> |_| Schema(0)) || c.by != code.identity(by) || c.owner != t.id {
         return Error(Schema(0))
     }
     let mut present = false
@@ -3750,7 +3744,7 @@ fn migrate_build[K, V, K2, V2](source: std.omap.OMap[Bytes, Arc[Bytes]], take ba
             }
             let mut raw: Bytes = list.new()
             capacity(le(mut raw, int.widen(number), 2))?
-            capacity(std.codec.encode(to.value, v2, mut raw))?
+            std.codec.encode(to.value, v2, mut raw) ?=> |_| Limit(Value)
             if list.len(raw) > 1048576 {
                 return Error(Limit(Value))
             }
@@ -3798,11 +3792,11 @@ fn migrate_build[K, V, K2, V2](source: std.omap.OMap[Bytes, Arc[Bytes]], take ba
         if !retained { live = int.saturating_sub(live, entry(from.catalog_key, raw)) }
     }
     roots.catalog = std.omap.remove(mut ids, roots.catalog, from.catalog_key)
-    let schema = capacity(std.codec.schema(to.value))?
+    let schema = std.codec.schema(to.value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
     let mut schemas: List[ValueSchema] = list.new()
     list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
-    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(to.key))?, schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
+    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
     live = int.saturating_add(live, entry(target, table_raw))
     let with_table = catalog_insert(mut ids, roots, target, table_raw)?
     roots = take with_table
@@ -4082,43 +4076,45 @@ type NewAccount {
     bonus: u64
 }
 
-fn old_put(v: OldAccount, mut b: Bytes) -> Result[(), Capacity] {
+fn old_put(v: OldAccount, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
     std.codec.put_u64(v.balance, mut b)
+    Ok(())
 }
 
-fn old_take(b: Bytes, mut at: u64) -> Result[OldAccount, std.codec.Stop] {
+fn old_take(b: Bytes, mut at: u64) -> Result[OldAccount, std.codec.DecodeError] {
     Ok(OldAccount(balance: std.codec.take_u64(b, mut at)?))
 }
 
-fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[OldAccount]) -> Result[(), Capacity] {
+fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[OldAccount]) -> Result[(), std.codec.EncodeError] {
     std.codec.define(mut s, "store.tests.Account", 0)?
     if std.codec.record(mut s, 1)? {
         return Ok(())
     }
     std.codec.field(mut s, "balance")?
-    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)
     std.codec.close(mut s)
     Ok(())
 }
 
-fn new_put(v: NewAccount, mut b: Bytes) -> Result[(), Capacity] {
-    std.codec.put_u64(v.balance, mut b)?
+fn new_put(v: NewAccount, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(v.balance, mut b)
     std.codec.put_u64(v.bonus, mut b)
+    Ok(())
 }
 
-fn new_take(b: Bytes, mut at: u64) -> Result[NewAccount, std.codec.Stop] {
+fn new_take(b: Bytes, mut at: u64) -> Result[NewAccount, std.codec.DecodeError] {
     let balance = std.codec.take_u64(b, mut at)?
     let bonus = std.codec.take_u64(b, mut at)?
     Ok(NewAccount(balance: balance, bonus: bonus))
 }
 
-fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[NewAccount]) -> Result[(), Capacity] {
+fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[NewAccount]) -> Result[(), std.codec.EncodeError] {
     std.codec.define(mut s, "store.tests.Account", 0)?
     if std.codec.record(mut s, 2)? {
         return Ok(())
     }
     std.codec.field(mut s, "balance")?
-    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)
     std.codec.field_default(mut s, "bonus", std.codec.of_u64(), 7)?
     std.codec.close(mut s)
     Ok(())
@@ -8800,7 +8796,7 @@ fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
     let ctx = DiskContext(store: StoreId(hi: stamp.store_hi, lo: stamp.store_lo), role: 5, seq: stamp.opened)
     let mut raw = capacity(disk_header_bytes(ctx, 0))?
     let mut body: Bytes = list.new()
-    capacity(std.codec.encode(codec, stamp, mut body))?
+    std.codec.encode(codec, stamp, mut body) ?=> |_| Limit(Value)
     list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0080, 1, body))?)
     Ok(take raw)
 }
@@ -9052,7 +9048,7 @@ fn range_inventory(data: std.omap.OMap[Bytes, Arc[Bytes]], ranges: List[RangeCha
 
 fn write_prepared_frame[T](mut file: HostFile, ctx: DiskContext, mut offset: u64, kind: u16, codec: std.codec.Codec[T], value: T) -> Result[(), Error] waits {
     let mut encoded: Bytes = list.new()
-    capacity(std.codec.encode(codec, value, mut encoded))?
+    std.codec.encode(codec, value, mut encoded) ?=> |_| Limit(Value)
     let raw = capacity(disk_seal(ctx, offset, kind, 1, encoded))?
     match host.write(mut file, raw) {
         Ok(()) => (),
@@ -9132,9 +9128,8 @@ fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec
     std.sha256.add(mut input.digest, encoded, 0u64, n)
     input.offset += 16u64 + n
     match std.codec.decode(codec, encoded) {
-        Error(c) => Error(Store(Full(c))),
-        Ok(Error(_)) => Error(ImportMalformed),
-        Ok(Ok(take value)) => Ok(take value),
+        Error(_) => Error(ImportMalformed),
+        Ok(take value) => Ok(take value),
     }
 }
 

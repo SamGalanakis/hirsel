@@ -29,7 +29,7 @@ pub fn own[T: codec](x: T) -> T {
     let c: std.codec.Codec[T] = std.codec.of()
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(c, x, mut b))
-    result.unwrap(result.unwrap(std.codec.decode(c, b)))
+    result.unwrap(std.codec.decode(c, b))
 }
 
 pub fn from_runner(x: runner.Outcome) -> Outcome {
@@ -37,7 +37,7 @@ pub fn from_runner(x: runner.Outcome) -> Outcome {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(cr, x, mut b))
-    result.unwrap(result.unwrap(std.codec.decode(co, b)))
+    result.unwrap(std.codec.decode(co, b))
 }
 
 pub fn remember(mut runs: Runs, r: Run) {
@@ -145,9 +145,9 @@ pub fn wire_state() -> State {
 
 pub fn key(conn: u64, stream: Bytes, p: u64) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(conn, mut b))
+    std.codec.put_u64(conn, mut b)
     result.unwrap(std.codec.put_list(stream, std.codec.of_u8(), mut b))
-    result.unwrap(std.codec.put_u64(p, mut b))
+    std.codec.put_u64(p, mut b)
     b
 }
 

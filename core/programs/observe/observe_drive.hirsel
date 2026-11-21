@@ -16,14 +16,14 @@ fn entry() -> Bytes { observe_fixture.entry() }
 
 fn stream(id: u64) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(id, mut b))
+    std.codec.put_u64(id, mut b)
     b
 }
 
 fn args(seed: u64, s: u64, p: u64, request: u64) -> observe_fixture.Request {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(seed, mut b))
-    result.unwrap(std.codec.put_u64(request, mut b))
+    std.codec.put_u64(seed, mut b)
+    std.codec.put_u64(request, mut b)
     observe_fixture.Request(stream: stream(s), p: p, arg: take b)
 }
 

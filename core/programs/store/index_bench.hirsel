@@ -5,30 +5,30 @@ pub type Account: send {
     balance: i64
 }
 
-fn account_put(a: Account, mut b: Bytes) -> Result[(), Capacity] {
-    std.codec.put_u64(a.id, mut b)?
-    std.codec.put_i64(a.balance, mut b)?
+fn account_put(a: Account, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(a.id, mut b)
+    std.codec.put_i64(a.balance, mut b)
     std.codec.put_string(a.owner, mut b)
 }
 
-fn account_take(b: Bytes, mut at: u64) -> Result[Account, std.codec.Stop] {
+fn account_take(b: Bytes, mut at: u64) -> Result[Account, std.codec.DecodeError] {
     let id = std.codec.take_u64(b, mut at)?
     let balance = std.codec.take_i64(b, mut at)?
     let owner = std.codec.take_string(b, mut at)?
     Ok(Account(id: id, owner: take owner, balance: balance))
 }
 
-fn account_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Account]) -> Result[(), Capacity] {
+fn account_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Account]) -> Result[(), std.codec.EncodeError] {
     std.codec.define(mut s, "store.bench.Account", 0)?
     if std.codec.record(mut s, 3)? {
         return Ok(())
     }
     std.codec.field(mut s, "id")?;
-    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)
     std.codec.field(mut s, "balance")?;
-    std.codec.schema_i64(mut s)?
+    std.codec.schema_i64(mut s)
     std.codec.field(mut s, "owner")?;
-    std.codec.schema_string(mut s)?
+    std.codec.schema_string(mut s)
     std.codec.close(mut s)
     Ok(())
 }

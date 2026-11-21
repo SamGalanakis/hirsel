@@ -42,7 +42,7 @@ fn trigger_entries(target: triggers.Entry[Signup]) -> Result[triggers.Entries, t
 
 fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -> Result[triggers.Id, WriteError] {
     if let Some(_) = stored(store.fetch(tx, store.shape(h.accounts), arg.id))? { return Error(Exists) }
-    let made: Result[triggers.Entry[Signup], Capacity] = triggers.granted(code.describe(run))
+    let made: Result[triggers.Entry[Signup], std.codec.EncodeError] = triggers.granted(code.describe(run))
     let target = match take made { Ok(take value) => take value, Error(_) => return Error(Rejected) }
     let entries = match trigger_entries(target) { Ok(take value) => take value, Error(_) => return Error(Rejected) }
     let copied: String = clone(arg.email)
@@ -123,28 +123,28 @@ pub fn scripted_services(tasks: Tasks) -> (Services, Task[()], Task[()]) {
     (Services(mail: take mail, payment: take payment), take mailing, take payments)
 }
 
-fn encode[A: codec](a: A) -> Result[Bytes, Capacity] {
+fn encode[A: codec](a: A) -> Result[Bytes, std.codec.EncodeError] {
     let mut raw: Bytes = list.new()
     let codec: std.codec.Codec[A] = std.codec.of()
     std.codec.encode(codec, a, mut raw)?
     Ok(take raw)
 }
 
-fn entry_key[A: codec, R: codec](f: StaticFn[fn(mut store.Tx, Tables, store.Caller, take A) -> Result[R, WriteError]]) -> Result[Bytes, Capacity] {
+fn entry_key[A: codec, R: codec](f: StaticFn[fn(mut store.Tx, Tables, store.Caller, take A) -> Result[R, WriteError]]) -> Result[Bytes, std.codec.EncodeError] {
     let input: std.codec.Codec[A] = std.codec.of()
     let reply: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
     let identity = code.identity(f)
     let mut raw: Bytes = list.with_capacity(list.len(identity) + 16u64)
     list.append(mut raw, identity)
-    std.codec.put_u64(std.codec.fingerprint(input)?, mut raw)?
-    std.codec.put_u64(std.codec.fingerprint(reply)?, mut raw)?
+    std.codec.put_u64(std.codec.fingerprint(input)?, mut raw)
+    std.codec.put_u64(std.codec.fingerprint(reply)?, mut raw)
     Ok(take raw)
 }
 
 fn decode_reply[R: codec](outcome: runner.Outcome) -> Result[R, Capacity] {
     let Returned(raw) = view outcome else { fail("sign-up: transact did not return") }
     let codec: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
-    match std.codec.decode(codec, raw)? {
+    match std.codec.decode(codec, raw) {
         Ok(Ok(take value)) => Ok(take value),
         _ => fail("sign-up: transact rejected"),
     }
@@ -293,7 +293,7 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     let h = result.unwrap(store.with_schema(db, code.describe(handles)))
     let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(snapshot, h.triggers, run_id)) else { fail("sign-up: missing terminal outcome") }
     let result_codec: std.codec.Codec[RunResult] = std.codec.of()
-    if let Ok(Active) = result.unwrap(std.codec.decode(result_codec, outcome)) {} else { fail("sign-up: expected an active outcome") }
+    if let Ok(Active) = std.codec.decode(result_codec, outcome) {} else { fail("sign-up: expected an active outcome") }
     let welcome: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, steps.StepId(run: run_id, index: 0u64))
     let paid: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, steps.StepId(run: run_id, index: 1u64))
     if let Ok(Some(Ok(1u64))) = welcome {} else { fail("sign-up: missing welcome receipt") }

@@ -1148,12 +1148,12 @@ pub type InputIssue = InvalidUtf8 | ExpectedValue | InvalidNumber | InvalidBase6
 
 /// Input offsets are byte offsets in the original JSON. Paths use RFC 6901
 /// JSON Pointer, with the empty string denoting the root.
-pub type TypedError = Input(u64, String, InputIssue) | Schema(u8, SchemaIssue) | Capacity(Capacity)
+pub type TypedError = Input(u64, String, InputIssue) | Schema(u8, SchemaIssue) | CodecFormat(codec.EncodeError) | LengthOverflow | Capacity(Capacity)
 
 /// Prepares the B-4 JSON profile of T. The format can be reused across values.
 pub fn typed[T: codec]() -> Result[Format[T], TypedError] {
     let binary: codec.Codec[T] = codec.of()
-    let description = typed_room(codec.describe(binary))?
+    let description = codec.describe(binary) ?=> CodecFormat
     let count = codec.schema_definitions(description)
     let mut shapes: List[Shape] = list.with_capacity(count)
     let mut pending: List[u64] = list.new()
@@ -1171,13 +1171,6 @@ pub fn typed[T: codec]() -> Result[Format[T], TypedError] {
     }
     let facts = shape_facts(shapes)?
     Ok(Format(binary, plan: JsonPlan(description: take description, root, shapes: take shapes, facts: take facts)))
-}
-
-fn typed_room[T](take value: Result[T, Capacity]) -> Result[T, TypedError] {
-    match take value {
-        Ok(take x) => Ok(take x),
-        Error(e) => Error(Capacity(e)),
-    }
 }
 
 fn shape_push[T](mut values: List[T], take x: T) -> Result[(), TypedError] {
@@ -1375,7 +1368,7 @@ fn decode_profile[T](format: Format[T], s: String) -> Result[T, TypedError] {
         let stop = d.pos
         return input_error(mut d, stop, ExpectedValue)
     }
-    match typed_room(codec.decode(format.binary, out))? {
+    match codec.decode(format.binary, out) {
         Ok(take value) => Ok(take value),
         Error(e) => codec_input_error(d, start, e),
     }
@@ -1485,14 +1478,15 @@ fn typed_name(s: String, mut d: ReadTyped) -> Result[String, TypedError] {
 fn put_typed_count(n: u64, mut out: Bytes) -> Result[(), TypedError] {
     let narrowed: Option[u32] = int.try_narrow(n)
     let Some(count) = narrowed else {
-        return Error(Capacity(Capacity(requested: n, available: 4294967295)))
+        return Error(LengthOverflow)
     }
-    typed_room(codec.put_u32(count, mut out))
+    codec.put_u32(count, mut out)
+    Ok(())
 }
 
 fn patch_typed_count(mut out: Bytes, start: u64, n: u64) -> Result[(), TypedError] {
     if n > 4294967295 {
-        return Error(Capacity(Capacity(requested: n, available: 4294967295)))
+        return Error(LengthOverflow)
     }
     for i in 0u64 .. 4 {
         out[start + i] = int.truncate(n >> (8 * i))
@@ -1518,9 +1512,10 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
             if at(s, d.pos) == b'n' {
                 let parsed = literal(s, mut d.pos, "null")
                 read_error(take parsed, mut d)?
-                typed_room(codec.put_tag(0, mut out))
+                codec.put_tag(0, mut out)
+                Ok(())
             } else {
-                typed_room(codec.put_tag(1, mut out))?
+                codec.put_tag(1, mut out)
                 read_shape(plan, item, s, depth, mut d, mut out)
             }
         },
@@ -1545,7 +1540,7 @@ fn read_base64(s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedE
 fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     open_typed(s, depth, b'[', mut d)?
     let start = list.len(out)
-    typed_room(codec.put_u32(0, mut out))?
+    codec.put_u32(0, mut out)
     let mut n: u64 = 0
     let path = string.byte_len(d.path)
     if !ends(s, mut d.pos, b']') {
@@ -1600,10 +1595,10 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
     let path = string.byte_len(d.path)
     field_path(mut d, name)?
     if name == "ok" {
-        typed_room(codec.put_tag(0, mut out))?
+        codec.put_tag(0, mut out)
         read_shape(plan, ok, s, depth + 1, mut d, mut out)?
     } else if name == "error" {
-        typed_room(codec.put_tag(1, mut out))?
+        codec.put_tag(1, mut out)
         read_shape(plan, err, s, depth + 1, mut d, mut out)?
     } else {
         return input_error(mut d, start, UnknownMember)
@@ -1678,7 +1673,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
                 source_mark(mut d, list.len(out), false)?
                 string.truncate(mut d.path, path)
             }
-            typed_room(codec.put_tag(0, mut out))?
+            codec.put_tag(0, mut out)
         } else {
             field_path(mut d, fields[i].name)?
             let close = d.pos - 1
@@ -1751,7 +1746,8 @@ fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), 
                 "false"
             })
             read_error(take parsed, mut d)?
-            typed_room(codec.put_bool(yes, mut out))
+            codec.put_bool(yes, mut out)
+            Ok(())
         },
         2 => {
             let text = typed_string(s, mut d)?
@@ -1761,13 +1757,15 @@ fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), 
             if end != string.byte_len(text) {
                 return input_error(mut d, start, ExpectedValue)
             }
-            typed_room(codec.put_char(scalar, mut out))
+            codec.put_char(scalar, mut out)
+            Ok(())
         },
         11 => read_float(op, s, mut d, mut out),
         12 => read_float(op, s, mut d, mut out),
         13 => {
             let text = typed_string(s, mut d)?
-            typed_room(codec.put_string(text, mut out))
+            codec.put_string(text, mut out) ?=> |_| LengthOverflow
+            Ok(())
         },
         20 => input_error(mut d, start, ExpectedValue),
         _ => read_integer(op, s, mut d, mut out),
@@ -1815,35 +1813,43 @@ fn put_integer(op: u8, spelling: String, start: u64, mut d: ReadTyped, mut out: 
     match op {
         3 => {
             let n = read_integer_value((int.parse(spelling) : Result[u8, ParseError]), start, mut d)?
-            typed_room(codec.put_u8(n, mut out))
+            codec.put_u8(n, mut out)
+            Ok(())
         },
         4 => {
             let n = read_integer_value((int.parse(spelling) : Result[u16, ParseError]), start, mut d)?
-            typed_room(codec.put_u16(n, mut out))
+            codec.put_u16(n, mut out)
+            Ok(())
         },
         5 => {
             let n = read_integer_value((int.parse(spelling) : Result[u32, ParseError]), start, mut d)?
-            typed_room(codec.put_u32(n, mut out))
+            codec.put_u32(n, mut out)
+            Ok(())
         },
         6 => {
             let n = read_integer_value((int.parse(spelling) : Result[u64, ParseError]), start, mut d)?
-            typed_room(codec.put_u64(n, mut out))
+            codec.put_u64(n, mut out)
+            Ok(())
         },
         7 => {
             let n = read_integer_value((int.parse(spelling) : Result[i8, ParseError]), start, mut d)?
-            typed_room(codec.put_i8(n, mut out))
+            codec.put_i8(n, mut out)
+            Ok(())
         },
         8 => {
             let n = read_integer_value((int.parse(spelling) : Result[i16, ParseError]), start, mut d)?
-            typed_room(codec.put_i16(n, mut out))
+            codec.put_i16(n, mut out)
+            Ok(())
         },
         9 => {
             let n = read_integer_value((int.parse(spelling) : Result[i32, ParseError]), start, mut d)?
-            typed_room(codec.put_i32(n, mut out))
+            codec.put_i32(n, mut out)
+            Ok(())
         },
         _ => {
             let n = read_integer_value((int.parse(spelling) : Result[i64, ParseError]), start, mut d)?
-            typed_room(codec.put_i64(n, mut out))
+            codec.put_i64(n, mut out)
+            Ok(())
         },
     }
 }
@@ -1875,9 +1881,11 @@ fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(),
             } else {
                 0
             }
-            return typed_room(codec.put_f32(float.from_bits32(negative | 0x7f800000 | nan), mut out))
+            codec.put_f32(float.from_bits32(negative | 0x7f800000 | nan), mut out)
+            return Ok(())
         }
-        return typed_room(codec.put_f64(float.from_bits64(bits), mut out))
+        codec.put_f64(float.from_bits64(bits), mut out)
+        return Ok(())
     }
     if op == 12 {
         let first = at(s, start)
@@ -1886,17 +1894,21 @@ fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(),
         }
         let parsed = read_number(s, mut d.pos)
         let value = read_error(take parsed, mut d)?
-        return typed_room(codec.put_f64(value, mut out))
+        codec.put_f64(value, mut out)
+        return Ok(())
     }
     let end = bare_number(s, mut d)?
     match float.parse32(string.slice(s, start, end)) {
-        Ok(v) => typed_room(codec.put_f32(v, mut out)),
+        Ok(v) => {
+            codec.put_f32(v, mut out)
+            Ok(())
+        },
         Error(Invalid(i)) => input_error(mut d, start + i, ExpectedValue),
         Error(_) => input_error(mut d, start, InvalidNumber),
     }
 }
 
-pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow | Capacity(Capacity)
+pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow
 
 scoped type TypedWriter {
     byte: scoped fn(u8),
@@ -1926,24 +1938,16 @@ pub fn write_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8)) -> 
 /// length pass runs before start or send. No JSON buffer is allocated.
 pub fn encode_typed[T](format: Format[T], value: T, mut scratch: Bytes, start: scoped fn(u64), send: scoped fn(u8)) -> Result[u64, TypedWriteError] {
     list.clear(mut scratch)
-    write_room(codec.encode(format.binary, value, mut scratch))?
+    codec.encode(format.binary, value, mut scratch) ?=> |_| LengthOverflow
     let length = typed_length(format, scratch)?
     start(length)
     write_typed(format, scratch, send)
 }
 
-fn write_room(take r: Result[(), Capacity]) -> Result[(), TypedWriteError] {
-    match r {
-        Ok(()) => Ok(()),
-        Error(e) => Error(Capacity(e)),
-    }
-}
-
-fn binary_read[T](take r: Result[T, codec.Stop]) -> Result[T, TypedWriteError] {
+fn binary_read[T](take r: Result[T, codec.DecodeError]) -> Result[T, TypedWriteError] {
     match take r {
-        Ok(take v) => Ok(take v),
-        Error(Bad(e)) => Error(Binary(e)),
-        Error(Full(e)) => Error(Capacity(e)),
+        Ok(take value) => Ok(take value),
+        Error(e) => Error(Binary(e)),
     }
 }
 

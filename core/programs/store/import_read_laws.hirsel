@@ -40,9 +40,8 @@ fn original_prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.co
     std.sha256.add(mut input.digest, encoded, 0u64, n)
     input.offset += 16u64 + n
     match std.codec.decode(codec, encoded) {
-        Error(c) => Error(Store(Full(c))),
-        Ok(Error(_)) => Error(ImportMalformed),
-        Ok(Ok(take value)) => Ok(take value),
+        Error(_) => Error(ImportMalformed),
+        Ok(take value) => Ok(take value),
     }
 }
 

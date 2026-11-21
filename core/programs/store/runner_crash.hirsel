@@ -84,15 +84,15 @@ const N_PLACE: u64 = 1048576u64
 fn key_of(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
     let carried: std.codec.Codec[Result[u64, u32]] = std.codec.of()
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key)
     key
 }
 
 fn u64_bytes(x: u64) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(x, mut b))
+    std.codec.put_u64(x, mut b)
     b
 }
 
@@ -570,7 +570,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
                     want(option.unwrap(take previous) == old_current, "activation: current changed but previous did not")
                 }
                 let describe: std.codec.Codec[runner.Describe] = std.codec.of()
-                let decoded = result.unwrap(result.unwrap(std.codec.decode(describe, current)))
+                let decoded = result.unwrap(std.codec.decode(describe, current))
                 want(list.len(decoded.exported) == 3u64 && decoded.exported[0u64].described.identity == code.identity(code.describe(bump)) &&
                      decoded.exported[1u64].described.identity == code.identity(code.describe(deny)) &&
                      decoded.exported[2u64].described.identity == code.identity(code.describe(trip)), "activation: incorrect new release")

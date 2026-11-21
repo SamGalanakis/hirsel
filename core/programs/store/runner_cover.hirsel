@@ -43,9 +43,9 @@ fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
 fn k_span() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(span)))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
     let unit: std.codec.Codec[()] = std.codec.of_unit()
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key)
     key
 }
 

@@ -16,15 +16,15 @@ pub type Ledger: codec {
     accounts: List[Account]
 }
 
-fn floats_encode(x: List[f64], mut out: Bytes) -> Result[(), Capacity] {
+fn floats_encode(x: List[f64], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     std.codec.put_list(x, std.codec.of_f64(), mut out)
 }
 
-fn floats_decode(b: Bytes, mut at: u64) -> Result[List[f64], std.codec.Stop] {
+fn floats_decode(b: Bytes, mut at: u64) -> Result[List[f64], std.codec.DecodeError] {
     std.codec.take_list(b, mut at, std.codec.of_f64())
 }
 
-fn floats_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[f64]]) -> Result[(), Capacity] {
+fn floats_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[f64]]) -> Result[(), std.codec.EncodeError] {
     std.codec.schema_list(mut s, std.codec.of_f64())
 }
 
@@ -32,15 +32,15 @@ fn floats() -> std.codec.Codec[List[f64]] {
     std.codec.make(floats_encode, floats_decode, floats_schema, 4)
 }
 
-fn strings_encode(x: List[String], mut out: Bytes) -> Result[(), Capacity] {
+fn strings_encode(x: List[String], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     std.codec.put_list(x, std.codec.of_string(), mut out)
 }
 
-fn strings_decode(b: Bytes, mut at: u64) -> Result[List[String], std.codec.Stop] {
+fn strings_decode(b: Bytes, mut at: u64) -> Result[List[String], std.codec.DecodeError] {
     std.codec.take_list(b, mut at, std.codec.of_string())
 }
 
-fn strings_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[String]]) -> Result[(), Capacity] {
+fn strings_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[String]]) -> Result[(), std.codec.EncodeError] {
     std.codec.schema_list(mut s, std.codec.of_string())
 }
 
@@ -66,7 +66,7 @@ fn run[T](c: std.codec.Codec[T], xs: T, mode: u64, r: u64, check: fn(T) -> u64) 
             std.codec.encode(c, xs, mut out)?
             sum += list.len(out)
         } else if mode == 2 {
-            match std.codec.decode(c, out)? {
+            match std.codec.decode(c, out) {
                 Ok(back) => {
                     sum += check(back)
                 }

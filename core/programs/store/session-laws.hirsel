@@ -125,16 +125,16 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     take key: Bytes, take arg: Bytes, version: u64) -> bool waits {
     let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut stream: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(0u32, mut stream))
+    std.codec.put_u32(0u32, mut stream)
     let request = head_request(store.Caller(issuer: 1, subject: list.new()), take stream, 0u64, take key, take arg, take to)
-    result.unwrap(head_arrival(mut head, take request, false))
+    result.unwrap(head_arrival(mut head, take request, false, false))
     if list.len(head.group) != 0u64 { result.unwrap(gate(mut head)) }
     let PubIn(e: take event) = result.unwrap(channel.receive(inbox))
     let Released(Release(version: _, snapshot: _, answers: take rows)) = take event else { return false }
     if list.len(rows) != 1u64 || rows[0u64].row.p != 0u64 { return false }
     let codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
     let reply = match rows[0u64].row.outcome {
-        Returned(body) => match std.codec.decode(codec, body) { Ok(Ok(Ok(7u32))) => true, _ => false },
+        Returned(body) => match std.codec.decode(codec, body) { Ok(Ok(7u32)) => true, _ => false },
         _ => false,
     }
     reply && store.version(store.snapshot(head.db)) == version
@@ -158,7 +158,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
         channel.new(1u64)
     let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new())))
     let mut arg: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(7u32, mut arg))
+    std.codec.put_u32(7u32, mut arg)
     let call_frame = Call(0u32, 0u64, 0u32, 10000u32, take arg)
     let frames: std.codec.Codec[Frame] = std.codec.of()
     let mut payload: Bytes = list.with_capacity(wire_output_size(call_frame))
@@ -264,7 +264,8 @@ pub fn law_writer_one_frame() -> bool {
             let _ = wire_offer(tx, mut busy, WireUnit(frame: take second, check: None, write_ack: false))
             false
         } else {
-            let charged = match list.with_capacity(1u64) { Error(_) => true, _ => false }
+            let mut probe: Bytes = list.new()
+            let charged = match list.try_reserve(mut probe, 1u64) { Error(_) => true, _ => false }
             charged && list.capacity(second) == 262158u64
         }
         let empty = match channel.try_receive(rx) { Error(Empty) => true, _ => false }
@@ -306,7 +307,8 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
         let mut owner = task.spawn(tasks, bytes 0u64, take er, wire_owner_park)
         let reader = task.spawn(tasks, bytes 0u64, take ar, wire_park)
         let writer = task.spawn(tasks, bytes 0u64, take br, wire_park)
-        let exact = match list.with_capacity(1u64) { Error(_) => true, _ => false }
+        let mut probe: Bytes = list.new()
+        let exact = match list.try_reserve(mut probe, 1u64) { Error(_) => true, _ => false }
         task.cancel(mut owner)
         wire_join(take reader, take writer)
         let _ = task.join(take owner)

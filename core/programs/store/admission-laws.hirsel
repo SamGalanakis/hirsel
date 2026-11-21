@@ -17,8 +17,8 @@ fn w3c_tx(mut tx: store.Tx, h: (), author: Caller, take count: u32) -> Result[By
 
 fn w3c_key[A, R](f: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = clone(f)
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
     key
 }
 
@@ -50,7 +50,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     list.push(mut s.entries, take transact_key)
     for stream in 0u32 .. 5u32 {
         let mut arg: Bytes = list.new()
-        result.unwrap(std.codec.put_u32(8168u32, mut arg))
+        std.codec.put_u32(8168u32, mut arg)
         let at = host.mono_ns(clock)
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
     }
@@ -68,7 +68,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     let mut answers: List[KeyedDone] = list.new()
     for stream in 0u32 .. 5u32 {
         let mut arg: Bytes = list.new()
-        result.unwrap(std.codec.put_u32(8164u32, mut arg))
+        std.codec.put_u32(8164u32, mut arg)
         let at = host.mono_ns(clock)
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
         let Req(e: take input) = result.unwrap(channel.try_receive(requests))
@@ -161,9 +161,9 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     let refused = match transport_receive(mut s, mut work) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
     let empty = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
     let mut old: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(0u32, mut old))
+    std.codec.put_u32(0u32, mut old)
     let mut changed: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(1u32, mut changed))
+    std.codec.put_u32(1u32, mut changed)
     let named: Bytes = match s.caller { Some(who) => wire_stream(who, 1u32), _ => return false }
     let digest = store.request_digest(entry, old)
     map.insert(mut s.held, slot_key(named, 2u64), WireHeld(stream: 1u32, p: 2u64, digest: digest, forwarded: true, queued: 0u64, owed: list.new()))
@@ -217,8 +217,8 @@ fn w3c_registry() -> Registry[(), W3cHandles] {
 fn w3c_retired() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, string.as_bytes("retired"))
-    result.unwrap(std.codec.put_u64(0u64, mut key))
-    result.unwrap(std.codec.put_u64(0u64, mut key))
+    std.codec.put_u64(0u64, mut key)
+    std.codec.put_u64(0u64, mut key)
     key
 }
 
@@ -260,7 +260,7 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
 
 fn w3c_arg(n: u32) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(n, mut b))
+    std.codec.put_u32(n, mut b)
     b
 }
 
@@ -304,8 +304,8 @@ fn w3c_answer(frame: Frame, version: u64, stream: u32, p: u64, expected: Outcome
 
 fn w3c_ok(version: u64) -> Outcome {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(0u32, mut b))
-    result.unwrap(std.codec.put_u64(version, mut b))
+    std.codec.put_u32(0u32, mut b)
+    std.codec.put_u64(version, mut b)
     Returned(take b)
 }
 
@@ -596,7 +596,7 @@ fn repair_board(mark: u8) -> List[Row] {
     let mut rows: List[Row] = list.new()
     for k in 0u64 .. REPAIR_KEYS {
         let mut key: Bytes = list.new()
-        result.unwrap(std.codec.put_u64(k, mut key))
+        std.codec.put_u64(k, mut key)
         let mut value: Bytes = list.new()
         for _ in 0u64 .. REPAIR_VALUE { list.push(mut value, mark) }
         list.push(mut rows, Row(sub: 1u32, key: take key, value: Some(take value)))
@@ -647,7 +647,7 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let mut exact = map.len(image) == REPAIR_KEYS
     for k in 0u64 .. REPAIR_KEYS {
         let mut key: Bytes = list.new()
-        result.unwrap(std.codec.put_u64(k, mut key))
+        std.codec.put_u64(k, mut key)
         exact = exact && match map.get(image, key) {
             Some(v) => list.len(v) == REPAIR_VALUE && v[0] == repairs && v[REPAIR_VALUE - 1u64] == repairs,
             None => false,

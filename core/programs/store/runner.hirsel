@@ -46,7 +46,7 @@ pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity] {
 pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
     let mut stream: Bytes = list.with_capacity(list.len(c.subject) + 6u64)
     caller_key(c, mut stream)?
-    std.codec.encode_key(std.codec.key_u32(), number, mut stream)?
+    std.codec.encode_key(std.codec.key_u32(), number, mut stream)
     Ok(take stream)
 }
 
@@ -567,7 +567,7 @@ fn encoded[R](cr: std.codec.Codec[R], r: R) -> Outcome {
     let mut out: Bytes = list.new()
     match std.codec.encode(cr, r, mut out) {
         Ok(()) => limited_reply(take out),
-        Error(c) => Failed(OutOfBytes(room(c))),
+        Error(_) => fail("runner: unrepresentable reply count"),
     }
 }
 
@@ -580,12 +580,11 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
         let run = scoped fn() -> Result[Result[Outcome, DecodeFail], OutOfTime] {
             bound steps s {
             match std.codec.decode(ca, arg) {
-                Ok(Ok(take a)) => match body(take a) {
+                Ok(take a) => match body(take a) {
                     Ok(take r) => Ok(encoded(cr, r)),
                     Error(c) => Ok(Failed(OutOfBytes(room(c)))),
                 },
-                Ok(Error(e)) => Error(DecodeFail(e: e)),
-                Error(c) => Ok(Failed(OutOfBytes(room(c)))),
+                Error(e) => Error(DecodeFail(e: e)),
             }
             }
         }
@@ -627,12 +626,11 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
         }
         let body = code.callable(f)
         match std.codec.decode(ca, arg) {
-            Ok(Ok(take a)) => match body(grants, caller, take a) {
+            Ok(take a) => match body(grants, caller, take a) {
                 Ok(take r) => encoded(cr, r),
                 Error(c) => Failed(OutOfBytes(room(c))),
             },
-            Ok(Error(e)) => Refused(Malformed(bad(e))),
-            Error(c) => Failed(OutOfBytes(room(c))),
+            Error(e) => Refused(Malformed(bad(e))),
         }
     }
     match take ran { Ok(take o) => take o, Error(e) => Failed(OutOfTime(e.steps)) }
@@ -641,15 +639,15 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
 // Key = identity ++ fingerprint(A) ++ fingerprint(reply), each fingerprint u64 little-endian.
 // The reply is the type the Returned bytes carry: Result[R, E] for transact, R for compute
 // and granted (RUNNER-SPEC v2.11.2), so a change to E alone changes the Key.
-fn described[A, R](identity: View[Bytes], revision: Option[View[Bytes]], kind: Kind, ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Exported), Capacity] {
+fn described[A, R](identity: View[Bytes], revision: Option[View[Bytes]], kind: Kind, ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Exported), std.codec.EncodeError] {
     let args = std.codec.schema(ca)?
     let result = std.codec.schema(cr)?
     let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
     list.append(mut key, identity)
     let args_fp = std.codec.fingerprint_of(args)
     let result_fp = std.codec.fingerprint_of(result)
-    std.codec.put_u64(args_fp, mut key)?
-    std.codec.put_u64(result_fp, mut key)?
+    std.codec.put_u64(args_fp, mut key)
+    std.codec.put_u64(result_fp, mut key)
     let mut id: Bytes = list.with_capacity(list.len(identity))
     list.append(mut id, identity)
     let mut rev: Bytes = list.new()
@@ -674,7 +672,7 @@ pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), code.revision(f), Compute, ca, cr) {
         Ok(take kd) => take kd,
-        Error(c) => return Error(Full(c)),
+        Error(_) => return Error(Bounds),
     }
     register_check(mut r, key, ca, n, s)?
     let made = fn(arg: Bytes) -> Outcome { adapt_compute(f, ca, cr, arg, n, s) }
@@ -686,7 +684,7 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), code.revision(f), Granted, ca, cr) {
         Ok(take kd) => take kd,
-        Error(c) => return Error(Full(c)),
+        Error(_) => return Error(Bounds),
     }
     register_check(mut r, key, ca, n, s)?
     let made = fn(tasks: Tasks, take g: JobGrant[G], take caller: Caller, take arg: Bytes, take notice: Option[JobReport]) -> Result[Task[Outcome], Capacity] {
@@ -701,18 +699,18 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
 }
 
 // The export list in registration order: the codec of List[Described].
-pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(), Capacity] {
+pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     let c: std.codec.Codec[Described] = std.codec.of()
     let count = list.len(r.exported)
-    if count > 0xffffffffu64 { return Error(Capacity(requested: count, available: 0xffffffffu64)) }
-    std.codec.put_u32(int.truncate(count), mut out)?
+    if count > 0xffffffffu64 { return Error(CountOverflow(count)) }
+    std.codec.put_u32(int.truncate(count), mut out)
     for entry in r.exported { std.codec.put_with(entry.described, c, mut out)? }
     Ok(())
 }
 
 pub type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
 
-pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity] {
+pub fn release_digest(exported: List[Exported]) -> Result[Bytes, std.codec.EncodeError] {
     let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
     let mut payload: Bytes = list.new()
     std.codec.encode(codec, exported, mut payload)?
@@ -749,9 +747,8 @@ fn preview_old_entries() -> Result[List[Exported], RegisterError] {
     }
     let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
     match std.codec.decode(codec, payload) {
-        Ok(Ok(take entries)) => Ok(take entries),
-        Ok(Error(_)) => Error(Bounds),
-        Error(c) => Error(Full(c)),
+        Ok(take entries) => Ok(take entries),
+        Error(_) => Error(Bounds),
     }
 }
 
@@ -769,16 +766,13 @@ fn preview_answers[G: send, H: send](r: Registry[G, H]) -> Result[List[Entry], R
 }
 
 fn encode_preview(take description: Describe, take answers: List[Entry]) -> Result[Bytes, RegisterError] {
-    let release = match release_digest(description.exported) {
-        Ok(take digest) => take digest,
-        Error(c) => return Error(Full(c)),
-    }
+    let release = release_digest(description.exported) ?=> |_| Bounds
     let preview = Preview(describe: take description, release: take release, answers: take answers)
     let codec: std.codec.Codec[Preview] = std.codec.of()
     let mut out: Bytes = list.new()
     match std.codec.encode(codec, preview, mut out) {
         Ok(()) => Ok(take out),
-        Error(c) => Error(Full(c)),
+        Error(_) => Error(Bounds),
     }
 }
 
@@ -786,7 +780,7 @@ pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(B
 
 fn launch_emit(data: Bytes) -> bool { false }
 
-fn encode_describe(description: Describe) -> Result[Bytes, Capacity] {
+fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError] {
     let codec: std.codec.Codec[Describe] = std.codec.of()
     let mut out: Bytes = list.new()
     std.codec.encode(codec, description, mut out)?
@@ -803,10 +797,7 @@ fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Res
     let target = launch_target(a)
     let description = Describe(digest: take digest, target: take target, n_place: launch_word(0u64, 0u64), exported: take exported)
     if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
-    match encode_describe(description) {
-        Ok(take payload) => Ok(take payload),
-        Error(c) => Error(Full(c)),
-    }
+    Ok(encode_describe(description) ?=> |_| Bounds)
 }
 
 pub type ReleaseRecord: codec + send { release: Bytes, digest: Bytes }
@@ -861,10 +852,12 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
     Ok(match selected { Some(choice) => choice, None => Current(0u64) })
 }
 
-fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), Capacity] {
-    let release = release_digest(r.exported)?
-    let description = Describe(digest: launch_digest()?, target: launch_owned_target()?, n_place: n_place, exported: clone(r.exported))
-    let payload = encode_describe(description)?
+fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
+    let release = release_digest(r.exported) ?=> |_| Bounds
+    let image = launch_digest() ?=> Full
+    let target = launch_owned_target() ?=> Full
+    let description = Describe(digest: take image, target: take target, n_place: n_place, exported: clone(r.exported))
+    let payload = encode_describe(description) ?=> |_| Bounds
     let Describe(digest: take digest, ..) = take description
     Ok((take payload, ReleaseRecord(release: take release, digest: take digest)))
 }
@@ -990,7 +983,7 @@ type Ran: send = Commit(Bytes) | Abort(Bytes) | Exhausted(Capacity) | Refuse(Ref
 fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
     let seen = bound bytes n {
         match std.codec.decode(ca, arg) {
-            Ok(Error(e)) => {
+            Error(e) => {
                 let why: Refusal = Malformed(bad(e))
                 Some(take why)
             },
@@ -1007,7 +1000,7 @@ fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
 fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], mut tx: store.Tx, h: H, author: Caller, arg: Bytes) -> Ran {
     let body = code.callable(f)
     match std.codec.decode(ca, arg) {
-        Ok(Ok(take a)) => {
+        Ok(take a) => {
             let res = body(mut tx, h, author, take a)
             let kept = match res { Ok(_) => true, Error(_) => false }
             let mut out: Bytes = list.new()
@@ -1018,11 +1011,10 @@ fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, Caller, take
                         Exhausted(Capacity(requested: length, available: MAX_RETURNED_BYTES))
                     } else if kept { Commit(take out) } else { Abort(take out) }
                 },
-                Error(c) => Exhausted(c),
+                Error(_) => fail("runner: unrepresentable reply count"),
             }
         },
-        Ok(Error(e)) => Refuse(Malformed(bad(e))),
-        Error(c) => Exhausted(c),
+        Error(e) => Refuse(Malformed(bad(e))),
     }
 }
 
@@ -1034,7 +1026,7 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
     let carried: std.codec.Codec[Result[R, E]] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), code.revision(f), Transact, ca, carried) {
         Ok(take kd) => take kd,
-        Error(c) => return Error(Full(c)),
+        Error(_) => return Error(Bounds),
     }
     let revision: Option[Bytes] = if list.len(d.revision) == 0u64 {
         None
@@ -1048,12 +1040,12 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
     insert(mut r, take key, take d, Transact(n, s, take revision, check, run))
 }
 
-pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, Capacity] {
+pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {
     let identity = code.identity(definition)
     let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
     list.append(mut key, identity)
-    std.codec.put_u64(std.codec.fingerprint(arg)?, mut key)?
-    std.codec.put_u64(std.codec.fingerprint(reply)?, mut key)?
+    std.codec.put_u64(std.codec.fingerprint(arg)?, mut key)
+    std.codec.put_u64(std.codec.fingerprint(reply)?, mut key)
     Ok(take key)
 }
 
@@ -1064,20 +1056,17 @@ pub fn register_attempt[G: send, H: send, F, A: codec, R: codec](mut registered:
     check_call_reserve(n, steps)?
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let key = match attempt_key(definition, ca, cr) { Ok(take k) => take k, Error(cap) => return Error(Full(cap)) }
+    let key = attempt_key(definition, ca, cr) ?=> |_| Bounds
     if map.contains(registered.slots, key) { return Error(AlreadyRegistered(take key)) }
     let made = fn(mut tx: store.Tx, attempt: triggers.Attempt, arg: Bytes) -> Result[Bytes, store.Error] {
         let value = match std.codec.decode(ca, arg) {
-            Ok(Ok(take decoded)) => take decoded,
-            Ok(Error(_)) => return Error(Missing("attempt argument")),
-            Error(cap) => return Error(Full(cap)),
+            Ok(take decoded) => take decoded,
+            Error(_) => return Error(Missing("attempt argument")),
         }
         let answer = run(mut tx, attempt, take value)?
         let mut raw: Bytes = list.new()
-        match std.codec.encode(cr, answer, mut raw) {
-            Ok(()) => Ok(take raw),
-            Error(cap) => Error(Full(cap)),
-        }
+        std.codec.encode(cr, answer, mut raw) ?=> |_| Limit(Value)
+        Ok(take raw)
     }
     let adapter = take made
     map.insert(mut registered.slots, take key, Fenced(n, steps, take adapter))
@@ -1124,12 +1113,11 @@ fn adapt_query[H: send, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, 
           let ran = isolate(fn() -> Result[Result[Cover, Queried], OutOfTime] {
            bound steps steps {
             let c = match std.codec.decode(ca, arg) {
-                Ok(Ok(take a)) => match body(tx, h, take a) {
+                Ok(take a) => match body(tx, h, take a) {
                     Ok(take value) => take value,
                     Error(c) => return Ok(Error(Stopped(Failed(OutOfBytes(room(c)))))),
                 },
-                Ok(Error(e)) => return Ok(Error(Stopped(Refused(Malformed(bad(e)))))),
-                Error(c) => return Ok(Error(Stopped(Failed(OutOfBytes(room(c)))))),
+                Error(e) => return Ok(Error(Stopped(Refused(Malformed(bad(e)))))),
             }
             let projected = match old {
                 Some(previous) => rerun_rows(prior, previous, s, c, sub, rows),
@@ -1173,7 +1161,7 @@ pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(s
     let cr: std.codec.Codec[()] = std.codec.of_unit()
     let (take key, take d) = match described(code.identity(f), code.revision(f), Query, ca, cr) {
         Ok(take kd) => take kd,
-        Error(c) => return Error(Full(c)),
+        Error(_) => return Error(Bounds),
     }
     register_check(mut r, key, ca, n, s)?
     let made = fn(at: store.Snapshot, h: H, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
@@ -1875,10 +1863,8 @@ fn round[G: send, H: send](mut b: Board[G, H], mut fenced: Fenced) -> List[Owe] 
 fn encode_runner_reply(o: Outcome) -> Result[Bytes, store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
-    match std.codec.encode(co, o, mut b) {
-        Ok(()) => Ok(take b),
-        Error(c) => Error(Full(c)),
-    }
+    std.codec.encode(co, o, mut b) ?=> |_| Limit(Value)
+    Ok(take b)
 }
 
 // ---- P2: the head (H1-H4) and its gate (V3, V4).
@@ -2290,7 +2276,7 @@ fn read_control(mut input: ReadHalf, maximum: u64) -> Option[HostCommand] waits 
     let mut body: Bytes = list.with_capacity(size)
     if !read_control_bytes(mut input, mut body, size) { return None }
     let codec: std.codec.Codec[HostCommand] = std.codec.of()
-    match std.codec.decode(codec, body) { Ok(Ok(take command)) => Some(take command), _ => None }
+    match std.codec.decode(codec, body) { Ok(take command) => Some(take command), _ => None }
 }
 
 fn read_control_bytes(mut input: ReadHalf, mut out: Bytes, size: u64) -> bool waits {
@@ -2310,7 +2296,7 @@ fn send_control(mut output: WriteHalf, host_result: HostReply) -> bool waits {
     if let Error(_) = std.codec.encode(codec, host_result, mut body) { return false }
     let mut header: Bytes = list.new()
     if list.len(body) > 4294967295u64 { return false }
-    if let Error(_) = std.codec.put_u32(int.narrow(list.len(body)), mut header) { return false }
+    std.codec.put_u32(int.narrow(list.len(body)), mut header)
     let mut offset = 0u64
     while offset < 4u64 + list.len(body) {
         match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), Never) {
@@ -2546,7 +2532,7 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
         if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
         let h = open_handles(db, handles)?
         let h2 = open_handles(db, handles)?
-        let release = match release_digest(local_registry.exported) { Ok(take value) => take value, Error(cap) => return Error(Store(Full(cap))) }
+        let release = release_digest(local_registry.exported) ?=> |_| Place(Bounds)
         return Ok((take local_registry, take h, take h2, take release, take identity))
     }
     let current = activation_result(current_description(db))?
@@ -2567,11 +2553,7 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     }
     if persistent && selected == None && launch_word(1u64, 0u64) == 0u64 { return Error(IdentityUnknown) }
     let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
-    let payload = prepare_activation(reg, n_place)
-    let (description, record) = match take payload {
-        Ok(take pair) => take pair,
-        Error(cap) => return Error(Store(Full(cap))),
-    }
+    let (description, record) = prepare_activation(reg, n_place) ?=> Place
     if let Some(version) = selected {
         let old = option.unwrap(take current)
         if old != description { return Error(NotCurrent(Active(version, take old))) }
@@ -2700,11 +2682,7 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
     let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
     let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
     if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
-    let payload = prepare_activation(registered, p.n_place)
-    let (take description, take record) = match take payload {
-        Ok(take answer) => take answer,
-        Error(c) => return Error(Open(Store(Full(c)))),
-    }
+    let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
     let ReleaseRecord(release: take release, digest: take image) = take record
     let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
         resident_limit: p.options.resident_limit, checkpoint_task_bytes: p.options.checkpoint_task_bytes)
@@ -2715,16 +2693,11 @@ fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.D
     let codec: std.codec.Codec[Describe] = std.codec.of()
     let decoded = std.codec.decode(codec, target.describe)
     let description = match take decoded {
-        Ok(Ok(take description)) => take description,
-        Ok(Error(_)) => return Error(ImportMalformed),
-        Error(c) => return Error(Store(Full(c))),
+        Ok(take description) => take description,
+        Error(_) => return Error(ImportMalformed),
     }
     if description.digest != target.digest { return Error(ImportMalformed) }
-    let answer = release_digest(description.exported)
-    let release = match take answer {
-        Ok(take release) => take release,
-        Error(c) => return Error(Store(Full(c))),
-    }
+    let release = release_digest(description.exported) ?=> |_| ImportMalformed
     if release != target.release { return Error(ImportMalformed) }
     let digest: Bytes = clone(target.digest)
     Ok(ReleaseRecord(release: take release, digest: take digest))
@@ -2733,7 +2706,8 @@ fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.D
 fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
     let description = match prepare_activation(reg, n_place) {
         Ok((take description, _)) => take description,
-        Error(c) => { store.release_export(mut db, request.attempt); return Error(Store(Full(c))) },
+        Error(Full(c)) => { store.release_export(mut db, request.attempt); return Error(Store(Full(c))) },
+        Error(_) => { store.release_export(mut db, request.attempt); return Error(Drift) },
     }
     let selected = current_description(db)
     match take selected {
@@ -3267,7 +3241,7 @@ fn answered[G: send, H: send](mut hd: Head[G, H], take q: Request, take receipt:
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let version = store.version(store.snapshot(hd.db))
     match std.codec.decode(co, receipt.reply) {
-        Ok(Ok(take outcome)) => worker(mut hd, take q, take outcome, receipt.ticket, version),
+        Ok(take outcome) => worker(mut hd, take q, take outcome, receipt.ticket, version),
         _ => fail("runner: stored reply did not decode"),
     }
 }
@@ -3290,7 +3264,7 @@ fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take pendin
 fn duplicate_reply[G: send, H: send](mut hd: Head[G, H], take q: Request, stored: store.Stored) -> Result[(), store.Error] waits {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let outcome = match std.codec.decode(co, stored.reply) {
-        Ok(Ok(take value)) => take value,
+        Ok(take value) => take value,
         _ => fail("runner: a stored reply does not decode"),
     }
     // A duplicate gets its saved reply as it was committed (ruling 73 as amended).
@@ -3509,8 +3483,8 @@ fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices
         }
         if matches_kind && triggers.matches(p, entry.described.identity, entry.described.args) {
             let mut key = copy_bytes(entry.described.identity)?
-            match std.codec.put_u64(entry.args_fp, mut key) { Ok(()) => (), Error(cap) => return Error(Full(cap)) }
-            match std.codec.put_u64(entry.result_fp, mut key) { Ok(()) => (), Error(cap) => return Error(Full(cap)) }
+            std.codec.put_u64(entry.args_fp, mut key)
+            std.codec.put_u64(entry.result_fp, mut key)
             return Ok(Some(take key))
         }
     }
@@ -3931,7 +3905,7 @@ fn trigger_law_invoked(outcome: Option[triggers.Terminal], expected: Result[u64,
     let Some(Returned(raw)) = view outcome else { return false }
     let codec: std.codec.Codec[Result[u64, u64]] = std.codec.of()
     match std.codec.decode(codec, raw) {
-        Ok(Ok(value)) => match value {
+        Ok(value) => match value {
             Ok(n) => match expected { Ok(want) => n == want, _ => false },
             Error(n) => match expected { Error(want) => n == want, _ => false },
         },
@@ -4005,7 +3979,7 @@ fn journal_test_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     if journal_law_trigger_transact(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
-fn trigger_law_entry_key() -> Result[Bytes, Capacity] {
+fn trigger_law_entry_key() -> Result[Bytes, std.codec.EncodeError] {
     let args: std.codec.Codec[u64] = std.codec.of()
     let returned: std.codec.Codec[Result[u64, u64]] = std.codec.of()
     let (take key, _) = described(code.identity(code.describe(trigger_law_body)), None, Transact, args, returned)?
@@ -4014,7 +3988,7 @@ fn trigger_law_entry_key() -> Result[Bytes, Capacity] {
 
 fn trigger_law_argument(n: u64) -> Result[Bytes, Capacity] {
     let mut raw: Bytes = list.new()
-    std.codec.put_u64(n, mut raw)?
+    std.codec.put_u64(n, mut raw)
     Ok(take raw)
 }
 
@@ -4030,7 +4004,7 @@ fn trigger_law_granted_body(ctx: TriggerContext, caller: Caller, take digit: u64
         result.unwrap(trigger_hold(ctx, 3u64, take expected, take actual))
         return Ok(0u64)
     }
-    let key = trigger_law_entry_key()?
+    let key = result.unwrap(trigger_law_entry_key())
     let arg = trigger_law_argument(digit)?
     match trigger_call(ctx, take key, take arg) {
         Ok(Returned(_)) => Ok(triggers.number(trigger_attempt(ctx))),
@@ -4670,7 +4644,7 @@ pub fn join_marked[R: send](take t: Task[R], to_publisher: Sender[PubIn]) -> Res
 fn slot_key(stream: Bytes, p: u64) -> Bytes {
     let mut k: Bytes = list.with_capacity(list.len(stream) + 8u64)
     list.append(mut k, stream)
-    result.unwrap(std.codec.put_u64(p, mut k))
+    std.codec.put_u64(p, mut k)
     k
 }
 
@@ -5860,43 +5834,45 @@ type Old { balance: u64 }
 
 type New { balance: u64, bonus: u64 }
 
-fn old_put(v: Old, mut b: Bytes) -> Result[(), Capacity] {
+fn old_put(v: Old, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
     std.codec.put_u64(v.balance, mut b)
+    Ok(())
 }
 
-fn old_take(b: Bytes, mut at: u64) -> Result[Old, std.codec.Stop] {
+fn old_take(b: Bytes, mut at: u64) -> Result[Old, std.codec.DecodeError] {
     Ok(Old(balance: std.codec.take_u64(b, mut at)?))
 }
 
-fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Old]) -> Result[(), Capacity] {
+fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Old]) -> Result[(), std.codec.EncodeError] {
     std.codec.define(mut s, "runner.tests.Account", 0)?
     if std.codec.record(mut s, 1)? {
         return Ok(())
     }
     std.codec.field(mut s, "balance")?
-    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)
     std.codec.close(mut s)
     Ok(())
 }
 
-fn new_put(v: New, mut b: Bytes) -> Result[(), Capacity] {
-    std.codec.put_u64(v.balance, mut b)?
+fn new_put(v: New, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(v.balance, mut b)
     std.codec.put_u64(v.bonus, mut b)
+    Ok(())
 }
 
-fn new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.Stop] {
+fn new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
     let balance = std.codec.take_u64(b, mut at)?
     let bonus = std.codec.take_u64(b, mut at)?
     Ok(New(balance: balance, bonus: bonus))
 }
 
-fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Result[(), Capacity] {
+fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Result[(), std.codec.EncodeError] {
     std.codec.define(mut s, "runner.tests.Account", 0)?
     if std.codec.record(mut s, 2)? {
         return Ok(())
     }
     std.codec.field(mut s, "balance")?
-    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)
     std.codec.field_default(mut s, "bonus", std.codec.of_u64(), 7)?
     std.codec.close(mut s)
     Ok(())
@@ -5991,7 +5967,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     list.len(owes) == 1u64 && list.len(owes[0].rows) == 1u64 && row_is(owes[0].rows[0], account_key(2u8), account_value(20u8, 9u8))
 }
 
-fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.Stop] {
+fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
     let value = new_take(b, mut at)?
     if value.balance == 10u64 {
         fail("fixture: old row failed in the current decoder")
@@ -6104,11 +6080,7 @@ fn wire_decode(b: Bytes) -> Result[Frame, u16] {
         return Error(1007u16)
     }
     let codec: std.codec.Codec[Frame] = std.codec.of()
-    match std.codec.decode(codec, b) {
-        Ok(Ok(take f)) => Ok(take f),
-        Ok(Error(_)) => Error(1007u16),
-        Error(_) => Error(1013u16),
-    }
+    Ok(std.codec.decode(codec, b) ?=> |_| 1007u16)
 }
 
 
@@ -6232,7 +6204,7 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
 /// One whole binary frame for f, its codec bytes written once behind the header.
 pub fn wire_encode(out: std.wsock.Outbound, f: Frame) -> Result[Bytes, std.wsock.Error] {
     let codec: std.codec.Codec[Frame] = std.codec.of()
-    std.wsock.encode_with(out, codec, f, wire_output_size(f))
+    std.wsock.try_encode_with(out, codec, f, wire_output_size(f))
 }
 
 fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64, slots: u64) -> Result[(Sender[WireAllocation[C]], Task[()]), Capacity] {
@@ -7254,9 +7226,8 @@ fn register_check[G: send, H: send, A](mut r: Registry[G, H], key: Bytes, ca: st
             let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
                 bound steps steps {
                     match std.codec.decode(ca, arg) {
-                        Ok(Ok(_)) => { let no_refusal: Option[Refusal] = None; no_refusal },
-                        Ok(Error(e)) => Some(Malformed(bad(e))),
-                        Error(c) => Some(Budget(room(c))),
+                        Ok(_) => { let no_refusal: Option[Refusal] = None; no_refusal },
+                        Error(e) => Some(Malformed(bad(e))),
                     }
                 }
             }
@@ -7512,8 +7483,8 @@ fn wire_can_read[G: send, H: send](s: WireSession[G, H]) -> bool {
 fn entry_key(identity: View[Bytes], args_fp: u64, result_fp: u64) -> Result[Bytes, Capacity] {
     let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
     list.append(mut key, identity)
-    std.codec.put_u64(args_fp, mut key)?
-    std.codec.put_u64(result_fp, mut key)?
+    std.codec.put_u64(args_fp, mut key)
+    std.codec.put_u64(result_fp, mut key)
     Ok(take key)
 }
 

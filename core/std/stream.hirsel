@@ -27,7 +27,7 @@ pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Boun
         return Error(InvalidStream)
     }
     let coding: codec.Codec[P] = codec.of()
-    let made: Result[Result[Bytes, Capacity], Capacity] = bound bytes ((size + 7) / 8 * 8) {
+    let made: Result[Result[Bytes, codec.EncodeError], Capacity] = bound bytes ((size + 7) / 8 * 8) {
         let mut block: Bytes = list.with_capacity(size)
         list.fill(mut block, out_cap, 0u8)
         match codec.encode(coding, state, mut block) {
@@ -37,7 +37,7 @@ pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Boun
     }
     match take made {
         Ok(Ok(take block)) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, driver)),
-        Ok(Error(e)) => Error(Allocation(e)),
+        Ok(Error(_)) => Error(InvalidStream),
         Error(e) => Error(Allocation(e)),
     }
 }
@@ -116,7 +116,7 @@ pub fn produce[P: codec + send, E](take seed: Seed, next: fn(mut P) -> Result[Op
     let Seed(block: take block, at, inbox: take inbox, credits: take credits, room) = take seed
     let decoded = codec.decode_at((codec.of() : codec.Codec[P]), block, at)
     discard(take block)
-    if let Ok(Ok(take initial)) = take decoded {
+    if let Ok(take initial) = take decoded {
         let mut state = take initial
         while let Ok(()) = channel.receive(credits) {
             match next_event(take state, room, next) {

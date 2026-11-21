@@ -639,7 +639,7 @@ fn typed_json_profile_round_trips() -> bool {
     map.insert(mut lookup, 10u64, string.from("ten"))
     map.insert(mut lookup, 2u64, string.from("two"))
     let mut payload: Bytes = list.new()
-    result.unwrap(codec.put_u8(77, mut payload))
+    codec.put_u8(77, mut payload)
     let mut series: List[u16] = list.new()
     list.push(mut series, 2u16)
     list.push(mut series, 0u16)

@@ -168,8 +168,8 @@ const N_PLACE: u64 = 1048576u64
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
     key
 }
 
@@ -219,13 +219,13 @@ fn k_crash() -> Bytes {
 
 fn u64_arg(x: u64) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(x, mut b))
+    std.codec.put_u64(x, mut b)
     b
 }
 
 fn sid(s: u64) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(s, mut b))
+    std.codec.put_u64(s, mut b)
     b
 }
 
@@ -690,7 +690,7 @@ fn drive_granted_copies(take d: Drive) -> () waits {
             Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == p =>
                 match done[0u64].outcome {
                     Returned(raw) => match std.codec.decode(std.codec.of_u64(), raw) {
-                        Ok(Ok(value)) => value == 41u64 + p,
+                        Ok(value) => value == 41u64 + p,
                         _ => false,
                     },
                     _ => false,
@@ -903,14 +903,14 @@ fn row_key(k: u64) -> Bytes {
     for x in [0u8, 0u8, 0u8, 1u8] {
         list.push(mut out, x)
     }
-    result.unwrap(std.codec.put_key_u64(k, mut out))
+    std.codec.put_key_u64(k, mut out)
     out
 }
 
 // write(k)'s value: the u64 codec's 8 bytes, little-endian.
 fn row_value(k: u64) -> Bytes {
     let mut out: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(k, mut out))
+    std.codec.put_u64(k, mut out)
     out
 }
 
@@ -1323,7 +1323,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     result.unwrap(std.dir.remove_all(parent, name))
     if let Some(raw) = stored {
         let described: std.codec.Codec[runner.Describe] = std.codec.of()
-        let activation = result.unwrap(result.unwrap(std.codec.decode(described, raw)))
+        let activation = result.unwrap(std.codec.decode(described, raw))
         let release = result.unwrap(runner.release_digest(activation.exported))
         let revision = option.unwrap(code.revision(code.describe(write)))
         if let Some(row) = installed {
@@ -1428,7 +1428,7 @@ fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u6
     let id = triggers.Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: version, index: 0u64)
     match triggers.fetch_outcome(tx, t, id) {
         Ok(None) => Ok(0u64),
-        Ok(Some(Returned(raw))) => match std.codec.decode(std.codec.of_u64(), raw) { Ok(Ok(value)) => Ok(value), _ => Error(3u32) },
+        Ok(Some(Returned(raw))) => match std.codec.decode(std.codec.of_u64(), raw) { Ok(value) => Ok(value), _ => Error(3u32) },
         _ => Error(4u32),
     }
 }
@@ -1456,7 +1456,7 @@ fn ping_call(client: wire_client.Conn, ping_keys: List[Bytes], key: Bytes, posit
             Ok(Batch(_, _, _, done)) => for item in done {
                 if item.p == position {
                     let Returned(raw) = view item.outcome else { fail("stop: call not returned") }
-                    match std.codec.decode(reply(), raw) { Ok(Ok(Ok(value))) => return value, _ => fail("stop: call refused") }
+                    match std.codec.decode(reply(), raw) { Ok(Ok(value)) => return value, _ => fail("stop: call refused") }
                 }
             },
             Ok(_) => (),
@@ -1856,7 +1856,7 @@ fn drive_deadline_hung(take d: Drive) -> () waits {
     match computed.outcome {
         Returned(b) => {
             let c: std.codec.Codec[u64] = std.codec.of()
-            match std.codec.decode(c, b) { Ok(Ok(19)) => {}, _ => fail("hung: compute did not answer") }
+            match std.codec.decode(c, b) { Ok(19) => {}, _ => fail("hung: compute did not answer") }
         },
         _ => fail("hung: compute faulted"),
     }

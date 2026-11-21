@@ -24,7 +24,7 @@ fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.
         match std.wsock.read(mut r, deadline(c))? {
             Message(take b) => {
                 let codec: std.codec.Codec[runner.Frame] = std.codec.of()
-                return match std.codec.decode(codec, b) { Ok(Ok(take f)) => Ok(take f), _ => Error(Protocol(1007u16)) }
+                return match std.codec.decode(codec, b) { Ok(take f) => Ok(take f), _ => Error(Protocol(1007u16)) }
             },
             Ping(control) => { let mut b: Bytes = list.new(); std.websocket.control(control, mut b); send(mut w, mut out, 10u8, b, c)? },
             Pong(_) => (),
@@ -44,7 +44,7 @@ fn read(take seed: Read) -> () waits {
         match std.wsock.read(mut r, deadline(c)) {
             Ok(Message(take b)) => {
                 let codec: std.codec.Codec[runner.Frame] = std.codec.of()
-                let f = match std.codec.decode(codec, b) { Ok(Ok(take f)) => take f, _ => return }
+                let f = match std.codec.decode(codec, b) { Ok(take f) => take f, _ => return }
                 if let Error(_) = channel.send(to, take f) { return }
                 pending = false
             },
@@ -188,7 +188,7 @@ pub fn slot(keys: List[Bytes], key: Bytes) -> u32 {
 pub fn stream(caller: runner.Caller, s: u32) -> Bytes {
     let mut b: Bytes = list.new()
     result.unwrap(runner.caller_key(caller, mut b))
-    result.unwrap(std.codec.encode_key(std.codec.key_u32(), s, mut b))
+    std.codec.encode_key(std.codec.key_u32(), s, mut b)
     b
 }
 

@@ -42,9 +42,10 @@ the reader child. Moving the resulting message preserves its allocation charge.
 `outbound` and `encode` run at the allocating owner. The client encoder requests
 four fresh host.random bytes on every frame, including controls. An encoded
 buffer reserves exactly payload+14 capacity, at most round8(max_frame+14)
-charged bytes. `encode_with` is the server's encode for a codec value of known
+charged bytes. `try_encode_with` is the server's encode for a codec value of known
 exact length: `websocket.binary_head` writes the header and the codec writes the
-payload behind it in the same buffer, so the payload is never copied. A codec
+payload behind it in the same buffer, so the payload is never copied. The initial reservation returns Allocation
+on refusal. A codec
 that writes any other length fails closed with 1011. `stage` moves one such buffer to the sole Writer. Busy returns
 the offered bytes unchanged. `flush` commits send prefixes and retains its
 cursor across TimedOut. Completion frees the buffer before the next encode.

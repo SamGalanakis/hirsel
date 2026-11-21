@@ -59,6 +59,11 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 ([OWN-22](ownership.md#own-22-scoped-types)) and a callable's logical width
 ([LANG-13](language.md#lang-13-callables)) are unaffected.
 
+The [standard codec](../../core/std/api/codec.md) raises Capacity on refused
+admission. Its value and schema writers report `EncodeError` for a count beyond
+the format's u32 field. Fixed-width scalar and key writers return unit.
+`decode` and `read` return `Result[T, DecodeError]`.
+
 | type | kind | bounds | size | holds |
 |---|---|---|---|---|
 | integers, floats | plain | `shareable`, `send`, `codec`; integers `key`, `ordered` | width | nothing |

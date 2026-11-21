@@ -77,11 +77,10 @@ fn run(out: Stdout, d: Dir, argv: Args) -> Result[(), Fail] waits {
     }
     let c: std.codec.Codec[List[Parcel]] = std.codec.of_list()
     let mut bytes: Bytes = list.new()
-    match std.codec.encode(c, ps, mut bytes) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    std.codec.encode(c, ps, mut bytes) ?=> |_| Corrupt
     let back = match std.codec.decode(c, bytes) {
-        Ok(Ok(take xs)) => xs,
-        Ok(Error(_)) => return Error(Corrupt),
-        Error(cap) => return Error(Mem(cap))
+        Ok(take xs) => xs,
+        Error(_) => return Error(Corrupt),
     }
     let mut buf = string.new()
     for p in back {

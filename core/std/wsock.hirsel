@@ -414,23 +414,21 @@ pub fn encode(mut out: Outbound, fin: bool, opcode: u8, payload: Bytes) -> Resul
 
 /// Encodes x as one whole binary frame, writing its codec bytes straight
 /// behind the header so the payload is built once. n is x's exact encoded
-/// length; a codec that writes any other count fails closed with 1011. Server
-/// role only. Capacity n+14, as encode reserves.
-/// Ex: `wsock.encode_with(out, codec, frame, size)?`.
-pub fn encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -> Result[Bytes, Error] {
+/// length. A length mismatch returns Protocol(1011). Server role only.
+/// Reserves n+14 bytes. Refusal of that reservation returns Allocation.
+/// Ex: `wsock.try_encode_with(out, codec, frame, size)?`.
+pub fn try_encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -> Result[Bytes, Error] {
     if n > out.max {
         return Error(Protocol(1009))
     }
     if out.role == Client {
         return Error(Configuration)
     }
-    let mut b = buffer(n + 14)?
+    let mut b: Bytes = list.new()
+    list.try_reserve(mut b, n + 14) ?=> Allocation
     websocket.binary_head(out.encoder, n, mut b) ?=> Protocol
     let start = list.len(b)
-    match codec.encode(coding, x, mut b) {
-        Ok(_) => {},
-        Error(c) => return Error(Allocation(c))
-    }
+    codec.encode(coding, x, mut b) ?=> |_| Protocol(1011u16)
     if list.len(b) - start != n {
         return Error(Protocol(1011))
     }

@@ -22,8 +22,8 @@ fn one[T](take x: T) -> List[T] {
 
 fn row(chunk: u32) -> runner.Row {
     let mut key: Bytes = list.new()
-    result.unwrap(std.codec.encode_key(std.codec.key_u32(), 0x01020304u32, mut key))
-    result.unwrap(std.codec.encode_key(std.codec.key_u32(), chunk, mut key))
+    std.codec.encode_key(std.codec.key_u32(), 0x01020304u32, mut key)
+    std.codec.encode_key(std.codec.key_u32(), chunk, mut key)
     let mut value: Bytes = list.new()
     let mut payload: Bytes = list.new()
     for i in 0u64 .. 64u64 {
@@ -70,7 +70,7 @@ fn vector[T](c: std.codec.Codec[T], x: T, expected: Bytes) -> bool {
         return false
     }
     match std.codec.decode(c, expected) {
-        Ok(Ok(take y)) => {
+        Ok(take y) => {
             let mut again: Bytes = list.new()
             result.unwrap(std.codec.encode(c, y, mut again))
             again == expected

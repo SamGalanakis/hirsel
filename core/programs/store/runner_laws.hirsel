@@ -47,14 +47,14 @@ fn e1(take x: u64) -> Result[u64, Capacity] {
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
     key
 }
 
 fn u32_arg(x: u32) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u32(x, mut b))
+    std.codec.put_u32(x, mut b)
     b
 }
 
@@ -228,7 +228,7 @@ fn trip(c: std.codec.Codec[runner.Outcome], take o: runner.Outcome) -> bool {
     let mut out: Bytes = list.new()
     result.unwrap(std.codec.encode(c, o, mut out))
     match std.codec.decode(c, out) {
-        Ok(Ok(back)) => same(back, o),
+        Ok(back) => same(back, o),
         _ => false,
     }
 }
@@ -251,7 +251,7 @@ pub fn law_p15_types_roundtrip() -> bool {
     let d = runner.Described(kind: Transact, identity: take id, args: u32_arg(1u32), result: u32_arg(2u32))
     result.unwrap(std.codec.encode(dc, d, mut out))
     let back = match std.codec.decode(dc, out) {
-        Ok(Ok(take x)) => take x,
+        Ok(take x) => take x,
         _ => return false,
     }
     let kind = match back.kind {
@@ -351,7 +351,7 @@ pub fn law_l4_malformed_flood() -> bool {
     let large = match runner.call(r, key, valid) {
         Returned(b) => b == {
             let mut e: Bytes = list.new()
-            result.unwrap(std.codec.put_u64(4096u64, mut e))
+            std.codec.put_u64(4096u64, mut e)
             e
         },
         _ => false,
@@ -383,7 +383,7 @@ pub fn law_l4_malformed_flood() -> bool {
     let gk = key_of(code.identity(code.describe(grow)), std.codec.of_u64(), std.codec.of_string())
     let over = match runner.call(g, gk, {
         let mut a: Bytes = list.new()
-        result.unwrap(std.codec.put_u64(3000u64, mut a))
+        std.codec.put_u64(3000u64, mut a)
         a
     }) {
         Failed(OutOfBytes(_)) => true,
@@ -391,7 +391,7 @@ pub fn law_l4_malformed_flood() -> bool {
     }
     let fits = match runner.call(g, gk, {
         let mut a: Bytes = list.new()
-        result.unwrap(std.codec.put_u64(100u64, mut a))
+        std.codec.put_u64(100u64, mut a)
         a
     }) {
         Returned(b) => list.len(b) == 104u64,
@@ -442,7 +442,7 @@ pub fn law_p02_start_finish(c: Clock, tasks: Tasks) -> bool waits {
     let ok = match runner.finish(take t) {
         Returned(b) => b == {
             let mut e: Bytes = list.new()
-            result.unwrap(std.codec.put_u64(42u64, mut e))
+            std.codec.put_u64(42u64, mut e)
             e
         },
         _ => false,
@@ -480,7 +480,7 @@ pub fn law_granted_tasks_copy_steps(tasks: Tasks) -> bool waits {
     let codec = std.codec.of_u64()
     let key = key_of(code.identity(code.describe(granted_spawn)), codec, codec)
     let mut arg: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(7u64, mut arg))
+    std.codec.put_u64(7u64, mut arg)
     let ran = bound steps 1000000u64 {
         match runner.start(r, tasks, tasks, store.Caller(issuer: 0u8, subject: list.new()), key, take arg) {
             Ok(take h) => match runner.finish(take h) {

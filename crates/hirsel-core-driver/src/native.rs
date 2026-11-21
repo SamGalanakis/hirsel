@@ -535,6 +535,7 @@ impl CheckProduct {
         closed_executable: bool,
     ) -> Result<Emitted, NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
+        self.preflight_foreign_link(reached, entry, options)?;
         let instances = reached.require_native(entry, options)?;
         // Only the executable is invoked by our launcher with an empty bound
         // stack. Objects returned to a caller must work in any task context.
@@ -840,6 +841,7 @@ impl CheckProduct {
         options: &NativeOptions,
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
+        self.preflight_foreign_link(reached, entry, options)?;
         let instances = reached.require_native(entry, options)?;
         let address = reached.address(entry)?;
         let inputs = reached

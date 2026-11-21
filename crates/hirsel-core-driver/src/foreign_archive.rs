@@ -42,54 +42,130 @@ struct Symbol {
     strong_function: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ArchiveOrigin<'a> {
+    pub object: ObjectRef,
+    pub module: &'a DefPath,
+    pub path: Option<&'a str>,
+}
+
+impl ArchiveOrigin<'_> {
+    fn label(self) -> String {
+        format!(
+            "archive {} of {}",
+            archive_name(self.object, self.path),
+            self.module.definition_identity()
+        )
+    }
+}
+
+pub(crate) struct ForeignDefinitions<'a>(BTreeMap<&'a [u8], ArchiveOrigin<'a>>);
+
 pub(crate) fn check_distinct_definitions<'a>(
-    archives: impl IntoIterator<Item = (&'a SealedArchive, ObjectRef, &'a DefPath)>,
+    archives: impl IntoIterator<Item = (&'a SealedArchive, ArchiveOrigin<'a>)>,
     budget: &mut DecodeBudget,
-) -> Result<(), AdmissionError> {
+) -> Result<ForeignDefinitions<'a>, AdmissionError> {
     let mut seen = BTreeSet::new();
-    let mut definitions = BTreeMap::<&[u8], (ContentHash, &DefPath)>::new();
-    for (archive, object, module) in archives {
+    let mut definitions = BTreeMap::<&[u8], ArchiveOrigin<'_>>::new();
+    for (archive, origin) in archives {
         budget.check()?;
-        if !seen.insert(object.hash) {
+        if !seen.insert(origin.object.hash) {
             continue;
         }
         for member in &archive.members {
             for symbol in member.symbols.iter().filter(|symbol| symbol.definition) {
                 budget.charge_slots(1)?;
-                match definitions.entry(&symbol.name) {
+                let name = symbol.name.split(|byte| *byte == b'@').next().unwrap();
+                match definitions.entry(name) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
-                        budget.charge_bytes(size_of::<(&[u8], ContentHash, &DefPath)>())?;
-                        entry.insert((object.hash, module));
+                        budget.charge_bytes(size_of::<(&[u8], ArchiveOrigin<'_>)>())?;
+                        entry.insert(origin);
                     }
                     std::collections::btree_map::Entry::Occupied(entry) => {
-                        let (previous, owner) = entry.get();
-                        if *previous != object.hash {
-                            return Err(AdmissionError::Refused(format!(
-                                "FFI-3: symbol {} is defined by archive object {} of {} and by archive object {} of {}",
-                                String::from_utf8_lossy(&symbol.name),
-                                crate::call::hex(&previous.0),
-                                owner.definition_identity(),
-                                crate::call::hex(&object.hash.0),
-                                module.definition_identity(),
-                            )));
+                        let previous = *entry.get();
+                        if previous.object.hash != origin.object.hash {
+                            return Err(collision(name, previous, &origin.label()));
                         }
                     }
                 }
             }
         }
     }
-    Ok(())
+    Ok(ForeignDefinitions(definitions))
+}
+
+fn collision(symbol: &[u8], archive: ArchiveOrigin<'_>, other: &str) -> AdmissionError {
+    AdmissionError::Refused(format!(
+        "FFI-3: symbol {} is defined by {} and by {other}",
+        String::from_utf8_lossy(symbol),
+        archive.label()
+    ))
+}
+
+impl ForeignDefinitions<'_> {
+    pub(crate) fn check_link_input(&self, bytes: &[u8], label: &str) -> Result<(), AdmissionError> {
+        let unsupported =
+            || AdmissionError::Refused(format!("FFI-3: cannot read symbol definitions of {label}"));
+        let check = |bytes: &[u8]| -> Result<(), AdmissionError> {
+            let file = ElfFile64::<LittleEndian>::parse(bytes).map_err(|_| unsupported())?;
+            let sections = file.elf_section_table();
+            let endian = LittleEndian;
+            for (index, section) in sections.enumerate() {
+                if !matches!(section.sh_type(endian), elf::SHT_SYMTAB | elf::SHT_DYNSYM) {
+                    continue;
+                }
+                let table = sections
+                    .symbol_table_by_index(endian, bytes, index)
+                    .map_err(|_| unsupported())?;
+                for symbol in table.iter() {
+                    if !matches!(
+                        symbol.st_bind(),
+                        elf::STB_GLOBAL | elf::STB_WEAK | elf::STB_GNU_UNIQUE
+                    ) || symbol.st_shndx(endian) == elf::SHN_UNDEF
+                    {
+                        continue;
+                    }
+                    let name = table
+                        .symbol_name(endian, symbol)
+                        .map_err(|_| unsupported())?;
+                    let base = name.split(|byte| *byte == b'@').next().unwrap();
+                    if let Some(&archive) = self.0.get(base) {
+                        return Err(collision(base, archive, label));
+                    }
+                }
+            }
+            Ok(())
+        };
+        if bytes.starts_with(AR) {
+            let archive = ArchiveFile::parse(bytes).map_err(|_| unsupported())?;
+            for member in archive.members() {
+                check(
+                    member
+                        .map_err(|_| unsupported())?
+                        .data(bytes)
+                        .map_err(|_| unsupported())?,
+                )?;
+            }
+            Ok(())
+        } else {
+            check(bytes)
+        }
+    }
 }
 
 fn refuse(context: &str, problem: impl std::fmt::Display) -> AdmissionError {
     AdmissionError::Refused(format!("FFI-3: {context}{problem}"))
 }
 
-fn context(archive: ObjectRef, module: &DefPath, target: &str, path: Option<&str>) -> String {
-    let file = path.map_or_else(
+fn archive_name(archive: ObjectRef, path: Option<&str>) -> String {
+    path.map_or_else(
         || format!("object {}", crate::call::hex(&archive.hash.0)),
         str::to_owned,
-    );
+    )
+}
+
+fn context(archive: ObjectRef, module: &DefPath, target: &str, path: Option<&str>) -> String {
+    let file = archive_name(archive, path);
     format!(
         "archive {file} of {} for {target}",
         module.definition_identity(),

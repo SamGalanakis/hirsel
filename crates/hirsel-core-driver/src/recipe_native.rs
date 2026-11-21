@@ -6,7 +6,7 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
 use crate::code_store::{CodeStore, ObjectKind};
-use crate::foreign_archive::SealedArchive;
+use crate::foreign_archive::{ArchiveOrigin, SealedArchive};
 use hirsel_core_ir::{
     FuncId, ItemId,
     address::{Binding, Group, builtin_semantics_number, foreign_address},
@@ -316,6 +316,63 @@ impl CheckProduct {
             Ok(object)
         })?;
 
+        let mut modules = self.reached_foreign_modules(reached)?;
+        let native_link = if modules.is_empty() || options.runtime.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::tool_inputs::toolchain(&options.link, target, &options.runtime)?.1)
+        };
+        selected.extend(
+            self.check_foreign_archives(
+                &modules,
+                entry,
+                target,
+                native_link
+                    .as_ref()
+                    .map(|link| (options.runtime.as_path(), link)),
+            )?,
+        );
+        let mut addresses = BTreeMap::new();
+        for leaf in modules.values_mut() {
+            let mut rows = Vec::new();
+            leaf.encode_archive_rows(&mut rows);
+            let archive_set = ObjectKind::ForeignArchive.hash(&rows);
+            leaf.functions
+                .sort_by_cached_key(|f| normal::encode_identity(&f.identity));
+            addresses.extend(leaf.functions.iter().map(|function| {
+                (
+                    function.identity.clone(),
+                    foreign_address(function, &leaf.symbols, archive_set),
+                )
+            }));
+        }
+
+        let archives = selected
+            .into_values()
+            .map(|row| {
+                let object = store.put(ObjectKind::ForeignArchive, &row.bytes)?;
+                if object.hash.0 != row.pin {
+                    return Err(AdmissionError::Hash(ContentHash(row.pin)).into());
+                }
+                Ok(object)
+            })
+            .collect::<Result<_, NativeStop>>()?;
+        let mut modules = modules.into_values().collect::<Vec<_>>();
+        modules.sort_by_cached_key(|leaf| {
+            normal::encode_identity(&Identity::plain(leaf.module.clone()))
+        });
+        Ok(ForeignRelease {
+            modules,
+            archives,
+            addresses,
+            grants,
+        })
+    }
+
+    fn reached_foreign_modules(
+        &self,
+        reached: &Reachable<'_>,
+    ) -> Result<BTreeMap<String, ForeignLeaf>, NativeStop> {
         let mut modules = BTreeMap::new();
         for identity in &reached.materialized.foreign {
             let function = &identity.definition;
@@ -343,11 +400,20 @@ impl CheckProduct {
                 header: header.clone(),
             });
         }
+        Ok(modules)
+    }
 
+    fn check_foreign_archives<'a>(
+        &'a self,
+        modules: &BTreeMap<String, ForeignLeaf>,
+        entry: &DefPath,
+        target: &str,
+        link: Option<(&Path, &crate::tool_inputs::LinkRecipe)>,
+    ) -> Result<BTreeMap<ContentHash, &'a ForeignArchiveCapture>, NativeStop> {
+        let mut selected = BTreeMap::new();
         let mut sealed = BTreeMap::new();
         let mut checked = Vec::new();
-        let mut addresses = BTreeMap::new();
-        for leaf in modules.values_mut() {
+        for leaf in modules.values() {
             let function = &leaf.functions[0].identity.definition;
             let (_, capture) = self.foreign_capture(function)?;
             let row = select_archive(&leaf.module, capture, target)?;
@@ -362,47 +428,58 @@ impl CheckProduct {
                 )?);
             }
             sealed[&object.hash].check_headers(object, leaf, target, entry, Some(&row.path))?;
-            checked.push((object, &leaf.module));
+            checked.push(ArchiveOrigin {
+                object,
+                module: &leaf.module,
+                path: Some(&row.path),
+            });
             selected.insert(object.hash, row);
-            let mut rows = Vec::new();
-            leaf.encode_archive_rows(&mut rows);
-            let archive_set = ObjectKind::ForeignArchive.hash(&rows);
-            leaf.functions
-                .sort_by_cached_key(|f| normal::encode_identity(&f.identity));
-            addresses.extend(leaf.functions.iter().map(|function| {
-                (
-                    function.identity.clone(),
-                    foreign_address(function, &leaf.symbols, archive_set),
-                )
-            }));
         }
-        crate::foreign_archive::check_distinct_definitions(
+        let symbols = crate::foreign_archive::check_distinct_definitions(
             checked
                 .into_iter()
-                .map(|(object, module)| (&sealed[&object.hash], object, module)),
+                .map(|origin| (&sealed[&origin.object.hash], origin)),
             &mut DecodeBudget::unlimited(),
         )?;
+        if let Some((runtime, link)) = link {
+            symbols.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
+            let closure = crate::link_closure::closure(
+                &link.args,
+                crate::tool_inputs::INPUT_MARKER,
+                crate::tool_inputs::SUPPORT_LIBS,
+                true,
+            )?;
+            for input in closure.binaries {
+                symbols.check_link_input(
+                    &std::fs::read(&input)?,
+                    &format!("link input {}", input.display()),
+                )?;
+            }
+        }
+        Ok(selected)
+    }
 
-        let archives = selected
-            .into_values()
-            .map(|row| {
-                let object = store.put(ObjectKind::ForeignArchive, &row.bytes)?;
-                if object.hash.0 != row.pin {
-                    return Err(AdmissionError::Hash(ContentHash(row.pin)).into());
-                }
-                Ok(object)
-            })
-            .collect::<Result<_, NativeStop>>()?;
-        let mut modules = modules.into_values().collect::<Vec<_>>();
-        modules.sort_by_cached_key(|leaf| {
-            normal::encode_identity(&Identity::plain(leaf.module.clone()))
-        });
-        Ok(ForeignRelease {
-            modules,
-            archives,
-            addresses,
-            grants,
-        })
+    pub(super) fn preflight_foreign_link(
+        &self,
+        reached: &Reachable<'_>,
+        entry: &DefPath,
+        options: &NativeOptions,
+    ) -> Result<(), NativeStop> {
+        if options.recording || reached.materialized.foreign.is_empty() {
+            return Ok(());
+        }
+        let inputs = reached
+            .native
+            .as_ref()
+            .ok_or_else(|| NativeStop::Entry("a foreign build needs a link recipe".into()))?;
+        reached.require()?;
+        self.check_foreign_archives(
+            &self.reached_foreign_modules(reached)?,
+            entry,
+            &options.target,
+            Some((&options.runtime, &inputs.recipe)),
+        )?;
+        Ok(())
     }
 
     fn foreign_capture(

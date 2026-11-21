@@ -1453,7 +1453,7 @@ mod tests {
     #[test]
     fn sealed_foreign_archives_check_pin_object_features_and_abi() {
         use crate::code_store::ObjectKind;
-        use crate::foreign_archive::{SealedArchive, check_distinct_definitions};
+        use crate::foreign_archive::{ArchiveOrigin, SealedArchive, check_distinct_definitions};
         use hirsel_core_ids::DefPath;
         use hirsel_core_ir::Identity;
         use hirsel_core_ir::decode::DecodeBudget;
@@ -1554,9 +1554,23 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
             .check_headers(valid_object, &leaf, target, &entry, None)
             .unwrap();
         let second_module = DefPath::from_full("other@1/native").unwrap();
-        let first_row = (&valid, valid_object, &module);
-        check_distinct_definitions(
-            [first_row, (&valid, valid_object, &second_module)],
+        let origin = ArchiveOrigin {
+            object: valid_object,
+            module: &module,
+            path: None,
+        };
+        let first_row = (&valid, origin);
+        let definitions = check_distinct_definitions(
+            [
+                first_row,
+                (
+                    &valid,
+                    ArchiveOrigin {
+                        module: &second_module,
+                        ..origin
+                    },
+                ),
+            ],
             &mut DecodeBudget::unlimited(),
         )
         .unwrap();
@@ -1581,16 +1595,59 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
             .check_headers(second_object, &other_leaf, target, &entry, None)
             .unwrap();
         let collision = check_distinct_definitions(
-            [first_row, (&second, second_object, &second_module)],
+            [
+                first_row,
+                (
+                    &second,
+                    ArchiveOrigin {
+                        object: second_object,
+                        module: &second_module,
+                        path: None,
+                    },
+                ),
+            ],
             &mut DecodeBudget::unlimited(),
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(
             collision.to_string(),
             format!(
                 "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by archive object {} of other@1/native",
                 crate::call::hex(&valid_object.hash.0),
                 crate::call::hex(&second_object.hash.0),
+            )
+        );
+        let runtime = std::fs::read(fixture.path().join("laws.a")).unwrap();
+        let collision = definitions
+            .check_link_input(&runtime, "the runtime")
+            .unwrap_err();
+        assert_eq!(
+            collision.to_string(),
+            format!(
+                "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by the runtime",
+                crate::call::hex(&valid_object.hash.0),
+            )
+        );
+        let linked = Command::new(llvm.join("ld.lld"))
+            .current_dir(fixture.path())
+            .args(["-shared", "--strip-all", "laws.o", "-o", "libsystem.so"])
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        let library = std::fs::read(fixture.path().join("libsystem.so")).unwrap();
+        let collision = definitions
+            .check_link_input(&library, "link input libsystem.so")
+            .unwrap_err();
+        assert_eq!(
+            collision.to_string(),
+            format!(
+                "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by link input libsystem.so",
+                crate::call::hex(&valid_object.hash.0),
             )
         );
         let (invalid, object) =

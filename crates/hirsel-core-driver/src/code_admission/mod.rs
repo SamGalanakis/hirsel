@@ -438,7 +438,7 @@ fn verify_release(
     closure::check(&recipe, &groups, &bodies, semantics, budget)?;
     if recipe.has_foreign() {
         let mut sealed = std::collections::BTreeMap::new();
-        charge_rows::<(ObjectRef, &hirsel_core_ids::DefPath)>(
+        charge_rows::<crate::foreign_archive::ArchiveOrigin<'_>>(
             budget,
             recipe.foreign_modules.len(),
         )?;
@@ -465,12 +465,16 @@ fn verify_release(
                 Entry::Vacant(entry) => entry.insert(check()?),
             };
             sealed.check_headers(archive, leaf, target, &recipe.entry.definition, None)?;
-            selected.push((archive, &leaf.module));
+            selected.push(crate::foreign_archive::ArchiveOrigin {
+                object: archive,
+                module: &leaf.module,
+                path: None,
+            });
         }
         crate::foreign_archive::check_distinct_definitions(
             selected
                 .into_iter()
-                .map(|(archive, module)| (&sealed[&archive.hash], archive, module)),
+                .map(|origin| (&sealed[&origin.object.hash], origin)),
             budget,
         )?;
         for archive in &recipe.foreign_archives {

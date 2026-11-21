@@ -138,6 +138,8 @@ fn joined_only(name: &str) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Closure {
     pub files: Vec<PathBuf>,
+    /// The binary inputs, including those named by a linker script.
+    pub binaries: Vec<PathBuf>,
     pub absent: Vec<PathBuf>,
 }
 
@@ -242,6 +244,7 @@ pub(crate) fn closure(
         search,
         sysroot,
         files: Vec::new(),
+        binaries: Vec::new(),
         absent: Vec::new(),
         stack: Vec::new(),
         require_libraries,
@@ -283,10 +286,13 @@ pub(crate) fn closure(
     }
     walk.files.sort();
     walk.files.dedup();
+    walk.binaries.sort();
+    walk.binaries.dedup();
     walk.absent.sort();
     walk.absent.dedup();
     Ok(Closure {
         files: walk.files,
+        binaries: walk.binaries,
         absent: walk.absent,
     })
 }
@@ -302,6 +308,7 @@ struct Walk {
     search: Vec<PathBuf>,
     sysroot: Option<PathBuf>,
     files: Vec<PathBuf>,
+    binaries: Vec<PathBuf>,
     absent: Vec<PathBuf>,
     /// The scripts being read, so an `INCLUDE` cycle ends.
     stack: Vec<PathBuf>,
@@ -395,6 +402,7 @@ impl Walk {
             || head.starts_with(b"BC\xc0\xde")
             || head.starts_with(b"\xde\xc0\x17\x0b");
         if binary && !script {
+            self.binaries.push(path.to_owned());
             return Ok(());
         }
         if self.stack.iter().any(|p| p == path) {

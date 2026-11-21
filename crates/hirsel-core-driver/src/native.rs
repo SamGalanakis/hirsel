@@ -152,6 +152,7 @@ pub enum NativeStop {
     Check(String),
     Instances(InstanceStop),
     Entry(String),
+    ForeignRecording(String),
     Emit {
         definition: DefPath,
         message: String,
@@ -171,6 +172,7 @@ impl fmt::Display for NativeStop {
             Self::Check(s) => write!(f, "check: {s}"),
             Self::Instances(s) => write!(f, "instances: {s:?}"),
             Self::Entry(s) => write!(f, "entry: {s}"),
+            Self::ForeignRecording(s) => write!(f, "refused: {s}"),
             Self::Emit {
                 definition,
                 message,
@@ -524,7 +526,7 @@ impl CheckProduct {
         closed_executable: bool,
     ) -> Result<Emitted, NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
-        let instances = reached.require()?;
+        let instances = reached.require_native(entry, options)?;
         // Only the executable is invoked by our launcher with an empty bound
         // stack. Objects returned to a caller must work in any task context.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
@@ -829,7 +831,7 @@ impl CheckProduct {
         options: &NativeOptions,
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
-        let instances = reached.require()?;
+        let instances = reached.require_native(entry, options)?;
         let address = reached.address(entry)?;
         let inputs = reached
             .native

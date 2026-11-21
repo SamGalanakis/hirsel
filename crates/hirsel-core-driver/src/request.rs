@@ -477,10 +477,6 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .ok_or("tape path is not UTF-8")?
                 .to_owned();
         }
-        let header = crate::tape_cli::header(Path::new(&path))?;
-        if !explicit_limit {
-            root_limit = header.limit;
-        }
         if !run_args.is_empty() {
             return Err("replay takes its arguments from the tape".into());
         }
@@ -915,6 +911,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
 
     let native_store = request.store.join("native");
     let store_root = request.store.clone();
+    let foreign_replay = replay_command
+        && request
+            .inputs
+            .packages
+            .iter()
+            .any(|package| package.sources.iter().any(|source| source.foreign));
+    if let Some(replay) = &replay_plan
+        && !foreign_replay
+    {
+        let header = crate::tape_cli::header(Path::new(&replay.path))?;
+        if !explicit_limit {
+            root_limit = header.limit;
+        }
+    }
     meter.finish("startup/discovery");
     // Native options come before the reach: a Cranelift development build
     // walks its instance records, which its options address. An options
@@ -966,7 +976,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // options or toolchain cannot be read goes on without one and meets
     // that error where it always has.
     let record = match &mut prepared {
-        _ if command == "image" || test_command || recipe_command || inspection.is_some() => None,
+        _ if command == "image"
+            || test_command
+            || recipe_command
+            || inspection.is_some()
+            || foreign_replay =>
+        {
+            None
+        }
         Some(Ok(options)) if options.logical_charge_report.is_none() => {
             crate::request_record::Request::new(
                 command,
@@ -1021,6 +1038,26 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             );
         }
     };
+    if foreign_replay {
+        let entry = selected_entry.as_ref().ok_or("replay requires an entry")?;
+        let limit = prepared
+            .as_ref()
+            .and_then(|options| options.as_ref().ok())
+            .map_or(crate::native::DEFAULT_INSTANCE_LIMIT, |options| {
+                options.instance_limit
+            });
+        if let Some(reason) = product.reachable(entry, limit)?.recording_refusal(entry) {
+            eprintln!("replay: refused: {reason}");
+            std::process::exit(2);
+        }
+        if let Some(Ok(options)) = &mut prepared {
+            let header =
+                crate::tape_cli::header(Path::new(&options.replay.as_ref().unwrap().path))?;
+            if !explicit_limit {
+                options.root_limit = header.limit;
+            }
+        }
+    }
     let reach = if native_command && !test_command {
         Some({
             let entry = selected_entry
@@ -1127,7 +1164,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 Err(error) => {
                     failed = true;
                     if !json {
-                        println!("fail executed {test}: {error} (time unavailable)");
+                        if matches!(error, crate::NativeStop::ForeignRecording(_)) {
+                            println!("fail executed {test}: {error}");
+                        } else {
+                            println!("fail executed {test}: {error} (time unavailable)");
+                        }
                     }
                     serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null})
                 }

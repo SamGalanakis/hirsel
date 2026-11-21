@@ -155,7 +155,7 @@ impl CheckProduct {
         store: &CodeStore,
         n_place: u64,
     ) -> Result<Publication, NativeStop> {
-        let instances = reached.require()?;
+        let instances = reached.require_native(entry, options)?;
         let decl = self.entry_decl(entry)?;
         let entry = Identity::plain(entry.clone());
         let items = instances
@@ -366,15 +366,22 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
 }
 
 pub(crate) fn foreign_recording_refusal(recipe: &Recipe) -> Option<String> {
-    let function = recipe
+    let functions = recipe
         .foreign_modules
         .iter()
         .flat_map(|leaf| &leaf.functions)
-        .map(|function| function.identity.definition.definition_identity())
-        .min()?;
+        .map(|function| &function.identity.definition);
+    recording_refusal(&recipe.entry.definition, functions)
+}
+
+pub(crate) fn recording_refusal<'a>(
+    entry: &DefPath,
+    functions: impl Iterator<Item = &'a DefPath>,
+) -> Option<String> {
+    let function = functions.map(DefPath::definition_identity).min()?;
     Some(format!(
         "FFI-8: a recording build cannot reach foreign code: {} reaches {}",
-        recipe.entry.definition.definition_identity(),
+        entry.definition_identity(),
         function,
     ))
 }
@@ -387,7 +394,7 @@ fn launch_options(
     if options.recording
         && let Some(reason) = foreign_recording_refusal(recipe)
     {
-        return Err(NativeStop::Entry(reason));
+        return Err(NativeStop::ForeignRecording(reason));
     }
     if recipe.has_foreign() {
         return Err(NativeStop::Entry(

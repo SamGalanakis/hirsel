@@ -105,6 +105,8 @@ pub(crate) struct InstanceSet {
     pub table: std::collections::BTreeMap<Identity, u32>,
     /// The record fields of each materialised instance, for its record.
     pub fields: std::collections::BTreeMap<Identity, Fields>,
+    summarize_foreign: bool,
+    pub(crate) foreign: BTreeSet<Identity>,
 }
 /// Which store an instance's object and record live in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -230,6 +232,13 @@ impl InstanceBody {
     }
 }
 impl InstanceSet {
+    pub(crate) fn for_reach() -> Self {
+        Self {
+            summarize_foreign: true,
+            ..Self::default()
+        }
+    }
+
     /// Each of `instances`' index in the reach record's table, if expanded,
     /// by one walk of both: `instances` is in identity order, as the table is.
     pub(crate) fn expansions<'a>(
@@ -464,9 +473,13 @@ impl CheckProduct {
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
         let mut resolver = Resolver::default();
-        collect_instances(roots, limit, |key| {
+        let mut reached = collect_instances(roots, limit, |key| {
             self.instance_step(key, instances, records, &mut resolver, &mut observe)
-        })
+        })?;
+        if !instances.foreign.is_empty() {
+            reached.retain(|identity| !instances.foreign.contains(identity));
+        }
+        Ok(reached)
     }
     /// Walk one instance: its record on a hit, else its materialised body,
     /// into `instances`; the instances it reaches.
@@ -485,6 +498,10 @@ impl CheckProduct {
                 .get(&key.definition.0.package)
                 .is_some_and(|modules| modules.contains_key(&key.definition.0.modules))
             {
+                if instances.summarize_foreign {
+                    instances.foreign.insert(key.clone());
+                    return Ok(Vec::new());
+                }
                 return Err(InstanceStop::Incomplete {
                     definition: key.definition.clone(),
                     message: "foreign modules are not enabled yet".into(),

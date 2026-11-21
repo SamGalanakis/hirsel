@@ -34,6 +34,40 @@ pub struct Reachable<'a> {
     pub(crate) reach: Option<crate::reach::Use>,
 }
 impl Reachable<'_> {
+    /// The bodyless foreign definitions selected by this entry's checked slot closure.
+    pub fn foreign_functions(&self) -> impl Iterator<Item = &DefPath> {
+        self.materialized
+            .foreign
+            .iter()
+            .map(|identity| &identity.definition)
+    }
+
+    pub(crate) fn recording_refusal(&self, entry: &DefPath) -> Option<String> {
+        if !self.accepted() {
+            return None;
+        }
+        crate::native::recipe_build::recording_refusal(entry, self.foreign_functions())
+    }
+
+    pub(crate) fn require_native(
+        &self,
+        entry: &DefPath,
+        options: &NativeOptions,
+    ) -> Result<&[Identity], NativeStop> {
+        let instances = self.require()?;
+        if !self.materialized.foreign.is_empty() {
+            if options.recording
+                && let Some(reason) = self.recording_refusal(entry)
+            {
+                return Err(NativeStop::ForeignRecording(reason));
+            }
+            return Err(NativeStop::Entry(
+                "foreign modules are not enabled yet".into(),
+            ));
+        }
+        Ok(instances)
+    }
+
     /// The entry's code address. A complete reach hit holds it in the record head.
     pub(crate) fn address(&self, entry: &DefPath) -> Result<ContentHash, NativeStop> {
         if let Some(crate::reach::Use {
@@ -379,7 +413,7 @@ impl CheckProduct {
             &BTreeSet<Identity>,
         )>,
     ) -> io::Result<Reachable<'_>> {
-        let mut materialized = crate::instances::InstanceSet::default();
+        let mut materialized = crate::instances::InstanceSet::for_reach();
         let roots = [Identity::plain(entry.clone())];
         let prior = records.and_then(|(_, p, _)| p);
         let instances = match records {

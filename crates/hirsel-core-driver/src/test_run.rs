@@ -525,6 +525,7 @@ impl CheckProduct {
         let pass = cache
             .filter(|_| {
                 matches!(runner, Runner::Native)
+                    && reached.foreign_functions().next().is_none()
                     && !options.recording
                     && options.replay.is_none()
                     && options.logical_charge_report.is_none()

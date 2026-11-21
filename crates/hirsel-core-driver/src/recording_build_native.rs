@@ -12,6 +12,70 @@ fn env_record_runtime() -> PathBuf {
         .expect("recording runtime archive")
 }
 
+#[test]
+fn foreign_source_replay_refuses_before_reading_tape() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name, text| std::fs::write(dir.path().join(name), text).unwrap();
+    write("hirsel.toml", r#"
+[package]
+name = "app"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"main.hirsel" = "main"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hfl_"
+archives = []
+"#);
+    write("main.hirsel", r#"
+pub opaque type Law {}
+fn enter(f: Foreign[Law]) {
+    native.zed(f)
+    native.alpha(f)
+}
+pub fn main(f: Foreign[Law]) -> Result[(), Exit] {
+    enter(f)
+    Ok(())
+}
+@test
+fn touches(f: Foreign[Law]) -> Result[(), ()] {
+    enter(f)
+    Ok(())
+}
+"#);
+    write("native.hirsel", "pub fn zed(f: Foreign[main.Law])\npub fn alpha(f: Foreign[main.Law])\n");
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let runtime = env_record_runtime();
+    let run = |command: &str, args: &[&str]| {
+        let mut argv = vec![command.to_owned(), dir.path().display().to_string()];
+        argv.extend([
+            "--runtime".into(), runtime.display().to_string(),
+            "--cc".into(), llvm.join("bin/clang").display().to_string(),
+            "--libraries".into(), root.join("core").display().to_string(),
+            "--source-core".into(), "--source-std".into(),
+            "--store".into(), dir.path().join("cache").display().to_string(),
+        ]);
+        argv.extend(args.iter().map(|s| (*s).to_owned()));
+        process::tape_request(&argv, dir.path())
+    };
+    let expected_main = "FFI-8: a recording build cannot reach foreign code: app@1/main/main reaches app@1/native/alpha";
+    let (code, _, error) = run("replay", &["--tape", "missing.tape"]);
+    assert_eq!(code, Some(2), "{error}");
+    let expected_replay = format!("replay: refused: {expected_main}");
+    assert_eq!(error.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock")).collect::<Vec<_>>(), [expected_replay], "{error}");
+    let (code, _, error) = run("build", &["--recording"]);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(error.lines().any(|line| line == format!("refused: {expected_main}")), "{error}");
+    let (code, output, error) = run("test", &["--replay", "--limit", "67108864"]);
+    assert_eq!(code, Some(1), "{output}\n{error}");
+    assert!(output.lines().any(|line| line.ends_with("refused: FFI-8: a recording build cannot reach foreign code: app@1/main/touches reaches app@1/native/alpha")), "{output}\n{error}");
+    assert!(!dir.path().join("program").exists());
+}
+
 /// The symbol's bytes, read from the executable's own symbol table.
 fn code_revision_of(executable: &Path) -> [u8; 32] {
     use object::{Object, ObjectSection, ObjectSymbol};

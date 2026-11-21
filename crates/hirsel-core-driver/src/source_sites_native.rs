@@ -147,6 +147,18 @@ fn failure_sites_dynamic_relocation_is_refused() {
 fn failure_sites_relocated(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let list = std::fs::read_to_string(libraries.join("std/list.hirsel")).unwrap();
+    let mut lines = list.lines().enumerate();
+    lines
+        .find(|(_, line)| line.starts_with("fn check_index["))
+        .expect("std/list.hirsel must define check_index");
+    let (line, column) = lines
+        .take_while(|(_, line)| *line != "}")
+        .find_map(|(line_number, line)| {
+            line.split_once("view xs[i]")
+                .map(|(prefix, _)| (line_number + 1, prefix.chars().count() + 1))
+        })
+        .expect("check_index must contain view xs[i]");
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let source = "pub fn main() -> Result[(), Exit] {\n    let mut xs: List[u64] = list.new()\n    let _ = list.remove(mut xs, 3)\n    Ok(())\n}\n";
     let build = |project: &str, cache: &str| {
@@ -170,7 +182,7 @@ fn failure_sites_relocated(backend: Backend) {
         assert!(other == first, "{project} under {cache} is another executable; its report: {report}");
     }
     assert_eq!(output.status.code(), Some(101), "{output:?}");
-    assert_eq!(report, "Bounds at std@1/list.hirsel:290:13\n");
+    assert_eq!(report, format!("Bounds at std@1/list.hirsel:{line}:{column}\n"));
 }
 
 #[test]

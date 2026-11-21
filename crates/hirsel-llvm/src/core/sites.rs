@@ -84,10 +84,11 @@ impl FunctionEmitter<'_> {
                 .names
                 .entry((anchor.item, anchor.start))
                 .or_insert_with(|| {
-                    let next = sites.next.entry(anchor.item).or_default();
+                    let item = self.module.items[anchor.item.index()].clone();
+                    let owner = hirsel_core_ir::source::release_site_owner(&item);
+                    let next = sites.next.entry(owner).or_default();
                     let ordinal = *next;
                     *next += 1;
-                    let item = self.module.items[anchor.item.index()].clone();
                     let name = hirsel_core_ir::source::release_site_symbol(&item, ordinal);
                     sites.bindings.push(hirsel_core_ir::source::ReleaseSite {
                         item,

@@ -1194,7 +1194,7 @@ impl Publication {
         let sources = bind_annexes(
             &mut self.units,
             std.as_ref().map_or(&no_points, |std| &std.points),
-            !matches!(options.backend, Backend::Llvm) || !options.optimize,
+            true,
         )?;
         let root = &self.units[entry];
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))

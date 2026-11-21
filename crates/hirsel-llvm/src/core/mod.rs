@@ -287,7 +287,8 @@ struct Items {
 #[derive(Default)]
 struct ReleaseSites {
     names: std::collections::HashMap<(ItemId, u32), String>,
-    next: std::collections::HashMap<ItemId, u32>,
+    /// The next ordinal of each owner's release sites.
+    next: std::collections::HashMap<hirsel_core_ids::DefPath, u32>,
     bindings: Vec<source::ReleaseSite>,
 }
 enum Item {

@@ -156,8 +156,8 @@ impl CheckProduct {
 
     /// The units of the release std of this product's library image: every
     /// plain root the image checked whole and what it reaches, prepared as a
-    /// recipe names them. Reads the library image and `instance_limit` only.
-    fn image_side(&self, instance_limit: usize) -> Result<SideUnits, NativeStop> {
+    /// recipe names them. Reads the library image only.
+    fn image_side(&self) -> Result<SideUnits, NativeStop> {
         let plain = self.std_plain_roots()?;
         let mut materialized = crate::instances::InstanceSet::default();
         let mut reached = BTreeSet::new();
@@ -166,7 +166,7 @@ impl CheckProduct {
         // lowers it itself and stops there as it does today.
         for root in plain {
             if let Ok(walked) =
-                self.instances_into([root.clone()], instance_limit, &mut materialized)
+                self.instances_into([root.clone()], SIDE_INSTANCE_LIMIT, &mut materialized)
             {
                 reached.extend(walked);
                 roots.push(root);
@@ -215,14 +215,12 @@ impl CheckProduct {
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
         let store = Store::new(&image.store_root().join(PREBUILT))?;
-        let instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
-        let side = self.image_side(instance_limit)?;
+        let side = self.image_side()?;
         for &(runtime, debug_lines) in variants {
             let generator = Generator {
                 target,
                 debug_lines,
                 observe_charge: false,
-                instance_limit,
                 runtime,
             };
             lower(&generator, generator.kin()?, side.clone_units(), &store)?;
@@ -309,7 +307,7 @@ pub(crate) fn std_side(
         return side(store, key, record);
     }
     let lowered = match image {
-        Some(product) => product.image_side(options.instance_limit)?,
+        Some(product) => product.image_side()?,
         None => SideUnits {
             whole: false,
             roots,
@@ -377,7 +375,7 @@ fn lower(
         &mut modules,
         &reached,
         crate::callable_variants::Roots::All(&reached),
-        options.instance_limit,
+        SIDE_INSTANCE_LIMIT,
         |identity| {
             let owner = units[identity].owner()?;
             Ok((
@@ -521,14 +519,18 @@ fn lower(
 }
 
 /// What a release std's lowering reads besides its units: the toolchain and
-/// variant its key names, and the instance limit an image's walk stops at.
+/// variant its key names. A side is lowered under `SIDE_INSTANCE_LIMIT`,
+/// whatever a program's own limit.
 struct Generator<'a> {
     target: &'a str,
     debug_lines: bool,
     observe_charge: bool,
-    instance_limit: usize,
     runtime: ContentHash,
 }
+
+/// The instance limit every release std is walked and lowered under: the
+/// side is a function of the std's content, never of the program it serves.
+const SIDE_INSTANCE_LIMIT: usize = crate::native::DEFAULT_INSTANCE_LIMIT;
 
 impl<'a> Generator<'a> {
     fn of(options: &'a NativeOptions, runtime: ContentHash) -> Self {
@@ -536,7 +538,6 @@ impl<'a> Generator<'a> {
             target: &options.target,
             debug_lines: options.debug_lines,
             observe_charge: options.logical_charge_report.is_some(),
-            instance_limit: options.instance_limit,
             runtime,
         }
     }

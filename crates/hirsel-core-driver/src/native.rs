@@ -538,7 +538,7 @@ impl CheckProduct {
         let runtime = inputs.toolchain.runtime;
         let std = std_release::std_side(&units, &root, Some(self), None, options, runtime)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
-        recipe_build::bind_annexes(&mut units, &std.points, false)?;
+        recipe_build::bind_annexes(&mut units, &std.points, true)?;
         let store = Store::new(&options.store)?;
         Ok(
             recipe_build::release_objects(&units, &root, std, options, runtime, &store, false)?
@@ -2360,7 +2360,16 @@ pub(crate) mod tests {
         let native = installed.build(&entry, &options).unwrap();
         run_clean(&native.executable, 7);
         assert_eq!(installed.rechecked.len(), 1);
-        assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), 2);
+        // A build reads the bodies its program reaches: `answer` and
+        // `identity`. An optimised LLVM build also lowers the release std of
+        // an image that holds none prebuilt, which reads every definition the
+        // image holds to find its plain roots, so `unused_bad` too.
+        let decoded = if backend == Backend::Llvm && optimize {
+            3
+        } else {
+            2
+        };
+        assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), decoded);
         // A second application's private native store: development reuses
         // core's objects and compiles its own entry; a release build links no
         // library object, and every part of the same program is already in

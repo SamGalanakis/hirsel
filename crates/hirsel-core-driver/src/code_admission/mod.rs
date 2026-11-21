@@ -419,9 +419,16 @@ fn verify_release(
     if recipe.has_foreign() {
         check_foreign_archive_inventory(&recipe, budget)?;
         let mut sealed = std::collections::BTreeMap::new();
+        charge_rows::<(ObjectRef, &hirsel_core_ids::DefPath)>(
+            budget,
+            recipe.foreign_modules.len(),
+        )?;
+        let mut selected = Vec::with_capacity(recipe.foreign_modules.len());
         for leaf in &recipe.foreign_modules {
             let target = &recipe.launch.target;
-            let row = leaf.targets.binary_search_by(|row| row.target.cmp(target))
+            let row = leaf
+                .targets
+                .binary_search_by(|row| row.target.cmp(target))
                 .expect("the checked archive inventory selects a row for each leaf");
             let archive = leaf.targets[row].archive;
             let mut check = || {
@@ -433,7 +440,14 @@ fn verify_release(
                 Entry::Vacant(entry) => entry.insert(check()?),
             };
             sealed.check_headers(archive, leaf, target, &recipe.entry.definition)?;
+            selected.push((archive, &leaf.module));
         }
+        crate::foreign_archive::check_distinct_definitions(
+            selected
+                .into_iter()
+                .map(|(archive, module)| (&sealed[&archive.hash], archive, module)),
+            budget,
+        )?;
         for archive in &recipe.foreign_archives {
             if !sealed.contains_key(&archive.hash) {
                 load(ObjectKind::ForeignArchive, archive, budget)?;

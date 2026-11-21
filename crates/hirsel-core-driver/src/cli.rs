@@ -158,7 +158,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--recording"],
         None,
         ["build"],
-        "Build a recording executable that records when started with HIRSEL_RECORD."
+        "Include recording support. Set HIRSEL_RECORD when running the executable to record."
     ),
     option!(
         RecordingRuntime,
@@ -348,7 +348,7 @@ static OPTIONS: &[OptionSpec] = &[
             "sdk",
             "call"
         ],
-        "Select the core runtime archive."
+        "Select the core runtime archive for the requested recording mode."
     ),
     option!(
         LogicalChargeReport,

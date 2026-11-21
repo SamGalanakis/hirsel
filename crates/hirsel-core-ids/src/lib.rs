@@ -3,6 +3,7 @@
 //! types or lowered code, so old and new front ends, storage and native code can
 //! name the same definition without depending on each other.
 
+pub mod host_op;
 pub mod launch;
 pub mod published;
 

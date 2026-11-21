@@ -541,7 +541,10 @@ def first_party(meta: dict) -> str:
                           "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                           "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if arm else
                          {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
-                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"} if binary == "hirsel-core-driver-unittest"
+                          else {
+                              "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                              "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+                          } if binary == "hirsel-core-driver-unittest"
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" or program_llvm else None)
             return dict(data=test_data(binary, name, package_dir, src),
                         files_env=files_env,

@@ -510,13 +510,27 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             )?)?)),
         }
     };
+    let select_runtime = || -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let archive = runtime.as_deref().ok_or_else(|| {
+            if needs_recording {
+                format!("no recording runtime archive for {target}; pass --runtime with a recording archive")
+            } else {
+                "build/run/test requires --runtime <core runtime archive>".into()
+            }
+        })?;
+        if explicit_runtime {
+            let bytes = std::fs::read(archive)?;
+            crate::installation::check_runtime(archive, &bytes, needs_recording)?;
+        }
+        Ok(archive.to_owned())
+    };
     if let Some(publication) = stored_recipe {
         use hirsel_core_ir::release_recipe::Backend as RecipeBackend;
         let root = publication.root();
         let recipe = publication.recipe();
         let mut options = NativeOptions::development(
             target.clone(),
-            runtime.ok_or("build requires --runtime <core runtime archive>")?,
+            select_runtime()?,
             select_link(cc)?,
             store.join("native"),
             output_path.unwrap_or_else(|| PathBuf::from("program")),
@@ -532,6 +546,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             release || (matches!(options.backend, Backend::Llvm) && backend.is_none());
         options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
         options.logical_charge_report = logical_charge_report;
+        options.recording = needs_recording;
         let recipe = release_manifest.as_ref().map(|_| recipe.clone());
         let product = publication.assemble(&options, Default::default())?;
         if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
@@ -671,18 +686,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             let archive = if publishing {
                 PathBuf::new()
             } else {
-                let archive =
-                    runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?;
-                if needs_recording
-                    && !archive_defines_symbol(&archive, b"hirsel_core_os_run_recording")?
-                {
-                    return Err(format!(
-                        "recording build requires a recording runtime archive (missing hirsel_core_os_run_recording in {})",
-                        archive.display()
-                    )
-                    .into());
-                }
-                archive
+                select_runtime()?
             };
             let mut options = NativeOptions::development(
                 target.clone(),
@@ -1186,47 +1190,6 @@ fn finish(
     // Publication and output are complete. The OS reclaims these in-memory
     // graphs at exit; the reusable library Driver retains ordinary destruction.
     std::process::exit(exit)
-}
-/// Check whether a Unix static archive (`.a`) defines `symbol` in its symbol table.
-fn archive_defines_symbol(path: &Path, symbol: &[u8]) -> std::io::Result<bool> {
-    let bytes = std::fs::read(path)?;
-    if !bytes.starts_with(b"!<arch>\n") {
-        return Ok(false);
-    }
-    let mut at = 8usize;
-    while at + 60 <= bytes.len() {
-        let header = &bytes[at..at + 60];
-        if &header[58..60] != b"`\n" {
-            break;
-        }
-        let name = &header[0..16];
-        let size = std::str::from_utf8(&header[48..58])
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        let data_start = at + 60;
-        let data_end = data_start.saturating_add(size).min(bytes.len());
-        let data = &bytes[data_start..data_end];
-        if name.starts_with(b"/ ") && data.len() >= 4 {
-            let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-            let strings_start = 4 + count * 4;
-            if strings_start <= data.len() {
-                return Ok(data[strings_start..]
-                    .split(|&b| b == 0)
-                    .any(|s| s == symbol));
-            }
-        } else if name.starts_with(b"/SYM64/ ") && data.len() >= 8 {
-            let count = u64::from_be_bytes(data[0..8].try_into().unwrap()) as usize;
-            let strings_start = 8 + count * 8;
-            if strings_start <= data.len() {
-                return Ok(data[strings_start..]
-                    .split(|&b| b == 0)
-                    .any(|s| s == symbol));
-            }
-        }
-        at = data_end + (size & 1);
-    }
-    Ok(false)
 }
 
 /// Run the request `args` names (the arguments after the program name) and

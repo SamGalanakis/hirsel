@@ -1193,33 +1193,4 @@ impl Decoder {
 /// The Args grant kind in the entry ABI.
 pub const ARGS_KIND: u8 = 10;
 
-/// Provider operation codes shared by the runtime ABI and tape codec.
-pub mod op {
-    pub const OPEN: u8 = 0;
-    pub const READ: u8 = 1;
-    pub const WRITE: u8 = 2;
-    pub const CLOSE: u8 = 3;
-    pub const TRY_LOCK: u8 = 4;
-    pub const UNLOCK: u8 = 5;
-    pub const MKDIR: u8 = 6;
-    pub const MKDTEMP: u8 = 7;
-    pub const REMOVE: u8 = 8;
-    pub const REMOVE_TREE: u8 = 9;
-    pub const WALL_MS: u8 = 10;
-    pub const MONO_NS: u8 = 11;
-    pub const STDOUT: u8 = 12;
-    pub const STDERR: u8 = 13;
-    pub const RENAME: u8 = 14;
-    pub const SLEEP_UNTIL: u8 = 15;
-    pub const SYNC: u8 = 16;
-    pub const SYNC_DIR: u8 = 17;
-    pub const RANDOM: u8 = 18;
-    pub const CONNECT: u8 = 19;
-    pub const LISTEN: u8 = 20;
-    pub const ACCEPT: u8 = 21;
-    pub const TLS_CONNECT: u8 = 22;
-    pub const SEND_SECRET: u8 = 23;
-    pub const RECV_BOUNDED: u8 = 27;
-    pub const SEND_PAIR: u8 = 26;
-    pub const STOPPED: u8 = 28;
-}
+pub use hirsel_core_ids::host_op as op;

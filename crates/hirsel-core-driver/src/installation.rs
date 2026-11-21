@@ -255,6 +255,64 @@ pub fn environment(
         recording_runtime: recording_runtime.map(Path::to_owned),
     })
 }
+/// Keep user-supplied archives in the runtime slot they implement.
+pub(crate) fn check_runtime(path: &Path, bytes: &[u8], recording: bool) -> io::Result<()> {
+    let defines_recording = archive_defines_symbol(bytes, b"hirsel_core_os_run_recording");
+    if defines_recording == recording {
+        return Ok(());
+    }
+    let required = if recording {
+        "a recording runtime archive"
+    } else {
+        "a runtime archive without recording"
+    };
+    Err(io::Error::other(format!(
+        "this build requires {required}: {}",
+        path.display()
+    )))
+}
+
+/// Check whether a Unix static archive (`.a`) defines `symbol` in its symbol table.
+fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
+    if !bytes.starts_with(b"!<arch>\n") {
+        return false;
+    }
+    let mut at = 8usize;
+    while at + 60 <= bytes.len() {
+        let header = &bytes[at..at + 60];
+        if &header[58..60] != b"`\n" {
+            break;
+        }
+        let name = &header[0..16];
+        let size = std::str::from_utf8(&header[48..58])
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let data_start = at + 60;
+        let data_end = data_start.saturating_add(size).min(bytes.len());
+        let data = &bytes[data_start..data_end];
+        if name.starts_with(b"/ ") && data.len() >= 4 {
+            let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+            let strings_start = 4 + count * 4;
+            if strings_start <= data.len() {
+                return data[strings_start..]
+                    .split(|&b| b == 0)
+                    .any(|s| s == symbol);
+            }
+        } else if name.starts_with(b"/SYM64/ ") && data.len() >= 8 {
+            let count = usize::try_from(u64::from_be_bytes(data[0..8].try_into().unwrap()));
+            if let Ok(count) = count
+                && let Some(strings_start) = count.checked_add(1).and_then(|n| n.checked_mul(8))
+                && let Some(names) = data.get(strings_start..)
+            {
+                return names.split(|&b| b == 0).any(|s| s == symbol);
+            }
+        }
+        at = data_end + (size & 1);
+    }
+    false
+}
+
 /// The same producer used by the CLI and the distribution assembler. Every
 /// outside input is read and checked before anything is written; the
 /// selection is written last, so a failed install keeps the previous one.
@@ -271,18 +329,23 @@ pub fn publish(
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
     let root = crate::product::normalized(root);
-    fn read_runtime<'a>(input: Option<(&Path, &'a str)>) -> io::Result<Option<(Vec<u8>, &'a str)>> {
+    fn read_runtime<'a>(
+        input: Option<(&Path, &'a str)>,
+        recording: bool,
+    ) -> io::Result<Option<(Vec<u8>, &'a str)>> {
         input
             .map(|(path, target)| {
                 if !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].contains(&target) {
                     return Err(io::Error::other("unsupported installed runtime target"));
                 }
-                Ok((std::fs::read(path)?, target))
+                let bytes = std::fs::read(path)?;
+                check_runtime(path, &bytes, recording)?;
+                Ok((bytes, target))
             })
             .transpose()
     }
-    let runtime = read_runtime(runtime)?;
-    let recording_runtime = read_runtime(recording_runtime)?;
+    let runtime = read_runtime(runtime, false)?;
+    let recording_runtime = read_runtime(recording_runtime, true)?;
     let linked = runtime
         .as_ref()
         .map(|(_, target)| *target)

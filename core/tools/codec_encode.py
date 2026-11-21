@@ -19,7 +19,7 @@ CEILING = {'rows': 2.80, 'strings': 2.20}
 WORKS = {'rows': 0, 'strings': 2}
 p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 p.add_argument('--builder', type=Path, required=True, help='the hirsel compiler')
-p.add_argument('--runtime', type=Path, required=True, help='the release runtime archive')
+p.add_argument('--runtime', type=Path, required=True, help='the runtime archive without recording')
 p.add_argument('--out', type=Path, required=True)
 p.add_argument('--cpu', default=os.environ.get('HIRSEL_MEASURE_CPU', '16'))
 p.add_argument('--samples', type=int, default=5)

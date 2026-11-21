@@ -104,7 +104,11 @@ class Resolution:
         env['RUSTC_BOOTSTRAP'] = '1'
         for member in sorted(self.members, key=lambda i: self.packages[i]['name']):
             package = self.packages[member]
-            for testing in (False, True):
+            builds = [(False, []), (True, [])]
+            if package['name'] == 'hirsel-core-rt':
+                # The recording archive adds a dependency as well as local cfgs.
+                builds.append((False, ['--features', 'record']))
+            for testing, feature_args in builds:
                 graphs = {}
                 for platform, config in self.platforms.items():
                     command = [env['CARGO'], 'test' if testing else 'build', '-p', package['name'],
@@ -112,12 +116,17 @@ class Resolution:
                                '--target', config['target'], '--unit-graph', '-Z', 'unstable-options']
                     if testing:
                         command.append('--no-run')
+                    command.extend(feature_args)
                     graphs[platform] = self.graph(command, env)
                     if graphs[platform]['version'] != 1:
                         raise ValueError('unsupported Cargo unit graph version')
                 target_keys = self.add_platforms(graphs)
                 graph = graphs[self.host_platform]
                 keys = target_keys[self.host_platform]
+                if feature_args:
+                    root_index, = graph['roots']
+                    self.record_runtime = keys[root_index]
+                    continue
                 if testing:
                     binaries = {u['target']['name']: keys[i] for i, u in enumerate(graph['units'])
                                 if u['pkg_id'] == member and u['target']['kind'] == ['bin'] and u['mode'] == 'build'}
@@ -277,6 +286,8 @@ class Resolution:
                     key = self.preferred.get(package)
                     if (call.func.id == 'hirsel_library' and key is not None
                             and self.root / literal(call, 'crate_root') == Path(self.units[key]['target']['src_path'])):
+                        if package == 'hirsel-core-rt' and 'record' in ast.literal_eval(attrs['features']):
+                            key = self.record_runtime
                         deps = self.values(key, lambda u: sorted(
                             self.label(dep) for _, dep in u['edges'] if dep in self.names
                             and self.units[dep]['target']['kind'] != ['custom-build']))

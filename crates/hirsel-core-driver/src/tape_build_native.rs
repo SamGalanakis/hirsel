@@ -4,10 +4,12 @@
 // open_refuses_a_changed_code_revision_arg_limit_or_policy).
 
 /// The recording runtime archive path from the Buck2 test environment.
-fn env_record_runtime() -> String {
-    std::env::var("HIRSEL_CORE_RT_RECORD_ARCHIVE")
-        .or_else(|_| std::env::var("HIRSEL_CORE_RT_ARCHIVE"))
-        .expect("HIRSEL_CORE_RT_RECORD_ARCHIVE")
+fn env_record_runtime() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_CORE_RT_RECORD_ARCHIVE").expect("recording runtime archive"))
+        .canonicalize()
+        .expect("recording runtime archive")
 }
 
 /// The symbol's bytes, read from the executable's own symbol table.
@@ -24,6 +26,216 @@ fn code_revision_of(executable: &Path) -> [u8; 32] {
         .unwrap();
     let at = (symbol.address() - section.address()) as usize;
     section.data().unwrap()[at..at + 32].try_into().unwrap()
+}
+
+/// RL1 exercises the CLI and the resulting ELF on both engines and profiles.
+#[test]
+fn recording_switch_preserves_native_observations() {
+    use object::{Object, ObjectSymbol};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        r#"
+fn spent_steps() -> u64 {
+    match (bound steps 8 { loop {} }) {
+        Error(e) => e.steps,
+        _ => 0
+    }
+}
+
+pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
+    let capacity = bound bytes 15 {
+        let literal: Result[FrozenBytes, Capacity] = b"abcdefghi"
+        let value = literal?
+        list.len(bytebuf.as_bytes(value))
+    }
+    match capacity {
+        Error(c) => if c.requested != 16 || c.available != 15 { return Error(Exit(status: 2)) },
+        Ok(_) => return Error(Exit(status: 3)),
+    }
+    if spent_steps() != 8 { return Error(Exit(status: 4)) }
+    result.unwrap(stdout.write(out, "first\n"))
+    let n = 1u64 / args.len(a)
+    if n != 1 { return Error(Exit(status: 5)) }
+    result.unwrap(stdout.write(out, "second\n"))
+    Ok(())
+}
+"#,
+    )
+    .unwrap();
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let plain = native_options(Backend::Cranelift, dir.path())
+        .runtime
+        .canonicalize()
+        .unwrap();
+    let recording = env_record_runtime();
+    let store = dir.path().join("store");
+    let code_store = dir.path().join("code");
+    let libraries = root.join("core");
+    let clang = llvm.join("bin/clang");
+    let inputs = [
+        app.to_str().unwrap(),
+        "--source-core",
+        "--libraries",
+        libraries.to_str().unwrap(),
+    ];
+    let source = [inputs.as_slice(), &["--grant", "Stdout"]];
+    let link = ["--cc", clang.to_str().unwrap()];
+    let invoke = |args: &[&str]| {
+        let mut call = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        call.extend(["--store".into(), store.display().to_string()]);
+        process::tape_request(&call, dir.path())
+    };
+    let mut expected = [None, None];
+    for engine in ["cranelift", "llvm"] {
+        for release in [false, true] {
+            let configuration = if release { "release" } else { "default" };
+            let profile: &[_] = if release { &["--release"] } else { &[] };
+            let tag = format!("{engine}-{configuration}");
+            let mut publish = vec!["publish"];
+            publish.extend(source.concat());
+            publish.extend([
+                "--backend",
+                engine,
+                "--code-store",
+                code_store.to_str().unwrap(),
+            ]);
+            let (status, recipe, err) = invoke(&publish);
+            assert_eq!(status, Some(0), "{tag} publish: {err}");
+
+            let mut observe = |recording_on: bool, use_recipe: bool| {
+                let program = dir.path().join("program");
+                let mut build = vec!["build"];
+                if use_recipe {
+                    build.extend([
+                        "--recipe",
+                        recipe.trim(),
+                        "--code-store",
+                        code_store.to_str().unwrap(),
+                    ]);
+                } else {
+                    build.extend(source.concat());
+                }
+                let runtime = if recording_on { &recording } else { &plain };
+                build.extend(link);
+                build.extend([
+                    "--backend",
+                    engine,
+                    "--runtime",
+                    runtime.to_str().unwrap(),
+                    "-o",
+                    program.to_str().unwrap(),
+                ]);
+                build.extend(profile);
+                if recording_on {
+                    build.push("--recording");
+                }
+                let (status, _, err) = invoke(&build);
+                assert_eq!(status, Some(0), "{tag} build: {err}");
+
+                let bytes = std::fs::read(&program).unwrap();
+                let elf = object::File::parse(bytes.as_slice()).unwrap();
+                let defines_recording_entry = elf.symbols().any(|symbol| {
+                    symbol.is_definition() && symbol.name() == Ok("hirsel_core_os_run_recording")
+                });
+                assert_eq!(
+                    defines_recording_entry, recording_on,
+                    "RL1 recording entry: {tag}, recipe={use_recipe}"
+                );
+                if !recording_on {
+                    let leaked: Vec<_> = elf
+                        .symbols()
+                        .filter(|symbol| symbol.is_definition())
+                        .filter_map(|symbol| symbol.name().ok())
+                        .filter(|name| {
+                            *name == "hirsel_core_os_replay"
+                                || name.contains("14hirsel_core_rt4tape")
+                                || name.contains("18hirsel_tape_format")
+                        })
+                        .collect();
+                    assert!(
+                        leaked.is_empty(),
+                        "RL1 no recording runtime symbols: {tag}: {leaked:?}"
+                    );
+                }
+
+                for (index, args) in [&["ok"][..], &[][..]].into_iter().enumerate() {
+                    let tape = dir.path().join(format!("{tag}-{use_recipe}-{index}.tape"));
+                    let run = |record: bool| {
+                        let mut command = Command::new(&program);
+                        command.args(args).env_remove("HIRSEL_RECORD");
+                        if record {
+                            command.env("HIRSEL_RECORD", &tape);
+                        }
+                        let out = command.output().unwrap();
+                        (out.status.code(), out.stdout, out.stderr)
+                    };
+                    let off = run(false);
+                    if index == 0 {
+                        assert_eq!(off, (Some(0), b"first\nsecond\n".to_vec(), vec![]), "{tag}");
+                    } else {
+                        assert_eq!(
+                            (off.0, off.1.as_slice()),
+                            (Some(101), b"first\n".as_slice()),
+                            "{tag}"
+                        );
+                        assert!(
+                            String::from_utf8_lossy(&off.2).starts_with("Division at "),
+                            "{tag}: {:?}",
+                            off.2
+                        );
+                    }
+                    assert_eq!(
+                        &off,
+                        expected[index].get_or_insert_with(|| off.clone()),
+                        "RL1 observations: {tag}"
+                    );
+                    if recording_on {
+                        assert_eq!(run(true), off, "RL1 recording on: {tag}");
+                        assert!(tape.is_file(), "RL1 recording on must write a tape: {tag}");
+                        let mut replay = vec!["replay"];
+                        replay.extend(inputs);
+                        replay.extend(link);
+                        let other = if engine == "llvm" {
+                            "cranelift"
+                        } else {
+                            "llvm"
+                        };
+                        let replay_output = dir.path().join("replay");
+                        replay.extend([
+                            "--backend",
+                            other,
+                            "--runtime",
+                            recording.to_str().unwrap(),
+                            "--tape",
+                            tape.to_str().unwrap(),
+                            "-o",
+                            replay_output.to_str().unwrap(),
+                        ]);
+                        if !release {
+                            replay.push("--release");
+                        }
+                        let (status, stdout, stderr) = invoke(&replay);
+                        assert_eq!(status, Some(0), "{tag} replay: {stderr}");
+                        assert!(
+                            stdout.is_empty(),
+                            "RL1 replay must not repeat live writes: {tag}"
+                        );
+                    }
+                }
+            };
+            observe(false, false);
+            observe(true, false);
+            observe(true, true);
+        }
+    }
 }
 
 /// The oracle is the revision the build reports (revision.rs, from the checked
@@ -296,8 +508,7 @@ fn tape_cli_replays() {
     std::fs::write(app.join("main.hirsel"), &source).unwrap();
     std::fs::write(data.join("input.json"), b"{\"answer\":42}\n").unwrap();
     let tape = dir.path().join("run.tape");
-    let options = native_options(Backend::Cranelift, dir.path());
-    let runtime = options.runtime.canonicalize().unwrap();
+    let runtime = env_record_runtime();
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let common = vec![
         "--runtime".to_owned(),
@@ -430,7 +641,7 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(Backend::Cranelift, dir.path());
-    options.runtime = PathBuf::from(env_record_runtime());
+    options.runtime = env_record_runtime();
     options.grant_mask = (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
     options.recording = true;
     let built = product.build(&entry, &options).unwrap();
@@ -567,7 +778,7 @@ fn tape_http_replays_both_native_engines() {
             "--backend".to_owned(),
             engine.to_owned(),
             "--runtime".to_owned(),
-            native.runtime.canonicalize().unwrap().display().to_string(),
+            env_record_runtime().display().to_string(),
             "--cc".to_owned(),
             linker.display().to_string(),
             "--libraries".to_owned(),
@@ -827,7 +1038,7 @@ fn cli_tls_replay(with_secret: bool) {
         "--backend".into(),
         "cranelift".into(),
         "--runtime".into(),
-        native.runtime.canonicalize().unwrap().display().to_string(),
+        env_record_runtime().display().to_string(),
         "--cc".into(),
         linker.display().to_string(),
         "--libraries".into(),
@@ -975,7 +1186,7 @@ fn simd_versions_preserve_run_tape_and_revision() {
     assert!(product.accepted());
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(Backend::Llvm, dir.path());
-    options.runtime = PathBuf::from(env_record_runtime());
+    options.runtime = env_record_runtime();
     options.optimize = true;
     options.grant_mask = 1 << grant_kind("Stdout").unwrap();
     options.recording = true;

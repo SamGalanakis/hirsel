@@ -25,10 +25,11 @@ uint8_t hirsel_core_os_run_with_sources(const HirselCoreOsConfig *, const Hirsel
 /* Native linker entry for a closed executable with no executable digest reader. */
 uint8_t hirsel_core_os_run_without_digest(const HirselCoreOsConfig *, const HirselCoreView *,
                                          const HirselCoreSourceTable *, HirselCoreEntry);
-/* FORM #122: a link plan can select a run tape without changing ordinary
-   startup. Paths and code identity are NUL-terminated generated strings;
-   mode is 0 Record, 1 Replay or 2 diagnose (Across, never live). */
-uint8_t hirsel_core_os_run_taped(const HirselCoreOsConfig *, const HirselCoreView *,
+/* The recording runtime's launcher entries. Paths and code identity are
+   NUL-terminated generated strings. Replay mode is 1 for replay or 2 for diagnose. */
+uint8_t hirsel_core_os_run_recording(const HirselCoreOsConfig *, const HirselCoreView *,
+    const HirselCoreSourceTable *, HirselCoreEntry, const char *identity, const uint8_t revision[32]);
+uint8_t hirsel_core_os_replay(const HirselCoreOsConfig *, const HirselCoreView *,
     const HirselCoreSourceTable *, HirselCoreEntry, const char *path, uint64_t mode,
     const char *identity, const uint8_t revision[32]);
 #endif

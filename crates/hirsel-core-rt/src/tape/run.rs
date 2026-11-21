@@ -488,7 +488,7 @@ unsafe extern "C" fn invoke(
 
 /// Startup entry for a recording build (`hirsel build --recording` / `hirsel run --record`).
 /// Reads and removes `HIRSEL_RECORD` before any grant snapshot is taken.
-/// Present: record into that path. Absent: run exactly as the release runtime does.
+/// With HIRSEL_RECORD unset, forward to the ordinary runtime entry.
 /// # Safety
 /// The generated config, names, source tables, entry and 32-byte revision stay
 /// pinned for the call. Identity is a NUL-terminated native string.
@@ -751,12 +751,12 @@ pub(super) fn check_launch_replay() {
         };
         // SAFETY: all startup tables and names remain pinned until the run ends.
         let status = unsafe {
-            hirsel_core_os_run_taped(
+            run_taped(
                 &input,
                 ptr::null(),
                 ptr::null(),
                 entry,
-                path.as_ptr(),
+                path.as_bytes().to_vec(),
                 mode,
                 c"launch-case".as_ptr(),
                 &[7; 32],

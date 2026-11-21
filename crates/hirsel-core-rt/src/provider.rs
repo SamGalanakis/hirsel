@@ -1,7 +1,7 @@
 //! CAP-8 issue/delivery seam. Host adapters and scripted adapters use the same ABI.
 use crate::{Context, causes};
 
-pub use hirsel_tape_format::op::*;
+pub use hirsel_core_ids::host_op::*;
 
 /// IoError tags. Other carries the host error number.
 #[repr(C)]

@@ -668,6 +668,7 @@ dependencies = [
 name = "hirsel-tape-format"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-ids",
  "hirsel-core-net",
  "twox-hash",
 ]

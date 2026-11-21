@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The standing provider-cost row: 10,000 small writes through a forwarding wrapper.
 
-Run from the repository with the release runtime archive:
+Run from the repository with the runtime archive without recording:
   python3 crates/hirsel-core-rt/measure-provider.py --runtime <libhirsel_core_rt.a>
 Builds measure/provider-wrap-writes.c against it with the repository's clang, then
 prints the median of five `perf stat -e instructions:u` runs on CPU 4 for the OS

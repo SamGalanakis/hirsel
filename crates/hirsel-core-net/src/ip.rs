@@ -51,3 +51,45 @@ impl Ip {
         bytes
     }
 }
+
+/// The byte length of one resolved address record: a family byte (0 for V4,
+/// 1 for V6) and 16 octets, a V4 address in the last four after twelve zeros.
+/// A resolve's tape delivery and a served Net's staged `Resolve` bytes are
+/// such records.
+pub const IP_RECORD_LEN: usize = 17;
+
+/// One address as a resolved address record.
+pub fn ip_record(address: IpAddr) -> [u8; IP_RECORD_LEN] {
+    let mut record = [0; IP_RECORD_LEN];
+    match address {
+        IpAddr::V4(ip) => record[13..].copy_from_slice(&ip.octets()),
+        IpAddr::V6(ip) => {
+            record[0] = 1;
+            record[1..].copy_from_slice(&ip.octets());
+        }
+    }
+    record
+}
+
+/// The addresses of whole, well-formed and distinct records, in order.
+pub fn ip_records(bytes: &[u8]) -> Option<Vec<IpAddr>> {
+    if bytes.len() % IP_RECORD_LEN != 0 {
+        return None;
+    }
+    let mut addresses = Vec::with_capacity(bytes.len() / IP_RECORD_LEN);
+    let mut seen = std::collections::HashSet::with_capacity(addresses.capacity());
+    for record in bytes.chunks_exact(IP_RECORD_LEN) {
+        let address = match record[0] {
+            0 if record[1..13] == [0; 12] => {
+                IpAddr::from(<[u8; 4]>::try_from(&record[13..]).unwrap())
+            }
+            1 => IpAddr::from(<[u8; 16]>::try_from(&record[1..]).unwrap()),
+            _ => return None,
+        };
+        if !seen.insert(address) {
+            return None;
+        }
+        addresses.push(address);
+    }
+    Some(addresses)
+}

@@ -836,8 +836,6 @@ pub fn writes(op: u8) -> bool {
         WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES
     )
 }
-/// One family byte followed by the 16 IP octets.
-pub const RESOLVED_IP_LEN: usize = 17;
 
 pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
@@ -984,7 +982,7 @@ impl Out {
             }
             op::RESOLVE if self.status == OK => usize::try_from(self.value)
                 .ok()
-                .and_then(|n| n.checked_mul(RESOLVED_IP_LEN))
+                .and_then(|n| n.checked_mul(hirsel_core_net::IP_RECORD_LEN))
                 .ok_or(Corrupt),
             op::RESOLVE if self.value != 0 => Err(Corrupt),
             op::RECV_BOUNDED | op::RESOLVE | op::STDIN_READ => Ok(0),

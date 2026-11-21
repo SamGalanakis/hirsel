@@ -2627,7 +2627,7 @@ impl Machine<'_> {
             || match op {
                 0 | 3 => tag == 9,
                 2 => tag == 10,
-                4 | 5 => tag == 3,
+                1 | 4 | 5 => tag == 3,
                 6 => tag == 11,
                 7 => tag == 0,
                 _ => false,
@@ -2657,6 +2657,10 @@ impl Machine<'_> {
             3 => {
                 let fits = if op == 5 {
                     w[0] <= call.words[2] + call.words[3]
+                } else if op == 1 {
+                    // Well-formed, distinct address records (NOTES 34).
+                    hirsel_core_net::ip_records(&call.staged)
+                        .is_some_and(|records| w[0] == records.len() as u64)
                 } else {
                     w[0] == call.staged.len() as u64
                 };
@@ -2751,10 +2755,23 @@ impl Machine<'_> {
         let call = &calls[&id];
         if let (Some(out), false) = (call.out, call.staged.is_empty()) {
             // The commit copies the staged bytes into the caller's capacity.
-            let staged = call.staged.clone();
+            let (op, staged) = (call.words[0], call.staged.clone());
             let (_, data, len, _) = self.carrier(out);
-            self.put(data + len, &staged);
-            self.store(out + 8, 8, len + staged.len() as u64);
+            if (vocab, op) == (Vocab::Net, 1) {
+                // A resolve's records become the caller's Ip elements.
+                let addresses = hirsel_core_net::ip_records(&staged).expect("checked records");
+                for (i, address) in addresses.iter().enumerate() {
+                    let at = (len + i as u64) * hirsel_core_net::Ip::SIZE as u64;
+                    self.put(
+                        data + at,
+                        &hirsel_core_net::Ip::from(*address).layout_bytes(),
+                    );
+                }
+                self.store(out + 8, 8, len + addresses.len() as u64);
+            } else {
+                self.put(data + len, &staged);
+                self.store(out + 8, 8, len + staged.len() as u64);
+            }
         }
         let mut row = port_outcome(vocab, op, answer);
         if vocab == Vocab::Net && matches!(op, 2 | 3) && row[1] == 0 {
@@ -2872,10 +2889,12 @@ impl Machine<'_> {
                 if vocab != Vocab::Net {
                     return Some(Ok(ok(h, served)));
                 }
-                // A served Net is an ordinary grant of every address and
-                // handshake (native `provide_port`), so `net.narrow`
+                // A served Net is an ordinary grant of every address, handshake
+                // and name (native `provide_port`), so `net.narrow`
                 // intersects it as any Net's.
                 let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
+                let resolve =
+                    hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
                 let rules = (0..2)
                     .flat_map(|dir| {
                         (0..2).map(move |family| {
@@ -2890,7 +2909,7 @@ impl Machine<'_> {
                             })
                         })
                     })
-                    .chain([tls])
+                    .chain([tls, resolve])
                     .collect();
                 let grants = &mut self.world.network.grants;
                 let key = grants
@@ -2979,7 +2998,7 @@ impl Machine<'_> {
                     return Some(Ok(ok(0, 0)));
                 }
                 let offer = match (*vocab, call.words[0]) {
-                    (Vocab::Dir, 10 | 19) | (Vocab::Net, 4) => call.words[2],
+                    (Vocab::Dir, 10 | 19) | (Vocab::Net, 1 | 4) => call.words[2],
                     (Vocab::Dir, 2 | 11) => call.words[3],
                     _ => 0,
                 };
@@ -3429,6 +3448,16 @@ impl Machine<'_> {
             HostOp::Connect => (vec![0, a[1], a[2], a[3], a[4]], vec![], None),
             HostOp::Listen => (vec![2, a[1], a[2], a[3], a[4], a[5]], vec![], None),
             HostOp::Accept => (vec![3, id], vec![], None),
+            HostOp::Resolve => {
+                // The name as written and room for the caller's spare Ip
+                // slots as address records (NOTES 34).
+                let name = self.carrier_bytes(a[1]).to_vec();
+                let (_, _, len, cap) = self.carrier(a[2]);
+                let room = cap
+                    .saturating_sub(len)
+                    .saturating_mul(hirsel_core_net::IP_RECORD_LEN as u64);
+                (vec![1, name.len() as u64, room], vec![name], Some(a[2]))
+            }
             HostOp::RecvBounded => {
                 let (_, _, len, cap) = self.carrier(a[1]);
                 let room = cap.saturating_sub(len).min(a[2]);
@@ -3633,23 +3662,28 @@ impl Machine<'_> {
         }
         Ok(result)
     }
-    fn network_resolve(&mut self, a: &[u64]) -> Vec<u64> {
+    fn network_resolve(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::{GrantRule, Ip, Name};
         let Some(name) = std::str::from_utf8(self.carrier_bytes(a[1]))
             .ok()
             .and_then(Name::parse)
         else {
-            return vec![0, 1, 0, 0];
+            return Ok(vec![0, 1, 0, 0]);
         };
         if !self.world.network.grants.get(&a[0]).is_some_and(|rules| {
             rules
                 .iter()
                 .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
         }) {
-            return vec![0, 1, 0, 0];
+            return Ok(vec![0, 1, 0, 0]);
+        }
+        if let Some(&c) = self.world.net_ports.get(&a[0]) {
+            // A served Net's rules covered the name: its server answers with
+            // address records (NOTES 34).
+            return self.net_call(t, HostOp::Resolve, c, 0, true, a);
         }
         if self.until(a, 3).is_some_and(|due| self.passed(due)) {
-            return vec![0, 6, 0, 0];
+            return Ok(vec![0, 6, 0, 0]);
         }
         let (data, len, cap) = (
             self.load(a[2], 8),
@@ -3664,7 +3698,7 @@ impl Machine<'_> {
             self.put(data + offset, &Ip::from(address).layout_bytes());
         }
         self.store(a[2] + 8, 8, len + count);
-        vec![count, 0, 0, 0]
+        Ok(vec![count, 0, 0, 0])
     }
 
     fn network_attempt(
@@ -4218,7 +4252,7 @@ impl Machine<'_> {
             | HostOp::StreamTerminal => {
                 unreachable!()
             }
-            HostOp::Resolve => self.network_resolve(a),
+            HostOp::Resolve => return self.network_resolve(t, a),
             HostOp::NetNarrowResolve => {
                 use hirsel_core_net::{GrantRule, ResolveRule};
                 match std::str::from_utf8(self.carrier_bytes(a[1]))

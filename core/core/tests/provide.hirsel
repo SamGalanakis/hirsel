@@ -1339,3 +1339,172 @@ fn granted_denied(token: Secret, tasks: Tasks) -> bool waits {
     }
     denied && result.unwrap(task.join(take server))
 }
+
+// A resolved address record (NOTES 34): family 0 and twelve zeros before a
+// V4 address's four octets, or family 1 and a V6 address's sixteen.
+fn v4_record(mut b: Bytes, x: u8, y: u8, z: u8, w: u8) {
+    list.push(mut b, 0u8)
+    let mut i = 0u64
+    while i < 12u64 {
+        list.push(mut b, 0u8)
+        i = i + 1u64
+    }
+    list.push(mut b, x)
+    list.push(mut b, y)
+    list.push(mut b, z)
+    list.push(mut b, w)
+}
+
+// 2001:db8::1.
+fn doc_v6_record(mut b: Bytes) {
+    list.push(mut b, 1u8)
+    list.push(mut b, 0x20u8)
+    list.push(mut b, 0x01u8)
+    list.push(mut b, 0x0du8)
+    list.push(mut b, 0xb8u8)
+    let mut i = 0u64
+    while i < 11u64 {
+        list.push(mut b, 0u8)
+        i = i + 1u64
+    }
+    list.push(mut b, 1u8)
+}
+
+// Resolves "Alpha.Test" into a list already holding one address with room
+// for two, then a name with no address and one the resolver cannot reach.
+// A narrowed Net that does not cover the name, and a malformed name, are
+// Denied before the server sees anything.
+fn resolve_client(take n: Net) -> bool waits {
+    let mut out: List[Ip] = list.with_capacity(3)
+    list.push(mut out, V4(1))
+    let two = match host.resolve(n, string.from("Alpha.Test"), mut out, Never) {
+        Ok(k) => k == 2 && list.len(out) == 3 && match out[0] {
+            V4(x) => x == 1,
+            _ => false
+        } && match out[1] {
+            V4(x) => x == 167772161,
+            _ => false
+        } && match out[2] {
+            V6(hi, lo) => hi == 0x20010db800000000 && lo == 1,
+            _ => false
+        },
+        _ => false
+    }
+    let mut none: List[Ip] = list.with_capacity(2)
+    let empty = match host.resolve(n, string.from("empty.test"), mut none, Never) {
+        Ok(k) => k == 0 && list.len(none) == 0,
+        _ => false
+    }
+    let unreachable = match host.resolve(n, string.from("far.test"), mut none, Never) {
+        Error(Unreachable) => true,
+        _ => false
+    }
+    let rule: Rule = Resolve(names: "beta.test")
+    let beta = result.unwrap(net.narrow(n, rule))
+    let narrowed = match host.resolve(beta, string.from("alpha.test"), mut none, Never) {
+        Error(Denied) => true,
+        _ => false
+    }
+    let malformed = match host.resolve(n, string.from("bad..test"), mut none, Never) {
+        Error(Denied) => true,
+        _ => false
+    }
+    two && empty && unreachable && narrowed && malformed
+}
+
+// Take the next call and expect Resolve of `name` with `room` bytes.
+fn resolve_call(mut s: Served[NetOp], name: String, room: u64) -> Option[Call[NetOp]] waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let mut p: Bytes = list.with_capacity(16)
+            provide.payload(call, 0, mut p)
+            let op = match provide.net_op(call) {
+                Resolve(name: k, room: r) => k == string.byte_len(name) && r == room,
+                _ => false
+            }
+            let named = match string.from_utf8(take p) {
+                Ok(take t) => t == name,
+                Error(_) => false
+            }
+            if op && named {
+                Some(take call)
+            } else {
+                let _ = take call
+                None
+            }
+        },
+        None => None
+    }
+}
+
+// Served Net names (NET-11, NOTES 34). The resolve's room is its spare Ip
+// slots as 17-byte records (2 slots, 34 bytes), so of three staged records
+// fill takes two, and Count(2) appends 10.0.0.1 and 2001:db8::1 after the
+// caller's own address. Count(0) is a name with no address and
+// Failed(Unreachable) reaches the caller as given. The narrowed and the
+// malformed lookups never reach the server.
+// expect: run net_resolve(tasks) = true
+fn net_resolve(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 128)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, resolve_client)
+    let two = match resolve_call(mut served, string.from("Alpha.Test"), 34) {
+        Some(take call) => {
+            let mut c = take call
+            let mut b: Bytes = list.with_capacity(51)
+            v4_record(mut b, 10, 0, 0, 1)
+            doc_v6_record(mut b)
+            v4_record(mut b, 192, 0, 2, 7)
+            let took = provide.fill(mut served, mut c, b)
+            took == 34 && net_answer(mut served, take c, Count(2))
+        },
+        None => false
+    }
+    let empty = match resolve_call(mut served, string.from("empty.test"), 34) {
+        Some(take call) => net_answer(mut served, take call, Count(0)),
+        None => false
+    }
+    let unreachable = match resolve_call(mut served, string.from("far.test"), 34) {
+        Some(take call) => net_answer(mut served, take call, Failed(Unreachable)),
+        None => false
+    }
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    two && empty && unreachable && client && quiet
+}
+
+// Stages 10.0.0.1 twice and answers Count(2).
+fn twice_resolved(take s: Served[NetOp]) -> bool waits {
+    let mut served = take s
+    match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let mut b: Bytes = list.with_capacity(34)
+            v4_record(mut b, 10, 0, 0, 1)
+            v4_record(mut b, 10, 0, 0, 1)
+            let took = provide.fill(mut served, mut c, b)
+            took == 34 && net_answer(mut served, take c, Count(2))
+        },
+        None => false
+    }
+}
+
+// NOTES 34: a resolve's records must be distinct; a repeated one fails the
+// server with Fail, and the caller sees Reset with nothing appended.
+// expect: run net_resolve_fail(tasks) = true
+fn net_resolve_fail(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 128)
+    let server = task.spawn(tasks, bytes 65536, take s, twice_resolved)
+    let mut out: List[Ip] = list.with_capacity(2)
+    let reset = match host.resolve(n, string.from("alpha.test"), mut out, Never) {
+        Error(Reset) => list.len(out) == 0,
+        _ => false
+    }
+    reset && fail_cause(task.join(take server))
+}

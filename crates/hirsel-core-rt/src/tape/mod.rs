@@ -1663,16 +1663,8 @@ unsafe fn record_out(
         // SAFETY: the resolve provider initialized these Ip elements in spare.
         for i in before..r.buffer.len {
             let ip = unsafe { r.buffer.data.cast::<hirsel_core_net::Ip>().add(i).read() };
-            match std::net::IpAddr::from(ip) {
-                std::net::IpAddr::V4(ip) => {
-                    out.payload.extend_from_slice(&[0; 13]);
-                    out.payload.extend_from_slice(&ip.octets());
-                }
-                std::net::IpAddr::V6(ip) => {
-                    out.payload.push(1);
-                    out.payload.extend_from_slice(&ip.octets());
-                }
-            }
+            out.payload
+                .extend_from_slice(&hirsel_core_net::ip_record(std::net::IpAddr::from(ip)));
         }
     } else if ok && r.operation == TLS_CONNECT {
         // SAFETY: the handshake pins both outputs through delivery.
@@ -1872,26 +1864,9 @@ unsafe fn replay_out(
             if count > crate::resolve::spare(&r.buffer) {
                 return Err(Fault::Corrupt);
             }
-            let mut addresses = Vec::with_capacity(count);
-            let mut seen = std::collections::HashSet::new();
-            for bytes in out
-                .payload
-                .chunks_exact(hirsel_tape_format::RESOLVED_IP_LEN)
-            {
-                let address = match bytes[0] {
-                    0 if bytes[1..13] == [0; 12] => {
-                        std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&bytes[13..]).unwrap()).into()
-                    }
-                    1 => {
-                        std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[1..]).unwrap()).into()
-                    }
-                    _ => return Err(Fault::Corrupt),
-                };
-                if !seen.insert(address) {
-                    return Err(Fault::Corrupt);
-                }
-                addresses.push(address);
-            }
+            let addresses = hirsel_core_net::ip_records(&out.payload)
+                .filter(|addresses| addresses.len() == count)
+                .ok_or(Fault::Corrupt)?;
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }

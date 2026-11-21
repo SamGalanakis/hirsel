@@ -1,0 +1,134 @@
+// test-vectors
+// Contract tests for `trace` (core/std/trace.hirsel). Expected documents are written by hand
+// from OTLP/JSON (opentelemetry-proto 09769935, docs/specification.md "JSON Protobuf
+// Encoding") in the member order of Python's json.dumps(sort_keys=True). The two-span
+// document is vectors/trace/two_spans.json, which tools/tests/obs_export.py also checks
+// against obs_export.py's span builder for the same input. Laws that keep a recorder to
+// the end finish it: the evaluator does not yet clean a Log held in a record field when the
+// record is dropped (the native engines do; core-form-883).
+fn ok_context(hi: u64, lo: u64, span: u64) -> trace.Context {
+    result.unwrap(trace.context(hi, lo, span))
+}
+
+// The virtual clock starts at mono 5000 ns and wall 1_700_000_000_000 ms, so the anchor is
+// Unix 1_700_000_000_000_000_000 ns and a reading m is that plus m - 5000:
+// parent starts at 6000 (..001000), child starts at 6250 (..001250), child ends at 9000
+// (..004000), parent ends at 12345 (..007345). The child ends first, so it is listed first.
+// Parent attributes are set out of key order and "attempt" is set twice: the document has
+// them sorted with the last value. The resource keeps its list order.
+// expect: run two_spans_on_a_virtual_clock() = true
+fn two_spans_on_a_virtual_clock() -> bool {
+    let (c, hand) = provide.clock(5000, 1700000000000)
+    let mut h = take hand
+    let r = trace.recorder(c)
+    let parent_ids = ok_context(0x0102030405060708, 0x090a0b0c0d0e0f10, 0x1112131415161718)
+    clock.advance_to(mut h, 6000)
+    let mut parent = result.unwrap(trace.start_with(r, c, None, parent_ids, "checkout", Server))
+    trace.set(mut parent, "http.route", Str("/cart"))
+    trace.set(mut parent, "attempt", Int(-3))
+    trace.set(mut parent, "cached", Bool(false))
+    trace.set(mut parent, "attempt", Int(2))
+    trace.link(mut parent, ok_context(0xfedcba9876543210, 0x0123456789abcdef, 2))
+    trace.set_status(mut parent, Succeeded)
+    clock.advance_to(mut h, 6250)
+    let child_ids = ok_context(0x0102030405060708, 0x090a0b0c0d0e0f10, 0xab)
+    let mut child = result.unwrap(trace.start_with(r, c, Some(trace.ids(parent)), child_ids, "db query", Client))
+    trace.set(mut child, "db.rows", Int(7))
+    trace.set_status(mut child, Failed)
+    clock.advance_to(mut h, 9000)
+    trace.end(r, c, take child)
+    clock.advance_to(mut h, 12345)
+    trace.end(r, c, take parent)
+    let mut about: List[trace.Attribute] = list.new()
+    list.push(mut about, trace.Attribute(key: "service.name", value: Str("shop")))
+    list.push(mut about, trace.Attribute(key: "deploy", value: Bool(true)))
+    let spans = trace.finish(take r)
+    let mut out = string.new()
+    trace.otlp_json(mut out, about, "hirsel.test", "1", spans)
+    out == two_spans_fixture()
+}
+
+// AnyValue spellings obs_export.py has no shape for. b"\x00\xffhi" is 00 ff 68 69, whose
+// base64 is "AP9o" then "aQ==" (RFC 4648 section 4). 0.25 is exact. An overflowed product is
+// -Infinity, a proto3 JSON string. The quote and newline are escaped (RFC 8259 section 7).
+// expect: run value_spellings() = true
+fn value_spellings() -> bool {
+    let (c, hand) = provide.clock(0, 1)
+    let mut h = take hand
+    let r = trace.recorder(c)
+    let mut s = result.unwrap(trace.start_with(r, c, None, ok_context(0, 1, 1), "v", Internal))
+    trace.set(mut s, "s", Str("a\"b\n"))
+    trace.set(mut s, "m", Int(-42))
+    trace.set(mut s, "i", Double(-1.0e308 * 10.0))
+    trace.set(mut s, "d", Double(0.25))
+    trace.set(mut s, "b", Blob(b"\x00\xffhi"))
+    clock.advance_to(mut h, 1)
+    trace.end(r, c, take s)
+    let spans = trace.finish(take r)
+    let mut out = string.new()
+    trace.otlp_json(mut out, list.new(), "s", "", spans)
+    out == "{\"resourceSpans\":[{\"resource\":{\"attributes\":[]},\"scopeSpans\":[{\"scope\":{\"name\":\"s\",\"version\":\"\"},\"spans\":[{\"attributes\":[{\"key\":\"b\",\"value\":{\"bytesValue\":\"AP9oaQ==\"}},{\"key\":\"d\",\"value\":{\"doubleValue\":0.25}},{\"key\":\"i\",\"value\":{\"doubleValue\":\"-Infinity\"}},{\"key\":\"m\",\"value\":{\"intValue\":\"-42\"}},{\"key\":\"s\",\"value\":{\"stringValue\":\"a\\\"b\\n\"}}],\"endTimeUnixNano\":\"1000001\",\"kind\":1,\"links\":[],\"name\":\"v\",\"spanId\":\"0000000000000001\",\"startTimeUnixNano\":\"1000000\",\"status\":{\"code\":0},\"traceId\":\"00000000000000000000000000000001\"}]}]}]}"
+}
+
+// OTLP: an all-zero trace id or span id is invalid. Only the whole 128-bit trace id being
+// zero makes it invalid, so a zero high word alone is accepted.
+// expect: run zero_ids_refused() = true
+fn zero_ids_refused() -> bool {
+    let zero_trace = trace.context(0, 0, 5) == Error(ZeroTrace)
+    let zero_span = trace.context(1, 0, 0) == Error(ZeroSpan)
+    let all_zero = trace.context(0, 0, 0) == Error(ZeroTrace)
+    let high_zero = trace.span_id(ok_context(0, 7, 5)) == 5
+    zero_trace && zero_span && all_zero && high_zero
+}
+
+// A child claims its parent's trace: a parent context from another trace, or the span itself
+// as its own parent, is refused before anything starts.
+// expect: run claimed_parent_refused() = true
+fn claimed_parent_refused() -> bool {
+    let (c, _hand) = provide.clock(0, 0)
+    let r = trace.recorder(c)
+    let own = ok_context(1, 2, 3)
+    let other_trace = match trace.start_with(r, c, Some(ok_context(1, 9, 4)), own, "x", Internal) {
+        Error(e) => e == OtherTrace,
+        Ok(_) => false,
+    }
+    let self_parent = match trace.start_with(r, c, Some(ok_context(1, 2, 3)), own, "x", Internal) {
+        Error(e) => e == SelfParent,
+        Ok(_) => false,
+    }
+    let _ = trace.finish(take r)
+    other_trace && self_parent
+}
+
+// Go TestPCG's stream from (1, 2) is 0xc4f5a58656eef510, 0x9dcec3ad077dec6c,
+// 0xc8d04605312f8088, 0xcbedc0dcb63ac19a. A root draws trace hi, trace lo, then its span
+// id; the child keeps the trace and draws the fourth word as its span id.
+// expect: run drawn_ids() = true
+fn drawn_ids() -> bool {
+    let (c, _hand) = provide.clock(0, 0)
+    let r = trace.recorder(c)
+    let mut g = rand.new(1, 2)
+    let root = trace.start(r, c, None, mut g, "root", Internal)
+    let child = trace.start(r, c, Some(trace.ids(root)), mut g, "child", Internal)
+    let root_ids = trace.ids(root)
+    let child_ids = trace.ids(child)
+    trace.end(r, c, take child)
+    trace.end(r, c, take root)
+    let _ = trace.finish(take r)
+    let (hi, lo) = trace.trace_id(root_ids)
+    let (child_hi, child_lo) = trace.trace_id(child_ids)
+    let root_ok = hi == 0xc4f5a58656eef510 && lo == 0x9dcec3ad077dec6c && trace.span_id(root_ids) == 0xc8d04605312f8088
+    root_ok && child_hi == hi && child_lo == lo && trace.span_id(child_ids) == 0xcbedc0dcb63ac19a
+}
+
+// A span ended on a Clock that reads below the recorder's anchor fails instead of wrapping
+// to a time near 2^64.
+// expect: run clock_behind_anchor() = fail Overflow
+fn clock_behind_anchor() -> bool {
+    let (anchored, _a) = provide.clock(1000, 0)
+    let (behind, _b) = provide.clock(0, 0)
+    let r = trace.recorder(anchored)
+    let s = result.unwrap(trace.start_with(r, anchored, None, ok_context(1, 1, 1), "x", Internal))
+    trace.end(r, behind, take s)
+    true
+}

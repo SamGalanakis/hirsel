@@ -194,6 +194,24 @@ class Export(unittest.TestCase):
             self.assertEqual(rows[0]['evidence'], load('view.json')['evidence'])
             self.assertEqual(rows[-1], {'state': 'finished', 'success': True})
 
+    def test_span_builder_matches_the_std_trace_fixture(self):
+        # core/std/tests/trace.hirsel encodes the same trace through std.trace and compares
+        # it with the same hand-written file, so the two encoders agree byte for byte.
+        trace = '0102030405060708090a0b0c0d0e0f10'
+        child = exporter.span_record(
+            'db query', '1700000000000001250', '1700000000000004000', 'Client',
+            exporter.attributes({'db.rows': 7}), trace, '00000000000000ab', '1112131415161718', status='Error')
+        parent = exporter.span_record(
+            'checkout', '1700000000000001000', '1700000000000007345', 'Server',
+            exporter.attributes({'http.route': '/cart', 'cached': False, 'attempt': 2}), trace, '1112131415161718',
+            links=[{'trace_id': 'fedcba98765432100123456789abcdef', 'span_id': '0000000000000002'}],
+            status='Success')
+        resource = [exporter.attribute('service.name', 'shop'), exporter.attribute('deploy', True)]
+        body = exporter.request_body('traces', resource, {'name': 'hirsel.test', 'version': '1'}, [child, parent])
+        validate_request('traces', body)
+        fixture = ROOT / 'core/std/tests/vectors/trace/two_spans.json'
+        self.assertEqual(exporter.encoded(body), fixture.read_bytes())
+
     def test_severity_ids_units_original_time_and_exact_integer_mapping(self):
         requests = {r['signal']: r['body'] for r in self.bundle()['requests']}
         logs = requests['logs']['resourceLogs'][0]['scopeLogs'][0]['logRecords']

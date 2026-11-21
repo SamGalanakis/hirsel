@@ -72,43 +72,101 @@ fn prepared_imports_match(a: ValidatedImport, b: ValidatedImport) -> bool {
     left == right && a.digest == b.digest && a.nodes == b.nodes && a.charge == b.charge && list.len(a.delta) == 0 && list.len(b.delta) == 0 && list.len(a.ranges) == 0 && list.len(b.ranges) == 0
 }
 
-fn prepared_read_boundary_sweep(d: Dir) -> bool waits {
+// R1: a refused admission in a read raises Capacity. The reads wait, so a child
+// task (FAIL-14), not isolate, is the boundary that observes the refusal; the
+// bound inside the child keeps each read's limit exact.
+type LawRead[R] = ReadReturned(R) | ReadRaised(Capacity) | ReadLost
+
+fn joined_read[X: send, R: send](tasks: Tasks, take job: X, f: fn(take X) -> Result[R, Capacity] waits) -> LawRead[R] waits {
+    let running = task.spawn(tasks, bytes 1048576, take job, f)
+    match task.join(take running) {
+        Ok(Ok(take seen)) => ReadReturned(take seen),
+        Error(Failed(causes)) => match raised_capacity(causes) {
+            Some(c) => ReadRaised(c),
+            None => ReadLost,
+        },
+        _ => ReadLost,
+    }
+}
+
+type ExportRead: send { d: Dir, c: Clock, limit: u64 }
+
+fn law_export_read(take job: ExportRead) -> Result[Option[DeployError], Capacity] waits {
+    let empty: Bytes = list.new()
+    bound bytes job.limit {
+        match open_export(job.d, job.c, empty, defaults()) {
+            Ok(_) => None,
+            Error(take problem) => Some(take problem),
+        }
+    }
+}
+
+// A refusal is the same refusal raised or returned: R1 raises an ordinary
+// allocation's refusal, while a bound-entry probe still returns it as Full.
+fn read_refusal(r: LawRead[Result[ValidatedImport, DeployError]]) -> Option[Capacity] {
+    match r {
+        ReadRaised(c) => Some(c),
+        ReadReturned(Error(Scratch(Full(c)))) => Some(c),
+        ReadReturned(Error(Store(Full(c)))) => Some(c),
+        _ => None,
+    }
+}
+
+// Two returned refusals must name the same side (scratch or store); a raised
+// one names neither.
+fn refusal_scope(r: LawRead[Result[ValidatedImport, DeployError]]) -> u64 {
+    match r {
+        ReadReturned(Error(Scratch(Full(_)))) => 1,
+        ReadReturned(Error(Store(Full(_)))) => 2,
+        _ => 0,
+    }
+}
+
+type PreparedRead: send { d: Dir, limit: u64, original: bool }
+
+fn law_prepared_read(take job: PreparedRead) -> Result[Result[ValidatedImport, DeployError], Capacity] waits {
+    bound bytes job.limit {
+        if job.original {
+            original_validate_prepared(job.d)
+        } else {
+            validate_prepared(job.d)
+        }
+    }
+}
+
+fn prepared_read_boundary_sweep(d: Dir, tasks: Tasks) -> bool waits {
     for limit in 120u64 .. 641u64 {
-        let before = result.unwrap(bound bytes limit {
-            original_validate_prepared(d)
-        })
-        let after = result.unwrap(bound bytes limit {
-            validate_prepared(d)
-        })
-        let agrees = match before {
-            Error(Scratch(Full(a))) => match after {
-                Ok(_) => true,
-                Error(Scratch(Full(b))) => a.requested == b.requested && a.available == b.available,
-                _ => false,
+        let before = joined_read(tasks, PreparedRead(d: d, limit: limit, original: true), law_prepared_read)
+        let after = joined_read(tasks, PreparedRead(d: d, limit: limit, original: false), law_prepared_read)
+        let agrees = match read_refusal(before) {
+            Some(a) => match after {
+                ReadReturned(Ok(_)) => true,
+                _ => match read_refusal(after) {
+                    Some(b) => a.requested == b.requested && a.available == b.available &&
+                        (refusal_scope(before) == 0 || refusal_scope(after) == 0 || refusal_scope(before) == refusal_scope(after)),
+                    None => false,
+                },
             },
-            Error(Store(Full(a))) => match after {
-                Ok(_) => true,
-                Error(Store(Full(b))) => a.requested == b.requested && a.available == b.available,
-                _ => false,
-            },
-            Error(Scratch(Corrupt(a))) => match after {
-                Error(Scratch(Corrupt(b))) => {
-                    a.file == b.file && a.offset == b.offset && match (a.why, b.why) {
-                        (Truncated, Truncated) => true,
-                        _ => false
-                    }
+            None => match take before {
+                ReadReturned(Error(Scratch(Corrupt(a)))) => match after {
+                    ReadReturned(Error(Scratch(Corrupt(b)))) => {
+                        a.file == b.file && a.offset == b.offset && match (a.why, b.why) {
+                            (Truncated, Truncated) => true,
+                            _ => false
+                        }
+                    },
+                    _ => false,
+                },
+                ReadReturned(Error(ImportMalformed)) => match after {
+                    ReadReturned(Error(ImportMalformed)) => true,
+                    _ => false,
+                },
+                ReadReturned(Ok(a)) => match after {
+                    ReadReturned(Ok(b)) => prepared_imports_match(a, b),
+                    _ => false,
                 },
                 _ => false,
             },
-            Error(ImportMalformed) => match after {
-                Error(ImportMalformed) => true,
-                _ => false,
-            },
-            Ok(a) => match after {
-                Ok(b) => prepared_imports_match(a, b),
-                _ => false,
-            },
-            _ => false,
         }
         if !agrees {
             return false
@@ -117,27 +175,23 @@ fn prepared_read_boundary_sweep(d: Dir) -> bool waits {
     true
 }
 
-pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
+pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     let empty: Bytes = list.new()
     // A zero-byte read spends only the 216-byte temporary charge.
     result.unwrap(std.file.write(d, "EXPORT", empty))
-    let empty_export = result.unwrap(bound bytes 216 {
-        open_export(d, c, empty, defaults())
-    })
+    let empty_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 216), law_export_read)
     match take empty_export {
-        Error(Store(Corrupt(fault))) => if fault.offset != 0 {
+        ReadReturned(Some(Store(Corrupt(fault)))) => if fault.offset != 0 {
             return false
         },
         _ => return false,
     }
     let mut fixture: Bytes = list.with_capacity(217)
-    result.unwrap(list.fill(mut fixture, 217, 0u8))
+    list.fill(mut fixture, 217, 0u8)
     result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 1)))
-    let short_export = result.unwrap(bound bytes 216 {
-        open_export(d, c, empty, defaults())
-    })
+    let short_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 216), law_export_read)
     match take short_export {
-        Error(Scratch(Full(admission))) => if admission.requested != 8 || admission.available != 0 {
+        ReadRaised(admission) => if admission.requested != 8 || admission.available != 0 {
             return false
         },
         _ => return false,
@@ -160,7 +214,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
         _ => return false,
     }
     result.unwrap(std.file.write(d, "PREPARED", list.slice(fixture, 0, 1)))
-    if !prepared_read_boundary_sweep(d) {
+    if !prepared_read_boundary_sweep(d, tasks) {
         return false
     }
     let short = result.unwrap(bound bytes 152 {
@@ -186,7 +240,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
     let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
     result.unwrap(write_prepared_frame(mut prepared_file, ctx, mut at, 0x0081, codec, meta))
     result.unwrap(host.close(take prepared_file))
-    if !prepared_read_boundary_sweep(d) {
+    if !prepared_read_boundary_sweep(d, tasks) {
         return false
     }
     let imported = match validate_prepared(d) {
@@ -199,7 +253,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
     let mut with_extra = result.unwrap(host.open(d, "PREPARED", Append))
     result.unwrap(host.write(mut with_extra, list.slice(fixture, 0, 1)))
     result.unwrap(host.close(take with_extra))
-    if !prepared_read_boundary_sweep(d) {
+    if !prepared_read_boundary_sweep(d, tasks) {
         return false
     }
     match validate_prepared(d) {
@@ -209,8 +263,8 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
 }
 
 @test
-fn disk_test_import_read_boundaries(d: Dir, c: Clock) -> Result[(), ()] waits {
-    if disk_law_import_read_boundaries(disk_test_directory(d), c) {
+fn disk_test_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_import_read_boundaries(disk_test_directory(d), c, tasks) {
         Ok(())
     } else {
         Error(())

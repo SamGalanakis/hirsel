@@ -135,6 +135,11 @@ pub fn builtin_address(identity: &Identity) -> Option<ContentHash> {
     builtin_semantics::number(&identity.definition).map(|n| hash_builtin(identity, n))
 }
 
+/// The exact semantics number implemented for a compiler builtin.
+pub fn builtin_semantics_number(definition: &hirsel_core_ids::DefPath) -> Option<u32> {
+    builtin_semantics::number(definition)
+}
+
 /// Whether the definition has a versioned compiler implementation.
 pub fn is_versioned_builtin(definition: &hirsel_core_ids::DefPath) -> bool {
     builtin_semantics::number(definition).is_some()

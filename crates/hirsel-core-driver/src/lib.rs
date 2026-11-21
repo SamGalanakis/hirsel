@@ -3,6 +3,7 @@
 pub mod call;
 pub mod cli;
 pub mod cli_tools;
+pub mod code_admission;
 pub mod code_store;
 pub mod describe;
 mod diagnostics;

@@ -3,9 +3,9 @@
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::ObjectRef;
 use std::{
-    fs::{self, File, Permissions},
+    fs::{self, File, OpenOptions, Permissions},
     io::{self, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -27,14 +27,17 @@ impl ObjectKind {
         }
     }
 
-    pub fn hash(self, bytes: &[u8]) -> ContentHash {
-        let domain = match self {
+    pub(crate) fn domain(self) -> &'static str {
+        match self {
             Self::Body => "hirsel.code-body.v1",
             Self::Annex => "hirsel.code-annex.v1",
             Self::Group => "hirsel.code-group.v1",
             Self::Recipe => "hirsel.release-recipe.v1",
-        };
-        ContentHash::of_parts(domain, [bytes])
+        }
+    }
+
+    pub fn hash(self, bytes: &[u8]) -> ContentHash {
+        ContentHash::of_parts(self.domain(), [bytes])
     }
 }
 
@@ -54,7 +57,17 @@ impl CodeStore {
     }
 
     pub fn open(&self, kind: ObjectKind, hash: ContentHash) -> io::Result<File> {
-        File::open(self.path(kind, hash))
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.path(kind, hash))?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "code object is not a regular file",
+            ));
+        }
+        Ok(file)
     }
 
     /// Publish one checked object, with an atomic, non-replacing name.

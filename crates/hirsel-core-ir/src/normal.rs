@@ -55,7 +55,32 @@ const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
 pub(crate) mod wire;
-use wire::{Read, Wire, Write};
+use wire::{Read, Tagged, Wire, Write};
+
+/// The frozen normal-form tag for an instruction.
+pub fn instruction_tag(instruction: &Inst) -> u8 {
+    instruction.tag()
+}
+
+/// The frozen normal-form tag for a terminator.
+pub fn terminator_tag(terminator: &Terminator) -> u8 {
+    terminator.tag()
+}
+
+/// The frozen normal-form tag for an engine runtime operation.
+pub fn runtime_tag(operation: &RtOp) -> u8 {
+    operation.tag()
+}
+
+/// The frozen normal-form tag inside an engine's host operation.
+pub fn host_tag(operation: &HostOp) -> u8 {
+    operation.tag()
+}
+
+/// The frozen normal-form tag inside an engine's flow operation.
+pub fn flow_tag(operation: &hirsel_core_layout::flow::Op) -> u8 {
+    operation.tag()
+}
 
 /// Fingerprint the closed ABI signature, independent of type row numbering.
 pub fn signature(module: &Module, function: FuncId) -> ContentHash {
@@ -1101,6 +1126,18 @@ impl DecodedBody {
             dictionaries: key.dictionaries.clone(),
             closures: self.closures[row].clone(),
         })
+    }
+
+    /// Resolve the retained slot in its canonical order.
+    pub fn slot_identity(&self, slot: usize, budget: &mut DecodeBudget) -> DecodeResult<Identity> {
+        match self.slots.get(slot) {
+            Some(Slot::External(function)) => self.identity(*function, budget),
+            Some(Slot::Builtin(definition)) => {
+                charge_identity(definition, &[], budget)?;
+                Ok(Identity::plain(definition.clone()))
+            }
+            None => Err(DecodeError::Malformed("slot outside normal form table")),
+        }
     }
 
     pub fn signature(

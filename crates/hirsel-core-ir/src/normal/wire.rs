@@ -469,8 +469,21 @@ macro_rules! wire_field {
     (read $input:ident, $field:ident @ optional_index) => {{ bool::read($input)?.then(|| $input.index()).transpose() }};
 }
 
+pub(super) trait Tagged {
+    fn tag(&self) -> u8;
+}
+
 macro_rules! tags {
+    (@ignore $field:ident) => { _ };
     ($ty:ty { $($tag:literal => $name:ident $( ( $($part:ident $(@ $part_kind:ident)?),+ ) )? $( { $($field:ident $(@ $field_kind:ident)?),+ } )?),* $(,)? }) => {
+        impl Tagged for $ty {
+            fn tag(&self) -> u8 {
+                match self {
+                    $(Self::$name $(( $(tags!(@ignore $part)),+ ))? $({ $($field: _),+ })? => $tag),*
+                }
+            }
+        }
+
         impl Wire for $ty {
             fn write(&self, out: &mut Write<'_, '_, '_>) {
                 match self {

@@ -1,0 +1,21 @@
+[package]
+name = "sqlite"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"sqlite.hirsel" = "sqlite"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hsq_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_sqlite.a", sha256 = "b90fbdeca7f416f284d68eaa773e019ee92619f824bce068fa7cdc0660df4fbb" },
+]
+
+[tests]
+limit = 67108864
+grants = ["Foreign=sqlite@1/sqlite/Sqlite", "Tasks", "Stdout"]
+
+[tests.sources]
+"tests.hirsel" = "tests"

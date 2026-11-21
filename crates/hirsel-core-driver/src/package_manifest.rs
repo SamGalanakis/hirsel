@@ -133,6 +133,55 @@ pub(crate) struct Manifest {
     pub(crate) workspace: Option<Workspace>,
 }
 
+// Keep native admission on the audited fixture archives until their slice gates pass.
+pub(crate) const STAGED_FOREIGN: [(&str, &str, &str, &str); 2] = [
+    (
+        "ffi_laws",
+        "hfl_",
+        "libffi_laws.a",
+        "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6",
+    ),
+    (
+        "sqlite",
+        "hsq_",
+        "libhirsel_sqlite.a",
+        "b90fbdeca7f416f284d68eaa773e019ee92619f824bce068fa7cdc0660df4fbb",
+    ),
+];
+
+fn staged_foreign(package: &Package, path: &Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    if package.id.major != 1 {
+        return false;
+    }
+    if package.id.name == "ffi_laws"
+        && ["headers", "types"]
+            .iter()
+            .any(|case| path.ends_with(format!("core/front/cases/ffi/{case}/ffi_laws/hirsel.toml")))
+    {
+        return package
+            .foreign
+            .values()
+            .all(|module| module.rows.is_empty());
+    }
+    STAGED_FOREIGN.iter().any(|&(name, symbols, file, pin)| {
+        package.id.name == name
+            && path.ends_with(format!("core/programs/{name}/hirsel.toml"))
+            && package.foreign.len() == 1
+            && package.foreign.iter().all(|(module, foreign)| {
+                module.as_slice() == ["native"]
+                    && foreign.symbols == symbols
+                    && foreign.rows.iter().all(|(target, archive)| {
+                        target == "x86_64-unknown-linux-gnu"
+                            && archive.file == file
+                            && crate::package_content::hex(&archive.pin) == pin
+                    })
+            })
+    })
+}
+
 impl Manifest {
     pub(crate) fn parse(bytes: &[u8], path: &Path) -> Result<Self, String> {
         Self::classify(bytes, path).1
@@ -156,22 +205,7 @@ impl Manifest {
             if !cfg!(test)
                 && let Some(package) = &manifest.package
                 && !package.foreign.is_empty()
-                && !std::fs::canonicalize(path).is_ok_and(|path| {
-                    package.id.name == "ffi_laws"
-                        && package.id.major == 1
-                        && path.ends_with("core/programs/ffi_laws/hirsel.toml")
-                        && package.foreign.len() == 1
-                        && package.foreign.iter().all(|(module, foreign)| {
-                            module.as_slice() == ["native"]
-                                && foreign.symbols == "hfl_"
-                                && foreign.rows.iter().all(|(target, archive)| {
-                                    target == "x86_64-unknown-linux-gnu"
-                                        && archive.file == "libffi_laws.a"
-                                        && crate::package_content::hex(&archive.pin)
-                                            == "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6"
-                                })
-                        })
-                })
+                && !staged_foreign(package, path)
             {
                 return Err(refuse("foreign modules are not enabled yet".into()));
             }

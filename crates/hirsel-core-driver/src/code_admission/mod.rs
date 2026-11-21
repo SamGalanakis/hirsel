@@ -336,17 +336,38 @@ pub fn admit_local(
     let bytes = read_recipe(store, root, limits.recipe_bytes, &budget)?;
     let recipe = Recipe::decode(&bytes, &mut budget)?;
     listed_objects(&recipe, limits, &mut budget)?;
+    let allow_foreign = staged_local_recipe(&recipe);
     verify_release(
         root,
         bytes,
         recipe,
         &mut budget,
         semantics,
+        allow_foreign,
         |kind, object, budget| {
             let file = open_object(store, kind, object.hash)?;
             read_verified(file, kind, object, budget)
         },
     )
+}
+
+fn staged_local_recipe(recipe: &Recipe) -> bool {
+    recipe.launch.target == "x86_64-unknown-linux-gnu"
+        && crate::package_manifest::STAGED_FOREIGN
+            .iter()
+            .any(|&(name, prefix, _, pin)| {
+                recipe.entry.definition.package_is(name, "1")
+                    && recipe.foreign_modules.iter().all(|leaf| {
+                        leaf.module.package_is(name, "1")
+                            && leaf.module.0.modules.is_empty()
+                            && leaf.module.0.name == "native"
+                            && leaf.symbols == prefix
+                    })
+                    && recipe
+                        .foreign_archives
+                        .iter()
+                        .all(|archive| crate::call::hex(&archive.hash.0) == pin)
+            })
 }
 
 impl AdmissionStore {
@@ -395,6 +416,7 @@ impl AdmissionStore {
             recipe,
             &mut budget,
             semantics,
+            false,
             |kind, object, budget| {
                 let key = ObjectKey {
                     kind,
@@ -419,6 +441,7 @@ fn verify_release(
     recipe: Recipe,
     budget: &mut DecodeBudget,
     semantics: &impl BackendSemantics,
+    allow_foreign: bool,
     mut load: impl FnMut(ObjectKind, &ObjectRef, &DecodeBudget) -> Result<Vec<u8>, AdmissionError>,
 ) -> Result<VerifiedRelease, AdmissionError> {
     let groups = decode_rows(&recipe.groups, budget, |object, budget| {
@@ -465,9 +488,11 @@ fn verify_release(
                 load(ObjectKind::ForeignArchive, archive, budget)?;
             }
         }
-        return Err(AdmissionError::Unsupported(
-            "foreign modules are not enabled yet",
-        ));
+        if !allow_foreign {
+            return Err(AdmissionError::Unsupported(
+                "foreign modules are not enabled yet",
+            ));
+        }
     }
     budget.check()?;
     Ok(VerifiedRelease {

@@ -2402,7 +2402,7 @@ pub extern "C" fn hirsel_core_ready(token: u64) {
 /// needs no `Moved` accessor.
 #[inline(never)]
 pub(crate) fn check_idle_tls() {
-    if !CURRENT.0.get().is_null() || !CALLBACK_TASK.0.get().is_null() || !WORKER.0.get().is_null() {
+    if !CURRENT.get_here().is_null() || !CALLBACK_TASK.get_here().is_null() || !WORKER.get_here().is_null() {
         crate::process::stop(b"UntiedParkWithTask");
     }
     crate::limit::check_unbound();
@@ -3548,6 +3548,22 @@ pub unsafe fn checkpoint() {
     }
 }
 
+/// The task's thread-locals before its unit parks and after it resumes, in
+/// one call each: both run on the unit's stack between switches.
+#[inline(never)]
+fn leave_task_tls() {
+    CURRENT.set_here(ptr::null_mut());
+    crate::fiber::guard_here((0, 0));
+}
+/// # Safety
+/// `task` is the resuming task, pinned by its run.
+#[inline(never)]
+unsafe fn enter_task_tls(task: *mut Task) {
+    CURRENT.set_here(task);
+    // SAFETY: by the contract.
+    crate::fiber::guard_here(unsafe { (*task).stack.as_ref().unwrap().bounds() });
+}
+
 pub(crate) fn current_task() -> *mut Task {
     CURRENT.get()
 }
@@ -3623,17 +3639,15 @@ pub(crate) unsafe fn park_unit_alone(task: *mut Task, spin: impl FnOnce() -> boo
         if spin() {
             return true;
         }
-        CURRENT.set(ptr::null_mut());
-        crate::fiber::guard((0, 0));
+        leave_task_tls();
         crate::limit::Funding::unbind();
         crate::units::park(None);
         // The caller takes its arrivals after resuming. Clear their flag
         // independently of the scheduler's ready tokens.
         let run = &*(*task).run;
         run.readies.port_pending.store(false, Ordering::Relaxed);
-        CURRENT.set(task);
+        enter_task_tls(task);
         abi::task_resume((*task).context);
-        crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
     }
     true
 }

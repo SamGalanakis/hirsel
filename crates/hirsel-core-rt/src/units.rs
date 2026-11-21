@@ -80,36 +80,68 @@ use sync::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
 
 /// mc-units-untied: a thread-local Cell whose every access computes the slot
 /// address inside a call that is never inlined, so no per-thread address
-/// computed before a unit moves to another worker is used after it.
-pub(crate) struct Moved<T: 'static>(pub(crate) &'static std::thread::LocalKey<Cell<T>>);
-impl<T: Copy> Moved<T> {
+/// computed before a unit moves to another worker is used after it. Each
+/// static has its own key type, so each gets its own accessors with a direct
+/// thread-local read (no shared accessor called through `LocalKey`).
+pub(crate) trait MovedKey: 'static {
+    type T: 'static;
+    fn key() -> &'static std::thread::LocalKey<Cell<Self::T>>;
+}
+pub(crate) struct Moved<K>(pub(crate) std::marker::PhantomData<K>);
+impl<K: MovedKey<T: Copy>> Moved<K> {
     #[inline(never)]
-    pub(crate) fn get(&'static self) -> T {
-        self.0.get()
+    pub(crate) fn get(&'static self) -> K::T {
+        K::key().get()
+    }
+    /// A read on code that cannot cross a stack switch before using it.
+    #[inline(always)]
+    pub(crate) fn get_here(&'static self) -> K::T {
+        K::key().get()
     }
 }
-impl<T> Moved<T> {
+impl<K: MovedKey> Moved<K> {
     #[inline(never)]
-    pub(crate) fn set(&'static self, v: T) {
-        self.0.set(v)
+    pub(crate) fn set(&'static self, v: K::T) {
+        K::key().set(v)
     }
     #[inline(never)]
-    pub(crate) fn replace(&'static self, v: T) -> T {
-        self.0.replace(v)
+    pub(crate) fn replace(&'static self, v: K::T) -> K::T {
+        K::key().replace(v)
+    }
+    /// `set` and `replace` on code that cannot cross a stack switch
+    /// between computing the slot and writing it.
+    #[inline(always)]
+    pub(crate) fn set_here(&'static self, v: K::T) {
+        K::key().set(v)
+    }
+    #[inline(always)]
+    pub(crate) fn replace_here(&'static self, v: K::T) -> K::T {
+        K::key().replace(v)
     }
 }
-impl<T: Default> Moved<T> {
+impl<K: MovedKey<T: Default>> Moved<K> {
     #[inline(never)]
-    pub(crate) fn take(&'static self) -> T {
-        self.0.take()
+    pub(crate) fn take(&'static self) -> K::T {
+        K::key().take()
     }
 }
 macro_rules! moved_tls {
     ($vis:vis static $name:ident: $t:ty = $init:expr;) => {
-        $vis static $name: $crate::units::Moved<$t> = {
+        #[allow(non_snake_case)]
+        $vis mod $name {
+            #[allow(unused_imports)]
+            use super::*;
             thread_local! { static INNER: std::cell::Cell<$t> = const { std::cell::Cell::new($init) }; }
-            $crate::units::Moved(&INNER)
-        };
+            pub(super) struct Key;
+            impl $crate::units::MovedKey for Key {
+                type T = $t;
+                #[inline(always)]
+                fn key() -> &'static std::thread::LocalKey<std::cell::Cell<$t>> {
+                    &INNER
+                }
+            }
+        }
+        $vis static $name: $crate::units::Moved<$name::Key> = $crate::units::Moved(std::marker::PhantomData);
     };
 }
 pub(crate) use moved_tls;
@@ -962,7 +994,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         // Acquire readiness published while this entry was already queued.
         u.state.swap(RUNNING, Ordering::SeqCst);
         // Law 1: never two workers inside one unit.
-        if u.inside.swap(true, Ordering::SeqCst) {
+        if u.inside.swap(true, Ordering::Acquire) {
             eprintln!("untied: law 1 violated: unit {} entered twice", u.id);
             std::process::abort();
         }
@@ -970,15 +1002,16 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         // Any park this entry ends is over: its deadline no longer applies.
         clear_timer(p, u);
         CUR.set(up.0.cast_mut());
-        let prev_fd = crate::fiber::set_stop_fd(u.stop_fd.get());
+        // The worker's host stack does not move threads.
+        let prev_fd = crate::fiber::set_stop_fd_here(u.stop_fd.get());
         *u.host.get() = host as *mut *mut u8;
         let timed = has_poll_sources(p) || work_waiting(p, ix);
         u.slice_start.set(timed.then(now));
         hirsel_stack::switch(host as *mut *mut u8, *u.sp.get());
-        u.stop_fd.set(crate::fiber::set_stop_fd(prev_fd));
+        u.stop_fd.set(crate::fiber::set_stop_fd_here(prev_fd));
         CUR.set(std::ptr::null_mut());
         let after = u.after.replace(After::Run);
-        u.inside.store(false, Ordering::SeqCst);
+        u.inside.store(false, Ordering::Release);
         match after {
             After::Done => {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);

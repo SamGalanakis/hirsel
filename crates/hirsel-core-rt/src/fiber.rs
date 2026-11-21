@@ -38,8 +38,18 @@ pub(crate) fn stop_fd() -> i32 {
 pub(crate) fn set_stop_fd(fd: i32) -> i32 {
     STOP_FD.replace(fd)
 }
+/// `set_stop_fd` on a stack that does not move threads (a worker's host stack).
+#[inline(always)]
+pub(crate) fn set_stop_fd_here(fd: i32) -> i32 {
+    STOP_FD.replace_here(fd)
+}
 pub(crate) fn guard(bounds: (usize, usize)) {
     GUARD.set(bounds);
+}
+/// `guard` from code that does not cross a stack switch before returning.
+#[inline(always)]
+pub(crate) fn guard_here(bounds: (usize, usize)) {
+    GUARD.set_here(bounds);
 }
 /// Whether the current stack has `bytes` above its guard page. A thread with
 /// no guarded stack current (a launcher or worker thread's own stack) has room.

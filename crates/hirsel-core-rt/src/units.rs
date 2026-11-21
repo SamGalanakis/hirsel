@@ -1246,8 +1246,8 @@ fn admit(p: &Pool) -> bool {
         .is_ok()
 }
 
-/// Make unit `id`, admitted already, and queue it. The record and its stack
-/// are made here; its program starts on its first run.
+/// Make unit `id`, admitted already, and queue it. The record is made here;
+/// its stack is taken and its program starts on its first run.
 fn create_unit(id: u32, role: u32) -> &'static Unit {
     let t0 = now();
     let p = pool();
@@ -1260,13 +1260,11 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         views.push(crate::process::View { data: e.as_ptr(), len: e.len() });
     }
     let config = crate::entry::OsConfig { args: views.as_ptr(), args_len: views.len(), ..*base };
-    let stack = p.memory.take_unit_stack();
-    let top = stack.top();
     let u: &'static Unit = Box::leak(Box::new(Unit {
         id,
         sp: UnsafeCell::new(std::ptr::null_mut()),
         host: UnsafeCell::new(std::ptr::null_mut()),
-        stack: UnsafeCell::new(Some(stack)),
+        stack: UnsafeCell::new(None),
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),
         after: Cell::new(After::Run),
@@ -1289,13 +1287,6 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         _extra: extra,
         config,
     }));
-    // SAFETY: the frame is written at the top of the unit's own stack.
-    unsafe {
-        let words = hirsel_stack::initial_frame(unit_entry, (u as *const Unit).cast_mut().cast(), std::ptr::null_mut());
-        let start = top.sub(16 + size_of_val(&words));
-        std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
-        *u.sp.get() = start;
-    }
     if !TABLE[id as usize]
         .compare_exchange(std::ptr::null_mut(), (u as *const Unit).cast_mut(), Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
@@ -1325,6 +1316,25 @@ fn spawn_child(parent: u32) -> u32 {
     }
     create_unit(id, ROLE_CHILD);
     id
+}
+
+/// Give a unit about to run for the first time its stack and initial frame.
+/// Done by the worker that runs it, so a cache miss's round trip to the
+/// memory thread never holds the poll turn or the unit's creator.
+/// # Safety
+/// `u` is dequeued by this worker and has never run.
+unsafe fn start_stack(p: &Pool, u: &Unit) {
+    let stack = p.memory.take_unit_stack();
+    // SAFETY: the frame is written at the top of the unit's own stack, which
+    // this worker alone owns until the unit runs.
+    unsafe {
+        let top = stack.top();
+        let words = hirsel_stack::initial_frame(unit_entry, (u as *const Unit).cast_mut().cast(), std::ptr::null_mut());
+        let start = top.sub(16 + size_of_val(&words));
+        std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
+        *u.sp.get() = start;
+        *u.stack.get() = Some(stack);
+    }
 }
 
 unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
@@ -1637,8 +1647,12 @@ fn poll_global(p: &Pool, timeout: i32) {
     fire_timers(p);
 }
 
+/// Connections the front listener admits per poll turn. The listener is
+/// level-triggered, so the rest are reported again at the next poll.
+const FRONT_ACCEPTS: usize = 64;
+
 fn accept_front(p: &Pool) {
-    loop {
+    for _ in 0..FRONT_ACCEPTS {
         // SAFETY: nonblocking accept on the live front listener.
         let fd = unsafe {
             libc::accept4(p.front, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
@@ -1742,6 +1756,9 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     // SAFETY: the dequeued record is live; this worker alone dequeued it.
     unsafe {
         let u = &*up.0;
+        if (*u.sp.get()).is_null() {
+            start_stack(p, u);
+        }
         // Acquire readiness published while this entry was already queued.
         u.state.swap(RUNNING, Ordering::SeqCst);
         // Law 1: never two workers inside one unit.

@@ -128,11 +128,21 @@ pub fn helper_laws() -> bool {
     if result.unwrap(helper.checksum_f64(1.25)) != 969109563u32 {
         return false
     }
-    let refused = bound bytes 0 {
-        helper.checksum_f64(1.25)
-    }
+    let refused = isolate(fn() -> Result[Result[u32, helper.Error], Capacity] {
+        bound bytes 0 {
+            helper.checksum_f64(1.25)
+        }
+    })
     match take refused {
-        Ok(Error(Capacity(c))) => c.available == 0,
+        Ok(Error(causes)) => {
+            for cause in causes {
+                return match cause.kind {
+                    Capacity(c) => c.available == 0,
+                    _ => false,
+                }
+            }
+            false
+        },
         _ => false
     }
 }

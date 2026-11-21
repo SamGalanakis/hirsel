@@ -1724,8 +1724,14 @@ impl Scheduler {
 
     fn stop_quiescent(&mut self) -> ! {
         #[cfg(feature = "record")]
-        {
-            let _ = self.tapes.seal_deadlock();
+        if let Some((_, fault)) = self.tapes.seal_deadlock() {
+            let mut line = crate::tape::format_verdict(fault, 0);
+            line.push('\n');
+            // SAFETY: stderr is fd 2 and `line` is valid for its length.
+            unsafe {
+                let _ = libc::write(2, line.as_ptr().cast(), line.len());
+                libc::_exit(1);
+            }
         }
         crate::process::stop(b"Deadlock");
     }

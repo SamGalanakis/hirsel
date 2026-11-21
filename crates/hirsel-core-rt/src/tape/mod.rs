@@ -456,6 +456,16 @@ impl Drop for ProviderFile {
     }
 }
 
+pub(crate) fn format_verdict(fault: Fault, at_corrupt: u64) -> String {
+    match fault {
+        Fault::Diverged(d) => format!("replay: Diverged({:?}) at {}", d.kind, d.at),
+        Fault::Truncated(at) => format!("replay: Truncated at {at}"),
+        Fault::Damaged(block) => format!("replay: Damaged at {block}"),
+        Fault::Corrupt => format!("replay: Corrupt at {at_corrupt}"),
+        other => format!("replay: {other}"),
+    }
+}
+
 impl Live {
     /// If this is a launcher replay, write `replay: VERDICT at N` (plus the source
     /// position under `--diagnose`) and exit 1 immediately so no program code,
@@ -464,16 +474,7 @@ impl Live {
         let Some(abort) = self.replay_abort else {
             return;
         };
-        let mut line = match fault {
-            Fault::Diverged(d) => format!("replay: Diverged({:?}) at {}", d.kind, d.at),
-            Fault::Truncated(at) => format!("replay: Truncated at {at}"),
-            Fault::Damaged(block) => format!("replay: Damaged at {block}"),
-            Fault::Corrupt => format!(
-                "replay: Corrupt at {}",
-                self.replayer.as_ref().map_or(0, |r| r.taken + 1)
-            ),
-            other => format!("replay: {other}"),
-        };
+        let mut line = format_verdict(fault, self.replayer.as_ref().map_or(0, |r| r.taken + 1));
         if abort.diagnose {
             // SAFETY: `abort.sources` is pinned for the process lifetime.
             if let Some(pos) = unsafe { crate::abi_sites::format_site(site, abort.sources) } {

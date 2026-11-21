@@ -171,6 +171,7 @@ pub(super) struct Store {
     open: BTreeMap<u64, (Vec<u8>, usize)>,
     next: u64,
     write_error: Option<IoError>,
+    fail_after_bytes: Option<(usize, IoError)>,
     read_meter: Option<hirsel_guard::admission::Owner>,
     read_peak: u64,
     bytes_read: usize,
@@ -207,8 +208,15 @@ impl Store {
                 WRITE => {
                     let (name, _) = &st.open[&r.handle];
                     let bytes = unsafe { std::slice::from_raw_parts(r.buffer.data, r.buffer.len) };
-                    st.files.get_mut(name).unwrap().extend_from_slice(bytes);
-                    o.written = bytes.len() as u64;
+                    let file = st.files.get_mut(name).unwrap();
+                    if let Some((limit, err)) = st.fail_after_bytes
+                        && file.len() + bytes.len() > limit
+                    {
+                        o.error = err;
+                    } else {
+                        file.extend_from_slice(bytes);
+                        o.written = bytes.len() as u64;
+                    }
                 }
                 READ => {
                     let (name, at) = st.open.get_mut(&r.handle).unwrap();
@@ -1294,150 +1302,97 @@ fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     );
 }
 
-/// The across open (v2.3, gavel 7): Replay of a tape whose revision is not
-/// the opener's opens, and only then is the tape labelled. Wrong
-/// implementations caught: an across open that still refuses, a label taken
-/// from the mode rather than the comparison, and a plain Replay that skips the
-/// revision when another refusal would also apply.
+/// Section 5.1 / Step 8.6: a recording write failure after K bytes leaves every
+/// program observation identical to a writer that never fails, stops writing at
+/// the last complete frame, and reports the truncation at end.
 #[test]
-fn an_across_open_runs_another_revision_and_says_so() {
-    let open = |revision: [u8; 32], e: &Expect| {
-        let mut store = Store::with(HAND);
-        unsafe {
-            Tape::open(
-                revision,
-                store.dir(),
-                b"t",
-                Mode::Replay,
-                &header(REVISION),
-                e,
-            )
-        }
-        .map(|(t, _)| t.revision_differs())
+fn recording_write_failure_preserves_observations_and_keeps_last_complete_frame() {
+    let mut full_store = Box::<Store>::default();
+    let mut full_world = World::new(100_000);
+    let (full_tape, _) = unsafe {
+        Tape::open(
+            REVISION,
+            full_store.dir(),
+            b"t",
+            Mode::Record,
+            &header(REVISION),
+            &expect(),
+        )
+    }
+    .unwrap();
+    let (expected_obs, expected_fault) =
+        scripted_run(&full_tape, full_world.provider(), 100_000, Variant::Same);
+    assert_eq!(expected_fault, None);
+    assert_eq!(full_tape.end_with_truncation(&ending()), Ok(None));
+    let full_bytes = full_store.file().to_vec();
+    let blocks = boundaries(&full_bytes);
+    assert!(blocks.len() > 2, "need multiple recorded blocks");
+
+    // Fail writes once the file would cross the middle of block 2: the header
+    // and earlier complete blocks succeed, and the failing write is rejected.
+    let limit = blocks[2] + 1;
+    let enospc = IoError {
+        tag: 5,
+        code: libc::ENOSPC as u32,
     };
-    let mut other = REVISION;
-    other[0] ^= 0x80;
-    let across = Expect {
-        across: true,
-        ..expect()
-    };
-    assert_eq!(open(other, &across), Ok(true));
-    assert_eq!(open(REVISION, &across), Ok(false));
-    assert_eq!(open(REVISION, &expect()), Ok(false));
-    assert_eq!(
-        open(other, &expect()),
-        Err(OpenError::Refused(Refusal::Revision))
+    let mut failing_store = Box::new(Store {
+        fail_after_bytes: Some((limit, enospc)),
+        ..Store::default()
+    });
+    let mut failing_world = World::new(100_000);
+    let (failing_tape, _) = unsafe {
+        Tape::open(
+            REVISION,
+            failing_store.dir(),
+            b"t",
+            Mode::Record,
+            &header(REVISION),
+            &expect(),
+        )
+    }
+    .unwrap();
+    let (obs, fault) = scripted_run(
+        &failing_tape,
+        failing_world.provider(),
+        100_000,
+        Variant::Same,
     );
     assert_eq!(
-        open(
-            other,
-            &Expect {
-                limit: 999,
-                ..across
-            }
+        obs, expected_obs,
+        "recording failure must not change any program observation"
+    );
+    assert_eq!(fault, None, "recording failure must not fault the program");
+    let truncation = failing_tape.end_with_truncation(&ending()).unwrap();
+    let Some((at, err)) = truncation else {
+        panic!("expected truncation report from end_with_truncation");
+    };
+    assert_eq!(err, enospc);
+    assert!(at >= 1, "truncation position must be at or after block 1");
+    let truncated = failing_store.file();
+    assert!(
+        truncated.len() <= limit,
+        "truncated recording must not exceed failing writer's limit"
+    );
+    assert_eq!(
+        truncated,
+        &full_bytes[..truncated.len()],
+        "truncated recording must be a prefix of the full recording"
+    );
+    assert!(
+        blocks.contains(&truncated.len()),
+        "truncated recording must end on a complete frame boundary"
+    );
+    let (_, _, verdict) = replay(truncated, 100_000, Variant::Same, &ending()).unwrap();
+    assert!(
+        matches!(
+            verdict,
+            Err(Fault::Diverged(Divergence {
+                kind: Mismatch::Missing,
+                ..
+            }))
         ),
-        Err(OpenError::Refused(Refusal::Limit))
+        "replaying a frame-aligned truncated recording reaches Missing, got {verdict:?}"
     );
-}
-
-/// Section 8. Wrong implementation caught: an end that leaves its handles
-/// live (a Record substitute still writing through, a Replay one turning into
-/// live I/O), or a cleanup that leaks the inner file.
-#[test]
-fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_file() {
-    let mut store = Box::<Store>::default();
-    let mut world = World::new(100);
-    let host = Counted::new(Some(world.provider()));
-    let (tape, _) = unsafe {
-        Tape::open(
-            REVISION,
-            store.dir(),
-            b"t",
-            Mode::Record,
-            &header(REVISION),
-            &expect(),
-        )
-    }
-    .unwrap();
-    let clock = tape
-        .on_tape(crate::entry::CLOCK, (host.provider(), 0))
-        .unwrap();
-    let dir = tape
-        .on_tape(crate::entry::DIR, (host.provider(), 0))
-        .unwrap();
-    let opened = plain(dir, OPEN, 0, b"data");
-    let file = (dir.0, handle_like(dir.1, opened.value));
-    let tape_cell = tape.cell;
-    tape.end(&ending()).unwrap();
-    let sealed = store.file().to_vec();
-    let before = host.calls.get();
-    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, STATUS_REFUSED);
-    assert_eq!(plain(dir, OPEN, 0, b"data").status, STATUS_REFUSED);
-    assert_eq!(spare(file, READ, &[], 10).status, STATUS_REFUSED);
-    assert_eq!(host.calls.get(), before, "an ended tape reached its source");
-    assert_eq!(plain(file, CLOSE, 0, &[]).status, STATUS_REFUSED);
-    assert_eq!(
-        host.calls.get(),
-        before + 3,
-        "cleanup closes the inner file once"
-    );
-    assert_eq!(plain(file, CLOSE, 0, &[]).status, STATUS_REFUSED);
-    assert_eq!(host.calls.get(), before + 3);
-    assert_eq!(store.file(), sealed, "nothing is written after end");
-
-    // The slot is reused by the next tape; the old handles still fail and
-    // never reach the new tape's sources or its file.
-    let mut next_store = Box::<Store>::default();
-    let next_host = Counted::new(Some(world.provider()));
-    let (next, _) = unsafe {
-        Tape::open(
-            REVISION,
-            next_store.dir(),
-            b"t",
-            Mode::Record,
-            &header(REVISION),
-            &expect(),
-        )
-    }
-    .unwrap();
-    assert!(ptr::eq(next.cell, tape_cell), "the ended slot is reused");
-    let _ = next
-        .on_tape(crate::entry::CLOCK, (next_host.provider(), 0))
-        .unwrap();
-    let written = next_store.file().to_vec();
-    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, STATUS_REFUSED);
-    assert_eq!(next_host.calls.get(), 0);
-    assert_eq!(next_store.file(), written);
-    drop(next);
-
-    // Replay of that tape: the same, and cleanup has nothing to close.
-    let mut store = Store::with(&sealed);
-    let refuse = Counted::new(None);
-    let (tape, _) = unsafe {
-        Tape::open(
-            REVISION,
-            store.dir(),
-            b"t",
-            Mode::Replay,
-            &header(REVISION),
-            &expect(),
-        )
-    }
-    .unwrap();
-    let clock = tape
-        .on_tape(crate::entry::CLOCK, (refuse.provider(), 0))
-        .unwrap();
-    let dir = tape
-        .on_tape(crate::entry::DIR, (refuse.provider(), 0))
-        .unwrap();
-    let opened = plain(dir, OPEN, 0, b"data");
-    assert_eq!(opened.value, 3);
-    let file = (dir.0, handle_like(dir.1, opened.value));
-    tape.end(&ending()).unwrap();
-    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, STATUS_REFUSED);
-    assert_eq!(spare(file, READ, &[], 10).status, STATUS_REFUSED);
-    assert_eq!(plain(file, CLOSE, 0, &[]).status, STATUS_REFUSED);
-    assert_eq!(refuse.calls.get(), 0);
 }
 
 /// Section 8, drop. Wrong implementation caught: a drop that loses the

@@ -34,6 +34,7 @@ pub(crate) mod ledger;
 use std::{
     cell::Cell,
     collections::VecDeque,
+    ptr,
     sync::{Arc, OnceLock, atomic::Ordering},
 };
 use sync::{AtomicU64, Mutex};
@@ -204,7 +205,7 @@ pub(crate) struct Unit {
     xspare: UnsafeCell<Vec<(u64, u32)>>,
     status: AtomicU8,
     stop_fd: Cell<i32>,
-    slice_start: Cell<u64>,
+    slice_start: Cell<Option<u64>>,
     created_ns: u64,
     first_park: Cell<bool>,
     /// The deadline of this unit's one live timer registration, or
@@ -292,6 +293,8 @@ struct Pool {
     gep: i32,
     gwake: i32,
     _shared: Arc<hirsel_core_net::Poller>,
+    /// The shared poller has been handed to a socket registry.
+    net_used: AtomicBool,
     /// Live park deadlines as (deadline, unit id): at most one per unit.
     timers: Mutex<BTreeSet<(u64, u32)>>,
     next_timer: AtomicU64,
@@ -302,6 +305,7 @@ struct Pool {
     stop: AtomicBool,
     last_poll: AtomicU64,
     spin_ns: u64,
+    connection_spins: u64,
     slice_ns: u64,
     poll_every_ns: u64,
     spin_poll_ns: u64,
@@ -406,7 +410,7 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         xspare: UnsafeCell::new(Vec::new()),
         status: AtomicU8::new(0),
         stop_fd: Cell::new(2),
-        slice_start: Cell::new(0),
+        slice_start: Cell::new(None),
         created_ns: t0,
         first_park: Cell::new(false),
         timer_at: AtomicU64::new(u64::MAX),
@@ -471,10 +475,9 @@ unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
 
 /// Switch from the running unit back to its worker. Returns when a worker
 /// (any) resumes the unit.
-fn leave(after: After) {
+fn leave(u: &Unit, after: After) {
     // SAFETY: called on the unit's own stack while it runs.
     unsafe {
-        let u = &*cur();
         crate::tasks::check_idle_tls();
         u.after.set(after);
         hirsel_stack::switch(u.sp.get(), **u.host.get());
@@ -489,7 +492,7 @@ pub(crate) fn park(deadline: Option<u64>) {
     if !u.first_park.replace(true) {
         add_stat(S_READY_TO_PARK_NS, now() - u.created_ns);
     }
-    leave(After::Wait(deadline));
+    leave(u, After::Wait(deadline));
 }
 
 /// The running unit's record, if untied and inside a unit.
@@ -536,20 +539,62 @@ pub(crate) fn untrack_sync(cell: *mut crate::os_sync::SyncCell) {
     }
 }
 
-/// Requeue the running unit if its slice is over and another unit waits.
+fn work_waiting(p: &Pool, ix: usize) -> bool {
+    p.queued.load(Ordering::Relaxed) != 0 || !p.lifo[ix].load(Ordering::Relaxed).is_null()
+}
+
+pub(crate) fn connection_spinner() -> *mut Unit {
+    if untied() && pool().connection_spins != 0 {
+        cur()
+    } else {
+        ptr::null_mut()
+    }
+}
+
+/// Spin only while a peer can make progress on another worker. Check work
+/// on every iteration, including the private slot that queued excludes.
+pub(crate) fn spin_connection(peer: &Unit, mut ready: impl FnMut() -> bool) -> bool {
+    let p = pool();
+    if p.connection_spins == 0
+        || p.w == 1
+        || !matches!(peer.state.load(Ordering::Relaxed), RUNNING | NOTIFIED)
+        || ptr::eq(peer, cur())
+    {
+        return false;
+    }
+    let ix = worker_ix();
+    for _ in 0..p.connection_spins {
+        if work_waiting(p, ix) || !matches!(peer.state.load(Ordering::Relaxed), RUNNING | NOTIFIED)
+        {
+            break;
+        }
+        if ready() {
+            return true;
+        }
+        std::hint::spin_loop();
+    }
+    false
+}
+
+/// Requeue the running unit when another unit waits and its slice is over.
 #[inline]
 pub(crate) fn maybe_yield() {
     let p = pool();
-    if p.queued.load(Ordering::Relaxed) == 0 && p.lifo[worker_ix()].load(Ordering::Relaxed).is_null() {
+    if !work_waiting(p, worker_ix()) {
         return;
     }
     // SAFETY: called on the unit's own stack while it runs.
     let u = unsafe { &*cur() };
-    if now().saturating_sub(u.slice_start.get()) < p.slice_ns {
+    // A turn that started without competition did not claim a timed slice.
+    // If work has arrived since then, yield at this checkpoint.
+    if u.slice_start
+        .get()
+        .is_some_and(|start| now().saturating_sub(start) < p.slice_ns)
+    {
         return;
     }
     bump(S_YIELDS);
-    leave(After::Yield);
+    leave(u, After::Yield);
 }
 
 /// Publish readiness to the next entry even when the unit already has a
@@ -602,8 +647,13 @@ pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
 /// The running unit's id, for the shared poller's tags.
 fn shared_unit() -> Option<u32> {
     let u = cur();
+    if u.is_null() {
+        return None;
+    }
+    // This callback runs before the registry can add a descriptor.
+    pool().net_used.store(true, Ordering::Relaxed);
     // SAFETY: a live unit record.
-    (!u.is_null()).then(|| unsafe { (*u).id })
+    Some(unsafe { (*u).id })
 }
 
 const LIFO_RUNS: u32 = 3;
@@ -612,7 +662,9 @@ fn enqueue(p: &Pool, u: &Unit) {
     let ix = worker_ix();
     if ix < p.w && p.lifo_on && !cur().is_null() {
         // Woken by the unit running on this worker: it runs here next.
-        let prev = p.lifo[ix].swap((u as *const Unit).cast_mut(), Ordering::AcqRel);
+        // Only this worker accesses its private slot.
+        let prev = p.lifo[ix].load(Ordering::Relaxed);
+        p.lifo[ix].store(ptr::from_ref(u).cast_mut(), Ordering::Relaxed);
         if !prev.is_null() {
             publish(p, &p.locals[ix], UP(prev));
         }
@@ -634,8 +686,9 @@ pub(crate) fn before_blocking() {
     if ix >= p.w || p.lifo[ix].load(Ordering::Relaxed).is_null() {
         return;
     }
-    let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
+    let l = p.lifo[ix].load(Ordering::Relaxed);
     if !l.is_null() {
+        p.lifo[ix].store(ptr::null_mut(), Ordering::Relaxed);
         publish(p, &p.locals[ix], UP(l));
     }
 }
@@ -742,6 +795,10 @@ fn add_timer(p: &Pool, at: u64, u: &Unit) {
 }
 /// End the unit's park: drop its timer registration if it still has one.
 fn clear_timer(p: &Pool, u: &Unit) {
+    // A running unit's timer can only be cleared by another worker.
+    if u.timer_at.load(Ordering::Relaxed) == u64::MAX {
+        return;
+    }
     let at = u.timer_at.swap(u64::MAX, Ordering::SeqCst);
     if at == u64::MAX {
         return;
@@ -751,8 +808,12 @@ fn clear_timer(p: &Pool, u: &Unit) {
     p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
 }
 fn fire_timers(p: &Pool) {
+    let next = p.next_timer.load(Ordering::SeqCst);
+    if next == u64::MAX {
+        return;
+    }
     let t = now();
-    if p.next_timer.load(Ordering::SeqCst) > t {
+    if next > t {
         return;
     }
     let mut due = Vec::new();
@@ -820,22 +881,22 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
             return Some(u);
         }
     }
-    if !p.lifo[ix].load(Ordering::Relaxed).is_null() {
-        let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
-        if !l.is_null() {
-            if p.lifo_runs[ix].load(Ordering::Relaxed) < LIFO_RUNS {
-                p.lifo_runs[ix].fetch_add(1, Ordering::Relaxed);
-                bump(S_LIFO);
-                return Some(UP(l));
-            }
-            // Out of private runs: the unit goes behind this worker's queue,
-            // or runs now if that queue is empty, as it would come first.
-            if p.locals[ix].lock().unwrap().is_empty() {
-                p.lifo_runs[ix].store(0, Ordering::Relaxed);
-                return Some(UP(l));
-            }
-            publish(p, &p.locals[ix], UP(l));
+    let l = p.lifo[ix].load(Ordering::Relaxed);
+    if !l.is_null() {
+        p.lifo[ix].store(ptr::null_mut(), Ordering::Relaxed);
+        let runs = p.lifo_runs[ix].load(Ordering::Relaxed);
+        if runs < LIFO_RUNS {
+            p.lifo_runs[ix].store(runs + 1, Ordering::Relaxed);
+            bump(S_LIFO);
+            return Some(UP(l));
         }
+        // Out of private runs. Take the slot only when this worker's
+        // queue is empty, as it would come first there.
+        if p.locals[ix].lock().unwrap().is_empty() {
+            p.lifo_runs[ix].store(0, Ordering::Relaxed);
+            return Some(UP(l));
+        }
+        publish(p, &p.locals[ix], UP(l));
     }
     p.lifo_runs[ix].store(0, Ordering::Relaxed);
     if p.queued.load(Ordering::SeqCst) == 0 {
@@ -865,6 +926,12 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
         }
     }
     None
+}
+
+/// Socket registrations and armed timers can make units runnable at any
+/// point in the turn. They keep the timed slice and existing poll cadence.
+fn has_poll_sources(p: &Pool) -> bool {
+    p.net_used.load(Ordering::Relaxed) || p.next_timer.load(Ordering::SeqCst) != u64::MAX
 }
 
 /// Poll the shared poller without blocking if no worker is blocked in it
@@ -899,8 +966,8 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         CUR.set(up.0.cast_mut());
         let prev_fd = crate::fiber::set_stop_fd(u.stop_fd.get());
         *u.host.get() = host as *mut *mut u8;
-        let started = now();
-        u.slice_start.set(started);
+        let timed = has_poll_sources(p) || work_waiting(p, ix);
+        u.slice_start.set(timed.then(now));
         hirsel_stack::switch(host as *mut *mut u8, *u.sp.get());
         u.stop_fd.set(crate::fiber::set_stop_fd(prev_fd));
         CUR.set(std::ptr::null_mut());
@@ -955,7 +1022,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         }
         // Busy workers poll now and then when no idle worker is blocked in
         // the poller.
-        if !p.poller_blocked.load(Ordering::Relaxed) {
+        if !p.poller_blocked.load(Ordering::Relaxed) && has_poll_sources(p) {
             poll_due(p, now(), p.poll_every_ns);
         }
     }
@@ -1112,11 +1179,13 @@ pub(crate) fn launch(
         gep,
         gwake,
         _shared: shared,
+        net_used: AtomicBool::new(false),
         timers: Mutex::new(BTreeSet::new()),
         next_timer: AtomicU64::new(u64::MAX),
         live: AtomicUsize::new(k),
         stop: AtomicBool::new(false),
         last_poll: AtomicU64::new(0),
+        connection_spins: env_u64("HIRSEL_UNTIED_CONN_SPINS", 16).min(128),
         spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 5) * 1000,
         spin_poll_ns: env_u64("HIRSEL_UNTIED_SPIN_POLL_US", 20) * 1000,
         slice_ns: env_u64("HIRSEL_UNTIED_SLICE_US", 500) * 1000,

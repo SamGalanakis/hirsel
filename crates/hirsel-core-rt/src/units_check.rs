@@ -1348,6 +1348,41 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
+    Case {
+        name: "connection_spin_yields_to_work",
+        workers: 2,
+        units: 3,
+        body: |id| {
+            match id {
+                0 => {
+                    while !FLAG[0].load(Ordering::SeqCst) {
+                        let _ = now();
+                    }
+                    // These two units occupy the workers; unit 2 is queued.
+                    assert!(!super::spin_connection(super::unit_ref(1).unwrap(), || {
+                        panic!("checked the port while unit 2 was runnable");
+                    }));
+                    wait_flag(1);
+                    served(0, "unit 0 resumed after unit 2 ran");
+                }
+                1 => {
+                    FLAG[0].store(true, Ordering::SeqCst);
+                    while !FLAG[1].load(Ordering::SeqCst) {
+                        let _ = now();
+                    }
+                }
+                _ => {
+                    FLAG[1].store(true, Ordering::SeqCst);
+                    wake_id(0);
+                }
+            }
+            0
+        },
+        producers: &[],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
     // 5-8. The connection path and the ledger on pool units
     // (`units_conn_check.rs`, which states the cases and their laws).
     Case {
@@ -1493,12 +1528,14 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         gep,
         gwake,
         _shared: shared,
+        net_used: super::AtomicBool::new(true),
         timers: super::Mutex::new(std::collections::BTreeSet::new()),
         next_timer: super::AtomicU64::new(u64::MAX),
         live: super::AtomicUsize::new(case.units as usize),
         stop: super::AtomicBool::new(false),
         last_poll: super::AtomicU64::new(0),
         spin_ns: 5_000,
+        connection_spins: 8,
         spin_poll_ns: 20_000,
         slice_ns: 500_000,
         poll_every_ns: 100_000,
@@ -1798,6 +1835,10 @@ mod tests {
     #[test]
     fn injector_starved() {
         check("injector_starved");
+    }
+    #[test]
+    fn connection_spin_yields_to_work() {
+        check("connection_spin_yields_to_work");
     }
     #[test]
     fn conn_wait_serve() {

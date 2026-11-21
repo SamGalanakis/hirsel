@@ -307,6 +307,10 @@ impl Inbox {
 pub(crate) struct Client(pub(crate) Arc<ConnCore>);
 
 impl Client {
+    pub(crate) fn receiver_port(&self) -> &super::Port {
+        &self.0.owner
+    }
+
     pub(crate) fn clone_client(&self) -> Client {
         self.0.slow.lock().unwrap().clients += 1;
         Client(self.0.clone())

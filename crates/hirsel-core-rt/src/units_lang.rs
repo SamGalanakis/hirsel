@@ -670,8 +670,9 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
     unsafe {
         let client = &(*client).client;
         let owners = &client.0.seqs;
-        let mut commit = tasks::before_commit();
-        if wait && tasks::check_cancel(context, site) != 0 {
+        let task = tasks::current_task();
+        let mut commit = tasks::before_commit_for(task);
+        if wait && tasks::check_cancel_for(context, site, task) != 0 {
             return failed;
         }
         let charge = item_charge(value, owners);
@@ -679,7 +680,9 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
         let sockets = detach_sockets(context, value, offsets());
         let mut source = CrossSend::new(value);
         source.sockets = sockets.clone();
-        let id = match UnitCtx::send_cross(client, source, charge, wait, || &mut unit().ctx) {
+        let id = match UnitCtx::send_cross(client, source, charge, wait, || {
+            &mut (*tasks::lang_unit_for(task)).ctx
+        }) {
             Sent::Accepted => {
                 free_owners(value, owners);
                 return out(0);
@@ -699,15 +702,16 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             }
             Sent::Waiting(id) => id,
         };
-        let u = unit();
+        let unit = tasks::lang_unit_for(task);
         let mut frame = SendWait {
             waiters: Waiters::default(),
             settled: None,
         };
-        u.sends.insert(id, &raw mut frame);
-        u.waits += 1;
+        (*unit).sends.insert(id, &raw mut frame);
+        (*unit).waits += 1;
         let mut withdrawn = false;
         loop {
+            let u = &mut *unit;
             if frame.settled.is_none() {
                 pump(u);
             }
@@ -729,21 +733,23 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 }
                 None => {}
             }
-            if !withdrawn && tasks::cancel_pending(context) {
+            if !withdrawn && tasks::cancel_pending_for(context, task) {
                 // A withdrawal that wins settles Withdrawn; one that loses
                 // waits for the acceptance or close on its way.
                 withdrawn = true;
                 if u.ctx.withdraw(client, id) {
-                    tasks::check_cancel(context, site);
+                    tasks::check_cancel_for(context, site, task);
                 }
                 continue;
             }
             drop(commit);
-            if tasks::park_unit_alone() {
-                commit = tasks::before_commit();
+            if tasks::park_unit_alone(task, || {
+                (*unit).ctx.port.spin_before_park(Some(client.receiver_port()))
+            }) {
+                commit = tasks::before_commit_for(task);
                 continue;
             }
-            commit = tasks::park(&raw mut frame.waiters);
+            commit = tasks::park_for(task, &raw mut frame.waiters);
         }
     }
 }
@@ -777,16 +783,18 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
     unsafe {
         let input = &(*inbox).inbox;
         let c = &input.0;
-        let mut commit = tasks::before_commit();
+        let task = tasks::current_task();
+        let mut commit = tasks::before_commit_for(task);
+        let unit = tasks::lang_unit_for(task);
         let mut waited = false;
         loop {
-            if wait && tasks::check_cancel(context, site) != 0 {
+            let u = &mut *unit;
+            if wait && tasks::check_cancel_for(context, site, task) != 0 {
                 if waited {
-                    unit().waits -= 1;
+                    u.waits -= 1;
                 }
                 return out(1 << 8, 0, 0);
             }
-            let u = unit();
             if c.side().taken.is_empty() && u.ctx.port.pending() {
                 if u.waits <= usize::from(waited) && u.ctx.take_single_item(c) {
                     take_sockets(u, &*inbox);
@@ -833,11 +841,11 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 u.waits += 1;
             }
             drop(commit);
-            if tasks::park_unit_alone() {
-                commit = tasks::before_commit();
+            if tasks::park_unit_alone(task, || (*unit).ctx.port.spin_before_park(None)) {
+                commit = tasks::before_commit_for(task);
                 continue;
             }
-            commit = tasks::park(&raw mut (*inbox).waiters);
+            commit = tasks::park_for(task, &raw mut (*inbox).waiters);
         }
     }
 }
@@ -862,7 +870,7 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
                 break;
             }
             drop(commit);
-            if tasks::park_unit_alone() {
+            if tasks::park_unit_alone(tasks::current_task(), || false) {
                 commit = tasks::before_commit();
                 continue;
             }

@@ -1551,6 +1551,7 @@ impl Scheduler {
         }
         self.poll_net(net_timeout);
         if !self.lang.is_null() {
+            self.readies.port_pending.store(false, Ordering::Relaxed);
             // SAFETY: the run pins its unit; no task runs.
             unsafe {
                 crate::units_lang::pump(&mut *self.lang);
@@ -1826,7 +1827,7 @@ impl Scheduler {
     }
 
     fn idle(&mut self, flow_pending: bool) {
-        if self.readies.pending.load(Ordering::Acquire) || !self.cancels.is_empty() {
+        if self.readies.has_pending() || !self.cancels.is_empty() {
             return;
         }
         let deadline = self.timers.deadline();
@@ -1846,7 +1847,7 @@ impl Scheduler {
             // Read before the ready flag: a sync's ready is pushed before its
             // count drops, so zero here and no ready below is quiescence.
             let syncing = self.readies.outside();
-            if !self.readies.pending.load(Ordering::Acquire)
+            if !self.readies.has_pending()
                 && self.now() == now
                 && deadline.is_none_or(|at| at > now)
                 && !flow_pending
@@ -1898,7 +1899,7 @@ impl Scheduler {
                 }
             }
         };
-        if release && !self.readies.pending.load(Ordering::Acquire) {
+        if release && !self.readies.has_pending() {
             release_idle(self);
         }
     }
@@ -2115,6 +2116,7 @@ pub(crate) struct Readies {
     tokens: Mutex<Vec<u64>>,
     /// Through the pool's seam: the pool checker schedules around it.
     pending: crate::units::sync::AtomicBool,
+    port_pending: crate::units::sync::AtomicBool,
     worker: std::thread::Thread,
     peers: Mutex<Vec<std::thread::Thread>>,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
@@ -2134,6 +2136,7 @@ impl Readies {
         Arc::new(Self {
             tokens: Mutex::new(Vec::new()),
             pending: crate::units::sync::AtomicBool::new(false),
+            port_pending: crate::units::sync::AtomicBool::new(false),
             worker: std::thread::current(),
             peers: Mutex::default(),
             net: Mutex::new(None),
@@ -2152,11 +2155,17 @@ impl Readies {
         self.lock().push(token);
         self.pending.store(true, Ordering::Release);
     }
+    pub(crate) fn unit_id(&self) -> u32 {
+        self.unit
+    }
     /// The port head carries its own arrivals. There is no operation token
     /// to enqueue or capture when the port readies the scheduler.
     pub(crate) fn ready_port(&self) {
-        self.pending.store(true, Ordering::Release);
+        self.port_pending.store(true, Ordering::Release);
         self.notify();
+    }
+    fn has_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire) || self.port_pending.load(Ordering::Acquire)
     }
     fn push(&self, token: u64) {
         self.enqueue(token);
@@ -2847,6 +2856,14 @@ pub(crate) fn before_commit() -> crate::sequencer::Guard {
     crate::sequencer::enter()
 }
 
+/// Enter a commit with the task already resolved by the operation entry.
+#[inline(always)]
+pub(crate) fn before_commit_for(_task: *mut Task) -> crate::sequencer::Guard {
+    #[cfg(feature = "record")]
+    replay_boundary_for(_task, false);
+    crate::sequencer::enter()
+}
+
 /// Only a pool fiber can retain a receive acquisition. Replay has to
 /// dispatch each scalar receive at its own tape gap.
 pub(crate) fn can_fuse_receives() -> bool {
@@ -2918,8 +2935,13 @@ fn tape_boundary(group: Group, ending: bool) {
 #[cfg(feature = "record")]
 #[inline(never)]
 fn replay_boundary(provider_entry: bool) {
-    let task = CURRENT.get();
-    // SAFETY: CURRENT pins this task. No scheduler reference is held across a switch.
+    replay_boundary_for(CURRENT.get(), provider_entry);
+}
+
+#[cfg(feature = "record")]
+#[inline(never)]
+fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
+    // SAFETY: called with the active task. No scheduler reference survives a switch.
     unsafe {
         if task.is_null() || !(*task).replay {
             return;
@@ -3462,12 +3484,22 @@ pub unsafe fn checkpoint() {
     }
 }
 
+pub(crate) fn current_task() -> *mut Task {
+    CURRENT.get()
+}
+
 /// The running task's unit (units_lang), made at its run's first unit
 /// operation.
 /// # Safety
 /// A task is running and holds the commit.
 pub(crate) unsafe fn lang_unit() -> *mut crate::units_lang::LangUnit {
-    let mut task = CURRENT.get();
+    // SAFETY: forwarded from the active task or callback.
+    unsafe { lang_unit_for(CURRENT.get()) }
+}
+
+/// # Safety
+/// `task` is the active task, or null in a callback.
+pub(crate) unsafe fn lang_unit_for(mut task: *mut Task) -> *mut crate::units_lang::LangUnit {
     if task.is_null() {
         task = CALLBACK_TASK.get();
     }
@@ -3493,12 +3525,12 @@ pub(crate) unsafe fn lang_unit() -> *mut crate::units_lang::LangUnit {
 /// a pump that readies another task sends the next wait the long way.
 /// # Safety
 /// The caller holds no commit and pins its condition across the park.
-pub(crate) unsafe fn park_unit_alone() -> bool {
-    if !crate::units::untied() || !WORKER.get().is_null() || !CALLBACK_TASK.get().is_null() {
-        return false;
-    }
-    let task = CURRENT.get();
-    if task.is_null() {
+pub(crate) unsafe fn park_unit_alone(task: *mut Task, spin: impl FnOnce() -> bool) -> bool {
+    if task.is_null()
+        || !crate::units::untied()
+        || !WORKER.get().is_null()
+        || !CALLBACK_TASK.get().is_null()
+    {
         return false;
     }
     // SAFETY: the running task pins its run; only this thread uses it.
@@ -3520,21 +3552,21 @@ pub(crate) unsafe fn park_unit_alone() -> bool {
             || !run.timers.root.is_null()
             || !run.parked.live.is_empty()
             || run.readies.outside()
-            || run.readies.pending.load(Ordering::Acquire)
+            || run.readies.has_pending()
         {
             return false;
+        }
+        if spin() {
+            return true;
         }
         CURRENT.set(ptr::null_mut());
         crate::fiber::guard((0, 0));
         crate::limit::Funding::unbind();
         crate::units::park(None);
-        // Nothing else in this run is armed. Clear the port notification
-        // here in place of the scheduler's turn. Preserve a real ready token
-        // if a completion posted one concurrently.
-        let run = &mut *(*task).run;
-        if run.readies.pending.swap(false, Ordering::Acquire) && !run.readies.lock().is_empty() {
-            run.readies.pending.store(true, Ordering::Release);
-        }
+        // The caller takes its arrivals after resuming. Clear their flag
+        // independently of the scheduler's ready tokens.
+        let run = &*(*task).run;
+        run.readies.port_pending.store(false, Ordering::Relaxed);
         CURRENT.set(task);
         abi::task_resume((*task).context);
         crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
@@ -3548,8 +3580,14 @@ pub(crate) unsafe fn park_unit_alone() -> bool {
 /// The active task owns the commit and holds the condition's owner alive
 /// across suspension. No references to scheduler/task state survive the switch.
 pub(crate) unsafe fn park(queue: *mut Waiters) -> crate::sequencer::Guard {
+    // SAFETY: the active task and queue meet the contract.
+    unsafe { park_for(CURRENT.get(), queue) }
+}
+
+/// # Safety
+/// As for `park`, with the active task passed by the caller.
+pub(crate) unsafe fn park_for(task: *mut Task, queue: *mut Waiters) -> crate::sequencer::Guard {
     let commit = crate::sequencer::enter();
-    let task = CURRENT.get();
     // SAFETY: the condition was checked in this commit and the queue is pinned.
     unsafe {
         if !task.is_null() {
@@ -3687,10 +3725,16 @@ pub(crate) unsafe fn delegable(request: &Delegated) -> bool {
 /// Context belongs to this task; primary is available on a normal path.
 #[inline(always)]
 pub(crate) unsafe fn cancel_pending(context: *mut Context) -> bool {
-    // SAFETY: the operation pins its exclusive, aligned task context. Pending
-    // cancellation is the common false condition; shield/grant checks are cold.
+    // SAFETY: the context and current task are pinned.
+    unsafe { cancel_pending_for(context, CURRENT.get()) }
+}
+
+/// # Safety
+/// The context and task belong to the running operation. Task may be null.
+#[inline(always)]
+pub(crate) unsafe fn cancel_pending_for(context: *mut Context, task: *mut Task) -> bool {
+    // SAFETY: the operation pins its exclusive, aligned task context.
     let current = unsafe { NonNull::new_unchecked(context).as_ref() };
-    let task = CURRENT.get();
     let requested = if task.is_null() {
         &current.cancel_requested
     } else {
@@ -3704,10 +3748,18 @@ pub(crate) unsafe fn cancel_pending(context: *mut Context) -> bool {
 /// Context belongs to this task; primary is available on a normal path.
 #[inline(always)]
 pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
+    // SAFETY: the operation pins the current task and its context.
+    unsafe { check_cancel_for(context, site, CURRENT.get()) }
+}
+
+/// # Safety
+/// As for `check_cancel`, with the active task passed by the caller.
+#[inline(always)]
+pub(crate) unsafe fn check_cancel_for(context: *mut Context, site: u64, task: *mut Task) -> u8 {
     // SAFETY: the operation pins the running task and its context.
-    if unsafe { cancel_pending(context) } {
+    if unsafe { cancel_pending_for(context, task) } {
         // SAFETY: this task exclusively owns the observed request and primary.
-        unsafe { observe_cancel(context, site) };
+        unsafe { observe_cancel(context, site, task) };
         1
     } else {
         0
@@ -3715,11 +3767,10 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
 }
 #[cold]
 #[inline(never)]
-unsafe fn observe_cancel(context: *mut Context, site: u64) {
+unsafe fn observe_cancel(context: *mut Context, site: u64, task: *mut Task) {
     // SAFETY: the operation entry exclusively owns this task context.
     unsafe {
         let _commit = before_commit();
-        let task = CURRENT.get();
         if task.is_null() {
             (*context).cancel_requested.store(false, Ordering::Release);
         } else {
@@ -4158,7 +4209,7 @@ impl RunPtr {
                         && run.deferred.is_null()
                         && no_live_tapes
                         && run.cancels.is_empty()
-                        && !run.readies.pending.load(Ordering::Acquire)
+                        && !run.readies.has_pending()
                         && run.has_outside_wait();
                     let untied = crate::units::untied();
                     let (timeout, release) = if wait_for_net && untied {
@@ -4368,7 +4419,7 @@ impl RunPtr {
         let deadline = crate::os::monotonic_ns().saturating_add(IDLE_SPIN_NS);
         loop {
             if pool.nudged[index].load(Ordering::Acquire)
-                || pool.readies.pending.load(Ordering::Acquire)
+                || pool.readies.has_pending()
             {
                 pool.wake(index);
                 return;
@@ -4390,7 +4441,7 @@ impl RunPtr {
                 return;
             }
             let deadline = run.timers.deadline();
-            if run.readies.pending.load(Ordering::Acquire) {
+            if run.readies.has_pending() {
                 pool.wake(index);
                 return;
             }
@@ -4424,7 +4475,7 @@ impl RunPtr {
             && let Some(events) = poller
                 .wait(timeout, || {
                     pool.nudged[index].load(Ordering::Acquire)
-                        || pool.readies.pending.load(Ordering::Acquire)
+                        || pool.readies.has_pending()
                 })
                 .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
         {

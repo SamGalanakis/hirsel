@@ -373,6 +373,9 @@ pub(crate) struct Port {
     // A tagged unit id for a ledger port, or one Arc count of the
     // language scheduler's waiter. Null means no wake target.
     wake: AtomicPtr<crate::tasks::Readies>,
+    /// The last publisher that woke this port, a hint for waits with many
+    /// possible senders. Pool unit records outlive their port references.
+    last_waker: AtomicPtr<super::Unit>,
 }
 
 // SAFETY: the port's fields are atomics; the arrivals it owns are Send.
@@ -385,6 +388,7 @@ impl Port {
             head: AtomicPtr::new(ptr::null_mut()),
             fwd: AtomicPtr::new(ptr::null_mut()),
             wake: AtomicPtr::new(ptr::null_mut()),
+            last_waker: AtomicPtr::new(ptr::null_mut()),
         })
     }
 
@@ -405,6 +409,43 @@ impl Port {
     pub(crate) fn set_wake(&self, unit: u32) {
         let tag = ptr::without_provenance_mut((unit as usize) << 1 | 1);
         self.wake.store(tag, Ordering::Release);
+    }
+
+    fn receiver(&self) -> Option<&'static super::Unit> {
+        let wake = self.wake.load(Ordering::Acquire);
+        let id = if wake.addr() & 1 != 0 {
+            (wake.addr() >> 1) as u32
+        } else if wake.is_null() {
+            return None;
+        } else {
+            // SAFETY: the port pins its scheduler's waiter.
+            unsafe { &*wake }.unit_id()
+        };
+        super::unit_ref(id)
+    }
+
+    pub(crate) fn spin_before_park(&self, settling_on: Option<&Self>) -> bool {
+        if super::pool().connection_spins == 0 {
+            return false;
+        }
+        let peer = match settling_on {
+            Some(port) => port.receiver(),
+            // SAFETY: the publisher stores a leaked pool unit record.
+            None => unsafe { self.last_waker.load(Ordering::Acquire).as_ref() },
+        };
+        let Some(peer) = peer else { return false };
+        // A language wait normally leaves the port armed. Disarm only when
+        // about to spin so a publication caught here needs no scheduler wake.
+        let mut armed = None;
+        let ready = super::spin_connection(peer, || {
+            armed.get_or_insert_with(|| self.disarm());
+            self.pending()
+        });
+        if !ready && armed == Some(true) {
+            // A publish that skipped the wake won the race with rearming.
+            return !self.arm();
+        }
+        ready
     }
 
     /// Push one arrival. Wakes the unit only if it was parked on the port.
@@ -446,6 +487,10 @@ impl Port {
             {
                 Ok(_) => {
                     if h == WAITING {
+                        let sender = super::connection_spinner();
+                        if !sender.is_null() && sender != self.last_waker.load(Ordering::Relaxed) {
+                            self.last_waker.store(sender, Ordering::Release);
+                        }
                         let wake = self.wake.load(Ordering::Acquire);
                         if wake.addr() & 1 != 0 {
                             super::wake_id((wake.addr() >> 1) as u32);
@@ -726,28 +771,45 @@ impl ArrivalRef {
         }
     }
 
-    fn into_body(self) -> (Body, TakeInfo, u32) {
-        let node = self.into_raw();
-        // SAFETY: the handle owns the node. An item keeps the slot reserved
-        // until receive or cleaning. Free the allocation for other arrivals.
+    /// Move an item out of its slot. The receiver still owns the reservation.
+    fn into_item(self) -> Result<(*const ConnCore, Taken, TakeInfo), Self> {
+        let node = self.0.as_ptr();
+        // SAFETY: this handle owns the initialized node. Only the Value
+        // and test name move out. The connection still owns the storage.
         unsafe {
             #[cfg(test)]
             super::sync::read_arrival(node);
-            let body = ptr::addr_of!((*node).body).read();
-            #[cfg(test)]
-            let info = ptr::addr_of!((*node).names).read().map(|mut names| {
-                names.content = body.content();
-                names
-            });
-            #[cfg(not(test))]
-            let info = ();
-            let slot = if let Body::Item(c, _) = body {
-                (*c).arrival_index(node)
-            } else {
-                drop(Box::from_raw(node.cast::<std::mem::MaybeUninit<Arrival>>()));
-                0
+            let Body::Item(c, value) = &(*node).body else {
+                return Err(self);
             };
-            (body, info, slot)
+            let c = *c;
+            let slot = (*c).arrival_index(node);
+            let (info, value) = (Self::take_info(node), ptr::read(value));
+            let _ = self.into_raw();
+            Ok((c, Taken { slot, value }, info))
+        }
+    }
+
+    /// Move the detached notice out and free the allocation that carried it.
+    fn into_notice(self) -> (TakeInfo, Body) {
+        let node = self.into_raw();
+        // SAFETY: the handle owns this boxed, non-item node.
+        unsafe {
+            let arrival = (Self::take_info(node), ptr::addr_of!((*node).body).read());
+            drop(Box::from_raw(node.cast::<std::mem::MaybeUninit<Arrival>>()));
+            arrival
+        }
+    }
+
+    /// The caller owns this initialized arrival and takes its name once.
+    unsafe fn take_info(_node: *mut Arrival) -> TakeInfo {
+        #[cfg(test)]
+        // SAFETY: the caller still owns the live body the name describes.
+        unsafe {
+            ptr::addr_of!((*_node).names).read().map(|mut names| {
+                names.content = (*_node).body.content();
+                names
+            })
         }
     }
 }
@@ -1006,12 +1068,11 @@ impl UnitCtx {
         let Some(arrival) = self.port.take_single_item(c) else {
             return false;
         };
-        let (body, _, slot) = self.intake_one(arrival).into_body();
-        let Body::Item(_, value) = body else {
+        let Ok((_, item, _)) = self.intake_one(arrival).into_item() else {
             unreachable!();
         };
         self.took_ident = ptr::from_ref(c).addr();
-        c.side().taken.push_back(Taken { slot, value });
+        c.side().taken.push_back(item);
         true
     }
 
@@ -1022,9 +1083,8 @@ impl UnitCtx {
             if let Some(t) = self.take() {
                 return t;
             }
-            if self.port.arm() {
+            if !self.port.spin_before_park(None) && self.port.arm() {
                 super::park(None);
-                self.port.disarm();
             }
         }
     }
@@ -1782,7 +1842,20 @@ impl UnitCtx {
                 first
             }
         };
-        let (body, info, slot) = arrival.into_body();
+        match arrival.into_item() {
+            Ok((c, item, info)) => {
+                // SAFETY: as in `intake_one`.
+                unsafe { &*c }.side().taken.push_back(item);
+                self.took_ident = c.addr();
+                Some((Took::Item, info))
+            }
+            Err(notice) => Some(self.take_notice(notice)),
+        }
+    }
+
+    #[cold]
+    fn take_notice(&mut self, notice: ArrivalRef) -> (Took, TakeInfo) {
+        let (info, body) = notice.into_notice();
         let (t, ident) = match body {
             Body::Credits(cs) => {
                 for c in cs {
@@ -1814,11 +1887,7 @@ impl UnitCtx {
                 self.drop_value(v);
                 (Took::Withdrawn(id), id as usize)
             }
-            Body::Item(c, value) => {
-                // SAFETY: as in `intake_one`.
-                unsafe { &*c }.side().taken.push_back(Taken { slot, value });
-                (Took::Item, c.addr())
-            }
+            Body::Item(..) => unreachable!(),
             Body::Close(c) => {
                 c.side().closed = true;
                 (Took::Close, Arc::as_ptr(&c).addr())
@@ -1831,7 +1900,7 @@ impl UnitCtx {
             Body::Cancel => (Took::Cancel, 0),
         };
         self.took_ident = ident;
-        Some((t, info))
+        (t, info)
     }
 
     /// The value of a waiting send settled `Closed`, back to its sender.

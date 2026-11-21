@@ -30,6 +30,11 @@ macro_rules! named {
     };
 }
 
+#[path = "units_ledger_abi.rs"]
+pub(crate) mod abi;
+#[cfg(not(test))]
+#[path = "units_conn_bench.rs"]
+pub(crate) mod bench;
 #[path = "units_conn.rs"]
 pub(crate) mod conn;
 #[cfg(test)]
@@ -230,22 +235,26 @@ impl Port {
         }
     }
 
-    /// Take every published arrival, oldest first.
-    fn drain(&self, into: &mut VecDeque<Box<Arrival>>) {
+    /// Take every published arrival, oldest first: one swap, and the stack
+    /// is reversed in place.
+    fn drain(&self) -> Chain {
         let h = self.head.load(Ordering::Acquire);
         if h.is_null() || marker(h) {
-            return;
+            return Chain(ptr::null_mut());
         }
         let mut p = self.head.swap(ptr::null_mut(), Ordering::Acquire);
-        let mut list = Vec::new();
+        let mut prev = ptr::null_mut();
         while !p.is_null() {
             // SAFETY: every node in the list was published with Box::into_raw
             // and is owned by the taker after the swap.
-            let a = unsafe { Box::from_raw(p) };
-            p = a.next;
-            list.push(a);
+            unsafe {
+                let next = (*p).next;
+                (*p).next = prev;
+                prev = p;
+                p = next;
+            }
         }
-        into.extend(list.into_iter().rev());
+        Chain(prev)
     }
 
     /// Install a marker, returning what was published before it.
@@ -391,6 +400,30 @@ impl Drop for HelperEnd {
     }
 }
 
+/// Arrivals taken from a port, oldest first, owned by the taker.
+struct Chain(*mut Arrival);
+
+impl Iterator for Chain {
+    type Item = Box<Arrival>;
+    fn next(&mut self) -> Option<Box<Arrival>> {
+        if self.0.is_null() {
+            return None;
+        }
+        // SAFETY: the chain owns each node (see `Port::drain`).
+        let mut a = unsafe { Box::from_raw(self.0) };
+        self.0 = std::mem::replace(&mut a.next, ptr::null_mut());
+        Some(a)
+    }
+}
+
+impl Drop for Chain {
+    fn drop(&mut self) {
+        for a in self.by_ref() {
+            drop(a);
+        }
+    }
+}
+
 impl Arrival {
     pub(crate) fn new(body: Body) -> Box<Arrival> {
         Box::new(Arrival {
@@ -524,6 +557,10 @@ pub(crate) struct UnitCtx {
     /// Nodes a finalizer made in this unit, in order: handed out, or None if
     /// it dropped them itself.
     pub(crate) fin_made: Vec<Option<Shared>>,
+    /// What the last take was about: a settlement's send id, an item's,
+    /// close's or seal answer's connection (`ConnCore` address), or a helper
+    /// end's helper index; 0 otherwise.
+    pub(crate) took_ident: usize,
     #[cfg(test)]
     pub(crate) label: String,
 }
@@ -553,6 +590,7 @@ impl UnitCtx {
             next_send: 0,
             next_bound: 0,
             fin_made: Vec::new(),
+            took_ident: 0,
             #[cfg(test)]
             label,
         }
@@ -1236,9 +1274,7 @@ impl UnitCtx {
     /// numbered here, and a seal answer is made once the items accepted
     /// before the seal have all come in.
     pub(crate) fn intake(&mut self) {
-        let mut list = VecDeque::new();
-        self.port.drain(&mut list);
-        for a in list {
+        for a in self.port.drain() {
             self.intake_one(a);
         }
     }
@@ -1275,9 +1311,8 @@ impl UnitCtx {
         }
         // An intake can publish a seal answer to this port: drain until empty.
         loop {
-            let mut list = VecDeque::new();
-            self.port.drain(&mut list);
-            if list.is_empty() {
+            let mut list = self.port.drain().peekable();
+            if list.peek().is_none() {
                 break;
             }
             for a in list {
@@ -1319,6 +1354,13 @@ impl UnitCtx {
             n.content = a.body.content();
         }
         let body = std::mem::replace(&mut a.body, Body::Credits(Vec::new()));
+        self.took_ident = match &body {
+            Body::Settlement(id, _) => *id as usize,
+            Body::Item(c, _) | Body::Close(c) | Body::SealAnswer(c) => *c as usize,
+            // SAFETY: the end arrival owns the ended helper's context.
+            Body::HelperEnd(e) => unsafe { e.0.as_ref() }.helper.as_ref().unwrap().k,
+            Body::Credits(_) | Body::LastRelease(_) => 0,
+        };
         let t = match body {
             Body::Credits(cs) => {
                 for c in cs {

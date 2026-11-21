@@ -57,6 +57,10 @@ pub mod tasks;
 pub mod test_provider;
 pub mod tls;
 mod units;
+/// The unit connection path's round-trip measurement (`examples/units_conn.rs`).
+#[cfg(not(test))]
+#[doc(hidden)]
+pub use units::ledger::bench::conn_pingpong as units_conn_pingpong;
 mod xxh3;
 
 mod frame_list;

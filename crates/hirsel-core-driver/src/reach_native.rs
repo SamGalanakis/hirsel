@@ -1,4 +1,4 @@
-// The reach record (hirsel.core-reach.v6). Law: a build in a primed store is
+// The reach record (hirsel.core-reach.v7). Law: a build in a primed store is
 // the build of the same sources and options into an empty store: the same
 // executable bytes and exit status. On a no-change request it walks nothing
 // (no instance on the M2 path, no object checked, no link); on a one-body edit

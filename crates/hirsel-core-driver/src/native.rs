@@ -445,6 +445,7 @@ impl Table {
     fn push<'c>(
         &mut self,
         instances: &[Identity],
+        foreign: &BTreeSet<Identity>,
         identity: &Identity,
         own: Option<ContentHash>,
         body: ContentHash,
@@ -468,7 +469,11 @@ impl Table {
                 .expect("the instances an instance calls or describes are reached")
                 as u32,
         };
-        let children = children.into_iter().map(index).collect();
+        let children = children
+            .into_iter()
+            .filter(|(_, child)| !foreign.contains(child))
+            .map(index)
+            .collect();
         let described = described.into_iter().map(index).collect();
         let closures = closures
             .into_iter()
@@ -535,8 +540,7 @@ impl CheckProduct {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::new(options.store.join("code"));
-        let (mut units, _, _) =
-            self.release_units(&root, &reached, &code, None, &BTreeMap::new())?;
+        let (mut units, _, _) = self.release_units(&root, &reached, &code, None)?;
         let runtime = inputs.toolchain.runtime;
         let std = std_release::std_side(&units, &root, Some(self), None, options, runtime)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
@@ -622,6 +626,7 @@ impl CheckProduct {
                     if let Some(table) = &mut table {
                         table.push(
                             instances,
+                            &materialized.foreign,
                             instance,
                             e.own,
                             e.body,
@@ -655,6 +660,7 @@ impl CheckProduct {
                     if let Some(table) = &mut table {
                         table.push(
                             instances,
+                            &materialized.foreign,
                             instance,
                             record.own,
                             record.body,
@@ -702,6 +708,7 @@ impl CheckProduct {
                 if let Some(table) = &mut table {
                     table.push(
                         instances,
+                        &materialized.foreign,
                         instance,
                         fields.own,
                         fields.body,
@@ -948,6 +955,7 @@ impl CheckProduct {
                     closures: &table.closures,
                     entry: &link,
                     places: source_rows.as_deref().unwrap_or_default(),
+                    foreign: &reached.materialized.foreign,
                 },
                 _ if reach.hit => crate::reach::Content::Held {
                     places: source_rows.as_deref(),

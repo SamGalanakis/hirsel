@@ -559,6 +559,70 @@ fn reexecute_heap_test(name: &str, child_flag: &str) -> bool {
     true
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_page_keeps_other_heaps_live_after_a_foreign_return() {
+    if reexecute_heap_test(
+        "tests::shared_page_keeps_other_heaps_live_after_a_foreign_return",
+        "HIRSEL_SHARED_PAGE_TEST_CHILD",
+    ) {
+        return;
+    }
+
+    const LIMIT: u64 = 17;
+    use crate::task_heap::{page_bytes, purge};
+    let native_page = |block: &Block| block.pointer().addr().get() / page_bytes();
+    let mut clients: Vec<(Context, Block)> = Vec::new();
+    let (first, second) = loop {
+        assert!(clients.len() <= 16, "no two heaps shared a page");
+        let context = Context::new(LIMIT);
+        let block = Block::new(&context, Some(LIMIT), 24, 8).unwrap();
+        if let Some(index) = clients
+            .iter()
+            .position(|(_, other)| native_page(other) == native_page(&block))
+        {
+            break (clients.swap_remove(index), (context, block));
+        }
+        clients.push((context, block));
+    };
+    let (first, returned) = first;
+    let (second, survivor) = second;
+    let page = native_page(&survivor) * page_bytes();
+    assert!(*survivor.payer() == second.payer());
+    assert!(*returned.payer() == first.payer());
+    // SAFETY: the survivor owns 24 writable bytes.
+    unsafe { survivor.pointer().cast::<u64>().write(17) };
+    let address = returned.pointer().as_ptr().expose_provenance();
+    std::mem::forget(returned);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let pointer =
+                std::ptr::NonNull::new(std::ptr::with_exposed_provenance_mut(address)).unwrap();
+            // SAFETY: this thread takes the unique block and its exact charge.
+            drop(unsafe { Block::from_raw(pointer, LIMIT) });
+        });
+    });
+    first.current.drain();
+    assert_eq!(first.available(), LIMIT);
+    drop(first);
+    purge();
+
+    let mut flag = 0;
+    // SAFETY: mincore checks the mapping without reading the survivor.
+    let mapped = unsafe { libc::mincore(page as *mut _, page_bytes(), &mut flag) } == 0;
+    if !mapped || flag & 1 == 0 {
+        // A broken lease has invalidated this block and its owning heap.
+        // Skip their destructors in this isolated child before reporting it.
+        std::mem::forget((second, survivor));
+        panic!("the shared page was discarded with a live block");
+    }
+    assert_eq!(second.available(), 0);
+    // SAFETY: the neighbor's return and purge left the live block mapped.
+    assert_eq!(unsafe { survivor.pointer().cast::<u64>().read() }, 17);
+    drop(survivor);
+    assert_eq!(second.available(), LIMIT);
+}
+
 #[test]
 fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
     // This law observes a cold mapping before measuring reuse. Run it apart

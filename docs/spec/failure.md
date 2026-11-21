@@ -208,7 +208,12 @@ with the next value.
 
 Ending views, freeing and refunding own blocks, closing regions, releasing counted nodes
 and failure propagation itself never allocate, never admit, never run user code other than
-finalizers and never fail.
+finalizers and never fail. Dropping a `HostFile`, `HostEntries`, `Socket`, half or `Listener`
+made by a virtual provider ([core](core.md#provide)) is one of these: the release notice is
+reserved inside the handle when the server issues it, dropping links that notice into its
+port without waiting, and the drop succeeds when the server has ended or its room is full.
+Its effects are visible at once (a dropped half reads end of stream at its peer, a dropped
+lock holder unlocks), and the server sees `Released` from `provide.next` later.
 
 ### FAIL-14: Failure boundary
 
@@ -233,7 +238,7 @@ writes one line to stderr, `run stop: ` and the stop's name
 | stop | name |
 |---|---|
 | the stack is exhausted | `Stack` |
-| every task waits on another task (a join, a channel send or receive, an abandon), no timer is pending and no provider operation is outstanding | `Deadlock` |
+| every task waits on another task (a join, a channel send or receive, an abandon, or an operation on a virtual provider whose call its server has not answered), no timer is pending and no provider operation is outstanding | `Deadlock` |
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |
@@ -243,6 +248,13 @@ writes one line to stderr, `run stop: ` and the stop's name
 | a host provider lacks one of its five callbacks when the run installs it, before `main`, or answers a `wait` or step kind outside the provider ABI | `Provider` |
 
 A flow operation ends at its closure ([CONC-14](tasks.md#conc-14-flows)). The `Deadlock` rule does not count its owner as waiting.
+An operation on a virtual provider ([core](core.md#provide)) waits on the task that serves
+its port, not on the host, so it is never an outstanding provider operation: a task that
+calls its own server, or two that wait on each other through ports, stop with `Deadlock`.
+A timer of a virtual `Clock` is pending only while some task waits in `clock.idle` on its
+hand. Before the run stops with `Deadlock`, each task waiting in `clock.idle` is woken with
+the earliest pending deadline of its clock, and if none of them advances time, each server
+waiting in `provide.next` with no queued call is woken with `None`.
 
 Termination by the host writes nothing and its status is the host's.
 

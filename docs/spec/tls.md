@@ -299,6 +299,15 @@ sent, or the operation fails. These checks run before issue, each with no effect
 The provider receives the bytes from run-owned memory. They never pass through program
 memory or a buffer that the program can see.
 
+**Virtual streams.** A TLS half of a `Net` made by `provide.net` ([core](core.md#provide))
+was verified by its server, not by a trust rule the run was granted, so it never satisfies
+a granted secret: `send_secret` on it gives `Denied` before issue for a `Secret` from an
+entry grant, whatever its patterns, and the server sees nothing. A `Secret` made by
+`secret.seal` passes the two checks above as usual. Its server receives the operation as
+`SendSecret` with the `Secret` itself, narrowed to the stream's verified name, and never its
+bytes (`provide.secret`). A server that forwards it to a real `tls.send_secret` passes that
+real stream's checks again.
+
 Failure after a partial send is different from `send_pair`. On `TimedOut`, `Aborted` or
 a transport error after some bytes were committed, the half is **spent**: every later
 send on it gives `Reset`. The reason is that the caller cannot resume in the middle of

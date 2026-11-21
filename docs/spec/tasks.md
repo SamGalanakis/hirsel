@@ -132,6 +132,15 @@ while it waits in progress for readiness, through its provider's abort, whose re
 operation's `Aborted` error; the request stays pending and is observed at the next
 cancellation point. An operation that does not wait after issue is reached only at issue,
 and in v1 only the socket operations and `stdin.read` wait after issue.
+A deadline `At(c, t)` is held on `c`'s own timers, never by the operation's provider: on a
+host `Clock` it passes at host monotonic time `t`, and on a virtual `Clock`
+([core](core.md#provide)) only when `clock.advance_to` reaches `t`, never by host time. An
+operation on a virtual provider waits after issue until its server replies; its server never
+sees the deadline or the `Clock`. Cancellation, the deadline and the server's
+`provide.reply` settle the call at one point, and the first wins: if cancellation or the
+deadline wins, the caller sees `Aborted` or `TimedOut` as from the host, and the reply
+returns `Error(Withdrawn)` with no effect on the caller, so a server commits its own state
+only after `reply` returns `Ok(())`.
 A user function declared `waits` is not itself a cancellation point. A flow operation ends at its closure within the stages' step bounds and observes no cancellation. A task looping over flow operations observes cancellation only where it reaches an explicit cancellation point. Observing a request is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
 cancelled. A step bound may stop it, and the scheduler may run another task at its slice

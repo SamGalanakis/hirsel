@@ -22,7 +22,14 @@ standard library. Its values are made only by its own module, from entry grants 
 by attenuation (CAP-7), so no program can forge one.
 A `Secret` can also be sealed from bytes the program already holds
 ([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
-before, because it already held those bytes. A capability that holds state is a
+before, because it already held those bytes. A capability is also made by **virtual
+construction**: `provide.dir`, `provide.net`, `provide.stdout`, `provide.stderr`,
+`provide.clock`, `provide.random` and `provide.process` ([core](core.md#provide)) each make
+a fresh capability whose provider is local state of the run, with the endpoint that answers
+it (a `Served` port, a `ClockHand` or a `StopTrigger`). Virtual construction grants no host
+authority: what such a capability reaches is only what the program that answers it already
+reaches (CAP-1), and a virtual `Net` never authorizes a granted `Secret`
+([TLS-5](tls.md#tls-5-secrets)). A capability that holds state is a
 resource ([OWN-3](ownership.md#own-3-kinds)); one that only designates authority is plain,
 and copying it copies the designation, never the thing designated. Each capability type
 declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
@@ -71,7 +78,12 @@ The **provider operations** are exactly the host primitives listed in [core](cor
 standard library's capability modules are ordinary code over them, and a program cannot
 declare another. Each is carried out by a **provider**: the implementation behind the
 capability, chosen by the run's configuration: the host, or a controlled provider such as
-a simulation that a test configures. Programs cannot tell providers apart except by the
+a simulation that a test configures. A program may also select a provider itself, by
+calling the operations on a capability of virtual construction (CAP-2): the program's own
+code answers them through `provide` ([core](core.md#provide)). This selects a provider for
+the existing operations; it declares no new one. The caller pays the same charges and
+admissions against a virtual provider as against the host for the same operations
+([MEM-24](budgets.md#mem-24-logical-charges)). Programs cannot tell providers apart except by the
 values the operations return. An engine may call a provider in more than one
 form, never with different behaviour: a provider that forwards every operation to another
 is indistinguishable from it. A provider operation that may wait is declared `waits` and is a cancellation point

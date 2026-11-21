@@ -1158,6 +1158,9 @@ struct Pool {
     _shared: Arc<hirsel_core_net::Poller>,
     timers: Mutex<BinaryHeap<Reverse<(u64, u32)>>>,
     next_timer: AtomicU64,
+    /// Units admitted and not yet ended. The initial units count from the
+    /// start; any later unit is admitted with `admit`. Reaching zero is the
+    /// decision to stop and is final: `admit` refuses from zero.
     live: AtomicUsize,
     stop: AtomicBool,
     front: i32,
@@ -1234,8 +1237,17 @@ fn mark_queued(p: &Pool, u: &Unit) {
     }
 }
 
-/// Make unit `id` and queue it. The record and its stack are made here; its
-/// program starts on its first run.
+/// Count one more live unit, unless the pool has decided to stop. Admission
+/// and the stop decision are the same count, so an admitted unit runs to its
+/// end before any worker leaves, and a refused one never starts.
+fn admit(p: &Pool) -> bool {
+    p.live
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then_some(n + 1))
+        .is_ok()
+}
+
+/// Make unit `id`, admitted already, and queue it. The record and its stack
+/// are made here; its program starts on its first run.
 fn create_unit(id: u32, role: u32) -> &'static Unit {
     let t0 = now();
     let p = pool();
@@ -1290,7 +1302,6 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
     {
         crate::process::stop(b"UnitIdTaken");
     }
-    p.live.fetch_add(1, Ordering::SeqCst);
     bump(S_CREATED);
     USTATS[S_CREATE_NS].fetch_add(now() - t0, Ordering::Relaxed);
     enqueue(p, u);
@@ -1307,6 +1318,10 @@ fn spawn_child(parent: u32) -> u32 {
     let id = 0x8000 + parent * 32 + n;
     if n >= 32 || id >= SPAWN {
         crate::process::stop(b"UnitIdSpace");
+    }
+    // The running parent is live, so the pool cannot have decided to stop.
+    if !admit(pool()) {
+        crate::process::stop(b"UnitAfterStop");
     }
     create_unit(id, ROLE_CHILD);
     id
@@ -1631,6 +1646,13 @@ fn accept_front(p: &Pool) {
         if fd < 0 {
             return;
         }
+        // SAFETY: accept4 returned a descriptor nothing else owns.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        if !admit(p) {
+            // The last unit has ended and the pool is stopping: refuse the
+            // connection (it closes here) and leave the rest unaccepted.
+            return;
+        }
         let one = 1i32;
         // SAFETY: a fresh connected socket.
         unsafe {
@@ -1650,8 +1672,6 @@ fn accept_front(p: &Pool) {
             };
             eprintln!("front id={id} fd={fd} peer={port}");
         }
-        // SAFETY: accept4 returned a descriptor nothing else owns.
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         listener_for(id, HANDOFF_PORT).queue.lock().unwrap().push_back(Pend::Fd(owned));
         create_unit(id, ROLE_SESSION);
     }
@@ -1950,7 +1970,7 @@ fn launch_untied(
         _shared: shared,
         timers: Mutex::new(BinaryHeap::new()),
         next_timer: AtomicU64::new(u64::MAX),
-        live: AtomicUsize::new(0),
+        live: AtomicUsize::new(k),
         stop: AtomicBool::new(false),
         front,
         next_session: AtomicU32::new(k as u32),

@@ -635,14 +635,23 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         // (None for the caller's own body), and each block's copy.
         let mut copies: Vec<(usize, Option<usize>)> = Vec::new();
         let mut chain: Vec<Option<usize>> = vec![None; body.blocks.len()];
-        let deep = |copies: &[(usize, Option<usize>)], mut copy: Option<usize>, f: usize| {
+        // Copies of f on the chain that ends in this copy.
+        let depth = |copies: &[(usize, Option<usize>)], mut copy: Option<usize>, f: usize| {
             let mut n = 0;
             while let Some(c) = copy {
                 n += usize::from(copies[c].0 == f);
                 copy = copies[c].1;
             }
-            n >= 8
+            n
         };
+        // Depth alone does not bound a callee that recurses more than once:
+        // its copies grow with the fan-out to the depth, until the budget
+        // runs out. The copies a callee makes inside its own copies also
+        // share one size limit per caller (GCC's
+        // max-inline-insns-recursive-auto). Unbounded, the median-of-nine
+        // pivot sample, with three recursive calls, spent the budget on 55
+        // copies of itself, each with its comparator calls.
+        let mut recursive_growth = std::collections::BTreeMap::<usize, usize>::new();
         loop {
             let selected = hot.iter().find_map(|&b| {
                 body.blocks[b]
@@ -666,11 +675,16 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
                         if module.functions[f.index()].versioned && !caller_versioned {
                             return None;
                         }
+                        let size = price(callee).max(1);
+                        let within = depth(&copies, chain[b], f.index());
                         (!call.cold
                             && f.index() != i
-                            && price(callee).max(1) <= budget
-                            && !deep(&copies, chain[b], f.index()))
-                        .then_some((b, offset, callee))
+                            && size <= budget
+                            && within < 8
+                            && (within == 0
+                                || recursive_growth.get(&f.index()).copied().unwrap_or(0) + size
+                                    <= 450))
+                            .then_some((b, offset, callee))
                     })
             });
             let Some((b, offset, callee)) = selected else {
@@ -684,6 +698,9 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
             let Callee::Direct(f) = body.calls[call.index()].callee else {
                 unreachable!()
             };
+            if depth(&copies, chain[b], f.index()) != 0 {
+                *recursive_growth.entry(f.index()).or_default() += price(callee).max(1);
+            }
             let inherits = hirsel_core_ir::source::inherits_site(
                 &module.instances[module.functions[f.index()].instance.index()],
             );

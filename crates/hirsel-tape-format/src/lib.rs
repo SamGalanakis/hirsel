@@ -10,7 +10,7 @@ use hirsel_core_net::{EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, Tl
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 6;
+pub const FORMAT: u16 = 7;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -220,6 +220,16 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Protected entry input. Tape diagnostics must not print it.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub struct MapHashKey(pub [u8; 16]);
+
+impl std::fmt::Debug for MapHashKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
 /// Block 0's payload (section 5.3).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
@@ -239,6 +249,7 @@ pub struct Header {
     pub net_rules: Vec<GrantRule>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
     pub env: Option<EnvSnapshot>,
+    pub map_hash_key: MapHashKey,
 }
 /// The complete encoded header does not fit in block zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -421,7 +432,7 @@ impl Header {
         arg: usize,
         grants: usize,
     ) -> Result<usize, HeaderTooLarge> {
-        let mut len = 2 + 1 + 16 + 32 + 4 + 8 + 8 + 1;
+        let mut len = 2 + 1 + 16 + 32 + 4 + 8 + 8 + 1 + 16;
         for field in [identity, arg, grants] {
             if field > MAX_LEN {
                 return Err(HeaderTooLarge);
@@ -475,6 +486,7 @@ impl Header {
         out.push(self.chooser);
         put_bytes(&mut out, &self.arg);
         put_bytes(&mut out, &grants);
+        out.extend_from_slice(&self.map_hash_key.0);
         Ok(out)
     }
     pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
@@ -501,6 +513,7 @@ impl Header {
         }
         let arg = c.bytes()?;
         let grants = c.bytes()?;
+        let map_hash_key = MapHashKey(c.fixed()?);
         if (kind == KIND_CALL && !grants.is_empty()) || !c.done() {
             return Err(Corrupt);
         }
@@ -539,6 +552,7 @@ impl Header {
             net_rules,
             secret_grants,
             env,
+            map_hash_key,
         })
     }
 }
@@ -604,25 +618,10 @@ impl Blocks {
     pub fn open<E>(
         mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
     ) -> Result<(Self, Header), ReadError<E>> {
-        let mut bytes = Vec::new();
-        read_block(&mut bytes, 0, &mut read)?;
-        let payload = &bytes[BLOCK_HEAD..bytes.len() - BLOCK_CHECK];
-        check_head(&bytes, 0)?;
-        if bytes[0] != 0 {
-            return Err(Stop::Damaged(0).into());
-        }
-        // The format is needed to locate the tape id for the checksum.
-        if let Some(version) = payload.get(..2)
-            && version != FORMAT.to_le_bytes()
-        {
-            return Err(Stop::Corrupt.into());
-        }
-        let Some(id) = payload.get(TAPE_ID_AT..TAPE_ID_AT + 16) else {
-            return Err(Stop::Damaged(0).into());
-        };
-        let tape_id = id.try_into().unwrap();
-        check_digest(&bytes, &tape_id, 0)?;
+        let bytes = header_block(&mut read, Some(FORMAT))?;
+        let payload = header_payload(&bytes);
         let header = Header::decode(payload).map_err(Stop::from)?;
+        let tape_id = header.tape_id;
         Ok((
             Self {
                 bytes,
@@ -682,6 +681,54 @@ fn fill<E>(
         bytes = &mut bytes[n..];
     }
     Ok(len - bytes.len())
+}
+
+fn header_payload(bytes: &[u8]) -> &[u8] {
+    &bytes[BLOCK_HEAD..bytes.len() - BLOCK_CHECK]
+}
+
+fn header_block<E>(
+    read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
+    format: Option<u16>,
+) -> Result<Vec<u8>, ReadError<E>> {
+    let mut bytes = Vec::new();
+    read_block(&mut bytes, 0, read)?;
+    check_head(&bytes, 0)?;
+    if bytes[0] != 0 {
+        return Err(Stop::Damaged(0).into());
+    }
+    let payload = header_payload(&bytes);
+    if let (Some(format), Some(version)) = (format, payload.get(..2))
+        && version != format.to_le_bytes()
+    {
+        return Err(Stop::Corrupt.into());
+    }
+    let tape_id = payload
+        .get(TAPE_ID_AT..TAPE_ID_AT + 16)
+        .ok_or(Stop::Damaged(0))?;
+    check_digest(&bytes, tape_id.try_into().unwrap(), 0)?;
+    Ok(bytes)
+}
+
+/// The fixed prefix of block 0 used to choose a pinned executable. The image
+/// validates the full header and frames with its own runtime before replay.
+pub fn run_route<E>(
+    mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
+) -> Result<([u8; 16], Vec<u8>), ReadError<E>> {
+    fn route(payload: &[u8]) -> Result<([u8; 16], Vec<u8>), Corrupt> {
+        let mut c = Cursor::new(payload);
+        c.take(2)?; // Runtime-owned format version.
+        if c.u8()? != KIND_RUN {
+            return Err(Corrupt);
+        }
+        let tape_id = c.fixed()?;
+        c.bytes()?; // Identity.
+        c.take(32 + 4 + 8 + 8 + 1)?; // Revision, charge policy, limits, chooser.
+        Ok((tape_id, c.bytes()?.to_vec()))
+    }
+
+    let bytes = header_block(&mut read, None)?;
+    route(header_payload(&bytes)).map_err(|e| Stop::from(e).into())
 }
 
 fn read_block<E>(

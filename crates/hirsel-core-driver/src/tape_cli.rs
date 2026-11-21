@@ -31,6 +31,10 @@ pub(crate) fn header(path: &Path) -> io::Result<Header> {
         .map(|(_, h)| h)
         .map_err(block_error)
 }
+pub(crate) fn run_route(path: &Path) -> io::Result<([u8; 16], Vec<u8>)> {
+    let mut file = File::open(path)?;
+    format::run_route(|buf| read(&mut file, buf)).map_err(block_error)
+}
 pub(crate) fn show(path: &Path) -> io::Result<()> {
     let mut file = File::open(path)?;
     let (mut blocks, h) = Blocks::open(|buf| read(&mut file, buf)).map_err(block_error)?;

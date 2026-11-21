@@ -1,7 +1,7 @@
 use super::{Error, Records, attempt};
 use crate::cli::{Invocation, OptionId as Opt};
 use hirsel_core_ids::ContentHash;
-use hirsel_tape_format::{Corrupt, Cursor, KIND_RUN};
+use hirsel_tape_format::{Corrupt, Cursor};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -50,15 +50,12 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
         }
     }
     let tape = tape.ok_or("replay requires --tape TAPE")?.canonicalize()?;
-    let header = crate::tape_cli::header(&tape)?;
-    if header.kind != KIND_RUN {
-        return Err("expected a Run recording".into());
-    }
+    let (tape_id, launch) = crate::tape_cli::run_route(&tape)?;
     let records = Records::read_only(&state.ok_or("replay requires --state DIR")?)?;
     let image = (|| -> io::Result<_> {
-        let pin = records.pin(header.tape_id, unix_seconds()?)?;
+        let pin = records.pin(tape_id, unix_seconds()?)?;
         let assembly = records.assembly(pin)?;
-        if launch_digest(&header.arg) != Ok(assembly.digest) {
+        if launch_digest(&launch) != Ok(assembly.digest) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "recording image differs from its pin",

@@ -182,7 +182,9 @@ combines two into more than either.
 Every input the run did not compute passes one **replay point**: each provider operation's
 result, each scheduler choice of [CONC-10](tasks.md#conc-10-event-order), and the entry's
 arguments, which include its grants, its root limit and its launch metadata
-([launch](launch.md)). A provider operation passes it twice: at issue, before any host
+([launch](launch.md)). At entry the launcher acquires a protected 128-bit Map hash key
+from host entropy. The key belongs to the run and every task uses it. A replay entry
+restores the recorded key without requesting host entropy. A provider operation passes it twice: at issue, before any host
 effect, and at delivery, before its result reaches the task. Each input enters the run once,
 at its own point, and nothing outside the run reaches a value except through such a point.
 A scheduler choice is an input; the result of an event is not, since the order and the

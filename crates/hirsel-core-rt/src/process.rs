@@ -223,9 +223,52 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
         let config = &*config;
+        let key = match map_hash_key() {
+            Ok(key) => key,
+            Err(error) => {
+                diagnostic(
+                    config,
+                    format!("not started: map hash entropy: {error}\n").as_bytes(),
+                );
+                if let Some(close) = config.close_grants {
+                    close(config.state);
+                }
+                return NOT_STARTED;
+            }
+        };
+        run_with_map_hash_key(config, entry, key)
+    }
+}
+
+fn map_hash_key() -> std::io::Result<[u8; 16]> {
+    let mut key = [0; 16];
+    let mut remaining = &mut key[..];
+    while !remaining.is_empty() {
+        // SAFETY: remaining is a writable slice passed for exactly its length.
+        let n = unsafe { libc::getrandom(remaining.as_mut_ptr().cast(), remaining.len(), 0) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        remaining = &mut remaining[n as usize..];
+    }
+    Ok(key)
+}
+
+/// Enter with the key restored from a checked Run header.
+pub(crate) unsafe fn run_with_map_hash_key(config: &Config, entry: Entry, key: [u8; 16]) -> u8 {
+    // SAFETY: the caller pins the same operands as hirsel_core_run.
+    unsafe {
         let _pipe_policy = PipePolicy::enter();
         let mut context = Context::new(config.root_limit);
         context.run = config;
+        context.map_hash_key = key;
         #[cfg(feature = "charge-observation")]
         let _observation = crate::peak::Run::start(&context);
         let mut files = crate::host_file::Files::default();

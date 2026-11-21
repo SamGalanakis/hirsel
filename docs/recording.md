@@ -213,10 +213,13 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape**, in tape format 6, which `crates/hirsel-tape-format` owns.
+A recording file is a **tape**, in tape format 7, which `crates/hirsel-tape-format` owns.
 The format is not part of the language and a replay reads only tapes its own build admits,
-so no reader ever sees another build's layout.
+and its pinned executable reads that layout. The host uses the checked block-zero prefix
+through the launch arguments to find and verify the pin.
 
+- The header ends with the run's 16-byte Map hash key. Replay restores it before starting
+  any task. Call tape fixtures reserve this field as sixteen zero bytes.
 - The header has no mode byte. Its grant snapshot stores the run's root Net rules in order
   and with duplicates; each address rule occupies 23 bytes.
 - The `Tls` rule record holds the direction byte 2; the trust byte, followed by 32 bytes of

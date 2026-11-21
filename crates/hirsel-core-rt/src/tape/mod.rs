@@ -333,6 +333,43 @@ pub struct Tape {
     drop_unsealed: fn(&Self),
 }
 
+enum TapeInput<'a> {
+    Record {
+        dir: Inner,
+        name: &'a [u8],
+        header: &'a Header,
+    },
+    Replay(ReplayInput),
+}
+
+struct ReplayInput {
+    source: ProviderFile,
+    blocks: Blocks,
+    stored: Header,
+}
+
+impl ReplayInput {
+    unsafe fn open(dir: Inner, name: &[u8]) -> Result<Self, OpenError> {
+        // SAFETY: forwarded.
+        let source = unsafe { ProviderFile::open(dir, 0, name) }.map_err(OpenError::Io)?;
+        let (blocks, stored) = match Blocks::open(|bytes| source.read(bytes)) {
+            Ok(b) => b,
+            Err(ReadError::Source(e)) => return Err(OpenError::Io(e)),
+            Err(ReadError::Format(Stop::Damaged(k))) => {
+                return Err(OpenError::Refused(Refusal::Damaged(k)));
+            }
+            Err(ReadError::Format(s)) => {
+                return Err(OpenError::Unreadable(Fault::stopped(s, 0)));
+            }
+        };
+        Ok(Self {
+            source,
+            blocks,
+            stored,
+        })
+    }
+}
+
 struct Startup {
     arg: Vec<u8>,
     net_rules: Vec<hirsel_core_net::GrantRule>,
@@ -863,30 +900,31 @@ impl Tape {
         expect: &Expect,
     ) -> Result<(Tape, Vec<u8>), OpenError> {
         // SAFETY: forwarded tape directory contract.
-        let (tape, stored) =
-            unsafe { Self::open_with_startup(revision, dir, name, mode, header, expect)? };
+        let dir = Inner {
+            provider: dir.0,
+            handle: dir.1,
+        };
+        let _commit = crate::sequencer::enter();
+        if mode == Mode::Replay && crate::tasks::parallel() {
+            crate::process::stop(b"ReplayWorkers");
+        }
+        let input = match mode {
+            Mode::Record => TapeInput::Record { dir, name, header },
+            Mode::Replay => TapeInput::Replay(unsafe { ReplayInput::open(dir, name)? }),
+        };
+        let (tape, stored) = unsafe { Self::open_with_startup(revision, input, expect)? };
         Ok((tape, stored.arg))
     }
 
     unsafe fn open_with_startup(
         revision: [u8; 32],
-        dir: (Provider, u64),
-        name: &[u8],
-        mode: Mode,
-        header: &Header,
+        input: TapeInput<'_>,
         expect: &Expect,
     ) -> Result<(Tape, Startup), OpenError> {
         let _commit = crate::sequencer::enter();
-        if crate::tasks::parallel() && mode == Mode::Replay {
-            crate::process::stop(b"ReplayWorkers");
-        }
-        let dir = Inner {
-            provider: dir.0,
-            handle: dir.1,
-        };
         let mut differs = false;
-        let (live, startup) = match mode {
-            Mode::Record => {
+        let (live, startup) = match input {
+            TapeInput::Record { dir, name, header } => {
                 if !matches!(
                     header.chooser,
                     format::CHOOSER_FIFO | format::CHOOSER_COMMIT
@@ -917,7 +955,7 @@ impl Tape {
                     waiting: BTreeMap::new(),
                     pending: BTreeMap::new(),
                     schedule: schedule::Schedule::new(header.chooser),
-                    mode,
+                    mode: Mode::Record,
                     fault: None,
                     replay_abort: None,
                     objects: vec![],
@@ -936,19 +974,15 @@ impl Tape {
                     },
                 )
             }
-            Mode::Replay => {
-                // SAFETY: forwarded.
-                let source = unsafe { ProviderFile::open(dir, 0, name) }.map_err(OpenError::Io)?;
-                let (blocks, stored) = match Blocks::open(|bytes| source.read(bytes)) {
-                    Ok(b) => b,
-                    Err(ReadError::Source(e)) => return Err(OpenError::Io(e)),
-                    Err(ReadError::Format(Stop::Damaged(k))) => {
-                        return Err(OpenError::Refused(Refusal::Damaged(k)));
-                    }
-                    Err(ReadError::Format(s)) => {
-                        return Err(OpenError::Unreadable(Fault::stopped(s, 0)));
-                    }
-                };
+            TapeInput::Replay(replay) => {
+                if crate::tasks::parallel() {
+                    crate::process::stop(b"ReplayWorkers");
+                }
+                let ReplayInput {
+                    source,
+                    blocks,
+                    stored,
+                } = replay;
                 if stored.identity != expect.identity {
                     return Err(OpenError::Refused(Refusal::Code));
                 }
@@ -967,7 +1001,7 @@ impl Tape {
                     waiting: BTreeMap::new(),
                     pending: BTreeMap::new(),
                     schedule: schedule::Schedule::new(stored.chooser),
-                    mode,
+                    mode: Mode::Replay,
                     fault: None,
                     replay_abort: None,
                     objects: vec![],

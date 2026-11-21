@@ -135,7 +135,7 @@ impl AddressOutcome {
             port: a.port,
         }
     }
-    fn outcome(self) -> Outcome {
+    pub(crate) fn outcome(self) -> Outcome {
         Outcome {
             value: self.value,
             error: self.error,
@@ -402,7 +402,7 @@ unsafe fn address_op(
     }
 }
 #[allow(clippy::too_many_arguments)]
-unsafe fn owned_op(
+pub(crate) unsafe fn owned_op(
     context: *mut Context,
     op: u8,
     key: u64,
@@ -649,12 +649,14 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
-        // A served Net's server never sees a secret (NOTES 32).
-        if served_socket(context, key).is_some() {
+        // A served Net's stream was verified by its server, so it never
+        // satisfies a granted Secret (TLS-5, NOTES 6).
+        let served = served_socket(context, key).is_some();
+        let secret = crate::secret::resolve(context, s);
+        if served && matches!(secret.origin, crate::secret::Origin::Granted(_)) {
             return DENIED;
         }
-        let secret = crate::secret::resolve(context, s);
-        {
+        let narrowed = {
             let _commit = crate::sequencer::enter();
             let Some(write) = (*files).tls_writes.get(&(key & !3)) else {
                 return DENIED;
@@ -673,11 +675,18 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             {
                 return DENIED;
             }
-        }
-        let bytes = secret
-            .bytes
-            .as_ref()
-            .map_or(&[][..], |bytes| bytes.as_slice());
+            // Its server receives the Secret narrowed to the stream's name,
+            // never its bytes (`provide.secret`).
+            served.then(|| crate::secret::Secret {
+                origin: secret.origin,
+                policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
+                bytes: secret.bytes.clone(),
+            })
+        };
+        let bytes = match (&narrowed, &secret.bytes) {
+            (None, Some(bytes)) => bytes.as_slice(),
+            _ => &[][..],
+        };
         let mut send = crate::secret::SendRequest {
             network: NetworkRequest {
                 send_tail: after,
@@ -701,6 +710,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             origin: secret.origin,
             patterns: secret.policy.patterns,
             committed: 0,
+            narrowed,
         };
         let request = Request {
             operation: SEND_SECRET,
@@ -721,8 +731,10 @@ pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> O
         let files = (*context).host_files;
         let key = request.handle;
         let provider = socket_provider(context, key);
+        // A served stream's results are the run's own: never taped (CAP-8).
+        let served = crate::provide::owns(&provider);
         #[cfg(feature = "record")]
-        let provider = if let Some(tape) = (*files).net_tape {
+        let provider = if let Some(tape) = (*files).net_tape.filter(|_| !served) {
             request.handle = tape.handle(key);
             tape.provider
         } else {
@@ -730,8 +742,10 @@ pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> O
         };
         let outcome = hirsel_core_host(context, &provider, &mut request);
         let committed = (*request.path.cast::<crate::secret::SendRequest>()).committed;
+        // A server reports no committed count: any failure after issue may
+        // follow a partial forward, so it spends a served half (NOTES 33).
         if (outcome.status != 0 || outcome.error != IoError::OK)
-            && (outcome.written != 0 || committed != 0)
+            && (served || outcome.written != 0 || committed != 0)
         {
             spend_write(files, key);
         }
@@ -739,7 +753,7 @@ pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> O
     }
 }
 
-unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) {
+pub(crate) unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) {
     let _commit = crate::sequencer::enter();
     unsafe { (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true };
 }

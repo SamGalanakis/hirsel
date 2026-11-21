@@ -1042,6 +1042,7 @@ pub enum HostOp {
     ProvideStderr = hirsel_core_ids::host_op::PROVIDE_STDERR as isize,
     PortNext = hirsel_core_ids::host_op::PORT_NEXT as isize,
     CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
+    CallSecret = hirsel_core_ids::host_op::CALL_SECRET as isize,
     CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
     PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
     ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
@@ -1125,6 +1126,7 @@ impl HostOp {
         HostOp::ProvideStderr,
         HostOp::PortNext,
         HostOp::CallWord,
+        HostOp::CallSecret,
         HostOp::CallPayload,
         HostOp::PortReply,
         HostOp::ProvideDir,
@@ -1206,6 +1208,7 @@ impl HostOp {
             HostOp::ProvideStderr => "provide_stderr",
             HostOp::PortNext => "port_next",
             HostOp::CallWord => "call_word",
+            HostOp::CallSecret => "call_secret",
             HostOp::CallPayload => "call_payload",
             HostOp::PortReply => "port_reply",
             HostOp::ProvideDir => "provide_dir",
@@ -1253,6 +1256,7 @@ impl HostOp {
             Self::ProvideStderr => "hirsel_core_provide_stderr",
             Self::PortNext => "hirsel_core_port_next",
             Self::CallWord => "hirsel_core_call_word",
+            Self::CallSecret => "hirsel_core_call_secret",
             Self::CallPayload => "hirsel_core_call_payload",
             Self::PortReply => "hirsel_core_port_reply",
             Self::ProvideDir => "hirsel_core_provide_dir",
@@ -1293,6 +1297,7 @@ impl HostOp {
                 | HostOp::ProvideStdout
                 | HostOp::ProvideStderr
                 | HostOp::CallWord
+                | HostOp::CallSecret
                 | HostOp::PortReply
                 | HostOp::ProvideDir
                 | HostOp::ProvideNet
@@ -1585,6 +1590,7 @@ impl RtOp {
                     | HostOp::EnvLen
                     | HostOp::ProvideRandom
                     | HostOp::ClockIdle
+                    | HostOp::CallSecret
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
                     HostOp::ProvideDir | HostOp::ProvideNet | HostOp::PortNext => {

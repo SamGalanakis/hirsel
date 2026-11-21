@@ -2404,6 +2404,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             | HostOp::EnvLen
             | HostOp::ProvideRandom
             | HostOp::ClockIdle
+            | HostOp::CallSecret
             | HostOp::ProcessTrigger => &["u64"],
             HostOp::ProvideProcess => &[],
             HostOp::ProvideDir | HostOp::ProvideNet | HostOp::PortNext => &["u64"],

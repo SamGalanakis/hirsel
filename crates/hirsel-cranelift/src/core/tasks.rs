@@ -251,6 +251,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideStderr
                     | HostOp::PortNext
                     | HostOp::CallWord
+                    | HostOp::CallSecret
                     | HostOp::CallPayload
                     | HostOp::PortReply
                     | HostOp::ProvideDir
@@ -298,6 +299,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideStderr
                     | HostOp::PortNext
                     | HostOp::CallWord
+                    | HostOp::CallSecret
                     | HostOp::CallPayload
                     | HostOp::PortReply
                     | HostOp::ProvideDir

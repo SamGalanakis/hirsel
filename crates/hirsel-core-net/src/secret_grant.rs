@@ -59,6 +59,16 @@ impl SecretPolicy {
         Some(Self { patterns, usage })
     }
 
+    /// The policy covering `name` alone, with no use: a Secret whose policy
+    /// covers a stream's verified name, narrowed to it (TLS-5, virtual
+    /// streams).
+    pub fn exactly(name: &Name) -> Self {
+        Self {
+            patterns: Arc::from([Pattern::Exact(name.clone())]),
+            usage: SecretUse::None,
+        }
+    }
+
     pub fn intersect(&self, requested: &Self) -> Option<Self> {
         let patterns = Pattern::intersection(&self.patterns, &requested.patterns);
         let usage = self.usage.min(requested.usage);

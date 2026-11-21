@@ -133,6 +133,7 @@ const NET_ACCEPT: u64 = 3;
 const NET_RECV: u64 = 4;
 const NET_SEND: u64 = 5;
 const NET_HANDSHAKE: u64 = 6;
+const NET_SEND_SECRET: u64 = 7;
 const NET_RELEASED: u64 = 8;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
@@ -172,6 +173,8 @@ struct PortCall {
     finished: bool,
     /// Reply bytes `fill` staged in the room.
     staged: Vec<u8>,
+    /// A SendSecret's Secret, narrowed to the stream's name at issue.
+    secret: Option<crate::secret::Secret>,
 }
 
 enum Queued {
@@ -330,6 +333,13 @@ impl Port {
                 let tail = unsafe { (*n.send_tail).len } as u64;
                 w[..4].copy_from_slice(&[NET_SEND, id, b.len as u64, tail]);
             }
+            SEND_SECRET => {
+                // A TLS write half; the Secret itself goes to the call.
+                let id = self.socket(request.handle, Kind::Socket)?;
+                // SAFETY: SEND_SECRET pins its `after` carrier through delivery.
+                let after = unsafe { (*n.send_tail).len } as u64;
+                w[..4].copy_from_slice(&[NET_SEND_SECRET, id, b.len as u64, after]);
+            }
             TLS_CONNECT => {
                 // The Socket is whole: `tls.connect` takes it before any split.
                 let id = self.socket(request.handle, Kind::Socket)?;
@@ -427,8 +437,8 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
             (Vocab::Dir, 2 | 12, 1) | (Vocab::Dir, 13, 2) => buffer,
             (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
             (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
-            (Vocab::Net, NET_SEND, 1) => buffer,
-            (Vocab::Net, NET_SEND, 2) => {
+            (Vocab::Net, NET_SEND | NET_SEND_SECRET, 1) => buffer,
+            (Vocab::Net, NET_SEND | NET_SEND_SECRET, 2) => {
                 let n = &*r.path.cast::<crate::net::NetworkRequest>();
                 request_bytes((*n.send_tail).data, (*n.send_tail).len)
             }
@@ -479,6 +489,7 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     NET_LISTEN => reply == R_LISTENER,
                     NET_RECV | NET_SEND => reply == R_COUNT,
                     NET_HANDSHAKE => reply == R_SECURED,
+                    NET_SEND_SECRET => reply == R_DONE,
                     _ => false,
                 }
         }
@@ -652,6 +663,7 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
                         answer: None,
                         finished: true,
                         staged: Vec::new(),
+                        secret: None,
                     },
                 );
                 id
@@ -785,6 +797,16 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 }
                 let id = p.next_id;
                 p.next_id += 1;
+                let secret = if p.vocab == Vocab::Net && words[0] == NET_SEND_SECRET {
+                    // SAFETY: SEND_SECRET pins its SendRequest in `path`.
+                    unsafe {
+                        (*request.path.cast_mut().cast::<crate::secret::SendRequest>())
+                            .narrowed
+                            .take()
+                    }
+                } else {
+                    None
+                };
                 p.calls.insert(
                     id,
                     PortCall {
@@ -796,6 +818,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                         answer: None,
                         finished: false,
                         staged: Vec::new(),
+                        secret,
                     },
                 );
                 let servers = p.servers.iter().map(|&(t, _)| t).collect();
@@ -1382,6 +1405,29 @@ pub unsafe extern "C" fn hirsel_core_call_word(
     Outcome {
         value: lock(port).calls[&id].words[i.min(7) as usize],
         ..Outcome::default()
+    }
+}
+
+/// `provide.secret(c)`: a SendSecret call's Secret, narrowed to the stream's
+/// name, as a new designation charged to the server's limit (error tag 2 and
+/// the room, from which it raises Capacity). Any other call fails the server.
+/// # Safety
+/// Context is running and `call` is a live `Call` key.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_call_secret(
+    context: *mut Context,
+    call: u64,
+    site: u64,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe {
+        let (port, id) = call_of(context, call);
+        let secret = lock(port).calls[&id].secret.clone();
+        let Some(secret) = secret else {
+            causes::record(&mut *context, causes::Cause::fail(Default::default(), site));
+            return CANCELLED;
+        };
+        crate::secret::designate(context, secret)
     }
 }
 

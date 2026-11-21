@@ -361,6 +361,7 @@ operations! {
     ("provide", "fill", Lane::Runtime(Kernel::Provide(HostOp::PortFill)), "B", "provide-r8a-1533", false),
     ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
     ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
+    ("provide", "secret", Lane::Runtime(Kernel::Provide(HostOp::CallSecret)), "B", "provide-r8a-1533", false),
     ("provide", "payload", Lane::Runtime(Kernel::Provide(HostOp::CallPayload)), "B", "provide-r8a-1533", false),
     ("provide", "commit", Lane::Runtime(Kernel::Provide(HostOp::PortReply)), "B", "provide-r8a-1533", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
@@ -2484,7 +2485,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for (i, v) in vals.iter().enumerate() {
             let v = (*v)?;
             let resource = (i == 0
-                && (hand || matches!(op, HostOp::CallWord | HostOp::CallPayload)))
+                && (hand
+                    || matches!(
+                        op,
+                        HostOp::CallWord | HostOp::CallSecret | HostOp::CallPayload
+                    )))
                 || (i == 1 && matches!(op, HostOp::PortReply | HostOp::PortFill));
             let by_place = resource && self.b.values[v.index()] == Ty::Ptr;
             args.push(Arg::Value(if by_place {
@@ -2573,6 +2578,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 )
             }
             HostOp::CallWord => Some(value),
+            HostOp::CallSecret => {
+                // A refused charge answers a nonzero error: the requested
+                // bytes in `value` and the available in `written`.
+                let u8_ = Ty::Scalar(Scalar::U8);
+                let ok = self.runtime_compare(u8_, error, 0, n)?;
+                self.raise_unless(ok, value, written, n);
+                Some(value)
+            }
             HostOp::PortReply | HostOp::PortFill => {
                 // A room refusal answers error tag 1: the requested bytes in
                 // `value` and the available in `written` (MEM-21).

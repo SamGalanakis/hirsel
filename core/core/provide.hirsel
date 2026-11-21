@@ -24,6 +24,11 @@ pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
 
+// A SendSecret call's Secret, narrowed to the stream's verified name: a new
+// designation charged as `secret.narrow` (TLS-5). Never its bytes; any other
+// call fails the server.
+pub fn secret(c: Call[NetOp]) -> Secret
+
 // Stage the first bytes of `b` in the room for the reply, at most what the
 // call's `room` still offers; returns how many it took.
 pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64

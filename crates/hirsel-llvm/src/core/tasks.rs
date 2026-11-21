@@ -109,6 +109,7 @@ impl FunctionEmitter<'_> {
             | HostOp::ProvideStderr
             | HostOp::PortNext
             | HostOp::CallWord
+            | HostOp::CallSecret
             | HostOp::CallPayload
             | HostOp::PortReply
             | HostOp::ProvideDir

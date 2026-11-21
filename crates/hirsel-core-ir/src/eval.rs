@@ -156,6 +156,8 @@ struct PortCall {
     held: bool,
     answer: Option<Vec<u64>>,
     finished: bool,
+    /// A SendSecret's Secret, narrowed to the stream's name at issue.
+    secret: Option<EvalSecret>,
 }
 /// A served object's state (native `provide::State`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2172,6 +2174,21 @@ impl Machine<'_> {
         out: Option<u64>,
         live: bool,
     ) -> X<Vec<u64>> {
+        self.port_call_with(t, c, words, fields, out, live, None)
+    }
+
+    /// `port_call` for a SendSecret, whose call holds its narrowed Secret.
+    #[allow(clippy::too_many_arguments)]
+    fn port_call_with(
+        &mut self,
+        t: &Task,
+        c: usize,
+        words: [u64; 8],
+        fields: Vec<Vec<u8>>,
+        out: Option<u64>,
+        live: bool,
+        secret: Option<EvalSecret>,
+    ) -> X<Vec<u64>> {
         let VirtualCell::Port {
             vocab,
             sealed,
@@ -2213,6 +2230,7 @@ impl Machine<'_> {
                 held: false,
                 answer: None,
                 finished: false,
+                secret,
             },
         );
         let servers: Vec<usize> = servers.iter().map(|&(k, _)| k).collect();
@@ -2453,6 +2471,7 @@ impl Machine<'_> {
                                 held: true,
                                 answer: None,
                                 finished: true,
+                                secret: None,
                             },
                         );
                         id
@@ -2610,12 +2629,14 @@ impl Machine<'_> {
                 2 => tag == 10,
                 4 | 5 => tag == 3,
                 6 => tag == 11,
+                7 => tag == 0,
                 _ => false,
             };
         if !answers {
             return None;
         }
         Some(match tag {
+            0 => ([0; 5], None),
             11 => {
                 // Some(i) names one of the offered protocols; None is (0, 0).
                 let mut wire = &call.fields[2][..];
@@ -2899,6 +2920,25 @@ impl Machine<'_> {
                 let (c, id) = Self::call_of(a[0]);
                 let (calls, ..) = self.world.cells[c].port();
                 ok(calls[&id].words[a[1].min(7) as usize], 0)
+            }
+            HostOp::CallSecret => {
+                // A new designation charged as `secret.narrow`; any call but
+                // a SendSecret fails the server (native `call_secret`).
+                let (c, id) = Self::call_of(a[0]);
+                let (calls, ..) = self.world.cells[c].port();
+                let Some(secret) = calls[&id].secret.clone() else {
+                    return Some(Err(Stop::Cause("Fail")));
+                };
+                let size = SecretGrant::logical_size(&secret.policy.patterns, 0);
+                let charge = size.unwrap_or(u64::MAX);
+                let payer = t.limits.last().unwrap();
+                if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
+                    return Some(Ok(vec![charge, 2, 0, available]));
+                }
+                let key = self.world.secrets.len() as u64;
+                self.world.secrets.push(secret);
+                self.world.grant_charges.push((payer.clone(), charge));
+                ok(key, 0)
             }
             HostOp::CallPayload => {
                 let (c, id) = Self::call_of(a[0]);
@@ -3916,10 +3956,6 @@ impl Machine<'_> {
 
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
-        if self.world.port_keys.contains_key(&(key & !3)) {
-            // A served Net's server never sees a secret (NOTES 32).
-            return Ok(vec![0, 1, 0, 0]);
-        }
         let Some((name, spent, _)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
@@ -3937,9 +3973,30 @@ impl Machine<'_> {
         {
             return Ok(vec![0, 1, 0, 0]);
         }
+        // Every evaluator Secret is sealed: it has no entry grants (TLS-5).
+        let narrowed = EvalSecret {
+            policy: SecretPolicy::exactly(name),
+            bytes: secret.bytes.clone(),
+        };
         let bytes = secret.bytes.clone();
         let before = self.carrier_bytes(a[1]).to_vec();
         let after = self.carrier_bytes(a[3]).to_vec();
+        if let Some((c, id, live)) = self.port_socket(key, 3) {
+            // Its server receives the Secret, never its bytes (NOTES 6).
+            if key & 3 != 2 {
+                return Ok(vec![0, 1, 0, 0]);
+            }
+            let mut w = [0; 8];
+            w[..4].copy_from_slice(&[7, id, before.len() as u64, after.len() as u64]);
+            let fields = vec![vec![], before, after];
+            let row = self
+                .check_cancel(t)
+                .and_then(|()| self.port_call_with(t, c, w, fields, None, live, Some(narrowed)));
+            if !matches!(&row, Ok(row) if row[1] == 0) {
+                self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+            }
+            return row;
+        }
         self.check_cancel(t)?;
         let model = self.world.network.sockets.model().unwrap().clone();
         model.advance_to(self.world.clock);
@@ -3962,9 +4019,6 @@ impl Machine<'_> {
     fn scram_send(&mut self, t: &mut Task, args: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::scram::Transcript;
         let key = args[0];
-        if self.world.port_keys.contains_key(&(key & !3)) {
-            return Ok(vec![0, 1, 0, 0]);
-        }
         let Some((name, spent, binding)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
@@ -4001,6 +4055,35 @@ impl Machine<'_> {
         let before = self.carrier_bytes(args[4]).to_vec();
         let after = self.carrier_bytes(args[5]).to_vec();
         let (message, signature) = transcript.derive(&password);
+        if let Some((c, id, live)) = self.port_socket(key, 3) {
+            // Only Send calls reach its server, until it took every byte
+            // (native `served_proof`); a failure spends the half.
+            let joined = Zeroizing::new([&before[..], &message, &after].concat());
+            let mut at = 0;
+            while at < joined.len() {
+                let mut w = [0; 8];
+                w[..4].copy_from_slice(&[5, id, (joined.len() - at) as u64, 0]);
+                let fields = vec![vec![], joined[at..].to_vec(), vec![]];
+                let row = match self.port_call(t, c, w, fields, None, live) {
+                    Ok(row) => row,
+                    Err(stop) => {
+                        self.refund(payer, CHARGE);
+                        self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                        return Err(stop);
+                    }
+                };
+                if row[1] != 0 {
+                    self.refund(payer, CHARGE);
+                    self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                    return Ok(vec![0, 5, row[2], row[1]]);
+                }
+                at += (row[0] as usize).min(joined.len() - at);
+            }
+            let id = SCRAM_BASE + self.world.next_scram;
+            self.world.next_scram += 1;
+            self.world.scrams.insert(id, (signature, payer));
+            return Ok(vec![id, 0, 0, 0]);
+        }
         let model = self.world.network.sockets.model().unwrap().clone();
         model.advance_to(self.world.clock);
         let deadline = self.until(args, 6);
@@ -4126,6 +4209,7 @@ impl Machine<'_> {
             | HostOp::ProvideStderr
             | HostOp::PortNext
             | HostOp::CallWord
+            | HostOp::CallSecret
             | HostOp::CallPayload
             | HostOp::PortReply
             | HostOp::ProvideDir

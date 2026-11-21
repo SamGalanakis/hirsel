@@ -157,10 +157,12 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
-        if crate::provide::owns(&net::socket_provider(context, key)) {
+        let served = crate::provide::owns(&net::socket_provider(context, key));
+        let secret = crate::secret::resolve(context, secret);
+        // A served stream never satisfies a granted Secret (TLS-6).
+        if served && matches!(secret.origin, crate::secret::Origin::Granted(_)) {
             return net::DENIED;
         }
-        let secret = crate::secret::resolve(context, secret);
         let (binding, spent) = match check_tls(files, key, Some(&secret)) {
             Ok(record) => record,
             Err(outcome) => return outcome,
@@ -186,6 +188,36 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
         if spent {
             return net_error(net::RESET);
         }
+        if served {
+            let Some(password) = secret.bytes.as_deref() else {
+                return net::DENIED;
+            };
+            let (message, signature) = transcript.derive(password);
+            let message = zeroize::Zeroizing::new(message);
+            let sent = served_proof(
+                context,
+                key,
+                [bytes(&*before), &message, bytes(&*after)],
+                [until_kind.into(), clock, deadline_ns, site],
+            );
+            if let Err(outcome) = sent {
+                return net_error(outcome);
+            }
+            let state = Box::new(State {
+                signature: Some(signature),
+                #[cfg(feature = "record")]
+                taped: None,
+                _charge: charge,
+            });
+            let value =
+                (*files)
+                    .registry
+                    .held(VERIFY_PROVIDER, Box::into_raw(state) as u64, CLOSE_SCRAM);
+            return Outcome {
+                value,
+                ..Outcome::default()
+            };
+        }
         let until = net::deadline(context, until_kind, clock, deadline_ns);
         let password = secret.bytes.as_deref().map(|bytes| bytes.as_slice());
         let mut scram = ScramRequest {
@@ -208,6 +240,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
                 origin: secret.origin,
                 patterns: secret.policy.patterns.clone(),
                 committed: 0,
+                narrowed: None,
             },
             client_first,
             server_first,
@@ -243,6 +276,51 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
             value,
             ..Outcome::default()
         }
+    }
+}
+
+/// A served stream's proof reaches its server only as Send calls (core.md,
+/// Net authority; NOTES 33): `before ‖ proof ‖ after`, offered again from the
+/// first byte not yet taken until every byte is. A failure spends the half,
+/// since the server reports no committed count. Its verdict is the run's own,
+/// never taped.
+unsafe fn served_proof(
+    context: *mut Context,
+    key: u64,
+    parts: [&[u8]; 3],
+    [until_kind, clock, deadline_ns, site]: [u64; 4],
+) -> Result<(), Outcome> {
+    unsafe {
+        let mut joined = zeroize::Zeroizing::new(parts.concat());
+        let mut at = 0;
+        while at < joined.len() {
+            let left = joined.len() - at;
+            let mut head = Buffer {
+                data: joined.as_mut_ptr().add(at),
+                len: left,
+                capacity: left,
+            };
+            let tail = net::empty_buffer();
+            let outcome = net::owned_op(
+                context,
+                SEND_PAIR,
+                key,
+                &mut head,
+                &tail,
+                0,
+                until_kind as u8,
+                clock,
+                deadline_ns,
+                site,
+            )
+            .outcome();
+            if outcome.status != 0 || outcome.error != IoError::OK {
+                net::spend_write((*context).host_files, key);
+                return Err(outcome);
+            }
+            at += (outcome.value as usize).min(left);
+        }
+        Ok(())
     }
 }
 

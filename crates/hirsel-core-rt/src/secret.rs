@@ -131,6 +131,26 @@ pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
     }
 }
 
+/// A new designation of `secret`, charged as `narrow` charges, to the
+/// current limit; a refusal answers error tag 2 (`provide.secret`).
+pub(crate) unsafe fn designate(context: *mut Context, secret: Secret) -> Outcome {
+    unsafe {
+        let charge = match admit((*context).payer(), &secret.policy.patterns, 0) {
+            Ok(charge) => charge,
+            Err(error) => return error,
+        };
+        let value = (*(*context).host_files)
+            .secrets
+            .lock()
+            .unwrap()
+            .push(secret, Some(charge));
+        Outcome {
+            value,
+            ..Outcome::default()
+        }
+    }
+}
+
 unsafe fn policy(to: *const Buffer) -> Option<SecretPolicy> {
     let bytes = unsafe { crate::tls::bytes(&*to) };
     SecretPolicy::parse(std::str::from_utf8(bytes).ok()?)
@@ -240,6 +260,9 @@ pub struct SendRequest {
     pub(crate) origin: Origin,
     pub(crate) patterns: Arc<[Pattern]>,
     pub(crate) committed: usize,
+    /// On a served stream: the Secret its server receives, narrowed to the
+    /// stream's name (`provide.secret`), and `secret` is empty.
+    pub(crate) narrowed: Option<Secret>,
 }
 
 #[cfg(feature = "record")]

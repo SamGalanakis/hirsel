@@ -70,3 +70,4 @@ pub const SCRAM: u8 = 68;
 pub const SCRAM_VERIFY: u8 = 69;
 // A Net port: its sockets and listeners are the port's (core.md, Provide).
 pub const PROVIDE_NET: u8 = 70;
+pub const CALL_SECRET: u8 = 71;

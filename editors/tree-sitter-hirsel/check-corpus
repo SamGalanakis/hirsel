@@ -34,6 +34,8 @@ DOC_SYNTAX_REFUSALS = {
     # 255 + 1 as u8, and an integer literal as f64.
     ("docs/spec/syntax.md", b"LANG-3", b"const BAD: u64 = 1."),
     ("docs/spec/language.md", b"LANG-9", b"type Bad = A(x: u64, u64)"),
+    # MEM-2 refuses a postfix `in`, which the expression grammar does not have.
+    ("docs/spec/syntax.md", b"MEM-2", b"fn placed(r: Region) { let _ = Own(n: 1) in r }"),
 }
 
 

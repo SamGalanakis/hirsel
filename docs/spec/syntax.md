@@ -36,8 +36,8 @@ pub opaque const where true false bytes
 
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
 are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer`, `float`, `packed`,
-`streamable` and `codec` in a bound list; `via` after a bound list, and `to` and `from` in
-its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`. Library types and functions, including `Region`,
+`streamable`, `codec` and `inert` in a bound list; `via` after a bound list, and `to` and `from` in
+its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`, as a parameter mark and as an argument mark; `clone` at the start of an item; `grant` after a type's bounds. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
 ```hirsel
@@ -206,19 +206,20 @@ fn first(a: u64) -> u64 {
 ```ebnf
 (* files and items *)
 file        = { NL | item, ( END | EOF ) }, EOF ;
-item        = { attribute }, [ "pub", [ "opaque" ] ], ( function | type-def | const-def ) ;
+item        = { attribute }, [ "pub", [ "opaque" ] ], ( function | type-def | const-def )
+            | "clone", fn-header, block ;
 attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")" ) ;
 const-def   = "const", name, ":", type, "=", expression ;
 function    = "fn", name, fn-header, block ;
 fn-header   = [ generics ], "(", list(parameter), ")", [ "->", type ],
               [ "waits" ], [ outlives ] ;
-parameter   = [ "take" | "mut" | "bytes" ], name, ":", type ;
+parameter   = [ "take" | "mut" | "bytes" | "steps" ], name, ":", type ;
 generics    = "[", nonempty(generic), "]" ;
 generic     = name, [ ":", bounds ] | "in", name ;
 bounds      = bound-name, { "+", bound-name } ;
 bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "float"
             | "packed" | "streamable" | "codec" | "inert" ;
-outlives    = "where", name, ":", name, { ",", name, ":", name } ;
+outlives    = "where", place, ":", place, { ",", place, ":", place } ;
 type-def    = [ "resource" | "scoped" ], "type", name, [ generics ],
               [ ":", bounds, [ via ] ], [ "grant", "bytes", integer ],
               ( fields | "=", type-rhs | empty ), [ drop ] ;
@@ -239,10 +240,12 @@ anchor      = "in", place, { ",", place } ;
 place       = name, { ".", name } ;
 type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | "(", ")" | "(", type, ")" | "(", type, ",", list(type), ")"
-            | [ "scoped" | "own", [ "[", ( "view" | bounds ), "]" ] ], "fn", "(", list(fn-param), ")",
+            | [ ( "scoped" | "own" ), [ "[", callable-bound, { "+", callable-bound }, "]" ] ],
+              "fn", "(", list(fn-param), ")",
               [ "->", type ], [ "waits" ] ;
 type-arg    = type | "in", place | integer ;
-fn-param    = [ "take" | "mut" | "bytes" ], [ name, ":" ], type ;
+callable-bound = "view" | bound-name ;
+fn-param    = [ "take" | "mut" | "bytes" | "steps" ], [ name, ":" ], type ;
 type-path   = name, { ".", name } ;
 
 (* statements and expressions *)
@@ -268,7 +271,7 @@ prefix      = ( "-" | "!" | "~" | "take" | "mut" | "copy" | "view" ), prefix | p
 postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
                        | ".", ( name | digits(digit) ) | "?" }, [ "?=>", mapper ] ;
 mapper      = type-path | "|", pattern, "|", prefix ;
-argument    = [ name, ":" ], expression | "bytes", expression ;
+argument    = [ name, ":" ], expression | ( "bytes" | "steps" ), expression ;
 primary     = literal | type-path | "(", ")" | "(", expression, ")"
             | "(", expression, ":", type, ")"
             | "(", expression, ",", list(expression), ")"
@@ -287,9 +290,10 @@ closure     = [ "scoped" ], "fn", "(", list(closure-param), ")", [ "->", type ],
 closure-param = [ "take" | "mut" | "bytes" ], name, [ ":", type ] ;
 
 (* patterns *)
-pattern     = "_" | [ "take" ], name | scalar, [ "..=", scalar ]
+pattern     = "_" | [ "take" | "mut" ], name | scalar, [ "..=", scalar ]
             | "(", ")" | "(", pattern, ",", list(pattern), ")"
-            | type-path, "(", [ pattern-field, { ",", pattern-field } ], [ ",", ".." ], ")" ;
+            | type-path, "(", { pattern-field, "," }, [ pattern-field | "..", [ "," ] ], ")"
+            | name, ".", type-path ;
 pattern-field = [ name, ":" ], pattern ;
 scalar      = literal | "-", integer ;
 
@@ -304,7 +308,6 @@ Precedence, strongest first:
 | operators | associativity |
 |---|---|
 | call, index, `.`, `?`, then `?=>` and its mapper | left, postfix; `?=>` ends the chain |
-| `in` (placement) | postfix, once |
 | `- ! ~ take mut copy view` | prefix |
 | `* / %` | left |
 | `+ -` | left |
@@ -334,7 +337,11 @@ attribute is refused by [LANG-7](language.md#lang-7-names), and an attribute on 
 and `drop` on a declaration that is not `resource` are refused. A parameter marked `bytes`
 is a byte count of type `u64`, and its argument is written `bytes e`; the mark is part of the
 signature, as `take` is, and an argument whose mark does not match its parameter is
-refused by [OWN-7](ownership.md#own-7-parameter-modes), at the argument. In a file of the package `core` ([core](core.md)) a function may end at
+refused by [OWN-7](ownership.md#own-7-parameter-modes), at the argument. A parameter marked
+`steps` is a `u64` as well, and its argument is written `steps e`; `steps` is a mark only before
+a name in a parameter and before a name, an integer, `if`, `match`, `true` or `false` in an
+argument. An item that begins `clone` is a clone body ([MEM-17](memory.md#mem-17-clone)). An
+expression has no postfix `in`: `e in r` is refused by [MEM-2](memory.md#mem-2-region-data). In a file of the package `core` ([core](core.md)) a function may end at
 its header, with no body, and a type with no body is built in. A function of a foreign
 module ([FFI-2](foreign.md#ffi-2-foreign-modules)) ends at its header too. In any other place a
 function without a body is refused here, at the end of its header. Malformed syntax with no
@@ -348,4 +355,23 @@ fn f(a: u64, b: u64, c: u64) -> bool { a < b < c }        // refused: LANG-5, co
 ```
 ```hirsel
 fn width() -> u64                                         // refused: LANG-5, a function outside core needs a body
+```
+```hirsel
+fn spend(steps k: u64) -> u64 { k }
+fn ten() -> u64 { spend(steps 10) }
+```
+```hirsel
+type Source = Text(String) | Count(u64)
+fn bump(mut src: Source) { match src { Count(mut n) => { n += 1 }, _ => {} } }
+```
+```hirsel
+fn run(f: scoped[view] fn() -> u64) -> u64 { f() }
+```
+```hirsel core
+type Bag[T] { items: List[T] }
+clone[T](b: Bag[T]) { Bag(items: clone(b.items)) }
+```
+```hirsel
+type Own { n: u64 }
+fn placed(r: Region) { let _ = Own(n: 1) in r }           // refused: MEM-2, no postfix in
 ```

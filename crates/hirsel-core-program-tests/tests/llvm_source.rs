@@ -3,14 +3,10 @@
 use hirsel_core_ir::eval;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
+use hirsel_core_program_tests::counted_loops::{CollectionShape, SEEDS, choices};
 use hirsel_llvm::core::symbol;
 use hirsel_llvm::core::*;
-use std::{
-    fmt::Write as _,
-    path::PathBuf,
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{collections::HashMap, fmt::Write as _, path::PathBuf, process::Command};
 hirsel_guard::install!();
 #[path = "../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
@@ -651,13 +647,12 @@ fn stride_overflow(budget: u64, end: u8) -> u64 {
     sentinels.push(("must_keep", [15, 9], returned(65536 | 15)));
     sentinels.push(("must_keep", [16, 9], overflow()));
     let mut calls: Vec<_> = sentinels
-        .iter()
+        .into_iter()
         .map(|(name, args, outcome)| (name.to_string(), args.to_vec(), Some(outcome)))
         .collect();
 
     // SplitMix64, with a fixed corpus size and a function name that identifies
     // its seed, width and body. Bounds are literal so release can prove ranges.
-    const SEEDS: [u64; 2] = [0x1543, 0x9e37_79b9_7f4a_7c15];
     for (ty, width) in [("u8", 8i64), ("i8", 8), ("u16", 16)] {
         writeln!(source, "fn keep_{ty}(mut i: {ty}, value: {ty}) {{}}").unwrap();
         writeln!(
@@ -666,14 +661,7 @@ fn stride_overflow(budget: u64, end: u8) -> u64 {
         )
         .unwrap();
         for seed in SEEDS {
-            let mut state = seed ^ ((ty.as_bytes()[0] as u64) << 16) ^ width as u64;
-            let mut choose = |options: u64| {
-                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                let mut x = state;
-                x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                (x ^ (x >> 31)) % options
-            };
+            let mut choose = choices(seed ^ ((ty.as_bytes()[0] as u64) << 16) ^ width as u64);
             let update = format!(
                 "let writer: fn(mut {ty}, {ty}) = if write_now {{ write_{ty} }} else {{ keep_{ty} }}"
             );
@@ -773,7 +761,45 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
         }
     }
 
-    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+    let folds = check_counted_loop_agreement(&source, &calls, None);
+    // Count both compiled functions and their invocations. Budget sweeps
+    // must not let one function supply an entire seed's fold coverage.
+    for seed in SEEDS {
+        let prefix = format!("range_{seed:x}_");
+        let tally = |names: &mut dyn Iterator<Item = &str>| {
+            names
+                .filter(|name| name.starts_with(&prefix))
+                .fold((0, 0), |(removed, total), name| {
+                    (removed + usize::from(folds[name] > 0), total + 1)
+                })
+        };
+        let (shapes_with_folds, shapes) = tally(&mut folds.keys().map(String::as_str));
+        let (cases_with_folds, invocations) =
+            tally(&mut calls.iter().map(|(name, _, _)| name.as_str()));
+        assert_counted_loop_folds(
+            "scalar",
+            seed,
+            25,
+            (shapes_with_folds, shapes),
+            (cases_with_folds, invocations),
+        );
+    }
+    for name in must_fold {
+        let count = folds[name];
+        eprintln!("{name}: {count} checks folded by CounterRangePass");
+        assert!(count > 0, "{name} must fold at least one check on pos");
+    }
+    check_collection_counted_loops();
+}
+
+type CountedLoopCall = (String, Vec<u64>, Option<eval::Outcome>);
+
+fn check_counted_loop_agreement(
+    source: &str,
+    calls: &[CountedLoopCall],
+    failure_expr: Option<&str>,
+) -> HashMap<String, usize> {
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases: Vec<_> = calls
         .iter()
         .map(|(name, args, _)| Case {
@@ -788,11 +814,22 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
     exports.dedup();
     let evaluated: Vec<_> = cases
         .iter()
-        .zip(&calls)
+        .zip(calls)
         .map(|(case, (name, args, expected))| {
             let run = eval::run(&program, case.function, &case.args, case.limit);
             if let Some(expected) = expected {
-                assert_eq!(&run.outcome, *expected, "{name}{args:?}");
+                assert_eq!(&run.outcome, expected, "{name}{args:?}");
+                if let Some(expr) = failure_expr
+                    && matches!(expected, eval::Outcome::Failed(_))
+                {
+                    let start = source.find(&format!("fn {name}(")).unwrap();
+                    let offset = source[start..].find(expr).unwrap() as u32;
+                    let [Some(anchor)] = run.sites.as_slice() else {
+                        panic!("{name}{args:?} must raise at {expr}, got {:?}", run.sites);
+                    };
+                    assert_eq!(program.items[anchor.item.index()].0.name, *name);
+                    assert_eq!(anchor.start, offset, "{name}{args:?} must raise at {expr}");
+                }
             }
             run
         })
@@ -821,47 +858,136 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
             }
         }
     }
-    eprintln!(
-        "counted-loop seeds {SEEDS:x?}, {} cases per engine",
-        cases.len()
-    );
     assert!(differences.is_empty(), "{}", differences.join("\n"));
 
-    let folded = |name: &str| {
-        let symbol = symbol(&program, names[name]);
-        folds.get(symbol.as_bytes()).copied().unwrap_or(0)
-    };
-    // Count both compiled functions and their invocations. Budget sweeps
-    // must not let one function supply an entire seed's fold coverage.
-    const MIN_FOLD_PERCENT: usize = 25;
-    for seed in SEEDS {
-        let prefix = format!("range_{seed:x}_");
-        let tally = |names: &mut dyn Iterator<Item = &str>| {
-            names
-                .filter(|name| name.starts_with(&prefix))
-                .fold((0, 0), |(removed, total), name| {
-                    (removed + usize::from(folded(name) > 0), total + 1)
+    names
+        .into_iter()
+        .filter(|(_, function)| exports.binary_search_by_key(&function.0, |id| id.0).is_ok())
+        .map(|(name, function)| {
+            let symbol = symbol(&program, function);
+            (name, folds.get(symbol.as_bytes()).copied().unwrap_or(0))
+        })
+        .collect()
+}
+
+fn assert_counted_loop_folds(
+    family: &str,
+    seed: u64,
+    minimum_percent: usize,
+    (shapes_with_folds, shapes): (usize, usize),
+    (cases_with_folds, invocations): (usize, usize),
+) {
+    eprintln!(
+        "{family} seed {seed:#x}: {shapes_with_folds}/{shapes} shapes, {cases_with_folds}/{invocations} cases folded by CounterRangePass"
+    );
+    assert!(
+        shapes > 0 && shapes_with_folds * 100 >= shapes * minimum_percent,
+        "{family} seed {seed:#x} requires folds in at least {minimum_percent}% of its shapes"
+    );
+    assert!(
+        invocations > 0 && cases_with_folds * 100 >= invocations * minimum_percent,
+        "{family} seed {seed:#x} requires folds in at least {minimum_percent}% of its cases"
+    );
+}
+
+fn check_collection_counted_loops() {
+    use CollectionShape::*;
+
+    let check =
+        |shape: CollectionShape, name: &str, extent, key, inputs: &[([u64; 4], Option<u64>)]| {
+            let source = shape.source(name, extent, key);
+            let calls: Vec<_> = inputs
+                .iter()
+                .map(|(args, value)| {
+                    let outcome = value.map_or_else(
+                        || eval::Outcome::Failed(vec!["Bounds".into()]),
+                        |value| eval::Outcome::Returned(vec![value]),
+                    );
+                    (name.to_owned(), args.to_vec(), Some(outcome))
                 })
+                .collect();
+            let count =
+                check_counted_loop_agreement(&source, &calls, Some(CollectionShape::CHECK))[name];
+            eprintln!("{name}: {count} checks folded by CounterRangePass");
+            count > 0
         };
-        let (shapes_with_folds, shapes) = tally(&mut names.keys().map(String::as_str));
-        let (cases_with_folds, invocations) =
-            tally(&mut calls.iter().map(|(name, _, _)| name.as_str()));
-        eprintln!(
-            "seed {seed:#x}: {shapes_with_folds}/{shapes} shapes, {cases_with_folds}/{invocations} cases folded by CounterRangePass"
-        );
-        assert!(
-            shapes > 0 && shapes_with_folds * 100 >= shapes * MIN_FOLD_PERCENT,
-            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its shapes"
-        );
-        assert!(
-            invocations > 0 && cases_with_folds * 100 >= invocations * MIN_FOLD_PERCENT,
-            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its cases"
+
+    // Each shape is a separate source program so the repeated fill can become
+    // the initializing memset before counter-range (see the closed-cell law).
+    for seed in SEEDS {
+        let mut choose = choices(seed);
+        let mut shapes_with_folds = 0;
+        let mut cases_with_folds = 0;
+        let mut cases = 0;
+        for shape in CollectionShape::ALL {
+            let extent = 8 << choose(4);
+            let key = 1 + choose(extent - 1);
+            let far = key + extent;
+            let at = 2 + choose(62);
+            let trips = 3 + choose(5);
+            let name = format!("collection_{seed:x}_{}", shape.label());
+            // table[good] is 1 and table[0] is 0. Copy reads the saved row,
+            // the mut call and latch change the next loaded cell, and only
+            // the admitted push reaches the corrective store.
+            let inputs: &[_] = match shape {
+                Store | WholeCopy => &[
+                    ([1, 0, far, 0], Some(1)),
+                    ([2, at, far, 0], Some(0)),
+                    ([trips, trips - 1, 0, 0], Some(1)),
+                ],
+                OffsetCopy => &[
+                    ([1, at, 0, 0], Some(0)),
+                    ([2, at, 0, 0], Some(1)),
+                    ([2, at, 0, 1], Some(0)),
+                    ([1, at, far, 0], None),
+                ],
+                MutCall => &[
+                    ([1, 1, far, 3], Some(0)),
+                    ([2, 1, key, 3], Some(1)),
+                    ([2, 1, far, 3], None),
+                ],
+                BackEdge => &[
+                    ([trips - 1, trips - 1, far, trips - 2], Some(0)),
+                    ([trips, trips - 1, key, trips - 2], Some(1)),
+                    ([trips, trips - 1, far, trips - 2], None),
+                ],
+                Push => &[
+                    ([1, at, far, 0], None),
+                    ([1, at, far, 4096], Some(1)),
+                    ([trips, at, key, 0], Some(1)),
+                ],
+            };
+            let folded = check(shape, &name, extent, key, inputs);
+            shapes_with_folds += usize::from(folded);
+            cases_with_folds += usize::from(folded) * inputs.len();
+            cases += inputs.len();
+        }
+        assert_counted_loop_folds(
+            "collection",
+            seed,
+            25,
+            (shapes_with_folds, CollectionShape::ALL.len()),
+            (cases_with_folds, cases),
         );
     }
-    for name in must_fold {
-        let count = folded(name);
-        eprintln!("{name}: {count} checks folded by CounterRangePass");
-        assert!(count > 0, "{name} must fold at least one check on pos");
+
+    // These counters wrap, and the compiler can bound all indices except
+    // the key read from the cells without any memory facts.
+    for shape in [Store, WholeCopy] {
+        let name = format!("must_fold_{}", shape.label());
+        assert!(
+            check(shape, &name, 8, 7, &[([1, 0, 8, 0], Some(1))]),
+            "{name} must fold the collection bounds check"
+        );
+    }
+    for (shape, args) in [
+        (OffsetCopy, [1, 5, 8, 0]),
+        (MutCall, [2, 1, 8, 3]),
+        (Push, [1, 0, 8, 0]),
+        (BackEdge, [2, 1, 8, 0]),
+    ] {
+        let name = format!("must_keep_{}", shape.label());
+        check(shape, &name, 8, 7, &[(args, None)]);
     }
 }
 

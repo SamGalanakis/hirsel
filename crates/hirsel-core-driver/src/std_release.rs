@@ -36,28 +36,18 @@ const STD_SCHEMA: u32 = 2;
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
 
-/// Entries a program lowers itself, as a composed program does, with every
-/// plain root they reach: each a definition or a module of them. Called over
-/// the unit, each costs a program more than its own lowering saves (Guard B).
+/// Definitions whose callers need the program to lower them and the plain
+/// roots they reach to pass Guard B.
 const ALWAYS_IMPORT: &[&str] = &[
-    "std@1/csv",
-    "std@1/json",
-    "std@1/regex",
-    "std@1/float",
-    "core@1/string/push_u64",
-    "std@1/string/push_uint",
+    "std@1/json/parse",
+    "std@1/json/write",
+    "std@1/regex/next_captures",
     "std@1/string/next_split",
-    "core@1/string/from",
-    "core@1/string/encode_base64",
-    "core@1/string/append_base64_bytes",
 ];
 
 fn always_imported(definition: &DefPath) -> bool {
     let path = definition.to_string();
-    ALWAYS_IMPORT.iter().any(|entry| {
-        path.strip_prefix(entry)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-    })
+    ALWAYS_IMPORT.contains(&path.as_str())
 }
 
 /// The release std's publication record, stored under the std key.

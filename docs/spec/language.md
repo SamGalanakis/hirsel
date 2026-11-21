@@ -132,8 +132,9 @@ The transform-fragment check for a `StaticFn` given to `flow.stage`
 ([CONC-14](tasks.md#conc-14-flows)) also reads each body in the instance set
 [PROG-9](programs.md#prog-9-code-descriptors) defines. Editing a dependency's body
 can therefore refuse that call.
-A closure writes its parameter types; its result type may be omitted when the expected
-type gives it.
+A closure writes its parameter names and modes. It writes every parameter type, or none
+of them when its expected type gives them ([LANG-11](#lang-11-typing-is-local)); its
+result type may be omitted when the expected type gives it.
 
 `waits` says that a call may wait and may observe cancellation
 ([CONC-7](tasks.md#conc-7-cancellation-points)). `main` is always `waits`
@@ -211,6 +212,8 @@ arm or exit gives an expression its type.
   `e`; a compound assignment `q op= e` types as `q op e`;
 - the function's declared result type: each `return e` and the body's tail; a closure's
   result type, written or expected: its body's tail;
+- a closure's expected callable type ([LANG-13](#lang-13-callables)): the types of
+  parameters the closure writes without one;
 - the expected type of a block: its last expression; of an `if` or `match`: each branch or
   arm; of a loop: each `break` value;
 - with none of those, the type of the first branch, arm or `break` value in source order
@@ -232,6 +235,16 @@ evaluated, moved, viewed and cleaned as `e` is, and an ascribed place is that pl
 fixes a call's type parameters from its result, the one way to fix them inside an
 expression: type arguments are never written at a call ([LANG-12](#lang-12-generics)), so
 `f.[T](..)` is not syntax.
+
+A closure omits its parameter types all together or not at all: one that writes some and
+omits others is refused here, at the first parameter without a type. It may omit them only
+where its expected type is a callable type whose every parameter type is fixed at that
+point of the forward visit below, with no hole left in any of them; otherwise it is
+refused here, at the first parameter. Each omitted type is the expected parameter type,
+exactly. Modes are never omitted: the closure writes `take`, `mut` or `bytes` as the
+callable type does, and one whose modes differ does not fit (LANG-13). Omitting the types
+changes nothing else: the closure's kind, captures and fit are checked as if it had
+written them. A top-level function still writes its whole signature (LANG-8).
 
 An `if` without `else` has type unit, and an arm of type `Never` constrains nothing. An
 expression whose type, after the conversions below, is not its
@@ -302,6 +315,19 @@ fn empty() -> u64 { list.len((list.new() : List[u64])) }
 ```
 ```hirsel unbuilt
 fn widen(x: u8) -> u64 { (x : u64) }                      // refused: LANG-11, at x: u8 is not u64
+```
+```hirsel unbuilt
+fn apply(f: fn(u64, take String) -> u64, x: u64, take s: String) -> u64 { f(x, take s) }
+fn g(take s: String) -> u64 { apply(fn(n, take t) { n + string.byte_len(t) }, 1, take s) }
+fn h() -> u64 { let inc: fn(u64) -> u64 = fn(x) { x + 1 }; inc(2) }
+```
+```hirsel unbuilt
+fn apply(f: fn(u64, u64) -> u64, x: u64) -> u64 { f(x, x) }
+fn g() -> u64 { apply(fn(a, b: u64) { a + b }, 1) }      // refused: LANG-11, at a: all or none
+```
+```hirsel unbuilt
+fn fold[A, T](xs: List[T], f: fn(A, T) -> A, init: A) -> A { init }
+fn total(xs: List[u64]) -> u64 { fold(xs, fn(acc, x) { acc + x }, 0) }   // refused: LANG-11, at acc: A is open
 ```
 ```hirsel
 fn f(c: bool, x: u8) -> u16 { if c { x } else { 0 } }     // refused: LANG-11, at x: u8 is not u16

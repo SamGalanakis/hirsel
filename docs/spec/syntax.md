@@ -279,8 +279,9 @@ loop-expr   = "loop", block | "while", cond, block
 if-expr     = "if", cond, block, [ "else", ( block | if-expr ) ] ;
 match-expr  = "match", expression, "{", [ arm, { entry-sep, arm }, [ entry-sep ] ], "}" ;
 arm         = pattern, [ "if", expression ], "=>", expression ;
-closure     = [ "scoped" ], "fn", "(", list(fn-param), ")", [ "->", type ], [ "waits" ],
+closure     = [ "scoped" ], "fn", "(", list(closure-param), ")", [ "->", type ], [ "waits" ],
               block ;
+closure-param = [ "take" | "mut" | "bytes" ], name, [ ":", type ] ;
 
 (* patterns *)
 pattern     = "_" | [ "take" ], name | scalar, [ "..=", scalar ]

@@ -86,7 +86,7 @@ fn put(mut c: Cache, key: String, value: String) -> Result[bool, m1.support.Erro
     }
     let e = Entry(key: take owned_key, payload: take staged, prev: None, next: None)
     let h = std.pool.insert(mut c.slots, take e)
-    m1.support.insert(mut c.index, take index_key, h)?
+    map.insert(mut c.index, take index_key, h)
     front(mut c, h)
     if let None = c.first {
         c.first = Some(h)
@@ -104,7 +104,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
                 return Error(m1.support.error("Parse@cache-op"))
             }
             puts += 1
-            m1.support.admission(variant, m1.support.name("put", puts, ".payload")?, string.byte_len(value))?
+            m1.support.admission(variant, m1.support.name("put", puts, ".payload"), string.byte_len(value))?
             if put(mut c, key, value)? {
                 evictions += 1
             }
@@ -143,25 +143,25 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     let mut evictions: u64 = 0
     let outcome = operations(mut c, input, variant, mut hits, mut checksum, mut evictions)
     let mut rendered = string.new()
-    m1.support.add(mut rendered, "hits=")?
-    m1.support.num(mut rendered, hits)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, checksum)?
-    m1.support.add(mut rendered, " evictions=")?
-    m1.support.num(mut rendered, evictions)?
-    m1.support.add(mut rendered, "\norder=")?
+    string.push(mut rendered, "hits=")
+    string.push_u64(mut rendered, hits)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, checksum)
+    string.push(mut rendered, " evictions=")
+    string.push_u64(mut rendered, evictions)
+    string.push(mut rendered, "\norder=")
     let mut p = c.head
     let mut first = true
     while let Some(h) = p {
         let e = result.unwrap(std.pool.get(c.slots, h))
         if !first {
-            m1.support.add(mut rendered, ",")?
+            string.push(mut rendered, ",")
         }
         first = false
-        m1.support.add(mut rendered, e.key)?
+        string.push(mut rendered, e.key)
         p = e.next
     }
-    m1.support.add(mut rendered, "\n")?
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     outcome
 }

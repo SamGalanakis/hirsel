@@ -50,8 +50,8 @@ from the payload charges above. These are hand derivations, not executed Hirsel
 results.
 
 Resource admission follows 77ad169e. A refused Temp returns its parent/name,
-so the already-created directory is removed before Capacity propagates. Other
-resource literals pass their returned fields through result.capacity_only.
+so the already-created directory is removed before Capacity propagates. A
+refused Owned literal drops its returned fields and reports Capacity.
 For 9175e560, LockError.Capacity returns the unacquired HostFile. lock_capacity
 moves it into a local scope: its mechanical, shielded cleanup closes it exactly
 once before the original Capacity is returned. No lock was held, so no lock

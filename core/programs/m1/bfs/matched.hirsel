@@ -46,7 +46,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     let mut positions: List[u32] = list.with_capacity(n)
     i = 0
     while i < n {
-        m1.support.push(mut positions, offsets[i])?;
+        list.push(mut positions, offsets[i]);
         i += 1
     }
     let mut neighbors: List[u32] = list.with_capacity(edge_count)
@@ -69,7 +69,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     m1.support.admission(variant, "search.queue", 8 * n)?
     let queue_owner = m1.support.marker(tx, "queue")?
     let mut queue: List[u64] = list.with_capacity(n)
-    m1.support.push(mut queue, from)?
+    list.push(mut queue, from)
     let _ = list.set(mut parent, from, from)
     let mut head: u64 = 0
     while head < list.len(queue) {
@@ -81,7 +81,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
             let next: u64 = int.widen(neighbors[lo])
             if parent[next] == n {
                 let _ = list.set(mut parent, next, here)
-                m1.support.push(mut queue, next)?
+                list.push(mut queue, next)
             }
             lo += 1
         }
@@ -98,25 +98,25 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     m1.support.admission(variant, "result.path", path_len * 8)?
     let mut path: List[u64] = list.with_capacity(path_len)
     cursor = to
-    m1.support.push(mut path, cursor)?
+    list.push(mut path, cursor)
     while cursor != from {
         cursor = parent[cursor];
-        m1.support.push(mut path, cursor)?
+        list.push(mut path, cursor)
     }
     list.reverse(mut path)
     let mut rendered = string.new()
-    m1.support.add(mut rendered, "path=")?
+    string.push(mut rendered, "path=")
     let mut first = true
     for node in path {
         if !first {
-            m1.support.add(mut rendered, ",")?
+            string.push(mut rendered, ",")
         }
         first = false
-        m1.support.num(mut rendered, node)?
+        string.push_u64(mut rendered, node)
     }
-    m1.support.add(mut rendered, "\nvisited=")?
-    m1.support.num(mut rendered, list.len(queue))?
-    m1.support.add(mut rendered, "\n")?
+    string.push(mut rendered, "\nvisited=")
+    string.push_u64(mut rendered, list.len(queue))
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)
 }
 

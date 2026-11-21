@@ -20,8 +20,8 @@ fn parse_error(e: std.json.Error, n: u64) -> Result[m1.support.Error, m1.support
         Build(Overflow) => "Build",
     }
     let mut label = string.from(prefix)
-    m1.support.add(mut label, "@document")?
-    m1.support.num(mut label, n)?
+    string.push(mut label, "@document")
+    string.push_u64(mut label, n)
     Ok(m1.support.error(take label))
 }
 
@@ -82,12 +82,12 @@ fn query(j: Json, path: String, at: u64) -> Result[View[Json], m1.support.Error]
 }
 
 fn document(out: Stdout, s: String, path: String, variant: String, n: u64, tx: Sender[String]) -> Result[(u64, u64), m1.support.Error] waits {
-    let owner = m1.support.marker(tx, m1.support.name("document", n, "")?)?
+    let owner = m1.support.marker(tx, m1.support.name("document", n, ""))?
     let mut nodes: u64 = 0
     let root = std.json.parse_tree(s, scoped fn() -> Result[(), m1.support.Error] {
         nodes += 1
-        let mut site = m1.support.name("document", n, ".node")?
-        m1.support.num(mut site, nodes)?
+        let mut site = m1.support.name("document", n, ".node")
+        string.push_u64(mut site, nodes)
         m1.support.admission(variant, site, 0)
     }, make, scoped fn(take e: std.json.Error) -> m1.support.Error {
         match parse_error(e, n) {
@@ -98,9 +98,9 @@ fn document(out: Stdout, s: String, path: String, variant: String, n: u64, tx: S
     let mut pretty = string.new()
     render(mut pretty, root)
     let selected = query(root, path, 1)?
-    let mut answer = m1.support.name("query", n, "=")?
+    let mut answer = m1.support.name("query", n, "=")
     render(mut answer, selected)
-    m1.support.add(mut answer, "\n")?
+    string.push(mut answer, "\n")
     m1.support.put(out, answer)?
     if variant == "print" {
         m1.support.put(out, pretty)?;
@@ -128,13 +128,13 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     let mut checksum: u64 = 0
     let outcome = documents(out, input, variant, tx, mut count, mut total, mut checksum)
     let mut rendered = string.new()
-    m1.support.add(mut rendered, "documents=")?
-    m1.support.num(mut rendered, count)?
-    m1.support.add(mut rendered, " pretty-bytes=")?
-    m1.support.num(mut rendered, total)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, checksum)?
-    m1.support.add(mut rendered, "\n")?
+    string.push(mut rendered, "documents=")
+    string.push_u64(mut rendered, count)
+    string.push(mut rendered, " pretty-bytes=")
+    string.push_u64(mut rendered, total)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, checksum)
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     outcome
 }

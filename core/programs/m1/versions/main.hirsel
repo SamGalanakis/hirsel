@@ -41,7 +41,7 @@ fn draft(root: Option[Arc[Node]], key: u64, value: u64, mut serial: u64, mut cou
         (share(n.left), share(n.right))
     }
     count += 1
-    m1.support.admission(variant, m1.support.name("draft.node", count, "")?, 64)?
+    m1.support.admission(variant, m1.support.name("draft.node", count, ""), 64)?
     node(n.key, if key == n.key {
         value
     } else {
@@ -118,19 +118,19 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     let mut pin = share(current)
     let mut completed: u64 = 0
     let outcome = updates(input, at, n, m1.support.case_variant(argv), mut current, mut serial, mut completed)
-    let mut rendered = m1.support.name("updates=", completed, " pinned=")?
-    m1.support.num(mut rendered, sum(pin, n))?
-    m1.support.add(mut rendered, " current=")?
-    m1.support.num(mut rendered, sum(current, n))?
-    m1.support.add(mut rendered, " live=")?
-    m1.support.num(mut rendered, live(pin, current)?)?
-    m1.support.add(mut rendered, "\nafter-unpin=")?
+    let mut rendered = m1.support.name("updates=", completed, " pinned=")
+    string.push_u64(mut rendered, sum(pin, n))
+    string.push(mut rendered, " current=")
+    string.push_u64(mut rendered, sum(current, n))
+    string.push(mut rendered, " live=")
+    string.push_u64(mut rendered, live(pin, current)?)
+    string.push(mut rendered, "\nafter-unpin=")
     let _ = replace(mut pin, None)
-    m1.support.num(mut rendered, live(pin, current)?)?
-    m1.support.add(mut rendered, "\nafter-current=")?
+    string.push_u64(mut rendered, live(pin, current)?)
+    string.push(mut rendered, "\nafter-current=")
     let _ = replace(mut current, None)
-    m1.support.num(mut rendered, live(pin, current)?)?
-    m1.support.add(mut rendered, "\n")?
+    string.push_u64(mut rendered, live(pin, current)?)
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {

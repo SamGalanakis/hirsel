@@ -19,8 +19,8 @@ fn header_value(s: String, hs: FixedSpan[Header], key: String) -> Option[View[St
 }
 
 fn request(block: String, variant: String, number: u64, take config: Arc[Config], tx: Sender[String]) -> Result[(u64, u64), m1.support.Error] {
-    let socket_owner = m1.support.marker(tx, m1.support.name("socket#", number, "")?)?
-    let scratch_owner = m1.support.marker(tx, m1.support.name("scratch#", number, "")?)?
+    let socket_owner = m1.support.marker(tx, m1.support.name("socket#", number, ""))?
+    let scratch_owner = m1.support.marker(tx, m1.support.name("scratch#", number, ""))?
     region scratch {
         let mut at: u64 = 0
         let first = m1.support.line(block, mut at)
@@ -41,16 +41,16 @@ fn request(block: String, variant: String, number: u64, take config: Arc[Config]
             let lo = at
             let row = m1.support.line(block, mut at)
             h += 1
-            let mut site = m1.support.name("request", number, ".header")?
-            m1.support.num(mut site, h)?
+            let mut site = m1.support.name("request", number, ".header")
+            string.push_u64(mut site, h)
             m1.support.admission(variant, site, 0)?
             let Some(colon) = string.find(row, 0, ": ") else {
                 return Error(m1.support.error("Parse@header"))
             }
             let name_lo: u32 = int.narrow(string.byte_len(arena))
-            m1.support.add(mut arena, string.slice(row, 0, colon))?
+            string.push(mut arena, string.slice(row, 0, colon))
             let name_hi: u32 = int.narrow(string.byte_len(arena))
-            m1.support.add(mut arena, string.slice(row, colon + 2, string.byte_len(row)))?
+            string.push(mut arena, string.slice(row, colon + 2, string.byte_len(row)))
             let value_hi: u32 = int.narrow(string.byte_len(arena))
             let value = Header(name_lo, name_hi, value_lo: name_hi, value_hi)
             span.push(mut headers, value)
@@ -66,13 +66,13 @@ fn request(block: String, variant: String, number: u64, take config: Arc[Config]
             return Error(m1.support.error("Parse@content"))
         }
         let size = string.byte_len(banner) + string.byte_len(id) + string.byte_len(content) + 2
-        m1.support.admission(variant, m1.support.name("request", number, ".reply")?, size)?
+        m1.support.admission(variant, m1.support.name("request", number, ".reply"), size)?
         let mut reply = string.with_capacity(size)
-        m1.support.add(mut reply, banner)?
-        m1.support.add(mut reply, ":")?
-        m1.support.add(mut reply, id)?
-        m1.support.add(mut reply, ":")?
-        m1.support.add(mut reply, content)?
+        string.push(mut reply, banner)
+        string.push(mut reply, ":")
+        string.push(mut reply, id)
+        string.push(mut reply, ":")
+        string.push(mut reply, content)
         if variant == "error" && number == 2 {
             return Error(m1.support.error("Io@request2.write"))
         }
@@ -105,21 +105,21 @@ fn serve(input: String, variant: String, config: Arc[Config], tx: Sender[String]
 
 fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
     let mut routes: Map[String, String] = map.new()
-    m1.support.insert(mut routes, "/alpha", "welcome")?
-    m1.support.insert(mut routes, "/beta", "ready")?
+    map.insert(mut routes, "/alpha", "welcome")
+    map.insert(mut routes, "/beta", "ready")
     let config = arc.new(Config(routes: take routes))
     let mut requests: u64 = 0
     let mut total: u64 = 0
     let mut checksum: u64 = 0
     let outcome = serve(input, variant, config, tx, mut requests, mut total, mut checksum)
     let mut rendered = string.new()
-    m1.support.add(mut rendered, "requests=")?
-    m1.support.num(mut rendered, requests)?
-    m1.support.add(mut rendered, " bytes=")?
-    m1.support.num(mut rendered, total)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, checksum)?
-    m1.support.add(mut rendered, "\n")?
+    string.push(mut rendered, "requests=")
+    string.push_u64(mut rendered, requests)
+    string.push(mut rendered, " bytes=")
+    string.push_u64(mut rendered, total)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, checksum)
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     outcome
 }

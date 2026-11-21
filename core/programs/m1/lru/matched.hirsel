@@ -27,7 +27,7 @@ fn key(c: Cache, h: u32) -> Result[String, m1.support.Error] {
     let mut payload_bytes: Bytes = list.with_capacity(int.widen(c.slots[i].key_len))
     let mut j: u64 = 0
     while j < int.widen(c.slots[i].key_len) {
-        m1.support.push(mut payload_bytes, c.slots[i].key[j])?;
+        list.push(mut payload_bytes, c.slots[i].key[j]);
         j += 1
     }
     Ok(result.unwrap(string.from_utf8(take payload_bytes)))
@@ -102,10 +102,10 @@ fn put(mut c: Cache, name: String, value: String) -> Result[bool, m1.support.Err
         h
     } else {
         let h: u32 = int.narrow(list.len(c.slots))
-        m1.support.push(mut c.slots, staged)?
+        list.push(mut c.slots, staged)
         h
     }
-    m1.support.insert(mut c.index, take owned, h)?
+    map.insert(mut c.index, take owned, h)
     touch(mut c, h)
     if let None = c.first {
         c.first = Some((h, c.slots[int.widen(h)].generation))
@@ -123,7 +123,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
                 return Error(m1.support.error("Parse@cache-op"))
             }
             puts += 1
-            m1.support.admission(variant, m1.support.name("put", puts, ".payload")?, 0)?
+            m1.support.admission(variant, m1.support.name("put", puts, ".payload"), 0)?
             if put(mut c, name, value)? {
                 evictions += 1
             }
@@ -137,7 +137,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
                 let mut value: Bytes = list.with_capacity(int.widen(c.slots[i].len))
                 let mut j: u64 = 0
                 while j < int.widen(c.slots[i].len) {
-                    m1.support.push(mut value, c.slots[i].payload[j])?;
+                    list.push(mut value, c.slots[i].payload[j]);
                     j += 1
                 }
                 touch(mut c, h)
@@ -165,24 +165,24 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     let mut evictions: u64 = 0
     let outcome = operations(mut c, input, variant, mut hits, mut checksum, mut evictions)
     let mut rendered = string.new()
-    m1.support.add(mut rendered, "hits=")?
-    m1.support.num(mut rendered, hits)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, checksum)?
-    m1.support.add(mut rendered, " evictions=")?
-    m1.support.num(mut rendered, evictions)?
-    m1.support.add(mut rendered, "\norder=")?
+    string.push(mut rendered, "hits=")
+    string.push_u64(mut rendered, hits)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, checksum)
+    string.push(mut rendered, " evictions=")
+    string.push_u64(mut rendered, evictions)
+    string.push(mut rendered, "\norder=")
     let mut p = c.head
     let mut first = true
     while p != NONE {
         if !first {
-            m1.support.add(mut rendered, ",")?
+            string.push(mut rendered, ",")
         }
         first = false
-        m1.support.add(mut rendered, key(c, p)?)?
+        string.push(mut rendered, key(c, p)?)
         p = c.slots[int.widen(p)].next
     }
-    m1.support.add(mut rendered, "\n")?
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     outcome
 }

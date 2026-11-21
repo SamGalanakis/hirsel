@@ -87,7 +87,7 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
     while at < string.byte_len(s.input) && sent < limit {
         let mut rows: List[String] = list.with_capacity(batch_size)
         while at < string.byte_len(s.input) && list.len(rows) < batch_size {
-            m1.support.push(mut rows, string.from(m1.support.line(s.input, mut at)))?
+            list.push(mut rows, string.from(m1.support.line(s.input, mut at)))
         }
         let b = batch(sent + 1, take rows, s.released)?
         if s.variant == "normal" && sent == 8 {
@@ -109,12 +109,12 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
         let mut id: u64 = 3
         while id <= 8 {
             let mut rows: List[String] = list.new()
-            m1.support.push(mut rows, "cancel")?
+            list.push(mut rows, "cancel")
             let _ = publish(s.output, batch(id, take rows, s.released)?)
             id += 1
         }
         let mut rows: List[String] = list.new()
-        m1.support.push(mut rows, "cancel")?
+        list.push(mut rows, "cancel")
         let ninth = batch(9, take rows, s.released)?
         let pending = match channel.try_send(s.output, take ninth) {
             Error(Full(take p)) => p,
@@ -136,7 +136,7 @@ fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
     for row in b.rows {
         let mut value = string.from(row)
         string.make_ascii_upper(mut value)
-        m1.support.push(mut output, take value)?
+        list.push(mut output, take value)
     }
     let _ = replace(mut b.rows, take output)
     Ok(())
@@ -222,16 +222,16 @@ fn joined_source(take h: Task[Result[SourceResult, m1.support.Error]]) -> Result
     }
 }
 
-fn ids(mut out: String, xs: List[u64]) -> Result[(), m1.support.Error] {
+fn ids(mut out: String, xs: List[u64]) -> () {
     let mut first = true
     for id in xs {
         if !first {
-            m1.support.add(mut out, ",")?
+            string.push(mut out, ",")
         };
         first = false;
-        m1.support.num(mut out, id)?
+        string.push_u64(mut out, id)
     }
-    m1.support.add(mut out, "\n")
+    string.push(mut out, "\n")
 }
 
 fn program(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.support.Error] waits {
@@ -338,34 +338,34 @@ fn program(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.suppo
     }
     let mut released_ids: List[u64] = list.new()
     while let Ok(id) = channel.receive(releases) {
-        m1.support.push(mut released_ids, id)?
+        list.push(mut released_ids, id)
     }
     let mut rendered = string.new()
     if failed {
-        m1.support.add(mut rendered, "release-order=")?;
-        ids(mut rendered, released_ids)?
+        string.push(mut rendered, "release-order=");
+        ids(mut rendered, released_ids)
     }
-    m1.support.add(mut rendered, "sent=")?
-    m1.support.num(mut rendered, sent)?
-    m1.support.add(mut rendered, " transformed=")?
-    m1.support.num(mut rendered, completed)?
-    m1.support.add(mut rendered, " sink-batches=")?
-    m1.support.num(mut rendered, stats.batches)?
-    m1.support.add(mut rendered, " rows=")?
-    m1.support.num(mut rendered, stats.rows)?
-    m1.support.add(mut rendered, " bytes=")?
-    m1.support.num(mut rendered, stats.size)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, stats.checksum)?
-    m1.support.add(mut rendered, if full {
+    string.push(mut rendered, "sent=")
+    string.push_u64(mut rendered, sent)
+    string.push(mut rendered, " transformed=")
+    string.push_u64(mut rendered, completed)
+    string.push(mut rendered, " sink-batches=")
+    string.push_u64(mut rendered, stats.batches)
+    string.push(mut rendered, " rows=")
+    string.push_u64(mut rendered, stats.rows)
+    string.push(mut rendered, " bytes=")
+    string.push_u64(mut rendered, stats.size)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, stats.checksum)
+    string.push(mut rendered, if full {
         "\nbackpressure=true\nreleased="
     } else {
         "\nbackpressure=false\nreleased="
-    })?
+    })
     list.sort(mut released_ids, fn(a: u64, b: u64) -> Order {
         std.order.compare(a, b)
     })
-    ids(mut rendered, released_ids)?
+    ids(mut rendered, released_ids)
     m1.support.put(out, rendered)?
     let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {

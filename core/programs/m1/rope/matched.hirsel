@@ -71,7 +71,7 @@ fn piece(mut s: Store, value: String) -> Result[Piece, m1.support.Error] {
         i
     } else {
         let id: u32 = int.narrow(list.len(s.slots))
-        m1.support.push(mut s.slots, Live(take c))?
+        list.push(mut s.slots, Live(take c))
         id
     }
     s.live += 1
@@ -127,7 +127,7 @@ fn edit(mut s: Store, root: List[Piece], pos: u64, len: u64, replacement: String
         return Error(m1.support.error("InvalidPosition"))
     }
     let cap = list.len(root) + 2
-    m1.support.admission(variant, m1.support.name("edit", number, ".piece")?, ((cap * 12 + 7) / 8) * 8)?
+    m1.support.admission(variant, m1.support.name("edit", number, ".piece"), ((cap * 12 + 7) / 8) * 8)?
     let mut out: List[Piece] = list.with_capacity(cap)
     // Stage every fallible allocation before adding any borrowed edge to the new root.
     let inserted = if string.byte_len(replacement) > 0 {
@@ -180,7 +180,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     let initial = m1.support.line(input, mut at)
     let mut s = Store(slots: list.new(), free: None, live: 0)
     let mut current: List[Piece] = list.with_capacity(1)
-    m1.support.push(mut current, piece(mut s, initial)?)?
+    list.push(mut current, piece(mut s, initial)?)
     let mut history: List[List[Piece]] = list.new()
     let mut edits: u64 = 0
     let outcome = operations(input, at, m1.support.case_variant(argv), mut s, mut current, mut history, mut edits)
@@ -188,23 +188,23 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     for p in current {
         checksum += list.sum_bytes(list.slice(string.as_bytes(chunk(s, p.id).value), int.widen(p.lo), int.widen(p.hi)))
     }
-    let mut rendered = m1.support.name("edits=", edits, " undo=")?
-    m1.support.num(mut rendered, list.len(history))?
-    m1.support.add(mut rendered, " bytes=")?
-    m1.support.num(mut rendered, length(current))?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, checksum)?
-    m1.support.add(mut rendered, " live=")?
-    m1.support.num(mut rendered, s.live)?
-    m1.support.add(mut rendered, "\nafter-history=")?
+    let mut rendered = m1.support.name("edits=", edits, " undo=")
+    string.push_u64(mut rendered, list.len(history))
+    string.push(mut rendered, " bytes=")
+    string.push_u64(mut rendered, length(current))
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, checksum)
+    string.push(mut rendered, " live=")
+    string.push_u64(mut rendered, s.live)
+    string.push(mut rendered, "\nafter-history=")
     while let Some(take old) = list.pop(mut history) {
         release(mut s, take old)
     }
-    m1.support.num(mut rendered, s.live)?
-    m1.support.add(mut rendered, "\nafter-text=")?
+    string.push_u64(mut rendered, s.live)
+    string.push(mut rendered, "\nafter-text=")
     release(mut s, take current)
-    m1.support.num(mut rendered, s.live)?
-    m1.support.add(mut rendered, "\n")?
+    string.push_u64(mut rendered, s.live)
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {

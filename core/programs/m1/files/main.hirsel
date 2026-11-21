@@ -32,9 +32,9 @@ resource type Owned grant bytes 1024 {
             failed = true
         }
     }
-    let _ = event(f.tx, "release=", f.name)
+    event(f.tx, "release=", f.name)
     if failed || f.injected {
-        let _ = event(f.tx, "cleanup-error=Io@release-", f.name)
+        event(f.tx, "cleanup-error=Io@release-", f.name)
         let cause = string.from("Io@release-")
         let mut label = cause
         let _ = string.push(mut label, f.name)
@@ -42,21 +42,21 @@ resource type Owned grant bytes 1024 {
     }
 }
 
-fn event(tx: Sender[Event], prefix: String, name: String) -> Result[(), m1.support.Error] {
+fn event(tx: Sender[Event], prefix: String, name: String) -> () {
     let mut line = string.from(prefix)
-    m1.support.add(mut line, name)?
+    string.push(mut line, name)
     match channel.try_send(tx, Line(take line)) {
-        Ok(()) => Ok(()),
+        Ok(()) => (),
         Error(_) => fail("trace capacity")
     }
 }
 
 fn acquired(take handle: Option[HostFile], take lock: Option[std.file.Lock], name: String, variant: String, tx: Sender[Event]) -> Result[Owned, m1.support.Error] {
     let mut failure = string.from("error-release-")
-    m1.support.add(mut failure, name)?
+    string.push(mut failure, name)
     let mut line = string.from("acquire=")
-    m1.support.add(mut line, name)?
-    let owner = Owned(handle: take handle, lock: take lock, name: string.from(name), injected: variant == failure || variant == "error-cleanup-all", tx: channel.sender(tx)) ?=> |(c, _)| m1.support.Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))
+    string.push(mut line, name)
+    let owner = Owned(handle: take handle, lock: take lock, name: string.from(name), injected: variant == failure || variant == "error-cleanup-all", tx: channel.sender(tx)) ?=> |(c, _)| m1.support.ambient_capacity(c)
     match channel.try_send(tx, Line(take line)) {
         Ok(()) => {},
         Error(_) => fail("trace capacity")
@@ -77,7 +77,7 @@ fn lock_capacity(c: Capacity, take returned: HostFile) -> Result[(), m1.support.
     {
         let file_to_close = returned
     }
-    m1.support.mem(Error(c))
+    Error(m1.support.ambient_capacity(c))
 }
 
 fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.support.Error] waits {
@@ -127,7 +127,7 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
             return Error(m1.support.error("Io@copy"))
         }
     }
-    event(tx, "copied=", m1.support.name("", copied, "")?)?
+    event(tx, "copied=", m1.support.name("", copied, ""))
     Ok(())
 }
 
@@ -138,7 +138,7 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
         Ok(take t) => t,
         Error((c, (owner, take returned_name))) => {
             let _ = std.dir.remove_all(owner, returned_name)
-            return m1.support.mem(Error(c))
+            return Error(m1.support.ambient_capacity(c))
         },
     }
     io(std.file.write(directory, "source.txt", string.as_bytes(input)), "Io@setup")?
@@ -178,16 +178,16 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
                 m1.support.put(out, line)?;
                 m1.support.put(out, "\n")?
             },
-            Cleanup(take label) => m1.support.push(mut cleanups, take label)?,
+            Cleanup(take label) => list.push(mut cleanups, take label),
         }
     }
-    let mut rendered = m1.support.name("destination-bytes=", list.len(data), " sum=")?
-    m1.support.num(mut rendered, list.sum_bytes(data))?
-    m1.support.add(mut rendered, if free {
+    let mut rendered = m1.support.name("destination-bytes=", list.len(data), " sum=")
+    string.push_u64(mut rendered, list.sum_bytes(data))
+    string.push(mut rendered, if free {
         " lock-free=true\n"
     } else {
         " lock-free=false\n"
-    })?
+    })
     m1.support.put(out, rendered)?
     let mut primary = outcome
     if let Ok(()) = primary {

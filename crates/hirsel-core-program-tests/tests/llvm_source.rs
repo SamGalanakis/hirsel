@@ -524,6 +524,221 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
 }
 
 #[test]
+fn seeded_scalar_counted_loops_agree_across_engines() {
+    // SEM-1 and MEM-30: the shift by 7 succeeds, a shift by 8 or -1 fails,
+    // and a checked u8 increment past 255 fails. Only completed back edges
+    // and calls spend steps, so a failure can occur with zero steps left.
+    let mut source = String::from(
+        r#"
+fn last_bit(budget: u64, end: u8) -> u64 {
+    match (bound steps budget {
+        let mut i = 7u8
+        let mut bits = 0u8
+        while i <= end {
+            bits ^= 1u8 << i
+            i += 1
+        }
+        let word: u64 = int.widen(bits)
+        word
+    }) { Ok(bits) => bits, Error(e) => 65536u64 + e.steps }
+}
+fn negative_shift(budget: u64, stop: i8) -> u64 {
+    match (bound steps budget {
+        let mut i = 2i8
+        let mut bits = 0i8
+        while i >= 0 {
+            if i == stop { return if bits == 3 { 41u64 } else { 42u64 } }
+            bits ^= 1i8 << (i - 1i8)
+            i -= 1
+        }
+        0u64
+    }) { Ok(bits) => bits, Error(e) => 65536u64 + e.steps }
+}
+fn stride_overflow(budget: u64, end: u8) -> u64 {
+    match (bound steps budget {
+        let mut i = 253u8
+        while i <= end { i += 2 }
+        let word: u64 = int.widen(i)
+        word
+    }) { Ok(i) => i, Error(e) => 65536u64 + e.steps }
+}
+"#,
+    );
+    let returned = |value| eval::Outcome::Returned(vec![value]);
+    let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
+    let sentinels = [
+        ("last_bit", [1, 6], returned(0)),
+        ("last_bit", [1, 7], returned(65537)),
+        ("last_bit", [2, 7], returned(128)),
+        ("last_bit", [0, 8], returned(65536)),
+        ("last_bit", [1, 8], overflow()),
+        ("negative_shift", [1, 0], returned(65537)),
+        ("negative_shift", [2, 0], returned(41)),
+        ("negative_shift", [2, 3], overflow()),
+        ("stride_overflow", [1, 254], returned(65537)),
+        ("stride_overflow", [2, 254], returned(255)),
+        ("stride_overflow", [1, 255], overflow()),
+    ];
+    let mut calls: Vec<_> = sentinels
+        .iter()
+        .map(|(name, args, outcome)| (name.to_string(), args.to_vec(), Some(outcome)))
+        .collect();
+
+    // SplitMix64, with a fixed corpus size and a function name that identifies
+    // its seed, width and body. Bounds are literal so release can prove ranges.
+    const SEEDS: [u64; 2] = [0x1543, 0x9e37_79b9_7f4a_7c15];
+    for (ty, width) in [("u8", 8i64), ("i8", 8), ("u16", 16)] {
+        writeln!(source, "fn keep_{ty}(mut i: {ty}, value: {ty}) {{}}").unwrap();
+        writeln!(
+            source,
+            "fn write_{ty}(mut i: {ty}, value: {ty}) {{ i = value }}"
+        )
+        .unwrap();
+        for seed in SEEDS {
+            let mut state = seed ^ ((ty.as_bytes()[0] as u64) << 16) ^ width as u64;
+            let mut choose = |options: u64| {
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut x = state;
+                x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                (x ^ (x >> 31)) % options
+            };
+            let update = format!(
+                "let writer: fn(mut {ty}, {ty}) = if write_now {{ write_{ty} }} else {{ keep_{ty} }}"
+            );
+            let widen = if ty == "i8" {
+                "let low: u8 = int.truncate(bits)\n        let word: u64 = int.widen(low)"
+            } else {
+                "let word: u64 = int.widen(bits)"
+            };
+            for shape in ["plain", "reset", "write", "alias", "break", "return"] {
+                let name = format!("range_{seed:x}_{ty}_{shape}");
+                let (comparison, advance, direction) = match choose(4) {
+                    0 => ("<", "+=", 1),
+                    1 => ("<=", "+=", 1),
+                    2 => (">", "-=", -1),
+                    _ => (">=", "-=", -1),
+                };
+                let edge = if direction > 0 { width - 1 } else { 1 };
+                let start = edge - direction * 2 + choose(3) as i64 - 1;
+                let end = edge + choose(3) as i64 - 1;
+                let step = 1 + choose(3);
+                let offset = [" - 1", "", " + 1"][choose(3) as usize];
+                let reset = start - direction;
+                let (before_loop, action) = match shape {
+                    "plain" => ("", String::new()),
+                    "reset" => ("", format!("if i == at {{ at = 100; i = {reset}{ty} }}")),
+                    "write" => ("", "if i == at { at = 100; i = value }".into()),
+                    "alias" => (
+                        update.as_str(),
+                        "if i == at { at = 100; writer(mut i, value) }".into(),
+                    ),
+                    "break" => ("", "if i == at { break }".into()),
+                    "return" => ("", "if i == at { return 1000u64 }".into()),
+                    _ => unreachable!(),
+                };
+                writeln!(
+                    source,
+                    r#"
+fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
+    match (bound steps budget {{
+        let mut i = {start}{ty}
+        let mut at = trigger
+        let mut bits = 0{ty}
+        {before_loop}
+        while i {comparison} {end}{ty} {{
+            {action}
+            bits ^= 1{ty} << (i{offset})
+            i {advance} {step}{ty}
+        }}
+        {widen}
+        word
+    }}) {{ Ok(bits) => bits, Error(e) => 65536u64 + e.steps }}
+}}
+"#,
+                )
+                .unwrap();
+                // The one-shot mutation keeps the trip count bounded even if it
+                // moves the counter against the stride. Adjacent budgets expose
+                // both the successful and failing path's exact charged prefix.
+                let inputs: &[(i64, u64)] = match shape {
+                    "plain" => &[(100, 0)],
+                    "alias" => &[(100, 0), (start, 0), (start, 1)],
+                    _ => &[(100, 0), (start, 0)],
+                };
+                let replacement = match (direction, ty) {
+                    (1, _) => width as u64,
+                    (_, "i8") => u64::from(u8::MAX), // -1i8
+                    _ => 0,
+                };
+                for &(trigger, replace) in inputs {
+                    for budget in 0..=12 {
+                        calls.push((
+                            name.clone(),
+                            vec![budget, trigger as u64, replacement, replace],
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+    let cases: Vec<_> = calls
+        .iter()
+        .map(|(name, args, _)| Case {
+            function: names[name],
+            args: args.clone(),
+            limit: 1_000_000,
+            injection: None,
+        })
+        .collect();
+    let mut exports: Vec<_> = cases.iter().map(|case| case.function).collect();
+    exports.sort_unstable_by_key(|f| f.0);
+    exports.dedup();
+    let evaluated: Vec<_> = cases
+        .iter()
+        .zip(&calls)
+        .map(|(case, (name, args, expected))| {
+            let run = eval::run(&program, case.function, &case.args, case.limit);
+            if let Some(expected) = expected {
+                assert_eq!(&run.outcome, *expected, "{name}{args:?}");
+            }
+            run
+        })
+        .collect();
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    let mut differences = Vec::new();
+    for (engine, optimization, object) in [
+        ("Cranelift dev", Optimization::None, cranelift),
+        ("LLVM release", Optimization::Speed, llvm),
+    ] {
+        let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+        assert_eq!(reports.len(), cases.len(), "{engine} report count");
+        for (((name, args, _), oracle), native) in calls.iter().zip(&evaluated).zip(reports) {
+            let sites: Vec<_> = oracle
+                .sites
+                .iter()
+                .map(|&anchor| anchor_word(&program.sites, anchor))
+                .collect();
+            if (&native.outcome, &native.sites) != (&oracle.outcome, &sites) {
+                differences.push(format!(
+                    "{engine} {name}{args:?}: got {:?} at {:?}, expected {:?} at {sites:?}",
+                    native.outcome, native.sites, oracle.outcome
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "counted-loop seeds {SEEDS:x?}, {} cases per engine",
+        cases.len()
+    );
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
     let mut cases: Vec<_> = FLOW_CASES

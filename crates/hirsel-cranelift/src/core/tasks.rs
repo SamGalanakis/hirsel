@@ -524,11 +524,11 @@ impl Function<'_, '_, '_> {
                     &[self.context, args[0], args[1], site, wait],
                 )?;
                 let packed = values[0];
-                let status = self.b.ins().ushr_imm(packed, 8);
+                let status = self.b.ins().ushr_imm_s(packed, 8);
                 let status = self.b.ins().ireduce(types::I8, status);
                 self.call_failure(status, call.fail)?;
                 outputs[0] = self.b.ins().ireduce(types::I8, packed);
-                outputs[1] = self.b.ins().ushr_imm(packed, 16);
+                outputs[1] = self.b.ins().ushr_imm_s(packed, 16);
                 outputs[2] = values[1];
                 3
             }

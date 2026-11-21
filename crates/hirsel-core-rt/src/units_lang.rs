@@ -22,7 +22,7 @@ use crate::{
     causes::{self, Cause, Causes, Cell},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
-    units::ledger::{Took, UnitCtx, Value},
+    units::ledger::{Took, UnitCtx},
 };
 use std::{collections::HashMap, mem::MaybeUninit, ptr, sync::Arc};
 

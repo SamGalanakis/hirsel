@@ -188,6 +188,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         );
         std::process::exit(0);
     }
+    if command == "primer" {
+        if invocation.positional.is_some() {
+            return Err("primer takes no arguments".into());
+        }
+        print!("{}", crate::cli_tools::PRIMER);
+        std::process::exit(0);
+    }
     if command == "fmt" || command == "explain" {
         use crate::cli::OptionId;
         let has = |option| invocation.options.iter().any(|(id, _)| *id == option);

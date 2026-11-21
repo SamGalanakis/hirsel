@@ -472,6 +472,7 @@ core declaration headers without bodies. The public formatter does not exempt
 coordinate-bearing diagnostic fixtures selected by a developer.
 
 `explain RULE` and `explain --list` use the catalogue generated from docs/spec.
+`primer` and `explain primer` print docs/PRIMER.md, compiled in.
 --json emits the same Rule fields or sorted array; human output identifies the
 spec file and full-rule anchor. Unknown IDs and list/rule conflicts exit 2.
 No old guidance catalogue is consulted.

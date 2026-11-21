@@ -3,7 +3,8 @@
 
 `--check` reports files that are not formatted and fails, as `cargo fmt --check`.
 rustfmt starts from each target's root file and follows its modules.
-Changed new-language sources are checked, never rewritten. Refusal/gap fixtures
+Changed new-language sources are checked, never rewritten, and the primer's copies
+(tools/site_sync.py --check) must match docs/PRIMER.md. Refusal/gap fixtures
 are excluded by explicit expectation comments to preserve diagnostic coordinates.
 """
 
@@ -88,7 +89,9 @@ def main():
     for edition, files in sorted(roots.items()):
         command = [str(RUSTFMT), '--edition', edition, *rustfmt_flags, *sorted(files)]
         status = subprocess.run(command, cwd=ROOT).returncode or status
-    return status or check_cases(changed_cases())
+    # The primer's site and skill copies are byte-identical to docs/PRIMER.md.
+    synced = subprocess.run([sys.executable, str(ROOT / 'tools/site_sync.py'), '--check'], cwd=ROOT).returncode
+    return status or synced or check_cases(changed_cases())
 
 
 if __name__ == '__main__':

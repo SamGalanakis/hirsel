@@ -2,7 +2,7 @@ name: Site
 on:
   push:
     branches: [main]
-    paths: ["site/**", ".github/workflows/pages.yml"]
+    paths: ["site/**", "docs/PRIMER.md", "core/std/API-INDEX.md", "tools/site_sync.py", ".github/workflows/pages.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 tools/site_sync.py --check
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:

@@ -1,0 +1,12 @@
+# Hirsel
+
+> Hirsel is a native systems language for coding agents: value semantics, declared
+> representation, explicit capabilities and logical byte budgets.
+
+The primer is the whole language in one page; with the installed `hirsel` binary it is
+enough to write, check and test working programs.
+
+## Docs
+
+- [Primer](/primer.md): the language, its rules and the command-line loop
+- [Standard library index](/api-index.md): every std module and its operations

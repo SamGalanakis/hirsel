@@ -3048,27 +3048,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
 }
 
-/// Whether `ty` is or contains the error type: a part that already produced a refusal
-/// or gap, so a comparison involving it is not refused again.
-fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
-    match t.kind(ty) {
-        TyKind::Error => true,
-        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| mentions_error(t, x)),
-        TyKind::Array(x, _) | TyKind::View(x) => mentions_error(t, *x),
-        TyKind::Fn(ps, r, _, _) => {
-            mentions_error(t, *r) || ps.iter().any(|&(_, x)| mentions_error(t, x))
-        }
-        TyKind::Anchored(x, root) => mentions_error(t, *x) || mentions_error(t, *root),
-        TyKind::Never
-        | TyKind::Unit
-        | TyKind::Scalar(_)
-        | TyKind::Vector(_)
-        | TyKind::Param(_)
-        | TyKind::Hole
-        | TyKind::Region(_) => false,
-    }
-}
-
 /// The bytes a value of a row with `repr` and `recipe` takes where it is held (a
 /// local, a field, an element, a copy), or with `logical` what it counts in a
 /// portable size (FORM #116). A resource's or a region value's holder is its block

@@ -261,6 +261,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let g = &self.p.fns[f];
+        if mentions_error(&self.t, g.callable) {
+            self.inherited_refusal = true;
+            self.halt();
+            return (ERROR, None);
+        }
         if g.params.iter().any(|p| self.vector_shape(p.ty).is_some())
             || self.vector_shape(g.result).is_some()
         {
@@ -270,10 +275,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 "a function with a vector parameter or result cannot be a callable value",
             );
             return (ERROR, None);
-        }
-        if g.result == ERROR {
-            self.inherited_refusal = true;
-            self.halt();
         }
         if g.anchors
             .iter()

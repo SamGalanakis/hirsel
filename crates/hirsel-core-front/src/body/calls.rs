@@ -247,6 +247,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => return self.call_value(n, callee, args, want, scratch),
         };
         let g = &p.fns[f];
+        if mentions_error(&self.t, g.callable) {
+            // The callee's signature owns the diagnostic.
+            self.inherited_refusal = true;
+            self.halt();
+            return (ERROR, None);
+        }
         // MEM-4: `emit(take w, x)` writes the literal `x` in place; it is a form.
         if self.is_emit(f) {
             self.builtin_use(f, n);
@@ -263,12 +269,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if g.path.0.name == "callable" && g.path.is_core("code.callable") {
             self.flow_callable(n);
-        }
-        if g.result == ERROR {
-            // The callee's refused header owns the diagnostic. Its error result
-            // cannot supply pattern payloads or a value for live emission.
-            self.inherited_refusal = true;
-            self.halt();
         }
         // PROG-9 is decided at the argument even when a generic function item
         // cannot otherwise be materialized without an expected callable type.

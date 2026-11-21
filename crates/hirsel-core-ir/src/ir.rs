@@ -964,6 +964,8 @@ pub enum RtOp {
     Xxh3Short,
     /// Accumulate complete XXH3 stripes in eight words with the given secret.
     Xxh3Stripes,
+    /// Take the socket or read the scratch grant designated by the place host.
+    LaunchHandle,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1291,6 +1293,7 @@ impl RtOp {
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
+            RtOp::LaunchHandle => (vec![V(u64_)], vec![u64_]),
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
@@ -1494,6 +1497,7 @@ impl RtOp {
             | RtOp::ArgsLen
             | RtOp::ArgsGet
             | RtOp::LaunchWord
+            | RtOp::LaunchHandle
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)

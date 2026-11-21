@@ -237,6 +237,11 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[ptr(CONTEXT), p(&args[0])],
             ),
+            RtOp::LaunchHandle => self.native_call(
+                "hirsel_core_launch_handle",
+                &[U],
+                &[ptr(CONTEXT), u(&args[0])],
+            ),
             RtOp::DescribeEmit => self.native_call(
                 "hirsel_core_describe_emit",
                 &[B],

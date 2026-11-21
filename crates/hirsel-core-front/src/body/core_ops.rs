@@ -357,13 +357,15 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
         && f.path.0.modules == ["runner"]
         && matches!(
             f.path.0.name.as_str(),
-            "launch_word" | "launch_text" | "launch_emit"
+            "launch_word" | "launch_text" | "launch_emit" | "launch_socket" | "launch_scratch"
         )
     {
         return Some(match f.path.0.name.as_str() {
             "launch_word" => u16::MAX,
             "launch_text" => u16::MAX - 1,
-            _ => u16::MAX - 2,
+            "launch_emit" => u16::MAX - 2,
+            "launch_socket" => u16::MAX - 3,
+            _ => u16::MAX - 4,
         });
     }
     if !f.path.package_is("core", "1") || f.body.is_some() {
@@ -415,6 +417,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<Option<ValueId>> {
         let binding = self.p.core_operations[f]?;
+        if matches!(binding, i if i == u16::MAX - 3 || i == u16::MAX - 4) {
+            let u = Ty::Scalar(Scalar::U64);
+            let field = self.konst(u, u64::from(binding == u16::MAX - 4), n)?;
+            let [handle, ..] = self.runtime_row(RtOp::LaunchHandle, &[Arg::Value(field)], n)?;
+            let has_handle = self.runtime_nonzero(u, handle, n)?;
+            return Some(self.runtime_result(
+                result,
+                has_handle,
+                n,
+                |cx, to, ty| {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(at, &[], u, handle, n);
+                    }
+                },
+                |_, _, _| {},
+            ));
+        }
         if binding == u16::MAX - 2 {
             return Some(
                 self.runtime_row(RtOp::DescribeEmit, &[Arg::Value(vals[0]?)], n)
@@ -1526,7 +1547,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
         let Some(i) = p.core_operations[f] else {
             continue;
         };
-        if i >= u16::MAX - 2 {
+        if i >= u16::MAX - 4 {
             continue;
         }
         let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {

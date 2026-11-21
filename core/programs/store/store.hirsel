@@ -8791,7 +8791,7 @@ type ExportLease: shareable + send {
 
 pub type Exported: send { dir: Dir, name: String, stamp: ExportStamp }
 
-type ExportCopy: send {
+pub opaque type ExportCopy: send {
     from: Dir,
     scratch: Dir,
     raw: Bytes,
@@ -8853,7 +8853,7 @@ fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
     Ok(take raw)
 }
 
-fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
+pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
     let mut name = scratch_result(capacity(string.with_capacity(32)))?
     let to = scratch_result(disk_io(host.mkdtemp(job.scratch, mut name)))?
     let raw_stamp = scratch_result(export_bytes(job.stamp))?
@@ -8877,6 +8877,17 @@ fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
 // E1 takes the manifest and the acknowledged extent under the writer's LOCK.
 // An export task copies those immutable names while the head continues.
 pub fn begin_export(mut db: Db, tasks: Tasks, scratch: Dir, take attempt: Bytes, activation: u64, allowance: u64) -> Result[Task[Result[Exported, DeployError]], DeployError] waits {
+    let job = begin_export_copy(mut db, scratch, take attempt, activation)?
+    match task.spawn(tasks, bytes allowance, take job, export_copy) {
+        Ok(take copying) => Ok(take copying),
+        Error((cap, take returned)) => {
+            release_export(mut db, returned.stamp.attempt)
+            Error(Store(Full(cap)))
+        },
+    }
+}
+
+pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activation: u64) -> Result[ExportCopy, DeployError] waits {
     deploy_result(healthy(db))?
     if !is_disk(db) || list.len(attempt) != 16 { return Error(ExportMismatch) }
     if let Some(_) = db.disk[0].lease { return Error(AttemptBusy) }
@@ -8896,13 +8907,8 @@ pub fn begin_export(mut db: Db, tasks: Tasks, scratch: Dir, take attempt: Bytes,
         end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     let lease = deploy_result(capacity(result.capacity_only(arc.new(take kept))))?
     let job = ExportCopy(from: from, scratch: scratch, raw: take raw, stamp: take stamp, lease: arc.share(lease))
-    match task.spawn(tasks, bytes allowance, take job, export_copy) {
-        Ok(take copying) => {
-            db.disk[0].lease = Some(take lease)
-            Ok(take copying)
-        },
-        Error((cap, _)) => Error(Store(Full(cap))),
-    }
+    db.disk[0].lease = Some(take lease)
+    Ok(take job)
 }
 
 // The owner joins or cancels the copy before it releases the attempt.
@@ -9399,6 +9405,13 @@ pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
 
 pub fn imported_digest(value: Imported) -> Inline[u8, 32] { value.digest }
 
+pub fn prepared_matches(value: ValidatedImport, describe: Bytes, release: Bytes, digest: Bytes) -> bool {
+    let target = view value.meta.target
+    target.describe == describe && target.release == release && target.digest == digest
+}
+
+pub fn identity_words(db: Db) -> (u64, u64) { (db.store.hi, db.store.lo) }
+
 pub type Cutover: send { attempt: Bytes, digest: Inline[u8, 32], deadline: u64 }
 
 type TargetLimits { resident: u64, pack: u64 }
@@ -9471,8 +9484,25 @@ fn accept_cutover(mut db: Db, request: Cutover) -> Result[Imported, DeployError]
     Ok(take staged)
 }
 
+// V2 can be observed while the admission timer and control inbox are live.
+// The head remains the sole reader of both writers' acknowledgement channels.
+pub fn cutover_settled(mut db: Db) -> Result[bool, Error] {
+    healthy(db)?
+    if !is_disk(db) { return Ok(true) }
+    if let Some(_) = disk_pending(db) {
+        let received = channel.try_receive(db.disk[0].acks)
+        match take received {
+            Ok(take ack) => apply_cut_ack(mut db, take ack)?,
+            Error(Empty) => return Ok(false),
+            Error(_) => return Error(Io(Closed)),
+        }
+    }
+    journal_poll(mut db)?
+    Ok(covered(db, Journal(db.frame_seq)))
+}
+
 fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes,
-    release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError]) -> Result[u64, DeployError] waits {
+    release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
     let staged = accept_cutover(mut db, request)?
     let base = view staged.meta.base
     if db.heads[0].head != base.head || db.next_table != base.next_table || current_activation != base.activation {
@@ -9497,7 +9527,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     if installation.plan.live > target.resident_limit {
         return Error(FullNew(Capacity(requested: installation.plan.live, available: target.resident_limit)))
     }
-    if host.mono_ns(db.clock) >= request.deadline { return Error(Expired) }
+    if host.mono_ns(db.clock) >= request.deadline || !before_cut() { return Error(Expired) }
     db.ceiling = disk_limit
     let limits = TargetLimits(resident: target.resident_limit, pack: target.checkpoint_task_bytes)
     db.disk[0].target = Some(limits)
@@ -9513,8 +9543,8 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
 
 // The runner has paused admission and settled its workers before this call.
 pub fn perform_cutover[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes,
-    release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError]) -> Result[u64, DeployError] waits {
-    let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from)
+    release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
+    let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from, before_cut)
     if is_disk(db) { forget_import(mut db) }
     take outcome
 }
@@ -10335,7 +10365,13 @@ fn disk_wait_cut(mut db: Db, generation: u64) -> Result[(), Error] waits {
     healthy(db)?
     while db.checkpointed < generation {
         let ack = disk_ack(db)
-        match take ack {
+        apply_cut_ack(mut db, take ack)?
+    }
+    Ok(())
+}
+
+fn apply_cut_ack(mut db: Db, take ack: DiskCutAck) -> Result[(), Error] {
+    match take ack {
             Saved(g, live) => {
                 let pending = disk_pending(db)
                 db.checkpointed = g
@@ -10350,31 +10386,30 @@ fn disk_wait_cut(mut db: Db, generation: u64) -> Result[(), Error] waits {
                 db.disk[0].pending = None
                 db.disk[0].refused_cut = None
                 db.disk[0].cut_live = live
+                Ok(())
             },
             NoRoom(g, c) => {
                 let previous = db.disk[0].previous_record_cut
                 db.disk[0].record_cut = previous
                 db.disk[0].pending = None
                 db.disk[0].refused_cut = Some((g, c))
-                return Error(Full(c))
+                Error(Full(c))
             },
             TargetNoRoom(g, c) => {
                 let previous = db.disk[0].previous_record_cut
                 db.disk[0].record_cut = previous
                 db.disk[0].pending = None
                 db.disk[0].refused_cut = Some((g, c))
-                return Error(OpenLimit(c))
+                Error(OpenLimit(c))
             },
             CutFailed(Io(e)) => {
                 if let None = db.poison {
                     db.poison = Some(e)
                 }
-                return Error(Poisoned(option.unwrap(db.poison)))
+                Error(Poisoned(option.unwrap(db.poison)))
             },
-            CutFailed(take e) => return Error(take e)
-        }
+            CutFailed(take e) => Error(take e),
     }
-    Ok(())
 }
 
 fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
@@ -11154,7 +11189,7 @@ fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes
 fn crash_apply(mut db: Db, attempt: Bytes, digest: Inline[u8, 32]) -> Result[u64, DeployError] waits {
     let requested = Cutover(attempt: deploy_result(copied(attempt))?, digest: digest, deadline: 18446744073709551615u64)
     let description = install_fixture_bytes(32u64, 65u8)
-    perform_cutover(mut db, requested, 1u64, description, std.codec.of_bytes(), install_target_value)
+    perform_cutover(mut db, requested, 1u64, description, std.codec.of_bytes(), install_target_value, scoped fn() -> bool { true })
 }
 
 fn crash_install_run(mut db: Db, d: Dir, c: Clock, tasks: Tasks) -> Result[u64, DeployError] waits {

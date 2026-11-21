@@ -59,6 +59,7 @@ pub struct Metadata {
     n_place: u64,
     describe: bool,
     preview: Option<Vec<u8>>,
+    preparing: Option<([u8; 16], [u8; 32])>,
 }
 
 impl Metadata {
@@ -88,6 +89,7 @@ impl Metadata {
             n_place,
             describe,
             preview: None,
+            preparing: None,
         }
     }
 
@@ -140,6 +142,10 @@ impl Metadata {
         self.preview = Some(old);
         self
     }
+    pub fn with_prepare(mut self, attempt: [u8; 16], digest: [u8; 32]) -> Self {
+        self.preparing = Some((attempt, digest));
+        self
+    }
 
     pub fn word(&self, field: u64, index: u64) -> u64 {
         let byte = |bytes: &[u8]| {
@@ -160,6 +166,15 @@ impl Metadata {
             6 => u64::from(self.preview.is_some()),
             7 => self.preview.as_ref().map_or(0, |old| old.len() as u64),
             8 => self.preview.as_deref().map_or(0, byte),
+            9 => u64::from(self.preparing.is_some()),
+            10 => self
+                .preparing
+                .as_ref()
+                .map_or(0, |(attempt, _)| byte(attempt)),
+            11 => self
+                .preparing
+                .as_ref()
+                .map_or(0, |(_, digest)| byte(digest)),
             _ => 0,
         }
     }

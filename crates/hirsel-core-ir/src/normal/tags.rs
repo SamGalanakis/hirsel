@@ -348,6 +348,7 @@ tags!(RtOp {
     37 => Sha1Blocks,
     38 => Xxh3Short,
     39 => Xxh3Stripes,
+    40 => LaunchHandle,
 });
 
 tags!(HostOp {

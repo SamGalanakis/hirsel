@@ -18,6 +18,7 @@ use std::{
         unix::ffi::OsStrExt,
     },
     path::Path,
+    sync::Mutex,
 };
 pub const DIR: u8 = 0;
 pub const NET: u8 = 1;
@@ -195,6 +196,54 @@ pub struct OsProcess {
     pub(crate) config: Config,
     _launch: Box<Metadata>,
     describe_out: Option<OwnedFd>,
+    host: Option<HostLaunch>,
+}
+
+pub(crate) struct HostLaunch {
+    pub(crate) control: Mutex<Option<OwnedFd>>,
+    pub(crate) scratch: u64,
+}
+
+/// The callback and its state are installed together by the OS launcher.
+pub(crate) unsafe fn launch_host<'a>(run: *const Config) -> Option<&'a HostLaunch> {
+    let run = unsafe { run.as_ref()? };
+    let writer = run.describe_output?;
+    if !std::ptr::fn_addr_eq(
+        writer,
+        describe_output as unsafe extern "C" fn(*mut u8, *const u8, usize) -> bool,
+    ) {
+        return None;
+    }
+    unsafe { run.state.cast::<OsProcess>().as_ref()?.host.as_ref() }
+}
+
+fn receive_host_control() -> io::Result<Option<OwnedFd>> {
+    let Some(control) = std::env::var_os("HIRSEL_CONTROL_FD") else {
+        return Ok(None);
+    };
+    if control != "4" || std::env::var_os("HIRSEL_HOST_PID").is_none() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    // SAFETY: the host transfers fd 4. Check its peer before taking ownership.
+    unsafe {
+        let mut peer: libc::sockaddr_un = std::mem::zeroed();
+        let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
+        if libc::getpeername(4, (&raw mut peer).cast(), &mut len) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if i32::from(peer.sun_family) != libc::AF_UNIX {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = OwnedFd::from_raw_fd(4);
+        let flags = libc::fcntl(4, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(4, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(fd))
+    }
 }
 #[repr(C)]
 pub struct OpenProcess {
@@ -217,6 +266,19 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         // SAFETY: constructor borrows the external input's exact extent.
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
+}
+fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    if text.len() != 2 * N {
+        return Err(invalid());
+    }
+    let mut out = [0u8; N];
+    for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
+        let hi = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
+        let lo = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
+        *byte = (hi * 16 + lo) as u8;
+    }
+    Ok(out)
 }
 pub(crate) enum StartupError {
     Io(io::Error),
@@ -255,6 +317,7 @@ impl OsProcess {
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
+            crate::process::arm_host_parent()?;
             let argv = (0..input.args_len).map(|index| bytes(*input.args.add(index)));
             for value in argv.clone() {
                 std::str::from_utf8(value)
@@ -316,6 +379,9 @@ impl OsProcess {
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let mut launch = launch_metadata(target, n_place, describe_mode);
+            if prepare_path.is_some() {
+                launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
+            }
             if preview_mode {
                 use std::io::Read;
                 let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
@@ -338,6 +404,10 @@ impl OsProcess {
             } else {
                 None
             };
+            let host_control = receive_host_control()?;
+            if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+            }
             let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
                 .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
             let mut os = Box::new(OsProvider::new(
@@ -369,6 +439,19 @@ impl OsProcess {
                     dirs.push((operations.grant)(&mut os, path)?);
                 }
             }
+            let host_scratch = if host_control.is_some() {
+                let operations =
+                    directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
+                let path = std::env::var_os("HIRSEL_SCRATCH")
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+                let path = Path::new(&path);
+                if !path.is_absolute() {
+                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                }
+                Some((operations.grant)(&mut os, path)?)
+            } else {
+                None
+            };
             let views = args
                 .iter()
                 .map(|a| Buffer {
@@ -478,6 +561,17 @@ impl OsProcess {
                 provider: provider_pointer,
                 handle: 0,
             });
+            let host = host_control.zip(host_scratch).map(|(control, handle)| {
+                metadata.push(Grant {
+                    kind: DIR,
+                    provider: provider_pointer,
+                    handle,
+                });
+                HostLaunch {
+                    control: Mutex::new(Some(control)),
+                    scratch: metadata.len() as u64,
+                }
+            });
             let metadata = metadata.into_boxed_slice();
             let config = Config {
                 root_limit: input.root_limit,
@@ -514,6 +608,7 @@ impl OsProcess {
                 config,
                 _launch: launch,
                 describe_out,
+                host,
             });
             let mut probe = Some(probe);
             for n in 0..input.parameters_len {

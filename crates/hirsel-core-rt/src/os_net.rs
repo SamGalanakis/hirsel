@@ -260,12 +260,18 @@ unsafe fn adopt_listener(request: *mut Request, fd: OwnedFd) -> Step {
 
 unsafe fn register_socket(n: &mut NetworkRequest, owned: OwnedFd) -> Result<u64, i32> {
     // SAFETY: the request pins the registry through issue.
+    unsafe { adopt_socket(n.sockets, owned) }.map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+}
+
+pub(crate) unsafe fn adopt_socket(
+    sockets: *mut hirsel_core_net::Sockets,
+    owned: OwnedFd,
+) -> io::Result<u64> {
+    // SAFETY: callers hold the sequencer and the run pins the socket registry.
     unsafe {
-        let poller = (*n.sockets)
-            .poller()
-            .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))?;
-        crate::tasks::attach_net(n.sockets, poller);
-        Ok((*n.sockets)
+        let poller = (*sockets).poller()?;
+        crate::tasks::attach_net(sockets, poller);
+        Ok((*sockets)
             .insert(owned)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles")))
     }

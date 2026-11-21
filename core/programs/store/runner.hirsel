@@ -55,7 +55,7 @@ pub type Selection: send = Current(u64) | Install
 pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | PublisherStopped
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
-pub type Phase: send = Starting(Step) | Ready | Draining
+pub type Phase: send = Starting(Step) | Ready | Draining | Paused
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
@@ -87,6 +87,8 @@ pub type Ended: codec + send = Stopped | Forced(u64)
 // Private runtime-supplied launch metadata. The body is a declaration placeholder;
 // the call is lowered to the immutable launch transport on every engine.
 fn launch_word(field: u64, index: u64) -> u64 { 0u64 }
+fn launch_socket() -> Option[Socket] { None }
+fn launch_scratch() -> Option[Dir] { None }
 
 fn launch_digest() -> Result[Bytes, Capacity] {
     let len = launch_word(1u64, 0u64)
@@ -131,6 +133,7 @@ fn status_hex(input: Bytes) -> Result[String, Capacity] {
 fn status_response(value: Status) -> Result[(bool, String), Capacity] {
     let (ready, phase) = match value.phase {
         Ready => (true, "ready"),
+        Paused => (true, "paused"),
         Draining => (false, "draining"),
         Starting(_) => (false, "starting"),
     }
@@ -200,6 +203,16 @@ fn status_watch(take watch: Option[Sender[Receiver[Phase]]]) -> Result[Option[Se
     }
 }
 
+type CutStatus: shareable + send { started: bool }
+type CutActivity: send { root: Latest[CutStatus], started: Arc[CutStatus], stopped: Arc[CutStatus] }
+
+fn cut_activity() -> Result[CutActivity, StartError] {
+    let started = match arc.new(CutStatus(started: true)) { Ok(take value) => take value, Error((c, _)) => return Error(Full(c)) }
+    let stopped = match arc.new(CutStatus(started: false)) { Ok(take value) => take value, Error((c, _)) => return Error(Full(c)) }
+    let root = match latest.new(arc.share(stopped)) { Ok(take tracker) => take tracker, Error((c, _)) => return Error(Full(c)) }
+    Ok(CutActivity(root: take root, started: take started, stopped: take stopped))
+}
+
 fn serve_inbox_capacity(limit: u64) -> u64 { int.saturating_add(int.saturating_mul(limit, 2u64), 22u64) }
 
 fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sender[LifeEvent], root: Latest[Option[DrainWindow]]) -> Result[Task[()], StartError] {
@@ -237,11 +250,15 @@ pub fn operate_bytes[G: send, H: send, S: send](p: PlaceConfig[G, H, S]) -> Resu
 }
 
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+    if launch_word(9u64, 0u64) != 0u64 { return operate_prepare(p) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
     if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
-    let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
-        session: session_config, max_sessions: limit, proxies: take proxies,
+    let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: configured, n_publisher: n_publisher,
+        session: wire_config, max_sessions: limit, proxies: take proxies,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config) = take p
+    let n_place = if !none(launch_scratch()) { launch_word(0u64, 0u64) } else { configured }
+    let mut session_config = wire_config
+    session_config.n_place = n_place
     if limit == 0u64 || limit > WIRE_OWNER_LIMIT || !wire_configuration(session_config) { return Error(Missing("socket")) }
     let watch = status_watch(take watching)?
     let mut current = match copy_status(latest.read(status)) { Ok(take held) => take held, Error(cap) => return Error(Full(cap)) }
@@ -250,6 +267,7 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
     let (to, inbox) = match take life { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
     let head_mail: Result[(Sender[HeadInput], Receiver[HeadInput]), Capacity] = channel.new(64u64)
     let (head_to, inbox_head) = match take head_mail { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
+    let hosting = start_host_control(tasks, clock, n_place, head_to)?
     let finish_mail: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
     let (finish_to, finish_from) = match take finish_mail { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
     let serving_total = match serving_bytes(session_config, limit) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
@@ -277,9 +295,11 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
     }
     let grant_bytes = match triggering { Some((config, _)) => config.grant_bytes, None => 0u64 }
     let allowance = int.saturating_add(head_bytes(backing, n_place, n_publisher), grant_bytes)
+    let activity = cut_activity()?
+    let cut = latest.handle(activity.root)
     let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
-        triggering: take triggering)
+        head_to: channel.sender(head_to), cut: take activity, triggering: take triggering)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
     let mut heading: Option[Task[()]] = match task.spawn(tasks, bytes allowance, take head_job, head_run) {
         Ok(take handle) => Some(take handle), Error((cap, _)) => return Error(Full(cap)),
@@ -289,7 +309,10 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
     let mut ready: Option[(Listener, Sender[PubIn])] = None
     let mut unused_listener_inputs = Some((take proxies, take supplied_wire, take inbox_serve))
     let mut stopped = false
+    let mut stop_after_cut = false
     let mut online = false
+    let mut retiring = false
+    let mut store_id = (0u64, 0u64)
     let mut expired = false
     let mut settled = false
     let mut serve_done: Option[u64] = None
@@ -297,7 +320,7 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
     let mut finishing = false
     let mut start_failure: Option[StartError] = None
     loop {
-        if !expired && stopped {
+        if !expired && stopped && !latest.read(cut).started {
             if let Some(window) = drain_window(latest.read(drain)) {
                 if host.mono_ns(clock) >= window.deadline {
                     expired = true
@@ -305,17 +328,17 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                 }
             }
         }
-        if expired && (match serving { None => true, _ => false }) {
+        if expired && !latest.read(cut).started && (match serving { None => true, _ => false }) {
             if let Some(take handle) = replace(mut heading, None) {
                 let mut active_head = take handle
                 task.cancel(mut active_head)
                 let _ = task.join(take active_head)
             }
             return Ok(Forced(match serve_done { Some(count) => count, None => 0u64 }))
-        } else if !expired && head_done {
+        } else if !expired && head_done && (!retiring || serve_done != None) {
             if let Some(take problem) = replace(mut start_failure, None) { return Error(take problem) }
             return Ok(Stopped)
-        } else if !expired && settled && !finishing {
+        } else if !expired && (settled || retiring) && !finishing {
             if let Some(_) = serve_done {
                 let _ = channel.try_send(finish_to, ())
                 let _ = channel.try_send(head_to, HeadFinish)
@@ -343,10 +366,15 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
         }
         match take event {
             StopRequested => {
+                if latest.read(cut).started {
+                    stop_after_cut = true
+                    continue
+                }
                 let started = host.mono_ns(clock)
                 stopped = true
                 drain_waiter = Some(start_drain(stop_config, started, clock, tasks, to, drain)?)
                 publish_phase(status, watch, mut current, Draining)?
+                let _ = channel.try_send(head_to, PauseDeadline(0u64))
                 if let Some(_) = replace(mut ready, None) { let _ = channel.try_send(head_to, HeadClose) }
                 if !online { let _ = channel.try_send(serve_to, ServeWake) }
             },
@@ -354,9 +382,10 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                 publish_phase(status, watch, mut current, Starting(Activating))?
                 let _ = channel.try_send(head_to, HeadContinue)
             },
-            Activated(take release, version) => {
+            Activated(take release, version, identity) => {
                 current.release = take release
                 current.activation = version
+                store_id = identity
                 if stopped {
                     publish_phase(status, None, mut current, Draining)?
                     let _ = channel.try_send(head_to, HeadClose)
@@ -384,20 +413,68 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                     online = true
                     let _ = channel.try_send(head_to, HeadContinue)
                     let _ = channel.try_send(serve_to, ServeStart)
+                    if let Some(host) = hosting {
+                        let copied: Result[Bytes, Capacity] = clone(current.release)
+                        let release = match take copied { Ok(take raw) => take raw, Error(c) => return Error(Full(c)) }
+                        let _ = channel.try_send(host.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: store_id.0, store_lo: store_id.1, release: take release)))
+                    }
                 }
             },
             AdmissionClose => {
                 if let Some(_) = serving { let _ = channel.try_send(head_to, HeadClose); let _ = channel.try_send(serve_to, ServeWake) }
             },
             DrainExpired => {
-                expired = true
-                let _ = channel.try_send(serve_to, ServeWake)
+                if !latest.read(cut).started {
+                    expired = true
+                    let _ = channel.try_send(serve_to, ServeWake)
+                }
             },
             Settled => { settled = true },
+            WritesPaused => if !stopped { publish_phase(status, watch, mut current, Paused)? },
+            WritesResumed => {
+                if stop_after_cut {
+                    stop_after_cut = false
+                    let _ = channel.try_send(to, StopRequested)
+                } else if !stopped {
+                    publish_phase(status, watch, mut current, Ready)?
+                }
+            },
+            RetirePlace => {
+                retiring = true
+                if let Error(_) = channel.send(serve_to, ServeRetire) { serve_done = Some(0u64) }
+            },
             HeadEnded(take ending) => {
                 if let Some(take handle) = replace(mut heading, None) { let _ = task.join(take handle) }
                 head_done = true
                 if let Error(take problem) = take ending {
+                    if let Some(host) = hosting {
+                        let response = match problem {
+                            Open(NotCurrent(Active(version, description))) => {
+                                let copied: Result[Bytes, Capacity] = clone(description)
+                                match take copied { Ok(take raw) => PlaceCurrent(version, take raw), Error(_) => PlaceRefused("Full") }
+                            },
+                            Open(NotCurrent(Legacy)) => PlaceRefused("Legacy"),
+                            Open(NotCurrent(Empty)) => PlaceRefused("Empty"),
+                            Full(_) => PlaceRefused("Full"),
+                            Open(Store(Full(_))) => PlaceRefused("Full"),
+                            Open(Store(Missing(name))) => {
+                                let copied: Result[String, Capacity] = clone(name)
+                                match take copied { Ok(take detail) => PlaceRefused(take detail), Error(_) => PlaceRefused("Full") }
+                            },
+                            Open(Store(Schema(_))) => PlaceRefused("Schema"),
+                            Open(Store(Decode(_))) => PlaceRefused("Decode"),
+                            Open(Store(Corrupt(_))) => PlaceRefused("Corrupt"),
+                            Open(Store(Held)) => PlaceRefused("Held"),
+                            Open(Store(Poisoned(_))) => PlaceRefused("Poisoned"),
+                            Open(Store(Io(_))) => PlaceRefused("Io"),
+                            Open(Place(_)) => PlaceRefused("Place"),
+                            Open(IdentityUnknown) => PlaceRefused("Identity"),
+                            Open(PublisherStopped) => PlaceRefused("PublisherStopped"),
+                            _ => PlaceRefused("Open"),
+                        }
+                        let _ = channel.send(host.answer, take response)
+                        if let Ok(()) = channel.receive(host.sent) {}
+                    }
                     if !stopped || online {
                         if let None = start_failure { start_failure = Some(take problem) }
                     }
@@ -414,6 +491,26 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                 }
             },
         }
+    }
+}
+
+fn prepare_bytes(field: u64, size: u64) -> Result[Bytes, StartError] {
+    let allocated: Result[Bytes, Capacity] = list.with_capacity(size)
+    let mut value = match take allocated { Ok(take raw) => take raw, Error(c) => return Error(Full(c)) }
+    for i in 0u64 .. size { result.unwrap(list.push(mut value, int.narrow(launch_word(field, i)))) }
+    Ok(take value)
+}
+
+fn operate_prepare[G: send, H: send, S: send](p: PlaceConfig[G, H, S]) -> Result[Ended, StartError] waits {
+    let (scratch, options) = match p.backing { Disk(scratch, options) => (scratch, options), _ => return Error(Missing("scratch")) }
+    let setup = PrepareConfig(scratch: scratch, options: options, attempt: prepare_bytes(10u64, 16u64)?, image_digest: prepare_bytes(11u64, 32u64)?,
+        clock: p.clock, tasks: p.tasks, n_place: launch_word(0u64, 0u64), place: p.place, migrate: p.migrate, handles: p.handles)
+    match prepare_deploy(setup) {
+        Ok(()) => Ok(Stopped),
+        Error(Open(take problem)) => Error(Open(take problem)),
+        Error(Identity) => Error(Open(IdentityUnknown)),
+        Error(Deploy(Store(take problem))) => Error(Open(Store(take problem))),
+        Error(Deploy(_)) => Error(Missing("prepared")),
     }
 }
 
@@ -692,14 +789,26 @@ fn preview_old_entries() -> Result[List[Exported], RegisterError] {
     }
 }
 
-fn encode_preview(take description: Describe) -> Result[Bytes, RegisterError] {
+fn preview_answers[G: send, H: send](r: Registry[G, H]) -> Result[List[Entry], RegisterError] {
     let old = preview_old_entries()?
-    if list.len(old) != 0u64 { return Error(Bounds) }
+    let made: Result[List[Entry], Capacity] = list.with_capacity(list.len(old))
+    let mut answers = match take made { Ok(take slots) => take slots, Error(c) => return Error(Full(c)) }
+    for i in 0u64 .. list.len(old) {
+        let row = view old[i]
+        let key = match entry_key(view row.described.identity, row.args_fp, row.result_fp) {
+            Ok(take key) => take key, Error(c) => return Error(Full(c)),
+        }
+        result.unwrap(list.push(mut answers, answer_want(r, key, int.narrow(i))))
+    }
+    Ok(take answers)
+}
+
+fn encode_preview(take description: Describe, take answers: List[Entry]) -> Result[Bytes, RegisterError] {
     let release = match release_digest(description.exported) {
         Ok(take digest) => take digest,
         Error(c) => return Error(Full(c)),
     }
-    let preview = Preview(describe: take description, release: take release, answers: list.new())
+    let preview = Preview(describe: take description, release: take release, answers: take answers)
     let codec: std.codec.Codec[Preview] = std.codec.of()
     let mut out: Bytes = list.new()
     match std.codec.encode(codec, preview, mut out) {
@@ -720,6 +829,7 @@ fn encode_describe(description: Describe) -> Result[Bytes, Capacity] {
 }
 
 fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
+    let preview = if launch_word(6u64, 0u64) != 0u64 { Some(preview_answers(r)?) } else { None }
     let Registry(exported: take exported, ..) = take r
     let digest = match launch_digest() {
         Ok(take digest) => take digest,
@@ -730,7 +840,7 @@ fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Res
         Error(c) => return Error(Full(c)),
     }
     let description = Describe(digest: take digest, target: take target, n_place: launch_word(0u64, 0u64), exported: take exported)
-    if launch_word(6u64, 0u64) != 0u64 { return encode_preview(take description) }
+    if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
     match encode_describe(description) {
         Ok(take payload) => Ok(take payload),
         Error(c) => Error(Full(c)),
@@ -1843,6 +1953,7 @@ type Request: send {
     key: Bytes,
     arg: Bytes,
     digest: store.RequestDigest,
+    deadline: u64,
     reply_to: Sender[WireEvent],
     live: Latest[HeadLife],
     identity: Latest[OwnerNumber],
@@ -2039,7 +2150,7 @@ pub fn post(m: Mailbox) -> Sender[PubIn] {
 // A stream's worker, from its commit until the gate releases its group.
 type Worker: send { p: u64, digest: store.RequestDigest, version: u64, outcome: Outcome, waiters: List[Recipient] }
 
-type Waiting: send { req: Request, parked: bool }
+type Waiting: send { req: Request, parked: bool, held_by_pause: bool }
 
 type Head[G: send, H: send] {
     db: store.Db,
@@ -2128,12 +2239,12 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take re
     finish_head(take hd, take publisher_task, take served)
 }
 
-fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()], take served: Result[(), store.Error]) -> Result[(), OpenError] waits {
+fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()], take served: Result[bool, store.Error]) -> Result[(), OpenError] waits {
     let Head(db: take kept, out: take last_word, cut: cut, trigger_drive: take drive, ..) = take head
     if let Some(take scheduled) = take drive { stop_triggers(take scheduled) }
-    let _ = channel.send(last_word, PubIn(e: Halt))
+    if let Ok(true) = served {} else { let _ = channel.send(last_word, PubIn(e: Halt)) }
     let stopped = match task.join(take publishing) { Ok(()) => cut, Error(_) => true }
-    match take served { Ok(()) => (), Error(take problem) => return Error(Store(take problem)) }
+    match take served { Ok(_) => (), Error(take problem) => return Error(Store(take problem)) }
     if stopped {
         let _ = close_store(take kept)
         return Error(PublisherStopped)
@@ -2182,12 +2293,235 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
 
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64)) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+    | WritesPaused | WritesResumed | RetirePlace
 
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
+    | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes) | PauseDeadline(u64)
+    | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport])
+
+pub type CutoverWork: send { request: store.Cutover, result_to: Sender[Result[u64, store.DeployError]] }
+
+pub type ExportCommand: send {
+    scratch: Dir, attempt: Bytes, retry: bool, answer: Sender[Result[store.ExportCopy, store.DeployError]],
+}
+pub type ReserveImport: send { checked: store.ValidatedImport, answer: Sender[Result[store.ImportWork, store.DeployError]] }
+pub type KeepImport: send { built: store.Imported, answer: Sender[Result[Inline[u8, 32], store.DeployError]] }
+
+type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
+    | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes)
+type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes }
+type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
+    | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64) | PlaceDrift | PlaceAborted | PlaceUncertain
+
+type HostControl {
+    answer: Sender[HostReply], sent: Receiver[()], reading: Task[()], writing: Task[()],
+}
+type HostReader: send {
+    input: ReadHalf, to_head: Sender[HeadInput], answer: Sender[HostReply], scratch: Dir, clock: Clock, maximum: u64,
+}
+type HostWriter: send { output: WriteHalf, responses: Receiver[HostReply], sent: Sender[()] }
+
+fn start_host_control(tasks: Tasks, clock: Clock, n_place: u64, to_head: Sender[HeadInput]) -> Result[Option[HostControl], StartError] {
+    let Some(take control) = launch_socket() else { return Ok(None) }
+    let Some(scratch) = launch_scratch() else { return Error(Missing("scratch")) }
+    let (take input, take output) = net.split(take control)
+    let queue: Result[(Sender[HostReply], Receiver[HostReply]), Capacity] = channel.new(2u64)
+    let (answer, responses) = match take queue { Ok(take pair) => take pair, Error(c) => return Error(Full(c)) }
+    let completion: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
+    let (notice, sent) = match take completion { Ok(take pair) => take pair, Error(c) => return Error(Full(c)) }
+    let writing = task.spawn(tasks, bytes 16384u64, HostWriter(output: take output, responses: take responses, sent: take notice), host_writer)
+    let writer = match take writing { Ok(take task_handle) => take task_handle, Error((c, _)) => return Error(Full(c)) }
+    let reading = task.spawn(tasks, bytes n_place, HostReader(input: take input, to_head: channel.sender(to_head), answer: channel.sender(answer), scratch: scratch, clock: clock, maximum: n_place), host_reader)
+    let reader = match take reading { Ok(take task_handle) => take task_handle, Error((c, _)) => return Error(Full(c)) }
+    Ok(Some(HostControl(answer: take answer, sent: take sent, reading: take reader, writing: take writer)))
+}
+
+fn read_control(mut input: ReadHalf, maximum: u64) -> Option[HostCommand] waits {
+    let length: Result[Bytes, Capacity] = list.with_capacity(4u64)
+    let mut header = match take length { Ok(take raw) => take raw, Error(_) => return None }
+    if !read_control_bytes(mut input, mut header, 4u64) { return None }
+    let mut at = 0u64
+    let size: u64 = match std.codec.take_u32(header, mut at) { Ok(n) => int.widen(n), _ => return None }
+    if size > maximum { return None }
+    let payload: Result[Bytes, Capacity] = list.with_capacity(size)
+    let mut body = match take payload { Ok(take raw) => take raw, Error(_) => return None }
+    if !read_control_bytes(mut input, mut body, size) { return None }
+    let codec: std.codec.Codec[HostCommand] = std.codec.of()
+    match std.codec.decode(codec, body) { Ok(Ok(take command)) => Some(take command), _ => None }
+}
+
+fn read_control_bytes(mut input: ReadHalf, mut out: Bytes, size: u64) -> bool waits {
+    while list.len(out) < size {
+        let left = size - list.len(out)
+        match host.recv_bounded(mut input, mut out, left, Never) {
+            Ok(n) if n > 0u64 => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn send_control(mut output: WriteHalf, host_result: HostReply) -> bool waits {
+    let codec: std.codec.Codec[HostReply] = std.codec.of()
+    let mut body: Bytes = list.new()
+    if let Error(_) = std.codec.encode(codec, host_result, mut body) { return false }
+    let mut header: Bytes = list.new()
+    if list.len(body) > 4294967295u64 { return false }
+    if let Error(_) = std.codec.put_u32(int.narrow(list.len(body)), mut header) { return false }
+    let mut offset = 0u64
+    while offset < 4u64 + list.len(body) {
+        match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), Never) {
+            Ok(n) if n > 0u64 => { offset += n },
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn host_writer(take writer: HostWriter) -> () waits {
+    let HostWriter(output: take output, responses: take responses, sent: take sent) = take writer
+    let mut socket = take output
+    while let Ok(take host_result) = channel.receive(responses) {
+        if !send_control(mut socket, host_result) { return }
+        let _ = channel.try_send(sent, ())
+    }
+}
+
+fn host_head[T: send](head: Sender[HeadInput], request: scoped fn(take Sender[T]) -> Result[HeadInput, Capacity]) -> Option[T] waits {
+    let queue: Result[(Sender[T], Receiver[T]), Capacity] = channel.new(1u64)
+    let (host_result, response) = match take queue { Ok(take pair) => take pair, Error(_) => return None }
+    let message = match request(take host_result) { Ok(take command) => take command, Error(_) => return None }
+    if let Error(_) = channel.send(head, take message) { return None }
+    match channel.receive(response) { Ok(take value) => Some(take value), Error(_) => None }
+}
+
+fn host_refusal(why: store.DeployError) -> String {
+    match why {
+        Store(Full(_)) => "Full",
+        Store(Missing(_)) => "Missing",
+        Store(Exists(_)) => "Exists",
+        Store(_) => "Store",
+        Scratch(_) => "Scratch",
+        ExportMismatch => "ExportMismatch",
+        AttemptBusy => "Busy",
+        ImportMalformed => "ImportMalformed",
+        IdBound => "IdBound",
+        Drift => "Drift",
+        Expired => "Expired",
+        FullNew(_) => "Full(New)",
+    }
+}
+
+fn host_export(head: Sender[HeadInput], scratch: Dir, attempt: Bytes, retry: bool) -> Result[store.Exported, store.DeployError] waits {
+    let response = host_head(head, scoped fn(take answer: Sender[Result[store.ExportCopy, store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let payload = ExportCommand(scratch: scratch, attempt: clone(attempt)?, retry: retry, answer: take answer)
+        let command = result.capacity_only(box.new(take payload))?
+        Ok(ExportCommand(take command))
+    })
+    let Some(take started) = take response else { return Error(AttemptBusy) }
+    store.export_copy(started?)
+}
+
+fn host_import(head: Sender[HeadInput], exported: store.Exported, description: Bytes, release: Bytes, digest: Bytes) -> Result[Inline[u8, 32], store.DeployError] waits {
+    let checked = store.validate_prepared(exported.dir)?
+    if !store.prepared_matches(checked, description, release, digest) { return Error(ImportMalformed) }
+    let mut awaiting = Some(take checked)
+    let reserved = host_head(head, scoped fn(take answer: Sender[Result[store.ImportWork, store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let payload = ReserveImport(checked: option.unwrap(replace(mut awaiting, None)), answer: take answer)
+        let command = result.capacity_only(box.new(take payload))?
+        Ok(ReserveImport(take command))
+    })
+    let Some(take reserved_work) = take reserved else { return Error(AttemptBusy) }
+    let mut built = Some(store.import_trees(reserved_work?)?)
+    let kept = host_head(head, scoped fn(take answer: Sender[Result[Inline[u8, 32], store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let payload = KeepImport(built: option.unwrap(replace(mut built, None)), answer: take answer)
+        let command = result.capacity_only(box.new(take payload))?
+        Ok(KeepImport(take command))
+    })
+    match take kept { Some(take answer) => take answer, None => Error(AttemptBusy) }
+}
+
+fn host_cutover(head: Sender[HeadInput], attempt: Bytes, digest: Bytes, deadline: u64) -> HostReply waits {
+    if list.len(attempt) != 16u64 || list.len(digest) != 32u64 { return PlaceRefused("ExportMismatch") }
+    let mut hash: Inline[u8, 32] = [0u8; 32]
+    for i in 0u64 .. 32u64 { hash[i] = digest[i] }
+    let response = host_head(head, scoped fn(take host_result: Sender[Result[u64, store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let request = store.Cutover(attempt: clone(attempt)?, digest: hash, deadline: deadline)
+        let command = result.capacity_only(box.new(CutoverWork(request: take request, result_to: take host_result)))?
+        Ok(StartCutover(take command))
+    })
+    match take response {
+        Some(Ok(version)) => PlaceInstalled(version),
+        Some(Error(Drift)) => PlaceDrift,
+        Some(Error(Store(Poisoned(_)))) => PlaceUncertain,
+        Some(Error(why)) => PlaceRefused(host_refusal(why)),
+        None => PlaceUncertain,
+    }
+}
+
+fn host_reader(take reader: HostReader) -> () waits {
+    let HostReader(input: take socket, to_head: take head, answer: take answer, scratch: scratch, clock: clock, maximum: maximum) = take reader
+    let mut input = take socket
+    let mut exported: Option[store.Exported] = None
+    while let Some(take request) = read_control(mut input, maximum) {
+        let host_result: HostReply = match take request {
+            HostExport(attempt, retry) => match host_export(head, scratch, attempt, retry) {
+                Ok(take found) => {
+                    let version = found.stamp.head
+                    let copied: Result[String, Capacity] = clone(found.name)
+                    let name = match take copied { Ok(take name) => take name, Error(_) => return }
+                    exported = Some(take found)
+                    PlaceExported(version, take name)
+                },
+                Error(why) => PlaceRefused(host_refusal(why)),
+            },
+            HostImport(description, release, digest) => match exported {
+                Some(info) => match host_import(head, info, description, release, digest) {
+                    Ok(hash) => {
+                        let allocated: Result[Bytes, Capacity] = list.with_capacity(32u64)
+                        let mut wire_hash = match take allocated { Ok(take bytes_out) => take bytes_out, Error(_) => return }
+                        for byte in hash { result.unwrap(list.push(mut wire_hash, byte)) }
+                        PlaceImported(take wire_hash)
+                    },
+                    Error(why) => PlaceRefused(host_refusal(why)),
+                },
+                None => PlaceRefused("ExportMismatch"),
+            },
+            HostCutover(attempt, digest, max_pause_ms, retry) => {
+                let deadline = if retry { 0u64 } else { std.clock.deadline_after_ms(host.mono_ns(clock), max_pause_ms) }
+                let _ = replace(mut exported, None)
+                host_cutover(head, attempt, digest, deadline)
+            },
+            HostAbort(take attempt) => {
+                let _ = replace(mut exported, None)
+                let _ = channel.send(head, AbortCutover(take attempt))
+                PlaceAborted
+            },
+        }
+        if let Error(_) = channel.send(answer, take host_result) { return }
+    }
+}
+
+type WritePause {
+    deadline: u64,
+    attempt: Bytes,
+    deadline_task: Task[()],
+    work: Option[CutoverWork],
+}
+
+type PauseWake: send { clock: Clock, deadline: u64, to: Sender[HeadInput] }
+
+fn pause_wake(take wake: PauseWake) -> () waits {
+    host.sleep_until(wake.clock, wake.deadline)
+    let _ = channel.send(wake.to, PauseDeadline(wake.deadline))
+}
 
 pub type HeadRequests = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
-type HeadDrain { finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], clock: Clock }
+type HeadDrain {
+    finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]],
+    clock: Clock, tasks: Tasks, head_to: Sender[HeadInput], n_place: u64, cut: CutActivity,
+}
 
 type ManagedHead[G: send, H: send, S: send]: send {
     backing: Backing, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
@@ -2195,6 +2529,7 @@ type ManagedHead[G: send, H: send, S: send]: send {
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
+    head_to: Sender[HeadInput], cut: CutActivity,
     triggering: Option[(TriggerConfig[G, S], Sender[HeadInput])],
 }
 
@@ -2212,7 +2547,7 @@ fn head_ended[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> () w
 fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[(), StartError] waits {
     let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
-        triggering: take triggering) = take job
+        head_to: take head_to, cut: take cut, triggering: take triggering) = take job
     let persistent = match backing { Disk(_, _) => true, _ => false }
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
@@ -2244,12 +2579,12 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
     let version = if persistent {
         match activation_version(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
     } else { 0u64 }
-    if !head_advance(to, inbox, Activated(take release, version)) { return head_closed(take db) }
+    if !head_advance(to, inbox, Activated(take release, version, store.identity_words(db))) { return head_closed(take db) }
     let mail = match mailbox(PUBLISHER_INBOX) {
         Ok(take mail) => take mail,
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
     }
-    let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock)
+    let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock, tasks: tasks, head_to: take head_to, n_place: n_place, cut: take cut)
     let ended = run_head(take db, take reg, take replay_identity, take local, take publisher_handles, place, n_place, ManagedRequests(take inbox), take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
     let _ = take temporary
     match take ended {
@@ -2459,7 +2794,7 @@ fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.D
     }
 }
 
-fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64) -> Result[u64, store.DeployError] waits {
+fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
     let description = match prepare_activation(reg, n_place) {
         Ok((take description, _)) => take description,
         Error(c) => { store.release_export(mut db, request.attempt); return Error(Store(Full(c))) },
@@ -2475,7 +2810,7 @@ fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg
         Error(take problem) => { store.release_export(mut db, request.attempt); return Error(Store(take problem)) },
     }
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
-    store.perform_cutover(mut db, request, version, description, codec, target_release)
+    store.perform_cutover(mut db, request, version, description, codec, target_release, before_cut)
 }
 
 pub type CutoverOutcome = Installed(u64, Result[(), store.Error]) | Refused(store.DeployError, store.Db)
@@ -2486,7 +2821,7 @@ pub type CutoverOutcome = Installed(u64, Result[(), store.Error]) | Refused(stor
 pub fn cutover[G: send, H: send](take db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64,
     retire: scoped fn(u64) -> () waits) -> CutoverOutcome waits {
     let mut owned = take db
-    match cutover_store(mut owned, request, reg, n_place) {
+    match cutover_store(mut owned, request, reg, n_place, scoped fn() -> bool { true }) {
         Ok(version) => {
             retire(version)
             Installed(version, store.close(take owned))
@@ -2534,24 +2869,139 @@ fn settle_probe(inbox: HeadRequests) -> Option[HeadInput] waits {
 fn close_head_admission[G: send, H: send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
     let waiting = replace(mut head.waiting, list.new())
     for take entry in take waiting {
-        let Waiting(req: take req, parked: _) = take entry
+        let Waiting(req: take req, ..) = take entry
         commitless(mut head, take req, Refused(Overloaded))?
     }
     Ok(())
 }
 
-fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, take drain: Option[HeadDrain]) -> Result[(), store.Error] waits {
+fn start_write_pause(mut pause: Option[WritePause], take work: CutoverWork, control: HeadDrain) -> Result[(), store.DeployError] waits {
+    let copied: Result[Bytes, Capacity] = clone(work.request.attempt)
+    let attempt = match take copied { Ok(take id) => take id, Error(c) => return Error(Store(Full(c))) }
+    if let Some(take previous) = replace(mut pause, None) {
+        let mut active = take previous
+        if !none(active.work) {
+            pause = Some(take active)
+            return Error(AttemptBusy)
+        }
+        if work.request.deadline != 0u64 || active.attempt != attempt {
+            pause = Some(take active)
+            return Error(ExportMismatch)
+        }
+        let CutoverWork(request: take request, result_to: take host_result) = take work
+        let store.Cutover(attempt: take id, digest: digest, ..) = take request
+        active.work = Some(CutoverWork(request: store.Cutover(attempt: take id, digest: digest, deadline: active.deadline), result_to: take host_result))
+        pause = Some(take active)
+        return Ok(())
+    }
+    let deadline = work.request.deadline
+    if host.mono_ns(control.clock) >= deadline { return Error(Expired) }
+    let wake = PauseWake(clock: control.clock, deadline: deadline, to: channel.sender(control.head_to))
+    let timer = match task.spawn(control.tasks, bytes 4096u64, take wake, pause_wake) {
+        Ok(take timer) => take timer, Error((c, _)) => return Error(Store(Full(c))),
+    }
+    pause = Some(WritePause(deadline: deadline, attempt: take attempt, deadline_task: take timer, work: Some(take work)))
+    let _ = channel.send(control.events, WritesPaused)
+    Ok(())
+}
+
+fn pause_expires(pause: Option[WritePause], now: u64) -> bool {
+    match pause { Some(active) => now >= active.deadline, None => false }
+}
+
+fn retry_export(mut pause: Option[WritePause], attempt: Bytes) -> Result[(), store.DeployError] {
+    let Some(take previous) = replace(mut pause, None) else { return Error(Expired) }
+    let mut active = take previous
+    let outcome: Result[(), store.DeployError] = if none(active.work) {
+        let copied: Result[Bytes, Capacity] = clone(attempt)
+        match take copied {
+            Ok(take id) => { active.attempt = take id; Ok(()) },
+            Error(c) => Error(Store(Full(c))),
+        }
+    } else { Error(AttemptBusy) }
+    pause = Some(take active)
+    outcome
+}
+
+fn pause_has_work(pause: Option[WritePause]) -> bool {
+    match pause { Some(active) => !none(active.work), None => false }
+}
+
+fn end_write_pause(mut db: store.Db, mut pause: Option[WritePause], control: HeadDrain, take why: store.DeployError) -> () waits {
+    if let Some(take active) = replace(mut pause, None) {
+        let WritePause(attempt: take id, deadline_task: take timer, work: take work, ..) = take active
+        let _ = take timer
+        store.release_export(mut db, id)
+        if let Some(CutoverWork(result_to: host_result, ..)) = take work {
+            let _ = channel.try_send(host_result, Error(take why))
+        }
+        let _ = channel.send(control.events, WritesResumed)
+    }
+}
+
+fn pause_progress[G: send, H: send](mut head: Head[G, H], mut pause: Option[WritePause], control: HeadDrain) -> Result[bool, store.Error] waits {
+    let deadline = match pause { Some(active) => active.deadline, None => return Ok(false) }
+    if !store.cutover_settled(mut head.db)? {
+        let now = host.mono_ns(control.clock)
+        host.sleep_until(control.clock, std.order.min(deadline, int.saturating_add(now, 1000000u64)))
+        return Ok(false)
+    }
+    if list.len(head.group) != 0u64 { gate(mut head)? }
+    let mut active = option.unwrap(replace(mut pause, None))
+    let work = replace(mut active.work, None)
+    let CutoverWork(request: take request, result_to: take host_result) = option.unwrap(take work)
+    let activate_cut = scoped fn() -> bool {
+        if !none(drain_window(latest.read(control.window))) { return false }
+        latest.publish(control.cut.root, arc.share(control.cut.started))
+        true
+    }
+    let committed = cutover_store(mut head.db, request, head.r, control.n_place, activate_cut)
+    match take committed {
+        Ok(version) => {
+            let _ = replace(mut pause, None)
+            let _ = channel.try_send(host_result, Ok(version))
+            Ok(true)
+        },
+        Error(Drift) => {
+            latest.publish(control.cut.root, arc.share(control.cut.stopped))
+            pause = Some(take active)
+            let _ = channel.try_send(host_result, Error(Drift))
+            Ok(false)
+        },
+        Error(Store(Poisoned(e))) => {
+            let _ = channel.try_send(host_result, Error(Store(Poisoned(e))))
+            Error(Poisoned(e))
+        },
+        Error(take why) => {
+            latest.publish(control.cut.root, arc.share(control.cut.stopped))
+            pause = Some(take active)
+            let _ = channel.try_send(host_result, Error(take why))
+            end_write_pause(mut head.db, mut pause, control, AttemptBusy)
+            Ok(false)
+        },
+    }
+}
+
+fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, take drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
     let mut closed = false
     let mut settled = false
     let mut input: Option[HeadInput] = None
+    let mut pause: Option[WritePause] = None
+    let mut resuming = false
     loop {
-        if head.cut { return Ok(()) }
+        if head.cut { return Ok(false) }
         if let Some(control) = drain {
-            if let Ok(()) = channel.try_receive(control.finish) { return Ok(()) }
+            if let Ok(()) = channel.try_receive(control.finish) { return Ok(false) }
             if let Some(_) = drain_window(latest.read(control.window)) {
+                end_write_pause(mut head.db, mut pause, control, AttemptBusy)
                 // A drain cuts running attempts. Their current rows stay until
                 // the next open, which starts a higher attempt.
                 if let Some(take scheduled) = replace(mut head.trigger_drive, None) { stop_triggers(take scheduled) }
+            }
+            if !none(pause) && pause_expires(pause, host.mono_ns(control.clock)) {
+                end_write_pause(mut head.db, mut pause, control, Expired)
+                refresh_waiting(mut head, true)
+                resuming = true
             }
             if !closed && closing_at(control.window, control.clock) {
                 closed = true
@@ -2562,32 +3012,109 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
                 settled = true
             }
         }
-        if !closed && advance_triggers(mut head)? { continue }
+        if none(pause) && !closed {
+            if resuming {
+                if next_waiting(mut head, drain)? { continue }
+                resuming = list.len(head.waiting) != 0u64
+            }
+            if advance_triggers(mut head)? { continue }
+        }
         let next = match replace(mut input, None) {
             Some(take next) => Some(take next),
             None => head_next(inbox, false),
         }
         match take next {
-            Some(RunRequest(take req)) => { head_arrival(mut head, take req, closed)?; continue },
+            Some(RunRequest(take req)) => {
+                head_arrival(mut head, take req, closed, !none(pause) || resuming)?
+                if none(pause) { continue }
+            },
+            Some(StartCutover(take boxed)) => {
+                let work = box.unbox(take boxed)
+                let host_result = channel.sender(work.result_to)
+                if let Some(control) = drain {
+                    if closed || !none(drain_window(latest.read(control.window))) {
+                        let _ = channel.try_send(host_result, Error(AttemptBusy))
+                    } else if let Error(take why) = start_write_pause(mut pause, take work, control) {
+                        let _ = channel.try_send(host_result, Error(take why))
+                    } else {
+                        for i in 0u64 .. list.len(head.waiting) { head.waiting[i].held_by_pause = true }
+                    }
+                } else { let _ = channel.try_send(host_result, Error(AttemptBusy)) }
+                continue
+            },
+            Some(AbortCutover(attempt)) => {
+                store.release_export(mut head.db, attempt)
+                if let Some(control) = drain {
+                    let current = match pause { Some(active) => active.attempt == attempt, None => false }
+                    if current {
+                        end_write_pause(mut head.db, mut pause, control, AttemptBusy)
+                        refresh_waiting(mut head, true)
+                        resuming = true
+                    }
+                }
+                continue
+            },
+            Some(ExportCommand(take command)) => {
+                let ExportCommand(scratch: scratch, attempt: take attempt, retry: retry, answer: take host_result) = box.unbox(take command)
+                let allowed: Result[(), store.DeployError] = if none(drain) || closed { Error(AttemptBusy) }
+                    else if retry { retry_export(mut pause, attempt) }
+                    else if !none(pause) { Error(AttemptBusy) } else { Ok(()) }
+                let exported: Result[store.ExportCopy, store.DeployError] = match take allowed {
+                    Ok(()) => match activation_version(head.db) {
+                        Ok(version) => store.begin_export_copy(mut head.db, scratch, take attempt, version),
+                        Error(take why) => Error(Store(take why)),
+                    },
+                    Error(take why) => Error(take why),
+                }
+                let _ = channel.try_send(host_result, take exported)
+                continue
+            },
+            Some(ReserveImport(take command)) => {
+                let ReserveImport(checked: take checked, answer: take host_result) = box.unbox(take command)
+                let reserved = store.reserve_import(mut head.db, take checked)
+                let _ = channel.try_send(host_result, take reserved)
+                continue
+            },
+            Some(KeepImport(take command)) => {
+                let KeepImport(built: take built, answer: take host_result) = box.unbox(take command)
+                let digest = store.imported_digest(built)
+                let kept: Result[Inline[u8, 32], store.DeployError] = match store.keep_import(mut head.db, take built) {
+                    Ok(()) => Ok(digest), Error(take why) => Error(take why),
+                }
+                let _ = channel.try_send(host_result, take kept)
+                continue
+            },
             Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
-            Some(HeadFinish) => return Ok(()),
+            Some(HeadFinish) => return Ok(false),
             Some(TriggerWake(at)) => { clear_trigger_timer(mut head, at); continue },
             Some(TriggerMessage(take message)) => { trigger_message(mut head, take message, closed)?; continue },
             Some(TriggerDone(a, take outcome)) => { trigger_done(mut head, a, take outcome, closed)?; continue },
             Some(_) => continue,
             None => (),
         }
-        if !closed && next_waiting(mut head)? { continue }
+        if let Some(control) = drain {
+            if pause_has_work(pause) {
+                if pause_progress(mut head, mut pause, control)? {
+                    let _ = channel.send(head.out, PubIn(e: Halt))
+                    let _ = channel.send(control.events, RetirePlace)
+                    let _ = channel.receive(control.finish)
+                    return Ok(true)
+                }
+                if none(pause) { refresh_waiting(mut head, true); resuming = true }
+                continue
+            }
+        }
+        if none(pause) && !closed && next_waiting(mut head, drain)? { continue }
         if list.len(head.group) > 0u64 {
             if let Some(take more) = settle_probe(inbox) { input = Some(take more); continue }
             gate(mut head)?
             continue
         }
-        match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(()) }
+        match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
     }
 }
 
-fn head_arrival[G: send, H: send](mut hd: Head[G, H], take message: Req, closed: bool) -> Result[(), store.Error] waits {
+fn head_arrival[G: send, H: send](mut hd: Head[G, H], take message: Req, closed: bool, hold: bool) -> Result[(), store.Error] waits {
     let Req(e: take e) = take message
     match take e {
         Requested(take q) => {
@@ -2604,7 +3131,9 @@ fn head_arrival[G: send, H: send](mut hd: Head[G, H], take message: Req, closed:
                         return Ok(())
                     }
                 }
-                route_admission(mut hd, take req, closed)?
+                if hold && !closed {
+                    result.unwrap(list.push(mut hd.waiting, Waiting(req: take req, parked: false, held_by_pause: true)))
+                } else { route_admission(mut hd, take req, closed)? }
             }
         },
         OwnerLeft => refresh_waiting(mut hd, false),
@@ -2640,7 +3169,7 @@ fn route_admission[G: send, H: send](mut hd: Head[G, H], take q: Request, closed
             commitless(mut hd, take q, Refused(RequestMismatch))
         } else if p == q.p {
             let owner = latest.read(q.identity).number
-            let Request(caller: _, stream: take stream, p: _, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
+            let Request(stream: take stream, reply_to: take to, ..) = take q
             let mut w = match map.remove(mut hd.busy, stream) {
                 Some(take x) => take x,
                 None => return Ok(()),
@@ -2651,7 +3180,7 @@ fn route_admission[G: send, H: send](mut hd: Head[G, H], take q: Request, closed
         } else if closed {
             commitless(mut hd, take q, Refused(Overloaded))
         } else {
-            result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: false)))
+            result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: false, held_by_pause: false)))
             Ok(())
         },
         None => if closed { commitless(mut hd, take q, Refused(Overloaded)) } else { begin(mut hd, take q) },
@@ -2659,11 +3188,16 @@ fn route_admission[G: send, H: send](mut hd: Head[G, H], take q: Request, closed
 }
 
 // The first unparked waiting request whose stream has no worker starts.
-fn next_waiting[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+fn next_waiting[G: send, H: send](mut hd: Head[G, H], drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
     let mut i = 0u64
     while i < list.len(hd.waiting) {
         if !hd.waiting[i].parked && !map.contains(hd.busy, hd.waiting[i].req.stream) {
-            let Waiting(req: take q, parked: _) = list.remove(mut hd.waiting, i)
+            let Waiting(req: take q, held_by_pause: held, ..) = list.remove(mut hd.waiting, i)
+            if held {
+                if let Some(control) = drain {
+                    if host.mono_ns(control.clock) >= q.deadline { continue }
+                }
+            }
             if latest.read(q.live).active {
                 begin(mut hd, take q)?
                 return Ok(true)
@@ -2690,7 +3224,7 @@ fn begin[G: send, H: send](mut hd: Head[G, H], take q: Request) -> Result[(), st
         Abandoned(take complete) => execute(mut hd, take q, take complete),
         Duplicate(stored) => duplicate_reply(mut hd, take q, stored),
         Rejected(_) => {
-            result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: true)))
+            result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: true, held_by_pause: false)))
             Ok(())
         },
         HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),
@@ -2833,7 +3367,7 @@ fn duplicate_reply[G: send, H: send](mut hd: Head[G, H], take q: Request, stored
 
 fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
     let owner = latest.read(q.identity).number
-    let Request(caller: _, stream: take stream, p: p, key: _, arg: _, digest: d, reply_to: take to, live: _, identity: _, seed: _) = take q
+    let Request(stream: take stream, p: p, digest: d, reply_to: take to, ..) = take q
     let mut waiters: List[Recipient] = list.new()
     result.unwrap(list.push(mut waiters, Recipient(owner: owner, to: take to)))
     let named: Bytes = result.unwrap(clone(stream))
@@ -2847,7 +3381,7 @@ fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome
 // Release on the one FIFO to the publisher.
 fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
     let owner = latest.read(q.identity).number
-    let Request(caller: _, stream: take stream, p: p, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
+    let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[Answer] = list.new()
     result.unwrap(list.push(mut answers, Answer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o))))
     if let Error(_) = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers)))) { hd.cut = true }
@@ -4155,7 +4689,7 @@ pub fn head_request(take author: Caller, take stream: Bytes, p: u64, take key: B
     let identity = result.unwrap(result.capacity_only(latest.new(take blank)))
     let seed = result.unwrap(result.capacity_only(arc.new(OwnerNumber(number: 0u64))))
     Req(e: Requested(Request(caller: take author, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
-        reply_to: take reply_to, live: take live, identity: take identity, seed: Some(take seed))))
+        deadline: 18446744073709551615u64, reply_to: take reply_to, live: take live, identity: take identity, seed: Some(take seed))))
 }
 
 pub fn head_outcome(take event: WireEvent) -> Option[KeyedDone] {
@@ -5727,7 +6261,7 @@ pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, std.websocket.Control) | Sent | Dropped | WriteTimedOut(u64) | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16) | DrainWake
+type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, std.websocket.Control) | Sent | Dropped | WriteTimedOut(u64) | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16) | DrainWake | RetireWire
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(std.websocket.Control) | Ponged | PeerClosed(std.websocket.Control)
 type WireParsed: send { reader: std.wsock.Reader, packet: Result[Option[WirePacket], std.wsock.Error] }
@@ -6215,6 +6749,10 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
                 None
             },
             Ended(_) => break Ok(()),
+            RetireWire => {
+                wire_owner_refuse(mut st, 1012u16)
+                None
+            },
         }
         let outgoing = match wire_owner_poll(mut st, mut service, take frame) { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
         match wire_owner_send(mut st, mut service, pool, take outgoing) { Stop(take r) => break take r, _ => {} }
@@ -6635,7 +7173,7 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
     result
 }
 
-type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake
+type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake | ServeRetire
 
 type OwnerControl: send { id: u64, to: Sender[ServeInput], drain: Latest[Option[DrainWindow]], status: Latest[Status] }
 
@@ -6730,8 +7268,9 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
     let mut refusing: Map[u64, Task[()]] = map.new()
     let mut serial = 0u64
     let mut abandoned = 0u64
+    let mut retiring = false
     loop {
-        if serve_closing(lifecycle, clock) {
+        if retiring || serve_closing(lifecycle, clock) {
             if let Some(take accept_task) = replace(mut accepting, None) {
                 let mut counted = take accept_task
                 task.cancel(mut counted)
@@ -6740,7 +7279,13 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 let mut closing_ids: List[u64] = list.new()
                 for (id, owner_task) in owners {
                     match owner_task.wake {
-                        Some(wake) => { let _ = channel.try_send(wake, wire_event(DrainWake)) },
+                        Some(wake) => {
+                            if retiring {
+                                let _ = channel.send(wake, wire_event(RetireWire))
+                            } else {
+                                let _ = channel.try_send(wake, wire_event(DrainWake))
+                            }
+                        },
                         None => result.unwrap(list.push(mut closing_ids, id)),
                     }
                 }
@@ -6751,10 +7296,11 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
         let event = match channel.receive(inbox) { Ok(take event) => take event, Error(_) => return Ok(abandoned) }
         match take event {
             ServeStart => (),
+            ServeRetire => { retiring = true },
             ServeWake => for (_, owner_task) in owners { if let Some(wake) = owner_task.wake { let _ = channel.try_send(wake, wire_event(DrainWake)) } },
-            AcceptEnded(problem) => if !serve_closing(lifecycle, clock) { return Error(Network(problem)) },
+            AcceptEnded(problem) => if !retiring && !serve_closing(lifecycle, clock) { return Error(Network(problem)) },
             OwnerReady(id, take wake, take acknowledgement) => {
-                if !serve_closing(lifecycle, clock) {
+                if !retiring && !serve_closing(lifecycle, clock) {
                     if let Some(take owner_task) = map.remove(mut owners, id) {
                         let mut promoted = take owner_task
                         promoted.wake = Some(take wake)
@@ -6769,7 +7315,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 if let Some(take handle) = map.remove(mut refusing, id) { let _ = task.join(take handle) }
             },
             AcceptedSocket(take socket, peer, at) => {
-                if serve_closing(lifecycle, clock) { continue }
+                if retiring || serve_closing(lifecycle, clock) { continue }
                 let _ = channel.try_send(permit, ())
                 let id = serial
                 serial += 1u64
@@ -7093,12 +7639,18 @@ fn wire_can_read[G: send, H: send](s: WireSession[G, H]) -> bool {
     (s.phase == 0u8 || s.phase == 3u8) && (match s.pending { None => true, _ => false }) && match s.joining { None => true, _ => false }
 }
 
-fn wire_key(w: Want) -> Result[Bytes, Capacity] {
-    let mut key: Bytes = list.with_capacity(list.len(w.identity) + 16u64)?
-    list.append(mut key, w.identity)?
-    std.codec.put_u64(w.args_fp, mut key)?
-    std.codec.put_u64(w.result_fp, mut key)?
+fn entry_key(identity: View[Bytes], args_fp: u64, result_fp: u64) -> Result[Bytes, Capacity] {
+    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)?
+    list.append(mut key, identity)?
+    std.codec.put_u64(args_fp, mut key)?
+    std.codec.put_u64(result_fp, mut key)?
     Ok(take key)
+}
+
+fn wire_key(w: Want) -> Result[Bytes, Capacity] { entry_key(view w.identity, w.args_fp, w.result_fp) }
+
+fn answer_want[G: send, H: send](r: Registry[G, H], key: Bytes, slot: u32) -> Entry {
+    if map.contains(r.slots, key) { Ready(slot) } else { Gone }
 }
 
 fn wire_stream(caller: Caller, number: u32) -> Bytes {
@@ -7596,13 +8148,13 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
         result.unwrap(list.push(mut held.owed, take owed))
         result.unwrap(map.insert(mut s.held, take k, take held))
     } else {
-        let Send(key: take entry, stream: take named, p: position, arg: take argument, digest: digest, deadline: _, budget: _) = take sent
+        let Send(key: take entry, stream: take named, p: position, arg: take argument, digest: digest, deadline: deadline, budget: _) = take sent
         let (live, identity) = match work.head {
             Some(lease) => (latest.handle(lease.live), latest.handle(lease.identity)),
             None => fail("runner: missing head lease"),
         }
         let Admitted(caller: take principal, ..) = take context
-        let request = Request(caller: take principal, stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
+        let request = Request(caller: take principal, stream: take named, p: position, key: take entry, arg: take argument, digest: digest, deadline: deadline, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
         let mut sends: List[WireOwed] = list.new()
         if let Error(_) = list.push(mut sends, take owed) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
         // v2.23: a full head inbox does not refuse. The request waits in `posts`, in order, and
@@ -8150,10 +8702,7 @@ fn wire_step_input[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
                 }
                 let index = s.placing - 1u64
                 let slot: u32 = int.narrow(index)
-                let answer: Entry = match map.get(s.registry.slots, s.entries[index]) {
-                    None => Gone,
-                    _ => Ready(slot),
-                }
+                let answer = answer_want(s.registry, s.entries[index], slot)
                 s.placing += 1u64
                 if index + 1u64 == list.len(s.entries) { s.phase = 4u8 }
                 return Ok(Some(Placed(take answer)))

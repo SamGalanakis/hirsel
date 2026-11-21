@@ -571,7 +571,12 @@ pattern. Use `float.total_order` for total ordering, or `float.eq`, `float.lt`, 
 `float.gt` and `float.ge` for IEEE 754 comparisons. `let p = e` needs an irrefutable pattern; `let p = e else { .. }`
 takes a refutable one, and its `else` block has type `Never`. `if let` and `while let` take
 refutable patterns. Arms of an owned scrutinee bind by
-[OWN-15](ownership.md#own-15-match-on-an-owned-value).
+[OWN-15](ownership.md#own-15-match-on-an-owned-value). Inside a constructor or tuple
+pattern of a `match` arm, an `if let` or a `while let`, a name may be marked `take`
+(`Some(take s)`) or `mut` (`File(mut f)`); `mut x` names the matched place of a writable
+scrutinee rather than binding a value (OWN-15). A `mut` binding that is an arm's whole
+pattern, or that is in a `let`, `let .. else` or `for` pattern, is refused here, at the
+binding.
 
 ```hirsel
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
@@ -590,6 +595,17 @@ fn zero(x: f64) -> u64 { match float.total_order(x, 0.0) { Equal => 1, _ => 2 } 
 ```
 ```hirsel
 fn zero(x: f64) -> u64 { match x { 0.0 => 1, _ => 2 } }   // refused: LANG-17, f64 is not key
+```
+```hirsel unbuilt
+fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError] {
+  match input { Some(mut f) => host.read(mut f, mut buf), None => Ok(0) }
+}
+```
+```hirsel unbuilt
+fn whole(mut s: String) { match s { mut t => {} } }      // refused: LANG-17, a mut binding is a payload
+```
+```hirsel unbuilt
+fn unpack(mut o: Option[String]) { let Some(mut s) = o else { return } }   // refused: LANG-17
 ```
 
 ### LANG-18: Errors

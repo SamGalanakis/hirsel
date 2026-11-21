@@ -420,8 +420,9 @@ fn last_len(xs: List[String]) -> u64 {
 ### OWN-9: Overlap
 
 Two places overlap when one is a prefix of the other, when they differ first at two
-indexes of the same sequence, or when they differ first at two variant payloads of the
-same value. Two different fields of one record do not overlap. Index operands are
+indexes of the same sequence, or when they differ first at the payloads of two different
+variants of the same value. Two different fields of one record, or of one variant, do not
+overlap. Index operands are
 evaluated left to right into temporaries before the places are compared. This one
 relation governs views, reservations, `mut` loans, moves, assignments, replacements,
 arguments of one call and captures.
@@ -533,7 +534,8 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 ### OWN-12: Assignment
 
 A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
-field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place; nothing
+field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place, or the
+payload of the variant a `mut` pattern binding selected in it ([OWN-15](#own-15-match-on-an-owned-value)); nothing
 reached through a view, a counted value or a region value is one. The one exception is
 an `Rc` or `Arc` payload lent by `rc.with_unique` or `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)): it is
 reached as the callback's `mut` parameter, which is a writable slot, and only after the
@@ -597,6 +599,36 @@ are views, and `take` under a view is refused. An arm that reads through a holde
 binds views of the payload, plain or own, and `take` in it is refused here, at the `take`:
 `box.unbox(take b)` moves a payload out.
 
+A binding written `mut x` under a constructor or tuple pattern of a `match` arm, an `if
+let` or a `while let` names the place it matches in the scrutinee; nothing is moved,
+copied or dropped, and the scrutinee stays its owner. This is the one way to write a variant
+payload in place. The scrutinee must be a writable place (OWN-12), an index or a `Box`
+payload included; a `mut` binding of a temporary or of a place reached through a view, a
+counted value or a region value is refused here, at the binding, as is a `mut` binding that
+is an arm's whole pattern, or that is in a `let`, `let .. else` or `for` pattern
+([LANG-17](language.md#lang-17-match)). The scrutinee's place, its indexes evaluated, is
+resolved once. Patterns and guards are tested through views as above, and a guard sees `x`
+as a view; once the arm is chosen and its guard has succeeded, those views end and the arm
+lends each `mut` place to its binding until the arm ends. A chosen pattern that both takes
+and lends is refused here, at the later binding.
+
+While the arm lasts, `x` is held as a `mut` parameter is (OWN-11): through it the arm reads,
+assigns, replaces and lends `mut`, and `take` of `x` or of a place under it is refused there.
+Every other read, view, loan, move, assignment, replacement or drop of a place that
+overlaps the lent one (OWN-9) is refused at OWN-9, as a `mut` argument's later siblings
+are: assigning a new variant to the scrutinee or to a place above it, or pushing to the
+`List` that holds it. A place that does not overlap it, such as another field of the record
+that holds the scrutinee, stays usable. A view or loan of `x` is a view or loan of the
+lent place, so a scoped result anchored to `mut x` freezes that place, which stays frozen
+after the arm while the result lives (OWN-20).
+
+The loan is checked, not run: it adds no allocation, step, cancellation point, replay event
+or drop flag (OWN-18), and `x` owns nothing. When the arm ends, by its value, an exit, a
+failure or a cancellation, the loan ends, and the payload place holds whatever value was
+last installed through `x`; the scrutinee's owner cleans it as usual
+([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). Rust's `match &mut e { V(x) => .. }` is
+the nearest precedent; Swift's `inout` exclusivity is the same rule for a parameter.
+
 ```hirsel
 fn unwrap_or_empty(take o: Option[String]) -> String {
   match o { Some(take s) => s, None => string.new() }
@@ -610,6 +642,68 @@ fn k(take b: Box[Option[String]]) -> String {
 ```hirsel
 fn f(take o: Option[String]) -> String {
   match o { Some(s) if string.byte_len(s) > 0 => take s, _ => string.new() }  // refused: OWN-15
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn bump(mut src: Source) {
+  match src { Text(mut s) => string.push(mut s, "!"), Count(mut n) => n += 1 }
+}
+fn first_text(mut xs: List[Source]) {
+  if let Text(mut s) = xs[0] { s = string.from("first") }
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn long(src: Source) -> bool { match src { Text(s) => string.byte_len(s) > 3, Count(_) => false } }
+fn bump_long(mut src: Source) {
+  match src { Text(mut s) if long(src) && string.byte_len(s) > 3 => string.push(mut s, "!"), _ => {} }
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grew(mut s: String) -> bool { string.push(mut s, "!"); true }
+fn lend_early(mut src: Source) {
+  match src { Text(mut s) if grew(mut s) => {}, _ => {} }   // refused: LANG-17, a guard lends mut
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn bump_view(src: Source) {
+  match src { Text(mut s) => string.push(mut s, "!"), Count(_) => {} }   // refused: OWN-5, src is a view
+}
+```
+```hirsel unbuilt
+type Pair = Both(String, Option[String])
+fn mixed(mut p: Pair) {
+  match p { Both(mut a, Some(take b)) => {}, _ => {} }   // refused: OWN-15, takes and lends
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+type Lines { input: Source, buffer: String }
+fn retag(mut l: Lines) {
+  match l.input {
+    Text(mut s) => { string.push(mut l.buffer, "x"); l.input = Count(0) }   // refused: OWN-9, at l.input
+    Count(_) => {}
+  }
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grow_list(mut xs: List[Source]) {
+  match xs[0] { Text(mut s) => list.push(mut xs, Count(0)), Count(_) => {} }   // refused: OWN-9
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn steal(mut src: Source) -> String {
+  match src { Text(mut s) => take s, Count(_) => string.new() }   // refused: OWN-11
+}
+```
+```hirsel unbuilt
+fn keep(mut o: Option[String]) -> String {
+  match o { Some(mut s) => replace(mut s, string.new()), None => string.new() }
 }
 ```
 
@@ -786,7 +880,11 @@ actual already has; a projected actual such as `mut x.f` freezes `x.f`. It is a 
 value and copies as OWN-3 says. No anchor is inferred from a body. A missing or wrong anchor
 is refused at the written result type. While the result lives, its anchored argument may
 still be read and viewed, as any frozen place may, and nothing writes, moves or frees what
-the result exposes (OWN-8).
+the result exposes (OWN-8). An actual `mut x` for a `mut` pattern binding `x` (OWN-15)
+is the payload place it names: the freeze lands on that place of the scrutinee and lasts
+for the result's extent, past the arm when the result leaves it, so the scrutinee and the
+places above it are not assigned, moved or dropped until the result ends. A call that fails
+delivers no result and leaves no freeze.
 
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
@@ -813,6 +911,24 @@ fn last(mut xs: List[String]) -> Option[View[String]] in xs {
   let v = list.get(xs, 0)
   list.clear(mut xs)                                  // refused: OWN-10, v freezes xs
   v
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
+fn escape(mut src: Source) -> u64 {
+  let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+  let n = string.byte_len(v)
+  n
+}
+```
+```hirsel unbuilt
+type Source = Text(String) | Count(u64)
+fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
+fn escape_then_retag(mut src: Source) -> u64 {
+  let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+  src = Count(1)                                      // refused: OWN-10, v freezes src's payload
+  string.byte_len(v)
 }
 ```
 ```hirsel

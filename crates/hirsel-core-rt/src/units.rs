@@ -1147,6 +1147,10 @@ struct Pool {
     threads: Vec<OnceLock<std::thread::Thread>>,
     handed: Vec<AtomicBool>,
     poll: Mutex<()>,
+    /// Set while a worker holds `poll`, for a probe or a blocking wait. A
+    /// worker parks on its own handle only after seeing it set, and the
+    /// holder checks for sleepers after clearing it (see `keep_poller`).
+    poll_held: AtomicBool,
     poller_blocked: AtomicBool,
     poll_until: AtomicU64,
     gep: i32,
@@ -1493,22 +1497,61 @@ fn notify_worker(p: &Pool) {
         return;
     }
     if p.nsleep.load(Ordering::SeqCst) > 0 {
-        let mut idle = p.idle.lock().unwrap();
-        if !covered(p)
-            && let Some(w) = idle.pop()
-        {
-            p.nsleep.fetch_sub(1, Ordering::SeqCst);
-            // The woken worker searches on this count.
-            p.searching.fetch_add(1, Ordering::SeqCst);
-            p.handed[w].store(true, Ordering::Release);
-            drop(idle);
-            p.threads[w].get().unwrap().unpark();
-            bump(S_OS_WAKES);
+        let idle = p.idle.lock().unwrap();
+        if !covered(p) && hand_search(p, idle) {
             return;
         }
     }
     if p.searching.load(Ordering::SeqCst) == 0 && p.poller_blocked.load(Ordering::SeqCst) {
         write_wake(p);
+    }
+}
+
+/// Wake the most recently parked worker, if any, with the search role.
+fn hand_search(p: &Pool, mut idle: std::sync::MutexGuard<'_, Vec<usize>>) -> bool {
+    let Some(w) = idle.pop() else { return false };
+    p.nsleep.fetch_sub(1, Ordering::SeqCst);
+    // The woken worker searches on this count.
+    p.searching.fetch_add(1, Ordering::SeqCst);
+    p.handed[w].store(true, Ordering::Release);
+    drop(idle);
+    p.threads[w].get().unwrap().unpark();
+    bump(S_OS_WAKES);
+    true
+}
+
+/// Called by a worker about to run a unit. Parked workers sleep with no
+/// timeout, so while any sleeps, some worker must hold the poll turn or be
+/// searching (a searcher ends by polling or by coming here). If none does,
+/// wake a sleeper: it searches, then blocks in the poller until the earliest
+/// deadline.
+fn keep_poller(p: &Pool) {
+    let unwatched = |p: &Pool| !p.poll_held.load(Ordering::SeqCst) && p.searching.load(Ordering::SeqCst) == 0;
+    if p.nsleep.load(Ordering::SeqCst) > 0 && unwatched(p) {
+        let idle = p.idle.lock().unwrap();
+        if unwatched(p) {
+            hand_search(p, idle);
+        }
+    }
+}
+
+/// The poll turn: `poll` held, with `poll_held` set for the sleepers' check.
+struct PollTurn<'a> {
+    p: &'a Pool,
+    _lock: std::sync::MutexGuard<'a, ()>,
+}
+impl<'a> PollTurn<'a> {
+    fn take(p: &'a Pool) -> Option<Self> {
+        let lock = p.poll.try_lock().ok()?;
+        p.poll_held.store(true, Ordering::SeqCst);
+        Some(PollTurn { p, _lock: lock })
+    }
+}
+impl Drop for PollTurn<'_> {
+    fn drop(&mut self) {
+        // Cleared before the lock is released; a holder that then runs a
+        // unit calls `keep_poller`, which reads the sleepers after this.
+        self.p.poll_held.store(false, Ordering::SeqCst);
     }
 }
 fn write_wake(p: &Pool) {
@@ -1668,7 +1711,7 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
 fn poll_due(p: &Pool, t: u64, every: u64) {
     if !p.poller_blocked.load(Ordering::Relaxed)
         && t.saturating_sub(p.last_poll.load(Ordering::Relaxed)) > every
-        && let Ok(_g) = p.poll.try_lock()
+        && let Some(_turn) = PollTurn::take(p)
     {
         poll_global(p, 0);
     }
@@ -1757,6 +1800,7 @@ fn worker_main(p: &'static Pool, ix: usize) {
     let mut handed = false;
     loop {
         if !handed && let Some(u) = find(p, ix) {
+            keep_poller(p);
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
@@ -1794,9 +1838,12 @@ fn worker_main(p: &'static Pool, ix: usize) {
         }
         p.searching.fetch_sub(1, Ordering::SeqCst);
         if let Some(u) = got {
-            // The last searcher to find work wakes another if work remains.
+            // The last searcher to find work wakes another if work remains,
+            // or if workers sleep and nobody watches the poller.
             if p.queued.load(Ordering::SeqCst) > 0 {
                 notify_worker(p);
+            } else {
+                keep_poller(p);
             }
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
@@ -1805,8 +1852,8 @@ fn worker_main(p: &'static Pool, ix: usize) {
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
             break;
         }
-        match p.poll.try_lock() {
-            Ok(_g) => {
+        match PollTurn::take(p) {
+            Some(_turn) => {
                 p.poller_blocked.store(true, Ordering::SeqCst);
                 if p.queued.load(Ordering::SeqCst) == 0 && !p.stop.load(Ordering::SeqCst) {
                     let nt = p.next_timer.load(Ordering::SeqCst);
@@ -1820,10 +1867,15 @@ fn worker_main(p: &'static Pool, ix: usize) {
                 }
                 p.poller_blocked.store(false, Ordering::SeqCst);
             }
-            Err(_) => {
+            None => {
                 let mut idle = p.idle.lock().unwrap();
                 p.nsleep.fetch_add(1, Ordering::SeqCst);
-                if p.queued.load(Ordering::SeqCst) != 0 || p.stop.load(Ordering::SeqCst) {
+                // Sleep only while another worker holds the poll turn: it
+                // reads the sleepers after it lets the turn go.
+                if p.queued.load(Ordering::SeqCst) != 0
+                    || p.stop.load(Ordering::SeqCst)
+                    || !p.poll_held.load(Ordering::SeqCst)
+                {
                     p.nsleep.fetch_sub(1, Ordering::SeqCst);
                     continue;
                 }
@@ -1890,6 +1942,7 @@ fn launch_untied(
         threads: (0..w).map(|_| OnceLock::new()).collect(),
         handed: (0..w).map(|_| AtomicBool::new(false)).collect(),
         poll: Mutex::new(()),
+        poll_held: AtomicBool::new(false),
         poller_blocked: AtomicBool::new(false),
         poll_until: AtomicU64::new(u64::MAX),
         gep,

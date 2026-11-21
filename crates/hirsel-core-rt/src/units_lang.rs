@@ -365,12 +365,20 @@ impl LangUnit {
         self.on_released(took);
     }
 
+    /// Every caller holds a commit. A release that took drained the port and
+    /// may have left later arrivals reached but untaken; pump takes them and
+    /// rearms the port, so no task parks on work the unit already holds.
     fn on_released(&mut self, took: Vec<Released>) {
+        if took.is_empty() {
+            return;
+        }
         let wake = self.waits > 0;
         for (t, id, _) in took {
             // SAFETY: a release runs in a commit that owns the unit.
             unsafe { on_take(self, t, id, wake) };
         }
+        // SAFETY: as above.
+        unsafe { pump(self) };
     }
 
     fn refund_retained(&mut self, id: usize) {

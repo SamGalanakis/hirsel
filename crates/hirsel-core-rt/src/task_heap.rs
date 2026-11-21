@@ -821,12 +821,11 @@ impl DedicatedCache {
             (extent >= needed
                 && payload.addr().get() & (class.align - 1) == 0
                 && backing.headroom(payload) >= own_prefix(class.kind))
-            .then(|| (extent, backing.used.get(), backing.born.get()))
+            .then(|| (backing.used.get(), backing.born.get()))
         };
-        // A growable block can start the same growth sequence again. Keep
-        // that reservation even if its resident extent is large for the
-        // first request. Otherwise prefer the closest resident fit, with at
-        // most the request's size in slack.
+        // Preserve the reservation for a repeated growth sequence. Only
+        // extents that have never grown can serve a different starting size.
+        // Among those, prefer the smallest already resident fit.
         let retained =
             self.retained
                 .iter()
@@ -834,24 +833,24 @@ impl DedicatedCache {
                 .enumerate()
                 .rev()
                 .filter_map(|(index, page)| {
-                    let (_, used, born) = fit(page)?;
-                    if class.growable && born == class.stride {
-                        Some((index, (false, false, 0)))
+                    let (used, born) = fit(page)?;
+                    if born == class.stride {
+                        Some((index, (false, 0)))
                     } else {
-                        (used.saturating_sub(needed) <= needed)
-                            .then_some((index, (true, used < needed, used.abs_diff(needed))))
+                        (used >= needed
+                            && used <= born.next_multiple_of(page_bytes())
+                            && used - needed <= needed)
+                            .then_some((index, (true, used)))
                     }
                 });
         let page = if let Some((index, _)) = retained.min_by_key(|&(_, rank)| rank) {
             self.remove_retained(index)
         } else {
-            let (index, _) = self
+            let index = self
                 .clean
                 .iter()
                 .copied()
-                .enumerate()
-                .filter_map(|(index, page)| fit(page).map(|(extent, _, _)| (index, extent)))
-                .min_by_key(|&(_, extent)| extent)?;
+                .position(|page| fit(page).is_some())?;
             self.clean.swap_remove_back(index).unwrap()
         };
         // SAFETY: the page has been taken off the cache and has no live slots.
@@ -2116,6 +2115,10 @@ mod tests {
         // SAFETY: the test owns GROWN writable bytes.
         unsafe { tail.write(0x5a) };
         free(start, GROWN);
+        // An unrelated request can use a compatible ungrown mapping. It
+        // must leave the reservation for the upcoming growth sequence.
+        let unrelated = allocate_unwritten(GROWN / 2, block::PLAIN);
+        free(unrelated, GROWN / 2);
         let start_again = allocate_unwritten(SMALL, block::PLAIN);
         assert!(
             resident(grow(start_again)),

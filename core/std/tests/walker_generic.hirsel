@@ -5,7 +5,7 @@ fn leaf[T](take x: T) -> T {
 }
 
 fn middle[T](take x: T) -> u64 {
-    let _ = take x
+    drop(take x)
     leaf(7u64)
 }
 

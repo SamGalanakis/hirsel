@@ -1,0 +1,22 @@
+// expect: accept
+// expect: run order() = 2 trace 1,2
+// expect: run failure() = fail Division@8:13 trace 1
+resource type DropOrder {
+    id: u64,
+    divisor: u64
+} drop(owner) {
+    let _ = 100 / owner.divisor
+}
+
+fn order() -> u64 {
+    let first = result.unwrap(DropOrder(id: 1, divisor: 1))
+    drop(take first)
+    let next = result.unwrap(DropOrder(id: 2, divisor: 1))
+    next.id
+}
+
+fn failure() -> u64 {
+    let first = result.unwrap(DropOrder(id: 1, divisor: 0))
+    core.drop(take first)
+    fail("drop returned")
+}

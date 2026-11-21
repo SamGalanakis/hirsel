@@ -31,7 +31,7 @@ fn released_shared_path(held: Arc[List[u64]]) -> bool {
     result.unwrap(list.push(mut children, arc.share(held)))
     result.unwrap(list.push(mut children, arc.share(held)))
     let parent = result.unwrap(arc.new(take children))
-    let _ = take parent
+    drop(take parent)
     let probe_result: Result[List[u64], Capacity] = list.with_capacity(13)
     match take probe_result {
         Ok(take probe) => {

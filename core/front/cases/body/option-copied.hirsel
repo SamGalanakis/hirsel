@@ -1,0 +1,21 @@
+// expect: accept
+// expect: run copied(0) = 42
+// expect: run copied(1) = 0
+type Pair {
+    left: u64,
+    right: u64
+}
+
+fn copied(i: u64) -> u64 {
+    let out = {
+        let mut xs: List[Pair] = result.unwrap(list.with_capacity(1))
+        result.unwrap(list.push(mut xs, Pair(left: 12, right: 30)))
+        result.unwrap(bound bytes 0 {
+            option.copied(list.get(xs, i))
+        })
+    }
+    match out {
+        Some(Pair(left, right)) => left + right,
+        None => 0,
+    }
+}

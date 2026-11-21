@@ -2130,6 +2130,16 @@ fn step_bounds_rules() {
 }
 
 #[test]
+fn explicit_drop_and_option_copied() {
+    let mut failures = run_case(&root().join("cases/body/explicit-drop.hirsel"));
+    failures.extend(run_case(&root().join("cases/body/option-copied.hirsel")));
+    assert!(
+        failures.is_empty(),
+        "drop and copied contracts: {failures:#?}"
+    );
+}
+
+#[test]
 fn static_strings_preserve_budget_law() {
     let mut failures = vec![];
     for name in [

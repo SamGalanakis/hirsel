@@ -886,7 +886,7 @@ fn replaced_entry() -> bool {
                 return false
             }
             // Drop the new map too; only the result need retain the old bytes.
-            let _ = take changed
+            drop(take changed)
             if omap.replaced_value(replaced) != prior {
                 return false
             }

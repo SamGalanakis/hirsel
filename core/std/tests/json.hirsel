@@ -352,7 +352,7 @@ fn parse_admission_order() -> bool {
             let bad_key = match json.parse_tree("{\"abcdef\\q\":0}", fn() -> Result[(), json.Error] {
                 Ok(())
             }, fn(take node: json.TreeValue[()]) {
-                let _ = take node
+                drop(take node)
             }, fn(take e: json.Error) -> json.Error {
                 take e
             }) {

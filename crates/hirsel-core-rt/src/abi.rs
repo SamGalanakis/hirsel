@@ -405,36 +405,71 @@ pub extern "C" fn hirsel_core_dest_id() -> u64 {
     crate::destination::next()
 }
 
-/// `rt.hash_bytes`: the fixed byte hash a `Map` key's text components fold
-/// (hirsel-core-ir crate docs, "Maps"): from `h = len`, fold
-/// `mix(h, w) = rotl((h ^ w) × 0x9E3779B97F4A7C15, 26)` over the little-endian
-/// 8-byte words, the last zero-padded, then `h ^ (h >> 32)`. The producer hashes
-/// static map literals with the same function, so it is fixed, never seeded. No
-/// context, admission or status; a range of length 0 is never read.
-///
+unsafe fn map_hash_range<'a>(data: *const u8, len: u64) -> &'a [u8] {
+    if len == 0 {
+        &[]
+    } else {
+        // SAFETY: the calling Map hash op guarantees a readable range.
+        unsafe { std::slice::from_raw_parts(data, len as usize) }
+    }
+}
+
 /// # Safety
-/// A non-empty range must be readable for its length.
+/// Context belongs to this task and a non-empty input is readable for its length.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_hash_bytes(data: *const u8, len: u64) -> u64 {
-    let bytes = match len {
-        0 => &[][..],
-        // SAFETY: the caller passes a readable range of len bytes.
-        n => unsafe { std::slice::from_raw_parts(data, n as usize) },
-    };
-    let mix = |h: u64, w: u64| ((h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15)).rotate_left(26);
-    let mut h = len;
-    // Full words need neither padding nor a variable-sized copy. Array elements
-    // have byte alignment, so this also handles unaligned input without overread.
-    let (words, tail) = bytes.as_chunks::<8>();
-    for &word in words {
-        h = mix(h, u64::from_le_bytes(word));
+pub unsafe extern "C" fn hirsel_core_map_hash_bytes(
+    context: *const Context,
+    data: *const u8,
+    len: u64,
+) -> u64 {
+    unsafe {
+        hirsel_core_layout::map_hash::bytes(&(*context).map_hash_key, map_hash_range(data, len))
     }
-    if !tail.is_empty() {
-        let mut word = [0u8; 8];
-        word[..tail.len()].copy_from_slice(tail);
-        h = mix(h, u64::from_le_bytes(word));
-    }
-    h ^ (h >> 32)
+}
+
+/// # Safety
+/// Context belongs to this task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_hash_word(context: *const Context, word: u64) -> u64 {
+    unsafe { hirsel_core_layout::map_hash::word(&(*context).map_hash_key, word) }
+}
+
+use hirsel_core_layout::map_hash::State as MapHashState;
+
+/// # Safety
+/// Context belongs to this task and state points to writable, aligned scratch.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_hash_start(
+    context: *const Context,
+    state: *mut MapHashState,
+) {
+    unsafe { state.write(MapHashState::new(&(*context).map_hash_key)) }
+}
+
+/// # Safety
+/// State points to initialized, exclusive, aligned scratch.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_hash_add_word(state: *mut MapHashState, word: u64) {
+    unsafe { (*state).word(word) }
+}
+
+/// # Safety
+/// State points to initialized, exclusive, aligned scratch. A non-empty input
+/// is readable for its length and disjoint from the state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_hash_add_bytes(
+    state: *mut MapHashState,
+    data: *const u8,
+    len: u64,
+) {
+    unsafe { (*state).bytes(map_hash_range(data, len)) }
+}
+
+/// # Safety
+/// State points to initialized, aligned scratch.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_hash_finish(state: *const MapHashState) -> u64 {
+    unsafe { (*state).finish() }
 }
 
 /// `rt.compare_bytes`: the bytewise order of two byte ranges (SEM-7), -1, 0 or 1,

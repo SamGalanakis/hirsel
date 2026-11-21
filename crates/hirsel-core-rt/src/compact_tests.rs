@@ -278,72 +278,81 @@ fn byte_order_is_unsigned_with_a_proper_prefix_first() {
     );
 }
 
-/// The producer hashes static map literals at compile time (FORM "Maps"); a run-time
-/// hash that differs makes every such key unfindable. Values derived by hand from the
-/// rule, as in hirsel-core-ir's strings.core f2.
+/// Fixed-key words from siphasher 1.0.4 over the structural byte stream.
+/// Offsets exercise unaligned words and the full tail range without an overread.
 #[test]
-fn byte_hash_matches_the_fixed_rule() {
-    let hash = |b: &[u8]| {
-        // SAFETY: a live slice.
-        unsafe { hirsel_core_hash_bytes(b.as_ptr(), b.len() as u64) }
+fn map_hash_uses_the_siphash_13_vectors() {
+    let mut ctx = Context::new(0);
+    let bytes = |ctx: &Context, b: &[u8]| {
+        // SAFETY: the context and byte range are live.
+        unsafe { hirsel_core_map_hash_bytes(ctx, b.as_ptr(), b.len() as u64) }
     };
-    // SAFETY: length 0 is never read.
-    assert_eq!(unsafe { hirsel_core_hash_bytes(std::ptr::null(), 0) }, 0);
-    assert_eq!(hash(b"a"), 4535047995308936329);
-    assert_eq!(hash(b"hello"), 5704403177778809783);
-    assert_eq!(hash(b"abcdefghi"), 6716469241732165301);
-}
-
-/// Independent fixed hash words at every short tail boundary, and longer inputs.
-/// Prefix offsets force unaligned word reads without changing the hashed bytes.
-#[test]
-fn byte_hash_full_words_and_tails() {
+    // SAFETY: a zero length permits a null byte range.
+    assert_eq!(
+        unsafe { hirsel_core_map_hash_bytes(&ctx, std::ptr::null(), 0) },
+        0xbd60acb658c79e45
+    );
     for (n, want) in [
-        (0, 0x0000000000000000),
-        (1, 0xe5fd29f0b385f416),
-        (2, 0xc924443460ebe687),
-        (3, 0x03021624ff145ab1),
-        (4, 0xb9fb4015eaba61ec),
-        (5, 0xeff86a054a56cda4),
-        (6, 0xd5f593f52c0ca4d9),
-        (7, 0xbbf2bde6f7e6b0f5),
-        (8, 0xa1efe7d601370d2c),
-        (9, 0x3a45815c4ef00d87),
-        (10, 0x392105ab391310ee),
-        (11, 0xacf7ae0a622f6ffc),
-        (12, 0xe1570d6f3be40f79),
-        (13, 0x29665eca4fce401a),
-        (14, 0xe2c818ef91307839),
-        (15, 0x94da40593ecd37d3),
-        (16, 0x946c4fbe22bde4d1),
-        (17, 0x382426beaa1d2be0),
-        (18, 0x3c655c73467dc5df),
-        (19, 0x55ac3819a86dc336),
-        (20, 0x3f4504c9cb11caad),
-        (21, 0x608764353109f567),
-        (22, 0xff96a12c51d83714),
-        (23, 0x0e7877deab119fc5),
-        (24, 0x3a8cb73ff27af871),
-        (25, 0x15c3b206ec7c388d),
-        (26, 0x2b287887e06d1ad8),
-        (27, 0x5d729fe47b9bd59b),
-        (28, 0xdb8606f2da2e7178),
-        (29, 0xf9d8142ebb92a17a),
-        (30, 0x4fd71be91a6c85c5),
-        (31, 0xa6db2efec4d4812c),
-        (32, 0xf341fec280082f43),
-        (33, 0x072b724a359808c8),
-        (63, 0xf4c4cef80f6531db),
-        (64, 0x060d4ebfcc94d8d0),
-        (65, 0xec3d8f7f63ae977d),
-        (257, 0x60fd66c4124c29cf),
+        (0, 0xbd60acb658c79e45),
+        (1, 0x8934f5f0a51fbffa),
+        (2, 0x02448a6b1c466c6f),
+        (3, 0x4577ab078b9dbddc),
+        (4, 0x59ebb5f15eeeb94a),
+        (5, 0xa314a10555783c3c),
+        (6, 0xa270c64d572974bf),
+        (7, 0x88d7b10d83238a46),
+        (8, 0x128eb5bf6a9b4604),
+        (9, 0xf5103240d47b2e9e),
+        (10, 0x8906c76a3a487ce0),
+        (11, 0x8cdc41e1889d00b7),
+        (12, 0x2f577626683bdcd0),
+        (13, 0x2d3a1aa9c3f86b1c),
+        (14, 0xcf3d96a5eee2ee1b),
+        (15, 0x940dedebc0559b50),
+        (16, 0x5026d4b5372d6206),
+        (17, 0x48b5a13e58996335),
+        (18, 0xf30650b163a36d39),
+        (19, 0x183ff6b555ad300c),
+        (20, 0x0f52c59cc0dc95d9),
+        (21, 0x2604d0d2cb21c46c),
+        (22, 0x35b4eba9b0ca0e76),
+        (23, 0xff8a2af253c0d053),
+        (24, 0x750feda696e350b3),
+        (25, 0x1572102aa3513ef5),
+        (26, 0x75953c1eb8043ead),
+        (27, 0x5f712c5602f5d393),
+        (28, 0x177af755cdbdf9fa),
+        (29, 0x76e82dedc44d97f8),
+        (30, 0x869b134d4fbd584e),
+        (31, 0xf5daff99b18b0ea3),
+        (32, 0x6a9d14ef1a0f4b98),
+        (33, 0xfc090f8af269999a),
+        (63, 0x2c3c5d16bd12a718),
+        (64, 0x47ee413eb5b62e62),
+        (65, 0x32c0c1aabb2e5dfd),
+        (257, 0x7f744cd6ade23b6e),
     ] {
         for prefix in 0..8 {
-            let mut data = vec![0xE7; prefix];
+            let mut data = vec![0xe7; prefix];
             data.extend((0..n).map(|i| i as u8));
-            // SAFETY: the offset range contains exactly n initialized bytes.
-            let got = unsafe { hirsel_core_hash_bytes(data.as_ptr().add(prefix), n as u64) };
-            assert_eq!(got, want, "length{n} prefix{prefix}");
+            assert_eq!(
+                bytes(&ctx, &data[prefix..]),
+                want,
+                "length {n}, prefix {prefix}"
+            );
         }
+    }
+    ctx.map_hash_key = std::array::from_fn(|i| i as u8);
+    let mut scratch = std::mem::MaybeUninit::uninit();
+    let state = scratch.as_mut_ptr();
+    // SAFETY: ctx is live and state is aligned exclusive scratch initialized
+    // by start. The byte range is a disjoint two-byte literal.
+    unsafe {
+        let word = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(hirsel_core_map_hash_word(&ctx, word), 0x369095118d299a8e);
+        hirsel_core_map_hash_start(&ctx, state);
+        hirsel_core_map_hash_add_bytes(state, b"ab".as_ptr(), 2);
+        hirsel_core_map_hash_add_word(state, 7);
+        assert_eq!(hirsel_core_map_hash_finish(state), 0xdb92b956a12fc30b);
     }
 }

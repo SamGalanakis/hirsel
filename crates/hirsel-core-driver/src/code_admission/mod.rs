@@ -177,11 +177,11 @@ impl BackendSemantics for NativeSemantics {
     }
 
     fn supports_tag(&self, backend: Backend, tag: EngineTag) -> bool {
-        // Both engines implement these exact v1 operation tags.
+        // Both engines implement these normal-form operation tags.
         match backend {
             Backend::Cranelift | Backend::Llvm => match tag {
                 EngineTag::Instruction(tag) => tag <= 43,
-                EngineTag::Runtime(tag) => tag <= 40,
+                EngineTag::Runtime(tag) => matches!(tag, 0..=15 | 17..=22 | 27..=46),
                 EngineTag::Host(tag) => tag <= 31,
                 EngineTag::Flow(tag) => tag <= 8,
                 EngineTag::Terminator(tag) => tag <= 6,

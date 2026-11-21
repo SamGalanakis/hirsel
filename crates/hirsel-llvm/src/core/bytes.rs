@@ -21,15 +21,14 @@ fn compare_bytes_signature() -> FnSig {
 }
 
 impl FunctionEmitter<'_> {
-    pub(super) fn hash_bytes(&mut self, data: &Value, len: &Value) -> Value {
-        let facts = read_only(self.facts);
-        self.call_declared(
-            "hirsel_core_hash_bytes",
+    pub(super) fn map_hash(&mut self, symbol: &str, arguments: &[CArg]) -> Vec<Value> {
+        vec![self.call_declared(
+            symbol,
             Type::I64,
-            &[ptr(data.clone()), word(len.clone())],
-            facts,
+            arguments,
+            read_only(self.facts),
             &CallAttrs::default(),
-        )
+        )]
     }
 
     pub(super) fn compare_bytes(&mut self, arguments: &[Value]) -> Value {

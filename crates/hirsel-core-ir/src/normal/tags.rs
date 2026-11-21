@@ -328,7 +328,6 @@ tags!(RtOp {
     13 => LatestRead,
     14 => DestId,
     15 => CompareBytes,
-    16 => HashBytes,
     17 => Sha256Blocks,
     18 => CauseNext,
     19 => CauseValue,
@@ -349,6 +348,12 @@ tags!(RtOp {
     38 => Xxh3Short,
     39 => Xxh3Stripes,
     40 => LaunchHandle,
+    41 => MapHashBytes,
+    42 => MapHashWord,
+    43 => MapHashStart,
+    44 => MapHashAddWord,
+    45 => MapHashAddBytes,
+    46 => MapHashFinish,
 });
 
 tags!(HostOp {

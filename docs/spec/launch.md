@@ -255,8 +255,9 @@ objects it lacks.
    `Unsolicited(h)` and is not kept. An object whose bytes do not hash to its listed hash is
    `Hash(h)`.
 5. Every group, body and annex of the closure decodes within the limits under PROG-10's
-   encoding rules, each annex against its own body, before any of it is put into a map
-   (`Malformed`).
+   encoding rules, each annex against its own body, before any of it is put into a map.
+   A body in a different normal-form version is `Unsupported`. Republish from source.
+   Invalid frames are `Malformed`.
 6. The closure walked from the entry through the groups' `External` bindings, compared as typed
    sets of groups, bodies and the annex paired with each body, equals the listed objects
    exactly (`Missing`, `Extra`).
@@ -307,8 +308,8 @@ root reaches. The roots are the union of: the assembly record of each retained a
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
 so the store's `releases` rows keep their format, and a recording pin names the assembly record of
-the run it records and is synced before `Pinned` is answered. A retained digest whose image is
-missing gives `Unknown(ImageGone)`.
+the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
+launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
 `hirsel host --record DIRECTORY` assembles with the recording runtime. The host
 assigns each serving process a recording ID and syncs its pin before launching

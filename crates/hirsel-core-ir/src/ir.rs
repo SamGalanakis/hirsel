@@ -919,8 +919,14 @@ pub enum RtOp {
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
-    /// The fixed byte hash a `Map` key's text components fold (crate docs, "Maps").
-    HashBytes,
+    /// Keyed SipHash-1-3 over a byte sequence or one canonical scalar word.
+    MapHashBytes,
+    MapHashWord,
+    /// Composite Hash: initialize, append to, and finish the caller's scratch.
+    MapHashStart,
+    MapHashAddWord,
+    MapHashAddBytes,
+    MapHashFinish,
     /// The SHA-256 compression of whole blocks into an eight-word state (crate docs, "SHA-256").
     Sha256Blocks,
     /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
@@ -1299,7 +1305,12 @@ impl RtOp {
     /// | `try_receive[T]` | receiver `ptr`, `&T` | status `u8`: 0 received, 1 `Empty`, 2 `Closed` |
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
-    /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
+    /// | `map_hash_bytes` | `data: ptr`, `len: u64` | `u64`: keyed byte sequence hash |
+    /// | `map_hash_word` | `word: u64` | `u64`: keyed scalar hash |
+    /// | `map_hash_start` | `state: ptr` | |
+    /// | `map_hash_add_word` | `state: ptr`, `word: u64` | |
+    /// | `map_hash_add_bytes` | `state: ptr`, `data: ptr`, `len: u64` | |
+    /// | `map_hash_finish` | `state: ptr` | `u64`: keyed hash of the stream |
     /// | `xxh3_short` | `data: ptr`, `len: u64` | `u64`: XXH3-64 (crate docs, "XXH3") |
     /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
@@ -1376,7 +1387,12 @@ impl RtOp {
                 vec![V(p), V(u64_), V(p), V(u64_)],
                 vec![Ty::Scalar(Scalar::I8)],
             ),
-            RtOp::HashBytes => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::MapHashBytes => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::MapHashWord => (vec![V(u64_)], vec![u64_]),
+            RtOp::MapHashStart => (vec![V(p)], vec![]),
+            RtOp::MapHashAddWord => (vec![V(p), V(u64_)], vec![]),
+            RtOp::MapHashAddBytes => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::MapHashFinish => (vec![V(p)], vec![u64_]),
             RtOp::Xxh3Short => (vec![V(p), V(u64_)], vec![u64_]),
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
@@ -1607,7 +1623,12 @@ impl RtOp {
             | RtOp::LatestRead
             | RtOp::DestId
             | RtOp::CompareBytes
-            | RtOp::HashBytes
+            | RtOp::MapHashBytes
+            | RtOp::MapHashWord
+            | RtOp::MapHashStart
+            | RtOp::MapHashAddWord
+            | RtOp::MapHashAddBytes
+            | RtOp::MapHashFinish
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
@@ -2388,24 +2409,6 @@ impl Module {
         };
         Ok(Closure { rows, hash })
     }
-}
-
-/// One step of the `Map` key hash (crate docs, "Maps"): `rotl((h ^ w) × K, 26)`.
-pub fn hash_mix(h: u64, w: u64) -> u64 {
-    (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(26)
-}
-
-/// `rt.hash_bytes` (crate docs, "Maps"): from `h = len`, [`hash_mix`] over the
-/// little-endian 8-byte words, the last zero-padded, then `h ^ (h >> 32)`. The
-/// producer uses it for static map literals; the run time's export is the same.
-pub fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut h = bytes.len() as u64;
-    for chunk in bytes.chunks(8) {
-        let mut word = [0u8; 8];
-        word[..chunk.len()].copy_from_slice(chunk);
-        h = hash_mix(h, u64::from_le_bytes(word));
-    }
-    h ^ (h >> 32)
 }
 
 /// `m` with every `mark` and `unmark` removed (FORM v1c). Neither has a run-time

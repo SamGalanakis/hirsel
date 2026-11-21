@@ -273,9 +273,29 @@ impl FunctionEmitter<'_> {
             RtOp::Host(op) => self.host_call(op, &args),
             RtOp::CauseNext => self.native_call("hirsel_core_cause_next", &[P], &[p(&args[0])]),
             RtOp::CauseValue => self.native_call("hirsel_core_cause_value", &[P], &[p(&args[0])]),
-            RtOp::HashBytes => {
-                vec![self.hash_bytes(&args[0], &args[1])]
+            RtOp::MapHashBytes => self.map_hash(
+                "hirsel_core_map_hash_bytes",
+                &[ptr(CONTEXT), p(&args[0]), u(&args[1])],
+            ),
+            RtOp::MapHashWord => {
+                self.map_hash("hirsel_core_map_hash_word", &[ptr(CONTEXT), u(&args[0])])
             }
+            RtOp::MapHashStart => self.native_call(
+                "hirsel_core_map_hash_start",
+                &[],
+                &[ptr(CONTEXT), p(&args[0])],
+            ),
+            RtOp::MapHashAddWord => self.native_call(
+                "hirsel_core_map_hash_add_word",
+                &[],
+                &[p(&args[0]), u(&args[1])],
+            ),
+            RtOp::MapHashAddBytes => self.native_call(
+                "hirsel_core_map_hash_add_bytes",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
+            RtOp::MapHashFinish => self.map_hash("hirsel_core_map_hash_finish", &[p(&args[0])]),
             RtOp::Xxh3Short => {
                 self.native_call("hirsel_core_xxh3_short", &[U], &[p(&args[0]), u(&args[1])])
             }

@@ -31,8 +31,8 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-// Body refusals carry stable paths for render-time name lookups.
-const VERSION: u32 = 38;
+// CoreIR carries the run-keyed Map operations.
+const VERSION: u32 = 39;
 pub(crate) const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;

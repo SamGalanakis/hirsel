@@ -603,6 +603,63 @@ fn m7_requires_exact_backend_semantics() {
         matches!(error, AdmissionError::Unsupported("engine operation tag")),
         "M7 exact engine tag required: {error:?}"
     );
+
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut fixture = Fixture::new("entry");
+        fixture.recipe.launch.backend = backend;
+        let body = fixture.body(
+            "entry",
+            "()",
+            "sig g1 = (u64) -> (u64)",
+            "v0: u64 = const 7\nv1: u64 = call rt.map_hash_word g1 (v0)\nreturn",
+        );
+        fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
+        assert_eq!(fixture.recipe.bodies.len(), 1);
+        let release = harness.admit(&fixture).unwrap();
+        assert_eq!(release.release().recipe(), &fixture.recipe);
+    }
+}
+
+#[test]
+fn a_current_recipe_cannot_admit_an_old_normal_form_body() {
+    let harness = Harness::new(LARGE);
+    let mut fixture = Fixture::new("entry");
+    let callee = fixture.body("old", "()", "", "return");
+    let mut old = fixture
+        .objects
+        .remove(&ObjectKey {
+            kind: ObjectKind::Body,
+            hash: callee.body.hash,
+        })
+        .unwrap();
+    old[..10].copy_from_slice(b"HIRBODY\0\x01\0");
+    fixture.recipe.bodies.clear();
+    let old = BodyRef {
+        body: fixture.object(ObjectKind::Body, old),
+        annex: callee.annex,
+    };
+    fixture.recipe.bodies.push(old);
+    let callee = fixture.group(&[(old, vec![])], 0);
+    let entry = fixture.body("entry", "()", &uses("old"), "call f1 g0 ()\nreturn");
+    fixture.recipe.address = fixture.group(&[(entry, vec![Binding::External(callee)])], 0);
+    assert!(matches!(
+        failure(harness.admit(&fixture)),
+        AdmissionError::Unsupported("code frame version")
+    ));
+
+    // A retained executable can still be launched with its admitted envelope.
+    // The same old recipe version is refused at a new admission.
+    let mut prior = fixture.recipe.encode();
+    prior[11..13].copy_from_slice(&1u16.to_le_bytes());
+    let error = failure(harness.run(limits(), &NativeSemantics, |peer| {
+        request(peer, Recipe::hash(&prior), &prior);
+        assert!(read_need(peer).is_none());
+    }));
+    assert!(matches!(error, AdmissionError::Unsupported(reason) if reason.contains("Republish")));
+    assert_eq!(
+        Recipe::decode_retained(&prior, &mut DecodeBudget::unlimited()).unwrap(),
+        fixture.recipe
+    );
 }
 
 fn refused_before_need(

@@ -73,8 +73,13 @@ HirselCoreGrowth hirsel_core_grow_cold(const HirselCoreContext *, void *carrier,
     size_t moved, uint64_t refund, bool overflow, uint8_t kind);
 /* rt.dest_id: no hidden context or failure status; never admits or allocates. */
 uint64_t hirsel_core_dest_id(void);
-/* rt.hash_bytes: the fixed Map byte hash (FORM "Maps"); no context or status. */
-uint64_t hirsel_core_hash_bytes(const uint8_t *data, uint64_t len);
+/* Map hashing (FORM "Maps"). The caller provides five u64 words of scratch. */
+uint64_t hirsel_core_map_hash_bytes(const HirselCoreContext *, const uint8_t *, uint64_t);
+uint64_t hirsel_core_map_hash_word(const HirselCoreContext *, uint64_t);
+void hirsel_core_map_hash_start(const HirselCoreContext *, void *);
+void hirsel_core_map_hash_add_word(void *, uint64_t);
+void hirsel_core_map_hash_add_bytes(void *, const uint8_t *, uint64_t);
+uint64_t hirsel_core_map_hash_finish(const void *);
 /* rt.sha1_blocks: RFC 3174 compression of the byte span and its padding. */
 void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len);
 

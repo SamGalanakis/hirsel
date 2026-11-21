@@ -195,7 +195,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("log", "new", 2),
     ("map", "capacity", 1),
     ("map", "compact", 1),
-    ("map", "hash", 1),
+    ("map", "hash", 2),
     ("map", "index_get", 1),
     ("map", "index_len", 1),
     ("map", "index_set", 1),

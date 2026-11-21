@@ -747,9 +747,8 @@ impl Publication {
                 crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?
             }
         };
-        // Runtime archive bytes are a final-link input. Emission reads the ABI
-        // and target description already built into the compiler and backends.
-        let emission = environment(&options, ContentHash::default())?;
+        // Native bodies and lent std code can operate on the same live Map.
+        let emission = environment(&options, tools.runtime)?;
         let emitter = key(
             "hirsel.recipe-emitter.v1",
             &(

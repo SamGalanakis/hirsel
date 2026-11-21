@@ -9,7 +9,7 @@ use crate::normal::{
 use hirsel_core_ids::ContentHash;
 
 const MAGIC: &[u8] = b"HIRRECIP\0\x01\x00";
-const NORMAL_FORM: u16 = 1;
+const NORMAL_FORM: u16 = crate::normal::VERSION;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectRef {
@@ -172,8 +172,24 @@ impl Recipe {
     pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<Self> {
         let mut input = Read::new(bytes, MAGIC, budget)?;
         if u16::read(&mut input)? != NORMAL_FORM {
-            return Err(DecodeError::Unsupported("recipe normal-form version"));
+            return Err(DecodeError::Unsupported(
+                "recipe normal-form version. Republish from source",
+            ));
         }
+        Self::decode_fields(input)
+    }
+
+    /// Read the recipe envelope for a host-owned assembly record. This names
+    /// an executable the host already assembled, whose runtime owns the body
+    /// version. The host uses these fields to launch it and retain its objects.
+    /// Admission and assembly of code must use `decode`.
+    pub fn decode_retained(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<Self> {
+        let mut input = Read::new(bytes, MAGIC, budget)?;
+        u16::read(&mut input)?;
+        Self::decode_fields(input)
+    }
+
+    fn decode_fields(mut input: Read<'_, '_>) -> DecodeResult<Self> {
         let entry = Wire::read(&mut input)?;
         let address = Wire::read(&mut input)?;
         let mut prev = None;
@@ -283,7 +299,7 @@ mod tests {
             },
         };
         // Independent frame, including two-byte ULEB for the group's length.
-        let mut bytes = b"HIRRECIP\0\x01\0\x01\0\x0fapp@1/main/main\0\0".to_vec();
+        let mut bytes = b"HIRRECIP\0\x01\0\x02\0\x0fapp@1/main/main\0\0".to_vec();
         bytes.extend_from_slice(&[1; 32]);
         bytes.push(1);
         bytes.extend_from_slice(&[2; 32]);

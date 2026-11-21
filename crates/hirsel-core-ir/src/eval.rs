@@ -59,6 +59,8 @@ pub struct Report {
 pub struct Checked {
     /// Executed instructions and terminators, shared by every task of the run.
     pub instructions: u64,
+    /// Executed source step charges.
+    pub steps: u64,
     /// Lent places: each `view` and `take` place frozen for its call, each `mut`
     /// place and destination checked against the call's other places.
     pub loans: u64,
@@ -91,6 +93,7 @@ pub struct Checked {
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
+    map_hash_key: [u8; 16],
     launch_target: (u64, u64),
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
@@ -858,6 +861,7 @@ struct Machine<'m> {
     dests: u64,
     admissions: usize,
     instructions: u64,
+    steps: u64,
     injection: Option<(usize, bool)>,
     world: World,
     /// The `view` places of the calls running now, as (block, offset, size).
@@ -1073,6 +1077,26 @@ fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
 
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
     run_injected(m, f, args, limit, None)
+}
+/// Test a single program with a chosen run key, and report its source step count.
+pub fn run_map_hash(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    key: [u8; 16],
+) -> (Report, u64) {
+    let (report, checked) = run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            map_hash_key: key,
+            ..WorldInput::default()
+        },
+    );
+    (report, checked.steps)
 }
 /// Where a run's NaNs take their one observable pattern (FORM #97: only a `reinterpret`
 /// from a float observes the pattern, and it gives the canonical one).
@@ -1342,6 +1366,7 @@ pub fn run_stdio(
     .0
 }
 struct WorldInput<'a> {
+    map_hash_key: [u8; 16],
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
     launch: Option<&'a hirsel_core_ids::launch::Metadata>,
@@ -1362,6 +1387,7 @@ impl Default for WorldInput<'_> {
     fn default() -> Self {
         Self {
             network: None,
+            map_hash_key: [0; 16],
             network_out: None,
             launch: None,
             revisions: None,
@@ -1567,6 +1593,7 @@ fn run_world(
     }
     let sites = chain.iter().map(|c| c.site).collect();
     let checked = Checked {
+        steps: mach.steps,
         instructions: input.instructions - mach.instructions,
         loans: mach.loans,
         roles: mach.role_checks,
@@ -1801,8 +1828,10 @@ impl<'m> Machine<'m> {
             dests: 0,
             admissions: 0,
             instructions: input.instructions,
+            steps: 0,
             injection: input.injection,
             world: World {
+                map_hash_key: input.map_hash_key,
                 launch: Some(input.launch.cloned().unwrap_or_else(|| {
                     hirsel_core_ids::launch::Metadata::source(
                         "",
@@ -1862,6 +1891,7 @@ impl<'m> Machine<'m> {
             dests: 0,
             admissions: 0,
             instructions: 0,
+            steps: 0,
             injection: None,
             world: World::default(),
             frozen: Vec::new(),
@@ -3964,6 +3994,16 @@ impl Machine<'_> {
         assert!(self.mem[b].live, "use of a freed block");
         &self.mem[b].bytes[o..o + n]
     }
+    fn load_map_hash(&self, p: u64) -> hirsel_core_layout::map_hash::State {
+        hirsel_core_layout::map_hash::State(std::array::from_fn(|i| self.load(p + i as u64 * 8, 8)))
+    }
+
+    fn store_map_hash(&mut self, p: u64, state: hirsel_core_layout::map_hash::State) {
+        for (i, word) in state.0.into_iter().enumerate() {
+            self.store(p + i as u64 * 8, 8, word);
+        }
+    }
+
     fn load(&self, p: u64, n: usize) -> u64 {
         let mut x = [0u8; 8];
         x[..n].copy_from_slice(self.get(p, n));
@@ -5079,13 +5119,44 @@ impl Machine<'_> {
                 let order = range(a[0], a[1]).cmp(&range(a[2], a[3]));
                 vec![order as i8 as u8 as u64]
             }
-            RtOp::HashBytes => {
-                let bytes = match a[1] {
-                    0 => Vec::new(),
-                    n => self.get(a[0], n as usize).to_vec(),
+            RtOp::MapHashBytes => {
+                let bytes = if a[1] == 0 {
+                    &[]
+                } else {
+                    self.get(a[0], a[1] as usize)
                 };
-                vec![crate::hash_bytes(&bytes)]
+                vec![hirsel_core_layout::map_hash::bytes(
+                    &self.world.map_hash_key,
+                    bytes,
+                )]
             }
+            RtOp::MapHashWord => vec![hirsel_core_layout::map_hash::word(
+                &self.world.map_hash_key,
+                a[0],
+            )],
+            RtOp::MapHashStart => {
+                let state = hirsel_core_layout::map_hash::State::new(&self.world.map_hash_key);
+                self.store_map_hash(a[0], state);
+                vec![]
+            }
+            RtOp::MapHashAddWord => {
+                let mut state = self.load_map_hash(a[0]);
+                state.word(a[1]);
+                self.store_map_hash(a[0], state);
+                vec![]
+            }
+            RtOp::MapHashAddBytes => {
+                let mut state = self.load_map_hash(a[0]);
+                let bytes = if a[2] == 0 {
+                    &[]
+                } else {
+                    self.get(a[1], a[2] as usize)
+                };
+                state.bytes(bytes);
+                self.store_map_hash(a[0], state);
+                vec![]
+            }
+            RtOp::MapHashFinish => vec![self.load_map_hash(a[0]).finish()],
             RtOp::Xxh3Short => {
                 let data = if a[1] == 0 {
                     &[]
@@ -6244,6 +6315,7 @@ impl Machine<'_> {
                         self.park_turn(None, false);
                     }
                 }
+                self.steps += 1;
             }
             Inst::LimitEnter {
                 admitted,

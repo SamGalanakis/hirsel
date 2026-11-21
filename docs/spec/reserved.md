@@ -97,7 +97,8 @@ dictionary, `Codec[T]` from `codec.of()` for a type with the `codec` bound (OWN-
 decode returns `Result[T, DecodeError]`, raising a refused admission as `Capacity`
 (MEM-21), into fresh ownership holding no authority; its schema and the writer's are explicit, resolved by field name. No region type
 is `codec`, so there is no region decoding. Eq, Hash and Format dictionaries are not in v1,
-and SEM-5 fixes one equality and hash per key type. An owner replaces a generated codec
+and SEM-5 fixes one equality and hash per key type. Map literals always build their lookup
+index at run time. An owner replaces a generated codec
 only by `via` a codec type, and no owner writes bytes.
 
 **R12.** Later derivation will be opt-in, owner-local, keep field order and opacity, and

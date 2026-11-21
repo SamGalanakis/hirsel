@@ -366,7 +366,7 @@
 //!   its locator's target emits (sample `stable-keys.core`). Each reads W from
 //!   the blob header (at 8) and the value's count, W wide, at `blob + at`:
 //!   - `Text`: its bytes follow the count; order and equality are
-//!     `rt.compare_bytes`, the hash word `rt.hash_bytes(bytes, count)`, exactly
+//!     `rt.compare_bytes`, the hash word `rt.map_hash_bytes(bytes, count)`, exactly
 //!     those of a `String` with the same bytes, at any W.
 //!   - `FixedSpan[e]`: elements follow the count at e's packed size;
 //!     `SeqSpan[e]` and `IndexedSpan[e]` (read as a `SeqSpan`, trailer ignored):
@@ -430,16 +430,20 @@
 //! old storage when its capacity is not 0). Cleanup is the recipe's: live entries in
 //! insertion order, each key before its value.
 //!
-//! A key's hash is glue built from `K`'s recipe: from `h = 0` it folds
-//! [`hash_mix`] `(h, w) = rotl((h ^ w) × 0x9E3779B97F4A7C15, 26)` over each scalar
-//! component zero-extended to `u64`, in field order (a variant's tag first), and
-//! over `rt.hash_bytes(data, len)` for each `String`, `Bytes` or `Text` component,
-//! then returns `h ^ (h >> 32)`. `rt.hash_bytes` ([`hash_bytes`]) starts at
-//! `h = len` and folds the little-endian 8-byte words, the last zero-padded. The
-//! function is fixed, not seeded: the producer hashes static map literals with
-//! [`hash_bytes`] and the run time must agree. Iteration is insertion order
-//! (SEM-5), so no hash is observable. Engines map `rt.hash_bytes` to `uint64_t
-//! hirsel_core_hash_bytes(const uint8_t *, uint64_t)`, with no context or status.
+//! A key's hash is SipHash-1-3 of its structural encoding, using the run key
+//! acquired at CAP-8. Encode fields in declaration order and a variant's case
+//! ordinal before its payload. Encode each scalar's unsigned logical bits,
+//! each case ordinal, and each sequence's element count as a little-endian
+//! u64. Follow a sequence count by its elements in index order. Byte sequences
+//! (including String and Text) use raw bytes padded with zeros to a word
+//! boundary after the last byte. Packed widths, offsets, locators and padding
+//! do not enter the stream. A reference encodes its value.
+//!
+//! `rt.map_hash_word` and `rt.map_hash_bytes` hash one scalar word or one
+//! byte sequence. Composite glue uses `rt.map_hash_start` to initialize five
+//! aligned words of private frame storage, appends words or byte sequences,
+//! and calls `rt.map_hash_finish` to finalize once. These operations do not
+//! admit, charge steps, or fail. Map literals build their index at run time.
 //!
 //! # XXH3
 //!

@@ -1034,6 +1034,8 @@ pub enum HostOp {
     CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
     CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
     PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
+    ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
+    PortFill = hirsel_core_ids::host_op::PORT_FILL as isize,
 }
 
 impl HostOp {
@@ -1109,6 +1111,8 @@ impl HostOp {
         HostOp::CallWord,
         HostOp::CallPayload,
         HostOp::PortReply,
+        HostOp::ProvideDir,
+        HostOp::PortFill,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1178,6 +1182,8 @@ impl HostOp {
             HostOp::CallWord => "call_word",
             HostOp::CallPayload => "call_payload",
             HostOp::PortReply => "port_reply",
+            HostOp::ProvideDir => "provide_dir",
+            HostOp::PortFill => "port_fill",
         }
     }
     /// C entry of a host operation that has its own adapter.
@@ -1217,6 +1223,8 @@ impl HostOp {
             Self::CallWord => "hirsel_core_call_word",
             Self::CallPayload => "hirsel_core_call_payload",
             Self::PortReply => "hirsel_core_port_reply",
+            Self::ProvideDir => "hirsel_core_provide_dir",
+            Self::PortFill => "hirsel_core_port_fill",
             _ => unreachable!(),
         }
     }
@@ -1249,6 +1257,8 @@ impl HostOp {
                 | HostOp::ProvideStderr
                 | HostOp::CallWord
                 | HostOp::PortReply
+                | HostOp::ProvideDir
+                | HostOp::PortFill
         )
     }
 }
@@ -1507,12 +1517,14 @@ impl RtOp {
                     | HostOp::ClockIdle
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
-                    HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::PortNext => {
-                        (vec![V(u64_)], outcome)
-                    }
+                    HostOp::ProvideStdout
+                    | HostOp::ProvideStderr
+                    | HostOp::ProvideDir
+                    | HostOp::PortNext => (vec![V(u64_)], outcome),
                     HostOp::CallWord => (vec![V(u64_), V(u64_)], outcome),
                     HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::PortReply => (vec![V(u64_); 6], outcome),
+                    HostOp::PortReply => (vec![V(u64_); 9], outcome),
+                    HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
                         (vec![V(u64_), V(u64_)], outcome)
                     }

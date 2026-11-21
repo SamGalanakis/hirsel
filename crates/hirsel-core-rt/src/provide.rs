@@ -42,29 +42,81 @@ struct ProcessCell {
     waiters: Vec<u64>,
 }
 
-/// A served port (NOTES 15): its calls by id, in issue order, each Queued
+/// A served port (NOTES 15, 21): its calls by id, in issue order, each Queued
 /// (not taken), Taken (the server holds its `Call`) or Settled.
 #[derive(Default)]
 struct Port {
+    vocab: Vocab,
     /// Cleaning the `Served` end seals the port: every unsettled and later
     /// call completes as `sealed` answers.
     sealed: bool,
     /// The outcome a sealed port gives: `Closed` for Dir and the streams.
     closed: Outcome,
+    /// The order of calls and Released notices: a call's id is its stamp.
     next_id: u64,
     calls: BTreeMap<u64, PortCall>,
     /// `next` waits: the token and whether quiescence answered it `None`.
     servers: Vec<(u64, bool)>,
+    /// The server's live objects by id (id 0 is the root Dir).
+    handles: BTreeMap<u64, Handle>,
+    /// The room admitted at construction and the bytes of it in use.
+    room: u64,
+    used: u64,
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Vocab {
+    #[default]
+    Stream,
+    Dir,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Dir,
+    File,
+    Entries,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    Live,
+    /// An explicit close was issued: the caller's handle is gone.
+    Closing,
+    /// Dropped: `next` delivers `Released(id)` in stamp order (FAIL-13).
+    Released(u64),
+}
+
+#[derive(Clone, Copy)]
+struct Handle {
+    kind: Kind,
+    state: State,
+}
+
+/// A live handle record's share of the room, with its release notice.
+const HANDLE_ROOM: u64 = 32;
+/// DirOp variants in declaration order (core.md, Provide).
+const DIR_CLOSE: u64 = 18;
+const DIR_RELEASED: u64 = 20;
+/// DirReply and StreamReply variants as `Reply[Op]` tags.
+const R_DONE: u64 = 0;
+const R_FAILED: u64 = 1;
+const R_WRITE_FAILED: u64 = 2;
+const R_COUNT: u64 = 3;
+const R_LOCKED: u64 = 4;
+const R_STAT: u64 = 5;
+const R_FILE: u64 = 6;
+const R_DIR: u64 = 7;
+const R_ENTRIES: u64 = 8;
+
 struct PortCall {
-    /// The caller's operation.
+    /// The caller's operation; 0 for a Released notice, which has none.
     token: u64,
     /// The caller's request, pinned until the caller collects the outcome
     /// or its abort settles the call; read only while the call is unsettled.
     request: *mut Request,
     /// The call's `Op` as scalars, copied at issue: tag, then fields.
-    words: [u64; 4],
+    words: [u64; 8],
     taken: bool,
     /// The server holds this call's `Call`.
     held: bool,
@@ -72,9 +124,41 @@ struct PortCall {
     answer: Option<Outcome>,
     /// The caller collected the answer, or its abort settled the call.
     finished: bool,
+    /// Reply bytes `fill` staged in the room.
+    staged: Vec<u8>,
+}
+
+enum Queued {
+    Call(u64),
+    Released(u64),
 }
 
 impl Port {
+    fn free_staged(&mut self, id: u64) {
+        if let Some(call) = self.calls.get_mut(&id) {
+            self.used -= call.staged.len() as u64;
+            call.staged = Vec::new();
+        }
+    }
+    /// A Close call ends: a server that took it knows the file is gone; one
+    /// that never saw it learns by `Released`.
+    fn closed_call(&mut self, id: u64) {
+        let Some(call) = self.calls.get(&id) else {
+            return;
+        };
+        if self.vocab != Vocab::Dir || call.words[0] != DIR_CLOSE {
+            return;
+        }
+        let (taken, file) = (call.taken, call.words[1]);
+        if taken {
+            if self.handles.remove(&file).is_some() {
+                self.used -= HANDLE_ROOM;
+            }
+        } else if let Some(h) = self.handles.get_mut(&file) {
+            h.state = State::Released(self.next_id);
+            self.next_id += 1;
+        }
+    }
     /// Settle an unsettled call; returns its caller's token to ready.
     fn settle(&mut self, id: u64, outcome: Outcome) -> Option<u64> {
         let call = self.calls.get_mut(&id)?;
@@ -82,25 +166,159 @@ impl Port {
             return None;
         }
         call.answer = Some(outcome);
-        Some(call.token)
+        let token = call.token;
+        self.free_staged(id);
+        self.closed_call(id);
+        Some(token)
     }
     /// Forget a call once neither its caller nor a `Call` refers to it.
     fn prune(&mut self, id: u64) {
         if self.calls.get(&id).is_some_and(|c| c.finished && !c.held) {
+            self.free_staged(id);
             self.calls.remove(&id);
         }
     }
     fn by_token(&self, token: u64) -> Option<u64> {
         self.calls
             .iter()
-            .find(|(_, c)| c.token == token && !c.finished)
+            .find(|(_, c)| c.token == token && c.token != 0 && !c.finished)
             .map(|(&id, _)| id)
     }
-    fn queued(&self) -> Option<u64> {
-        self.calls
+    /// The oldest queued call or Released notice.
+    fn queued(&self) -> Option<Queued> {
+        let call = self
+            .calls
             .iter()
             .find(|(_, c)| !c.taken && !c.finished && c.answer.is_none())
-            .map(|(&id, _)| id)
+            .map(|(&id, _)| id);
+        let released = self
+            .handles
+            .iter()
+            .filter_map(|(&h, r)| match r.state {
+                State::Released(at) => Some((at, h)),
+                _ => None,
+            })
+            .min();
+        match (call, released) {
+            (Some(c), Some((at, h))) if at < c => Some(Queued::Released(h)),
+            (Some(c), _) => Some(Queued::Call(c)),
+            (None, Some((_, h))) => Some(Queued::Released(h)),
+            (None, None) => None,
+        }
+    }
+    fn live(&self, handle: u64, kind: Kind) -> bool {
+        self.handles
+            .get(&handle)
+            .is_some_and(|h| h.kind == kind && h.state == State::Live)
+    }
+    /// The call's words for a caller's request, or None when its handle is
+    /// not one of this port's live objects of the operation's kind.
+    fn words(&self, request: &Request) -> Option<[u64; 8]> {
+        let h = request.handle;
+        let b = request.buffer;
+        let spare = (b.capacity.saturating_sub(b.len)) as u64;
+        let path = request.path_len as u64;
+        let mut w = [0; 8];
+        let (kind, fields): (Kind, &[u64]) = match request.operation {
+            OPEN => (Kind::Dir, &[0, h, path, request.mode as u64]),
+            OPEN_DIR => (Kind::Dir, &[1, h, path]),
+            MKDTEMP => (Kind::Dir, &[2, h, b.len as u64, spare]),
+            STAT => (Kind::Dir, &[3, h, path]),
+            MKDIR => (Kind::Dir, &[4, h, path]),
+            REMOVE => (Kind::Dir, &[5, h, path]),
+            REMOVE_TREE => (Kind::Dir, &[6, h, path]),
+            RENAME => {
+                let split = rename_split(request) as u64;
+                w[..4].copy_from_slice(&[7, h, split, path.saturating_sub(split + 1)]);
+                (Kind::Dir, &[])
+            }
+            SYNC_DIR => (Kind::Dir, &[8, h]),
+            ENTRIES => (Kind::Dir, &[9, h]),
+            READ => (Kind::File, &[10, h, spare]),
+            READ_AT => {
+                w[..4].copy_from_slice(&[11, h, request.offset(), spare]);
+                (Kind::File, &[])
+            }
+            WRITE => (Kind::File, &[12, h, b.len as u64]),
+            WRITE_AT => {
+                w[..4].copy_from_slice(&[13, h, request.offset(), b.len as u64]);
+                (Kind::File, &[])
+            }
+            STAT_FILE => (Kind::File, &[14, h]),
+            SYNC => (Kind::File, &[15, h]),
+            TRY_LOCK => (Kind::File, &[16, h]),
+            UNLOCK => (Kind::File, &[17, h]),
+            CLOSE => (Kind::File, &[DIR_CLOSE, h]),
+            NEXT_ENTRIES => (Kind::Entries, &[19, h, spare]),
+            _ => return None,
+        };
+        w[..fields.len()].copy_from_slice(fields);
+        self.live(h, kind).then_some(w)
+    }
+}
+
+/// Rename's combined path is `from`, NUL, `to` (host_ops.rs).
+fn rename_split(request: &Request) -> usize {
+    // SAFETY: the caller's adapter keeps its combined path across `drive`.
+    let path = unsafe { request_bytes(request.path, request.path_len) };
+    path.iter().position(|&b| b == 0).unwrap_or(path.len())
+}
+
+unsafe fn request_bytes<'a>(data: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller pins its request views while the call is unsettled.
+        unsafe { std::slice::from_raw_parts(data, len) }
+    }
+}
+
+/// A data field of an unsettled call: the bytes the caller's request holds.
+/// # Safety
+/// The call is unsettled, so its caller is parked inside `drive`.
+unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8] {
+    // SAFETY: forwarded.
+    unsafe {
+        let r = &*call.request;
+        let buffer = request_bytes(r.buffer.data, r.buffer.len);
+        let path = request_bytes(r.path, r.path_len);
+        match (vocab, call.words[0], field) {
+            (Vocab::Stream, 0, 0) => buffer,
+            (Vocab::Dir, 0 | 1 | 3 | 4 | 5 | 6, 1) => path,
+            (Vocab::Dir, 2 | 12, 1) | (Vocab::Dir, 13, 2) => buffer,
+            (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
+            (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
+            _ => &[],
+        }
+    }
+}
+
+/// The spare capacity a call offers for reply bytes.
+fn call_room(vocab: Vocab, words: &[u64; 8]) -> u64 {
+    match (vocab, words[0]) {
+        (Vocab::Dir, 10 | 19) => words[2],
+        (Vocab::Dir, 2 | 11) => words[3],
+        _ => 0,
+    }
+}
+
+/// Whether a reply variant answers the call's operation (core.md, Handles).
+fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
+    match vocab {
+        Vocab::Stream => matches!(reply, R_DONE | R_WRITE_FAILED),
+        Vocab::Dir => {
+            (reply == R_FAILED && op != DIR_RELEASED)
+                || match op {
+                    0 => reply == R_FILE,
+                    1 | 2 => reply == R_DIR,
+                    3 | 14 => reply == R_STAT,
+                    9 => reply == R_ENTRIES,
+                    10 | 11 | 19 => reply == R_COUNT,
+                    12 | 13 => matches!(reply, R_DONE | R_WRITE_FAILED),
+                    16 => reply == R_LOCKED,
+                    _ => reply == R_DONE,
+                }
+        }
     }
 }
 
@@ -230,12 +448,40 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
     if queued.is_some() || quiesced {
         port.servers.retain(|&(t, _)| t != token);
         lock(&SERVERS).remove(&token);
-        let Some(id) = queued else {
-            return done(Outcome::default());
+        let id = match queued {
+            None => return done(Outcome::default()),
+            Some(Queued::Call(id)) => {
+                let call = port.calls.get_mut(&id).expect("queued call");
+                call.taken = true;
+                call.held = true;
+                id
+            }
+            Some(Queued::Released(handle)) => {
+                // The notice's record was reserved with the handle: it leaves
+                // the room now and becomes a Call that needs no reply.
+                port.handles.remove(&handle);
+                port.used -= HANDLE_ROOM;
+                let id = port.next_id;
+                port.next_id += 1;
+                let mut words = [0; 8];
+                words[0] = DIR_RELEASED;
+                words[1] = handle;
+                port.calls.insert(
+                    id,
+                    PortCall {
+                        token: 0,
+                        request: ptr::null_mut(),
+                        words,
+                        taken: true,
+                        held: true,
+                        answer: None,
+                        finished: true,
+                        staged: Vec::new(),
+                    },
+                );
+                id
+            }
         };
-        let call = port.calls.get_mut(&id).expect("queued call");
-        call.taken = true;
-        call.held = true;
         return done(Outcome {
             value: id,
             written: 1,
@@ -257,13 +503,17 @@ fn collect(port: &Mutex<Port>, token: u64, abort: bool) -> Option<Outcome> {
     let call = port.calls.get_mut(&id).expect("live call");
     let outcome = match call.answer {
         Some(answer) => answer,
-        None if abort => Outcome {
-            status: 1,
-            ..Outcome::default()
-        },
+        None if abort => {
+            port.free_staged(id);
+            port.closed_call(id);
+            Outcome {
+                status: 1,
+                ..Outcome::default()
+            }
+        }
         None => return None,
     };
-    call.finished = true;
+    port.calls.get_mut(&id).expect("live call").finished = true;
     port.prune(id);
     Some(outcome)
 }
@@ -319,13 +569,45 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             outcome.written = filled as u64;
         }
         (Cell::Port(port), PORT_NEXT) => return next_step(state, port, token),
-        (Cell::Port(port), STDOUT | STDERR) => {
+        (Cell::Port(port), RELEASE) => {
+            // A dropped derived handle (FAIL-13): mark it, allocating nothing;
+            // `next` delivers the notice. A sealed port's server never asks.
             let mut p = lock(port);
+            let stamp = p.next_id;
+            let live = match p.handles.get_mut(&request.handle) {
+                Some(h) if h.state == State::Live => {
+                    h.state = State::Released(stamp);
+                    true
+                }
+                _ => false,
+            };
+            if live {
+                p.next_id += 1;
+                let servers = p.servers.iter().map(|&(t, _)| t).collect();
+                drop(p);
+                ready_all(servers);
+            }
+        }
+        (Cell::Port(port), operation) if operation != CLOSE_CALL && operation != CLOSE_SERVED => {
+            let mut p = lock(port);
+            let words = match p.vocab {
+                Vocab::Stream => {
+                    let mut w = [0; 8];
+                    w[1] = request.buffer.len as u64;
+                    Some(w)
+                }
+                Vocab::Dir => p.words(request),
+            };
             if p.sealed {
                 outcome = p.closed;
-            } else {
+            } else if let Some(words) = words {
                 // Scalars are copied now; the bytes stay the caller's until
                 // `payload` copies them out of an unsettled call (NOTES 15).
+                if p.vocab == Vocab::Dir && words[0] == DIR_CLOSE {
+                    if let Some(h) = p.handles.get_mut(&words[1]) {
+                        h.state = State::Closing;
+                    }
+                }
                 let id = p.next_id;
                 p.next_id += 1;
                 p.calls.insert(
@@ -333,17 +615,21 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                     PortCall {
                         token,
                         request: &raw mut *request,
-                        words: [0, request.buffer.len as u64, 0, 0],
+                        words,
                         taken: false,
                         held: false,
                         answer: None,
                         finished: false,
+                        staged: Vec::new(),
                     },
                 );
                 let servers = p.servers.iter().map(|&(t, _)| t).collect();
                 drop(p);
                 ready_all(servers);
                 return pending();
+            } else {
+                // Not this port's live object of the operation's kind.
+                outcome.error = IoError { tag: 2, code: 0 };
             }
         }
         (Cell::Port(port), CLOSE_CALL) => {
@@ -668,22 +954,33 @@ fn empty_request(operation: u8, handle: u64, site: u64) -> Request {
     }
 }
 
-/// `provide.stdout(bytes n)` and `provide.stderr(bytes n)`: a port with room
-/// `n`, admitted with the port's own record and held until the run ends
-/// (NOTES 18). `value` is the capability's grant and `written` the `Served`
-/// key; a refusal answers as `Cells::add`.
+/// `provide.stdout/stderr/dir(bytes n)`: a port with room `n`, admitted
+/// with the port's own record and held until the run ends (NOTES 18). `value`
+/// is the capability's grant (id 0, a Dir port's root) and `written` the
+/// `Served` key; a refusal answers as `Cells::add`.
 /// # Safety
 /// Context is running.
-unsafe fn provide_stream(context: *mut Context, n: u64) -> Outcome {
+unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab) -> Outcome {
     // SAFETY: forwarded.
     let files = unsafe { files(context) };
-    let port = Port {
+    let mut port = Port {
+        vocab,
         closed: Outcome {
             error: IoError { tag: 4, code: 0 },
             ..Outcome::default()
         },
+        room: n,
         ..Port::default()
     };
+    if vocab == Vocab::Dir {
+        port.handles.insert(
+            0,
+            Handle {
+                kind: Kind::Dir,
+                state: State::Live,
+            },
+        );
+    }
     let charge = PROVIDE_CELL.saturating_add(n);
     // SAFETY: forwarded.
     let provider = match unsafe {
@@ -704,13 +1001,25 @@ unsafe fn provide_stream(context: *mut Context, n: u64) -> Outcome {
 /// # Safety
 /// Context is running.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_provide_dir(
+    context: *mut Context,
+    n: u64,
+    _site: u64,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { provide_port(context, n, Vocab::Dir) }
+}
+
+/// # Safety
+/// Context is running.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_provide_stdout(
     context: *mut Context,
     n: u64,
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_stream(context, n) }
+    unsafe { provide_port(context, n, Vocab::Stream) }
 }
 
 /// # Safety
@@ -722,7 +1031,7 @@ pub unsafe extern "C" fn hirsel_core_provide_stderr(
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_stream(context, n) }
+    unsafe { provide_port(context, n, Vocab::Stream) }
 }
 
 /// `provide.next(mut s) -> Option[Call[Op]] waits`: `written` 1 and `value`
@@ -773,7 +1082,7 @@ pub unsafe extern "C" fn hirsel_core_call_word(
     // SAFETY: forwarded.
     let (port, id) = unsafe { call_of(context, call) };
     Outcome {
-        value: lock(port).calls[&id].words[i.min(3) as usize],
+        value: lock(port).calls[&id].words[i.min(7) as usize],
         ..Outcome::default()
     }
 }
@@ -788,7 +1097,7 @@ pub unsafe extern "C" fn hirsel_core_call_word(
 pub unsafe extern "C" fn hirsel_core_call_payload(
     context: *mut Context,
     call: u64,
-    _field: u64,
+    field: u64,
     out: *mut Buffer,
     site: u64,
 ) -> Outcome {
@@ -801,27 +1110,144 @@ pub unsafe extern "C" fn hirsel_core_call_payload(
         if c.finished || c.answer.is_some() {
             return Outcome::default();
         }
-        let from = (*c.request).buffer;
+        let from = field_bytes(port.vocab, c, field);
         let out = &mut *out;
-        if out.capacity.saturating_sub(out.len) < from.len {
+        if out.capacity.saturating_sub(out.len) < from.len() {
             causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
             return CANCELLED;
         }
-        ptr::copy_nonoverlapping(from.data, out.data.add(out.len), from.len);
-        out.len += from.len;
+        ptr::copy_nonoverlapping(from.as_ptr(), out.data.add(out.len), from.len());
+        out.len += from.len();
         Outcome {
-            written: from.len as u64,
+            written: from.len() as u64,
             ..Outcome::default()
         }
     }
 }
 
-/// `provide.reply`'s commit: settle the call with the reply (`tag` 0 Done; 1
-/// WriteFailed with `a` written, `b` the error's provider tag and `c` its
-/// code) and ready its caller; `value` 1 is Withdrawn: the call was settled
-/// first, or its caller has a cancellation pending that it observes (NOTES
-/// 16). A `Call` of another port is consumed as a dropped one and withdrawn
-/// (NOTES 20).
+/// A Capacity refusal of `requested` room bytes: error tag 1, `written` the
+/// bytes available, from which the server raises Capacity (MEM-21).
+fn refused(requested: u64, available: u64) -> Outcome {
+    Outcome {
+        value: requested,
+        error: IoError { tag: 1, code: 0 },
+        written: available,
+        ..Outcome::default()
+    }
+}
+
+/// `provide.fill(mut s, mut c, b)`: stage the first bytes of `b` in the room,
+/// at most what the call's `room` still offers; returns how many it took. A
+/// room too short for them raises Capacity in the server.
+/// # Safety
+/// Context is running, `served` a live `Served` key, `call` a live `Call` key
+/// and `b` a live Bytes carrier.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_port_fill(
+    context: *mut Context,
+    served: u64,
+    call: u64,
+    b: *const Buffer,
+    _site: u64,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe {
+        let (port, id) = call_of(context, call);
+        let registry = &files(context).registry;
+        let Cell::Port(own) = cell(registry.file_provider(served).state) else {
+            unreachable!("a Served designates a port")
+        };
+        let mut p = lock(port);
+        let vocab = p.vocab;
+        let c = &p.calls[&id];
+        if !ptr::eq(own, port) || c.finished || c.answer.is_some() {
+            return Outcome::default();
+        }
+        let bytes = request_bytes((*b).data, (*b).len);
+        let offered = call_room(vocab, &c.words).saturating_sub(c.staged.len() as u64);
+        let take = offered.min(bytes.len() as u64);
+        let available = p.room - p.used;
+        if take > available {
+            return refused(take, available);
+        }
+        p.used += take;
+        let c = p.calls.get_mut(&id).expect("live call");
+        c.staged.extend_from_slice(&bytes[..take as usize]);
+        Outcome {
+            value: take,
+            ..Outcome::default()
+        }
+    }
+}
+
+/// The caller's outcome for a reply that answers its call, or None when the
+/// reply breaks the port's rules (the server fails).
+fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
+    let op = call.words[0];
+    if !answers(p.vocab, op, tag) {
+        return None;
+    }
+    let io = |t: u64, code: u64| {
+        ((1..=5).contains(&t)).then_some(IoError {
+            tag: t as u8,
+            code: code as u32,
+        })
+    };
+    let mut out = Outcome::default();
+    match tag {
+        R_DONE => {
+            out.written = match (p.vocab, op) {
+                (Vocab::Stream, _) | (Vocab::Dir, 12) => {
+                    call.words[2 - (p.vocab == Vocab::Stream) as usize]
+                }
+                (Vocab::Dir, 13) => call.words[3],
+                _ => 0,
+            }
+        }
+        R_FAILED => out.error = io(w[0], w[1])?,
+        R_WRITE_FAILED => {
+            let len = if op == 13 {
+                call.words[3]
+            } else {
+                call.words[2 - (p.vocab == Vocab::Stream) as usize]
+            };
+            if w[0] > len {
+                return None;
+            }
+            out.error = io(w[1], w[2])?;
+            out.written = w[0];
+        }
+        R_COUNT => {
+            // A read's count is the bytes it staged; a listing's, its entries.
+            if op != 19 && w[0] != call.staged.len() as u64 {
+                return None;
+            }
+            out.value = w[0];
+        }
+        R_LOCKED => out.value = (w[0] != 0) as u64,
+        R_STAT => {
+            out.kind = w[0].min(3) as u8;
+            out.value = w[1];
+            out.written = w[2];
+        }
+        _ => {
+            // A new object: never the root, never an id already in use.
+            if w[0] == 0 || p.handles.contains_key(&w[0]) {
+                return None;
+            }
+            out.value = w[0];
+        }
+    }
+    Some(out)
+}
+
+/// `provide.reply`'s commit: settle the call with the reply's tag and words
+/// and ready its caller. `value` 1 is Withdrawn: the call was settled first,
+/// or its caller has a cancellation pending that it observes (NOTES 16). A
+/// `Call` of another port is consumed as a dropped one and withdrawn (NOTES
+/// 20). A reply that does not answer the call's operation, or names an id it
+/// may not issue, settles the caller as sealed and fails the server (`Fail`);
+/// a new handle the room cannot hold is a Capacity refusal.
 /// # Safety
 /// Context is running, `served` is a live `Served` key and `call` a live
 /// `Call` key, consumed here.
@@ -832,11 +1258,15 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
     served: u64,
     call: u64,
     tag: u64,
-    a: u64,
-    b: u64,
-    c: u64,
-    _site: u64,
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64,
+    w4: u64,
+    w5: u64,
+    site: u64,
 ) -> Outcome {
+    let w = [w0, w1, w2, w3, w4, w5];
     // SAFETY: forwarded; the Call's carrier is consumed, never closed.
     let (registry, (provider, id)) = unsafe {
         let registry = &files(context).registry;
@@ -855,33 +1285,74 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         call.held = false;
     }
     let foreign = registry.file_provider(served).state != provider.state;
+    let notice = !foreign && p.vocab == Vocab::Dir && p.calls[&id].words[0] == DIR_RELEASED;
+    if notice {
+        // A Released notice needs no reply; `Done` acknowledges it.
+        p.prune(id);
+        if tag == R_DONE {
+            return Outcome::default();
+        }
+        drop(p);
+        // SAFETY: the server's running context records its failure.
+        unsafe { causes::record(&mut *context, causes::Cause::fail(Default::default(), site)) };
+        return CANCELLED;
+    }
     let live = p
         .calls
         .get(&id)
         .is_some_and(|call| !call.finished && call.answer.is_none());
-    let outcome = if foreign || !live || crate::tasks::call_cancelled(p.calls[&id].token) {
+    if foreign || !live || crate::tasks::call_cancelled(p.calls[&id].token) {
         let closed = p.closed;
         let token = if foreign { p.settle(id, closed) } else { None };
+        p.free_staged(id);
         p.prune(id);
         drop(p);
         ready_all(token.into_iter().collect());
         return withdrawn;
-    } else {
-        match tag {
-            0 => Outcome {
-                written: p.calls[&id].words[1],
-                ..Outcome::default()
-            },
-            _ => Outcome {
-                error: IoError {
-                    tag: b as u8,
-                    code: c as u32,
-                },
-                written: a,
-                ..Outcome::default()
-            },
-        }
+    }
+    let closed = p.closed;
+    let Some(outcome) = answer(&p, &p.calls[&id], tag, w) else {
+        let token = p.settle(id, closed);
+        drop(p);
+        ready_all(token.into_iter().collect());
+        // SAFETY: the server's running context records its failure.
+        unsafe { causes::record(&mut *context, causes::Cause::fail(Default::default(), site)) };
+        return CANCELLED;
     };
+    let kind = match tag {
+        R_FILE => Some(Kind::File),
+        R_DIR => Some(Kind::Dir),
+        R_ENTRIES => Some(Kind::Entries),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        let available = p.room - p.used;
+        if available < HANDLE_ROOM {
+            let token = p.settle(id, closed);
+            drop(p);
+            ready_all(token.into_iter().collect());
+            return refused(HANDLE_ROOM, available);
+        }
+        p.used += HANDLE_ROOM;
+        p.handles.insert(
+            w[0],
+            Handle {
+                kind,
+                state: State::Live,
+            },
+        );
+    }
+    let c = &p.calls[&id];
+    if !c.staged.is_empty() {
+        // The commit copies the staged bytes into the caller's spare
+        // capacity, which `fill` bounded by the call's room.
+        // SAFETY: the call is unsettled, so its caller's request is pinned.
+        unsafe {
+            let b = &mut (*c.request).buffer;
+            ptr::copy_nonoverlapping(c.staged.as_ptr(), b.data.add(b.len), c.staged.len());
+            b.len += c.staged.len();
+        }
+    }
     let token = p.settle(id, outcome);
     drop(p);
     ready_all(token.into_iter().collect());
@@ -958,3 +1429,7 @@ pub(crate) fn forget(cells: &mut Cells) {
         payer.refund(charge);
     }
 }
+
+#[cfg(test)]
+#[path = "provide_tests.rs"]
+mod tests;

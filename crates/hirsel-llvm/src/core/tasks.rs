@@ -107,6 +107,8 @@ impl FunctionEmitter<'_> {
             | HostOp::CallWord
             | HostOp::CallPayload
             | HostOp::PortReply
+            | HostOp::ProvideDir
+            | HostOp::PortFill
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {

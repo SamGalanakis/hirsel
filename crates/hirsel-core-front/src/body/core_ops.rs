@@ -345,6 +345,8 @@ operations! {
     ("process", "trigger", Lane::Runtime(Kernel::Provide(HostOp::ProcessTrigger)), "B", "provide-r8a-1533", false),
     ("provide", "stdout", Lane::Runtime(Kernel::Provide(HostOp::ProvideStdout)), "B", "provide-r8a-1533", false),
     ("provide", "stderr", Lane::Runtime(Kernel::Provide(HostOp::ProvideStderr)), "B", "provide-r8a-1533", false),
+    ("provide", "dir", Lane::Runtime(Kernel::Provide(HostOp::ProvideDir)), "B", "provide-r8a-1533", false),
+    ("provide", "fill", Lane::Runtime(Kernel::Provide(HostOp::PortFill)), "B", "provide-r8a-1533", false),
     ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
     ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
     ("provide", "payload", Lane::Runtime(Kernel::Provide(HostOp::CallPayload)), "B", "provide-r8a-1533", false),
@@ -2434,6 +2436,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::ProcessTrigger
                 | HostOp::PortNext
                 | HostOp::PortReply
+                | HostOp::PortFill
         );
         // A resource operand arrives as its key, or as a pointer to it when the
         // caller lends or hands over a place.
@@ -2442,7 +2445,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let v = (*v)?;
             let resource = (i == 0
                 && (hand || matches!(op, HostOp::CallWord | HostOp::CallPayload)))
-                || (i == 1 && op == HostOp::PortReply);
+                || (i == 1 && matches!(op, HostOp::PortReply | HostOp::PortFill));
             let by_place = resource && self.b.values[v.index()] == Ty::Ptr;
             args.push(Arg::Value(if by_place {
                 self.runtime_key(v, n)
@@ -2450,7 +2453,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 v
             }));
         }
-        let [value, _, _, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        if op == HostOp::PortReply {
+            // The commit consumes the Call even when the reply fails the server.
+            self.consume(vals[1], n);
+        }
+        let [value, error, _, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
         if matches!(
             op,
             HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
@@ -2461,7 +2468,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let ok = self.runtime_nonzero(u, value, n)?;
             self.raise_unless(ok, requested, written, n);
         }
-        if matches!(op, HostOp::ProvideStdout | HostOp::ProvideStderr) {
+        if matches!(
+            op,
+            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::ProvideDir
+        ) {
             // A port's room, with its own record, saturating as the run time's.
             let cell = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
             let requested = self.value(u);
@@ -2483,7 +2493,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             HostOp::ProvideClock
             | HostOp::ProvideProcess
             | HostOp::ProvideStdout
-            | HostOp::ProvideStderr => {
+            | HostOp::ProvideStderr
+            | HostOp::ProvideDir => {
                 let id = self.runtime_type(result, n)?;
                 let to = self.new_slot(PlaceTy::Declared(id), n);
                 self.runtime_store(to, &[Step::Field(0)], u, value, n);
@@ -2520,10 +2531,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     |_, _, _| {},
                 )
             }
-            HostOp::CallWord | HostOp::PortReply => {
-                if op == HostOp::PortReply {
-                    self.consume(vals[1], n);
-                }
+            HostOp::CallWord => Some(value),
+            HostOp::PortReply | HostOp::PortFill => {
+                // A room refusal answers error tag 1: the requested bytes in
+                // `value` and the available in `written` (MEM-21).
+                let u8_ = Ty::Scalar(Scalar::U8);
+                let ok = self.runtime_compare(u8_, error, 0, n)?;
+                self.raise_unless(ok, value, written, n);
                 Some(value)
             }
             HostOp::ProcessTrigger => {

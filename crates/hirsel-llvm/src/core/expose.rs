@@ -400,7 +400,14 @@ fn expand(
             Terminator::Raise { cause, cleanup } => Terminator::Raise {
                 cause: match cause {
                     RaiseCause::Fail(a) => RaiseCause::Fail(rename.a(a)),
-                    other => other,
+                    RaiseCause::Capacity {
+                        requested,
+                        available,
+                    } => RaiseCause::Capacity {
+                        requested: rename.v(requested),
+                        available: rename.v(available),
+                    },
+                    plain @ (RaiseCause::Unwrap | RaiseCause::Bounds) => plain,
                 },
                 cleanup: rename.f(cleanup),
             },

@@ -413,6 +413,8 @@ tags!(HostOp {
     58 => CallWord,
     59 => CallPayload,
     60 => PortReply,
+    61 => ProvideDir,
+    62 => PortFill,
 });
 
 tags!(RaiseCause {

@@ -51,7 +51,7 @@ fn unpack(take o: Option[String]) {
 }
 
 fn temporary() {
-    match Count(1) { Count(mut n) => { n += 1 }, Text(_) => {} }
+    match count(1) { Count(mut n) => { n += 1 }, Text(_) => {} }
 }
 
 fn read_sum(mut src: Source) -> u64 {
@@ -70,3 +70,6 @@ fn through_view(a: Source) {
 // expect: cause OWN-9 at 38:54 from 38:24
 // expect: cause OWN-11 at 42:32 from 42:22
 // expect: cause OWN-9 at 58:48 from 58:23
+
+// A `Source` temporary: a bare `Count` names two visible types (LANG-7).
+fn count(n: u64) -> Source { Count(n) }

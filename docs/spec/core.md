@@ -519,9 +519,15 @@ pub fn trigger(take t: StopTrigger)
   `Socket`, `Listener`). The caller receives a fresh handle of the ordinary type bound to
   the port, the kind and the id, so it reaches only that port's object of that kind, and a
   handle of another provider or another port given to an operation is refused before it
-  reaches the server (`Denied`). A reply that issues id 0, an id already live for its kind,
-  or a variant that does not answer the call's operation fails the server with `Fail`, and
-  the call is settled as for a sealed port. `net.split` divides a socket in the caller
+  reaches the server (`Denied`). A port's ids are one space, since `Released(id)` names no
+  kind. Each issued id holds 32 bytes of the port's room until the server receives its
+  `Released`; a `Dir` id, plain like the capability, holds them until the run ends. A reply
+  that issues id 0, an id already live, or a variant that does not answer the call's
+  operation fails the server with `Fail`, and a reply that issues an id when the room is
+  short raises `Capacity` in the server; either way the call is settled as for a sealed
+  port. `Close(file)` ends the caller's handle at issue, and its id once the server has
+  taken the call; a `Close` cancelled before then queues `Released(file)` as a drop does.
+  `NextEntries` bytes are whole records in `host.next_entries`'s format. `net.split` divides a socket in the caller
   and asks the server nothing; dropping a half queues `Released(id, Read)` or
   `Released(id, Write)` (FAIL-13).
 - **Reply.** `provide.reply` is the commit point of the call: it copies the staged bytes into

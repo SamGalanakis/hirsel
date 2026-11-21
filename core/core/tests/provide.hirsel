@@ -210,7 +210,7 @@ fn echo(tasks: Tasks) -> bool waits {
     }
     let second = match provide.next(mut served) {
         Some(take call) => {
-            let failed = WriteFailed(WriteError(written: 1, error: Other(5)))
+            let failed: StreamReply = WriteFailed(WriteError(written: 1, error: Other(5)))
             match provide.reply(mut served, take call, provide.stream_reply(failed)) {
                 Ok(_) => true,
                 _ => false
@@ -320,4 +320,353 @@ fn foreign_call(tasks: Tasks) -> bool waits {
     let _ = take served
     let _ = take other
     refused && closed
+}
+
+// Served Dir ports (core.md, Provide). The client opens "a", writes "hi",
+// reads into a 4-byte buffer, stats and closes; the server answers each from
+// the call's words and payload.
+fn dir_client(take d: Dir) -> bool waits {
+    match host.open(d, "a", CreateNew) {
+        Ok(take f) => {
+            let mut file = take f
+            let wrote = match host.write(mut file, string.as_bytes("hi")) {
+                Ok(_) => true,
+                _ => false
+            }
+            let mut b: Bytes = list.with_capacity(4)
+            let read = match host.read(mut file, mut b) {
+                Ok(n) => n == 3 && list.len(b) == 3 && b[0] == 0x78 && b[2] == 0x7a,
+                _ => false
+            }
+            let stat = match host.stat_file(mut file) {
+                Ok(s) => s.size == 7 && s.modified_ns == -1 && match s.kind {
+                    File => true,
+                    _ => false
+                },
+                _ => false
+            }
+            let closed = match host.close(take file) {
+                Ok(_) => true,
+                _ => false
+            }
+            wrote && read && stat && closed
+        },
+        Error(_) => false
+    }
+}
+
+fn answer(mut s: Served[DirOp], take c: Call[DirOp], r: DirReply) -> bool {
+    match provide.reply(mut s, take c, provide.dir_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+// The server sees Open(0, 1, CreateNew) with path "a" and issues File(5);
+// Write(5, 2) with "hi"; Read(5, 4), where it stages "xyz" (fill takes all
+// 3) and answers Count(3); StatFile(5), answered size 7 and mtime -1; then
+// Close(5). The client sees exactly those results.
+// expect: run dir_echo(tasks) = true
+fn dir_echo(tasks: Tasks) -> bool waits {
+    let (d, s) = provide.dir(bytes 256)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, d, dir_client)
+    let opened = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.dir_op(call) {
+                Open(dir, path, mode) => dir == 0 && path == 1 && match mode {
+                    CreateNew => true,
+                    _ => false
+                },
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(4)
+            provide.payload(call, 1, mut p)
+            let named = list.len(p) == 1 && p[0] == 0x61
+            let ok = answer(mut served, take call, File(5))
+            op && named && ok
+        },
+        None => false
+    }
+    let wrote = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.dir_op(call) {
+                Write(file, len) => file == 5 && len == 2,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(4)
+            provide.payload(call, 1, mut p)
+            let data = list.len(p) == 2 && p[0] == 0x68 && p[1] == 0x69
+            let ok = answer(mut served, take call, Done)
+            op && data && ok
+        },
+        None => false
+    }
+    let read = match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let op = match provide.dir_op(c) {
+                Read(file, room) => file == 5 && room == 4,
+                _ => false
+            }
+            let took = provide.fill(mut served, mut c, string.as_bytes("xyz"))
+            let ok = answer(mut served, take c, Count(3))
+            op && took == 3 && ok
+        },
+        None => false
+    }
+    let stat = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.dir_op(call) {
+                StatFile(file) => file == 5,
+                _ => false
+            }
+            let ok = answer(mut served, take call, Stat(Stat(kind: File, size: 7, modified_ns: -1)))
+            op && ok
+        },
+        None => false
+    }
+    let closed = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.dir_op(call) {
+                Close(file) => file == 5,
+                _ => false
+            }
+            let ok = answer(mut served, take call, Done)
+            op && ok
+        },
+        None => false
+    }
+    let client = result.unwrap(task.join(take child))
+    opened && wrote && read && stat && closed && client
+}
+
+fn drop_client(take d: Dir) -> bool waits {
+    let first = match host.open(d, "a", Read) {
+        Ok(take f) => {
+            let _ = take f
+            true
+        },
+        Error(_) => false
+    }
+    let second = match host.open(d, "b", Read) {
+        Ok(take f) => {
+            let _ = take f
+            true
+        },
+        Error(_) => false
+    }
+    first && second
+}
+
+// Take the next call, expect an Open, and issue File(id).
+fn issue(mut s: Served[DirOp], id: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.dir_op(call) {
+                Open(dir, path, mode) => dir == 0 && path == 1,
+                _ => false
+            }
+            let ok = answer(mut s, take call, File(id))
+            op && ok
+        },
+        None => false
+    }
+}
+
+// Take the next call and expect Released(id), which Done acknowledges.
+fn released(mut s: Served[DirOp], id: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.dir_op(call) {
+                Released(id: h) => h == id,
+                _ => false
+            }
+            let ok = answer(mut s, take call, Done)
+            op && ok
+        },
+        None => false
+    }
+}
+
+// FAIL-13: a dropped file reaches the server as Released(id), queued before
+// the client's next open. A room of 32 holds one handle: File(5) fills it,
+// Released(5) refunds it, so File(6) fits. Once the client ends with both
+// released, next returns None.
+// expect: run dir_released(tasks) = true
+fn dir_released(tasks: Tasks) -> bool waits {
+    let (d, s) = provide.dir(bytes 32)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, d, drop_client)
+    let first = issue(mut served, 5)
+    let one = released(mut served, 5)
+    let second = issue(mut served, 6)
+    let two = released(mut served, 6)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    first && one && second && two && client && quiet
+}
+
+// The primary cause of a failed task is Fail.
+fn fail_cause(r: Result[bool, JoinError]) -> bool {
+    match r {
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Fail(_) => true,
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+fn zero_server(take s: Served[DirOp]) -> bool waits {
+    let mut served = take s
+    issue(mut served, 0)
+}
+
+fn twice_server(take s: Served[DirOp]) -> bool waits {
+    let mut served = take s
+    let first = issue(mut served, 5)
+    first && issue(mut served, 5)
+}
+
+fn variant_server(take s: Served[DirOp]) -> bool waits {
+    let mut served = take s
+    match provide.next(mut served) {
+        Some(take call) => answer(mut served, take call, Count(1)),
+        None => false
+    }
+}
+
+fn opens_closed(d: Dir) -> bool waits {
+    match host.open(d, "a", Read) {
+        Ok(take f) => {
+            let _ = take f
+            false
+        },
+        Error(e) => match e {
+            Closed => true,
+            _ => false
+        }
+    }
+}
+
+// core.md, Handles: a reply issuing id 0, an id already live, or a variant
+// that does not answer the call fails the server with Fail, and the caller
+// sees Closed. The first file of the twice server stays open past its
+// server's end, and dropping it then still completes.
+// expect: run dir_fail(tasks) = true
+fn dir_fail(tasks: Tasks) -> bool waits {
+    let (d0, s0) = provide.dir(bytes 64)
+    let zero = task.spawn(tasks, bytes 65536, take s0, zero_server)
+    let closed0 = opens_closed(d0)
+    let failed0 = fail_cause(task.join(take zero))
+    let (d1, s1) = provide.dir(bytes 64)
+    let twice = task.spawn(tasks, bytes 65536, take s1, twice_server)
+    let kept = host.open(d1, "a", Read)
+    let closed1 = opens_closed(d1)
+    let failed1 = fail_cause(task.join(take twice))
+    let first = match take kept {
+        Ok(take f) => {
+            let _ = take f
+            true
+        },
+        Error(_) => false
+    }
+    let (d2, s2) = provide.dir(bytes 64)
+    let variant = task.spawn(tasks, bytes 65536, take s2, variant_server)
+    let closed2 = opens_closed(d2)
+    let failed2 = fail_cause(task.join(take variant))
+    closed0 && failed0 && closed1 && failed1 && first && closed2 && failed2
+}
+
+fn greedy_server(take s: Served[DirOp]) -> bool waits {
+    let mut served = take s
+    let opened = issue(mut served, 5)
+    match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let took = provide.fill(mut served, mut c, string.as_bytes("abcdefghi"))
+            let ok = answer(mut served, take c, Count(took))
+            opened && ok
+        },
+        None => false
+    }
+}
+
+fn reads_closed(take f: HostFile) -> bool waits {
+    let mut file = take f
+    let mut b: Bytes = list.with_capacity(16)
+    match host.read(mut file, mut b) {
+        Ok(_) => false,
+        Error(e) => match e {
+            Closed => true,
+            _ => false
+        }
+    }
+}
+
+// The primary cause of a failed task, when it is a refused admission.
+fn join_refusal(r: Result[bool, JoinError]) -> Option[Capacity] {
+    match r {
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+// MEM-21: a port admits its room with a cell's 32: a bound of 40 holds
+// provide.dir(bytes 8), and a bound of 39 refuses it, asking 40 of 39. In a
+// room of 40, File(5) holds 32 and leaves 8; a fill of 9 bytes into a read
+// offering 16 asks 9 of the 8, a Capacity refusal in the server, and the
+// reader sees Closed.
+// expect: run dir_room(tasks) = true
+fn dir_room(tasks: Tasks) -> bool waits {
+    let held = bound bytes 40 {
+        let (d, s) = provide.dir(bytes 8)
+        let _ = take s
+        true
+    }
+    let fits = match held {
+        Ok(v) => v,
+        _ => false
+    }
+    let refused = match refusal(isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 39 {
+            let (d, s) = provide.dir(bytes 8)
+            let _ = take s
+            true
+        }
+    })) {
+        Some(c) => c.requested == 40 && c.available == 39,
+        None => false
+    }
+    let (d, s) = provide.dir(bytes 40)
+    let server = task.spawn(tasks, bytes 65536, take s, greedy_server)
+    let closed = match host.open(d, "a", Read) {
+        Ok(take f) => reads_closed(take f),
+        Error(_) => false
+    }
+    let short = match join_refusal(task.join(take server)) {
+        Some(c) => c.requested == 9 && c.available == 8,
+        None => false
+    }
+    fits && refused && closed && short
 }

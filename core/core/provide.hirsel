@@ -16,9 +16,15 @@ pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
 
 pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
 
+pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
+
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
+
+// Stage the first bytes of `b` in the room for the reply, at most what the
+// call's `room` still offers; returns how many it took.
+pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
 
 // Word `i` of the call's Op: 0 is its variant, then its fields.
 fn word[Op](c: Call[Op], i: u64) -> u64
@@ -27,12 +33,83 @@ pub fn stream_op(c: Call[StreamOp]) -> StreamOp {
     Write(len: word(c, 1))
 }
 
-// The provider's answer: a variant and up to three scalars.
+fn open_mode(w: u64) -> OpenMode {
+    if w == 0 {
+        Read
+    } else if w == 1 {
+        Write
+    } else if w == 2 {
+        Append
+    } else if w == 3 {
+        CreateNew
+    } else {
+        ReadWrite
+    }
+}
+
+pub fn dir_op(c: Call[DirOp]) -> DirOp {
+    let t = word(c, 0)
+    let a = word(c, 1)
+    let b = word(c, 2)
+    let d = word(c, 3)
+    if t == 0 {
+        Open(dir: a, path: b, mode: open_mode(d))
+    } else if t == 1 {
+        OpenDir(dir: a, path: b)
+    } else if t == 2 {
+        Mkdtemp(dir: a, prefix: b, room: d)
+    } else if t == 3 {
+        Stat(dir: a, path: b)
+    } else if t == 4 {
+        Mkdir(dir: a, path: b)
+    } else if t == 5 {
+        Remove(dir: a, path: b)
+    } else if t == 6 {
+        RemoveTree(dir: a, path: b)
+    } else if t == 7 {
+        Rename(dir: a, from: b, to: d)
+    } else if t == 8 {
+        SyncDir(dir: a)
+    } else if t == 9 {
+        Entries(dir: a)
+    } else if t == 10 {
+        Read(file: a, room: b)
+    } else if t == 11 {
+        ReadAt(file: a, at: b, room: d)
+    } else if t == 12 {
+        Write(file: a, len: b)
+    } else if t == 13 {
+        WriteAt(file: a, at: b, len: d)
+    } else if t == 14 {
+        StatFile(file: a)
+    } else if t == 15 {
+        Sync(file: a)
+    } else if t == 16 {
+        TryLock(file: a)
+    } else if t == 17 {
+        Unlock(file: a)
+    } else if t == 18 {
+        Close(file: a)
+    } else if t == 19 {
+        NextEntries(entries: a, room: b)
+    } else {
+        Released(id: a)
+    }
+}
+
+// The provider's answer: a variant and up to six scalars.
 pub opaque type Reply[Op] {
     tag: u64,
-    a: u64,
-    b: u64,
-    c: u64
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64,
+    w4: u64,
+    w5: u64
+}
+
+fn words[Op](tag: u64, w0: u64, w1: u64, w2: u64) -> Reply[Op] {
+    Reply(tag: tag, w0: w0, w1: w1, w2: w2, w3: 0, w4: 0, w5: 0)
 }
 
 // The run time's error tag and code for an IoError.
@@ -46,21 +123,59 @@ fn io_words(e: IoError) -> (u64, u64) {
     }
 }
 
+fn kind_word(k: Kind) -> u64 {
+    match k {
+        File => 0,
+        Directory => 1,
+        Symlink => 2,
+        Other => 3,
+    }
+}
+
+// A reply's tags are shared: Done 0, Failed 1, WriteFailed 2, then the
+// DirReply variants in declaration order.
 pub fn stream_reply(r: StreamReply) -> Reply[StreamOp] {
     match r {
-        Done => Reply(tag: 0, a: 0, b: 0, c: 0),
+        Done => words(0, 0, 0, 0),
         WriteFailed(e) => {
             let (tag, code) = io_words(e.error)
-            Reply(tag: 1, a: e.written, b: tag, c: code)
+            words(2, e.written, tag, code)
         },
     }
 }
 
+pub fn dir_reply(r: DirReply) -> Reply[DirOp] {
+    match r {
+        Done => words(0, 0, 0, 0),
+        Failed(e) => {
+            let (tag, code) = io_words(e)
+            words(1, tag, code, 0)
+        },
+        WriteFailed(e) => {
+            let (tag, code) = io_words(e.error)
+            words(2, e.written, tag, code)
+        },
+        Count(n) => words(3, n, 0, 0),
+        Locked(held) => {
+            let w: u64 = if held {
+                1
+            } else {
+                0
+            }
+            words(4, w, 0, 0)
+        },
+        Stat(s) => words(5, kind_word(s.kind), s.size, int.truncate(s.modified_ns)),
+        File(id) => words(6, id, 0, 0),
+        Dir(id) => words(7, id, 0, 0),
+        Entries(id) => words(8, id, 0, 0),
+    }
+}
+
 // Settles the call with the reply's words; 1 when it was settled first.
-fn commit[Op](mut s: Served[Op], take c: Call[Op], tag: u64, a: u64, b: u64, d: u64) -> u64
+fn commit[Op](mut s: Served[Op], take c: Call[Op], tag: u64, w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64) -> u64
 
 pub fn reply[Op](mut s: Served[Op], take c: Call[Op], take r: Reply[Op]) -> Result[(), Withdrawn] {
-    if commit(mut s, take c, r.tag, r.a, r.b, r.c) == 0 {
+    if commit(mut s, take c, r.tag, r.w0, r.w1, r.w2, r.w3, r.w4, r.w5) == 0 {
         Ok(())
     } else {
         Error(Withdrawn())

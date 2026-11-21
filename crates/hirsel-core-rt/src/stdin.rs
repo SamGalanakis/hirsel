@@ -283,6 +283,29 @@ fn other(code: u32) -> Outcome {
 pub(crate) struct ReadRequest {
     pub(crate) until: Until,
     pub(crate) deadline: u64,
+    operations: &'static Operations,
+}
+
+impl ReadRequest {
+    pub(crate) fn new(until: Until) -> Self {
+        Self {
+            until,
+            deadline: 0,
+            operations: &OPERATIONS,
+        }
+    }
+}
+
+pub(crate) struct Operations {
+    pub(crate) step: unsafe fn(*mut Request, u64, bool) -> Step,
+    pub(crate) abort: unsafe fn(*mut Request, u64, u8) -> Outcome,
+}
+
+static OPERATIONS: Operations = Operations { step, abort };
+
+pub(crate) unsafe fn operations(request: *const Request) -> &'static Operations {
+    // SAFETY: the Stdin adapter pins the private ReadRequest through settlement.
+    unsafe { (*(*request).path.cast::<ReadRequest>()).operations }
 }
 
 fn done(outcome: Outcome) -> Step {
@@ -292,7 +315,7 @@ fn done(outcome: Outcome) -> Step {
     }
 }
 
-pub(crate) unsafe fn step(request: *mut Request, token: u64, issue: bool) -> Step {
+unsafe fn step(request: *mut Request, token: u64, issue: bool) -> Step {
     // SAFETY: the adapter pins ReadRequest and the carrier, and the live OS
     // grant supplies a Stream for this run. The worker never borrows them.
     unsafe {
@@ -339,7 +362,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, issue: bool) -> Ste
     }
 }
 
-pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Outcome {
+unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Outcome {
     // SAFETY: a pending OS read pins its stream and both operands until abort.
     unsafe {
         let request = &mut *request;
@@ -373,10 +396,7 @@ pub unsafe extern "C" fn hirsel_core_stdin_read(
     site: u64,
 ) -> Outcome {
     unsafe {
-        let mut read = ReadRequest {
-            until: crate::net::deadline(context, until_kind, clock, at),
-            deadline: 0,
-        };
+        let mut read = ReadRequest::new(crate::net::deadline(context, until_kind, clock, at));
         let mut request = Request {
             operation: STDIN_READ,
             mode: 0,

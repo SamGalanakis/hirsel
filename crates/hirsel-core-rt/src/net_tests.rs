@@ -75,6 +75,7 @@ fn net_laws_child() {
             len: 0,
         },
         secret_ops: std::ptr::null(),
+        env_ops: std::ptr::null(),
         target: crate::process::View {
             data: b"test-target".as_ptr(),
             len: 11,
@@ -284,10 +285,7 @@ fn stdin_stream_preserves_bytes_across_timeout_and_abort() {
 
     // Hold delivery after the helper has read. Cancellation wins this race and
     // the bytes remain in the shared stream, even for a smaller next buffer.
-    let mut read = crate::stdin::ReadRequest {
-        until: None,
-        deadline: 0,
-    };
+    let mut read = crate::stdin::ReadRequest::new(None);
     let mut request = Request {
         operation: STDIN_READ,
         mode: 0,

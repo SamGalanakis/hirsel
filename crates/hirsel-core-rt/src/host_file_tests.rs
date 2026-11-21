@@ -188,6 +188,7 @@ fn native_host_file_child() {
             len: 0,
         },
         secret_ops: std::ptr::null(),
+        env_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,

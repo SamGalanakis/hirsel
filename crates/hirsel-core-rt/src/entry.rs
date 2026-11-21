@@ -137,6 +137,14 @@ pub struct SecretOperations {
     pub(crate) read: fn([&[u8]; 3], u64) -> Option<crate::secret::Granted>,
 }
 
+/// Validates and snapshots the names covered by a live Env grant.
+pub struct EnvOperations {
+    load: unsafe fn(&OsConfig, bool) -> Result<Option<Box<crate::env::Env>>, StartupError>,
+}
+
+#[unsafe(no_mangle)]
+pub static hirsel_core_os_env_ops: EnvOperations = EnvOperations { load: load_env };
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OsConfig {
@@ -167,6 +175,8 @@ pub struct OsConfig {
     /// Installed by the native linker for a launch with Secret grants.
     pub secret_ops: *const SecretOperations,
     pub env_patterns: View,
+    /// Installed by the native linker for a launch with an Env grant.
+    pub env_ops: *const EnvOperations,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -175,6 +185,7 @@ impl OsConfig {
             process_ops: &hirsel_core_os_process_ops,
             socket_activation: &hirsel_core_os_socket_activation,
             secret_ops: &crate::secret::hirsel_core_os_secret_ops,
+            env_ops: &hirsel_core_os_env_ops,
             ..*self
         }
     }
@@ -306,6 +317,31 @@ impl StartupError {
         }
     }
 }
+
+unsafe fn load_env(
+    input: &OsConfig,
+    describe_mode: bool,
+) -> Result<Option<Box<crate::env::Env>>, StartupError> {
+    // SAFETY: the launcher pins the pattern and Secret source tables.
+    unsafe {
+        let patterns = std::str::from_utf8(bytes(input.env_patterns))
+            .ok()
+            .and_then(hirsel_core_net::EnvPatterns::parse)
+            .ok_or(StartupError::EnvPatterns)?;
+        for i in 0..input.secret_grants_len {
+            let source = bytes((*input.secret_grants.add(i))[1]);
+            if let Ok(source) = std::str::from_utf8(source)
+                && let Some(hirsel_core_net::SecretSource::Env(name)) =
+                    hirsel_core_net::SecretSource::parse(source)
+                && patterns.covers(name)
+            {
+                return Err(StartupError::EnvSecretOverlap(name.to_owned()));
+            }
+        }
+        Ok((!describe_mode).then(|| Box::new(crate::env::Env::snapshot(patterns))))
+    }
+}
+
 impl OsProcess {
     #[cfg(feature = "record")]
     pub(crate) fn host_launch(&self) -> Option<&HostLaunch> {
@@ -363,21 +399,8 @@ impl OsProcess {
                 None
             };
             let env = if input.grant_mask & (1 << ENV) != 0 {
-                let patterns = std::str::from_utf8(bytes(input.env_patterns))
-                    .ok()
-                    .and_then(hirsel_core_net::EnvPatterns::parse)
-                    .ok_or(StartupError::EnvPatterns)?;
-                for i in 0..input.secret_grants_len {
-                    let source = bytes((*input.secret_grants.add(i))[1]);
-                    if let Ok(source) = std::str::from_utf8(source)
-                        && let Some(hirsel_core_net::SecretSource::Env(name)) =
-                            hirsel_core_net::SecretSource::parse(source)
-                        && patterns.covers(name)
-                    {
-                        return Err(StartupError::EnvSecretOverlap(name.to_owned()));
-                    }
-                }
-                (!describe_mode).then(|| Box::new(crate::env::Env::snapshot(patterns)))
+                let operations = input.env_ops.as_ref().ok_or(StartupError::EnvPatterns)?;
+                (operations.load)(input, describe_mode)?
             } else {
                 None
             };
@@ -733,7 +756,8 @@ pub unsafe extern "C" fn hirsel_core_os_run(
 /// # Safety
 /// Input/name/entry contracts are os_run's; sources follows
 /// abi_sites::hirsel_core_os_process_set_sources through reporting. The native
-/// linker supplies the operations tables for directory, Process and Net grants.
+/// linker supplies the operations tables for directory, Process, Net, Secret
+/// and Env grants.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     input: *const OsConfig,

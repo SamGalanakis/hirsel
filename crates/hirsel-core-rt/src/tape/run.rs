@@ -808,6 +808,7 @@ pub(super) fn check_launch_replay() {
                 len: 0,
             },
             secret_ops: std::ptr::null(),
+            env_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),

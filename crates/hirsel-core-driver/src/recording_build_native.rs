@@ -443,7 +443,7 @@ fn run_tape_replays_stdin_and_env_without_host_sources() {
     std::fs::write(&input, b"nine bytes").unwrap();
     let source = r#"
 pub fn main(i: Stdin, e: Env, out: Stdout) -> Result[(), Exit] waits {
-    let mut prefix: Bytes = result.unwrap(list.with_capacity(3))
+    let mut prefix: Bytes = list.with_capacity(3)
     if result.unwrap(stdin.read(i, mut prefix, Never)) != 3 {
         return Error(Exit(status: 3))
     }

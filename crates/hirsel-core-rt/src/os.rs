@@ -594,7 +594,8 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         return step;
     }
     if unsafe { (*request).operation == STDIN_READ } {
-        let step = unsafe { crate::stdin::step(request, token, true) };
+        // SAFETY: STDIN_READ carries the adapter's live Stdin request.
+        let step = unsafe { (crate::stdin::operations(request).step)(request, token, true) };
         #[cfg(test)]
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
@@ -658,12 +659,12 @@ pub(crate) mod probe {
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
     unsafe { (*(*request).path.cast::<crate::net::NetworkRequest>()).os }
 }
-/// The OS provider without directory operations parks only socket requests.
+/// The OS provider without directory operations parks socket and Stdin requests.
 unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
         if (*request).operation == STDIN_READ {
-            crate::stdin::step(request, token, false)
+            (crate::stdin::operations(request).step)(request, token, false)
         } else {
             (socket_operations(request).step)(request, token, false)
         }
@@ -673,7 +674,7 @@ unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
         if (*request).operation == STDIN_READ {
-            crate::stdin::abort(request, token, reason)
+            (crate::stdin::operations(request).abort)(request, token, reason)
         } else {
             (socket_operations(request).abort)(request, token, reason)
         }

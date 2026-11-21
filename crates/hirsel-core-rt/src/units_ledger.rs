@@ -420,6 +420,28 @@ impl Port {
         }
     }
 
+    /// Take and rearm in one exchange when the only published arrival is an
+    /// item for this inbox. A racing publication takes the normal drain path.
+    fn take_single_item(&self, c: *const ConnCore) -> Option<ArrivalRef> {
+        let head = self.head.load(Ordering::Acquire);
+        if marker(head) {
+            return None;
+        }
+        // SAFETY: only this port's owner removes published nodes. A
+        // publisher can prepend a node but cannot change the visible head.
+        if unsafe {
+            !(*head).next.is_null()
+                || !matches!((*head).body, Body::Item(conn, _) if conn == c)
+        } {
+            return None;
+        }
+        self.head
+            .compare_exchange(head, WAITING, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        // SAFETY: the successful exchange detached this one node.
+        Some(unsafe { ArrivalRef::from_raw(head) })
+    }
+
     /// Take every published arrival, oldest first: one swap, and the stack
     /// is reversed in place.
     fn drain(&self) -> Chain {
@@ -915,6 +937,28 @@ impl UnitCtx {
     /// Bind the unit to the pool unit `id`: a publish to a parked port wakes it.
     pub(crate) fn bind(&self, id: u32) {
         self.port.set_wake(id);
+    }
+
+    /// The running receiver can take its own item without dispatching an
+    /// inbox wake. Older arrivals and batches still go through `take`.
+    pub(crate) fn take_single_item(&mut self, c: &ConnCore) -> bool {
+        if !self.reached.is_empty() {
+            return false;
+        }
+        #[cfg(test)]
+        if self.hooked() {
+            return false;
+        }
+        let Some(arrival) = self.port.take_single_item(c) else {
+            return false;
+        };
+        let (body, _, slot) = self.intake_one(arrival).into_body();
+        let Body::Item(_, value) = body else {
+            unreachable!();
+        };
+        self.took_ident = ptr::from_ref(c).addr();
+        c.side().taken.push_back(Taken { slot, value });
+        true
     }
 
     /// Take the next arrival, parking the pool unit until one is published.

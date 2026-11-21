@@ -664,7 +664,10 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 return out(1 << 8, 0, 0);
             }
             let u = unit();
-            if c.side().taken.is_empty() && u.ctx.port.pending() {
+            if c.side().taken.is_empty()
+                && u.ctx.port.pending()
+                && (u.waits > usize::from(waited) || !u.ctx.take_single_item(c))
+            {
                 pump_for(u, waited);
             }
             let received = input.receive_cross(|bytes, flat, content| {

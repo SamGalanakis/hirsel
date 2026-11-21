@@ -1791,6 +1791,7 @@ fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), 
             let text = typed_string(s, mut d)?
             typed_room(codec.put_string(text, mut out))
         },
+        20 => input_error(mut d, start, ExpectedValue),
         _ => read_integer(op, s, mut d, mut out),
     }
 }
@@ -2333,6 +2334,7 @@ fn write_atom(op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u
                 write_nonfinite(w, mut length, v)
             }
         },
+        20 => Error(Binary(Invalid(pos))),
         _ => {
             let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
             binary_read(codec.need(binary, pos, n))?

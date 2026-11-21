@@ -207,6 +207,7 @@ fn type_name(t: &Value, defs: &[Value]) -> String {
     ];
     match op {
         0..=13 => names[op as usize].into(),
+        20 => "Never".into(),
         14 if t[1] == json!([3]) => "Bytes".into(),
         14 => format!("List[{}]", type_name(&t[1], defs)),
         15 => format!(
@@ -760,6 +761,7 @@ fn write(
                 }
             }
         }
+        20 => return Err(format!("{at}: Never has no values")),
         _ => return Err(format!("Malformed: schema opcode {op}")),
     }
     Ok(())
@@ -914,6 +916,7 @@ fn read(t: &Value, defs: &[Value], r: &mut Cursor) -> Result<Value, String> {
                 }
             }
         }
+        20 => return Err("Malformed: Never".into()),
         _ => return Err(format!("Malformed: schema opcode {op}")),
     })
 }

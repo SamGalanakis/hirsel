@@ -44,7 +44,7 @@ impl<'a> Reader<'a> {
     fn ty(&mut self) -> Result<Value, Error> {
         let op = self.byte()?;
         Ok(match op {
-            0..=13 => json!([op]),
+            0..=13 | 20 => json!([op]),
             14 | 16 => json!([op, self.ty()?]),
             15 | 17 => json!([op, self.ty()?, self.ty()?]),
             18 => {
@@ -218,6 +218,7 @@ impl Schema {
                     .join(", ")
             ),
             19 => format!("{prefix}Def{}", t[1]),
+            20 => "never".into(),
             _ => unreachable!(),
         }
     }
@@ -454,6 +455,7 @@ mod tests {
             (vec![15, 13, 6], "Map<string, bigint>"),
             (vec![16, 16, 5], "Option<Option<number>>"),
             (vec![17, 6, 13], "Result<bigint, string>"),
+            (vec![17, 3, 20], "Result<number, never>"),
             (vec![18, 2, 0, 0, 0, 6, 13], "[bigint, string]"),
         ] {
             let mut bytes = scalar(0);

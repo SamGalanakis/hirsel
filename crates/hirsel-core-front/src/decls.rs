@@ -2882,8 +2882,7 @@ fn bounds_inner<const ENCODING: bool>(
     plain_extra
         | match row {
             TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED | CODEC,
-            TyKind::Never => all,
-            TyKind::Unit => all | CODEC,
+            TyKind::Never | TyKind::Unit => all | CODEC,
             TyKind::Scalar(Scalar::F32 | Scalar::F64) => {
                 PLAIN | SHAREABLE | SEND | FLOAT | ENCODED | CODEC
             }

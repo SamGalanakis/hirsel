@@ -719,10 +719,11 @@ runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 | 15 | `Map[K, V]`, any K | an array of `[k, v]` pairs in insertion order. A pair is a 2-element array; a duplicate key gives 400. An entry (key plus value) with LEAST 0 is refused at bind, the codec's rule (codec.hirsel:463) | refused |
 | 16 | `Option[T]` | `null` or T's form. As a record field, an absent member is also None. Refused at bind when T is nullable (below) | query: below. Path: refused |
 | 17 | `Result[T, E]` | `{"ok": t}` or `{"error": e}`, exactly one member | refused |
-| 18 | tuple | refused at bind (its codec is not built, codec.md) | refused |
+| 18 | tuple | refused at bind | refused |
 | 19 | record | an object with its fields by name, in any member order. An unknown member gives 400. A missing member gives 400 unless the field is an `Option` (None) or has a declared default (the default, which is the HTTP form of RUNNER-SPEC §6's `Resolve`) | only its scalar fields, through `FieldSource` |
 | 19 | sum | a variant with 0 fields is `"Name"`; with 1 field `{"Name": v}`; with n ≥ 2 `{"Name": [v1, …, vn]}` | refused |
 | 19 | via | the form of the type it is written as | that type's form |
+| 20 | Never | no JSON value is accepted | refused |
 
 **Nullability.** A type is nullable when its JSON form can be `null`: `()`, `Option[_]`, and a `via` or nominal type whose underlying type is nullable, computed through every `via` and nominal definition. `Option[T]` with a nullable T is refused at bind, because `null` would have two meanings.
 

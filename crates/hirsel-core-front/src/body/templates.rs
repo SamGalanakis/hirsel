@@ -464,9 +464,10 @@ pub(super) fn codec_maker(
 }
 
 /// std's maker of each built-in type, by the type's row name: a scalar, `()`, String
-/// or DecodeError. `of` and every maker are siblings in std's `codec` module.
-const BUILTIN_CODECS: [(&str, &str, bool); 15] = [
+/// Never or DecodeError. `of` and every maker are siblings in std's `codec` module.
+const BUILTIN_CODECS: &[(&str, &str, bool)] = &[
     ("()", "of_unit", true),
+    ("Never", "of_never", true),
     ("bool", "of_bool", true),
     ("char", "of_char", true),
     ("u8", "of_u8", true),
@@ -484,8 +485,8 @@ const BUILTIN_CODECS: [(&str, &str, bool); 15] = [
 ];
 /// The makers of [`BUILTIN_CODECS`], which a body naming `of` reads
 /// ([`crate::SIBLING_READS`]).
-pub const BUILTIN_CODEC_MAKERS: [&str; 15] = {
-    let mut makers = [""; 15];
+pub const BUILTIN_CODEC_MAKERS: [&str; BUILTIN_CODECS.len()] = {
+    let mut makers = [""; BUILTIN_CODECS.len()];
     let mut i = 0;
     while i < makers.len() {
         makers[i] = BUILTIN_CODECS[i].1;
@@ -501,7 +502,7 @@ pub(super) fn builtin_codec(name: &str) -> Option<&'static str> {
         .find_map(|&(row, maker, _)| (row == name).then_some(maker))
 }
 
-/// Scalar/String/unit makers witness their implicit codec bound. A legacy
+/// Built-in makers witness their implicit codec bound. A legacy
 /// protocol helper alone does not; nominal types get the bound from declarations.
 fn builtin_codec_bound(name: &str) -> bool {
     BUILTIN_CODECS

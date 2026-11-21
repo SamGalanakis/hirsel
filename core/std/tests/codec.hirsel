@@ -123,7 +123,11 @@ fn code(e: codec.DecodeError) -> u64 {
 }
 
 fn outcome[T](c: codec.Codec[T], b: Bytes) -> u64 {
-    match codec.decode(c, b) {
+    decode_outcome(codec.decode(c, b))
+}
+
+fn decode_outcome[T](r: Result[Result[T, codec.DecodeError], Capacity]) -> u64 {
+    match r {
         Ok(Ok(_)) => 0,
         Ok(Error(e)) => code(e),
         Error(_) => 9999
@@ -2512,4 +2516,55 @@ fn typed_json_codec_admission() -> bool {
         _ => false,
     }
     correct && decoded_row.range.w.lo == 2 && decoded_row.range.w.hi == 9 && decoded_row.score == 7 && reversed && duplicate && refused_option && refused_list && exhausted
+}
+
+// SEM-10: tuple components concatenate in order. The String has a little-endian
+// u32 byte count. A Result's u32 tag 0 precedes the Ok, and tag 1 cannot carry Never.
+type NeverPayload[T]: codec = Live | Dead(String, (u8, T))
+
+// expect: run tuple_never_codec() = ((true, true, true), (true, true, true), (2002, 2002, 2000, 2002, 2002))
+fn tuple_never_codec() -> ((bool, bool, bool), (bool, bool, bool), (u64, u64, u64, u64, u64)) {
+    let left: codec.Codec[(u8, String)] = codec.of()
+    let right: codec.Codec[(String, u8)] = codec.of()
+    let lb = unhex("07 01000000 61")
+    let rb = unhex("01000000 61 07")
+    let ls = result.unwrap(codec.schema(left))
+    let rs = result.unwrap(codec.schema(right))
+    let ordered = enc(left, (7u8, "a")) == lb && again(left, lb) && enc(right, ("a", 7u8)) == rb && again(right, rb)
+    let tuple_schemas = codec.fingerprint_of(ls) != codec.fingerprint_of(rs)
+    let cross = outcome(left, rb) != 0 && outcome(right, lb) != 0 && wrong_writer(left, rs) && wrong_writer(right, ls)
+    let n: codec.Codec[Result[u8, Never]] = codec.of()
+    let u: codec.Codec[Result[u8, ()]] = codec.of()
+    let v: codec.Codec[Result[u8, u8]] = codec.of()
+    let b = unhex("00000000 07")
+    let ok = enc(n, Ok(7)) == b && again(n, b) && enc(u, Ok(7)) == b && enc(v, Ok(7)) == b
+    let ns = result.unwrap(codec.schema(n))
+    let us = result.unwrap(codec.schema(u))
+    let vs = result.unwrap(codec.schema(v))
+    let schema = codec.fingerprint_of(ns) != codec.fingerprint_of(us) && codec.fingerprint_of(ns) != codec.fingerprint_of(vs)
+    let incompatible = wrong_writer(n, us) && wrong_writer(n, vs) && wrong_writer(u, ns) && wrong_writer(v, ns)
+    let never: codec.Codec[Never] = codec.of()
+    let sum: codec.Codec[NeverPayload[Never]] = codec.of()
+    let bad = unhex("ffff 01000000")
+    let nbad = decode_outcome(codec.decode_at(n, bad, 2))
+    let sbad = decode_outcome(codec.decode_at(sum, bad, 2))
+    let r = result.unwrap(result.unwrap(codec.resolve(n, ns)))
+    let via_reader = decode_outcome(codec.read_at(r, bad, 2))
+    // Add an unused empty record definition to force the schema resolution plan.
+    let current = result.unwrap(codec.schema(sum))
+    let end = list.len(current) - 5
+    let mut writer = unhex("03 02000000")
+    result.unwrap(list.append(mut writer, list.slice(current, 5, end)))
+    result.unwrap(list.append(mut writer, unhex("01000000 58 00000000 00 00000000")))
+    result.unwrap(list.append(mut writer, list.slice(current, end, list.len(current))))
+    let evolved = result.unwrap(result.unwrap(codec.resolve(sum, writer)))
+    let via_plan = decode_outcome(codec.read_at(evolved, bad, 2))
+    ((ordered, tuple_schemas, cross), (ok, schema, incompatible), (nbad, sbad, outcome(never, unhex("")), via_reader, via_plan))
+}
+
+fn wrong_writer[T](c: codec.Codec[T], writer: Bytes) -> bool {
+    match result.unwrap(codec.resolve(c, writer)) {
+        Error(Schema(_)) => true,
+        _ => false,
+    }
 }

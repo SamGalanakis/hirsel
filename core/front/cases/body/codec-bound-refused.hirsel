@@ -22,7 +22,7 @@ fn require[T: codec](x: T) -> u64 { 1 }
 fn plain_missing(x: Plain) -> u64 { require(x) }
 fn conditional_missing(x: Wrapper[HostFile]) -> u64 { require(x) }
 type Wrapper[T]: codec { x: T }
-fn never_missing(x: Option[Never]) -> u64 { require(x) }
+
 // expect: refuse OWN-4 at 2:25
 // expect: refuse OWN-4 at 3:28
 // expect: refuse OWN-4 at 4:21
@@ -43,10 +43,8 @@ fn never_missing(x: Option[Never]) -> u64 { require(x) }
 // expect: refuse OWN-4 at 19:30
 // expect: refuse LANG-12 at 22:45
 // expect: refuse LANG-12 at 23:63
-// expect: refuse LANG-12 at 25:53
 // expect: compared LANG-12 at 22:45 | app@1/main/Plain | codec
 // expect: compared LANG-12 at 23:63 | app@1/main/Wrapper[core@1/core/HostFile] | codec
-// expect: compared LANG-12 at 25:53 | core@1/core/Option[Never] | codec
 // expect: compared OWN-19 at 14:33 | scoped fn() -> u64 | not scoped
 // expect: compared OWN-19 at 9:25 | View[u64] | not scoped
 // expect: compared OWN-4 at 10:26 | core@1/core/Rc[u64] | codec
@@ -64,8 +62,8 @@ fn never_missing(x: Option[Never]) -> u64 { require(x) }
 // expect: compared OWN-4 at 9:25 | View[u64] | codec
 type Restricted[T: codec]: codec { x: T }
 type Denied = Restricted[HostFile]
-// expect: refuse LANG-12 at 66:26
-// expect: compared LANG-12 at 66:26 | core@1/core/HostFile | codec
+// expect: refuse LANG-12 at 64:26
+// expect: compared LANG-12 at 64:26 | core@1/core/HostFile | codec
 
 // expect: cause OWN-4 at 7:27 from 7:6 7:19 7:27 5:15
 // expect: cause OWN-4 at 8:31 from 8:6 8:16 8:23 8:31 6:20

@@ -179,6 +179,7 @@ impl Words<'_> {
         match t.kind(ty).clone() {
             TyKind::Scalar(x) => self.word(x.name()),
             TyKind::Unit => self.punct("()"),
+            TyKind::Never => self.definition(&DefPath::core("core.Never")),
             TyKind::Tuple(xs) => {
                 self.punct("(");
                 self.list(t, &xs)?;
@@ -248,7 +249,7 @@ impl Words<'_> {
                 self.word("fn");
                 self.callable(t, &ps, r, w)?;
             }
-            TyKind::Error | TyKind::Hole | TyKind::Never | TyKind::Param(_) => return None,
+            TyKind::Error | TyKind::Hole | TyKind::Param(_) => return None,
         }
         Some(())
     }

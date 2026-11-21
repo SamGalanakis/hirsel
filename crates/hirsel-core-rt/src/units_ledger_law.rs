@@ -410,7 +410,7 @@ impl Run {
                         got.push("<none>".to_string());
                         break;
                     };
-                    let ident = arr.names.as_ref().map_or("<unnamed>".into(), |n| n.ident.clone());
+                    let ident = arr.as_ref().map_or("<unnamed>".into(), |n| n.ident.clone());
                     match t {
                         Took::HelperEnd => {
                             let label = ident.strip_prefix("helper_end:").unwrap();

@@ -42,10 +42,10 @@ pub(crate) mod conn;
 mod law;
 
 use super::sync::{AtomicPtr, AtomicU64};
-use conn::ConnCore;
+use conn::{ConnCore, Taken};
 use std::{
     cell::{Cell, UnsafeCell},
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     ptr::{self, NonNull},
     sync::{Arc, atomic::Ordering},
 };
@@ -129,28 +129,144 @@ struct Res {
     fin: Option<Fin>,
 }
 
-/// An owned value: its exclusive charges, the shares it holds, and, for a
-/// resource, its cause cell, grant reserve and finalizer.
-pub(crate) struct Value {
-    charges: Vec<Charge>,
+/// Plain blocks carry their charge with the value. Combining values or
+/// adding a second charge spills the list in its original order.
+#[derive(Default)]
+enum Charges {
+    #[default]
+    Empty,
+    One(Charge),
+    Many(Vec<Charge>),
+}
+
+impl Charges {
+    fn push(&mut self, charge: Charge) {
+        match self {
+            Self::Empty => *self = Self::One(charge),
+            Self::One(first) => *self = Self::Many(vec![*first, charge]),
+            Self::Many(charges) => charges.push(charge),
+        }
+    }
+
+    fn extend(&mut self, charges: impl IntoIterator<Item = Charge>) {
+        for charge in charges {
+            self.push(charge);
+        }
+    }
+}
+
+impl std::ops::Deref for Charges {
+    type Target = [Charge];
+
+    fn deref(&self) -> &[Charge] {
+        match self {
+            Self::Empty => &[],
+            Self::One(charge) => std::slice::from_ref(charge),
+            Self::Many(charges) => charges,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Charges {
+    fn deref_mut(&mut self) -> &mut [Charge] {
+        match self {
+            Self::Empty => &mut [],
+            Self::One(charge) => std::slice::from_mut(charge),
+            Self::Many(charges) => charges,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ValueExtra {
+    charges: Charges,
     shared: Vec<Shared>,
-    res: Option<Box<Res>>,
+    res: Option<Res>,
+}
+
+/// An owned value with exclusive charges and optional resource or share data.
+pub(crate) struct Value {
+    data: ValueData,
     #[cfg(test)]
     pub(crate) tag: u64,
 }
 
+enum ValueData {
+    Empty,
+    One(Charge),
+    Many(Vec<Charge>),
+    Extra(Box<ValueExtra>),
+}
+
 impl Value {
-    fn plain(charges: Vec<Charge>) -> Value {
+    fn plain(charges: Charges) -> Value {
+        let data = match charges {
+            Charges::Empty => ValueData::Empty,
+            Charges::One(charge) => ValueData::One(charge),
+            Charges::Many(charges) => ValueData::Many(charges),
+        };
         Value {
-            charges,
-            shared: Vec::new(),
-            res: None,
+            data,
             #[cfg(test)]
             tag: 0,
         }
     }
+
+    fn charges(&self) -> &[Charge] {
+        match &self.data {
+            ValueData::Empty => &[],
+            ValueData::One(charge) => std::slice::from_ref(charge),
+            ValueData::Many(charges) => charges,
+            ValueData::Extra(extra) => &extra.charges,
+        }
+    }
+
+    fn charges_mut(&mut self) -> &mut [Charge] {
+        match &mut self.data {
+            ValueData::Empty => &mut [],
+            ValueData::One(charge) => std::slice::from_mut(charge),
+            ValueData::Many(charges) => charges,
+            ValueData::Extra(extra) => &mut extra.charges,
+        }
+    }
+
+    fn extra_mut(&mut self) -> &mut ValueExtra {
+        if !matches!(self.data, ValueData::Extra(_)) {
+            let old = std::mem::replace(&mut self.data, ValueData::Empty);
+            self.data = ValueData::Extra(Box::new(old.into_parts()));
+        }
+        let ValueData::Extra(extra) = &mut self.data else {
+            unreachable!();
+        };
+        extra
+    }
+
+    fn push_charge(&mut self, charge: Charge) {
+        match &mut self.data {
+            ValueData::Empty => self.data = ValueData::One(charge),
+            ValueData::One(first) => self.data = ValueData::Many(vec![*first, charge]),
+            ValueData::Many(charges) => charges.push(charge),
+            ValueData::Extra(extra) => extra.charges.push(charge),
+        }
+    }
+
     pub(crate) fn bytes(&self) -> u64 {
-        self.charges.iter().map(|c| c.size).sum()
+        self.charges().iter().map(|c| c.size).sum()
+    }
+}
+
+impl ValueData {
+    fn into_parts(self) -> ValueExtra {
+        let charges = match self {
+            Self::Empty => Charges::Empty,
+            Self::One(charge) => Charges::One(charge),
+            Self::Many(charges) => Charges::Many(charges),
+            Self::Extra(extra) => return *extra,
+        };
+        ValueExtra {
+            charges,
+            ..ValueExtra::default()
+        }
     }
 }
 
@@ -196,15 +312,20 @@ impl Port {
     }
 
     /// Push one arrival. Wakes the unit only if it was parked on the port.
-    pub(crate) fn publish(&self, a: Box<Arrival>) {
-        let a = Box::into_raw(a);
-        let mut h = self.head.load(Ordering::Acquire);
+    pub(crate) fn publish(&self, a: ArrivalRef) {
+        let a = a.into_raw();
+        // A parked publisher can see the same head address after a pop and
+        // reuse. Links follow the live node at that address.
+        a.expose_provenance();
+        // An empty port is the common ready handoff. Try the publish
+        // directly so a sender does not first ask for a shared copy.
+        let mut h = ptr::null_mut();
         loop {
             if h == FORWARD {
                 // SAFETY: `fwd` is stored before FORWARD and never changes after.
                 let f = unsafe { &*self.fwd.load(Ordering::Acquire) };
-                // SAFETY: `a` came from Box::into_raw above and was never shared.
-                let a = unsafe { Box::from_raw(a) };
+                // SAFETY: publish still owns the node.
+                let a = unsafe { ArrivalRef::from_raw(a) };
                 if a.body.forwarded() {
                     f.publish(a);
                 }
@@ -212,11 +333,17 @@ impl Port {
             }
             if h == DEAD {
                 // SAFETY: as above.
-                drop(unsafe { Box::from_raw(a) });
+                drop(unsafe { ArrivalRef::from_raw(a) });
                 return;
             }
             // SAFETY: `a` is not yet visible to any other thread.
-            unsafe { (*a).next = if h == WAITING { ptr::null_mut() } else { h } };
+            unsafe {
+                (*a).next = if h == WAITING {
+                    ptr::null_mut()
+                } else {
+                    ptr::with_exposed_provenance_mut(h.addr())
+                };
+            }
             match self
                 .head
                 .compare_exchange(h, a, Ordering::AcqRel, Ordering::Acquire)
@@ -243,10 +370,13 @@ impl Port {
             return Chain(ptr::null_mut());
         }
         let mut p = self.head.swap(ptr::null_mut(), Ordering::Acquire);
+        // SAFETY: the head belongs to this taker after the swap.
+        if unsafe { (*p).next.is_null() } {
+            return Chain(p);
+        }
         let mut prev = ptr::null_mut();
         while !p.is_null() {
-            // SAFETY: every node in the list was published with Box::into_raw
-            // and is owned by the taker after the swap.
+            // SAFETY: the taker owns every detached node after the swap.
             unsafe {
                 let next = (*p).next;
                 (*p).next = prev;
@@ -258,7 +388,7 @@ impl Port {
     }
 
     /// Install a marker, returning what was published before it.
-    fn close_with(&self, m: *mut Arrival, into: &mut VecDeque<Box<Arrival>>) {
+    fn close_with(&self, m: *mut Arrival, into: &mut VecDeque<ArrivalRef>) {
         let mut p = self.head.swap(m, Ordering::AcqRel);
         if marker(p) {
             return;
@@ -266,7 +396,7 @@ impl Port {
         let mut list = Vec::new();
         while !p.is_null() {
             // SAFETY: as in `drain`.
-            let a = unsafe { Box::from_raw(p) };
+            let a = unsafe { ArrivalRef::from_raw(p) };
             p = a.next;
             list.push(a);
         }
@@ -315,7 +445,7 @@ impl Drop for Port {
 /// place by the taker.
 pub(crate) struct Arrival {
     next: *mut Arrival,
-    pub(crate) body: Body,
+    body: Body,
     #[cfg(test)]
     pub(crate) names: Option<Box<Names>>,
 }
@@ -357,7 +487,7 @@ pub(crate) enum Body {
     /// The settlement of a waiting send, to its sender.
     Settlement(u32, Settle),
     Item(*const ConnCore, Value),
-    Close(*const ConnCore),
+    Close(Arc<ConnCore>),
     /// Made by the owner itself, after the items accepted before the seal.
     SealAnswer(*const ConnCore),
 }
@@ -376,9 +506,10 @@ impl Body {
                 format!("root {} ret {}", h.used(info.root), info.ret.as_ref().map_or(0, |v| v.bytes()))
             }
             Body::Settlement(_, Settle::Accepted(cs)) => amounts(cs),
-            Body::Settlement(_, Settle::Closed(v) | Settle::Withdrawn(v)) | Body::Item(_, v) => {
+            Body::Settlement(_, Settle::Closed(v) | Settle::Withdrawn(v)) => {
                 format!("{} bytes", v.bytes())
             }
+            Body::Item(_, v) => format!("{} bytes tag {}", v.bytes(), v.tag),
             Body::Close(_) | Body::SealAnswer(_) => String::new(),
         }
     }
@@ -404,14 +535,14 @@ impl Drop for HelperEnd {
 struct Chain(*mut Arrival);
 
 impl Iterator for Chain {
-    type Item = Box<Arrival>;
-    fn next(&mut self) -> Option<Box<Arrival>> {
+    type Item = ArrivalRef;
+    fn next(&mut self) -> Option<ArrivalRef> {
         if self.0.is_null() {
             return None;
         }
         // SAFETY: the chain owns each node (see `Port::drain`).
-        let mut a = unsafe { Box::from_raw(self.0) };
-        self.0 = std::mem::replace(&mut a.next, ptr::null_mut());
+        let a = unsafe { ArrivalRef::from_raw(self.0) };
+        self.0 = a.next;
         Some(a)
     }
 }
@@ -424,19 +555,117 @@ impl Drop for Chain {
     }
 }
 
+/// Owns an arrival until it is published or dropped. Items occupy slots
+/// pinned by the receiving unit until it cleans the connection.
+pub(crate) struct ArrivalRef(NonNull<Arrival>);
+
+// SAFETY: the handle owns the node and transfers exclusive access with it.
+unsafe impl Send for ArrivalRef {}
+
+impl ArrivalRef {
+    /// The caller owns this initialized node and its backing outlives the handle.
+    unsafe fn from_raw(p: *mut Arrival) -> Self {
+        Self(NonNull::new(p).unwrap())
+    }
+
+    fn into_raw(self) -> *mut Arrival {
+        std::mem::ManuallyDrop::new(self).0.as_ptr()
+    }
+
+    pub(crate) fn boxed(body: Body) -> Self {
+        assert!(!matches!(body, Body::Item(..)));
+        Self(NonNull::from(Box::leak(Box::new(Arrival::new(body)))))
+    }
+
+    /// The caller reserved this slot and keeps its connection live through publish.
+    unsafe fn item(node: *mut Arrival, c: &ConnCore, value: Value) -> Self {
+        // SAFETY: the reservation grants exclusive access to the uninitialized slot.
+        unsafe {
+            node.write(Arrival::new(Body::Item(c, value)));
+            Self::from_raw(node)
+        }
+    }
+
+    fn into_body(self) -> (Body, TakeInfo, u32) {
+        let node = self.into_raw();
+        // SAFETY: the handle owns the node. An item keeps the slot reserved
+        // until receive or cleaning. Free the allocation for other arrivals.
+        unsafe {
+            #[cfg(test)]
+            super::sync::read_arrival(node);
+            let body = ptr::addr_of!((*node).body).read();
+            #[cfg(test)]
+            let info = ptr::addr_of!((*node).names).read().map(|mut names| {
+                names.content = body.content();
+                names
+            });
+            #[cfg(not(test))]
+            let info = ();
+            let slot = if let Body::Item(c, _) = body {
+                (*c).arrival_index(node)
+            } else {
+                drop(Box::from_raw(node.cast::<std::mem::MaybeUninit<Arrival>>()));
+                0
+            };
+            (body, info, slot)
+        }
+    }
+}
+
+impl std::ops::Deref for ArrivalRef {
+    type Target = Arrival;
+
+    fn deref(&self) -> &Arrival {
+        // SAFETY: the handle owns the node.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl std::ops::DerefMut for ArrivalRef {
+    fn deref_mut(&mut self) -> &mut Arrival {
+        // SAFETY: the handle owns the node.
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl Drop for ArrivalRef {
+    fn drop(&mut self) {
+        let node = self.0.as_ptr();
+        if matches!(self.body, Body::Item(..)) {
+            // SAFETY: the handle owns the node. The slot is still reserved
+            // and the backing is pinned by the receiver or publisher.
+            unsafe { node.drop_in_place() };
+        } else {
+            // SAFETY: all other arrivals are allocated by `boxed`.
+            drop(unsafe { Box::from_raw(node) });
+        }
+    }
+}
+
 impl Arrival {
-    pub(crate) fn new(body: Body) -> Box<Arrival> {
-        Box::new(Arrival {
+    fn new(body: Body) -> Self {
+        Self {
             next: ptr::null_mut(),
             body,
             #[cfg(test)]
             names: None,
-        })
+        }
     }
 }
 
+// The production take needs only its kind and the unit's took_ident; the
+// laws also consume the arrival's name and content.
 #[cfg(test)]
-pub(crate) fn name_it(mut a: Box<Arrival>, src: impl FnOnce() -> String, ident: impl FnOnce() -> String) -> Box<Arrival> {
+pub(crate) type TakeInfo = Option<Box<Names>>;
+#[cfg(not(test))]
+pub(crate) type TakeInfo = ();
+
+#[cfg(test)]
+pub(crate) fn name_it(
+    mut a: ArrivalRef,
+    src: impl FnOnce() -> String,
+    ident: impl FnOnce() -> String,
+) -> ArrivalRef {
     if naming() {
         a.names = Some(Box::new(Names {
             src: src(),
@@ -454,7 +683,7 @@ pub(crate) fn name_it(mut a: Box<Arrival>, src: impl FnOnce() -> String, ident: 
 struct Node {
     count: AtomicU64,
     charge: Charge,
-    payload: UnsafeCell<(Vec<Charge>, Vec<Shared>)>,
+    payload: UnsafeCell<(Charges, Vec<Shared>)>,
     home: Arc<Port>,
     #[cfg(test)]
     label: String,
@@ -537,11 +766,13 @@ pub(crate) struct UnitCtx {
     #[allow(clippy::vec_box)]
     books: Vec<Box<Rec>>,
     stack: Vec<RecRef>,
-    reached: VecDeque<Box<Arrival>>,
+    reached: VecDeque<ArrivalRef>,
+    /// Pins connection slots until all their arrivals have been taken or dropped.
+    connections: HashMap<usize, Arc<ConnCore>>,
     /// Test hook: arrivals published to the unit wait here until the harness
     /// names the source whose oldest one reaches the unit next.
     #[cfg(test)]
-    held: Option<VecDeque<Box<Arrival>>>,
+    held: Option<VecDeque<ArrivalRef>>,
     helpers: Vec<Option<Handle>>,
     helper: Option<HelperInfo>,
     /// The active primary cell (helpers only).
@@ -576,6 +807,7 @@ impl UnitCtx {
             books: Vec::new(),
             stack: Vec::new(),
             reached: VecDeque::new(),
+            connections: HashMap::new(),
             #[cfg(test)]
             held: None,
             helpers: Vec::new(),
@@ -620,7 +852,7 @@ impl UnitCtx {
 
     /// Take the next arrival, parking the pool unit until one is published.
     /// Must run on the bound pool unit.
-    pub(crate) fn wait(&mut self) -> (Took, Box<Arrival>) {
+    pub(crate) fn wait(&mut self) -> (Took, TakeInfo) {
         loop {
             if let Some(t) = self.take() {
                 return t;
@@ -774,7 +1006,7 @@ impl UnitCtx {
 
     pub(crate) fn alloc_block(&mut self, size: u64) -> Result<Value, Cap> {
         let r = self.admit(size)?;
-        Ok(Value::plain(vec![Charge { size, payer: r }]))
+        Ok(Value::plain(Charges::One(Charge { size, payer: r })))
     }
 
     pub(crate) fn alloc_run_lifetime(&mut self, size: u64) -> Result<(), Cap> {
@@ -790,7 +1022,7 @@ impl UnitCtx {
         fin: Option<Fin>,
     ) -> Result<Value, Cap> {
         let r = self.admit(fields + CELL + grant)?;
-        let mut charges = Vec::new();
+        let mut charges = Charges::Empty;
         if fields > 0 {
             charges.push(Charge {
                 size: fields,
@@ -810,21 +1042,27 @@ impl UnitCtx {
             charges.len() - 1
         });
         let mut v = Value::plain(charges);
-        v.res = Some(Box::new(Res {
+        v.extra_mut().res = Some(Res {
             cell,
             grant: g,
             grant_size: grant,
             fin,
-        }));
+        });
         Ok(v)
     }
 
     /// One value holding all of these (no charge; a resource's finalizer is lost).
     pub(crate) fn combine(&mut self, vals: Vec<Value>) -> Value {
-        let mut out = Value::plain(Vec::new());
+        let mut charges = Charges::Empty;
+        let mut shared = Vec::new();
         for v in vals {
-            out.charges.extend(v.charges);
-            out.shared.extend(v.shared);
+            let parts = v.data.into_parts();
+            charges.extend(parts.charges.iter().copied());
+            shared.extend(parts.shared);
+        }
+        let mut out = Value::plain(charges);
+        if !shared.is_empty() {
+            out.extra_mut().shared = shared;
         }
         out
     }
@@ -832,20 +1070,16 @@ impl UnitCtx {
     /// Drop a value. A resource's finalizer runs inside a grant record; a
     /// failing one returns the cause chain, a passing one its survivors.
     pub(crate) fn drop_value(&mut self, v: Value) -> Option<Value> {
-        let Value {
+        let ValueExtra {
             charges,
             shared,
             res,
-            ..
-        } = v;
+        } = v.data.into_parts();
         for s in shared {
             self.drop_shared(s);
         }
-        let Some((res, fin)) = res.and_then(|r| {
-            let r = *r;
-            r.fin.clone().map(|f| (r, f))
-        }) else {
-            for c in charges {
+        let Some((res, fin)) = res.and_then(|r| r.fin.clone().map(|f| (r, f))) else {
+            for &c in charges.iter() {
                 self.refund(c);
             }
             return None;
@@ -859,10 +1093,10 @@ impl UnitCtx {
             me.add_used(g, n);
             Charge { size: n, payer: g }
         };
-        let mut survivors = Vec::new();
+        let mut survivors = Charges::Empty;
         if fin.spawn_shared > 0 {
             let c = in_grant(self, fin.spawn_shared);
-            let s = self.new_node(c, Vec::new(), Vec::new());
+            let s = self.new_node(c, Charges::Empty, Vec::new());
             if fin.share_out {
                 self.fin_made.push(Some(s));
             } else {
@@ -887,9 +1121,9 @@ impl UnitCtx {
             }
         }
         if fin.fails {
-            let mut cs = vec![cell];
+            let mut cs = Charges::One(cell);
             cs.extend(msg);
-            cs.extend(survivors);
+            cs.extend(survivors.iter().copied());
             Some(Value::plain(cs))
         } else {
             self.refund(cell);
@@ -932,7 +1166,7 @@ impl UnitCtx {
             Some(c) => std::mem::replace(c, new),
             None => new,
         };
-        Ok(Value::plain(vec![caught]))
+        Ok(Value::plain(Charges::One(caught)))
     }
 
     // -- helpers --------------------------------------------------------------
@@ -986,7 +1220,7 @@ impl UnitCtx {
         });
         h.stack.push(root);
         let arg = arg.map(|mut v| {
-            for c in &mut v.charges {
+            for c in v.charges_mut().iter_mut() {
                 self.refund(*c);
                 c.payer = root;
                 h.add_used(root, c.size);
@@ -1023,10 +1257,10 @@ impl UnitCtx {
         let ret = if with_cell {
             Some(match ret {
                 Some(mut v) => {
-                    v.charges.push(cell);
+                    v.push_charge(cell);
                     v
                 }
-                None => Value::plain(vec![cell]),
+                None => Value::plain(Charges::One(cell)),
             })
         } else {
             self.refund(cell);
@@ -1042,7 +1276,7 @@ impl UnitCtx {
         self.port.disarm();
         let p = NonNull::from(Box::leak(self));
         let a = named!(
-            Arrival::new(Body::HelperEnd(HelperEnd(p))),
+            ArrivalRef::boxed(Body::HelperEnd(HelperEnd(p))),
             format!("helper:{label}"),
             format!("helper_end:{label}")
         );
@@ -1123,7 +1357,7 @@ impl UnitCtx {
 
     // -- shared nodes and boards ----------------------------------------------
 
-    fn new_node(&mut self, charge: Charge, payload: Vec<Charge>, nested: Vec<Shared>) -> Shared {
+    fn new_node(&mut self, charge: Charge, payload: Charges, nested: Vec<Shared>) -> Shared {
         let s = self.next_shared;
         self.next_shared += 1;
         let n = Box::new(Node {
@@ -1143,8 +1377,8 @@ impl UnitCtx {
             Ok(r) => r,
             Err(c) => return Err((c, payload)),
         };
-        let (p, nested) = payload.map_or((Vec::new(), Vec::new()), |v| (v.charges, v.shared));
-        Ok(self.new_node(Charge { size, payer: r }, p, nested))
+        let parts = payload.map_or_else(ValueExtra::default, |v| v.data.into_parts());
+        Ok(self.new_node(Charge { size, payer: r }, parts.charges, parts.shared))
     }
 
     /// Release one share. The last release releases the nested nodes, then
@@ -1173,7 +1407,7 @@ impl UnitCtx {
         #[cfg(test)]
         let label = n.label.clone();
         let a = named!(
-            Arrival::new(Body::Credits(cs)),
+            ArrivalRef::boxed(Body::Credits(cs)),
             format!("shared:{label}"),
             format!("credits:{label}")
         );
@@ -1248,7 +1482,7 @@ impl UnitCtx {
         #[cfg(test)]
         let label = b.label.clone();
         let a = named!(
-            Arrival::new(Body::Credits(vec![Credit {
+            ArrivalRef::boxed(Body::Credits(vec![Credit {
             amount: b.root.size,
             to: b.root.payer,
         }])),
@@ -1261,7 +1495,7 @@ impl UnitCtx {
     // -- arrivals -------------------------------------------------------------
 
     /// Where an arrival goes once it has reached this unit.
-    fn layer(&mut self, a: Box<Arrival>) {
+    fn layer(&mut self, a: ArrivalRef) {
         #[cfg(test)]
         if let Some(h) = self.held.as_mut() {
             h.push_back(a);
@@ -1273,13 +1507,14 @@ impl UnitCtx {
     /// Move everything published to the port into the unit. Items are
     /// numbered here, and a seal answer is made once the items accepted
     /// before the seal have all come in.
-    pub(crate) fn intake(&mut self) {
-        for a in self.port.drain() {
-            self.intake_one(a);
+    fn intake_remaining(&mut self, arrivals: impl Iterator<Item = ArrivalRef>) {
+        for a in arrivals {
+            let a = self.intake_one(a);
+            self.layer(a);
         }
     }
 
-    fn intake_one(&mut self, #[allow(unused_mut)] mut a: Box<Arrival>) {
+    fn intake_one(&mut self, #[allow(unused_mut)] mut a: ArrivalRef) -> ArrivalRef {
         if let Body::Item(c, _) = a.body {
             // SAFETY: an item's connection is held by its owner, this unit.
             let c = unsafe { &*c };
@@ -1291,16 +1526,14 @@ impl UnitCtx {
                 n.ident = format!("item:{}#{seq}", c.label);
             }
             let _ = seq;
-            self.layer(a);
             if side.seal_due > 0 {
                 side.seal_due -= 1;
                 if side.seal_due == 0 {
                     self.seal_answer(c);
                 }
             }
-            return;
         }
-        self.layer(a);
+        a
     }
 
     /// Test hook: the oldest held arrival from `src` reaches the unit.
@@ -1315,9 +1548,7 @@ impl UnitCtx {
             if list.peek().is_none() {
                 break;
             }
-            for a in list {
-                self.intake_one(a);
-            }
+            self.intake_remaining(list);
         }
         let h = self.held.as_mut().unwrap();
         let i = h
@@ -1340,23 +1571,28 @@ impl UnitCtx {
     }
 
     /// Take the next arrival that has reached the unit and apply it.
-    pub(crate) fn take(&mut self) -> Option<(Took, Box<Arrival>)> {
+    pub(crate) fn take(&mut self) -> Option<(Took, TakeInfo)> {
         #[cfg(test)]
         let hooked = self.held.is_some();
         #[cfg(not(test))]
         let hooked = false;
-        if self.reached.is_empty() && !hooked {
-            self.intake();
-        }
-        let mut a = self.reached.pop_front()?;
-        #[cfg(test)]
-        if let Some(n) = a.names.as_mut() {
-            n.content = a.body.content();
-        }
-        let body = std::mem::replace(&mut a.body, Body::Credits(Vec::new()));
+        let arrival = match self.reached.pop_front() {
+            Some(a) => a,
+            None if hooked => return None,
+            None => {
+                let mut arrivals = self.port.drain();
+                let first = self.intake_one(arrivals.next()?);
+                // Intake accounted for the whole batch before the first take
+                // in the queue path. Keep that order when taking directly.
+                self.intake_remaining(arrivals);
+                first
+            }
+        };
+        let (body, info, slot) = arrival.into_body();
         self.took_ident = match &body {
             Body::Settlement(id, _) => *id as usize,
-            Body::Item(c, _) | Body::Close(c) | Body::SealAnswer(c) => *c as usize,
+            Body::Item(c, _) | Body::SealAnswer(c) => c.addr(),
+            Body::Close(c) => Arc::as_ptr(c).addr(),
             // SAFETY: the end arrival owns the ended helper's context.
             Body::HelperEnd(e) => unsafe { e.0.as_ref() }.helper.as_ref().unwrap().k,
             Body::Credits(_) | Body::LastRelease(_) => 0,
@@ -1390,14 +1626,13 @@ impl UnitCtx {
                 self.drop_value(v);
                 Took::Withdrawn(id)
             }
-            Body::Item(c, v) => {
+            Body::Item(c, value) => {
                 // SAFETY: as in `intake_one`.
-                unsafe { &*c }.side().taken.push_back(v);
+                unsafe { &*c }.side().taken.push_back(Taken { slot, value });
                 Took::Item
             }
             Body::Close(c) => {
-                // SAFETY: as in `intake_one`.
-                unsafe { &*c }.side().closed = true;
+                c.side().closed = true;
                 Took::Close
             }
             Body::SealAnswer(c) => {
@@ -1406,7 +1641,7 @@ impl UnitCtx {
                 Took::SealAnswer
             }
         };
-        Some((t, a))
+        Some((t, info))
     }
 
     /// The value of a waiting send settled `Closed`, back to its sender.
@@ -1421,8 +1656,13 @@ impl UnitCtx {
         let root = self.stack[0];
         self.rec(root).retired.set(true);
         self.run_lifetime.clear();
-        let mut rest = VecDeque::new();
-        self.port.close_with(DEAD, &mut rest);
+        self.discard_arrivals();
+    }
+
+    fn discard_arrivals(&mut self) {
+        if !matches!(self.port.head.load(Ordering::Acquire), DEAD | FORWARD) {
+            self.port.close_with(DEAD, &mut VecDeque::new());
+        }
         self.reached.clear();
         #[cfg(test)]
         {
@@ -1444,5 +1684,11 @@ impl UnitCtx {
             };
             out.push(format!("{}={used}/{}", r.name.as_ref().unwrap(), r.limit));
         }
+    }
+}
+
+impl Drop for UnitCtx {
+    fn drop(&mut self) {
+        self.discard_arrivals();
     }
 }

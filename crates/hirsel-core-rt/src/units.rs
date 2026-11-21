@@ -1121,8 +1121,11 @@ fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Counters, printed at exit under HIRSEL_XSTATS.
+/// Counts from outside the worker pool and from workers that have exited.
 pub(crate) static USTATS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+thread_local! {
+    static WORKER_STATS: [Cell<u64>; 16] = [const { Cell::new(0) }; 16];
+}
 const S_RESUMES: usize = 0;
 const S_PARKS: usize = 1;
 const S_YIELDS: usize = 2;
@@ -1139,7 +1142,15 @@ const S_GPOLL_EVENTS: usize = 12;
 const S_NOTIFIED_REQUEUE: usize = 13;
 const S_LIFO: usize = 14;
 fn bump(i: usize) {
-    USTATS[i].fetch_add(1, Ordering::Relaxed);
+    add_stat(i, 1);
+}
+
+fn add_stat(i: usize, n: u64) {
+    if worker_ix() == usize::MAX {
+        USTATS[i].fetch_add(n, Ordering::Relaxed);
+    } else {
+        WORKER_STATS.with(|stats| stats[i].set(stats[i].get().wrapping_add(n)));
+    }
 }
 
 const PARKED: u8 = 0;
@@ -1187,7 +1198,7 @@ pub(crate) struct Unit {
     slice_start: Cell<u64>,
     queued_ns: AtomicU64,
     created_ns: u64,
-    first_park: AtomicBool,
+    first_park: Cell<bool>,
     /// The deadline of this unit's one live timer registration, or
     /// `u64::MAX`. Set when the unit parks with a deadline; cleared, and the
     /// set entry removed, when the park ends.
@@ -1399,7 +1410,7 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         slice_start: Cell::new(0),
         queued_ns: AtomicU64::new(0),
         created_ns: t0,
-        first_park: AtomicBool::new(false),
+        first_park: Cell::new(false),
         timer_at: AtomicU64::new(u64::MAX),
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
@@ -1414,7 +1425,7 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         crate::process::stop(b"UnitIdTaken");
     }
     bump(S_CREATED);
-    USTATS[S_CREATE_NS].fetch_add(now() - t0, Ordering::Relaxed);
+    add_stat(S_CREATE_NS, now() - t0);
     enqueue(p, u);
     u
 }
@@ -1489,8 +1500,8 @@ pub(crate) fn park(deadline: Option<u64>) {
     bump(S_PARKS);
     // SAFETY: called on the unit's own stack while it runs.
     let u = unsafe { &*cur() };
-    if !u.first_park.swap(true, Ordering::Relaxed) {
-        USTATS[S_READY_TO_PARK_NS].fetch_add(now() - u.created_ns, Ordering::Relaxed);
+    if !u.first_park.replace(true) {
+        add_stat(S_READY_TO_PARK_NS, now() - u.created_ns);
     }
     leave(After::Wait(deadline));
 }
@@ -1810,7 +1821,7 @@ fn poll_global(p: &Pool, timeout: i32) {
         } else if tag == FRONT_TAG {
             accept_front(p);
         } else {
-            USTATS[S_GPOLL_EVENTS].fetch_add(1, Ordering::Relaxed);
+            bump(S_GPOLL_EVENTS);
             let unit = (tag >> hirsel_core_net::SHARED_UNIT_SHIFT) as u32;
             if let Some(u) = unit_ref(unit) {
                 let ident = tag & ((1 << hirsel_core_net::SHARED_UNIT_SHIFT) - 1);
@@ -2133,6 +2144,12 @@ fn worker_main(p: &'static Pool, ix: usize) {
             }
         }
     }
+    // The launch joins the workers before reading the totals.
+    WORKER_STATS.with(|stats| {
+        for (total, local) in USTATS.iter().zip(stats) {
+            total.fetch_add(local.get(), Ordering::Relaxed);
+        }
+    });
 }
 
 fn launch_untied(

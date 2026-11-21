@@ -5,14 +5,17 @@
 //! flags. A send accepted at issue is one update of the word, one publish to
 //! the owner's port, and a wake only if the owner is parked; a ready receiver
 //! takes the item with no lock and frees its slot and bytes with one
-//! subtraction. The lock is taken only on the slow paths: a send that has to
+//! subtraction. Up to 22 slots, the word records exactly which ones are in
+//! use. Larger connections keep the count in the word and use a free list.
+//! The connection lock is taken only on the slow paths: a send that has to
 //! wait, the service of waiting sends, a withdrawal, the seal, the last client
 //! and the cleaning's end.
 use super::super::sync::{AtomicU64, Mutex};
-use super::{Arrival, Body, Cap, Credit, Kind, RecRef, Settle, UnitCtx, Value};
+use super::{Arrival, ArrivalRef, Body, Cap, Credit, Kind, RecRef, Settle, UnitCtx, Value};
 use std::{
     cell::UnsafeCell,
     collections::VecDeque,
+    mem::MaybeUninit,
     sync::{Arc, atomic::Ordering},
 };
 
@@ -21,13 +24,15 @@ const WAITERS: u64 = 1 << 62;
 const SLOT_SHIFT: u32 = 40;
 const SLOT: u64 = 1 << SLOT_SHIFT;
 const BYTES: u64 = SLOT - 1;
-const SLOTS: u64 = ((1 << 22) - 1) << SLOT_SHIFT;
+const BITMAP_CAP: u32 = 22;
+const SLOTS: u64 = ((1 << BITMAP_CAP) - 1) << SLOT_SHIFT;
 /// The largest capacity and room the word can hold.
 pub(crate) const MAX_CAP: u64 = (1 << 22) - 1;
 pub(crate) const MAX_ROOM: u64 = BYTES;
 
-fn slots(w: u64) -> u64 {
-    (w & SLOTS) >> SLOT_SHIFT
+fn first_free_bit(w: u64) -> u64 {
+    let free = !w & SLOTS;
+    free & free.wrapping_neg()
 }
 
 struct Waiter {
@@ -49,7 +54,7 @@ struct Slow {
 
 /// The owner's side, touched only by the owner.
 pub(crate) struct Side {
-    pub(crate) taken: VecDeque<Value>,
+    pub(crate) taken: VecDeque<Taken>,
     /// Items that have come into the owner, and of those, received or cleaned.
     pub(crate) intaken: u64,
     freed: u64,
@@ -61,8 +66,31 @@ pub(crate) struct Side {
     cleaned: bool,
 }
 
-pub(crate) struct ConnCore {
+type ArrivalSlot = UnsafeCell<MaybeUninit<Arrival>>;
+
+#[repr(C, align(64))]
+struct Hot {
     word: AtomicU64,
+    first: ArrivalSlot,
+}
+
+#[cfg(all(not(test), target_arch = "x86_64"))]
+const _: () = assert!(std::mem::size_of::<Hot>() == 64);
+
+struct FreeArrivals {
+    returned: Vec<u32>,
+    next: u32,
+}
+
+pub(crate) struct Taken {
+    pub(super) slot: u32,
+    pub(super) value: Value,
+}
+
+pub(crate) struct ConnCore {
+    hot: Hot,
+    spares: Box<[ArrivalSlot]>,
+    free: Option<Box<Mutex<FreeArrivals>>>,
     cap: u64,
     b: u64,
     h: u64,
@@ -75,21 +103,87 @@ pub(crate) struct ConnCore {
     pub(crate) label: String,
 }
 
-// SAFETY: the word and the lock are shared; `side` is touched only by the
-// owner; `room` and `admitting` are copied, never dereferenced, by others.
+// SAFETY: slots pass from sender to port to taker. Reuse follows the
+// connection word's bitmap, or the free-list lock on larger connections.
+// The owner alone touches `side`. Other units only copy the record pointers.
 unsafe impl Send for ConnCore {}
 unsafe impl Sync for ConnCore {}
 
 impl ConnCore {
+    fn arrival_slot(&self, before: u64) -> *mut Arrival {
+        let i = if let Some(free) = &self.free {
+            let mut free = free.lock().unwrap();
+            free.returned.pop().unwrap_or_else(|| {
+                let i = free.next;
+                free.next += 1;
+                i
+            })
+        } else {
+            first_free_bit(before).trailing_zeros() - SLOT_SHIFT
+        };
+        if i == 0 {
+            self.hot.first.get().cast()
+        } else {
+            self.spares[i as usize - 1].get().cast()
+        }
+    }
+
+    /// The caller owns this connection's published slot.
+    pub(super) unsafe fn arrival_index(&self, node: *mut Arrival) -> u32 {
+        if node == self.hot.first.get().cast() {
+            0
+        } else {
+            // SAFETY: all other slot addresses come from this slice.
+            unsafe { node.cast::<ArrivalSlot>().offset_from(self.spares.as_ptr()) as u32 + 1 }
+        }
+    }
+
+    fn occupied(&self, w: u64) -> u64 {
+        let field = (w & SLOTS) >> SLOT_SHIFT;
+        if self.cap <= u64::from(BITMAP_CAP) {
+            u64::from(field.count_ones())
+        } else {
+            field
+        }
+    }
+
+    fn admit_item(&self, w: u64, bytes: u64) -> Option<u64> {
+        let bit = if self.cap <= u64::from(BITMAP_CAP) {
+            let bit = first_free_bit(w);
+            if bit == 0 || bit.trailing_zeros() - SLOT_SHIFT >= self.cap as u32 {
+                return None;
+            }
+            bit
+        } else {
+            if self.occupied(w) >= self.cap {
+                return None;
+            }
+            SLOT
+        };
+        ((w & BYTES) + bytes <= self.b).then(|| w + bit + bytes)
+    }
+
+    fn release_item(&self, index: u32, bytes: u64) -> u64 {
+        // A slot stays reserved through take. Receive or cleaning releases it
+        // only after all reads of the node have finished.
+        let bit = if let Some(free) = &self.free {
+            free.lock().unwrap().returned.push(index);
+            SLOT
+        } else {
+            SLOT << index
+        };
+        self.hot.word.fetch_sub(bit + bytes, Ordering::AcqRel)
+    }
+
     pub(crate) fn room_used(&self) -> u64 {
-        self.word.load(Ordering::Acquire) & BYTES
+        self.hot.word.load(Ordering::Acquire) & BYTES
     }
     pub(crate) fn room_add(&self, n: u64) {
-        let w = self.word.fetch_add(n, Ordering::AcqRel);
+        let w = self.hot.word.fetch_add(n, Ordering::AcqRel);
         assert!((w & BYTES) + n <= self.b, "room over its limit");
     }
     pub(crate) fn room_sub(&self, n: u64) {
-        let w = self.word.fetch_sub(n, Ordering::AcqRel);
+        let w = self.hot.word.fetch_sub(n, Ordering::AcqRel);
         assert!(w & BYTES >= n, "a negative room balance");
     }
     #[allow(clippy::mut_from_ref)]
@@ -97,9 +191,6 @@ impl ConnCore {
         // SAFETY: only the owner calls this, from its own thread, and never
         // holds two of these at once.
         unsafe { &mut *self.side.get() }
-    }
-    fn fits(&self, w: u64, bytes: u64) -> bool {
-        slots(w) < self.cap && (w & BYTES) + bytes <= self.b
     }
 }
 
@@ -159,7 +250,19 @@ impl UnitCtx {
         let c = Arc::new_cyclic(|w| {
             let r = self.new_rec(b, Some(adm), Kind::Room(w.as_ptr()), true, room_name);
             ConnCore {
-                word: AtomicU64::new(0),
+                hot: Hot {
+                    word: AtomicU64::new(0),
+                    first: UnsafeCell::new(MaybeUninit::uninit()),
+                },
+                spares: (1..cap)
+                    .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+                    .collect(),
+                free: (cap > u64::from(BITMAP_CAP)).then(|| {
+                    Box::new(Mutex::new(FreeArrivals {
+                        returned: Vec::with_capacity(cap as usize),
+                        next: 0,
+                    }))
+                }),
                 cap,
                 b,
                 h,
@@ -187,21 +290,23 @@ impl UnitCtx {
                 label,
             }
         });
+        self.connections.insert(Arc::as_ptr(&c).addr(), c.clone());
         Ok((Inbox(c.clone()), Client(c)))
     }
 
     /// The room pays for an item from here on; the sender's own payers are
     /// credited now (accepted at issue).
     fn pay_into_room(&self, c: &ConnCore, v: &mut Value) {
-        for ch in &mut v.charges {
+        for ch in v.charges_mut() {
             self.refund(*ch);
             ch.payer = c.room;
         }
     }
 
-    fn publish_item(c: &ConnCore, v: Value) {
+    fn publish_item(c: &ConnCore, before: u64, v: Value) {
         let a = named!(
-            Arrival::new(Body::Item(c as *const ConnCore, v)),
+            // SAFETY: the connection admitted this item before choosing the slot.
+            unsafe { ArrivalRef::item(c.arrival_slot(before), c, v) },
             format!("conn:{}", c.label),
             String::new()
         );
@@ -216,33 +321,51 @@ impl UnitCtx {
             self.drop_value(v);
             return Sent::Bounds;
         }
-        let fast = c.word.try_update(Ordering::AcqRel, Ordering::Acquire, |w| {
-            (w & (SEALED | WAITERS) == 0 && c.fits(w, bytes)).then_some(w + SLOT + bytes)
-        });
+        let fast = c
+            .hot
+            .word
+            .compare_exchange(0, SLOT + bytes, Ordering::AcqRel, Ordering::Acquire)
+            .or_else(|w| {
+                if w & (SEALED | WAITERS) != 0 {
+                    return Err(w);
+                }
+                c.hot
+                    .word
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |w| {
+                        if w & (SEALED | WAITERS) == 0 {
+                            c.admit_item(w, bytes)
+                        } else {
+                            None
+                        }
+                    })
+            });
         match fast {
-            Ok(_) => {
+            Ok(w) => {
                 self.pay_into_room(c, &mut v);
-                Self::publish_item(c, v);
+                Self::publish_item(c, w, v);
                 return Sent::Accepted;
             }
             Err(w) if w & SEALED != 0 => return Sent::Closed(v),
             Err(_) => {}
         }
         let mut s = c.slow.lock().unwrap();
-        let mut w = c.word.load(Ordering::Acquire);
+        let mut w = c.hot.word.load(Ordering::Acquire);
         loop {
             if w & SEALED != 0 {
                 return Sent::Closed(v);
             }
-            if w & WAITERS == 0 && c.fits(w, bytes) {
+            if w & WAITERS == 0
+                && let Some(updated) = c.admit_item(w, bytes)
+            {
                 match c
+                    .hot
                     .word
-                    .compare_exchange(w, w + SLOT + bytes, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange(w, updated, Ordering::AcqRel, Ordering::Acquire)
                 {
                     Ok(_) => {
                         drop(s);
                         self.pay_into_room(c, &mut v);
-                        Self::publish_item(c, v);
+                        Self::publish_item(c, w, v);
                         return Sent::Accepted;
                     }
                     Err(x) => {
@@ -256,7 +379,8 @@ impl UnitCtx {
             }
             if w & WAITERS == 0 {
                 if let Err(x) =
-                    c.word
+                    c.hot
+                        .word
                         .compare_exchange(w, w | WAITERS, Ordering::AcqRel, Ordering::Acquire)
                 {
                     w = x;
@@ -284,6 +408,7 @@ impl UnitCtx {
         loop {
             let Some(head) = s.waiters.front() else {
                 let _ = c
+                    .hot
                     .word
                     .try_update(Ordering::AcqRel, Ordering::Acquire, |w| {
                         (w & WAITERS != 0).then_some(w & !WAITERS)
@@ -291,16 +416,23 @@ impl UnitCtx {
                 return;
             };
             let bytes = head.bytes;
-            let w = c.word.try_update(Ordering::AcqRel, Ordering::Acquire, |w| {
-                (w & SEALED == 0 && c.fits(w, bytes)).then_some(w + SLOT + bytes)
-            });
-            if w.is_err() {
+            let Ok(w) = c
+                .hot
+                .word
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |w| {
+                    if w & SEALED == 0 {
+                        c.admit_item(w, bytes)
+                    } else {
+                        None
+                    }
+                })
+            else {
                 return;
-            }
+            };
             let mut wt = s.waiters.pop_front().unwrap();
             let credits = wt
                 .value
-                .charges
+                .charges_mut()
                 .iter_mut()
                 .map(|ch| {
                     let cr = Credit {
@@ -311,9 +443,9 @@ impl UnitCtx {
                     cr
                 })
                 .collect();
-            Self::publish_item(c, wt.value);
+            Self::publish_item(c, w, wt.value);
             let a = named!(
-                Arrival::new(Body::Settlement(wt.id, Settle::Accepted(credits))),
+                ArrivalRef::boxed(Body::Settlement(wt.id, Settle::Accepted(credits))),
                 format!("conn:{}", c.label),
                 format!("settlement:{}:Accepted", wt.label)
             );
@@ -335,7 +467,7 @@ impl UnitCtx {
         };
         let wt = s.waiters.remove(i).unwrap();
         let a = named!(
-            Arrival::new(Body::Settlement(wt.id, Settle::Withdrawn(wt.value))),
+            ArrivalRef::boxed(Body::Settlement(wt.id, Settle::Withdrawn(wt.value))),
             format!("conn:{}", c.label),
             format!("settlement:{}:Withdrawn", wt.label)
         );
@@ -355,17 +487,17 @@ impl UnitCtx {
                 Received::Empty
             };
         };
-        let bytes = front.bytes();
+        let bytes = front.value.bytes();
         let r = match self.admit(bytes) {
             Ok(r) => r,
             Err(cap) => return Received::Capacity(cap),
         };
-        let mut v = side.taken.pop_front().unwrap();
-        for ch in &mut v.charges {
+        let Taken { slot, value: mut v } = side.taken.pop_front().unwrap();
+        for ch in v.charges_mut() {
             ch.payer = r;
         }
         side.freed += 1;
-        let w = c.word.fetch_sub(SLOT + bytes, Ordering::AcqRel);
+        let w = c.release_item(slot, bytes);
         if w & WAITERS != 0 {
             Self::serve(c, &mut c.slow.lock().unwrap());
         }
@@ -381,6 +513,7 @@ impl UnitCtx {
         side.sealed = true;
         let mut s = c.slow.lock().unwrap();
         let w = c
+            .hot
             .word
             .try_update(Ordering::AcqRel, Ordering::Acquire, |w| {
                 Some((w | SEALED) & !WAITERS)
@@ -388,14 +521,14 @@ impl UnitCtx {
             .unwrap();
         for wt in s.waiters.drain(..) {
             let a = named!(
-                Arrival::new(Body::Settlement(wt.id, Settle::Closed(wt.value))),
+                ArrivalRef::boxed(Body::Settlement(wt.id, Settle::Closed(wt.value))),
                 format!("conn:{}", c.label),
                 format!("settlement:{}:Closed", wt.label)
             );
             wt.sender.publish(a);
         }
         drop(s);
-        let due = slots(w) - (side.intaken - side.freed);
+        let due = c.occupied(w) - (side.intaken - side.freed);
         side.seal_due = due;
         if due == 0 {
             self.seal_answer(c);
@@ -404,7 +537,7 @@ impl UnitCtx {
 
     pub(super) fn seal_answer(&mut self, c: &ConnCore) {
         let a = named!(
-            Arrival::new(Body::SealAnswer(c as *const ConnCore)),
+            ArrivalRef::boxed(Body::SealAnswer(c as *const ConnCore)),
             format!("conn:{}", c.label),
             format!("seal_answer:{}", c.label)
         );
@@ -422,10 +555,10 @@ impl UnitCtx {
         let side = c.side();
         assert!(side.seal_taken && !side.cleaned, "cleaning before the seal answer, or twice");
         let mut causes = Vec::new();
-        while let Some(v) = side.taken.pop_back() {
-            c.word.fetch_sub(SLOT, Ordering::AcqRel);
+        while let Some(Taken { slot, value }) = side.taken.pop_back() {
+            c.release_item(slot, 0);
             side.freed += 1;
-            if let Some(cause) = self.drop_value(v) {
+            if let Some(cause) = self.drop_value(value) {
                 causes.push(cause);
             }
         }
@@ -441,12 +574,13 @@ impl UnitCtx {
         if last {
             Self::last_release(c, retained);
         }
+        self.connections.remove(&Arc::as_ptr(&inbox.0).addr());
         causes
     }
 
     fn last_release(c: &ConnCore, retained: u64) {
         let a = named!(
-            Arrival::new(Body::LastRelease(Credit {
+            ArrivalRef::boxed(Body::LastRelease(Credit {
                 amount: retained,
                 to: c.admitting,
             })),
@@ -466,14 +600,14 @@ impl UnitCtx {
             if s.clients > 0 {
                 return;
             }
-            let sealed = c.word.load(Ordering::Acquire) & SEALED != 0;
+            let sealed = c.hot.word.load(Ordering::Acquire) & SEALED != 0;
             let close = !sealed && !s.close_sent;
             s.close_sent |= close;
             (close, s.cleaned.then_some(s.retained))
         };
         if close {
             let a = named!(
-                Arrival::new(Body::Close(c as *const ConnCore)),
+                ArrivalRef::boxed(Body::Close(cl.0.clone())),
                 format!("conn:{}", c.label),
                 format!("close:{}", c.label)
             );

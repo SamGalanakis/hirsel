@@ -709,6 +709,11 @@ pub(crate) mod seam {
             }
         }
     }
+    #[track_caller]
+    pub(crate) fn read_arrival<T>(node: *const T) {
+        at_point(node.addr(), "read arrival", Location::caller());
+    }
+
     pub(super) static SCHED_ON: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
     impl<T> std::ops::Deref for MutexGuard<'_, T> {
@@ -1339,7 +1344,7 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
-    // 5-7. The connection path and the ledger on pool units
+    // 5-8. The connection path and the ledger on pool units
     // (`units_conn_check.rs`, which states the cases and their laws).
     Case {
         name: "conn_wait_serve",
@@ -1369,6 +1374,19 @@ pub(super) static CASES: &[Case] = &[
         producers: &[],
         goals: 0b111,
         params: conn::params_helper_forward,
+        pct: None,
+    },
+    Case {
+        name: "conn_slot_reuse",
+        workers: 3,
+        units: 3,
+        body: conn::slot_reuse,
+        producers: &[],
+        goals: 0b111,
+        params: |r| {
+            PARAM[0].store(r(0, 400), Ordering::Relaxed);
+            PARAM[1].store(r(0, 1), Ordering::Relaxed);
+        },
         pct: None,
     },
 ];
@@ -1518,7 +1536,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         n(addr(&u.xpending), format!("unit {id} xpending"));
         n(addr(&u.xready), format!("unit {id} arrivals"));
         n(addr(&u.inside), format!("unit {id} inside"));
-        n(addr(&u.first_park), format!("unit {id} first_park"));
     }
     for (i, f) in FLAG.iter().enumerate() {
         n(addr(f), format!("flag {i}"));
@@ -1786,5 +1803,9 @@ mod tests {
     #[test]
     fn conn_helper_forward() {
         check("conn_helper_forward");
+    }
+    #[test]
+    fn conn_slot_reuse() {
+        check("conn_slot_reuse");
     }
 }

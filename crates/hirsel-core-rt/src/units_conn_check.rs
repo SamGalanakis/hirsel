@@ -17,7 +17,7 @@
 //!   units' sends, and no limit sees it apart from those send decisions.
 use super::{FLAG, PARAM, compute_until, draw, now, param, served, this_unit, wait_flag};
 use crate::units::ledger::conn::{Client, Inbox, Received, Sent};
-use crate::units::ledger::{Arrival, NAMING, Shared, Took, UnitCtx, Value};
+use crate::units::ledger::{NAMING, Shared, TakeInfo, Took, UnitCtx, Value};
 use crate::units::wake_id;
 use std::sync::atomic::Ordering;
 
@@ -102,6 +102,7 @@ impl<T> Slot<T> {
 }
 
 static CLIENT: Slot<Client> = Slot::new();
+static OTHER_CLIENT: Slot<Client> = Slot::new();
 static HELPER: Slot<Box<UnitCtx>> = Slot::new();
 static SHARE: Slot<Shared> = Slot::new();
 /// Items the sender saw accepted, published before it drops its client.
@@ -137,8 +138,8 @@ impl Cx {
         self.took(&a);
         t
     }
-    fn took(&self, a: &Arrival) {
-        let n = a.names.as_ref().expect("arrivals are named in the checker");
+    fn took(&self, a: &TakeInfo) {
+        let n = a.as_ref().expect("arrivals are named in the checker");
         self.ev(format!("I take {} [{}]", n.ident, n.content));
         self.obs("took", "");
     }
@@ -304,6 +305,66 @@ pub(super) fn seal_in_flight(id: u32) -> u8 {
             assert_eq!(cx.used(), 0, "the sender's root kept a charge");
             served(1, "unit 1's sends all decided and its root is back to zero");
         }
+    }
+    0
+}
+
+/// Two publishers and a taker share a connection. An item stays in its
+/// slot while the owner reads it, even when the other publisher can admit.
+pub(super) fn slot_reuse(id: u32) -> u8 {
+    if id == 0 {
+        let mut cx = Cx::root(0, 4096);
+        let cap = if param(1) == 0 { 2 } else { 23 };
+        cx.ev(format!("I connection capacity {cap}"));
+        let (inbox, client) = cx.u.conn_new(cap, 8, 64).unwrap();
+        cx.obs("conn_new", "");
+        OTHER_CLIENT.put(client.clone_client());
+        CLIENT.put(client);
+        FLAG[0].store(true, Ordering::SeqCst);
+        wake_id(1);
+        wake_id(2);
+        let mut next = [1, ITEMS + 1];
+        loop {
+            match cx.recv(&inbox) {
+                Received::Ok(v) => {
+                    assert!((1..=2 * ITEMS).contains(&v.tag), "slot lost its value");
+                    let sender = ((v.tag - 1) / ITEMS) as usize;
+                    assert_eq!(v.tag, next[sender], "slot reuse changed a sender's item");
+                    next[sender] += 1;
+                    cx.drop_value(v);
+                }
+                Received::Empty => {
+                    cx.wait();
+                }
+                Received::Closed => break,
+                Received::Capacity(c) => panic!("receive refused: {c:?}"),
+            }
+        }
+        assert_eq!(next, [ITEMS + 1, 2 * ITEMS + 1], "slot reuse lost an item");
+        retire(&mut cx, &inbox);
+        served(0, "both streams received in order");
+    } else {
+        wait_flag(0);
+        let client = if id == 1 {
+            CLIENT.take()
+        } else {
+            OTHER_CLIENT.take()
+        };
+        let mut cx = Cx::root(id as usize, 4096);
+        for k in 1..=ITEMS {
+            compute_until(now() + draw(0, param(0)));
+            let mut v = cx.u.alloc_block(16).unwrap();
+            v.tag = (id as u64 - 1) * ITEMS + k;
+            match cx.send(&client, v, true) {
+                Sent::Accepted => {}
+                Sent::Waiting(send) => assert_eq!(cx.wait(), Took::Accepted(send)),
+                other => panic!("send {k}: {other:?}"),
+            }
+        }
+        cx.u.drop_client(client);
+        cx.obs("drop_client", "");
+        assert_eq!(cx.used(), 0, "the sender's root kept a charge");
+        served(id as usize, "all items sent");
     }
     0
 }

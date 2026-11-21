@@ -776,6 +776,30 @@ impl Glue<'_, '_, '_> {
         let status = self.direct(f, &[self.ctx, base, site]);
         self.merge(status);
         if resource {
+            let paths = hirsel_core_layout::foreign_cleanup(
+                &self.tables.input.types,
+                self.tables.layouts,
+                TypeRef(index as u32),
+            );
+            if !paths.is_empty() {
+                let count = self.icon(paths.len() as u64);
+                let mut data = DataDescription::new();
+                data.define(paths.into_iter().flat_map(u64::to_le_bytes).collect());
+                data.set_align(8);
+                let id = self
+                    .object
+                    .declare_anonymous_data(false, false)
+                    .map_err(error)?;
+                self.object.define_data(id, &data).map_err(error)?;
+                let global = self.object.declare_data_in_func(id, self.b.func);
+                let paths = self.b.ins().symbol_value(types::I64, global);
+                self.call(
+                    "hirsel_core_foreign_cleanup",
+                    &[P, P, P, U],
+                    &[],
+                    &[self.ctx, base, paths, count],
+                )?;
+            }
             self.call("hirsel_core_finalizer_end", &[P, P], &[], &[self.ctx, base])?;
         }
         Ok(())

@@ -19,6 +19,7 @@ pub mod charge;
 mod continuation;
 pub mod event;
 pub mod flow;
+mod foreign;
 pub mod isa;
 pub mod map_hash;
 mod recipe;
@@ -27,6 +28,7 @@ pub mod source_positions;
 mod target;
 
 pub use continuation::{Frames, Point, frames, spare_words};
+pub use foreign::{foreign_cleanup, foreign_kind, next_foreign_handle};
 pub use target::Target;
 
 /// Reserve a shape before filling its references, using the caller's type identity.

@@ -151,7 +151,8 @@ impl<'a> Abi<'a> {
                     && matches!(&shape.body, Body::Variant(cases) if matches!(cases.as_slice(),
                         [none, some] if none.name == "None" && none.fields.is_empty()
                             && some.name == "Some"
-                            && matches!(some.fields.as_slice(), [field] if field.ty == FieldTy::Scalar(Scalar::U64))))
+                            && matches!(some.fields.as_slice(), [field] if matches!(field.ty,
+                                FieldTy::Inline(row) if hirsel_core_layout::foreign_kind(&module.types[row.index()]) == Some(kind)))))
             }),
         }
     }

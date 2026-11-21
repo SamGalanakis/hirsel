@@ -11,6 +11,6 @@
 // expect: compared LANG-9 at 15:43 | x: | positional
 type P { x: u64, y: u64 }
 fn order(a: u64) -> P { P(x: a, z: a) }
-fn bare(a: u64) -> P { P(a, a) }
+fn bare(a: u64) -> P { P(a + 1, a) }
 fn labelled(a: u64) -> Option[u64] { Some(x: a) }
 fn wrong(a: u64) -> Option[u64] { Ok(a) }

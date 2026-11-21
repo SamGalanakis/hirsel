@@ -669,7 +669,7 @@ pub type HttpBinding: send {
   op: String, method: Method, path: String, entry: Bytes, fields: List[FieldSource], mode: Mode,
   ok_status: u16, error_status: u16, body_max: u64, arg_max: u64, deadline_ms: u64, steps: u64
 }
-runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
+pub fn bind[G, H](mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 ```
 
 **Finalization.**

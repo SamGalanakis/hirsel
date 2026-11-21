@@ -1,0 +1,218 @@
+// Appended by the S2 driver. The reference uses the original read and admission order.
+fn original_prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
+    let mut out: Bytes = capacity(list.with_capacity(n))?
+    while list.len(out) < n {
+        let mut chunk: Bytes = capacity(list.with_capacity(n - list.len(out)))?
+        if disk_io(host.read(mut file, mut chunk))? == 0 {
+            return Error(disk_fault("PREPARED", list.len(out), Truncated))
+        }
+        capacity(list.append(mut out, chunk))?
+    }
+    Ok(take out)
+}
+
+fn original_prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
+    let raw = scratch_result(original_prepared_read(mut input.file, 16u64))?
+    let n = read_le(raw, 4u64, 4u64)
+    if read_le(raw, 0u64, 2u64) != int.widen(kind) || read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
+        return Error(ImportMalformed)
+    }
+    let encoded = scratch_result(original_prepared_read(mut input.file, n))?
+    let check = deploy_result(capacity(disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded)))?
+    if check != read_le(raw, 8u64, 8u64) {
+        return Error(ImportMalformed)
+    }
+    std.sha256.add(mut input.digest, raw, 0u64, 16u64)
+    std.sha256.add(mut input.digest, encoded, 0u64, n)
+    input.offset += 16u64 + n
+    match std.codec.decode(codec, encoded) {
+        Error(c) => Error(Store(Full(c))),
+        Ok(Error(_)) => Error(ImportMalformed),
+        Ok(Ok(take value)) => Ok(take value),
+    }
+}
+
+fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let header = scratch_result(original_prepared_read(mut file, 72u64))?
+    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let mut digest = std.sha256.start()
+    std.sha256.add(mut digest, header, 0u64, 72u64)
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest)
+    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let meta = original_prepared_frame(mut input, 0x0081, metadata_codec)?
+    if list.len(meta.base.attempt) != 16 || meta.base.store_hi != head.context.store.hi || meta.base.store_lo != head.context.store.lo || meta.base.opened != head.context.seq || meta.base.branch != 0 || meta.base.next_table == 0 || meta.next_table < meta.base.next_table || list.len(meta.target.digest) != 32 || list.len(meta.target.release) != 32 || list.len(meta.target.describe) == 0 {
+        return Error(ImportMalformed)
+    }
+    // These fixtures contain only the header and metadata frame.
+    if meta.changes != 0 || meta.ranges != 0 {
+        return Error(ImportMalformed)
+    }
+    let delta: List[CatalogChange] = list.new()
+    let needed = deploy_result(changed_ranges(delta, meta.base.next_table, meta.next_table))?
+    if list.len(needed) != meta.ranges {
+        return Error(ImportMalformed)
+    }
+    let ranges: List[ValidatedRange] = list.new()
+    let mut extra: Bytes = deploy_result(capacity(list.with_capacity(1)))?
+    if scratch_result(disk_io(host.read(mut input.file, mut extra)))? != 0 {
+        return Error(ImportMalformed)
+    }
+    let PreparedInput(file: take done, digest: take hashed, ..) = take input
+    scratch_result(disk_io(host.close(take done)))?
+    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: std.sha256.finish(hashed), nodes: 0, charge: 0))
+}
+
+fn prepared_imports_match(a: ValidatedImport, b: ValidatedImport) -> bool {
+    let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let mut left: Bytes = list.new()
+    let mut right: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, a.meta, mut left))
+    result.unwrap(std.codec.encode(codec, b.meta, mut right))
+    left == right && a.digest == b.digest && a.nodes == b.nodes && a.charge == b.charge && list.len(a.delta) == 0 && list.len(b.delta) == 0 && list.len(a.ranges) == 0 && list.len(b.ranges) == 0
+}
+
+fn prepared_read_boundary_sweep(d: Dir) -> bool waits {
+    for limit in 120u64 .. 641u64 {
+        let before = result.unwrap(bound bytes limit {
+            original_validate_prepared(d)
+        })
+        let after = result.unwrap(bound bytes limit {
+            validate_prepared(d)
+        })
+        let agrees = match before {
+            Error(Scratch(Full(a))) => match after {
+                Ok(_) => true,
+                Error(Scratch(Full(b))) => a.requested == b.requested && a.available == b.available,
+                _ => false,
+            },
+            Error(Store(Full(a))) => match after {
+                Ok(_) => true,
+                Error(Store(Full(b))) => a.requested == b.requested && a.available == b.available,
+                _ => false,
+            },
+            Error(Scratch(Corrupt(a))) => match after {
+                Error(Scratch(Corrupt(b))) => {
+                    a.file == b.file && a.offset == b.offset && match (a.why, b.why) {
+                        (Truncated, Truncated) => true,
+                        _ => false
+                    }
+                },
+                _ => false,
+            },
+            Error(ImportMalformed) => match after {
+                Error(ImportMalformed) => true,
+                _ => false,
+            },
+            Ok(a) => match after {
+                Ok(b) => prepared_imports_match(a, b),
+                _ => false,
+            },
+            _ => false,
+        }
+        if !agrees {
+            return false
+        }
+    }
+    true
+}
+
+pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
+    let empty: Bytes = list.new()
+    // A zero-byte read spends only the 216-byte temporary charge.
+    result.unwrap(std.file.write(d, "EXPORT", empty))
+    let empty_export = result.unwrap(bound bytes 216 {
+        open_export(d, c, empty, defaults())
+    })
+    match take empty_export {
+        Error(Store(Corrupt(fault))) => if fault.offset != 0 {
+            return false
+        },
+        _ => return false,
+    }
+    let mut fixture: Bytes = result.unwrap(list.with_capacity(217))
+    result.unwrap(list.fill(mut fixture, 217, 0u8))
+    result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 1)))
+    let short_export = result.unwrap(bound bytes 216 {
+        open_export(d, c, empty, defaults())
+    })
+    match take short_export {
+        Error(Scratch(Full(admission))) => if admission.requested != 8 || admission.available != 0 {
+            return false
+        },
+        _ => return false,
+    }
+    result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 216)))
+    match open_export(d, c, empty, defaults()) {
+        Error(Store(Corrupt(_))) => {},
+        _ => return false,
+    }
+    result.unwrap(std.file.write(d, "EXPORT", fixture))
+    match open_export(d, c, empty, defaults()) {
+        Error(Scratch(Corrupt(fault))) => {
+            if fault.offset != 216 {
+                return false
+            }
+            if let Malformed = fault.why {} else {
+                return false
+            }
+        },
+        _ => return false,
+    }
+    result.unwrap(std.file.write(d, "PREPARED", list.slice(fixture, 0, 1)))
+    if !prepared_read_boundary_sweep(d) {
+        return false
+    }
+    let short = result.unwrap(bound bytes 152 {
+        validate_prepared(d)
+    })
+    match take short {
+        Error(Scratch(Corrupt(fault))) => {
+            if fault.offset != 1 || fault.file != "PREPARED" {
+                return false
+            }
+            if let Truncated = fault.why {} else {
+                return false
+            }
+        },
+        _ => return false,
+    }
+    let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 6, seq: 3)
+    let mut prepared_file = result.unwrap(host.open(d, "PREPARED", Write))
+    let header = result.unwrap(disk_header_bytes(ctx, 0))
+    result.unwrap(host.write(mut prepared_file, header))
+    let meta = PreparedMeta(base: ExportStamp(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: PreparedTarget(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, checkpoint_task_bytes: 1048576), next_table: 1, changes: 0, ranges: 0)
+    let mut at = 72u64
+    let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    result.unwrap(write_prepared_frame(mut prepared_file, ctx, mut at, 0x0081, codec, meta))
+    result.unwrap(host.close(take prepared_file))
+    if !prepared_read_boundary_sweep(d) {
+        return false
+    }
+    let imported = match validate_prepared(d) {
+        Ok(take checked) => take checked,
+        _ => return false,
+    }
+    if imported.meta.base.attempt != meta.base.attempt || imported.meta.target.describe != meta.target.describe {
+        return false
+    }
+    let mut with_extra = result.unwrap(host.open(d, "PREPARED", Append))
+    result.unwrap(host.write(mut with_extra, list.slice(fixture, 0, 1)))
+    result.unwrap(host.close(take with_extra))
+    if !prepared_read_boundary_sweep(d) {
+        return false
+    }
+    match validate_prepared(d) {
+        Error(ImportMalformed) => true,
+        _ => false,
+    }
+}
+
+@test
+fn disk_test_import_read_boundaries(d: Dir, c: Clock) -> Result[(), ()] waits {
+    if disk_law_import_read_boundaries(disk_test_directory(d), c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

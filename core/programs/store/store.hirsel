@@ -9150,11 +9150,18 @@ type PreparedInput { file: HostFile, ctx: DiskContext, offset: u64, digest: std.
 fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
     let mut out: Bytes = capacity(list.with_capacity(n))?
     while list.len(out) < n {
-        let mut chunk: Bytes = capacity(list.with_capacity(n - list.len(out)))?
-        if disk_io(host.read(mut file, mut chunk))? == 0 {
+        let room = n - list.len(out)
+        // Keep the old temporary's admission before issuing the read.
+        let charge = ((room + 7u64) / 8u64) * 8u64
+        capacity(bound bytes charge {})?
+        if disk_io(host.read(mut file, mut out))? == 0 {
+            // The old temporary was still charged when the eight-byte name
+            // was cloned. Check both charges before cloning in the caller.
+            if let Error(c) = bound bytes (charge + 8u64) {} {
+                return Error(Full(Capacity(requested: 8, available: c.available - charge)))
+            }
             return Error(disk_fault("PREPARED", list.len(out), Truncated))
         }
-        capacity(list.append(mut out, chunk))?
     }
     Ok(take out)
 }

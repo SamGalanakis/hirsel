@@ -16,7 +16,7 @@ from store_crash_tests import run_crashes
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
 
-LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
+LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact', 'import_read_boundaries',
         'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
 NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS if name != 'pack_bound'}
 
@@ -48,8 +48,16 @@ def main():
     rows = []
     with tempfile.TemporaryDirectory(prefix='hirsel-store-disk-laws-') as tmp, contextlib.ExitStack() as resources:
         work = Path(tmp)
+        corpus = inputs(args.root.resolve())
+        crash_manifest = work / 'crash-inputs.json'
+        crash_manifest.write_text(json.dumps(corpus))
+        library = corpus['packages'][-1]['sources'][0]
+        law_source = work / 'store-with-import-read-laws.hirsel'
+        law_source.write_text(Path(library['file']).read_text() + '\n' +
+                              (args.root / 'core/programs/store/import_read_laws.hirsel').read_text())
+        library['file'] = str(law_source)
         manifest = work / 'inputs.json'
-        manifest.write_text(json.dumps(inputs(args.root.resolve())))
+        manifest.write_text(json.dumps(corpus))
         evaluator = resources.enter_context(Evaluator(args.evaluator.resolve())) if args.evaluator else None
         for engine in args.backend or ['evaluator', 'cranelift', 'llvm', 'llvm-release']:
             if engine == 'evaluator':
@@ -107,7 +115,7 @@ def main():
                 print(f'{engine} pack_bound: {"PASS" if good else "FAIL"}', flush=True)
                 try:
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
-                                       args.cc, manifest, work, engine,
+                                       args.cc, crash_manifest, work, engine,
                                        count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals'))
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:

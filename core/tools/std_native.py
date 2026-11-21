@@ -509,7 +509,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None, schedule_runtime=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None, schedule_runtime=None, record_runtime=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -647,7 +647,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
-                           '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
+                           '--runtime', str(record_runtime or runtime) if https else str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
                            '-o', str(scratch / 'programs')]
                 if https:
                     tape = scratch / 'https.tape'
@@ -795,6 +795,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
+    parser.add_argument('--record-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_RECORD_ARCHIVE'))
     parser.add_argument('--model-runtime', type=Path)
     parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
@@ -823,7 +824,8 @@ def main():
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
                typescript=args.typescript, node=args.node,
                model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
-               schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
+               schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
+               record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
     ran = {(row['test'], row['file']) for row in rows if row['ran']}
     empty = [selector for selector in args.filter
              if not any(matches_filter(root, case, selector) and

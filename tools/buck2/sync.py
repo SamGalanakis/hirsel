@@ -691,9 +691,12 @@ def first_party(meta: dict) -> str:
                           "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
                           "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"]
         tls = ' + glob(["crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"])' if phase == "std" else ""
+        env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"}
+        if phase == "std":
+            env["HIRSEL_CORE_RT_RECORD_ARCHIVE"] = "//:hirsel-core-rt-record-archives[aarch64]"
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/aarch64.py",
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
-            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"},
+            files_env=env,
             data=Raw('glob(["core/core/**", "core/std/**", "core/front/runtime/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/aarch64.py", "core/tools/front_native.py", "core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]' + tls)))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
@@ -874,7 +877,8 @@ def first_party(meta: dict) -> str:
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
                                           "node": "//tools/buck2:sdk-node[bin/node]", "model-runtime.a": "//:core-native-runtime-fixture-pic",
                                           "schedule-runtime.a": "//:core-scripted-runtime-pic"},
-                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                                           "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c", "core/tools/case_progress.py", "crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel", "core/programs/store/triggers.hirsel"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py",
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py", "core/tools/case_progress.py"]))

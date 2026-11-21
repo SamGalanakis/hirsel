@@ -133,55 +133,6 @@ pub(crate) struct Manifest {
     pub(crate) workspace: Option<Workspace>,
 }
 
-// Keep native admission on the audited fixture archives until their slice gates pass.
-pub(crate) const STAGED_FOREIGN: [(&str, &str, &str, &str); 2] = [
-    (
-        "ffi_laws",
-        "hfl_",
-        "libffi_laws.a",
-        "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6",
-    ),
-    (
-        "sqlite",
-        "hsq_",
-        "libhirsel_sqlite.a",
-        "cd8e4d635e16291d6737ba42d831dfff06db88da9aefcc25d0cdfa4f63a484a5",
-    ),
-];
-
-fn staged_foreign(package: &Package, path: &Path) -> bool {
-    let Ok(path) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    if package.id.major != 1 {
-        return false;
-    }
-    if package.id.name == "ffi_laws"
-        && ["headers", "types"]
-            .iter()
-            .any(|case| path.ends_with(format!("core/front/cases/ffi/{case}/ffi_laws/hirsel.toml")))
-    {
-        return package
-            .foreign
-            .values()
-            .all(|module| module.rows.is_empty());
-    }
-    STAGED_FOREIGN.iter().any(|&(name, symbols, file, pin)| {
-        package.id.name == name
-            && path.ends_with(format!("core/programs/{name}/hirsel.toml"))
-            && package.foreign.len() == 1
-            && package.foreign.iter().all(|(module, foreign)| {
-                module.as_slice() == ["native"]
-                    && foreign.symbols == symbols
-                    && foreign.rows.iter().all(|(target, archive)| {
-                        target == "x86_64-unknown-linux-gnu"
-                            && archive.file == file
-                            && crate::package_content::hex(&archive.pin) == pin
-                    })
-            })
-    })
-}
-
 impl Manifest {
     pub(crate) fn parse(bytes: &[u8], path: &Path) -> Result<Self, String> {
         Self::classify(bytes, path).1
@@ -201,16 +152,7 @@ impl Manifest {
             Err(error) => return (false, Err(error)),
         };
         let workspace = table.contains_key("workspace");
-        let result = Self::validate_table(text, &table, refuse).and_then(|manifest| {
-            if !cfg!(test)
-                && let Some(package) = &manifest.package
-                && !package.foreign.is_empty()
-                && !staged_foreign(package, path)
-            {
-                return Err(refuse("foreign modules are not enabled yet".into()));
-            }
-            Ok(manifest)
-        });
+        let result = Self::validate_table(text, &table, refuse);
         (workspace, result)
     }
 

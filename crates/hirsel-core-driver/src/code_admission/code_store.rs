@@ -301,7 +301,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
         archive: Some(archive),
     });
     let admit = |fixture: &Fixture, archive_bytes: &[u8]| {
-        failure(harness.run(limits(), &NativeSemantics, |peer| {
+        harness.run(limits(), &NativeSemantics, |peer| {
             for key in start(peer, fixture) {
                 let bytes = if key.kind == ObjectKind::ForeignArchive {
                     archive_bytes
@@ -311,21 +311,22 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
                 send_object(peer, key, bytes);
             }
             peer.write_all(&[0]).unwrap();
-        }))
+        })
     };
     assert!(
-        matches!(admit(&fixture, b"abc"), AdmissionError::Missing(hash) if hash == archive.hash)
+        matches!(admit(&fixture, b"abc"), Err(AdmissionError::Missing(hash)) if hash == archive.hash)
     );
 
     fixture.recipe.foreign_archives.push(archive);
-    assert!(matches!(admit(&fixture, b"abd"), AdmissionError::Hash(hash) if hash == archive.hash));
-    assert!(matches!(
-        admit(&fixture, b"abc"),
-        AdmissionError::Unsupported("foreign modules are not enabled yet")
-    ));
+    assert!(
+        matches!(admit(&fixture, b"abd"), Err(AdmissionError::Hash(hash)) if hash == archive.hash)
+    );
+    assert!(admit(&fixture, b"abc").is_ok());
 
     fixture.recipe.launch.grants.clear();
-    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == archive.hash));
+    assert!(
+        matches!(admit(&fixture, b"abc"), Err(AdmissionError::Extra(hash)) if hash == archive.hash)
+    );
 
     // The address binds the full table even when the selected archive is unchanged.
     let grant = GrantBinding {
@@ -358,7 +359,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
 
     fixture.recipe.launch.grants.push(grant.clone());
     fixture.recipe.foreign_modules.push(leaf.clone());
-    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == address));
+    assert!(matches!(admit(&fixture, b"abc"), Err(AdmissionError::Extra(hash)) if hash == address));
 
     let mut fixture = Fixture::new("entry");
     fixture.recipe.launch.grants.push(grant);
@@ -367,7 +368,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
     let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
     fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
-    let error = admit(&fixture, b"abc").to_string();
+    let error = failure(admit(&fixture, b"abc")).to_string();
     assert!(error.ends_with("is not an indexed ar archive"), "{error}");
 
     // An exact FFI-9 address and matching identity cannot substitute for the
@@ -386,7 +387,9 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     wrong_abi.recipe.address = wrong_abi.group(&[(body, vec![Binding::External(address)])], 0);
     assert!(matches!(
         admit(&wrong_abi, b"abc"),
-        AdmissionError::Binding("slot signature differs from its bound foreign header")
+        Err(AdmissionError::Binding(
+            "slot signature differs from its bound foreign header"
+        ))
     ));
 
     fixture.recipe.foreign_modules[0].targets.insert(
@@ -399,7 +402,9 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
             },
         },
     );
-    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Missing(hash) if hash == address));
+    assert!(
+        matches!(admit(&fixture, b"abc"), Err(AdmissionError::Missing(hash)) if hash == address)
+    );
 }
 
 // DESIGN §6.2 M1: the attested hash covers the exact bytes in every object kind.

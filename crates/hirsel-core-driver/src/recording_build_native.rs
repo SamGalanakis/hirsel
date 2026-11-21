@@ -66,7 +66,9 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
     let (code, _, error) = run("replay", &["--tape", "missing.tape"]);
     assert_eq!(code, Some(2), "{error}");
     let expected_replay = format!("replay: refused: {expected_main}");
-    assert_eq!(error.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock")).collect::<Vec<_>>(), [expected_replay], "{error}");
+    let mut lines = error.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock"));
+    assert!(lines.next().unwrap().starts_with("main.hirsel:5:"), "{error}");
+    assert_eq!(lines.collect::<Vec<_>>(), [expected_replay], "{error}");
     let (code, _, error) = run("build", &["--recording"]);
     assert_eq!(code, Some(2), "{error}");
     assert!(error.lines().any(|line| line == format!("refused: {expected_main}")), "{error}");

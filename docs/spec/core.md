@@ -38,7 +38,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
 | `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](#provide) |
-| `foreign` | unbuilt: the type `Ptr` | FFI-4 to FFI-7 |
+| `foreign` | the raw handle type `Ptr` | FFI-4 to FFI-7 |
 | `args`, `env`, `host`, `stdin`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [env](../../core/core/env.hirsel), [host](../../core/core/host.hirsel), [stdin](../../core/core/stdin.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5, CAP-7 |
 
 A library module may extend a core module by name (LANG-7).
@@ -101,8 +101,8 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Socket`, `ReadHalf`, `WriteHalf`, `Listener` | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
 | `Secret` | plain | `shareable`, `send` | 8 | capability |
-| `Foreign[I]` (unbuilt, [FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
-| `foreign.Ptr[K]` (unbuilt, [FFI-6](foreign.md#ffi-6-handles)) | plain | `send` | 8 | a handle-table ordinal of kind `K`; holds a raw handle (OWN-2) |
+| `Foreign[I]` ([FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
+| `foreign.Ptr[K]` ([FFI-6](foreign.md#ffi-6-handles)) | plain | `send` | 8 | a handle-table ordinal of kind `K`; holds a raw handle (OWN-2) |
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |

@@ -248,22 +248,24 @@ pub(crate) fn port_waker_drop(w: *mut ()) {
     drop(unsafe { Arc::from_raw(w as *const Readies) });
 }
 
-type Pending = Option<(Box<UnitCtx>, Arc<HelperShared>)>;
+/// A helper about to start its run, and where the run's unit is handed back.
+type Pending = Option<(Box<UnitCtx>, Arc<HelperShared>, *mut *mut LangUnit)>;
 std::thread_local! {
-    /// The helper unit this thread is about to run, for its `run_root`.
+    /// The helper unit this thread is about to run, for its `run_root`. Set
+    /// and taken on one thread before the run's first switch, so a pool unit
+    /// that later resumes on another worker never reads it again.
     static PENDING: std::cell::RefCell<Pending> = const { std::cell::RefCell::new(None) };
-    /// The helper unit that run made, which this thread owns.
-    static ADOPTED: std::cell::Cell<*mut LangUnit> = const { std::cell::Cell::new(ptr::null_mut()) };
 }
 
 /// For `run_root`: the helper unit this thread is starting, bound to the
-/// run's scheduler, or null (borrowed: the helper's thread owns it).
+/// run's scheduler, or null (borrowed: the helper's body owns it).
 pub(crate) fn adopt(readies: &Arc<Readies>) -> *mut LangUnit {
-    let Some((ctx, shared)) = PENDING.with(|p| p.borrow_mut().take()) else {
+    let Some((ctx, shared, out)) = PENDING.with(|p| p.borrow_mut().take()) else {
         return ptr::null_mut();
     };
     let u = Box::into_raw(LangUnit::new(ctx, readies, Some(shared)));
-    ADOPTED.set(u);
+    // SAFETY: `out` is on the helper body's own stack, live across its run.
+    unsafe { *out = u };
     u
 }
 
@@ -818,14 +820,20 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             n,
             shared,
         ));
-        std::thread::Builder::new()
-            .name("hirsel-unit".into())
-            .spawn(move || {
-                let job = job;
-                let (hctx, data, xb, xo, rb, ro, run, body, layout, n, shared) = job.0;
-                helper_main(hctx, data, xb, xo, rb, ro, run, body, layout, n, shared);
-            })
-            .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+        let start = move || {
+            let job = job;
+            let (hctx, data, xb, xo, rb, ro, run, body, layout, n, shared) = job.0;
+            helper_main(hctx, data, xb, xo, rb, ro, run, body, layout, n, shared);
+        };
+        // On the pool the helper is a unit beside its owner; without one it
+        // has a thread of its own.
+        let start: crate::units::Job = Box::new(start);
+        if let Err(start) = crate::units::spawn_job(start) {
+            std::thread::Builder::new()
+                .name("hirsel-unit".into())
+                .spawn(start)
+                .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+        }
         SpawnUnit {
             task: (h as usize | 1) as *mut tasks::Task,
             requested: 0,
@@ -867,7 +875,8 @@ fn helper_main(
         }
         unpack(&mut context, payer, &data, input.as_mut_ptr(), xb, &xo);
         drop(data);
-        PENDING.with(|p| *p.borrow_mut() = Some((hctx, shared)));
+        let mut adopted: *mut LangUnit = ptr::null_mut();
+        PENDING.with(|p| *p.borrow_mut() = Some((hctx, shared, &raw mut adopted)));
         let mut result = vec![0u8; layout.result.bytes.max(rb as usize)];
         let provider = if run.is_null() {
             tasks::SchedulerProvider::default()
@@ -883,7 +892,7 @@ fn helper_main(
             layout.result.bytes,
             provider,
         );
-        let lu = ADOPTED.replace(ptr::null_mut());
+        let lu = adopted;
         if lu.is_null() {
             crate::process::stop(b"UnitLedger");
         }
@@ -1064,6 +1073,10 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
         0
     }
 }
+
+#[doc(hidden)]
+#[path = "units_lang_bench.rs"]
+pub mod bench;
 
 #[cfg(test)]
 #[path = "units_lang_tests.rs"]

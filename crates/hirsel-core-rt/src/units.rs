@@ -1103,6 +1103,7 @@ const HANDOFF_PORT: u16 = 7;
 const ROLE_INITIAL: u32 = 0;
 const ROLE_SESSION: u32 = 1;
 const ROLE_CHILD: u32 = 2;
+const ROLE_HELPER: u32 = 3;
 const WAKE_TAG: u64 = u64::MAX;
 const FRONT_TAG: u64 = u64::MAX - 1;
 
@@ -1212,7 +1213,13 @@ pub(crate) struct Unit {
     _views: Vec<crate::process::View>,
     _extra: Vec<String>,
     config: crate::entry::OsConfig,
+    /// A helper unit's body (CONC-15), run in place of main.
+    job: Cell<Option<Job>>,
+    /// A helper unit's record is reused by a later helper once it ends.
+    helper: bool,
 }
+/// A helper unit's body.
+pub(crate) type Job = Box<dyn FnOnce() + Send>;
 // SAFETY: the Cells are touched only by the one worker inside the unit;
 // entry and exit are ordered by the state word and the queue locks.
 unsafe impl Sync for Unit {}
@@ -1378,6 +1385,54 @@ fn admit(p: &Pool) -> bool {
 /// Make unit `id`, admitted already, and queue it. The record is made here;
 /// its stack is taken and its program starts on its first run.
 fn create_unit(id: u32, role: u32) -> &'static Unit {
+    create_unit_with(id, role, None)
+}
+
+/// Helper units take ids from here up, recycled with their records.
+const HELPER_BASE: u32 = 0x8000;
+static HELPER_NEXT: AtomicU32 = AtomicU32::new(HELPER_BASE);
+/// Ended helper units, whose records and ids the next helpers reuse.
+static SPARE_HELPERS: std::sync::Mutex<Vec<UP>> = std::sync::Mutex::new(Vec::new());
+
+/// Run `job` as a new unit on the pool, beside the calling unit (CONC-15).
+/// Hands `job` back when no pool runs: the caller places the helper itself.
+pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
+    if !untied() || cur().is_null() {
+        return Err(job);
+    }
+    let p = pool();
+    // The running spawner is live, so the pool cannot have decided to stop.
+    if !admit(p) {
+        crate::process::stop(b"UnitAfterStop");
+    }
+    let spare = SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    if let Some(up) = spare {
+        // SAFETY: an ended helper's leaked record; no worker is inside it and
+        // its stack was returned. A late wake of its old run is a spurious
+        // turn of the new one.
+        let u = unsafe { &*up.0 };
+        u.after.set(After::Run);
+        u.children.set(0);
+        u.status.store(0, Ordering::Relaxed);
+        u.stop_fd.set(2);
+        u.first_park.set(false);
+        u.timer_at.store(u64::MAX, Ordering::Relaxed);
+        u.alone_depth.set(0);
+        u.job.set(Some(job));
+        u.state.store(QUEUED, Ordering::SeqCst);
+        bump(S_CREATED);
+        enqueue(p, u);
+        return Ok(());
+    }
+    let id = HELPER_NEXT.fetch_add(1, Ordering::Relaxed);
+    if id >= SPAWN {
+        crate::process::stop(b"UnitIdSpace");
+    }
+    create_unit_with(id, ROLE_HELPER, Some(job));
+    Ok(())
+}
+
+fn create_unit_with(id: u32, role: u32, job: Option<Job>) -> &'static Unit {
     let t0 = now();
     let p = pool();
     let base = &BASE.get().unwrap().0;
@@ -1420,6 +1475,8 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         _views: views,
         _extra: extra,
         config,
+        helper: job.is_some(),
+        job: Cell::new(job),
     }));
     if !TABLE[id as usize]
         .compare_exchange(std::ptr::null_mut(), (u as *const Unit).cast_mut(), Ordering::AcqRel, Ordering::Acquire)
@@ -1475,10 +1532,19 @@ unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
     // SAFETY: the record outlives its stack; see create_unit.
     unsafe {
         let u = &*(a as *const Unit);
-        let run = RUN.get().unwrap().0;
-        let status = run(&u.config);
-        #[cfg(feature = "record")]
-        finish_unit(u.id);
+        let status = match u.job.take() {
+            Some(job) => {
+                job();
+                0
+            }
+            None => {
+                let run = RUN.get().unwrap().0;
+                let status = run(&u.config);
+                #[cfg(feature = "record")]
+                finish_unit(u.id);
+                status
+            }
+        };
         u.status.store(status, Ordering::Relaxed);
         u.after.set(After::Done);
         hirsel_stack::switch(u.sp.get(), **u.host.get());
@@ -1995,6 +2061,10 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
+                *u.sp.get() = std::ptr::null_mut();
+                if u.helper {
+                    SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).push(up);
+                }
                 if p.live.fetch_sub(1, Ordering::SeqCst) == 1 {
                     p.stop.store(true, Ordering::SeqCst);
                     let parked = std::mem::take(&mut *p.idle.lock().unwrap());

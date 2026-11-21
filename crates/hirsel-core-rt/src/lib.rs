@@ -62,6 +62,7 @@ pub mod units_lang;
 #[cfg(not(test))]
 #[doc(hidden)]
 pub use units::ledger::bench::conn_pingpong as units_conn_pingpong;
+pub use units_lang::bench::pingpong as units_lang_pingpong;
 mod xxh3;
 
 mod frame_list;

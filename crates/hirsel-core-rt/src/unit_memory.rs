@@ -204,6 +204,7 @@ impl Memory {
             let _ = send.send(map());
         }));
         self.ready.notify_one();
+        let _blocking = super::blocking();
         receive.recv().unwrap()
     }
 
@@ -231,6 +232,7 @@ impl Memory {
     fn release(&self, bytes: usize, release: Reclaim) {
         let mut work = self.work.lock().unwrap();
         while work.releases.len() == RELEASE_SLOTS {
+            let _blocking = super::blocking();
             work = self.release_room.wait(work).unwrap();
         }
         work.releases.push_back((bytes, release));

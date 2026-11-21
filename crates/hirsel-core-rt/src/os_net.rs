@@ -754,16 +754,24 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
         let s = &mut *tls.state.cast::<HandshakeState>();
         if first {
             let roots = s.roots.take().unwrap_or_else(|| {
+                if let Some(roots) = streams.system.get() {
+                    return roots.clone();
+                }
+                let _blocking = crate::units::blocking();
                 streams
                     .system
                     .get_or_init(crate::os_tls::system_roots)
                     .clone()
             });
-            match crate::os_tls::Stream::new(
-                s.name.take().unwrap(),
-                roots,
-                std::mem::take(&mut s.alpn),
-            ) {
+            let stream = {
+                let _blocking = crate::units::blocking();
+                crate::os_tls::Stream::new(
+                    s.name.take().unwrap(),
+                    roots,
+                    std::mem::take(&mut s.alpn),
+                )
+            };
+            match stream {
                 Ok(stream) => s.stream = Some(stream),
                 Err(outcome) => return tls_finish(tls, key, outcome),
             }

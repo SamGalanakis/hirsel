@@ -42,6 +42,7 @@ pub(crate) struct StopSignals {
 }
 impl StopSignals {
     fn install() -> io::Result<Self> {
+        let _blocking = crate::units::blocking();
         let mut active = ACTIVE.lock().unwrap();
         if active.is_none() {
             *active = Some(Relay::install()?);
@@ -72,6 +73,7 @@ impl Drop for StopSignals {
 }
 
 fn release() {
+    let _blocking = crate::units::blocking();
     let mut active = ACTIVE.lock().unwrap();
     let relay = active.as_mut().unwrap();
     relay.users -= 1;

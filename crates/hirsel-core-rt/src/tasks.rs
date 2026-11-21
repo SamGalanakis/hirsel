@@ -3232,6 +3232,16 @@ unsafe fn poll_turn(task: *mut Task) {
             }
             return;
         }
+        if crate::units::lost_slot() {
+            // This poll can move the unit without changing the running task or
+            // taking any of the unit's inputs. The old thread keeps its host
+            // and callback frames until they have unwound to a safe point.
+            CURRENT.set(ptr::null_mut());
+            crate::fiber::guard((0, 0));
+            crate::limit::preserve_binding(crate::units::maybe_yield);
+            CURRENT.set(task);
+            crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
+        }
         if !(*run).head.is_null() || !(*run).deferred.is_null() {
             (*task).state = State::Ready;
             (*task).ready = ptr::null_mut();

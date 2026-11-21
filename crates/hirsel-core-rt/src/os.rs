@@ -90,6 +90,7 @@ impl OsProvider {
     /// Only run configuration can acquire a root from an ambient host path.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn grant(&mut self, path: &Path) -> io::Result<u64> {
+        let _blocking = crate::units::blocking();
         let file = std::fs::File::open(path)?;
         if !file.metadata()?.is_dir() {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
@@ -101,6 +102,7 @@ impl OsProvider {
     /// Startup-only capability probe. The per-operation confined open is unchanged.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
+        let _blocking = crate::units::blocking();
         drop(beneath(
             self.directories[&handle].as_raw_fd(),
             b".",
@@ -560,11 +562,6 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     {
         return step;
     }
-    // Standard output, standard error and file operations may block this
-    // worker in the kernel; a sleep or a random read does not.
-    if unsafe { !matches!((*request).operation, SLEEP_UNTIL | RANDOM) } {
-        crate::units::before_blocking();
-    }
     let outcome = unsafe { crate::tasks::host_operation(state, request, issue_on_stack) };
     #[cfg(test)]
     probe::note(probe::ISSUE, request, probe::answer(&outcome));
@@ -668,7 +665,10 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
         STDERR => write_request(os.stderr.as_raw_fd(), request),
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL => Outcome::default(),
-        RANDOM => request_outcome(random(request)),
+        RANDOM => {
+            let _blocking = crate::units::blocking();
+            request_outcome(random(request))
+        }
         _ => {
             let issue_file = os.issue_file.unwrap();
             // SAFETY: the directory provider was installed before the run issued this request.
@@ -728,6 +728,9 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
 
 unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract.
+    let operation = unsafe { (*request).operation };
+    // WRITE is marked by write_all, which also serves standard streams.
+    let _blocking = (operation != WRITE).then(crate::units::blocking_file);
     request_outcome(unsafe { (&mut *state.cast::<OsProvider>()).execute_file(&mut *request) })
 }
 
@@ -782,6 +785,7 @@ fn syscall(rc: isize) -> io::Result<isize> {
     }
 }
 pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
+    let _blocking = crate::units::blocking_file();
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: live descriptor and remaining readable bytes.

@@ -347,7 +347,9 @@ struct Alternate {
 }
 impl Alternate {
     fn new() -> Self {
-        let stack = crate::units::memory().map_or_else(Stack::new, |memory| memory.map(Stack::new));
+        // A spare must be able to start while the memory thread is busy
+        // with the old worker's request.
+        let stack = Stack::new();
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();

@@ -292,6 +292,7 @@ impl OsProcess {
             let mut launch = launch_metadata(target, n_place, describe_mode);
             if preview_mode {
                 use std::io::Read;
+                let _blocking = crate::units::blocking();
                 let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
                 let mut old = Vec::new();
                 input

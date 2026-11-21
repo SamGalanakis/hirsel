@@ -277,6 +277,7 @@ pub(crate) unsafe fn submit(
     if let Err(errno) = started {
         return (done(errno), None);
     }
+    let _blocking = crate::units::blocking();
     // SAFETY: fd is the program's live descriptor for the request's handle.
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {

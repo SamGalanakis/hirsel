@@ -227,7 +227,8 @@ any object.
 The **release recipe** ([launch](launch.md#release-recipe-and-host-assembly)) gains two parts.
 The **foreign modules** part has one record, a **foreign leaf**, per foreign module that the
 entry's closure reaches, in strictly ascending order of the module's identity encoding. A
-leaf holds the module's identity encoding, its symbol prefix as a text, its whole archive
+leaf holds its module's definition path as a text, with the components escaped as in PROG-9,
+its symbol prefix as a text, its whole archive
 table, and its reached functions. The table is the number of rows and then each row in
 ascending order of target, as the target text, the 32-byte pin and the byte length as a
 number. The rows, without the count before them, are exactly the bytes FFI-9's archive-set
@@ -235,13 +236,16 @@ digest is taken over. The reached
 functions are their number and then each function, in strictly ascending order of identity
 encoding, as that encoding and its PROG-9 header text `S` as a text. So a reader with no
 source recomputes every foreign function's address from the leaf, and selects the row for
-the recipe's target from it. The **foreign archives** part lists the distinct pins of the
-rows the leaves select for the recipe's target, each as its SHA-256 and byte length, in
-strictly ascending order of hash. An archive's bytes are an object of the code store, named
+the recipe's target from it. The **foreign archives** part lists the distinct pins selected for
+the recipe's target by its leaves and by every entry `Foreign` binding, each as its SHA-256
+and byte length, in strictly ascending order of hash. A binding selects the pinned archive
+of its interface whether or not the entry reaches a call to it. Only reach places functions
+in leaves. An archive's bytes are an object of the code store, named
 by that SHA-256, and they are transferred, reserved, collected and reassembled as the
 recipe's other objects are. With these parts the recipe is version 2, and its root is
 `R = H("hirsel.release-recipe.v2", recipe)`. The version-1 domain is never reused for the new
-encoding. A program that reaches no foreign function has two empty parts, and it still uses
+encoding. A program that reaches no foreign function has an empty foreign modules part.
+Its foreign archives part holds the pins its entry grants select, if any, and it still uses
 version 2. Recipe admission walks the leaves as launch's admission steps 6 and 7 say. So
 `hirsel build --recipe R` links exactly the pinned bytes the addresses select, and two
 programs that differ only in an archive have different roots.
@@ -265,8 +269,10 @@ test configuration it is the grant string `"Foreign=sqlite@1/sqlite/Sqlite"`. A 
 `Foreign[I]` parameter has no grant naming `I` does not start, and it reports
 `not granted: Foreign[D]` ([PROG-3](programs.md#prog-3-entry)). A `Foreign` grant whose `D`
 names no interface of the program is refused before the run as an unknown grant. In the
-release recipe a grant binding of kind `Foreign` holds `D` as its one value, and the
-manifest's `grants` list shows it as the string `Foreign=D`.
+release recipe a grant binding of kind `Foreign` holds `D` as its one value, followed by
+the SHA-256 and byte length of its interface's archive for the recipe target. The pin
+is in the recipe's foreign archives part even when the entry reaches no call to that
+interface. The manifest's `grants` list shows the binding as the string `Foreign=D`.
 
 The grant is explicit at launch (FFI-1). A test configuration's `"Foreign=D"` string says
 which tests take it, and `hirsel test` gives it to them only when its own command line also

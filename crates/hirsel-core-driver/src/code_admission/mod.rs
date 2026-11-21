@@ -449,6 +449,11 @@ fn listed_objects(
     limits: &AdmissionLimits,
     budget: &mut DecodeBudget,
 ) -> Result<Listing, AdmissionError> {
+    if recipe.has_foreign() {
+        return Err(AdmissionError::Unsupported(
+            "foreign modules are not enabled yet",
+        ));
+    }
     let count = recipe
         .bodies
         .len()

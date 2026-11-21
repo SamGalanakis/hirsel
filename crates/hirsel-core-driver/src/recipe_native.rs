@@ -134,9 +134,9 @@ pub struct Publication {
     addresses: BTreeMap<Identity, ContentHash>,
 }
 
-const GRANT_NAMES: [&str; 12] = [
+const GRANT_NAMES: [&str; 13] = [
     "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-    "Args", "Secret",
+    "Args", "Secret", "Foreign",
 ];
 
 pub(super) fn kind(name: &str) -> Option<u8> {
@@ -227,6 +227,8 @@ impl CheckProduct {
             entry,
             groups,
             bodies,
+            foreign_modules: vec![],
+            foreign_archives: vec![],
             launch,
         };
         let root = store.put(ObjectKind::Recipe, &recipe.encode())?.hash;
@@ -284,6 +286,11 @@ fn bindings(decl: &EntryDecl, options: &NativeOptions) -> Result<Vec<GrantBindin
                 NativeStop::Entry(format!("unsupported provider parameter {}", param.ty))
             })?;
         let kind = GrantKind::from_tag(tag).expect("runtime grant kind");
+        if kind == GrantKind::Foreign {
+            return Err(NativeStop::Entry(
+                "foreign modules are not enabled yet".into(),
+            ));
+        }
         let index = next[usize::from(tag)];
         next[usize::from(tag)] += 1;
         let values = match kind {
@@ -316,6 +323,7 @@ fn bindings(decl: &EntryDecl, options: &NativeOptions) -> Result<Vec<GrantBindin
             ordinal: ordinal as u32,
             kind,
             values,
+            archive: None,
         });
     }
     if options.directories.len() > next[GrantKind::Dir as usize]
@@ -342,7 +350,7 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     let mut grants = Vec::new();
     for grant in &recipe.launch.grants {
         match grant.kind {
-            GrantKind::Dir | GrantKind::Net | GrantKind::Env => grants.extend(
+            GrantKind::Dir | GrantKind::Net | GrantKind::Env | GrantKind::Foreign => grants.extend(
                 grant
                     .values
                     .iter()
@@ -362,6 +370,11 @@ fn launch_options(
     names: &[String],
     options: &NativeOptions,
 ) -> Result<(NativeOptions, EntryDecl), NativeStop> {
+    if recipe.has_foreign() {
+        return Err(NativeStop::Entry(
+            "foreign modules are not enabled yet".into(),
+        ));
+    }
     let mut options = options.clone();
     options.target.clone_from(&recipe.launch.target);
     options.backend = match recipe.launch.backend {

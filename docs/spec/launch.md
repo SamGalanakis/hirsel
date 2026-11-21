@@ -198,16 +198,18 @@ version and these parts:
 - the **foreign modules** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
   one foreign leaf per reached foreign module, with its identity, symbol prefix, whole archive
   table and reached functions, in strictly ascending order of module identity;
-- the **foreign archives** (FFI-3): the distinct archives the leaves select for the recipe's
-  target, each its SHA-256 and byte length, in strictly ascending order of hash; an archive's
-  bytes are a code-store object named by that SHA-256;
+- the **foreign archives** (FFI-3): the distinct archives the leaves and Foreign bindings
+  select for the recipe's target, each its SHA-256 and byte length, in strictly ascending
+  order of hash. An archive's bytes are a code-store object named by that SHA-256;
 - the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
   `n_place`, and the **grant bindings**.
 
 The grant bindings follow `main`'s capability parameters in declaration order. Each binding
 gives the parameter's ordinal, its kind, and the values that parameter receives, in order and
 with their count: each directory path a `Dir` parameter takes, each rule text a `Net`
-parameter takes, or the one interface definition identity a `Foreign` parameter takes. So exchanging the paths given to two `Dir` parameters changes R. The
+parameter takes, or the one interface definition identity a `Foreign` parameter takes.
+A `Foreign` binding then holds the SHA-256 and byte length of the selected archive.
+So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
 
@@ -278,7 +280,8 @@ objects it lacks.
    by the function's name. An address that neither a group nor a leaf gives is `Missing`. A
    leaf, or a function of one, that no slot reaches is `Extra`. Each leaf's table has a row
    for the recipe's target (`Missing` otherwise), and the foreign archives part is exactly the
-   set of those selected rows' pins and lengths (`Missing`, `Extra`).
+   set of the pins and lengths selected by those rows and by the `Foreign` bindings
+   (`Missing`, `Extra`).
 7. Every slot's identity equals the bound member's or builtin's identity, every `Internal`
    index is in range, each group's members form one strongly connected component, the entry's
    identity matches, and the closure has one address per identity with every slot's signature

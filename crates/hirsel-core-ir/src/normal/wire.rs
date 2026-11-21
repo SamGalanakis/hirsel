@@ -135,6 +135,10 @@ impl<'a, 'b> Read<'a, 'b> {
         Ok(head)
     }
 
+    pub(crate) fn remaining(&self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub(crate) fn unsigned(&mut self) -> DecodeResult<u64> {
         let mut value = 0;
         for shift in (0..64).step_by(7) {

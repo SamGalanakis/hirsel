@@ -32,7 +32,7 @@ impl ObjectKind {
             Self::Body => hirsel_core_ir::normal::BODY_HASH_DOMAIN,
             Self::Annex => "hirsel.code-annex.v1",
             Self::Group => "hirsel.code-group.v1",
-            Self::Recipe => "hirsel.release-recipe.v1",
+            Self::Recipe => hirsel_core_ir::release_recipe::HASH_DOMAIN,
         }
     }
 

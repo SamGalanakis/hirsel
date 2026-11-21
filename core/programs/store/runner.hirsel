@@ -626,7 +626,7 @@ pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, e
 
 pub type Preview: codec + send { describe: Describe, release: Bytes, answers: List[Entry] }
 
-pub type Release: codec + send {
+pub type ReleaseManifest: codec + send {
     describe: Describe,
     release: Bytes,
     grants: List[String],

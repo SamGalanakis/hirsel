@@ -74,7 +74,7 @@ type Kind: codec + send = Compute | Transact | Query | Granted
 type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
 type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
 type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
-type Release: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64, recipe: Bytes }
+type ReleaseManifest: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64, recipe: Bytes }
 ```
 
 Entries are in registration order. `Described` has the fields `kind`, `identity`,
@@ -148,7 +148,7 @@ allowance. So the entries and `release` come from running `place` inside the
 executable, and from no second list or second hash (RUNNER-SPEC D1, extended in
 v2.15 §12.2). A preview error or timeout writes no manifest and fails the build
 with that error. The manifest is one value of this type, encoded with the
-ordinary value codec. Its type, `Release`, is declared with `Describe` above.
+ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` above.
 
 - `describe` is the preview child's `Describe`: digest, target, `n_place` and
   the exported entries in registration order. `n_place` is the allowance the

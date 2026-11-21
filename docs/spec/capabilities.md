@@ -195,9 +195,12 @@ is a tool run against a recording. Both are specified with the tools
 replay accepts, how a replay compares what the run does with what was recorded, and its
 verdicts.
 
-A **release build** contains no recording machinery. A recording build is the same program,
-for the same target and engine at the same optimisation, with that machinery added; it runs
-with recording off or on. In all three, a run given the same values at the replay point
+Recording is an optional switch, off by default, and independent of every other build
+choice. A build without the switch contains no recording machinery. A recording build is
+the same program, for the same target and engine at the same optimisation, with that
+machinery added; it runs with recording off or on. There is no other build split: no build
+mode, optimisation level or debug setting turns recording on or off, or changes what a
+program means ([PROG-6](programs.md#prog-6-one-meaning)). In all three, a run given the same values at the replay point
 (CAP-8) in the same order makes the same observations
 ([SEM-8](semantics.md#sem-8-determinism)): its values, output and outcome, its causes and
 their sites, its charges and `Capacity` refusals, its steps and slice ends, its events, and

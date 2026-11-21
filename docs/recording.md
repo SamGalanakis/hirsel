@@ -14,9 +14,12 @@ contract ([store](../core/std/api/store.md)).
 
 ## Recording builds
 
-A **release build** is every executable built without a recording option: `hirsel build`,
-`hirsel run` and `hirsel test`, debug or `--release`. It links the runtime without
-recording machinery, so it cannot record, and nothing in it tests whether recording is on.
+Recording is an optional switch, off by default. It is independent of the engine, the
+target and the optimisation: `--release` and `--backend` choose those, for a build with
+recording or without it, and choose nothing about recording. A build without the switch,
+every `hirsel build`, `hirsel run` and `hirsel test` that names no recording option, links
+the runtime without recording machinery, so it cannot record, and nothing in it tests
+whether recording is on.
 
 A **recording build** is the same program, for the same target and engine at the same
 optimisation, with the charge and step policies of the build it accompanies, linked with
@@ -30,16 +33,16 @@ the recording runtime. These commands make one:
 | `hirsel test app --limit N --replay` | runs each selected test in the recording build, recording on, then replays it ([Testing with recordings](#testing-with-recordings)) |
 
 `--release`, `--backend` and `--target` select the engine, optimisation and target of a
-recording build as they do for a release build.
+recording build as they do for any other build.
 
 A recording executable started with the environment variable `HIRSEL_RECORD=PATH` records
 into PATH. The runtime reads the variable and removes it from the environment before the run
 starts, so no grant observes it. Started without it, the executable runs with recording off.
-A release executable never reads it.
+An executable built without recording never reads it.
 
 **Same observations.** Given the same values at the replay point
-([CAP-8](spec/capabilities.md#cap-8-the-replay-point)) in the same order, a release build,
-a recording build with recording off and the same build with recording on make the same
+([CAP-8](spec/capabilities.md#cap-8-the-replay-point)) in the same order, a build without
+recording, a recording build with recording off and the same build with recording on make the same
 observations ([SEM-8](spec/semantics.md#sem-8-determinism)). Recording runs outside the
 program's accounting. It charges no limit, takes no step, adds no event, poll or provider
 operation, holds no share of a program value, acts on no program handle and changes no
@@ -47,17 +50,17 @@ delivery.
 
 Real elapsed time is not an observation. Recording adds work, so in a live run it can change
 which of the allowed orders and clock readings occur. A recording build reproduces a
-language-level fault of a release run when that run's inputs recur. It cannot recover an
-earlier release run's inputs, and it does not reproduce a fault in the release build's
-machine code, native stack layout or host memory pressure.
+language-level fault of a run without recording when that run's inputs recur. It cannot
+recover such a run's inputs, and it does not reproduce a fault in that build's machine
+code, native stack layout or host memory pressure.
 
 ## What a recording holds
 
 A recording holds the values the run receives at the replay point, in the run's order:
 
 - the entry's arguments: the grant snapshot, the argument vector, the root limit and the
-  launch metadata ([launch](spec/launch.md)). A release build and a recording build are
-  different executables, so the executable digest a recording holds is the recording
+  launch metadata ([launch](spec/launch.md)). A build without recording and a recording
+  build are different executables, so the executable digest a recording holds is the recording
   build's;
 - each provider operation's issue: its operation, its object and its canonical arguments;
 - each delivery: its result, error, bytes or committed count;
@@ -235,7 +238,7 @@ recording. It runs against a controlled provider that the run's configuration ch
 
 | law | bug | oracle and setup |
 |---|---|---|
-| **RL1** recording changes nothing | recording machinery that adds a charge, a step, a poll or a second read, or leaks into a release build | For a corpus of small programs with scripted providers and ordered senders, run the release build, the recording build with recording off and the same build with recording on, on both engines. Their outputs, outcomes, cause sites and chains, `Capacity` refusals, step counts and provider call logs are equal. The release executable defines no symbol of the recording runtime. |
+| **RL1** recording changes nothing | recording machinery that adds a charge, a step, a poll or a second read, or leaks into a build without recording | For a corpus of small programs with scripted providers and ordered senders, run the build without recording, the recording build with recording off and the same build with recording on, on both engines. Their outputs, outcomes, cause sites and chains, `Capacity` refusals, step counts and provider call logs are equal. The executable built without recording defines no symbol of the recording runtime. |
 | **RL2** a divergence ends the replay at its position | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to (a) drop a handle at another point, (b) omit its last send and (c) send other bytes, each still returning the recorded result. Each replay ends `Diverged` at the hand-counted frame position, exits 1, and its scripted provider records zero calls. |
 | **RL3** replay is offline | replay reaching the host or needing keys | Record an HTTPS GET against the loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest are equal to the recorded run's, and the inner provider records zero calls. |
 | **RL4** replay without the secret | replay reading the secret's source | Replay TL10's recording ([TLS](spec/tls.md#laws)) with the environment variable unset. The run starts. Its outputs equal the recorded run's, byte for byte. The inner provider records zero calls. |

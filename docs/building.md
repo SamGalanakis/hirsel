@@ -90,8 +90,9 @@ hirsel build app --recording -o app-rec
 hirsel test app --limit 64M --replay
 ```
 
-A release build has no recording machinery; `--recording`, `--record`,
-`replay` and `test --replay` use a recording build of the same program.
+Recording is an optional switch, off by default, independent of `--release`
+and `--backend`. A build without it has no recording machinery; `--recording`,
+`--record`, `replay` and `test --replay` use a recording build of the same program.
 Recording and replay, what a recording holds and the replay verdicts are in
 [Recording and replay](recording.md). A recording is for diagnosis and testing.
 Work that must survive a crash goes through the store and its step library

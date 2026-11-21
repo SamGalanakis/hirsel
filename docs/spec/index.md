@@ -111,7 +111,7 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
-| recording, recording build, release build | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
+| recording, recording build | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
 | region data, region value | [MEM-2](memory.md#mem-2-region-data) |
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |
 | reservation | [OWN-11](ownership.md#own-11-call-arguments) |

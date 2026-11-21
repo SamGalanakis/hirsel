@@ -32,7 +32,7 @@ require or extract a constant argument.
   releases it. If mapping fails, the launcher hashes the opened file directly.
   Replacement, rename or deletion of the file after launch leaves the digest
   stable. Both native backends use the same runtime launch boundary. A closed
-  release executable with no digest reader may omit capture on a run that is not recorded.
+  executable with no digest reader may omit capture on a run that is not recorded.
 - An evaluator launching a built artifact hashes the artifact it loaded, and
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.
@@ -50,8 +50,8 @@ or evaluator launch owns its own value for the entire run. Views of it cannot
 outlive that owner. No filesystem lookup occurs when a view is read.
 
 Launch metadata is an entry argument and passes the replay point
-([CAP-8](capabilities.md#cap-8-the-replay-point)). A release build and a recording build of
-one program are different executables, so their digests differ
+([CAP-8](capabilities.md#cap-8-the-replay-point)). A build without recording and a recording build
+of one program are different executables, so their digests differ
 ([recording](../recording.md#what-a-recording-holds)).
 
 `Welcome.executable` carries this digest, including an empty digest for

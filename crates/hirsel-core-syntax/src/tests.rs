@@ -166,6 +166,13 @@ fn formatter_uses_syntax_roles_for_spacing() {
         "fn f() {\n    -(x)\n}\n"
     );
     formatted("fn f(){ scoped fn(x:u64)->u64{x} }", ParseMode::Source);
+    assert_eq!(
+        formatted(
+            "fn f(){a?=>|(c,_)|Full(c);b ?=>json.wrap}",
+            ParseMode::Source
+        ),
+        "fn f() {\n    a ?=> |(c, _)| Full(c);\n    b ?=> json.wrap\n}\n"
+    );
 }
 
 #[test]
@@ -257,6 +264,7 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
     }
     for (single, split) in [
         ("fn f() { a.b.c }", "fn f() { a\n .b\n .c }"),
+        ("fn f() { a? ?=> m }", "fn f() { a\n ?\n ?=> m }"),
         (
             "fn f() { a().b.0?.c? }",
             "fn f() { a()\n .b\n .0\n ?\n .c\n ? }",
@@ -378,6 +386,8 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
         ("fn f() { a < b\n < c }", "< c", "LANG-5"),
         ("fn f() { match a\n + {} {} }", "{} {}", "LANG-5"),
         ("fn f() { match x { a\n .b => c } }", ".", "LANG-4"),
+        ("fn f() { a ?=> m(b) }", "(b)", "LANG-5"),
+        ("fn f() { a ?=> m?}", "?}", "LANG-5"),
     ] {
         let p = parse(source, ParseMode::Source);
         let at = source.find(site).unwrap() as u32;

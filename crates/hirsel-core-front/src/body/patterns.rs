@@ -1654,6 +1654,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let outer = self.result_parts(self.fd.result);
         let operand = self.kids(n)[0];
+        let mapper = self.kids(n).get(1).copied();
         // LANG-18: only the payload expectation reaches the operand. Its own
         // expression determines the Result/Option shape and every error type.
         let hint = want.map(|mut w| {
@@ -1687,9 +1688,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         };
-        let bound = error.filter(|&e| matches!(self.t.kind(e), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"])))
+        // LANG-18: `e ?=> m` maps a Result's error into the enclosing Result's.
+        let mapped = match (mapper, error, outer) {
+            (None, ..) => None,
+            (Some(_), None, _) => {
+                let a = self.shown(subject.ty);
+                let message = "`?=>` maps the error of a Result; an Option propagates with `?`";
+                self.refuse_compared("LANG-18", n, a, "Result", message);
+                return (ERROR, None);
+            }
+            (Some(_), Some(_), Some((od, _, Some(f)))) if od == d => Some(f),
+            (Some(_), Some(_), _) => {
+                let b = self.shown(self.fd.result);
+                let message = "`?=>` needs an enclosing function returning a Result";
+                self.refuse_compared("LANG-18", n, b, "Result", message);
+                return (ERROR, None);
+            }
+        };
+        let bound = error.filter(|_| mapped.is_none()).filter(|&e| matches!(self.t.kind(e), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"])))
             .and_then(|_| self.patterns.scopes.iter().rposition(|s| matches!(s.kind, ScopeKind::Bound { .. })));
-        if bound.is_none() {
+        if bound.is_none() && mapped.is_none() {
             let Some((od, _, oe)) = outer else {
                 self.refuse(
                     "LANG-18",
@@ -1752,7 +1770,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             None
         };
-        if let Some(scope) = bound {
+        if let (Some(m), Some(e), Some(f)) = (mapper, error, mapped) {
+            // The mapper runs on the error edge before any scope is left.
+            let was_dead = self.dead;
+            let (t, v) = if self.kind(m) == NodeKind::Arm {
+                self.mapper_arm(m, e, error_value, f)
+            } else {
+                self.apply_mapper(n, m, e, error_value, f)
+            };
+            self.consume(v, n);
+            if t != ERROR {
+                let value = self.wrap_case(self.fd.result, err_case, f, v, n);
+                self.ret(value, n);
+            } else {
+                self.halt();
+            }
+            self.dead = was_dead;
+        } else if let Some(scope) = bound {
             let context = self.patterns.scopes[scope];
             let ScopeKind::Bound { failed } = context.kind else {
                 unreachable!()
@@ -1781,6 +1815,45 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.temp(success, value);
         (success, value)
+    }
+    /// LANG-18's inline arm `|p| v`: `p` binds the error payload as `let p = take x`
+    /// would, and `v` of type `mapped` is code of the enclosing function.
+    fn mapper_arm(
+        &mut self,
+        arm: NodeId,
+        error: TyId,
+        value: Option<ValueId>,
+        mapped: TyId,
+    ) -> (TyId, Option<ValueId>) {
+        let [pat, body] = *self.kids(arm) else {
+            unreachable!("a mapper arm is a pattern and a value");
+        };
+        self.depth += 1;
+        let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
+        let owners = self.owner_mark();
+        self.temp(error, value);
+        let subject = Subject {
+            anchors: 0,
+            ty: error,
+            value,
+            place: None,
+            owned: true,
+            viewed: false,
+        };
+        let id = self.pattern(pat, error);
+        let matrix = self.patterns.matrix.len();
+        self.patterns.matrix.push(id);
+        if let Some(missing) = self.pattern_missing(matrix, error) {
+            let message = format!("a `?=>` arm pattern is refutable; missing `{missing}`");
+            self.refuse("LANG-17", pat, message);
+        }
+        self.patterns.matrix.truncate(matrix);
+        let subject = self.chosen_pattern(id, subject, pat);
+        self.bind_pattern(id, subject, false);
+        let (t, v) = self.expr(body, expect(mapped));
+        self.pattern_scope_end(scope, holds, owners, body, t, v);
+        self.depth -= 1;
+        (t, v)
     }
     pub(super) fn pattern_scope_mark(&self) -> usize {
         self.patterns.scopes.len()

@@ -660,6 +660,16 @@ fn f() -> Result[u64, ParseError] { let r: Result[u64, ParseError] = receipt(); 
 fn receipt[E]() -> Result[u64, E] { loop {} }
 fn f() -> Result[u64, ParseError] { let n: u64 = receipt()?; Ok(n) }   // refused: LANG-12, at receipt(): E is open
 ```
+```hirsel
+type ReadError = Parse(ParseError) | Short(u64)
+fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
+fn read(n: u64) -> Result[u64, ReadError] { let h = half(n) ?=> Parse; Ok(h) }
+fn mark(n: u64) -> Result[u64, ReadError] { Ok(half(n) ?=> |_| Short(n)) }
+```
+```hirsel
+fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
+fn f(n: u64) -> Option[u64] { Some(half(n) ?=> |_| 0) }   // refused: LANG-18, the function returns an Option
+```
 
 ### LANG-19: Recursion
 

@@ -1212,6 +1212,9 @@ struct Cx<'c, 'a, 'e> {
     /// A place already evaluated while testing whether an ascription denotes
     /// it directly. A conversion reads this place without repeating its indices.
     ascribed_operand: Option<(NodeId, At)>,
+    /// LANG-18: while a `?=>` path mapper is applied, its one argument is the
+    /// error payload already in hand: the mapping node, its type and value.
+    mapped_error: Option<(NodeId, TyId, Option<ValueId>)>,
     /// Block depth, and the slots of the open blocks in declaration order.
     depth: u32,
     /// The type the last expression checked synthesised, before its expected type.
@@ -1381,6 +1384,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             freezes: vec![],
             steps: vec![],
             ascribed_operand: None,
+            mapped_error: None,
             depth: 0,
             synth_ty: UNIT,
             tail_ty: UNIT,
@@ -2724,6 +2728,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// `n` checked and emitted: the single place an expression's value is produced. A
     /// live expression of a valued type that produced no value marks the body halted.
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        if let Some((node, ty, value)) = self.mapped_error
+            && node == n
+        {
+            // The mapper's argument is the error payload; it is owned here until
+            // the mapper takes it.
+            self.mapped_error = None;
+            self.temp(ty, value);
+            return (ty, value);
+        }
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
         if !self.versioned && t > HOLE && matches!(self.t.kind(t), TyKind::Vector(_)) {

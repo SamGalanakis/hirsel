@@ -705,7 +705,10 @@ fn punctuation(bytes: &[u8]) -> Option<(usize, TokenKind)> {
         b':' => (1, TokenKind::Colon),
         b';' => (1, TokenKind::Semicolon),
         b'@' => (1, TokenKind::At),
-        b'?' => (1, TokenKind::Question),
+        b'?' => match (at(1), at(2)) {
+            (Some(b'='), Some(b'>')) => (3, TokenKind::QuestionFatArrow),
+            _ => (1, TokenKind::Question),
+        },
         b'~' => (1, TokenKind::Tilde),
         b'.' => match (at(1), at(2)) {
             (Some(b'.'), Some(b'=')) => (3, TokenKind::DotDotEq),

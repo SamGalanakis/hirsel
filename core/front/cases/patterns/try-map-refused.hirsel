@@ -1,0 +1,45 @@
+// `?=>` maps a Result's error into the enclosing function's Result, by a
+// variant or a callable taking the payload, or by an irrefutable arm; a record
+// name is not a value, so it is no mapper.
+// expect: refuse LANG-18 at 23:13
+// expect: compared LANG-18 at 23:13 | core@1/core/Option[u64] | Result
+// expect: refuse LANG-18 at 28:13
+// expect: compared LANG-18 at 28:13 | core@1/core/Option[u64] | Result
+// expect: refuse LANG-17 at 33:24
+// expect: refuse LANG-18 at 38:13
+// expect: compared LANG-18 at 38:13 | view | take
+// expect: refuse LANG-7 at 43:23
+type Low = Code(u64) | Gone
+
+type High = Plain(u64) | Invalid
+
+type Record { e: Low }
+
+fn low() -> Result[u64, Low] { Error(Gone) }
+fn some() -> Option[u64] { None }
+fn viewer(e: Low) -> High { Invalid }
+
+fn option() -> Result[u64, High] {
+    let n = some() ?=> Plain
+    Ok(n)
+}
+
+fn outer() -> Option[u64] {
+    let n = low() ?=> |_| Invalid
+    Some(n)
+}
+
+fn refutable() -> Result[u64, High] {
+    let n = low() ?=> |Code(c)| Plain(c)
+    Ok(n)
+}
+
+fn viewed() -> Result[u64, High] {
+    let n = low() ?=> viewer
+    Ok(n)
+}
+
+fn record() -> Result[u64, Record] {
+    let n = low() ?=> Record
+    Ok(n)
+}

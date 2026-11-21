@@ -139,9 +139,46 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- calls
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
-        let result = self.call_inner(n, want, &mut scratch);
+        let c = self.kids(n);
+        let result = self.call_inner(n, c[0], &c[1..], want, &mut scratch);
         self.call_scratch.push(scratch);
         result
+    }
+
+    /// LANG-18: apply a `?=>` path mapper `m` to the error payload `value` of type
+    /// `error`, as the call `m(take x)` checked against `expect(mapped)`.
+    pub(super) fn apply_mapper(
+        &mut self,
+        n: NodeId,
+        mapper: NodeId,
+        error: TyId,
+        value: Option<ValueId>,
+        mapped: TyId,
+    ) -> (TyId, Option<ValueId>) {
+        let destination = self.destination.take();
+        self.mapped_error = Some((n, error, value));
+        let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        let result = self.call_inner(n, mapper, &[n], expect(mapped), &mut scratch);
+        self.call_scratch.push(scratch);
+        // A refused mapper leaves its argument unread; it is not owned here.
+        self.mapped_error = None;
+        self.destination = destination;
+        result
+    }
+
+    /// LANG-18: a mapper takes its one argument, the error payload, by `take`.
+    pub(super) fn mapper_mode(&mut self, n: NodeId, mode: Option<Mode>) -> bool {
+        if !self.mapped_error.is_some_and(|(node, ..)| node == n) {
+            return true;
+        }
+        if let Some(mode) = mode
+            && mode != Mode::Take
+        {
+            let message = "a `?=>` mapper takes the error payload by `take`";
+            self.refuse_compared("LANG-18", n, mode.keyword(), "take", message);
+            return false;
+        }
+        true
     }
 
     pub(super) fn call_target(&self, callee: NodeId) -> Option<&'c Target> {
@@ -178,12 +215,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn call_inner(
         &mut self,
         n: NodeId,
+        callee: NodeId,
+        args: &[NodeId],
         want: Option<Want>,
         scratch: &mut CallScratch,
     ) -> (TyId, Option<ValueId>) {
         self.out.counts.calls += 1;
-        let c = self.kids(n);
-        let (callee, args) = (c[0], &c[1..]);
         self.out.counts.uses += 1;
         let p: &'c Program<'a> = self.p;
         let f = match self.call_target(callee) {
@@ -309,6 +346,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let k = g.params.len();
             let message = format!("expected {k} arguments");
             self.refuse_arity_at(self.span(args[k]), args.len(), k, message);
+            return (ERROR, None);
+        }
+        if !self.mapper_mode(n, g.params.first().map(|q| q.mode)) {
             return (ERROR, None);
         }
         if g.waits {

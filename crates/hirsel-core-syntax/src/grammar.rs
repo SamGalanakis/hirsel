@@ -49,6 +49,7 @@ pub enum Continuation {
     Index,
     Projection,
     Try,
+    TryMap,
     Binary(u8, bool),
 }
 /// LANG-4's closed set for a complete expression at a newline. Assignment
@@ -78,6 +79,7 @@ pub fn line_continuation(word: Symbol) -> bool {
             | sym::PERCENT
             | sym::DOT
             | sym::QUESTION
+            | sym::QUESTION_FATARROW
     )
 }
 #[inline(always)]
@@ -87,6 +89,7 @@ pub fn continuation(word: Symbol) -> Option<Continuation> {
         sym::LBRACKET => Continuation::Index,
         sym::DOT => Continuation::Projection,
         sym::QUESTION => Continuation::Try,
+        sym::QUESTION_FATARROW => Continuation::TryMap,
         sym::DOTDOT => Continuation::Binary(1, true),
         sym::DOTDOTEQ => Continuation::Binary(1, true),
         sym::OROR => Continuation::Binary(2, false),

@@ -1,0 +1,102 @@
+// `e ?=> m` maps the error at the exit by a variant, a function, a local callable
+// or an inline arm, run on the error edge. An owned payload moves into the mapped
+// error or is dropped by the arm's pattern; every run refunds its admissions.
+// expect: accept
+// expect: run by_variant(false) = 5
+// expect: run by_variant(true) = 7
+// expect: run by_function(true) = 107
+// expect: run by_local(true) = 207
+// expect: run by_arm(true) = 5
+// expect: run by_wildcard(true) = 1
+type Low = Code(u64) | Gone
+
+type High = Lifted(Low) | Plain(u64) | Invalid
+
+fn low(bad: bool) -> Result[u64, Low] {
+    if bad {
+        Error(Code(7))
+    } else {
+        Ok(5)
+    }
+}
+
+fn payload(bad: bool) -> Result[u64, (u64, List[u64])] {
+    let mut xs: List[u64] = list.new()
+    let _ = list.push(mut xs, 1)
+    let _ = list.push(mut xs, 2)
+    if bad {
+        Error((3, take xs))
+    } else {
+        Ok(list.len(xs))
+    }
+}
+
+fn bump(take e: Low) -> High {
+    match e {
+        Code(c) => Plain(c + 100),
+        Gone => Invalid
+    }
+}
+
+fn twice(take e: Low) -> High {
+    match e {
+        Code(c) => Plain(c + 200),
+        Gone => Invalid
+    }
+}
+
+fn read(r: Result[u64, High]) -> u64 {
+    match r {
+        Ok(n) => n,
+        Error(Lifted(Code(c))) => c,
+        Error(Lifted(Gone)) => 0,
+        Error(Plain(c)) => c,
+        Error(Invalid) => 1
+    }
+}
+
+fn variant(bad: bool) -> Result[u64, High] {
+    let n = low(bad) ?=> Lifted
+    Ok(n)
+}
+
+fn function(bad: bool) -> Result[u64, High] {
+    Ok(low(bad) ?=> bump)
+}
+
+fn local(bad: bool) -> Result[u64, High] {
+    let m: fn(take Low) -> High = twice
+    let n = low(bad) ?=> m
+    Ok(n)
+}
+
+fn arm(bad: bool) -> Result[u64, High] {
+    let k: u64 = 2
+    let n = payload(bad) ?=> |(c, _)| Plain(c + k)
+    Ok(n)
+}
+
+fn wildcard(bad: bool) -> Result[u64, High] {
+    let n = payload(bad) ?=> |_| Invalid
+    Ok(n)
+}
+
+fn by_variant(bad: bool) -> u64 {
+    read(variant(bad))
+}
+
+fn by_function(bad: bool) -> u64 {
+    read(function(bad))
+}
+
+fn by_local(bad: bool) -> u64 {
+    read(local(bad))
+}
+
+fn by_arm(bad: bool) -> u64 {
+    read(arm(bad))
+}
+
+fn by_wildcard(bad: bool) -> u64 {
+    read(wildcard(bad))
+}

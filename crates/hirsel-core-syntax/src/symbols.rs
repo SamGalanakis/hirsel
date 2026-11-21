@@ -46,6 +46,7 @@ pub mod sym {
     pub const COPY: Symbol = Symbol(15);
     pub const VIEW: Symbol = Symbol(16);
     pub const TYPE: Symbol = Symbol(17);
+    pub const QUESTION_FATARROW: Symbol = Symbol(18);
     pub const RESOURCE: Symbol = Symbol(19);
     pub const SCOPED: Symbol = Symbol(20);
     pub const REGION: Symbol = Symbol(21);
@@ -192,7 +193,7 @@ impl Default for Symbols {
             Arc::from("copy"),
             Arc::from("view"),
             Arc::from("type"),
-            Arc::from(""), // Unused terminal ID.
+            Arc::from("?=>"),
             Arc::from("resource"),
             Arc::from("scoped"),
             Arc::from("region"),

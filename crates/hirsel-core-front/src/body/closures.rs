@@ -432,6 +432,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         }
+        if !self.mapper_mode(n, scratch.params.first().map(|q| q.0)) {
+            return (ERROR, None);
+        }
         if waits {
             self.waited = true;
             if !self.fd.waits && !self.entry {

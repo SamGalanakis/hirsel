@@ -83,6 +83,17 @@ fn item_text(item: &Item) -> String {
                     roles[token.0 as usize].unary = true;
                 }
             }
+            // `e ?=> |p| v`: the arm's pipes hug its pattern.
+            NodeKind::Try
+                if children.len() == 2 && tree.node(children[1]).kind == NodeKind::Arm =>
+            {
+                let pattern = tree.node(tree.children(children[1])[0]);
+                roles[pattern.origin.tokens.start as usize].attach = true;
+                let close = (pattern.origin.tokens.end as usize..range.end)
+                    .find(|&t| !tree.tokens[t].kind.is_trivia())
+                    .unwrap();
+                roles[close].attach = true;
+            }
             NodeKind::Call | NodeKind::Index => {
                 let callee_end = tree.node(children[0]).origin.tokens.end as usize;
                 let open = (callee_end..range.end)

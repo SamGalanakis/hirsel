@@ -20,6 +20,9 @@ pub enum TokenKind {
     KwCopy = 15,
     KwView = 16,
     KwType = 17,
+    /// `?=>`: the mapping propagate (LANG-18). Terminal 18 sits among the
+    /// keyword numbers but is punctuation.
+    QuestionFatArrow = 18,
     KwResource = 19,
     KwScoped = 20,
     KwRegion = 21,
@@ -136,10 +139,10 @@ impl TokenKind {
         }
     }
     pub fn is_keyword(self) -> bool {
-        (self as u8) <= 29
+        (self as u8) <= 29 && self != Self::QuestionFatArrow
     }
     pub fn is_punctuation(self) -> bool {
-        (30..=76).contains(&(self as u8))
+        (30..=76).contains(&(self as u8)) || self == Self::QuestionFatArrow
     }
     pub fn is_trivia(self) -> bool {
         matches!(

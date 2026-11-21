@@ -182,20 +182,24 @@ fn carrier(
 }
 
 fn fetch(
-    workspace: &Workspace,
+    workspace: &mut Workspace,
     store: &PackageStore,
     declaration: &(Id, SourceLocation),
     root: Root,
     cached: &mut Libraries,
 ) -> Result<(), Failure> {
     let (id, source) = declaration;
-    cached.extend(store.fetch(&workspace.root, id, root, source)?.entries);
+    let (archive, identity) = store.fetch(&workspace.root, id, root, source)?;
+    if let Some(identity) = identity {
+        workspace.record_input(identity);
+    }
+    cached.extend(archive.entries);
     Ok(())
 }
 
 impl Resolution {
     pub(crate) fn resolve(
-        workspace: Workspace,
+        mut workspace: Workspace,
         store: PackageStore,
         frozen: bool,
     ) -> Result<Self, Failure> {
@@ -253,7 +257,7 @@ impl Resolution {
                 if !cached.contains_key(root)
                     && let Some(declaration) = declared.get(root)
                 {
-                    fetch(&workspace, &store, declaration, *root, &mut cached)?;
+                    fetch(&mut workspace, &store, declaration, *root, &mut cached)?;
                 }
                 if let Some(library) = cached.remove(root) {
                     check_identity(id, *root, &library.content.id)?;
@@ -274,7 +278,7 @@ impl Resolution {
                     && let Some(nearest) = carrier(*root, &libraries, &declared, &paths)
                 {
                     fetch(
-                        &workspace,
+                        &mut workspace,
                         &store,
                         &declared[&nearest],
                         nearest,

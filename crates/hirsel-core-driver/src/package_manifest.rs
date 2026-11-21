@@ -135,14 +135,36 @@ pub(crate) struct Manifest {
 
 impl Manifest {
     pub(crate) fn parse(bytes: &[u8], path: &Path) -> Result<Self, String> {
+        Self::classify(bytes, path).1
+    }
+
+    pub(crate) fn classify(bytes: &[u8], path: &Path) -> (bool, Result<Self, String>) {
         let refuse = |message| format!("{}: {message}", path.display());
-        let text = std::str::from_utf8(bytes).map_err(|error| refuse(error.to_string()))?;
-        let table = text
-            .parse::<Table>()
-            .map_err(|error| refuse(error.to_string()))?;
+        let parsed = || {
+            let text = std::str::from_utf8(bytes).map_err(|error| refuse(error.to_string()))?;
+            let table = text
+                .parse::<Table>()
+                .map_err(|error| refuse(error.to_string()))?;
+            Ok((text, table))
+        };
+        let (text, table) = match parsed() {
+            Ok(parsed) => parsed,
+            Err(error) => return (false, Err(error)),
+        };
+        let workspace = table.contains_key("workspace");
+        (workspace, Self::validate_table(text, &table, refuse))
+    }
+
+    fn validate_table(
+        text: &str,
+        table: &Table,
+        refuse: impl Fn(String) -> String,
+    ) -> Result<Self, String> {
         let mut unknown = Vec::new();
-        unknown_keys(&table, "", Shape::Manifest, &mut unknown);
+        unknown_keys(table, "", Shape::Manifest, &mut unknown);
         if !unknown.is_empty() {
+            unknown.sort_unstable();
+            unknown.dedup();
             return Err(unknown
                 .into_iter()
                 .map(|key| refuse(format!("unknown key {key}")))

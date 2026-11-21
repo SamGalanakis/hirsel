@@ -91,8 +91,8 @@ impl PackageStore {
         id: &Id,
         pin: Root,
         source: &SourceLocation,
-    ) -> Result<PackageArchive, Box<dyn std::error::Error>> {
-        let bytes = match source {
+    ) -> Result<(PackageArchive, Option<FileId>), Box<dyn std::error::Error>> {
+        let (bytes, identity) = match source {
             SourceLocation::Archive(path) => {
                 let file = walk(directory, Path::new(path))
                     .and_then(|file| file.read(ARCHIVE_LIMIT))
@@ -102,17 +102,20 @@ impl PackageStore {
                             error.explain("workspace", "a regular file")
                         )
                     })?;
-                file.bytes
+                (file.bytes, Some(file.identity))
             }
-            SourceLocation::Url(url) => fetch_https(url)
-                .map_err(|error| format!("{id}: fetching {url} failed: {error}"))?
-                .into(),
+            SourceLocation::Url(url) => (
+                fetch_https(url)
+                    .map_err(|error| format!("{id}: fetching {url} failed: {error}"))?
+                    .into(),
+                None,
+            ),
         };
         let archive = PackageArchive::decode(&bytes)
             .map_err(|error| format!("{id}: {source} is not a package archive: {error}"))?;
         archive.verify(id, pin, &source.to_string())?;
         self.install(&archive)?;
-        Ok(archive)
+        Ok((archive, identity))
     }
 }
 

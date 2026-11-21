@@ -37,7 +37,7 @@ pub(crate) struct Workspace {
 struct Discovered {
     dir: File,
     path: PathBuf,
-    manifest: Manifest,
+    manifest: Result<Manifest, String>,
 }
 
 fn parent(directory: &File) -> io::Result<File> {
@@ -137,18 +137,19 @@ fn discover(
     let first;
     loop {
         if let Some(captured) = capture_manifest(manifests, &directory, &path)? {
-            let manifest = Manifest::parse(&captured.bytes, &path.join(MANIFEST))?;
-            let workspace = manifest.workspace.is_some();
-            let discovered = Discovered {
-                dir: directory.try_clone()?,
-                path: path.clone(),
-                manifest,
-            };
-            if workspace {
-                first = discovered;
-                break;
-            }
-            if member.is_none() {
+            let (workspace, manifest) = Manifest::classify(&captured.bytes, &path.join(MANIFEST));
+            if !workspace && member.is_some() {
+                manifest?;
+            } else {
+                let discovered = Discovered {
+                    dir: directory.try_clone()?,
+                    path: path.clone(),
+                    manifest,
+                };
+                if workspace {
+                    first = discovered;
+                    break;
+                }
                 member = Some(discovered);
             }
         }
@@ -160,10 +161,10 @@ fn discover(
             let same = Discovered {
                 dir: member.dir.try_clone()?,
                 path: member.path.clone(),
-                manifest: Manifest {
+                manifest: Ok(Manifest {
                     package: None,
                     workspace: None,
-                },
+                }),
             };
             return Ok(Some((same, member)));
         }
@@ -175,10 +176,10 @@ fn discover(
         None => Discovered {
             dir: first.dir.try_clone()?,
             path: first.path.clone(),
-            manifest: Manifest {
+            manifest: Ok(Manifest {
                 package: None,
                 workspace: None,
-            },
+            }),
         },
     };
     Ok(Some((first, requested)))
@@ -194,18 +195,20 @@ impl Workspace {
         needs_package: bool,
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let mut manifests = BTreeMap::new();
-        let Some((mut root, mut selected)) = discover(dir, &mut manifests)? else {
+        let Some((root, selected)) = discover(dir, &mut manifests)? else {
             return Ok(None);
         };
         let root_id = identity(&root.dir)?;
         let selected_id = identity(&selected.dir)?;
         let root_manifest = root.path.join(MANIFEST);
         let selected_manifest = selected.path.join(MANIFEST);
-        if needs_package
-            && root_id == selected_id
-            && root.manifest.package.is_none()
-            && selected.manifest.package.is_none()
-        {
+        let mut root_config = root.manifest?;
+        let mut selected_config = Some(selected.manifest);
+        if root_id == selected_id {
+            let same = selected_config.take().unwrap()?;
+            root_config.package = root_config.package.or(same.package);
+        }
+        if needs_package && root_id == selected_id && root_config.package.is_none() {
             return Err(format!(
                 "{} is a workspace root, not a package; name a member directory",
                 root_manifest.display()
@@ -216,14 +219,8 @@ impl Workspace {
         let mut opened = BTreeMap::new();
         let mut drafts = BTreeMap::new();
 
-        let workspace = root.manifest.workspace.take();
-        let package = root.manifest.package.take().or_else(|| {
-            if root_id == selected_id {
-                selected.manifest.package.take()
-            } else {
-                None
-            }
-        });
+        let workspace = root_config.workspace;
+        let package = root_config.package;
         if let Some(package) = package {
             opened.insert(root_id, package.id.clone());
             drafts.insert(
@@ -237,108 +234,125 @@ impl Workspace {
             );
         }
         if let Some(config) = &workspace {
-            let mut selected = Some(selected);
+            let mut refusals = Vec::new();
+            let mut listed_ids = BTreeSet::from([root_id]);
             for listed in &config.members {
-                let opened_member = walk(&root.dir, Path::new(listed)).map_err(|error| {
-                    format!(
-                        "{}: workspace.members: {listed:?} {}",
-                        root_manifest.display(),
-                        error.explain("workspace", "a directory")
-                    )
-                })?;
-                let relative = opened_member.path.clone();
-                if relative.to_str().is_none() {
-                    return Err(format!(
+                let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+                    let opened_member = walk(&root.dir, Path::new(listed)).map_err(|error| {
+                        format!(
+                            "{}: workspace.members: {listed:?} {}",
+                            root_manifest.display(),
+                            error.explain("workspace", "a directory")
+                        )
+                    })?;
+                    let relative = opened_member.path.clone();
+                    if relative.to_str().is_none() {
+                        return Err(format!(
                         "{}: workspace.members: {listed:?} resolves to a non-UTF-8 directory name",
                         root_manifest.display()
                     )
                     .into());
-                }
-                let dir = opened_member.directory().map_err(|error| {
-                    format!(
-                        "{}: workspace.members: {listed:?} {}",
-                        root_manifest.display(),
-                        error.explain("workspace", "a directory")
-                    )
-                })?;
-                let dir_id = identity(&dir)?;
-                if dir_id == root_id || opened.contains_key(&dir_id) {
-                    return Err(format!(
-                        "{}: workspace.members: {listed:?} is listed twice",
-                        root_manifest.display()
-                    )
-                    .into());
-                }
-                let path = root.path.join(listed);
-                let manifest_path = path.join(MANIFEST);
-                let manifest = if dir_id == selected_id
-                    && let Some(selected) = selected.take()
-                {
-                    selected.manifest
-                } else {
-                    let captured = capture_manifest(&mut manifests, &dir, &path)?
-                        .ok_or_else(|| format!("{}: does not exist", manifest_path.display()))?;
-                    Manifest::parse(&captured.bytes, &manifest_path)?
-                };
-                if manifest.workspace.is_some() {
-                    return Err(format!(
-                        "{}: workspace.members: {listed:?} belongs to the workspace at {}",
-                        root_manifest.display(),
-                        manifest_path.display()
-                    )
-                    .into());
-                }
-                let mut ancestor_path = relative.parent();
-                let mut ancestor = parent(&dir)?;
-                loop {
-                    if identity(&ancestor)? == root_id {
-                        break;
                     }
-                    let Some(relative) = ancestor_path else {
+                    let dir = opened_member.directory().map_err(|error| {
+                        format!(
+                            "{}: workspace.members: {listed:?} {}",
+                            root_manifest.display(),
+                            error.explain("workspace", "a directory")
+                        )
+                    })?;
+                    let dir_id = identity(&dir)?;
+                    if !listed_ids.insert(dir_id) {
                         return Err(format!(
-                            "{}: workspace.members: {listed:?} resolves outside the workspace",
+                            "{}: workspace.members: {listed:?} is listed twice",
                             root_manifest.display()
                         )
                         .into());
+                    }
+                    let path = root.path.join(listed);
+                    let manifest_path = path.join(MANIFEST);
+                    let manifest = if dir_id == selected_id
+                        && let Some(manifest) = selected_config.take()
+                    {
+                        manifest?
+                    } else {
+                        let captured =
+                            capture_manifest(&mut manifests, &dir, &path)?.ok_or_else(|| {
+                                format!("{}: does not exist", manifest_path.display())
+                            })?;
+                        Manifest::parse(&captured.bytes, &manifest_path)?
                     };
-                    let at = root.path.join(relative);
-                    if let Some(captured) = capture_manifest(&mut manifests, &ancestor, &at)? {
-                        if Manifest::parse(&captured.bytes, &at.join(MANIFEST))?
-                            .workspace
-                            .is_some()
-                        {
+                    if manifest.workspace.is_some() {
+                        return Err(format!(
+                            "{}: workspace.members: {listed:?} belongs to the workspace at {}",
+                            root_manifest.display(),
+                            manifest_path.display()
+                        )
+                        .into());
+                    }
+                    let mut ancestor_path = relative.parent();
+                    let mut ancestor = parent(&dir)?;
+                    loop {
+                        if identity(&ancestor)? == root_id {
+                            break;
+                        }
+                        let Some(relative) = ancestor_path else {
                             return Err(format!(
+                                "{}: workspace.members: {listed:?} resolves outside the workspace",
+                                root_manifest.display()
+                            )
+                            .into());
+                        };
+                        let at = root.path.join(relative);
+                        if let Some(captured) = capture_manifest(&mut manifests, &ancestor, &at)? {
+                            if Manifest::parse(&captured.bytes, &at.join(MANIFEST))?
+                                .workspace
+                                .is_some()
+                            {
+                                return Err(format!(
                                 "{}: workspace.members: {listed:?} belongs to the workspace at {}",
                                 root_manifest.display(),
                                 at.join(MANIFEST).display()
                             )
                             .into());
+                            }
                         }
+                        let above = parent(&ancestor)?;
+                        if identity(&above)? == identity(&ancestor)? {
+                            return Err(format!(
+                                "{}: workspace.members: {listed:?} resolves outside the workspace",
+                                root_manifest.display()
+                            )
+                            .into());
+                        }
+                        ancestor_path = relative.parent();
+                        ancestor = above;
                     }
-                    let above = parent(&ancestor)?;
-                    if identity(&above)? == identity(&ancestor)? {
+                    let package = manifest.package.ok_or_else(|| {
+                        format!("{}: expected [package]", manifest_path.display())
+                    })?;
+                    if drafts.contains_key(&package.id) {
                         return Err(format!(
-                            "{}: workspace.members: {listed:?} resolves outside the workspace",
-                            root_manifest.display()
+                            "{}: workspace.members: {listed:?} repeats {}",
+                            root_manifest.display(),
+                            package.id
                         )
                         .into());
                     }
-                    ancestor_path = relative.parent();
-                    ancestor = above;
+                    Ok((dir_id, dir, relative, manifest_path, package))
+                })();
+                match result {
+                    Ok((dir_id, dir, relative, manifest_path, package)) => {
+                        opened.insert(dir_id, package.id.clone());
+                        drafts.insert(package.id.clone(), (dir, relative, manifest_path, package));
+                    }
+                    Err(error) => refusals.push(error.to_string()),
                 }
-                let package = manifest
-                    .package
-                    .ok_or_else(|| format!("{}: expected [package]", manifest_path.display()))?;
-                if drafts.contains_key(&package.id) {
-                    return Err(format!(
-                        "{}: workspace.members: {listed:?} repeats {}",
-                        root_manifest.display(),
-                        package.id
-                    )
-                    .into());
-                }
-                opened.insert(dir_id, package.id.clone());
-                drafts.insert(package.id.clone(), (dir, relative, manifest_path, package));
+            }
+            if let Some(Err(error)) = selected_config {
+                refusals.push(error);
+            }
+            if !refusals.is_empty() {
+                return Err(refusals.join("\nhirsel: ").into());
             }
         }
         let member = opened.get(&selected_id).cloned();
@@ -503,6 +517,10 @@ impl Workspace {
                 .values()
                 .flatten()
                 .any(|manifest| manifest.identity == identity)
+    }
+
+    pub(crate) fn record_input(&mut self, identity: FileId) {
+        self.inputs.insert(identity);
     }
 
     pub(crate) fn selected(&self) -> Result<&Id, String> {

@@ -1413,6 +1413,52 @@ fn package_l14_a_rename_reaches_images_sites_and_the_recipe() {
 }
 
 #[test]
+fn package_manifest_refusals_follow_workspace_member_and_key_order() {
+    let law = PackageLaw::new();
+    law.write(
+        "work/hirsel.toml",
+        "[workspace]\nmembers = [\"zeta\", \"alpha\"]\n",
+    );
+    law.write("work/zeta/hirsel.toml", "zzz = true\naaa = true\n");
+    law.library("work/alpha", "Alpha", 1, PACKAGE_X_SOURCE, "");
+
+    for directory in ["work", "work/zeta"] {
+        PackageLaw::refuse(
+            law.run(&["lock", directory]),
+            concat!(
+                "work/zeta/hirsel.toml: unknown key aaa\n",
+                "hirsel: work/zeta/hirsel.toml: unknown key zzz\n",
+                "hirsel: work/alpha/hirsel.toml: package.name: \"Alpha\" is not ",
+                "[a-z][a-z0-9_]* with at most 64 bytes",
+            ),
+        );
+        assert!(!law.path("work/hirsel.lock").exists());
+    }
+}
+
+#[test]
+fn package_pack_output_cannot_alias_a_fetched_archive() {
+    let law = PackageLaw::new();
+    law.fixture_json();
+    law.library(
+        "work",
+        "wrap",
+        1,
+        "pub fn answer() -> u64 { 42 }\n",
+        &format!("[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"json.hpkg\" }}\n"),
+    );
+    std::fs::rename(law.path("vendor/jx.hpkg"), law.path("work/json.hpkg")).unwrap();
+    std::fs::hard_link(law.path("work/json.hpkg"), law.path("output.hpkg")).unwrap();
+    let original = std::fs::read(law.path("output.hpkg")).unwrap();
+    PackageLaw::refuse(
+        law.run(&["pack", "work", "--out", "output.hpkg"]),
+        "--out output.hpkg is an input of this command",
+    );
+    assert_eq!(std::fs::read(law.path("output.hpkg")).unwrap(), original);
+    assert!(!law.path("work/hirsel.lock").exists());
+}
+
+#[test]
 fn package_pack_output_cannot_alias_an_input() {
     let law = PackageLaw::new();
     law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");

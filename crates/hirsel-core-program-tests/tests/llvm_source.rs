@@ -12,6 +12,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 hirsel_guard::install!();
+#[path = "../../hirsel-core-rt/testdata/host_memory.rs"]
+mod host_memory;
 include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
 

@@ -27,9 +27,9 @@ fn growth_shadow_copies_back_data_and_capacity() {
 #[test]
 fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     fs::write(
-        scratch.0.join("input.o"),
+        scratch.path().join("input.o"),
         program.cranelift_object(NATIVE_TARGET, false, false, false),
     )
     .unwrap();
@@ -118,9 +118,9 @@ use hirsel_core_program_tests::wire_socket;
 fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
     let (program, names) =
         hirsel_core_program_tests::SourceProgram::lower(wire_socket::SOURCE, None);
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     fs::write(
-        scratch.0.join("input.o"),
+        scratch.path().join("input.o"),
         program.cranelift_object(NATIVE_TARGET, false, false, false),
     )
     .unwrap();

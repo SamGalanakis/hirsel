@@ -8,14 +8,9 @@ for zlib (RFC 1950) and gzip (RFC 1952). Go splits these into `compress/flate`,
 `compress/zlib` and `compress/gzip`. Here one module and one `Format` serve all three,
 because they share every block and differ only in header and trailer.
 
-**What exists.** Main has no compression runtime yet. The predecessor tree's
-`stdlib/std@1/flate.hir` (runtime-gzip-658, d2dc4663 and its parents) is a complete decoder
-and encoder for all three formats. Its decoder ports Go's `compress/flate` inflate with
-zlib `puff`'s canonical code construction, and keeps its window in place across compactions.
-Its corpus holds the Go and zlib vectors the compression prior-art audit listed. That code
-and corpus are the port source for this module, and the shapes below are its shapes in
-current Hirsel. `std.assets` gzips at build time through `core/tools/http_assets.py` and
-needs none of this at run time.
+The decoder uses a 32 KiB history ring, with a bit reservoir that retains a
+partial symbol across input calls. The same engine serves whole buffers and
+push calls. Gzip header fields and header CRCs are included in the framing checks.
 
 ## Whole buffers
 

@@ -43,6 +43,8 @@ upstream license texts under the bundle's `notices/` directory; see
 | Go net/url | `src/net/url/url_test.go:30-665,1521-1627` strict inputs from `urltests` and the `parseTests` query table with literal plus and semicolon | `core/std/tests/uri.hirsel` | golang/go `46b62495e1bf4d56e0313320772ae588d9119aed` | BSD-3-Clause (Go) |
 | LLVM | `compiler-rt/lib/builtins/crt{begin,end}.c` and `libunwind/` compiled into the link kit and linked into every executable | link kit (`tools/buck2/native-toolchain/link_kit.py`) | llvm/llvm-project `a738f2737189bcc1de75c25e8cd1d4b466c9526e` | Apache-2.0 WITH LLVM-exception (license text below) |
 | GNU C Library | glibc 2.28's `Scrt1.o`, `crti.o`, `crtn.o` and `libc_nonshared.a` (Debian 2.28-10+deb10u1) linked into every executable; its libraries' public dynamic symbol tables generate the link kit's stubs | link kit (`tools/buck2/native-toolchain/link_kit.py`) | glibc 2.28 (Debian 2.28-10+deb10u1) | LGPL-2.1-or-later, with glibc's exception granting unlimited permission to link these compiled startup and nonshared files into other programs; `tools/toolchain-dist/licenses/common-licenses/LGPL-2.1` |
+| Go standard library | Block decoding and Huffman completeness in `src/compress/flate/inflate.go`, hash-chain match search in `src/compress/flate/deflate.go`, framing in `src/compress/gzip/gunzip.go` and `src/compress/zlib/reader.go` | `core/std/flate.hirsel`, `core/std/tests/flate.hirsel` | golang/go `ebe2feefc400f813aefdc8a036e66d2619da6649` | BSD-3-Clause (Go) |
+| zlib | Canonical Huffman decoding and construction in `contrib/puff/puff.c:235-255,340-379`. Copyright (C) 2002-2013 Mark Adler, all rights reserved. | `core/std/flate.hirsel` | madler/zlib `09155eaa2f9270dc4ed1fa13e2b4b2613e6e4851` | Zlib |
 
 Where an upstream offers MIT or Apache-2.0, the MIT option is used.
 
@@ -502,4 +504,24 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## Zlib License (zlib)
+
+```text
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
 ```

@@ -1,0 +1,628 @@
+// DEFLATE block decoding follows Go compress/flate/inflate.go
+// (ebe2feefc400) and zlib contrib/puff/puff.c:235-255,340-379
+// (09155eaa2f92). The count/symbol walk reads only the bits it needs,
+// so a push caller can discard all consumed bytes between calls.
+pub type Format: key = Raw | Zlib | Gzip
+
+pub type FlateError: key = Truncated | Corrupt(u64) | Header | Checksum | TooLarge | TrailingData(u64)
+
+pub type Error = Data(FlateError) | Capacity(Capacity)
+
+pub type Step {
+    consumed: u64,
+    produced: u64,
+    ended: bool
+}
+
+type Phase = Start | GzipHeader(u64, u8) | ExtraLength(u8) | ExtraHigh(u8, u64) | Extra(u8, u64) | Text(u8, u8) | HeaderCheck | Block | StoredHeader | Stored(u64) | DynamicHeader | CodeLengths(u64, u64, u64, u64) | Lengths(u64, u64, u64) | Fixed | Dynamic | Trailer | GzipSize | End
+
+type Stop = Continue | Input | Output | Done
+
+// A unit reads tentatively at `used`. On input exhaustion the loaded
+// bytes remain in the reservoir and the next call retries the unit.
+type Bits {
+    data: u64,
+    count: u64,
+    used: u64,
+    at: u64,
+    offset: u64
+}
+
+pub opaque type Decoder {
+    format: Format,
+    phase: Phase,
+    fault: Option[FlateError],
+    bits: Bits,
+    window: Bytes,
+    tables: List[u16],
+    size: u64,
+    max_distance: u64,
+    last: bool,
+    pending: u64,
+    distance: u64,
+    header_crc: u32,
+    crc: u32,
+    adler_a: u32,
+    adler_b: u32
+}
+
+const WINDOW: u64 = 32768
+
+const ORDER: Inline[u64, 19] =[16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+// The shared length prefix is followed by canonical count/symbol tables for
+// the code-length, literal/length and distance alphabets. Slot zero of each
+// count table is the maximum code length. Counts occupy slots 1 through 15.
+const CODE_TABLE: u64 = 320
+
+const LITERAL_TABLE: u64 = 355
+
+const DISTANCE_TABLE: u64 = 659
+
+const TABLE_SIZE: u64 = 707
+
+/// Start a raw, zlib or gzip decoder with an admitted window and tables.
+pub fn decoder(format: Format) -> Result[Decoder, Capacity] {
+    let mut window: Bytes = list.with_capacity(WINDOW)?
+    list.fill(mut window, WINDOW, 0)?
+    let mut tables: List[u16] = list.with_capacity(TABLE_SIZE)?
+    list.fill(mut tables, TABLE_SIZE, 0)?
+    Ok(Decoder(format: format, phase: Start(), fault: None(), bits: Bits(data: 0, count: 0, used: 0, at: 0, offset: 0), window: take window, tables: take tables, size: 0, max_distance: WINDOW, last: false, pending: 0, distance: 0, header_crc: 0, crc: 0, adler_a: 1, adler_b: 0))
+}
+
+fn read_bits(mut b: Bits, input: Bytes, n: u64) -> Result[u64, FlateError] {
+    while b.count < b.used + n {
+        if b.at == list.len(input) {
+            return Error(Truncated())
+        }
+        let byte: u64 = int.widen(input[b.at])
+        b.data = b.data | (byte << b.count)
+        b.count += 8
+        b.at += 1
+    }
+    let value = (b.data >> b.used) & ((1u64 << n) - 1)
+    b.used += n
+    Ok(value)
+}
+
+fn commit(mut b: Bits) {
+    b.data = b.data >> b.used
+    b.count -= b.used
+    b.used = 0
+}
+
+fn position(b: Bits) -> u64 {
+    b.offset + b.at - (b.count - b.used) / 8
+}
+
+fn unit_offset(b: Bits) -> u64 {
+    b.offset + b.at - (b.count + 7) / 8
+}
+
+fn reversed8(byte: u64) -> u64 {
+    ((byte * 0x0202020202) & 0x010884422010) % 1023
+}
+
+fn fixed_symbol(mut b: Bits, input: Bytes) -> Result[u64, FlateError] {
+    let first = reversed8(read_bits(mut b, input, 7)? << 1)
+    if first < 24 {
+        return Ok(first + 256)
+    }
+    let code = first * 2 + read_bits(mut b, input, 1)?
+    if code < 192 {
+        Ok(code - 48)
+    } else if code < 200 {
+        Ok(code + 88)
+    } else {
+        Ok(code * 2 + read_bits(mut b, input, 1)? - 256)
+    }
+}
+
+fn build_codes(mut tables: List[u16], root: u64, start: u64, n: u64) -> bool {
+    let mut count: Inline[u16, 16] =[0; 16]
+    let mut max: u64 = 0
+    for i in 0u64 .. n {
+        let length: u64 = int.widen(tables[start + i])
+        if length > 0 {
+            count[length] += 1
+            if length > max {
+                max = length
+            }
+        }
+    }
+    let mut left: u16 = 1
+    let mut offsets: Inline[u64, 16] =[0; 16]
+    let mut total: u64 = 0
+    for length in 1u64 .. 16 {
+        left *= 2
+        if count[length] > left {
+            return false
+        }
+        left -= count[length]
+        offsets[length] = total
+        total += int.widen(count[length])
+        tables[root + length] = count[length]
+    }
+    if max > 0 && left > 0 && !(max == 1 && count[1] == 1) {
+        return false
+    }
+    tables[root] = int.narrow(max)
+    for i in 0u64 .. n {
+        let length: u64 = int.widen(tables[start + i])
+        if length > 0 {
+            tables[root + 16 + offsets[length]] = int.narrow(i)
+            offsets[length] += 1
+        }
+    }
+    true
+}
+
+fn read_symbol(mut b: Bits, input: Bytes, tables: List[u16], root: u64) -> Result[u64, FlateError] {
+    let max: u64 = int.widen(tables[root])
+    let mut code: u64 = 0
+    let mut first: u64 = 0
+    let mut index = root + 16
+    for length in 1u64 .. (max + 1) {
+        code = code * 2 + read_bits(mut b, input, 1)?
+        let count: u64 = int.widen(tables[root + length])
+        let next = first + count
+        if code < next {
+            return Ok(int.widen(tables[index + code - first]))
+        }
+        index += count
+        first = next * 2
+    }
+    Error(Corrupt(unit_offset(b)))
+}
+
+fn next_gzip_field(flags: u8, after: u8) -> Phase {
+    if after < 4 && flags & 4 != 0 {
+        ExtraLength(flags)
+    } else if after < 8 && flags & 8 != 0 {
+        Text(flags, 8)
+    } else if after < 16 && flags & 16 != 0 {
+        Text(flags, 16)
+    } else if flags & 2 != 0 {
+        HeaderCheck()
+    } else {
+        Block()
+    }
+}
+
+fn after_block(last: bool) -> Phase {
+    if last {
+        Trailer()
+    } else {
+        Block()
+    }
+}
+
+fn emit(mut d: Decoder, mut out: Bytes, byte: u8) {
+    let _ = list.push(mut out, byte)
+    d.window[d.size & (WINDOW - 1)] = byte
+    d.size += 1
+}
+
+fn match_byte(d: Decoder) -> u8 {
+    d.window[(d.size - d.distance) & (WINDOW - 1)]
+}
+
+fn length_base(code: u64) -> (u64, u64) {
+    if code < 265 {
+        (code - 254, 0u64)
+    } else if code == 285 {
+        (258u64, 0u64)
+    } else {
+        let extra = (code - 261) / 4
+        (((4 + ((code - 265) & 3)) << extra) + 3, extra)
+    }
+}
+
+fn advance_symbols(mut d: Decoder, input: Bytes, limit: u64, mut out: Bytes, fixed: bool) -> Result[Stop, FlateError] {
+    while d.pending > 0 {
+        if list.len(out) == limit {
+            return Ok(Output())
+        }
+        let byte = match_byte(d)
+        emit(mut d, mut out, byte)
+        d.pending -= 1
+    }
+    let symbol = if fixed {
+        fixed_symbol(mut d.bits, input)?
+    } else {
+        read_symbol(mut d.bits, input, d.tables, LITERAL_TABLE)?
+    }
+    if symbol < 256 {
+        if list.len(out) == limit {
+            d.bits.used = 0
+            return Ok(Output())
+        }
+        emit(mut d, mut out, int.narrow(symbol))
+    } else if symbol == 256 {
+        if d.last {
+            d.bits.used += (d.bits.count - d.bits.used) % 8
+        }
+        d.phase = after_block(d.last)
+    } else {
+        if symbol > 285 {
+            return Error(Corrupt(unit_offset(d.bits)))
+        }
+        let (base, extra) = length_base(symbol)
+        let length = if extra == 0 {
+            base
+        } else {
+            base + read_bits(mut d.bits, input, extra)?
+        }
+        let code = if fixed {
+            reversed8(read_bits(mut d.bits, input, 5)? << 3)
+        } else {
+            read_symbol(mut d.bits, input, d.tables, DISTANCE_TABLE)?
+        }
+        if code >= 30 {
+            return Error(Corrupt(unit_offset(d.bits)))
+        }
+        let distance = if code < 4 {
+            code + 1
+        } else {
+            let more = (code - 2) / 2
+            (((2 + (code & 1)) << more) + 1) + read_bits(mut d.bits, input, more)?
+        }
+        if distance > d.size || distance > d.max_distance {
+            return Error(Corrupt(unit_offset(d.bits)))
+        }
+        d.pending = length
+        d.distance = distance
+    }
+    commit(mut d.bits)
+    Ok(Continue())
+}
+
+fn advance(mut d: Decoder, input: Bytes, limit: u64, mut out: Bytes) -> Result[Stop, FlateError] {
+    let phase = d.phase
+    match phase {
+        Start() => {
+            match d.format {
+                Raw() => {
+                    d.phase = Block()
+                },
+                Zlib() => {
+                    let method = read_bits(mut d.bits, input, 8)?
+                    let flags = read_bits(mut d.bits, input, 8)?
+                    if method & 15 != 8 || method >> 4 > 7 || (method * 256 + flags) % 31 != 0 || flags & 32 != 0 {
+                        return Error(Header())
+                    }
+                    d.max_distance = 256u64 << (method >> 4)
+                    d.phase = Block()
+                    commit(mut d.bits)
+                },
+                Gzip() => {
+                    d.phase = GzipHeader(0, 0)
+                },
+            }
+        },
+        GzipHeader(at, flags) => {
+            let first = d.bits.at
+            let byte: u8 = int.narrow(read_bits(mut d.bits, input, 8)?)
+            if (at == 0 && byte != 31) || (at == 1 && byte != 139) || (at == 2 && byte != 8) || (at == 3 && byte & 224 != 0) {
+                return Error(Header())
+            }
+            d.header_crc = crc32.update(d.header_crc, input, first, d.bits.at)
+            commit(mut d.bits)
+            let next_flags = if at == 3 {
+                byte
+            } else {
+                flags
+            }
+            d.phase = if at == 9 {
+                next_gzip_field(next_flags, 0)
+            } else {
+                GzipHeader(at + 1, next_flags)
+            }
+        },
+        ExtraLength(flags) => {
+            // Checksum each header byte as it enters the reservoir, including
+            // the first length byte when a later call supplies the second.
+            let at = d.bits.at
+            let length = read_bits(mut d.bits, input, 8)?
+            d.header_crc = crc32.update(d.header_crc, input, at, d.bits.at)
+            commit(mut d.bits)
+            d.phase = ExtraHigh(flags, length)
+        },
+        ExtraHigh(flags, low) => {
+            let at = d.bits.at
+            let high = read_bits(mut d.bits, input, 8)?
+            d.header_crc = crc32.update(d.header_crc, input, at, d.bits.at)
+            commit(mut d.bits)
+            d.phase = Extra(flags, low + high * 256)
+        },
+        Extra(flags, left) => {
+            let at = d.bits.at
+            let have = list.len(input) - at
+            let n = if left < have {
+                left
+            } else {
+                have
+            }
+            d.bits.at += n
+            d.header_crc = crc32.update(d.header_crc, input, at, d.bits.at)
+            if n != left {
+                d.phase = Extra(flags, left - n)
+                return Ok(Input())
+            }
+            d.phase = next_gzip_field(flags, 4)
+        },
+        Text(flags, field) => {
+            let at = d.bits.at
+            let mut found = false
+            while d.bits.at < list.len(input) && !found {
+                found = input[d.bits.at] == 0
+                d.bits.at += 1
+            }
+            d.header_crc = crc32.update(d.header_crc, input, at, d.bits.at)
+            if !found {
+                return Ok(Input())
+            }
+            d.phase = next_gzip_field(flags, field)
+        },
+        HeaderCheck() => {
+            let stored = read_bits(mut d.bits, input, 16)?
+            let expected: u64 = int.widen(d.header_crc & 65535)
+            if stored != expected {
+                return Error(Header())
+            }
+            commit(mut d.bits)
+            d.phase = Block()
+        },
+        DynamicHeader() => {
+            let header = read_bits(mut d.bits, input, 14)?
+            let nlit = (header & 31) + 257
+            let ndist = ((header >> 5) & 31) + 1
+            if nlit > 286 {
+                return Error(Corrupt(unit_offset(d.bits)))
+            }
+            for i in 0u64 .. 19 {
+                d.tables[i] = 0
+            }
+            d.phase = CodeLengths(nlit, ndist, (header >> 10) + 4, 0)
+            commit(mut d.bits)
+        },
+        CodeLengths(nlit, ndist, nclen, at) => {
+            let length: u16 = int.narrow(read_bits(mut d.bits, input, 3)?)
+            d.tables[ORDER[at]] = length
+            if at + 1 == nclen {
+                if !build_codes(mut d.tables, CODE_TABLE, 0, 19) {
+                    return Error(Corrupt(unit_offset(d.bits)))
+                }
+                d.phase = Lengths(nlit, ndist, 0)
+            } else {
+                d.phase = CodeLengths(nlit, ndist, nclen, at + 1)
+            }
+            commit(mut d.bits)
+        },
+        Lengths(nlit, ndist, at) => {
+            let symbol = read_symbol(mut d.bits, input, d.tables, CODE_TABLE)?
+            let (count, value) = if symbol < 16 {
+                let length: u16 = int.narrow(symbol)
+                (1u64, length)
+            } else if symbol == 16 {
+                if at == 0 {
+                    return Error(Corrupt(unit_offset(d.bits)))
+                }
+                (read_bits(mut d.bits, input, 2)? + 3, d.tables[at - 1])
+            } else if symbol == 17 {
+                (read_bits(mut d.bits, input, 3)? + 3, 0u16)
+            } else {
+                (read_bits(mut d.bits, input, 7)? + 11, 0u16)
+            }
+            let end = at + count
+            if end > nlit + ndist {
+                return Error(Corrupt(unit_offset(d.bits)))
+            }
+            for i in at .. end {
+                d.tables[i] = value
+            }
+            if end == nlit + ndist {
+                if d.tables[256] == 0 || !build_codes(mut d.tables, LITERAL_TABLE, 0, nlit) || !build_codes(mut d.tables, DISTANCE_TABLE, nlit, ndist) {
+                    return Error(Corrupt(unit_offset(d.bits)))
+                }
+                d.phase = Dynamic()
+            } else {
+                d.phase = Lengths(nlit, ndist, end)
+            }
+            commit(mut d.bits)
+        },
+        Block() => {
+            let header = read_bits(mut d.bits, input, 3)?
+            d.last = header & 1 != 0
+            let kind = header >> 1
+            if kind == 0 {
+                d.bits.used += (d.bits.count - d.bits.used) % 8
+                d.phase = StoredHeader()
+            } else if kind == 1 {
+                d.phase = Fixed()
+            } else if kind == 2 {
+                d.phase = DynamicHeader()
+            } else {
+                return Error(Corrupt(unit_offset(d.bits)))
+            }
+            commit(mut d.bits)
+        },
+        StoredHeader() => {
+            let length = read_bits(mut d.bits, input, 16)?
+            let check = read_bits(mut d.bits, input, 16)?
+            if length ^ check != 65535 {
+                return Error(Corrupt(unit_offset(d.bits)))
+            }
+            commit(mut d.bits)
+            d.phase = Stored(length)
+        },
+        Stored(left) => {
+            let mut remaining = left
+            while remaining > 0 && list.len(out) < limit && d.bits.at < list.len(input) {
+                let value = input[d.bits.at]
+                emit(mut d, mut out, value)
+                d.bits.at += 1
+                remaining -= 1
+            }
+            if remaining == 0 {
+                d.phase = after_block(d.last)
+            } else {
+                d.phase = Stored(remaining)
+                if list.len(out) == limit {
+                    return Ok(Output())
+                } else {
+                    return Ok(Input())
+                }
+            }
+        },
+        Fixed() => return advance_symbols(mut d, input, limit, mut out, true),
+        Dynamic() => return advance_symbols(mut d, input, limit, mut out, false),
+        Trailer() => {
+            match d.format {
+                Raw() => (),
+                Zlib() => {
+                    let wire = read_bits(mut d.bits, input, 32)?
+                    let expected = (d.adler_a & 255) << 24 | (d.adler_a >> 8) << 16 | (d.adler_b & 255) << 8 | (d.adler_b >> 8)
+                    let expected64: u64 = int.widen(expected)
+                    if wire != expected64 {
+                        return Error(Checksum())
+                    }
+                },
+                Gzip() => {
+                    let wire = read_bits(mut d.bits, input, 32)?
+                    let crc: u64 = int.widen(d.crc)
+                    // Commit the CRC separately so the reservoir never
+                    // needs to shift a word by its full width.
+                    if wire != crc {
+                        return Error(Checksum())
+                    }
+                    d.phase = GzipSize()
+                    commit(mut d.bits)
+                    return Ok(Continue())
+                },
+            }
+            commit(mut d.bits)
+            d.phase = End()
+            return Ok(Done())
+        },
+        GzipSize() => {
+            let size = read_bits(mut d.bits, input, 32)?
+            if size != d.size & 0xffffffff {
+                return Error(Checksum())
+            }
+            commit(mut d.bits)
+            d.phase = End()
+            return Ok(Done())
+        },
+        End() => return Ok(Done()),
+    }
+    Ok(Continue())
+}
+
+fn adler(mut a: u32, mut b: u32, out: Bytes, lo: u64, hi: u64) {
+    for i in lo .. hi {
+        let byte: u32 = int.widen(out[i])
+        a = (a + byte) % 65521
+        b = (b + a) % 65521
+    }
+}
+
+fn checksum(mut d: Decoder, out: Bytes, lo: u64) {
+    let hi = list.len(out)
+    match d.format {
+        Raw() => (),
+        Zlib() => adler(mut d.adler_a, mut d.adler_b, out, lo, hi),
+        Gzip() => {
+            d.crc = crc32.update(d.crc, out, lo, hi)
+        },
+    }
+}
+
+fn run(mut d: Decoder, input: Bytes, limit: u64, mut out: Bytes) -> Result[Stop, FlateError] {
+    let mut checked = list.len(out)
+    while true {
+        if let Trailer() = d.phase {
+            checksum(mut d, out, checked)
+            checked = list.len(out)
+        }
+        match advance(mut d, input, limit, mut out) {
+            Ok(Continue()) => (),
+            Ok(stop) => {
+                checksum(mut d, out, checked)
+                return Ok(stop)
+            },
+            Error(Truncated()) => {
+                d.bits.used = 0
+                checksum(mut d, out, checked)
+                return Ok(Input())
+            },
+            Error(error) => {
+                d.fault = Some(error)
+                d.window = list.new()
+                d.tables = list.new()
+                return Error(error)
+            },
+        }
+    }
+    Ok(Input())
+}
+
+/// Append decoded bytes into the spare capacity of out. Reports the end of
+/// one stream, leaving any following bytes unconsumed. Alloc: none.
+pub fn decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes) -> Result[Step, FlateError] {
+    if let Some(error) = d.fault {
+        return Error(error)
+    }
+    let slice = list.slice(input, lo, hi)
+    let start = list.len(out)
+    let limit = list.capacity(out)
+    let stop = run(mut d, slice, limit, mut out)?
+    let consumed = d.bits.at
+    d.bits.offset += consumed
+    d.bits.at = 0
+    Ok(Step(consumed: consumed, produced: list.len(out) - start, ended: match stop {
+        Done() => true,
+        _ => false
+    }))
+}
+
+fn admit[T](take work: Result[T, Capacity]) -> Result[T, Error] {
+    match take work {
+        Ok(value) => Ok(take value),
+        Error(error) => Error(Capacity(error)),
+    }
+}
+
+/// Decode one stream with a checked output bound. A following byte is
+/// TrailingData at its input offset. Work and allocation are linear.
+pub fn decode(format: Format, data: Bytes, max_output: u64) -> Result[Bytes, Error] {
+    let mut d = admit(decoder(format))?
+    let mut out: Bytes = list.new()
+    while true {
+        let capacity = list.capacity(out)
+        let limit = if capacity < max_output {
+            capacity
+        } else {
+            max_output
+        }
+        match run(mut d, data, limit, mut out) {
+            Ok(Done()) => {
+                let end = position(d.bits)
+                if end != list.len(data) {
+                    return Error(Data(TrailingData(end)))
+                }
+                return Ok(take out)
+            },
+            Ok(Input()) => return Error(Data(Truncated())),
+            Ok(Output()) => {
+                if limit == max_output {
+                    return Error(Data(TooLarge()))
+                }
+                admit(list.reserve(mut out, 1))?
+            },
+            Ok(Continue()) => (),
+            Error(error) => return Error(Data(error)),
+        }
+    }
+    Error(Data(Truncated()))
+}

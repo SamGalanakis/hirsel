@@ -666,12 +666,13 @@ fn network_outcomes_decode_with_exact_payloads() {
     );
 
     let mut encoded_header = header.encode(header.revision).unwrap();
-    let last = encoded_header.len() - 1;
-    encoded_header[last] = 0;
-    encoded_header[last - 1] = 0;
-    encoded_header[last - 3] = 1;
-    assert!(Header::decode(&encoded_header).is_err(), "reversed range");
-    encoded_header.pop();
+    let last = encoded_header.len() - header.map_hash_key.0.len() - 1;
+    let mut reversed = encoded_header.clone();
+    reversed[last] = 0;
+    reversed[last - 1] = 0;
+    reversed[last - 3] = 1;
+    assert!(Header::decode(&reversed).is_err(), "reversed range");
+    encoded_header.remove(last);
     assert!(Header::decode(&encoded_header).is_err(), "short rule list");
 
     let mut decoder = Decoder::default();
@@ -984,9 +985,10 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // Format 4 has 72 fixed bytes, 14 identity bytes + 1 length byte,
-    // a 3-byte argument length and a 1-byte empty grants length.
-    h.arg = vec![0; MAX_LEN - 91];
+    // Format 7 has 88 fixed bytes, including the 16-byte Map key.
+    // The identity takes 14 bytes plus one length byte, the argument
+    // length takes three bytes and the empty grants length takes one.
+    h.arg = vec![0; MAX_LEN - 107];
     let mut store = Box::<Store>::default();
     let (tape, _) =
         unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()) }.unwrap();

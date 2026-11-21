@@ -24,6 +24,8 @@ from part3u import LIMIT_NS, LOAD, PARTITIONS, RUN, SERVER, SYNCS, TOOL, TOOL_DE
 
 
 PORT = 28200
+# Session units of session_u, one listening port each.
+SESSION_UNITS = 8
 TOOL_PORT = 28190
 NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
@@ -209,24 +211,16 @@ class Runner:
         if side == "tokiow8":
             argv = [self.bin / "twin", *base, 8, SYNCS, self.store]
         elif side.startswith("untied"):
-            env |= {
-                "HIRSEL_UNTIED": "8", "HIRSEL_UNITS": str(PARTITIONS + 1),
-                "HIRSEL_FRONT": str(PORT), "HIRSEL_XSTATS": "1",
-            }
+            # One root; K session units each listen on PORT + u (L4).
+            nports = SESSION_UNITS
+            env |= {"HIRSEL_UNTIED": "8", "HIRSEL_XSTATS": "1"}
             if side == "untied (1 GiB)":
                 env["HIRSEL_RETENTION_MB"] = "1024"
-            if "hot" in cell:
-                env["HIRSEL_UNTIED_QUEUE_WAIT"] = "1"
-            name = "session_u_rec" if recorded else "session_u"
-            argv = [self.bin / name, *base, 2]
+            if recorded:
+                raise ValueError("session_u has no recorded build: a recording holds the root alone")
+            argv = [self.bin / "session_u", *base, SESSION_UNITS]
         else:
-            if side == "S3k7":
-                nports = 7
-                env |= {"HIRSEL_UNITS": "8", "HIRSEL_XRING": "65536"}
-            else:
-                env["HIRSEL_S8_WORKERS"] = side.removeprefix("S1w")
-            name = "session_rec" if recorded else "session"
-            argv = [self.bin / name, *base, int(side == "S3k7")]
+            raise ValueError(f"side {side}: the ring sides (S3k7, S1w*) went with the ring")
         if cell["ready_ack"]:
             argv.append(1)
         env = {k: v for k, v in os.environ.items() if not k.startswith("HIRSEL_")} | env
@@ -279,7 +273,7 @@ class Runner:
                 profile["rc"] = profile_proc.wait(timeout=5)
 
     def trial(self, trial_id, side, cell, rate, seed, tool_pid, profile_mode):
-        assert_ports_free(range(PORT, PORT + 7))
+        assert_ports_free(range(PORT, PORT + max(7, SESSION_UNITS)))
         for directory in (self.store, self.tapes):
             for file in directory.iterdir():
                 file.unlink()

@@ -1,0 +1,23 @@
+[package]
+name = "tree-sitter-hirsel"
+description = "Hirsel grammar for Tree-sitter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/SamGalanakis/hirsel"
+build = "bindings/rust/build.rs"
+include = ["bindings/rust/*", "grammar.js", "queries/*", "src/**", "tree-sitter.json"]
+
+[workspace]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tree-sitter = "=0.25.10"

@@ -1,0 +1,27 @@
+{
+  "name": "tree-sitter-hirsel",
+  "version": "0.1.0",
+  "description": "Hirsel grammar for Tree-sitter",
+  "license": "MIT",
+  "repository": "https://github.com/SamGalanakis/hirsel",
+  "main": "bindings/node",
+  "files": ["binding.gyp", "bindings/node/*", "grammar.js", "queries/*", "src/**", "tree-sitter.json"],
+  "scripts": {
+    "install": "node-gyp-build"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.5.0",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "tree-sitter": "0.25.0"
+  },
+  "peerDependencies": {
+    "tree-sitter": "^0.25.0"
+  },
+  "peerDependenciesMeta": {
+    "tree-sitter": {
+      "optional": true
+    }
+  }
+}

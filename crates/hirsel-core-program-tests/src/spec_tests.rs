@@ -403,6 +403,7 @@ fn every_live_spec_fence_checks_its_claim() {
         .filter(|path| path.extension().is_some_and(|e| e == "md"))
         .collect::<Vec<_>>();
     paths.sort();
+    paths.push(repo().join("docs/PRIMER.md"));
     let (mut failures, mut unbuilt) = (Vec::new(), 0);
     let fences = paths
         .iter()

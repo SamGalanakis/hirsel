@@ -1,0 +1,145 @@
+==================
+Nested block comment
+==================
+
+fn f() {
+  /* opening /* nested /* deepest */ nested */ closing */
+  1
+}
+
+---
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (block_comment)
+      (integer_literal))))
+
+==================
+Raw delimiters keep inner quotes and fewer hashes
+==================
+
+fn f() {
+  r##"quote: "# still text"##
+  br#"quote: "
+and a newline"#
+  r"no hashes"
+}
+
+---
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (raw_string_literal)
+      (raw_byte_string_literal)
+      (raw_string_literal))))
+
+==================
+Minus, paren and bracket start fresh statements after a newline
+==================
+
+fn f() {
+  let a = 3
+  -a
+  (a)
+  [a]
+}
+
+---
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (let_statement
+        (binding_pattern (identifier))
+        (integer_literal))
+      (unary_expression (identifier))
+      (parenthesized_expression (identifier))
+      (array_expression (identifier)))))
+
+==================
+A minus before a newline and a leading compound assignment continue
+==================
+
+fn f() {
+  let mut a = 3 -
+    2
+  a
+    -= 1
+}
+
+---
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (let_statement
+        (binding_pattern (identifier))
+        (binary_expression (integer_literal) (integer_literal)))
+      (assignment (identifier) (integer_literal)))))
+
+==================
+A bare exit ends at the newline, even with a comment
+==================
+
+fn f() {
+  'outer: loop {
+    break 'outer /* newline
+    */ -1
+  }
+  return
+  // comment
+  [1]
+}
+
+---
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (labelled_expression
+        (label)
+        (loop_expression
+          (block
+            (break_expression (label))
+            (block_comment)
+            (unary_expression (integer_literal)))))
+      (return_expression)
+      (line_comment)
+      (array_expression (integer_literal)))))
+
+==================
+A block inside parentheses is its own statement context
+==================
+
+fn f() {
+  ({ 3 /* newline
+      */ -1 }
+    - 2)
+}
+
+---
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (parenthesized_expression
+        (binary_expression
+          (block
+            (integer_literal)
+            (block_comment)
+            (unary_expression (integer_literal)))
+          (integer_literal))))))

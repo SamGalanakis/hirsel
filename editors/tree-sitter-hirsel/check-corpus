@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Check every core source and Hirsel documentation fence against the editor grammar."""
+
+import argparse
+import ctypes
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from tree_sitter import Language, Parser, Query, QueryCursor
+
+GRAMMAR = Path(__file__).resolve().parent
+ROOT = GRAMMAR.parents[1]
+FENCE = re.compile(rb"^[ \t]*(`{3,}|~{3,})([^\r\n]*)$")
+RULE = rb"[A-Z]+-[0-9]+"
+SOURCE_REFUSAL = re.compile(rb"// expect: refuse (" + RULE + rb") at (\d+):\d+(?:\s.*)?$")
+DOC_REFUSAL = re.compile(rb"// refused:\s*(" + RULE + rb")\b[:,]?\s*(.*)")
+
+SYNTAX_RULES = {b"LANG-1", b"LANG-2", b"LANG-4", b"LANG-5"}
+# LANG-5 also diagnoses a bytes-mode type mismatch after parsing.
+BYTES_MODE_TYPE_CASES = {
+    "core/front/cases/bytes-type.hirsel",
+    "core/front/cases/own/callable-bytes-closure.hirsel",
+    "core/front/cases/own/callable-bytes-type.hirsel",
+}
+# These rules cover semantics as well as the specific syntax refusals below.
+SOURCE_SYNTAX_REFUSALS = {
+    ("core/front/cases/body/removed-region-forms.hirsel", b"MEM-2"),
+}
+DOC_SYNTAX_REFUSALS = {
+    # LANG-3's other examples refuse a checked type or value: 300 as u8,
+    # 255 + 1 as u8, and an integer literal as f64.
+    ("docs/spec/syntax.md", b"LANG-3", b"const BAD: u64 = 1."),
+    ("docs/spec/language.md", b"LANG-9", b"type Bad = A(x: u64, u64)"),
+}
+
+
+def load_parser(library):
+    grammar = ctypes.CDLL(str(library))
+    entry = grammar.tree_sitter_hirsel
+    entry.restype = ctypes.c_void_p
+    capsule = ctypes.pythonapi.PyCapsule_New
+    capsule.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p)
+    capsule.restype = ctypes.py_object
+    language = Language(capsule(entry(), b"tree_sitter.Language", None))
+    return grammar, Parser(language), Query(language, "(line_comment) @comment")
+
+
+def hirsel_fences(path):
+    """Read fenced blocks with all info strings beginning with the word hirsel."""
+    opening = None
+    for line_number, line in enumerate(path.read_bytes().splitlines(keepends=True), 1):
+        match = FENCE.match(line.rstrip(b"\r\n"))
+        if opening is None:
+            if match:
+                delimiter, info = match.groups()
+                info = info.split()
+                opening = delimiter
+                if info[:1] == [b"hirsel"]:
+                    contents = []
+                    start = line_number + 1
+                else:
+                    contents = None
+        elif (match and match[1].startswith(opening) and not match[2].strip()):
+            if contents is not None:
+                yield start, b"".join(contents)
+            opening = None
+        elif contents is not None:
+            contents.append(line)
+    if opening is not None:
+        raise ValueError(f"{path.relative_to(ROOT)}: unclosed fenced block")
+
+
+def syntax_refusals(tree, comments, path, source, fence):
+    lines = source.split(b"\n")
+    expected = set()
+    for comment in QueryCursor(comments).captures(tree).get("comment", []):
+        text = comment.text
+        if not fence:
+            if not text.startswith(b"// expect: refuse"):
+                continue
+            match = SOURCE_REFUSAL.fullmatch(text)
+            if not match:
+                raise ValueError(f"{path}: refusal marker has no rule ID or source position")
+            rule, line = match.groups()
+            if rule == b"LANG-5" and path in BYTES_MODE_TYPE_CASES:
+                continue
+            if rule in SYNTAX_RULES or (path, rule) in SOURCE_SYNTAX_REFUSALS:
+                expected.add(int(line))
+            continue
+        if not text.startswith(b"// refused:"):
+            continue
+        match = DOC_REFUSAL.fullmatch(text)
+        if not match:
+            raise ValueError(f"{path}: refusal marker has no rule ID")
+        rule, reason = match.groups()
+        row, column = comment.start_point
+        code = lines[row][:column].strip()
+        # Core and foreign modules allow signatures, so the editor grammar does
+        # too. Only package context can refuse a signature or a foreign body.
+        if rule == b"LANG-5" and reason == b"a function outside core needs a body":
+            continue
+        if rule in SYNTAX_RULES or (path, rule, code) in DOC_SYNTAX_REFUSALS:
+            expected.add(row + 1 if code else None)
+    return expected
+
+
+def error_nodes(node):
+    if node.is_error or node.is_missing:
+        yield node
+    for child in node.children:
+        if child.has_error:
+            yield from error_nodes(child)
+
+
+def check(parser, comments, path, source, start=None):
+    root = parser.parse(source).root_node
+    expected = syntax_refusals(root, comments, path, source, start is not None)
+    found = set()
+    issues = []
+    origin = start or 1
+    if root.has_error:
+        for node in error_nodes(root):
+            first = node.start_point.row + 1
+            last = node.end_point.row + int(node.end_point.column > 0)
+            matched = {line for line in expected if line is None or first <= line <= max(first, last)}
+            if matched:
+                found.update(matched)
+            else:
+                kind = f"MISSING {node.type}" if node.is_missing else "ERROR"
+                issues.append(f"{path}:{origin + first - 1}:{node.start_point.column + 1}: unexpected {kind}")
+    for line in sorted(expected - found, key=lambda line: line or 0):
+        issues.append(f"{path}:{origin + (line or 1) - 1}: expected ERROR or MISSING for syntax refusal")
+    return bool(expected), issues
+
+
+def run(library):
+    # Keep the shared object loaded for the life of the parser and queries.
+    _grammar, parser, comments = load_parser(library)
+    source_count = source_negative = 0
+    issues = []
+    for path in sorted((ROOT / "core").rglob("*.hirsel")):
+        negative, errors = check(parser, comments, path.relative_to(ROOT).as_posix(), path.read_bytes())
+        issues.extend(errors)
+        source_count += 1
+        source_negative += negative
+
+    docs = sorted((ROOT / "docs/spec").glob("*.md"))
+    primer = ROOT / "docs/PRIMER.md"
+    if primer.is_file():
+        docs.append(primer)
+    fence_count = fence_negative = 0
+    for path in docs:
+        for line, source in hirsel_fences(path):
+            negative, errors = check(parser, comments, path.relative_to(ROOT).as_posix(), source, line)
+            issues.extend(errors)
+            fence_count += 1
+            fence_negative += negative
+
+    if not source_count or not fence_count:
+        raise ValueError("empty core source or documentation fence inventory")
+    for issue in issues:
+        print(issue, file=sys.stderr)
+    print(
+        f"{source_count} core files ({source_negative} syntax-negative), "
+        f"{fence_count} Hirsel fences ({fence_negative} syntax-negative), "
+        f"{len(issues)} unexpected parse results"
+    )
+    return bool(issues)
+
+
+def main():
+    options = argparse.ArgumentParser(description=__doc__)
+    options.add_argument("--parser", type=Path, help="use an already built Tree-sitter shared library")
+    library = options.parse_args().parser
+    if library:
+        return run(library.resolve())
+    with tempfile.TemporaryDirectory(prefix="hirsel-tree-sitter-") as temp:
+        library = Path(temp) / "hirsel.so"
+        subprocess.run(["tree-sitter", "build", "-o", str(library)], cwd=GRAMMAR, check=True)
+        return run(library)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

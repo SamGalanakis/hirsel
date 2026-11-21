@@ -114,3 +114,6 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
         Error(_) => Error(Exit(status: 4)),
     }
 }
+// expect: refuse LANG-2 at 79:13
+// expect: refuse LANG-2 at 80:33
+// expect: refuse LANG-5 at 81:47

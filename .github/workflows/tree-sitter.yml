@@ -1,0 +1,70 @@
+name: Hirsel Tree-sitter grammar
+on:
+  push:
+    paths:
+      - editors/tree-sitter-hirsel/**
+      - core/**
+      - docs/spec/**
+      - docs/PRIMER.md
+      - .github/workflows/tree-sitter.yml
+  pull_request:
+    paths:
+      - editors/tree-sitter-hirsel/**
+      - core/**
+      - docs/spec/**
+      - docs/PRIMER.md
+      - .github/workflows/tree-sitter.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  grammar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/tree-sitter-hirsel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install validation tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tree-sitter/bin"
+          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.10/tree-sitter-linux-x64.gz \
+            | gzip -d > "$RUNNER_TEMP/tree-sitter/bin/tree-sitter"
+          chmod +x "$RUNNER_TEMP/tree-sitter/bin/tree-sitter"
+          curl -fsSL https://github.com/ribru17/ts_query_ls/releases/download/v3.16.0/ts_query_ls-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP/tree-sitter/bin"
+          echo "$RUNNER_TEMP/tree-sitter/bin" >> "$GITHUB_PATH"
+          python3 -m pip install 'tree-sitter==0.25.2'
+          rustup toolchain install 1.99.0 --profile minimal
+      - name: Check the generated parser
+        run: |
+          tree-sitter generate
+          git diff --exit-code -- src
+          test -z "$(git ls-files --others --exclude-standard -- src)"
+          tree-sitter build -o "$RUNNER_TEMP/tree-sitter/hirsel.so"
+      - name: Check the core and spec corpus
+        run: ./check-corpus --parser "$RUNNER_TEMP/tree-sitter/hirsel.so"
+      - name: Check editor queries
+        run: ts_query_ls check -f queries/ --config "{\"parser_install_directories\":[\"$RUNNER_TEMP/tree-sitter\"]}"
+      - name: Test the scanner and newline rules
+        run: tree-sitter test
+      - name: Test the Rust binding
+        run: cargo +1.99.0 test --locked -j4
+      - name: Build the Node binding
+        run: |
+          npm ci
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const Parser = require('tree-sitter');
+          const parser = new Parser();
+          parser.setLanguage(require('.'));
+          const root = parser.parse('fn main() { 1 }').rootNode;
+          assert.equal(root.hasError, false);
+          assert.equal(root.firstNamedChild.type, 'function_definition');
+          JS

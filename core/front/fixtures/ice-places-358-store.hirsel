@@ -266,3 +266,4 @@ pub fn main(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Resu
         Error(_) => Error(Exit(status: 4)),
     }
 }
+// expect: refuse LANG-4 at 174:11

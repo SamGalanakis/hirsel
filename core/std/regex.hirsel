@@ -3728,12 +3728,22 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, width: u64, entry: u
     let mut now = Frontier(offset: c.slices.front, extent: 0, ready: 0)
     let mut later = Frontier(offset: c.slices.back, extent: 0, ready: 0)
     let mut pos = at
+    let pref = re.pref_plan
+    let skip_enabled = entry == re.start && pref.kind != NO_PREFILTER && pref.kind < REVERSE_SUFFIX
+    if skip_enabled {
+        let Some(hit) = prefilter_at(string.as_bytes(s), re.prefilter, pref, pos) else {
+            return None
+        }
+        pos = hit
+    }
     let mut found: Option[Match] = None
     clear_slots(mut c.work, flow.row, flow.slots)
     closure(re, flow, mut c.work, mut now, s, pos, entry)
     while now.ready != 0 {
         let mut rank: u64 = 0
+        let mut next_pos = pos
         let ch: u32 = if pos < width {
+            next_pos += 1
             int.widen(byte(s, pos))
         } else {
             0
@@ -3753,8 +3763,19 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, width: u64, entry: u
             } else if pos < width {
                 match nfa_advance(inst, re.edges, ch) {
                     Some(successor) => {
+                        // Only the lowest-priority scan thread returns to the
+                        // unanchored entry. Preserve any threads already advanced.
+                        if skip_enabled && successor == entry && later.ready == 0 {
+                            let Some(hit) = prefilter_at(string.as_bytes(s), re.prefilter, pref, next_pos) else {
+                                return found
+                            }
+                            if hit != next_pos {
+                                next_pos = hit
+                                later.extent = 0
+                            }
+                        }
                         copy_slots(mut c.work, flow.row, row, flow.slots)
-                        closure(re, flow, mut c.work, mut later, s, pos + 1, successor)
+                        closure(re, flow, mut c.work, mut later, s, next_pos, successor)
                     },
                     None => {},
                 }
@@ -3767,7 +3788,7 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, width: u64, entry: u
         let previous_offset = now.offset
         now = later
         later = Frontier(offset: previous_offset, extent: 0, ready: 0)
-        pos += 1
+        pos = next_pos
     }
     found
 }

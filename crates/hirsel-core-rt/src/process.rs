@@ -224,7 +224,7 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
     unsafe {
         let config = &*config;
         let _pipe_policy = PipePolicy::enter();
-        let mut context = Context::new(config.root_limit);
+        let mut context = Context::with_unit_heap(config.root_limit);
         context.run = config;
         #[cfg(feature = "charge-observation")]
         let _observation = crate::peak::Run::start(&context);

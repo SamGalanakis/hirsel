@@ -40,18 +40,23 @@ that pin, reserves the bound once and sets current. A no-survivor exit returns
 unused room and the record without union bookkeeping. Survivor handover and
 page growth use cold paths; ordinary scope entry allocates no heap record.
 
-Each task owns size-class queues and recycles empty pages. A page groups one
-payer and native class, including alignment and cleanup storage. Plain slots
-contain only the payload. Fixed nonleaf blocks use spare words within or after
-the payload for resumable cleanup. Dynamic buffers keep a 40-byte frame, and
-resources reserve a state pointer. The page records the payer and native kind.
-A transferred block keeps its page and allocating heap alive until its last
-free. A task-local lock serializes queue operations and foreign returns.
-Dedicated descriptors live outside the mapping and use a sharded address
-index. Purging a dedicated mapping discards its payload and ownership prefix.
-Ordinary slabs claim aligned slots from bitmap-managed ranges shared across
-heaps. A returned slot gives back its resident pages, and the last slot
-releases the range.
+A serial unit owns size-class queues and recycles empty pages. Standalone
+serial runs share one heap across their tasks, and the concurrent test pool
+gives each task its own heap. Slots of the same native class and alignment can
+share a page across payers. A small slot stores its payer ahead of its
+ownership prefix. Fixed nonleaf blocks keep their cleanup words within or
+after the payload. Dynamic buffers keep a 40-byte frame, and resources reserve
+a state pointer. Dedicated descriptors store the payer outside the mapping
+and use a sharded address index.
+
+The custodian changes open free lists without locking. A foreign worker
+publishes to the page's atomic return list after settling the slot's charge.
+The first pending slot links the page into the custodian's queue. Returning
+storage keeps the page and heap alive through collection. The unit, serial
+run, or concurrent task closes its heap once. Late foreign returns go to the
+orphan queue. Ordinary slabs claim aligned storage from bitmap-managed ranges.
+The heap bounds its empty stock and discards native pages that contain no live
+slot at scheduler idle.
 
 Regions bump within nonmoving pools keyed by native size and alignment. The
 first chunk rounds the request to a granule. Each pool grows geometrically

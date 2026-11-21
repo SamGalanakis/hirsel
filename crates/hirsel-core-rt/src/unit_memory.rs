@@ -306,6 +306,10 @@ impl Memory {
         }
     }
 
+    pub(crate) fn dispose_slab(&self, slab: Slab) {
+        self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
+    }
+
     pub(crate) fn take_page(&self, fits: impl FnMut(&Mapping) -> bool) -> Option<Mapping> {
         self.pages.take(fits)
     }

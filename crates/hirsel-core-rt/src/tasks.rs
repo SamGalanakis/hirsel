@@ -1017,6 +1017,19 @@ unsafe fn waiting_heap<'a>(
     }
 }
 
+/// # Safety
+/// The idle serial dispatcher has exclusive custody of the root and its heap.
+unsafe fn trim_run_heap(root: TaskPtr) {
+    // SAFETY: the run pins the root context, and this dispatcher has custody.
+    unsafe {
+        if let Some(heap) = (*(*root.0).context).heap.get()
+            && heap.pending()
+        {
+            heap.trim();
+        }
+    }
+}
+
 unsafe fn switch_to_idle(task: *mut Task) {
     let worker = WORKER.get();
     // SAFETY: the running task is pinned here, and only this worker owns the
@@ -1234,6 +1247,7 @@ impl TimerHeap {
 
 struct Scheduler {
     pool: Option<NonNull<Pool>>,
+    share_heap: bool,
     deferred: *mut Task,
     deferred_tail: *mut Task,
     stacks: Stock,
@@ -3374,15 +3388,15 @@ pub(crate) fn provider_group() -> Option<crate::tape::schedule::Group> {
     unsafe { task.as_ref().and_then(|t| t.group) }
 }
 
-/// The running task's heap, or null outside a task or before its first block.
-pub(crate) fn current_heap() -> *const crate::task_heap::Heap {
+/// Whether the running task has exclusive custody of this heap.
+pub(crate) fn owns_current_heap(heap: &Arc<crate::task_heap::Heap>) -> bool {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins its task and context, or is null outside a task.
     unsafe {
         task.as_ref()
             .and_then(|task| task.context.as_ref())
             .and_then(|context| context.heap.get())
-            .map_or(ptr::null(), std::sync::Arc::as_ptr)
+            .is_some_and(|owner| Arc::ptr_eq(owner, heap))
     }
 }
 
@@ -3928,7 +3942,7 @@ thread_local! {
     static REPLAY_STAGES: Local<bool> = const { Local::new(false) };
 }
 
-fn worker_count() -> usize {
+pub(crate) fn worker_count() -> usize {
     #[cfg(any(test, feature = "testing"))]
     if WORKER_COUNT.get() != 0 {
         return WORKER_COUNT.get();
@@ -3996,6 +4010,7 @@ pub unsafe fn run_root(
     crate::fiber::arm();
     let mut run = Scheduler {
         pool: None,
+        share_heap: workers == 1,
         deferred: ptr::null_mut(),
         deferred_tail: ptr::null_mut(),
         stacks: Stock::default(),
@@ -4304,6 +4319,9 @@ impl RunPtr {
                         && !run.readies.has_pending()
                         && run.has_outside_wait();
                     let untied = crate::units::untied();
+                    if wait_for_net {
+                        trim_run_heap(root);
+                    }
                     let (timeout, release) = if wait_for_net && untied {
                         (poll_timeout(run.timers.deadline()), false)
                     } else if wait_for_net {
@@ -4329,6 +4347,9 @@ impl RunPtr {
                             release_idle(run);
                         }
                         if !wait_for_net {
+                            if run.share_heap {
+                                trim_run_heap(root);
+                            }
                             let flow_pending =
                                 pool.is_some_and(|pool| pool.units.load(Ordering::Acquire) != 0);
                             run.idle(flow_pending);
@@ -4356,7 +4377,9 @@ impl RunPtr {
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
                     _ => {}
                 }
-                if let Some(heap) = waiting_heap(task, direct) {
+                if !worker.is_null()
+                    && let Some(heap) = waiting_heap(task, direct)
+                {
                     heap.trim();
                 }
             }
@@ -4644,7 +4667,7 @@ unsafe fn spawn_in(
         let parent = CURRENT.get();
         let run = (*parent).run;
         let id = (*run).id();
-        let child_context = abi::task_child(context, &mut record, bytes, id);
+        let child_context = abi::task_child(context, &mut record, bytes, id, (*run).share_heap);
         let task = Box::new(Task {
             arc_runtime: false,
             arc_hooks: true,
@@ -5126,6 +5149,7 @@ mod ready_routing_laws {
             };
             let mut run = Scheduler {
                 pool: None,
+                share_heap: false,
                 deferred: ptr::null_mut(),
                 deferred_tail: ptr::null_mut(),
                 stacks: Stock::default(),

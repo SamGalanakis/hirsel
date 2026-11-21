@@ -91,6 +91,7 @@ pub const WORKLIST_FAILED: usize = 40;
 pub const fn fixed_point(k: u64) -> usize {
     FIXED_DESCRIPTOR_BYTES + FIXED_POINT_BYTES * (k as usize - 1)
 }
+#[inline(always)]
 pub const fn own_prefix(kind: u8) -> usize {
     match kind {
         NATIVE_PLAIN => 0,
@@ -119,9 +120,9 @@ pub const fn own_prefix(kind: u8) -> usize {
 // the owner's posted credits and records the event. Trace kinds are
 // layout::event::ARC_*.
 
-// Each allocation page owns a payer identity. Its outstanding charges keep the
-// original slot alive across scope exit. Free resolves the payer before its
-// slot returns to the allocating task, including on another worker.
+// Each allocation carries its payer identity. Outstanding charges keep the
+// original limit slot alive across scope exit. Free resolves the payer before
+// returning physical storage to its custodian, including from another worker.
 
 // FORM #55. cause_value borrows this exact core layout, not a translated view.
 // Cells begin with Cause followed by next; native funding follows the prefix.

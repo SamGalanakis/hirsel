@@ -58,18 +58,19 @@ pub(crate) unsafe fn set_resource(payload: NonNull<u8>, resource: *mut crate::ca
     }
 }
 pub(crate) unsafe fn resource(payload: NonNull<u8>) -> *mut crate::causes::Resource {
-    // SAFETY: the tagged native word identifies whether a state slot exists.
+    // SAFETY: a live block pins its kind. Only resources have a state slot.
     unsafe {
-        if task_heap::kind(payload) != RESOURCE {
-            std::ptr::null_mut()
+        if task_heap::kind(payload) == RESOURCE {
+            resource_state(payload)
         } else {
-            payload
-                .as_ptr()
-                .sub(size_of::<usize>())
-                .cast::<*mut crate::causes::Resource>()
-                .read()
+            std::ptr::null_mut()
         }
     }
+}
+
+pub(crate) unsafe fn resource_state(payload: NonNull<u8>) -> *mut crate::causes::Resource {
+    // SAFETY: the caller supplies a live RESOURCE block with a state slot.
+    unsafe { payload.cast::<*mut crate::causes::Resource>().sub(1).read() }
 }
 /// Write the frame of buffer storage whose recipe borrows a descriptor in its
 /// live parent; the drain links it.
@@ -133,7 +134,7 @@ pub(crate) fn allocate_admitted(
 /// # Safety
 /// A live block pins its original payer until its logical refund.
 #[inline]
-pub(crate) unsafe fn funding<'a>(payload: NonNull<u8>) -> &'a Payer {
+pub(crate) unsafe fn funding(payload: NonNull<u8>) -> Payer {
     // SAFETY: the live block pins its page and original payer.
     unsafe { task_heap::payer(payload) }
 }
@@ -152,17 +153,31 @@ pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
 /// As `free`, and `context` (if any) is the running task's.
 #[inline(always)]
 pub(crate) unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>) {
-    // SAFETY: this live block pins page metadata. Resolve the logical refund
-    // first. The page remains live until the physical slot is returned.
+    // SAFETY: the live block pins this page. The caller owns the slot.
+    unsafe { free_on_page(task_heap::page_of(payload), payload, charge, context) }
+}
+
+/// # Safety
+/// As `free_with`. The page is the one that holds the live block.
+#[inline(always)]
+pub(crate) unsafe fn free_on_page(
+    page: NonNull<task_heap::Page>,
+    payload: NonNull<u8>,
+    charge: u64,
+    context: Option<&Context>,
+) {
+    // SAFETY: the payer remains pinned until settlement. The live slot
+    // keeps the page after settlement and through physical return.
     unsafe {
-        let page = task_heap::page_of(payload);
-        let payer = *task_heap::Page::funding(page);
-        if charge != 0 || task_heap::Page::kind(page) != RESOURCE {
+        if charge != 0 {
+            let payer = task_heap::Page::funding(page, payload);
             if let Some(context) = context {
                 payer.settle_in(context, charge);
             } else {
                 payer.settle(charge);
             }
+        } else if task_heap::Page::kind(page) != RESOURCE {
+            task_heap::Page::funding(page, payload).settle(0);
         }
         task_heap::release_page(page, payload, context);
     }
@@ -223,10 +238,10 @@ impl Block {
     }
     pub(crate) fn partition(&mut self, bytes: u64) -> Payer {
         self.charge -= bytes;
-        *self.payer()
+        self.payer()
     }
     #[inline]
-    pub(crate) fn payer(&self) -> &Payer {
+    pub(crate) fn payer(&self) -> Payer {
         // SAFETY: this owner pins the live block and native payer.
         unsafe { funding(self.pointer) }
     }
@@ -258,7 +273,7 @@ impl Block {
         // SAFETY: the live block pins its payer and its page through the refund.
         unsafe {
             let page = task_heap::page_of(pointer);
-            let payer = *task_heap::Page::funding(page);
+            let payer = task_heap::Page::funding(page, pointer);
             payer.settle_at_unit(charge);
             task_heap::release_page(page, pointer, None);
         }

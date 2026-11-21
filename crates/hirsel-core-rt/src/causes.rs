@@ -347,7 +347,7 @@ pub unsafe fn resource_new(
     )?;
     let payer = block.payer();
     let state = Box::new(Resource {
-        cell: Some(Cell::prepaid(*payer)),
+        cell: Some(Cell::prepaid(payer)),
         grant: Some(payer.prepaid(grant)),
         creator: crate::tasks::current_id(),
         previous: None,
@@ -475,13 +475,29 @@ pub(crate) unsafe fn resource_step(
 pub unsafe fn free_value(context: &Context, pointer: std::ptr::NonNull<u8>, charge: u64) {
     // SAFETY: the caller owns the block and its initialized allocation metadata.
     unsafe {
-        let resource = block::resource(pointer);
-        if resource.is_null() {
-            block::free_in(context, pointer, charge);
-        } else {
-            let storage = charge - 32 - (*resource).grant.as_ref().unwrap().available();
-            resource_free(pointer, storage);
+        let page = crate::task_heap::page_of(pointer);
+        if crate::task_heap::Page::kind(page) == block::RESOURCE {
+            let resource = block::resource_state(pointer);
+            if !resource.is_null() {
+                free_unused_resource(pointer, resource, charge);
+                return;
+            }
         }
+        block::free_on_page(page, pointer, charge, Some(context));
+    }
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn free_unused_resource(
+    pointer: std::ptr::NonNull<u8>,
+    resource: *mut Resource,
+    charge: u64,
+) {
+    // SAFETY: the caller has exclusive custody of the resource and its grant.
+    unsafe {
+        let storage = charge - 32 - (*resource).grant.as_ref().unwrap().available();
+        resource_free(pointer, storage);
     }
 }
 

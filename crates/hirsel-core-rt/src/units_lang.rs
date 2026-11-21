@@ -1183,7 +1183,7 @@ fn helper_main(
     // SAFETY: this thread owns the helper's context and run for its life.
     unsafe {
         // The task record and primary cell are the owner's (outside n).
-        let mut context = Context::new(n + 256 + 32);
+        let mut context = Context::with_unit_heap(n + 256 + 32);
         context.run = run;
         let mut files = crate::host_file::Files::default();
         context.host_files = &mut files;

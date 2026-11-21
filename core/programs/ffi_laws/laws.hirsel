@@ -1,0 +1,2 @@
+pub opaque type Laws {}
+pub opaque type Obj {}

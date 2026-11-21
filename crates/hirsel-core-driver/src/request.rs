@@ -858,7 +858,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         request.entry = None;
         Some(match manifest_runs {
             Some(runs) => {
-                if explicit_limit || !grants.is_empty() {
+                let mut configured = grants.clone();
+                configured.foreign.clear();
+                if explicit_limit || !configured.is_empty() {
                     return Err("the package's manifest declares its tests' run configuration; test takes no --limit, --dir or --grant".into());
                 }
                 runs
@@ -979,6 +981,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         _ if command == "image"
             || test_command
             || recipe_command
+            || !grants.foreign.is_empty()
             || inspection.is_some()
             || foreign_replay =>
         {
@@ -1064,7 +1067,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .as_ref()
                 .ok_or("build/run requires an entry")?;
             match &prepared {
-                Some(Ok(options)) if recipe_command => {
+                Some(Ok(options))
+                    if recipe_command || (command == "run" && !grants.foreign.is_empty()) =>
+                {
                     product.reachable(entry, options.instance_limit)?
                 }
                 Some(Ok(options)) => product.reachable_for(entry, options)?,
@@ -1202,7 +1207,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .as_ref()
             .ok_or("build/run requires an entry")?;
         let reached = reach.as_ref().unwrap();
-        let assembled = if recipe_command {
+        let grant_lines = command == "run" && !grants.foreign.is_empty();
+        let assembled = if recipe_command || grant_lines {
             match product.publish_release(
                 entry,
                 reached,
@@ -1223,21 +1229,25 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         }
                         std::process::exit(0);
                     }
-                    let recipe = release_manifest
-                        .as_ref()
-                        .map(|_| publication.recipe.clone());
+                    let recipe = (release_manifest.is_some() || grant_lines)
+                        .then(|| publication.recipe.clone());
                     let built =
                         publication.assemble_with(options, reached.counters, Some(&product), None);
                     if let (Ok(built), Some(path), Some(recipe)) =
-                        (&built, &release_manifest, recipe)
+                        (&built, &release_manifest, &recipe)
                     {
                         crate::release_manifest::write(
                             path,
                             &built.executable,
                             root,
-                            &recipe,
+                            recipe,
                             place_timeout,
                         )?;
+                    }
+                    if let (true, Ok(_), Some(recipe)) = (grant_lines, &built, &recipe) {
+                        for line in crate::native::recipe_build::foreign_grant_lines(recipe, root) {
+                            eprintln!("{line}");
+                        }
                     }
                     built
                 }

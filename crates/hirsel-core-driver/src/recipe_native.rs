@@ -698,6 +698,22 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     grants
 }
 
+pub(crate) fn foreign_grant_lines(
+    recipe: &Recipe,
+    root: ContentHash,
+) -> impl Iterator<Item = String> + '_ {
+    recipe.launch.grants.iter().filter_map(move |grant| {
+        let archive = grant.archive?;
+        let interface = grant.values.first()?;
+        Some(format!(
+            "foreign: {interface}: target {}, archive sha256 {}, recipe {}",
+            recipe.launch.target,
+            selection(archive.hash),
+            selection(root),
+        ))
+    })
+}
+
 pub(crate) fn foreign_recording_refusal(recipe: &Recipe) -> Option<String> {
     let functions = recipe
         .foreign_modules
@@ -729,11 +745,6 @@ fn launch_options(
     {
         return Err(NativeStop::ForeignRecording(reason));
     }
-    if recipe.has_foreign() {
-        return Err(NativeStop::Entry(
-            "foreign modules are not enabled yet".into(),
-        ));
-    }
     let mut options = options.clone();
     options.target.clone_from(&recipe.launch.target);
     options.backend = match recipe.launch.backend {
@@ -745,6 +756,7 @@ fn launch_options(
     options.grant_mask = 0;
     options.net_rules.clear();
     options.secret_grants.clear();
+    options.foreign_grants.clear();
     options.env_patterns = None;
     if names.len() != recipe.launch.grants.len() {
         return Err(NativeStop::Entry(
@@ -761,6 +773,17 @@ fn launch_options(
         let invalid = || NativeStop::Entry(format!("invalid recipe binding for parameter {i}"));
         if i != binding.ordinal as usize {
             return Err(invalid());
+        }
+        if kind == GrantKind::Foreign {
+            let [interface] = values.as_slice() else {
+                return Err(invalid());
+            };
+            options.foreign_grants.insert(interface.clone());
+            params.push(EntryParameter {
+                ty: format!("core@1/core/Foreign[{interface}]"),
+                name: name.clone(),
+            });
+            continue;
         }
         match kind {
             GrantKind::Dir => match values.as_slice() {

@@ -1,0 +1,6 @@
+pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
+    let _ = native.make(f)
+    let _ = native.make(f)
+    let _ = native.make(f)
+    Ok(())
+}

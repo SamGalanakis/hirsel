@@ -426,7 +426,7 @@ impl InstanceSet {
     }
 }
 impl CheckProduct {
-    fn is_foreign(&self, path: &DefPath) -> bool {
+    pub(crate) fn is_foreign(&self, path: &DefPath) -> bool {
         self.foreign_inputs
             .get(&path.0.package)
             .is_some_and(|modules| modules.contains_key(&path.0.modules))

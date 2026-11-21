@@ -1,0 +1,22 @@
+[package]
+name = "ffi_laws"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"laws.hirsel" = "laws"
+"native.hirsel" = "native"
+"main.hirsel" = "main"
+
+[foreign.native]
+symbols = "hfl_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6" },
+]
+
+[tests]
+limit = 67108864
+grants = ["Foreign=ffi_laws@1/laws/Laws", "Tasks"]
+
+[tests.sources]
+"tests.hirsel" = "tests"

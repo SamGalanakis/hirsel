@@ -159,6 +159,15 @@ fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
             .iter()
             .any(|p| kind(&p.ty) == Some(named("Secret")) && p.name == grant.parameter)
     });
+    options.foreign_grants.retain(|interface| {
+        decl.parameters.iter().any(|param| {
+            param
+                .ty
+                .strip_prefix("core@1/core/Foreign[")
+                .and_then(|ty| ty.strip_suffix(']'))
+                == Some(interface)
+        })
+    });
 }
 
 /// PROG-4: each test run starts in a working directory of its own, empty
@@ -321,12 +330,28 @@ impl TestBatch<'_> {
         // Each test's own run configuration; one test's never changes another's.
         let configure = |test: &DefPath| {
             let mut test_options = self.runs.options(test, options);
+            if let Some(Ok(decl)) = product.test_entries.get(test) {
+                for parameter in &decl.parameters {
+                    if let Some(interface) = parameter
+                        .ty
+                        .strip_prefix("core@1/core/Foreign[")
+                        .and_then(|ty| ty.strip_suffix(']'))
+                        && (!test_options.foreign_grants.contains(interface)
+                            || !options.foreign_grants.contains(interface))
+                        && !self.replay
+                    {
+                        return Err(NativeStop::Entry(format!(
+                            "not granted: Foreign[{interface}]: pass --grant Foreign={interface} to hirsel test"
+                        )));
+                    }
+                }
+            }
             test_options.output = options
                 .output
                 .join(crate::request::hex(ContentHash::of_bytes(
                     test.to_string().as_bytes(),
                 )));
-            test_options
+            Ok(test_options)
         };
         if self.jobs.get() == 1
             || tests.len() <= 1
@@ -337,7 +362,13 @@ impl TestBatch<'_> {
             || !matches!(self.runner, Runner::Native)
         {
             for test in tests {
-                let test_options = configure(test);
+                let test_options = match configure(test) {
+                    Ok(options) => options,
+                    Err(error) => {
+                        report(test, Err(error));
+                        continue;
+                    }
+                };
                 let result = if self.replay {
                     product
                         .run_test_with_replay(
@@ -380,7 +411,13 @@ impl TestBatch<'_> {
             };
             let mut running = 0;
             for (index, test) in tests.iter().enumerate() {
-                let test_options = configure(test);
+                let test_options = match configure(test) {
+                    Ok(options) => options,
+                    Err(error) => {
+                        complete(index, Err(error));
+                        continue;
+                    }
+                };
                 let exclusive = product.test_needs_exclusive_run(test, &test_options);
                 let slots = if exclusive { 0 } else { self.jobs.get() - 1 };
                 while running > slots {
@@ -521,7 +558,11 @@ impl CheckProduct {
         // An unused launch grant could otherwise touch host state before the
         // test starts.
         let options = &self.granted(test, options);
-        let reached = self.reachable_for(test, options)?;
+        let reached = if options.foreign_grants.is_empty() || options.recording {
+            self.reachable_for(test, options)?
+        } else {
+            self.reachable(test, options.instance_limit)?
+        };
         let pass = cache
             .filter(|_| {
                 matches!(runner, Runner::Native)
@@ -551,7 +592,28 @@ impl CheckProduct {
                 wall_time: Duration::ZERO,
             }));
         }
-        let built = self.build_reachable(test, &reached, options)?;
+        let built = if options.foreign_grants.is_empty() || options.recording {
+            self.build_reachable(test, &reached, options)?
+        } else {
+            let store = crate::code_store::CodeStore::new(options.store.join("code"));
+            let publication = self.publish_release(
+                test,
+                &reached,
+                options,
+                &store,
+                hirsel_core_ids::launch::DEFAULT_N_PLACE,
+            )?;
+            let lines = crate::native::recipe_build::foreign_grant_lines(
+                publication.recipe(),
+                publication.root(),
+            )
+            .collect::<Vec<_>>();
+            let built = publication.assemble_with(options, reached.counters, Some(self), None)?;
+            for line in lines {
+                eprintln!("{line}");
+            }
+            built
+        };
         let mut command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
         let directory = private_directory(&mut command)?;
         Ok(TestLaunch::Run(TestProcess {

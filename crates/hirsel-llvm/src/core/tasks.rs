@@ -364,8 +364,7 @@ impl FunctionEmitter<'_> {
                 )
             }
             RtOp::ConnClient => self.native_call("hirsel_core_conn_client", &[P], &[p(&args[0])]),
-            RtOp::ConnSend { item } | RtOp::ConnTrySend { item } => {
-                let cross = self.cross(item, 0);
+            RtOp::ConnSend { .. } | RtOp::ConnTrySend { .. } => {
                 let wait = u64::from(matches!(op, RtOp::ConnSend { .. }));
                 self.native_call(
                     "hirsel_core_conn_send",
@@ -374,27 +373,30 @@ impl FunctionEmitter<'_> {
                         ptr(CONTEXT),
                         p(&args[0]),
                         p(&args[1]),
-                        p(&cross),
                         u(&at),
                         zeroext(Type::I8, int(wait)),
                     ],
                 )
             }
-            RtOp::ConnReceive { item } | RtOp::ConnTryReceive { item } => {
-                let cross = self.cross(item, 0);
+            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
                 let wait = u64::from(matches!(op, RtOp::ConnReceive { .. }));
-                self.native_call(
+                let returned = self.native_call(
                     "hirsel_core_conn_receive",
-                    &[K, U, U, K],
+                    &[U, U],
                     &[
                         ptr(CONTEXT),
                         p(&args[0]),
                         p(&args[1]),
-                        p(&cross),
                         u(&at),
                         zeroext(Type::I8, int(wait)),
                     ],
-                )
+                );
+                let packed = &returned[0];
+                let outcome = self.cast(Cast::Trunc, &Type::I64, packed, &Type::I8);
+                let status = self.bin(Binary::LShr, &Type::I64, packed, &int(8));
+                let status = self.cast(Cast::Trunc, &Type::I64, &status, &Type::I8);
+                let requested = self.bin(Binary::LShr, &Type::I64, packed, &int(16));
+                vec![outcome, requested, returned[1].clone(), status]
             }
             RtOp::Join { .. } => self.native_call(
                 "hirsel_core_join",

@@ -21,10 +21,10 @@ use crate::{
     block::{self, Block},
     causes::{self, Cause, Causes, Cell},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
-    units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Received, Sent},
-    units::ledger::{ItemBuf, Took, UnitCtx, Value},
+    units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
+    units::ledger::{Took, UnitCtx, Value},
 };
-use std::{collections::HashMap, ptr, sync::Arc};
+use std::{collections::HashMap, mem::MaybeUninit, ptr, sync::Arc};
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -95,14 +95,6 @@ unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
 
 /// Copy `value` and its owners' content into one buffer.
 unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
-    let mut data = Vec::new();
-    // SAFETY: as `pack_into`.
-    unsafe { pack_into(&mut data, value, bytes, owners) };
-    data
-}
-
-/// `pack` into `data`, reusing its buffer.
-unsafe fn pack_into(data: &mut Vec<u8>, value: *const u8, bytes: u64, owners: &[[u64; 4]]) {
     // SAFETY: `value` is an initialized item of `bytes` bytes.
     unsafe {
         let content = |o: &[u64; 4]| {
@@ -110,8 +102,8 @@ unsafe fn pack_into(data: &mut Vec<u8>, value: *const u8, bytes: u64, owners: &[
             (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
         };
         let seqs = owners.iter().filter(|o| o[1] == SEQ);
-        data.clear();
-        data.reserve(bytes as usize + seqs.clone().map(|o| content(o).1).sum::<usize>());
+        let mut data =
+            Vec::with_capacity(bytes as usize + seqs.clone().map(|o| content(o).1).sum::<usize>());
         data.extend_from_slice(std::slice::from_raw_parts(value, bytes as usize));
         for o in seqs {
             let (p, n) = content(o);
@@ -119,14 +111,62 @@ unsafe fn pack_into(data: &mut Vec<u8>, value: *const u8, bytes: u64, owners: &[
                 data.extend_from_slice(std::slice::from_raw_parts(p, n));
             }
         }
+        data
     }
 }
 
-/// Item buffers a unit keeps for its next sends: a received item's buffer
-/// goes back here, so a steady exchange allocates none. Only small buffers
-/// are kept, so the spares stay under 64 × 4 KiB of runtime memory.
-const SPARE_ITEMS: usize = 64;
-const SPARE_BYTES: usize = 4096;
+/// A send can wait for a slot. Its call frame pins this source and its
+/// owners until the send has published or its settlement is taken.
+pub(crate) struct CrossSend {
+    value: *const u8,
+    #[cfg(test)]
+    pub(crate) tag: u64,
+}
+
+impl CrossSend {
+    pub(crate) fn new(value: *const u8) -> Self {
+        Self {
+            value,
+            #[cfg(test)]
+            tag: 0,
+        }
+    }
+
+    /// The connection owns the destination slot. Only the flat bytes go
+    /// there; sequence contents occupy the connection's room.
+    pub(crate) unsafe fn copy_into(
+        self,
+        slot: *mut u8,
+        stride: usize,
+        seqs: &[[u64; 4]],
+    ) -> Box<[MaybeUninit<u8>]> {
+        // SAFETY: the reserved slot has the connection's item layout. The
+        // sender pins every source buffer through publication.
+        unsafe {
+            if stride != 0 {
+                ptr::copy_nonoverlapping(self.value, slot, stride);
+            }
+            let content = |o: &[u64; 4]| {
+                let at = self.value.add(o[0] as usize);
+                (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
+            };
+            if seqs.is_empty() {
+                return Box::default();
+            }
+            let mut room = Box::new_uninit_slice(seqs.iter().map(|o| content(o).1).sum());
+            let to = room.as_mut_ptr().cast::<u8>();
+            let mut at = 0;
+            for o in seqs {
+                let (p, n) = content(o);
+                if n != 0 {
+                    ptr::copy_nonoverlapping(p, to.add(at), n);
+                    at += n;
+                }
+            }
+            room
+        }
+    }
+}
 
 /// Free the seq buffers of a value whose content has been copied out; its
 /// clients have moved and are not touched.
@@ -156,11 +196,30 @@ unsafe fn unpack(
     bytes: u64,
     owners: &[[u64; 4]],
 ) {
-    // SAFETY: `dest` is writable for `bytes`; `data` was made by `pack` for
-    // the same layout.
+    // SAFETY: `data` was packed for the same layout and `dest` is writable.
     unsafe {
         ptr::copy_nonoverlapping(data.as_ptr(), dest, bytes as usize);
-        let mut at = bytes as usize;
+        unpack_owners(
+            context,
+            payer,
+            data.as_ptr().add(bytes as usize),
+            dest,
+            owners,
+        );
+    }
+}
+
+/// Rebuild the sequence owners after the item's flat bytes have been copied.
+unsafe fn unpack_owners(
+    context: *mut Context,
+    payer: crate::limit::Payer,
+    content: *const u8,
+    dest: *mut u8,
+    owners: &[[u64; 4]],
+) {
+    // SAFETY: the receiver admitted the owners and the flat bytes give their lengths.
+    unsafe {
+        let mut at = 0;
         for o in owners {
             if o[1] != SEQ {
                 continue;
@@ -180,7 +239,7 @@ unsafe fn unpack(
                 o[2].clamp(1, 16) as usize,
                 crate::abi_layout::NATIVE_PLAIN,
             );
-            ptr::copy_nonoverlapping(data.as_ptr().add(at), p.as_ptr(), n);
+            ptr::copy_nonoverlapping(content.add(at), p.as_ptr(), n);
             at += n;
             set_word(slot, p.as_ptr() as u64);
             set_word(slot.add(16), len);
@@ -189,11 +248,11 @@ unsafe fn unpack(
 }
 
 /// Drop the clients inside a packed item that no one received.
-unsafe fn drop_packed_clients(unit: &mut LangUnit, data: &[u8], owners: &[[u64; 4]]) {
+unsafe fn drop_packed_clients(unit: &mut LangUnit, flat: *const u8, owners: &[[u64; 4]]) {
     for o in owners {
         if o[1] == CLIENT {
             // SAFETY: `pack` copied the inline handle word.
-            let h = unsafe { word(data.as_ptr().add(o[0] as usize)) } as *mut ClientH;
+            let h = unsafe { word(flat.add(o[0] as usize)) } as *mut ClientH;
             if !h.is_null() {
                 // SAFETY: the item owned this client.
                 unit.ctx.drop_client(unsafe { Box::from_raw(h) }.client);
@@ -225,7 +284,6 @@ pub(crate) struct LangUnit {
     /// The run's root task, cancelled by a cancel arrival (helpers).
     pub(crate) root: *mut tasks::Task,
     helper: Option<Arc<HelperShared>>,
-    spare: Vec<ItemBuf>,
 }
 
 impl LangUnit {
@@ -234,8 +292,7 @@ impl LangUnit {
         readies: &Arc<Readies>,
         helper: Option<Arc<HelperShared>>,
     ) -> Box<Self> {
-        ctx.port
-            .set_waker(Arc::into_raw(readies.clone()) as *mut ());
+        ctx.port.set_waker(readies);
         ctx.port.arm();
         Box::new(LangUnit {
             ctx,
@@ -244,7 +301,6 @@ impl LangUnit {
             helpers: map(),
             retained: map(),
             waits: 0,
-            spare: Vec::new(),
             root: ptr::null_mut(),
             helper,
         })
@@ -257,17 +313,6 @@ impl Drop for LangUnit {
             self.ctx.end_root();
         }
     }
-}
-
-/// A publish to an armed port readies its scheduler.
-pub(crate) fn port_ready(w: *mut ()) {
-    // SAFETY: the port holds one count of this scheduler's waiter.
-    unsafe { (*(w as *const Readies)).ready_port() }
-}
-
-pub(crate) fn port_waker_drop(w: *mut ()) {
-    // SAFETY: made by Arc::into_raw in `LangUnit::new`.
-    drop(unsafe { Arc::from_raw(w as *const Readies) });
 }
 
 /// A helper about to start its run, and where the run's unit is handed back.
@@ -310,6 +355,12 @@ pub(crate) unsafe fn drop_root_unit(u: *mut LangUnit) {
 /// Take every arrival and wake what waits on it; then arm the port so the
 /// next publish readies the scheduler. Runs in a commit.
 pub(crate) unsafe fn pump(u: &mut LangUnit) {
+    // SAFETY: the caller owns the unit for this commit.
+    unsafe { pump_for(u, false) };
+}
+
+unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
+    let wake_inboxes = u.waits > usize::from(receiving);
     loop {
         while let Some((took, _a)) = u.ctx.take() {
             let id = u.ctx.took_ident;
@@ -317,7 +368,7 @@ pub(crate) unsafe fn pump(u: &mut LangUnit) {
             unsafe {
                 match took {
                     Took::Item | Took::Close | Took::SealAnswer => {
-                        if let Some(h) = u.inboxes.get(&id) {
+                        if wake_inboxes && let Some(h) = u.inboxes.get(&id) {
                             Waiters::wake_all(&raw mut (**h).waiters);
                         }
                     }
@@ -431,15 +482,17 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
         };
         let _commit = tasks::before_commit();
         let u = unit();
+        let owners = (*item).owners();
+        let seqs = owners.iter().copied().filter(|o| o[1] == SEQ).collect();
         let (inbox, client) = u
             .ctx
-            .conn_new(cap, logical, b)
+            .conn_new_cross(cap, logical, b, (*item).bytes as usize, seqs)
             .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
         let key = Arc::as_ptr(&inbox.0) as usize;
         let ih = Box::into_raw(Box::new(InboxH {
             inbox,
             waiters: Waiters::default(),
-            owners: (*item).owned(),
+            owners: owners.iter().copied().filter(|o| o[1] == CLIENT).collect(),
             charge: Some(held),
         }));
         u.inboxes.insert(key, ih);
@@ -488,13 +541,12 @@ pub struct SendOutcome {
 
 /// `conn.send` (`wait`) and `conn.try_send`.
 /// # Safety
-/// A live client borrow and an initialized item of the descriptor's layout.
+/// A live client borrow and an initialized item of the connection's layout.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_conn_send(
     context: *mut Context,
     client: *mut ClientH,
     value: *mut u8,
-    item: *const Cross,
     site: u64,
     wait: bool,
 ) -> SendOutcome {
@@ -503,24 +555,17 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
         outcome: 0,
         status: 1,
     };
-    // SAFETY: the caller pins the client, the value and the descriptor.
+    // SAFETY: the caller pins the client and the value.
     unsafe {
-        let item = &*item;
-        let owners = item.owners();
+        let client = &(*client).client;
+        let owners = &client.0.seqs;
         let mut commit = tasks::before_commit();
         if wait && tasks::check_cancel(context, site) != 0 {
             return failed;
         }
-        let u = unit();
         let charge = item_charge(value, owners);
-        let mut v = u
-            .ctx
-            .alloc_block(charge)
-            .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
-        let mut data = u.spare.pop().unwrap_or_else(ItemBuf::new);
-        pack_into(data.bytes_mut(), value, item.bytes, owners);
-        v.set_item_buf(data);
-        let id = match u.ctx.send(&(*client).client, v, wait) {
+        let source = CrossSend::new(value);
+        let id = match UnitCtx::send_cross(client, source, charge, wait, || &mut unit().ctx) {
             Sent::Accepted => {
                 free_owners(value, owners);
                 return out(0);
@@ -529,16 +574,11 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
                 return failed;
             }
-            Sent::Closed(v) => {
-                u.ctx.drop_value(v);
-                return out(1);
-            }
-            Sent::Full(v) => {
-                u.ctx.drop_value(v);
-                return out(2);
-            }
+            Sent::Closed(_) => return out(1),
+            Sent::Full(_) => return out(2),
             Sent::Waiting(id) => id,
         };
+        let u = unit();
         let mut frame = SendWait {
             waiters: Waiters::default(),
             settled: None,
@@ -570,7 +610,7 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 // A withdrawal that wins settles Withdrawn; one that loses
                 // waits for the acceptance or close on its way.
                 withdrawn = true;
-                if u.ctx.withdraw(&(*client).client, id) {
+                if u.ctx.withdraw(client, id) {
                     tasks::check_cancel(context, site);
                 }
                 continue;
@@ -587,13 +627,13 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
 
 #[repr(C)]
 pub struct ReceiveOutcome {
-    /// 0 received, 1 closed, 2 Capacity (the item stays queued), 3 empty.
-    pub outcome: u8,
-    pub requested: u64,
+    /// The low byte holds the outcome and the next byte holds the failure
+    /// status. Requested fits in the remaining bits because MAX_ROOM is 40 bits.
+    pub code_and_requested: u64,
     pub available: u64,
-    /// 1: the task failed with `Cancelled` at the wait.
-    pub status: u8,
 }
+
+const _: () = assert!(MAX_ROOM <= u64::MAX >> 16);
 
 /// `conn.receive` (`wait`) and `conn.try_receive`.
 /// # Safety
@@ -603,21 +643,17 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
     context: *mut Context,
     inbox: *mut InboxH,
     dest: *mut u8,
-    item: *const Cross,
     site: u64,
     wait: bool,
 ) -> ReceiveOutcome {
-    let out = |outcome, requested, available| ReceiveOutcome {
-        outcome,
-        requested,
+    let out = |outcome: u64, requested: u64, available| ReceiveOutcome {
+        code_and_requested: (requested << 16) | outcome,
         available,
-        status: 0,
     };
     // SAFETY: the inbox borrow pins the handle and its connection.
     unsafe {
-        let item = &*item;
-        let owners = item.owners();
-        let h = &mut *inbox;
+        let input = &(*inbox).inbox;
+        let c = &input.0;
         let mut commit = tasks::before_commit();
         let mut waited = false;
         loop {
@@ -625,44 +661,37 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 if waited {
                     unit().waits -= 1;
                 }
-                return ReceiveOutcome {
-                    status: 1,
-                    ..out(0, 0, 0)
-                };
+                return out(1 << 8, 0, 0);
             }
             let u = unit();
-            let side = h.inbox.0.side();
-            if side.taken.is_empty() {
-                pump(u);
+            if c.side().taken.is_empty() && u.ctx.port.pending() {
+                pump_for(u, waited);
             }
-            if let Some(bytes) = h.inbox.front_bytes() {
-                let payer = (*context).payer();
-                if bytes > 0
-                    && let Err(e) = block::admit_storage(payer, Some(bytes))
-                {
-                    if waited {
-                        u.waits -= 1;
+            let received = input.receive_cross(|bytes, flat, content| {
+                if c.seqs.is_empty() {
+                    if c.stride != 0 {
+                        ptr::copy_nonoverlapping(flat, dest, c.stride);
                     }
-                    return out(2, e.requested, e.available);
+                } else {
+                    let payer = (*context).payer();
+                    if bytes != 0 {
+                        block::admit_storage(payer, Some(bytes))?;
+                    }
+                    ptr::copy_nonoverlapping(flat, dest, c.stride);
+                    unpack_owners(context, payer, content.as_ptr().cast(), dest, &c.seqs);
                 }
-                let Received::Ok(v) = u.ctx.receive(&h.inbox) else {
-                    crate::process::stop(b"UnitLedger");
-                };
-                let mut v = v;
-                unpack(context, payer, v.item(), dest, item.bytes, owners);
-                if u.spare.len() < SPARE_ITEMS
-                    && let Some(data) = v.take_item_buf()
-                    && data.capacity() <= SPARE_BYTES
-                {
-                    u.spare.push(data);
-                }
-                u.ctx.drop_value(v);
+                Ok::<_, Capacity>(())
+            });
+            if let Some(result) = received {
                 if waited {
                     u.waits -= 1;
                 }
-                return out(0, 0, 0);
+                return match result {
+                    Ok(()) => out(0, 0, 0),
+                    Err(e) => out(2, e.requested, e.available),
+                };
             }
-            if side.closed {
+            if c.side().closed {
                 if waited {
                     u.waits -= 1;
                 }
@@ -680,7 +709,7 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 commit = tasks::before_commit();
                 continue;
             }
-            commit = tasks::park(&raw mut h.waiters);
+            commit = tasks::park(&raw mut (*inbox).waiters);
         }
     }
 }
@@ -715,8 +744,7 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         (*context).cancel_shield -= 1;
         let side = h.inbox.0.side();
         for v in side.taken.iter() {
-            let data = v.item().to_vec();
-            drop_packed_clients(u, &data, &h.owners);
+            drop_packed_clients(u, h.inbox.flat_ptr(v), &h.owners);
         }
         let key = Arc::as_ptr(&h.inbox.0) as usize;
         u.inboxes.remove(&key);
@@ -1034,7 +1062,7 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: *mut u8) -> (boo
                     &hb.result.owners,
                 );
             } else if let Some(v) = ret.as_ref() {
-                drop_packed_clients(u, &v.item().to_vec(), &hb.result.owners);
+                drop_packed_clients(u, v.item().as_ptr(), &hb.result.owners);
             }
         } else {
             for (kind, site) in &ended.causes {

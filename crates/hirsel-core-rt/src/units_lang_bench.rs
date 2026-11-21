@@ -38,9 +38,8 @@ fn plain(bytes: u64) -> Cross {
 
 unsafe fn send(c: *mut Context, to: *mut ClientH, v: u64, back: *mut ClientH) -> u8 {
     let mut x = Item { v, back };
-    let i = item();
-    // SAFETY: a live client and an item of the descriptor's layout.
-    let o = unsafe { hirsel_core_conn_send(c, to, (&raw mut x).cast(), &i, 0, true) };
+    // SAFETY: a live client and an item of the connection's layout.
+    let o = unsafe { hirsel_core_conn_send(c, to, (&raw mut x).cast(), 0, true) };
     assert_eq!(o.status, 0);
     o.outcome
 }
@@ -49,11 +48,9 @@ unsafe fn receive(c: *mut Context, from: *mut InboxH) -> Option<Item> {
         v: 0,
         back: ptr::null_mut(),
     };
-    let i = item();
     // SAFETY: a live inbox and a writable item.
-    let o = unsafe { hirsel_core_conn_receive(c, from, (&raw mut x).cast(), &i, 0, true) };
-    assert_eq!(o.status, 0);
-    match o.outcome {
+    let o = unsafe { hirsel_core_conn_receive(c, from, (&raw mut x).cast(), 0, true) };
+    match o.code_and_requested {
         0 => Some(x),
         1 => None,
         n => panic!("receive outcome {n}"),

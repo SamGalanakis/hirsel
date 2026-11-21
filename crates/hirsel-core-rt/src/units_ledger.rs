@@ -182,9 +182,8 @@ struct ValueExtra {
     charges: Charges,
     shared: Vec<Shared>,
     res: Option<Res>,
-    /// The bytes a language item carries across: its inline value, then the
-    /// content of each flat owner in it (units_lang). Empty for every value
-    /// the ledger makes itself.
+    /// A helper's packed result, including its sequence contents.
+    /// Empty for values the ledger makes itself.
     item: Vec<u8>,
 }
 
@@ -200,6 +199,9 @@ enum ValueData {
     One(Charge),
     Many(Vec<Charge>),
     Extra(Box<ValueExtra>),
+    // Flat bytes live in the reserved arrival slot. Only variable-length
+    // owner content travels with the arrival.
+    Cross(u64, Box<[std::mem::MaybeUninit<u8>]>),
 }
 
 impl Value {
@@ -218,7 +220,7 @@ impl Value {
 
     fn charges(&self) -> &[Charge] {
         match &self.data {
-            ValueData::Empty => &[],
+            ValueData::Empty | ValueData::Cross(..) => &[],
             ValueData::One(charge) => std::slice::from_ref(charge),
             ValueData::Many(charges) => charges,
             ValueData::Extra(extra) => &extra.charges,
@@ -227,7 +229,7 @@ impl Value {
 
     fn charges_mut(&mut self) -> &mut [Charge] {
         match &mut self.data {
-            ValueData::Empty => &mut [],
+            ValueData::Empty | ValueData::Cross(..) => &mut [],
             ValueData::One(charge) => std::slice::from_mut(charge),
             ValueData::Many(charges) => charges,
             ValueData::Extra(extra) => &mut extra.charges,
@@ -251,11 +253,30 @@ impl Value {
             ValueData::One(first) => self.data = ValueData::Many(vec![*first, charge]),
             ValueData::Many(charges) => charges.push(charge),
             ValueData::Extra(extra) => extra.charges.push(charge),
+            ValueData::Cross(..) => unreachable!(),
         }
     }
 
     pub(crate) fn bytes(&self) -> u64 {
-        self.charges().iter().map(|c| c.size).sum()
+        match &self.data {
+            ValueData::Cross(bytes, _) => *bytes,
+            _ => self.charges().iter().map(|c| c.size).sum(),
+        }
+    }
+
+    fn cross(bytes: u64, content: Box<[std::mem::MaybeUninit<u8>]>) -> Self {
+        Self {
+            data: ValueData::Cross(bytes, content),
+            #[cfg(test)]
+            tag: 0,
+        }
+    }
+
+    fn cross_content(&self) -> &[std::mem::MaybeUninit<u8>] {
+        let ValueData::Cross(_, content) = &self.data else {
+            unreachable!();
+        };
+        content
     }
 
     /// A language item's bytes (units_lang); empty for a ledger value.
@@ -269,48 +290,6 @@ impl Value {
     pub(crate) fn set_item(&mut self, item: Vec<u8>) {
         self.extra_mut().item = item;
     }
-
-    /// Give this value a language item held in `buf`, whose box is reused.
-    pub(crate) fn set_item_buf(&mut self, mut buf: ItemBuf) {
-        let old = std::mem::replace(&mut self.data, ValueData::Empty).into_parts();
-        debug_assert!(old.shared.is_empty() && old.res.is_none());
-        buf.0.charges = old.charges;
-        self.data = ValueData::Extra(buf.0);
-    }
-
-    /// Take a language item's box and bytes out for reuse; the value keeps
-    /// its charges.
-    pub(crate) fn take_item_buf(&mut self) -> Option<ItemBuf> {
-        let ValueData::Extra(extra) = &mut self.data else {
-            return None;
-        };
-        if !extra.shared.is_empty() || extra.res.is_some() {
-            return None;
-        }
-        let charges = std::mem::take(&mut extra.charges);
-        let ValueData::Extra(extra) = std::mem::replace(&mut self.data, Value::plain(charges).data)
-        else {
-            unreachable!();
-        };
-        Some(ItemBuf(extra))
-    }
-}
-
-/// A language item's bytes in a reusable box (units_lang).
-pub(crate) struct ItemBuf(Box<ValueExtra>);
-
-impl ItemBuf {
-    pub(crate) fn new() -> ItemBuf {
-        ItemBuf(Box::default())
-    }
-
-    pub(crate) fn bytes_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.0.item
-    }
-
-    pub(crate) fn capacity(&self) -> usize {
-        self.0.item.capacity()
-    }
 }
 
 impl ValueData {
@@ -320,6 +299,7 @@ impl ValueData {
             Self::One(charge) => Charges::One(charge),
             Self::Many(charges) => Charges::Many(charges),
             Self::Extra(extra) => return *extra,
+            Self::Cross(..) => unreachable!(),
         };
         ValueExtra {
             charges,
@@ -349,10 +329,9 @@ pub(crate) struct Port {
     head: AtomicPtr<Arrival>,
     fwd: AtomicPtr<Port>,
     /// The pool unit to wake when a publish replaces `WAITING`.
-    wake: AtomicU64,
-    /// A language unit's task scheduler to ready instead (units_lang): one
-    /// count of its waiter, released with the port.
-    waker: AtomicPtr<()>,
+    // A tagged unit id for a ledger port, or one Arc count of the
+    // language scheduler's waiter. Null means no wake target.
+    wake: AtomicPtr<crate::tasks::Readies>,
 }
 
 // SAFETY: the port's fields are atomics; the arrivals it owns are Send.
@@ -364,15 +343,16 @@ impl Port {
         Arc::new(Port {
             head: AtomicPtr::new(ptr::null_mut()),
             fwd: AtomicPtr::new(ptr::null_mut()),
-            wake: AtomicU64::new(0),
-            waker: AtomicPtr::new(ptr::null_mut()),
+            wake: AtomicPtr::new(ptr::null_mut()),
         })
     }
 
     /// Ready this scheduler waiter (one count of it moves into the port)
     /// when a publish replaces `WAITING`. Set once, before the port is armed.
-    pub(crate) fn set_waker(&self, waker: *mut ()) {
-        let old = self.waker.swap(waker, Ordering::AcqRel);
+    pub(crate) fn set_waker(&self, waker: &Arc<crate::tasks::Readies>) {
+        let waker = Arc::into_raw(waker.clone()).cast_mut();
+        debug_assert_eq!(waker.addr() & 1, 0);
+        let old = self.wake.swap(waker, Ordering::AcqRel);
         debug_assert!(old.is_null());
     }
 
@@ -382,7 +362,8 @@ impl Port {
     }
 
     pub(crate) fn set_wake(&self, unit: u32) {
-        self.wake.store(unit as u64 + 1, Ordering::Release);
+        let tag = ptr::without_provenance_mut((unit as usize) << 1 | 1);
+        self.wake.store(tag, Ordering::Release);
     }
 
     /// Push one arrival. Wakes the unit only if it was parked on the port.
@@ -424,14 +405,12 @@ impl Port {
             {
                 Ok(_) => {
                     if h == WAITING {
-                        let w = self.waker.load(Ordering::Acquire);
-                        if !w.is_null() {
-                            crate::units_lang::port_ready(w);
-                            return;
-                        }
-                        let u = self.wake.load(Ordering::Acquire);
-                        if u != 0 {
-                            super::wake_id((u - 1) as u32);
+                        let wake = self.wake.load(Ordering::Acquire);
+                        if wake.addr() & 1 != 0 {
+                            super::wake_id((wake.addr() >> 1) as u32);
+                        } else if !wake.is_null() {
+                            // SAFETY: the port pins its scheduler's waiter.
+                            unsafe { &*wake }.ready_port();
                         }
                     }
                     return;
@@ -512,9 +491,10 @@ impl Drop for Port {
     fn drop(&mut self) {
         let mut rest = VecDeque::new();
         self.close_with(DEAD, &mut rest);
-        let w = self.waker.load(Ordering::Acquire);
-        if !w.is_null() {
-            crate::units_lang::port_waker_drop(w);
+        let wake = self.wake.load(Ordering::Acquire);
+        if !wake.is_null() && wake.addr() & 1 == 0 {
+            // SAFETY: set_waker transferred exactly one count to the port.
+            drop(unsafe { Arc::from_raw(wake) });
         }
         let f = self.fwd.load(Ordering::Acquire);
         if !f.is_null() {
@@ -1359,8 +1339,12 @@ impl UnitCtx {
         let owner = info.owner.clone();
         #[cfg(test)]
         let label = self.label.clone();
-        // The helper's pool unit ends now: no publish may wake it again.
-        self.port.wake.store(0, Ordering::Release);
+        // Retire a directly bound unit id. A language scheduler's waiter
+        // remains pinned until the port drops, as a publish may already own
+        // a reference to it.
+        if self.port.wake.load(Ordering::Relaxed).addr() & 1 != 0 {
+            self.port.wake.store(ptr::null_mut(), Ordering::Release);
+        }
         self.port.disarm();
         let p = NonNull::from(Box::leak(self));
         let a = named!(

@@ -592,6 +592,12 @@ pub(crate) mod seam {
             v
         }
         #[track_caller]
+        pub(crate) fn store(&self, v: *mut T, o: Ordering) {
+            at_point(self.a(), "store", Location::caller());
+            self.0.store(v, o);
+            note(|| super::unit_name(v.addr()));
+        }
+        #[track_caller]
         pub(crate) fn swap(&self, v: *mut T, o: Ordering) -> *mut T {
             at_point(self.a(), "swap", Location::caller());
             let r = self.0.swap(v, o);
@@ -1387,6 +1393,19 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
+    Case {
+        name: "conn_flat_slot_reuse",
+        workers: 3,
+        units: 3,
+        body: conn::flat_slot_reuse,
+        producers: &[],
+        goals: 0b111,
+        params: |r| {
+            PARAM[0].store(r(0, 400), Ordering::Relaxed);
+            PARAM[1].store(r(0, 1), Ordering::Relaxed);
+        },
+        pct: None,
+    },
 ];
 
 /// Run one schedule of `case` and exit the process with its verdict.
@@ -1795,5 +1814,9 @@ mod tests {
     #[test]
     fn conn_slot_reuse() {
         check("conn_slot_reuse");
+    }
+    #[test]
+    fn conn_flat_slot_reuse() {
+        check("conn_flat_slot_reuse");
     }
 }

@@ -19,6 +19,7 @@ use super::{FLAG, PARAM, compute_until, draw, now, param, served, this_unit, wai
 use crate::units::ledger::conn::{Client, Inbox, Received, Sent};
 use crate::units::ledger::{NAMING, Shared, TakeInfo, Took, UnitCtx, Value};
 use crate::units::wake_id;
+use crate::units_lang::CrossSend;
 use std::sync::atomic::Ordering;
 
 /// Each unit's stream of inputs (`I`) and observations (`O`), by unit index.
@@ -145,7 +146,11 @@ impl Cx {
     }
     fn send(&mut self, c: &Client, v: Value, blocking: bool) -> Sent {
         let r = self.u.send(c, v, blocking);
-        let d = match &r {
+        self.sent(&r);
+        r
+    }
+    fn sent(&self, r: &Sent) {
+        let d = match r {
             Sent::Bounds => "Bounds",
             Sent::Closed(_) => "Closed",
             Sent::Accepted => "Accepted",
@@ -154,7 +159,6 @@ impl Cx {
         };
         self.ev(format!("I send {d}"));
         self.obs("send", "");
-        r
     }
     fn recv(&mut self, i: &Inbox) -> Received {
         let r = self.u.receive(i);
@@ -312,11 +316,26 @@ pub(super) fn seal_in_flight(id: u32) -> u8 {
 /// Two publishers and a taker share a connection. An item stays in its
 /// slot while the owner reads it, even when the other publisher can admit.
 pub(super) fn slot_reuse(id: u32) -> u8 {
+    reuse(id, false)
+}
+
+/// A publisher may reserve another slot while the receiver is copying. The
+/// old slot's flat bytes must remain reserved until the copy is complete.
+pub(super) fn flat_slot_reuse(id: u32) -> u8 {
+    reuse(id, true)
+}
+
+fn reuse(id: u32, flat: bool) -> u8 {
     if id == 0 {
         let mut cx = Cx::root(0, 4096);
         let cap = if param(1) == 0 { 2 } else { 23 };
         cx.ev(format!("I connection capacity {cap}"));
-        let (inbox, client) = cx.u.conn_new(cap, 8, 64).unwrap();
+        let (inbox, client) = if flat {
+            cx.u.conn_new_cross(cap, 8, 64, 8, Box::default())
+        } else {
+            cx.u.conn_new(cap, 8, 64)
+        }
+        .unwrap();
         cx.obs("conn_new", "");
         OTHER_CLIENT.put(client.clone_client());
         CLIENT.put(client);
@@ -325,19 +344,49 @@ pub(super) fn slot_reuse(id: u32) -> u8 {
         wake_id(2);
         let mut next = [1, ITEMS + 1];
         loop {
-            match cx.recv(&inbox) {
-                Received::Ok(v) => {
-                    assert!((1..=2 * ITEMS).contains(&v.tag), "slot lost its value");
-                    let sender = ((v.tag - 1) / ITEMS) as usize;
-                    assert_eq!(v.tag, next[sender], "slot reuse changed a sender's item");
-                    next[sender] += 1;
-                    cx.drop_value(v);
-                }
-                Received::Empty => {
+            let (tag, value) = if flat {
+                let tag = inbox.front_tag();
+                let mut item = 0;
+                let got = inbox.receive_cross(|bytes, src, content| {
+                    assert_eq!(bytes, 0);
+                    assert!(content.is_empty());
+                    // SAFETY: the connection reserved this slot for this take.
+                    item = unsafe { src.cast::<u64>().read_unaligned() };
+                    Ok::<_, ()>(())
+                });
+                cx.obs(
+                    "recv",
+                    got.map_or("Empty".to_string(), |r| {
+                        r.unwrap();
+                        format!("Ok {item}")
+                    }),
+                );
+                if got.is_some() {
+                    assert_eq!(Some(item), tag, "slot reuse changed the flat bytes");
+                    (item, None)
+                } else if inbox.0.side().closed {
+                    break;
+                } else {
                     cx.wait();
+                    continue;
                 }
-                Received::Closed => break,
-                Received::Capacity(c) => panic!("receive refused: {c:?}"),
+            } else {
+                match cx.recv(&inbox) {
+                    Received::Ok(v) => (v.tag, Some(v)),
+                    Received::Empty => {
+                        cx.wait();
+                        continue;
+                    }
+                    Received::Closed => break,
+                    Received::Capacity(c) => panic!("receive refused: {c:?}"),
+                }
+            };
+            assert!((1..=2 * ITEMS).contains(&tag), "slot lost its value");
+            let sender = ((tag - 1) / ITEMS) as usize;
+            assert_eq!(tag, next[sender], "slot reuse changed a sender's item");
+            next[sender] += 1;
+            if let Some(v) = value {
+                cx.drop_value(v);
             }
         }
         assert_eq!(next, [ITEMS + 1, 2 * ITEMS + 1], "slot reuse lost an item");
@@ -353,9 +402,20 @@ pub(super) fn slot_reuse(id: u32) -> u8 {
         let mut cx = Cx::root(id as usize, 4096);
         for k in 1..=ITEMS {
             compute_until(now() + draw(0, param(0)));
-            let mut v = cx.u.alloc_block(16).unwrap();
-            v.tag = (id as u64 - 1) * ITEMS + k;
-            match cx.send(&client, v, true) {
+            let tag = (id as u64 - 1) * ITEMS + k;
+            let sent = if flat {
+                let mut source = CrossSend::new((&raw const tag).cast());
+                source.tag = tag;
+                // SAFETY: the source stays live through the settlement wait below.
+                let sent = unsafe { UnitCtx::send_cross(&client, source, 0, true, || &mut cx.u) };
+                cx.sent(&sent);
+                sent
+            } else {
+                let mut v = cx.u.alloc_block(16).unwrap();
+                v.tag = tag;
+                cx.send(&client, v, true)
+            };
+            match sent {
                 Sent::Accepted => {}
                 Sent::Waiting(send) => assert_eq!(cx.wait(), Took::Accepted(send)),
                 other => panic!("send {k}: {other:?}"),

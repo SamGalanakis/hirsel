@@ -2113,13 +2113,17 @@ impl Readies {
         self.lock().push(token);
         self.pending.store(true, Ordering::Release);
     }
-    /// A unit's port has an arrival for this run (units_lang). The token is
-    /// no operation's, so only the wake and the pending flag matter.
+    /// The port head carries its own arrivals. There is no operation token
+    /// to enqueue or capture when the port readies the scheduler.
     pub(crate) fn ready_port(&self) {
-        self.push(u64::MAX);
+        self.pending.store(true, Ordering::Release);
+        self.notify();
     }
     fn push(&self, token: u64) {
         self.enqueue(token);
+        self.notify();
+    }
+    fn notify(&self) {
         if self.unit != crate::units::NONE && crate::units::untied() {
             crate::units::wake_id(self.unit);
             return;
@@ -3505,16 +3509,12 @@ pub(crate) unsafe fn park_unit_alone() -> bool {
         crate::fiber::guard((0, 0));
         crate::limit::Funding::unbind();
         crate::units::park(None);
-        // Only the port's own token can be pending: nothing else of this
-        // run is armed. Taking it here stands for the scheduler's turn.
+        // Nothing else in this run is armed. Clear the port notification
+        // here in place of the scheduler's turn. Preserve a real ready token
+        // if a completion posted one concurrently.
         let run = &mut *(*task).run;
-        if run.readies.pending.swap(false, Ordering::Acquire) {
-            let mut tokens = run.readies.lock();
-            if tokens.iter().any(|&t| t != u64::MAX) {
-                run.readies.pending.store(true, Ordering::Release);
-            } else {
-                tokens.clear();
-            }
+        if run.readies.pending.swap(false, Ordering::Acquire) && !run.readies.lock().is_empty() {
+            run.readies.pending.store(true, Ordering::Release);
         }
         CURRENT.set(task);
         abi::task_resume((*task).context);

@@ -501,34 +501,35 @@ impl Function<'_, '_, '_> {
                 outputs[0] = self.c_call("hirsel_core_conn_client", &[P], &[P], &[args[0]])?[0];
                 1
             }
-            RtOp::ConnSend { item } | RtOp::ConnTrySend { item } => {
-                let cross = self.cross(item, 0)?;
+            RtOp::ConnSend { .. } | RtOp::ConnTrySend { .. } => {
                 let wait = matches!(op, RtOp::ConnSend { .. });
                 let wait = self.b.ins().iconst(types::I8, i64::from(wait));
                 let values = self.c_call(
                     "hirsel_core_conn_send",
-                    &[P, P, P, P, U, B],
+                    &[P, P, P, U, B],
                     &[K, K],
-                    &[self.context, args[0], args[1], cross, site, wait],
+                    &[self.context, args[0], args[1], site, wait],
                 )?;
                 self.call_failure(values[1], call.fail)?;
                 outputs[0] = values[0];
                 1
             }
-            RtOp::ConnReceive { item } | RtOp::ConnTryReceive { item } => {
-                let cross = self.cross(item, 0)?;
+            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
                 let wait = matches!(op, RtOp::ConnReceive { .. });
                 let wait = self.b.ins().iconst(types::I8, i64::from(wait));
                 let values = self.c_call(
                     "hirsel_core_conn_receive",
-                    &[P, P, P, P, U, B],
-                    &[K, U, U, K],
-                    &[self.context, args[0], args[1], cross, site, wait],
+                    &[P, P, P, U, B],
+                    &[U, U],
+                    &[self.context, args[0], args[1], site, wait],
                 )?;
-                self.call_failure(values[3], call.fail)?;
-                for i in 0..3 {
-                    outputs[i] = values[i];
-                }
+                let packed = values[0];
+                let status = self.b.ins().ushr_imm(packed, 8);
+                let status = self.b.ins().ireduce(types::I8, status);
+                self.call_failure(status, call.fail)?;
+                outputs[0] = self.b.ins().ireduce(types::I8, packed);
+                outputs[1] = self.b.ins().ushr_imm(packed, 16);
+                outputs[2] = values[1];
                 3
             }
             RtOp::Join { .. } => {

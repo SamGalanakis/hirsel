@@ -1145,6 +1145,9 @@ fn bump(i: usize) {
     add_stat(i, 1);
 }
 
+// A unit may resume on another worker. Resolve this worker's TLS in the
+// callee so the caller cannot cache its address across a stack switch.
+#[inline(never)]
 fn add_stat(i: usize, n: u64) {
     if worker_ix() == usize::MAX {
         USTATS[i].fetch_add(n, Ordering::Relaxed);

@@ -196,7 +196,9 @@ impl ConnCore {
 
 /// The owner's handle: receive, seal, clean.
 pub(crate) struct Inbox(pub(crate) Arc<ConnCore>);
-/// A sender's handle.
+/// A sender's handle. The ABI boxes it, so alignment keeps the client's
+/// reads off cache lines that the receiver might write.
+#[repr(align(64))]
 pub(crate) struct Client(pub(crate) Arc<ConnCore>);
 
 impl Client {

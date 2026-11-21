@@ -1351,6 +1351,101 @@ fn flow_transform_rejects() {
 }
 
 #[test]
+fn package_root_names() {
+    let files = tempfile::tempdir().unwrap();
+    let app = "\
+fn address() -> u64 { dep.inside(dep.Number(value: 2)) + dep.worker.count() }
+fn stutter(n: dep.dep.Number) -> u64 { 0 }
+";
+    let app_path = files.path().join("app.hirsel");
+    std::fs::write(&app_path, app).unwrap();
+    let mut inputs = crate::source_manifest(app, app_path, &core_dir(), "main");
+    inputs
+        .packages
+        .last_mut()
+        .unwrap()
+        .dependencies
+        .push(package("dep"));
+    let dep = "\
+pub type Number { value: u64 }
+pub fn read(n: Number) -> u64 { n.value }
+pub fn inside(n: dep.Number) -> u64 { dep.read(n) }
+pub fn worker() -> u64 { 0 }
+";
+    let sources = [("dep", dep), ("worker", "pub fn count() -> u64 { 1 }\n")]
+        .into_iter()
+        .map(|(module, source)| {
+            let file = files.path().join(format!("{module}.hirsel"));
+            std::fs::write(&file, source).unwrap();
+            ModuleSource {
+                file,
+                modules: vec![module.into()],
+                signatures: false,
+            }
+        })
+        .collect();
+    inputs.packages.push(PackageManifest {
+        package: package("dep"),
+        dependencies: vec![package("core")],
+        sources,
+    });
+
+    // An image overlay can discover the sibling after the root member is indexed.
+    let mut base = inputs.clone();
+    base.packages.last_mut().unwrap().sources.truncate(1);
+    let corpus = base.load().unwrap();
+    let mut index = corpus.index(&corpus.parse());
+    let dep_package = index
+        .package(
+            index.symbols.find("dep").unwrap(),
+            index.symbols.find("1").unwrap(),
+        )
+        .unwrap();
+    let name = index.symbols.find("worker").unwrap();
+    let sibling = index.add_module(dep_package, &[name]);
+    let [refusal] = index.diagnostics.as_slice() else {
+        panic!("expected one root conflict: {:?}", index.diagnostics);
+    };
+    let member = index.definition(refusal.primary.module, name).unwrap();
+    assert_eq!(refusal.rule, "LANG-7");
+    assert_eq!(refusal.primary, index.get(member).site);
+    assert_eq!(refusal.causal[0].module, sibling);
+
+    let checked = Checked::check(inputs, files, None);
+    let product = &checked.product;
+
+    // LANG-7 puts the collision at the declaration and the stutter at the second token.
+    let diagnostics = product.machine_diagnostics().unwrap();
+    assert_eq!(diagnostics.len(), 2, "{:?}", product.diagnostics);
+    for (module, source, marker, token, cause) in [
+        ("dep@1/dep", dep, "worker()", "worker", Some("dep@1/worker")),
+        ("app@1/main", app, "dep.Number) ->", "dep", None),
+    ] {
+        let start = source.find(marker).unwrap() as u32;
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.primary.module == module)
+            .unwrap();
+        assert_eq!(diagnostic.rule, "LANG-7");
+        assert_eq!(diagnostic.primary.span.start, start);
+        assert_eq!(diagnostic.primary.span.end, start + token.len() as u32);
+        assert!(
+            diagnostic
+                .causal
+                .iter()
+                .map(|site| site.module.as_str())
+                .eq(cause)
+        );
+    }
+    let identity = Identity::plain(DefPath::from_full("app@1/main/address").unwrap());
+    let units = product.units([identity.clone()], 65_536).unwrap();
+    let (module, function) =
+        hirsel_core_materialize::join(&units.modules().unwrap(), &identity).unwrap();
+    let report = eval::run(&module, function, &[], u64::MAX);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![3]));
+}
+
+#[test]
 fn corpus() {
     let paths = case_source::files(&root().join("cases")).expect("cases dir");
     assert!(!paths.is_empty());

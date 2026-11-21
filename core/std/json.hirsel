@@ -69,7 +69,7 @@ pub fn size(s: String) -> Result[u64, Error] {
 pub fn parse(r: Region, s: String) -> Result[Json in r, Error] {
     let n = size(s)?
     let mut i: u64 = 0
-    match build_stream_in(r, bytes n, fn(take w: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+    match build_stream_in(r, bytes n, fn(take w: core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
         write_value(s, mut i, take w)
     }) {
         Ok(take b) => Ok(finish(take b)),
@@ -965,7 +965,7 @@ fn hex4(s: String, p: u64) -> Result[u32, Error] {
 // Writing pass. It runs only on input that `size` has accepted, and s is frozen for the
 // call, so every check it would repeat has already passed. Where a branch cannot be
 // reached, it fails (FOR SPEC 7).
-fn write_value[in r](s: String, mut i: u64, take w: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+fn write_value[in r](s: String, mut i: u64, take w: core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
     skip(s, mut i)
     let c = at(s, i)
     if c == b'n' {
@@ -978,15 +978,15 @@ fn write_value[in r](s: String, mut i: u64, take w: core.core.Writer[Json, in r]
         i += 5
         emit(take w, False)
     } else if c == b'"' {
-        emit(take w, Str(emit(fn(take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        emit(take w, Str(emit(fn(take t: core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
             write_string(s, mut i, take t)
         })))
     } else if c == b'[' {
         i += 1
-        emit(take w, Arr(emit(fn(take xs: core.core.Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
+        emit(take w, Arr(emit(fn(take xs: core.Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
             skip(s, mut i)
             while at(s, i) != b']' {
-                writer.append(mut xs, fn(take x: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                writer.append(mut xs, fn(take x: core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
                     write_value(s, mut i, take x)
                 })?
                 skip(s, mut i)
@@ -999,14 +999,14 @@ fn write_value[in r](s: String, mut i: u64, take w: core.core.Writer[Json, in r]
         })))
     } else if c == b'{' {
         i += 1
-        emit(take w, Obj(emit(fn(take ms: core.core.Writer[IndexedSpan[Member], in r]) -> Result[Child[IndexedSpan[Member]], BuildError] {
+        emit(take w, Obj(emit(fn(take ms: core.Writer[IndexedSpan[Member], in r]) -> Result[Child[IndexedSpan[Member]], BuildError] {
             skip(s, mut i)
             while at(s, i) != b'}' {
-                writer.append(mut ms, fn(take m: core.core.Writer[Member, in r]) -> Result[Child[Member], BuildError] {
+                writer.append(mut ms, fn(take m: core.Writer[Member, in r]) -> Result[Child[Member], BuildError] {
                     skip(s, mut i)
-                    emit(take m, Member(key: emit(fn(take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                    emit(take m, Member(key: emit(fn(take t: core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
                         write_string(s, mut i, take t)
-                    }), value: emit(fn(take v: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                    }), value: emit(fn(take v: core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
                         skip(s, mut i)
                         i += 1
                         write_value(s, mut i, take v)
@@ -1056,7 +1056,7 @@ fn decoded_string_part(s: String, mut i: u64) -> Result[DecodedStringPart, Error
 
 /// At the opening '"': writes the decoded string, then closes it. Each run
 /// between escapes is one push and each escape is one scalar.
-fn write_string[in r](s: String, mut i: u64, take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+fn write_string[in r](s: String, mut i: u64, take t: core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
     i += 1
     while at(s, i) != b'"' {
         let part = match decoded_string_part(s, mut i) {

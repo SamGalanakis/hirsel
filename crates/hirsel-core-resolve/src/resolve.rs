@@ -717,6 +717,86 @@ impl<'a> Resolver<'a, '_> {
             self.missing(n)
         }
     }
+    fn module_path<const TYPE_CONTEXT: bool, const CONSTRUCT: bool>(
+        &mut self,
+        n: NodeId,
+        mut module: ModuleId,
+        mut tail: impl Iterator<Item = TokenId> + Clone,
+        last: TokenId,
+        projections: &mut Span,
+    ) -> Target {
+        let mut package_root = None;
+        if let Some(p) = self.index.path_package(module)
+            && let Some(root) = self.index.root_module(p)
+        {
+            let second = tail.clone().next().unwrap();
+            if self.name(second) == p.name {
+                let mut site = self.site(n);
+                site.span = self.item.token_span(second);
+                self.out.diagnostics.push(Refusal::new(
+                    "LANG-7",
+                    site,
+                    format!("name `{}` was not found", self.index.symbols.text(p.name)),
+                ));
+                return Target::Missing;
+            }
+            module = root;
+            package_root = Some(p.root);
+        }
+        while let Some(t) = tail.next() {
+            if t == last {
+                break;
+            }
+            let symbol = self.name(t);
+            let (scope, child) = if let Some(root) = package_root.take() {
+                (
+                    root,
+                    self.index
+                        .child(root, symbol)
+                        .or_else(|| self.index.child(module, symbol)),
+                )
+            } else {
+                (module, self.index.child(module, symbol))
+            };
+            self.record(
+                n,
+                Namespace::Value,
+                LookupScope::Children(scope),
+                symbol,
+                false,
+                child.map_or(LookupResult::Missing, |m| {
+                    LookupResult::Found(Target::Module(m))
+                }),
+            );
+            if let Some(child) = child {
+                module = child;
+                continue;
+            }
+            let value = self
+                .qualified_member(n, module, t, Namespace::Value, false)
+                .unwrap_or_else(|| self.missing(n));
+            if let Target::Definition(id) = value {
+                match self.index.get(id).kind {
+                    DefinitionKind::Function => return self.function_head(n, t, id),
+                    DefinitionKind::Constant => {
+                        *projections = Span {
+                            start: tail.next().unwrap().0,
+                            end: self.item.tree.node(n).origin.tokens.end,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            return value;
+        }
+        let ns = if TYPE_CONTEXT {
+            Namespace::Type
+        } else {
+            Namespace::Value
+        };
+        self.qualified_member(n, module, last, ns, CONSTRUCT)
+            .unwrap_or_else(|| self.missing(n))
+    }
     fn use_path<const TYPE_CONTEXT: bool, const CONSTRUCT: bool>(&mut self, n: NodeId) {
         let type_context = TYPE_CONTEXT;
         let construct = CONSTRUCT;
@@ -798,56 +878,13 @@ impl<'a> Resolver<'a, '_> {
                     .head_lookup(n, name)
                     .or_else(|| self.module_lookup(n, self.module, name, Namespace::Value, false));
                 match first {
-                    Some(Target::Module(mut module)) => {
-                        let mut tail = rest.clone();
-                        let mut selected_value = None;
-                        while let Some(t) = tail.next() {
-                            if t == last {
-                                break;
-                            }
-                            let symbol = self.name(t);
-                            let child = self.index.child(module, symbol);
-                            self.record(
-                                n,
-                                Namespace::Value,
-                                LookupScope::Children(module),
-                                symbol,
-                                false,
-                                child.map_or(LookupResult::Missing, |m| {
-                                    LookupResult::Found(Target::Module(m))
-                                }),
-                            );
-                            if let Some(child) = child {
-                                module = child;
-                            } else {
-                                let value = self
-                                    .qualified_member(n, module, t, Namespace::Value, false)
-                                    .unwrap_or_else(|| self.missing(n));
-                                selected_value = Some(match value {
-                                    Target::Definition(id)
-                                        if self.index.get(id).kind == DefinitionKind::Function =>
-                                    {
-                                        self.function_head(n, t, id)
-                                    }
-                                    Target::Definition(id)
-                                        if self.index.get(id).kind == DefinitionKind::Constant =>
-                                    {
-                                        projections = Span {
-                                            start: tail.next().unwrap().0,
-                                            end: self.item.tree.node(n).origin.tokens.end,
-                                        };
-                                        Target::Definition(id)
-                                    }
-                                    _ => value,
-                                });
-                                break;
-                            }
-                        }
-                        selected_value.unwrap_or_else(|| {
-                            self.qualified_member(n, module, last, ns, construct)
-                                .unwrap_or_else(|| self.missing(n))
-                        })
-                    }
+                    Some(Target::Module(module)) => self.module_path::<TYPE_CONTEXT, CONSTRUCT>(
+                        n,
+                        module,
+                        rest.clone(),
+                        last,
+                        &mut projections,
+                    ),
                     Some(Target::Definition(id))
                         if self.index.get(id).kind == DefinitionKind::Function =>
                     {

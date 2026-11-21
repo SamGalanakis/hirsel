@@ -245,6 +245,14 @@ impl NameIndex {
                 merge: Rows::default(),
             });
             self.children.insert((parent, name), id);
+            // An overlay can add a module after the root's members are indexed.
+            if !self.definitions.is_empty()
+                && let Some(package) = self.path_package(parent)
+                && let Some(root) = self.root_module(package)
+                && let Some(member) = self.definition(root, name)
+            {
+                self.refuse_root_member(self.get(member).site, name, id);
+            }
             if hirsel_core_syntax::keyword_symbol(name) {
                 self.diagnostics.push(
                     Refusal::new(
@@ -266,6 +274,37 @@ impl NameIndex {
     }
     pub fn child(&self, parent: ModuleId, name: Symbol) -> Option<ModuleId> {
         self.children.get(&(parent, name)).copied()
+    }
+    /// The naming scope at a package head, whether found as a dependency or
+    /// through its root module. Discovery still uses the physical module paths.
+    pub(crate) fn path_package(&self, module: ModuleId) -> Option<Package> {
+        let row = &self.modules[module.0 as usize];
+        if row.depth > 1 {
+            return None;
+        }
+        let package = self.packages[row.package.0 as usize];
+        (module == package.root || row.name == package.name).then_some(package)
+    }
+    pub(crate) fn root_module(&self, package: Package) -> Option<ModuleId> {
+        self.child(package.root, package.name)
+    }
+    fn refuse_root_member(&mut self, site: Site, name: Symbol, conflict: ModuleId) {
+        let mut refusal = Refusal::new(
+            "LANG-7",
+            site,
+            "root module member has the name of a module of its package",
+        )
+        .with_comparison(
+            self.symbols.text(name),
+            "a name distinct from the package's modules",
+        );
+        refusal.causal.push(Site {
+            module: conflict,
+            source: None,
+            item: u32::MAX,
+            span: Span::default(),
+        });
+        self.diagnostics.push(refusal);
     }
     pub fn module_package(&self, module: ModuleId) -> PackageKey {
         self.modules[module.0 as usize].package
@@ -555,6 +594,16 @@ impl NameIndex {
             item: ordinal,
             span: item.token_span(t),
         };
+        if kind != DefinitionKind::Clone
+            && let Some(package) = self.path_package(module)
+            && module != package.root
+            && let Some(conflict) = self
+                .child(package.root, name)
+                .or_else(|| self.child(module, name))
+        {
+            self.refuse_root_member(site, name, conflict);
+            return;
+        }
         if kind == DefinitionKind::Type && crate::resolve::builtin(name) {
             self.diagnostics.push(
                 Refusal::new("LANG-7", site, "builtin type name cannot be redeclared")

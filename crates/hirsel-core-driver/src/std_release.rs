@@ -44,9 +44,14 @@ const INDEX_LENGTH: usize = 8;
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
 
-/// Whether `definition` is the library's: a side holds these units only.
+/// The source law runner places program modules in the core and std packages.
 fn library(definition: &DefPath) -> bool {
-    definition.package_is("std", "1") || definition.package_is("core", "1")
+    (definition.package_is("std", "1") || definition.package_is("core", "1"))
+        && definition
+            .0
+            .modules
+            .first()
+            .is_none_or(|name| name != "tests")
 }
 
 /// A release std's publication record, stored under its side key.
@@ -104,6 +109,9 @@ fn program_side(
         let mut seen = BTreeSet::new();
         let mut work = from;
         while let Some(identity) = work.pop() {
+            if !library(&identity.definition) {
+                continue;
+            }
             let Some(unit) = units.get(&identity) else {
                 continue;
             };

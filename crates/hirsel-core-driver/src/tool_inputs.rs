@@ -1486,6 +1486,16 @@ mod tests {
             not_ar.to_string(),
             format!("{} is not an indexed ar archive", prefix(digest(abc)))
         );
+        let thin = b"!<thin>\n";
+        let pin = ObjectKind::ForeignArchive.hash(thin);
+        let thin = open(thin.to_vec(), pin, thin.len() as u64).err().unwrap();
+        assert_eq!(
+            thin.to_string(),
+            format!(
+                "{} is a thin archive; its members are not inside the pinned bytes",
+                prefix(pin)
+            )
+        );
 
         let fixture = tempfile::tempdir().unwrap();
         let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
@@ -1606,6 +1616,70 @@ __asm__(".data\n.globl hfl_unique\n.type hfl_unique,@gnu_unique_object\nhfl_uniq
             problem.to_string(),
             format!(
                 "{}: member laws.o has symbol hfl_unique with binding STB_GNU_UNIQUE, which is not an admitted object feature",
+                prefix(object.hash)
+            )
+        );
+        for (source, expected) in [
+            (
+                "void *malloc(__SIZE_TYPE__ n) { return 0; }",
+                ": member laws.o defines malloc, which does not start with the prefix hfl_",
+            ),
+            (
+                r#"
+static int hfl_impl(void) { return 0; }
+static int (*hfl_resolve(void))(void) { return hfl_impl; }
+__attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
+"#,
+                ": member laws.o has indirect function hfl_indirect, which is not an admitted object feature",
+            ),
+        ] {
+            let (invalid, object) = build(source);
+            let error = invalid
+                .check_headers(object, &leaf, target, &entry)
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("{}{expected}", prefix(object.hash))
+            );
+        }
+        let (invalid, object) = build_source("int hfl_touch(void) { return 0; }");
+        let error = invalid
+            .check_headers(object, &leaf, target, &entry)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{} has no ABI text", prefix(object.hash))
+        );
+
+        // llvm-ar indexes both definitions. A reached symbol must select one member.
+        std::fs::copy(
+            fixture.path().join("laws.o"),
+            fixture.path().join("duplicate.o"),
+        )
+        .unwrap();
+        let output = Command::new(llvm.join("llvm-ar"))
+            .current_dir(fixture.path())
+            .args(["rcs", "laws.a", "duplicate.o"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(fixture.path().join("laws.a")).unwrap();
+        let object = ObjectRef {
+            hash: ObjectKind::ForeignArchive.hash(&bytes),
+            len: bytes.len() as u64,
+        };
+        let duplicate = open(bytes, object.hash, object.len).unwrap();
+        let error = duplicate
+            .check_headers(object, &leaf, target, &entry)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} does not define hfl_touch, declared at ffi_laws@1/main/main",
                 prefix(object.hash)
             )
         );

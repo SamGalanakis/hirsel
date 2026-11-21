@@ -18,8 +18,15 @@ const LLVM_ADDRSIG: elf::SectionType = elf::SectionType(0x6fff_4c03);
 
 pub(crate) struct SealedArchive {
     _file: File,
-    indexed: BTreeMap<Vec<u8>, Vec<u64>>,
-    members: BTreeMap<u64, Member>,
+    indexed: BTreeMap<Vec<u8>, IndexedSymbol>,
+    members: Vec<Member>,
+}
+
+struct IndexedSymbol {
+    offset: Option<u64>,
+    /// The first definition matches the indexed member and is a global function.
+    /// A second definition makes the symbol ambiguous.
+    definition_matches: Option<bool>,
 }
 
 struct Member {
@@ -46,7 +53,7 @@ pub(crate) fn check_distinct_definitions<'a>(
         if !seen.insert(object.hash) {
             continue;
         }
-        for member in archive.members.values() {
+        for member in &archive.members {
             for symbol in member.symbols.iter().filter(|symbol| symbol.definition) {
                 budget.charge_slots(1)?;
                 match definitions.entry(&symbol.name) {
@@ -162,7 +169,7 @@ impl SealedArchive {
             ));
         }
         // An index names actual member headers, never a location inside an object.
-        let mut symbols = BTreeMap::<Vec<u8>, Vec<u64>>::new();
+        let mut symbols = BTreeMap::<Vec<u8>, IndexedSymbol>::new();
         for entry in indexed {
             let entry = entry.map_err(|_| bad_ar())?;
             let offset = entry.offset().0;
@@ -174,10 +181,13 @@ impl SealedArchive {
             }
             symbols
                 .entry(entry.name().to_vec())
-                .or_default()
-                .push(offset);
+                .and_modify(|symbol| symbol.offset = None)
+                .or_insert(IndexedSymbol {
+                    offset: Some(offset),
+                    definition_matches: None,
+                });
         }
-        let mut members = BTreeMap::new();
+        let mut members = Vec::with_capacity(objects.len());
         for (offset, name, bytes) in objects {
             let bad_member = || {
                 refuse(
@@ -186,7 +196,16 @@ impl SealedArchive {
                 )
             };
             let member = parse_member(bytes, &name, target).ok_or_else(bad_member)?;
-            members.insert(offset, member);
+            for symbol in member.symbols.iter().filter(|symbol| symbol.definition) {
+                if let Some(indexed) = symbols.get_mut(&symbol.name) {
+                    indexed.definition_matches = Some(
+                        indexed.definition_matches.is_none()
+                            && indexed.offset == Some(offset)
+                            && symbol.strong_function,
+                    );
+                }
+            }
+            members.push(member);
         }
         Ok(Self {
             _file: file,
@@ -206,13 +225,10 @@ impl SealedArchive {
         let site = entry.definition_identity();
         for function in &leaf.functions {
             let symbol = format!("{}{}", leaf.symbols, function.identity.definition.0.name);
-            let defines = self.indexed.get(symbol.as_bytes()).is_some_and(|rows| {
-                rows.iter().all(|offset| {
-                    self.members[offset].symbols.iter().any(|definition| {
-                        definition.strong_function && definition.name == symbol.as_bytes()
-                    })
-                })
-            });
+            let defines = self
+                .indexed
+                .get(symbol.as_bytes())
+                .is_some_and(|row| row.definition_matches == Some(true));
             if !defines {
                 return Err(refuse(
                     &context,
@@ -220,7 +236,7 @@ impl SealedArchive {
                 ));
             }
         }
-        for member in self.members.values() {
+        for member in &self.members {
             if let Some(feature) = &member.bad_feature {
                 return Err(refuse(
                     &context,
@@ -231,7 +247,7 @@ impl SealedArchive {
                 ));
             }
         }
-        for member in self.members.values() {
+        for member in &self.members {
             if let Some(symbol) = member
                 .symbols
                 .iter()
@@ -247,7 +263,7 @@ impl SealedArchive {
                 ));
             }
         }
-        let mut abi = self.members.values().flat_map(|m| &m.abi);
+        let mut abi = self.members.iter().flat_map(|m| &m.abi);
         let [Some(Some(abi)), None] = [abi.next(), abi.next()] else {
             return Err(refuse(&context, " has no ABI text"));
         };

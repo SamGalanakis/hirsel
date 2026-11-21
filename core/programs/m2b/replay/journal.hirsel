@@ -216,7 +216,7 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
                 list.append(mut b, string.as_bytes(text))
             },
             Cancelled => put_u8(mut b, 6)?,
-            Capacity => put_u8(mut b, 7)?,
+            Capacity(_) => put_u8(mut b, 7)?,
             OutOfTime => put_u8(mut b, 9)?,
         }
         break

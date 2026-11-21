@@ -17,7 +17,8 @@ fn triple(b: Bytes) -> Result[Bytes, Capacity] {
 
 // Asks for more than any journal bound in these cases admits.
 fn big(b: Bytes) -> Result[Bytes, Capacity] {
-    let mut out: Bytes = list.with_capacity(100000)
+    let mut out: Bytes = list.new()
+    list.try_reserve(mut out, 100000)?
     list.append(mut out, b)
     Ok(out)
 }

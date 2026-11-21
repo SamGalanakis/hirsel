@@ -56,7 +56,7 @@ deadline and replay only adds one reading. Catches: a replay that
 waits again, a record that does not wait.
 
 ## refused = 10000065536
-`big` asks for a 100000-byte list inside the journal's `bound bytes 65536`; nothing else is
+`big` calls `list.try_reserve` for 100000 bytes inside the journal's `bound bytes 65536`; nothing else is
 admitted inside the bound, so it is refused with `Capacity { requested: 100000, available:
 65536 }` (MEM-25). The refusal is recorded (tag 1), and replay meets the same refusal with
 the same figures. Value `requested × 100000 + available`. Catches: a refused allocation

@@ -24,6 +24,7 @@ pub enum OptionId {
     Filter,
     TestJobs,
     TestTimeout,
+    Rerun,
     Release,
     DebugLines,
     Backend,
@@ -449,6 +450,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("SECONDS"),
         ["test"],
         "Bound each test's execution, excluding build time."
+    ),
+    option!(
+        Rerun,
+        ["--rerun"],
+        None,
+        ["test"],
+        "Execute every selected test, reusing no recorded pass."
     ),
     option!(
         Release,

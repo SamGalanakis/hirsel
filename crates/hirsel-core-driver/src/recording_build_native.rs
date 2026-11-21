@@ -1934,16 +1934,126 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
     assert_eq!(code, Some(0), "test --replay: {out}\n{err}");
 
     let mut sealed = base.clone();
-    sealed.extend(["--expect-verdict".into(), "Sealed".into()]);
+    sealed.extend(["--expect-verdict".into(), "Sealed".into(), "--rerun".into()]);
     let (code, out, err) = process::tape_request(&sealed, dir.path());
     assert_eq!(
         code,
         Some(0),
-        "test --replay --expect-verdict Sealed: {out}\n{err}"
+        "test --replay --expect-verdict Sealed --rerun: {out}\n{err}"
     );
 
     let mut wrong_verdict = base;
     wrong_verdict.extend(["--expect-verdict".into(), "Diverged(Arg)".into()]);
     let (code, _, _) = process::tape_request(&wrong_verdict, dir.path());
     assert_ne!(code, Some(0), "mismatched --expect-verdict must fail");
+
+    test_pass_cache_cli();
+}
+
+fn test_pass_cache_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("test-app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        r#"
+@test
+fn good() -> Result[(), ()] waits { Ok(()) }
+@test
+fn rejected() -> Result[(), ()] { Error(()) }
+"#,
+    )
+    .unwrap();
+    let runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap());
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let base = [
+        "test".into(),
+        app.display().to_string(),
+        "--limit".into(),
+        "1048576".into(),
+        "--runtime".into(),
+        runtime.display().to_string(),
+        "--cc".into(),
+        llvm.join("bin/clang").display().to_string(),
+        "--libraries".into(),
+        root.join("core").display().to_string(),
+        "--source-core".into(),
+        "--store".into(),
+        dir.path().join("store").display().to_string(),
+    ];
+    let run = |args: &[&str], code| {
+        let mut invocation = base.to_vec();
+        invocation.extend(args.iter().map(|s| (*s).to_owned()));
+        let output = process::tape_request_command(&invocation, dir.path())
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .env("HIRSEL_HOST_PID", "invalid")
+            .env("HIRSEL_CONTROL_FD", "4")
+            .env("HIRSEL_SCRATCH", dir.path().join("absent-scratch"))
+            .output()
+            .unwrap();
+        let out = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{out}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let out = out.split_once(process::CHILD_MARK).unwrap().1;
+        if args.contains(&"--json") {
+            return out.to_owned();
+        }
+        out.lines()
+            .map(|line| {
+                if line.starts_with("pass executed ") || line.starts_with("fail executed ") {
+                    let (row, time) = line.rsplit_once(" (").unwrap();
+                    assert!(time.strip_suffix(" ms)").unwrap().parse::<f64>().unwrap() >= 0.0);
+                    row
+                } else {
+                    line
+                }
+            })
+            .flat_map(|line| [line, "\n"])
+            .collect::<String>()
+    };
+
+    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: error\n";
+    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: error\n";
+    assert_eq!(run(&["-j", "1"], 1), executed);
+    assert_eq!(run(&["-j", "2"], 1), cached);
+    assert_eq!(run(&["--rerun"], 1), executed);
+    let mut rows: serde_json::Value = serde_json::from_str(&run(&["--json"], 1)).unwrap();
+    let executed_time = rows["tests"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("wall_ms")
+        .unwrap();
+    assert!(executed_time.as_f64().unwrap() >= 0.0);
+    assert_eq!(
+        rows,
+        serde_json::json!({
+            "passed": false,
+            "tests": [
+                {"definition":"app@1/main/good","passed":true,"source":"cached","status":0,"stdout":"","stderr":"","timed_out":false,"wall_ms":null},
+                {"definition":"app@1/main/rejected","passed":false,"source":"executed","status":1,"stdout":"","stderr":"","timed_out":false}
+            ]
+        })
+    );
+
+    let good = ["--filter", "/good"];
+    assert_eq!(run(&good, 0), "pass cached app@1/main/good\n");
+    assert_eq!(run(&["--filter", "/absent"], 2), "");
+    let with_grant = ["--filter", "/good", "--grant", "Stdout"];
+    assert_eq!(run(&with_grant, 0), "pass cached app@1/main/good\n");
+    let missing = dir.path().join("absent-dir");
+    let with_dir = ["--filter", "/good", "--dir", missing.to_str().unwrap()];
+    assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
+    let mut rerun_with_dir = with_dir.to_vec();
+    rerun_with_dir.push("--rerun");
+    assert_eq!(run(&rerun_with_dir, 0), "pass executed app@1/main/good\n");
+    assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
+    assert!(!missing.exists());
 }

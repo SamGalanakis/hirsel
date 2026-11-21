@@ -1,11 +1,14 @@
 //! PROG-4: a checked test uses the ordinary entry ABI, in a fresh process. A run
 //! stop can end that process without ending another test's run.
-use crate::{CheckProduct, NativeOptions, NativeStop};
+use crate::native::EntryDecl;
+use crate::{CheckProduct, NativeOptions, NativeStop, PackageProduct, Reachable, Store};
 use hirsel_core_ids::{ContentHash, DefPath};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
-use std::process::{Command, Output, Stdio};
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// Execution inputs are separate from the target-independent checking products
@@ -73,6 +76,27 @@ impl Runner {
             }
         }
     }
+
+    fn test_command(&self, executable: &Path) -> Command {
+        let mut command = self.command(executable);
+        // Tests are standalone runs. A place launcher owns its descriptor
+        // numbers, parent PID, scratch path, socket activation and tape.
+        for name in [
+            "HIRSEL_HOST_PID",
+            "HIRSEL_CONTROL_FD",
+            "HIRSEL_HOST_CONTROL_FD",
+            "HIRSEL_SCRATCH",
+            "LISTEN_PID",
+            "LISTEN_FDS",
+            "LISTEN_FDNAMES",
+            "LISTEN_PIDFDID",
+            "HIRSEL_RECORD",
+            "HIRSEL_RECORD_ID",
+        ] {
+            command.env_remove(name);
+        }
+        command
+    }
 }
 
 #[derive(Debug)]
@@ -81,6 +105,7 @@ pub struct TestOutcome {
     pub output: Output,
     pub timed_out: bool,
     /// Time spent launching, running and collecting the child or replay pair.
+    /// A cached result has no child time.
     pub wall_time: Duration,
 }
 impl TestOutcome {
@@ -88,6 +113,102 @@ impl TestOutcome {
     pub fn passed(&self) -> bool {
         !self.timed_out && self.output.status.success()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Source {
+    Cached,
+    Executed,
+}
+
+impl Source {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Cached => "cached",
+            Self::Executed => "executed",
+        }
+    }
+}
+
+const TEST_PASS_SCHEMA: u32 = 1;
+
+fn clear_test_grants(options: &mut NativeOptions) {
+    options.grant_mask = 0;
+    options.directories.clear();
+    options.net_rules.clear();
+    options.secret_grants.clear();
+    options.env_patterns = None;
+}
+
+/// Reused passes of determined tests (PROG-4).
+pub struct TestCache {
+    store: Store,
+}
+
+impl TestCache {
+    /// A cache that cannot be opened leaves every test to execute.
+    pub fn open(root: &Path) -> Option<Self> {
+        Some(Self {
+            store: Store::new(root).ok()?,
+        })
+    }
+
+    pub fn default_root() -> PathBuf {
+        PackageProduct::default_cache().join("test-results")
+    }
+
+    fn get(&self, key: ContentHash) -> Option<Output> {
+        let bytes = self.store.get(key).ok()??;
+        let (TEST_PASS_SCHEMA, stdout, stderr) = crate::decode(&bytes)? else {
+            return None;
+        };
+        Some(Output {
+            status: ExitStatus::from_raw(0),
+            stdout,
+            stderr,
+        })
+    }
+
+    fn put(&self, key: ContentHash, output: &Output) {
+        if let Ok(bytes) = crate::encode(&(TEST_PASS_SCHEMA, &output.stdout, &output.stderr)) {
+            let _ = self.store.put_keyed(key, &bytes);
+        }
+    }
+}
+
+fn test_key(
+    test: &DefPath,
+    decl: &EntryDecl,
+    reached: &Reachable<'_>,
+    options: &NativeOptions,
+) -> Option<ContentHash> {
+    let address = reached.address(test).ok()?;
+    let inputs = reached.native.as_ref()?;
+    let environment = match &inputs.records {
+        Some(records) => records.digest,
+        None => {
+            let env = crate::native::environment(options, inputs.toolchain.runtime).ok()?;
+            ContentHash::of_parts("hirsel.core-environment.v1", [&env[..]])
+        }
+    };
+    // Keep the executable's launch policy in the key. The code address closes
+    // over called bodies, and source maps only affect failure output.
+    crate::native::key(
+        "hirsel.test-pass.v1",
+        &(
+            TEST_PASS_SCHEMA,
+            test,
+            decl,
+            address,
+            environment,
+            inputs.toolchain.image,
+            inputs.recipe.identity,
+            inputs.toolchain.environment,
+            crate::native_entry::policy(options),
+            None::<u64>, // Seed, once test execution can select one.
+        ),
+    )
+    .ok()
 }
 
 pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
@@ -115,7 +236,35 @@ pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
     }
 }
 
-type TestResult = Result<TestOutcome, NativeStop>;
+type TestResult = Result<(TestOutcome, Source), NativeStop>;
+
+enum TestLaunch<'a> {
+    Cached(TestOutcome),
+    Run(TestProcess<'a>),
+}
+
+struct TestProcess<'a> {
+    command: Command,
+    pass: Option<(&'a TestCache, ContentHash)>,
+}
+
+impl TestProcess<'_> {
+    fn run(mut self, test: &DefPath, timeout: Option<Duration>) -> TestResult {
+        let (output, timed_out, wall_time) = execute(&mut self.command, timeout)?;
+        let outcome = TestOutcome {
+            definition: test.clone(),
+            output,
+            timed_out,
+            wall_time,
+        };
+        if outcome.passed()
+            && let Some((cache, key)) = self.pass
+        {
+            cache.put(key, &outcome.output);
+        }
+        Ok((outcome, Source::Executed))
+    }
+}
 
 pub(crate) struct TestBatch<'a> {
     pub jobs: NonZeroUsize,
@@ -123,6 +272,8 @@ pub(crate) struct TestBatch<'a> {
     pub runner: &'a Runner,
     pub replay: bool,
     pub expect_verdict: Option<&'a str>,
+    pub cache: Option<&'a TestCache>,
+    pub rerun: bool,
 }
 
 impl TestBatch<'_> {
@@ -148,20 +299,28 @@ impl TestBatch<'_> {
             || options.replay.is_some()
             || options.logical_charge_report.is_some()
             || !matches!(self.runner, Runner::Native)
-            || std::env::var_os("HIRSEL_CONTROL_FD").is_some()
         {
             for test in tests {
                 test_options.output = output(test);
                 let result = if self.replay {
-                    product.run_test_with_replay(
+                    product
+                        .run_test_with_replay(
+                            test,
+                            &test_options,
+                            self.timeout,
+                            self.runner,
+                            self.expect_verdict,
+                        )
+                        .map(|outcome| (outcome, Source::Executed))
+                } else {
+                    product.run_test_reusing(
                         test,
                         &test_options,
                         self.timeout,
                         self.runner,
-                        self.expect_verdict,
+                        self.cache,
+                        self.rerun,
                     )
-                } else {
-                    product.run_test_with_runner(test, &test_options, self.timeout, self.runner)
                 };
                 report(test, result);
             }
@@ -198,17 +357,29 @@ impl TestBatch<'_> {
                 if exclusive {
                     complete(
                         index,
-                        product.run_test_with_runner(
+                        product.run_test_reusing(
                             test,
                             &test_options,
                             self.timeout,
                             self.runner,
+                            self.cache,
+                            self.rerun,
                         ),
                     );
                     continue;
                 }
-                let mut command = match product.test_command(test, &test_options, self.runner) {
-                    Ok(command) => command,
+                let process = match product.test_launch(
+                    test,
+                    &test_options,
+                    self.runner,
+                    self.cache,
+                    self.rerun,
+                ) {
+                    Ok(TestLaunch::Run(process)) => process,
+                    Ok(TestLaunch::Cached(outcome)) => {
+                        complete(index, Ok((outcome, Source::Cached)));
+                        continue;
+                    }
                     Err(error) => {
                         complete(index, Err(error));
                         continue;
@@ -220,7 +391,7 @@ impl TestBatch<'_> {
                     // Report panics too so the caller can unwind while the
                     // scope joins the remaining children.
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        test_outcome(test, &mut command, timeout)
+                        process.run(test, timeout)
                     }));
                     let _ = completed.send((index, outcome));
                 });
@@ -273,26 +444,76 @@ impl CheckProduct {
         timeout: Option<Duration>,
         runner: &Runner,
     ) -> Result<TestOutcome, NativeStop> {
-        test_outcome(
-            test,
-            &mut self.test_command(test, options, runner)?,
-            timeout,
-        )
+        self.run_test_reusing(test, options, timeout, runner, None, false)
+            .map(|(outcome, _)| outcome)
     }
 
-    fn test_command(
+    /// Reuse a passing native test when its checked code and launch inputs match.
+    pub fn run_test_reusing(
+        &self,
+        test: &DefPath,
+        options: &NativeOptions,
+        timeout: Option<Duration>,
+        runner: &Runner,
+        cache: Option<&TestCache>,
+        rerun: bool,
+    ) -> Result<(TestOutcome, Source), NativeStop> {
+        match self.test_launch(test, options, runner, cache, rerun)? {
+            TestLaunch::Cached(outcome) => Ok((outcome, Source::Cached)),
+            TestLaunch::Run(process) => process.run(test, timeout),
+        }
+    }
+
+    fn test_launch<'a>(
         &self,
         test: &DefPath,
         options: &NativeOptions,
         runner: &Runner,
-    ) -> Result<Command, NativeStop> {
-        if !self.test_entries.contains_key(test) {
+        cache: Option<&'a TestCache>,
+        rerun: bool,
+    ) -> Result<TestLaunch<'a>, NativeStop> {
+        let Some(decl) = self.test_entries.get(test) else {
             return Err(NativeStop::Entry(format!(
                 "{test} is not a discovered @test"
             )));
+        };
+        let parameterless = decl.as_ref().ok().filter(|decl| decl.parameters.is_empty());
+        // PROG-4 grants the test's parameters. An unused launch grant can
+        // otherwise touch host state before a parameterless test starts.
+        let mut effective_options;
+        let options = if parameterless.is_some() {
+            effective_options = options.clone();
+            clear_test_grants(&mut effective_options);
+            &effective_options
+        } else {
+            options
+        };
+        let reached = self.reachable_for(test, options)?;
+        let pass = cache
+            .filter(|_| {
+                matches!(runner, Runner::Native)
+                    && !options.recording
+                    && options.replay.is_none()
+                    && options.logical_charge_report.is_none()
+            })
+            .zip(parameterless)
+            .and_then(|(cache, decl)| {
+                test_key(test, decl, &reached, options).map(|key| (cache, key))
+            });
+        if !rerun
+            && let Some((cache, key)) = pass
+            && let Some(output) = cache.get(key)
+        {
+            return Ok(TestLaunch::Cached(TestOutcome {
+                definition: test.clone(),
+                output,
+                timed_out: false,
+                wall_time: Duration::ZERO,
+            }));
         }
-        let built = self.build(test, options)?;
-        Ok(runner.command(&std::fs::canonicalize(&built.executable)?))
+        let built = self.build_reachable(test, &reached, options)?;
+        let command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        Ok(TestLaunch::Run(TestProcess { command, pass }))
     }
 
     fn test_needs_exclusive_run(&self, test: &DefPath, options: &NativeOptions) -> bool {
@@ -334,19 +555,22 @@ impl CheckProduct {
         expect_verdict: Option<&str>,
     ) -> Result<TestOutcome, NativeStop> {
         use std::os::unix::fs::PermissionsExt;
-        if !self.test_entries.contains_key(test) {
+        let Some(decl) = self.test_entries.get(test) else {
             return Err(NativeStop::Entry(format!(
                 "{test} is not a discovered @test"
             )));
-        }
+        };
         let tape_dir = tempfile::tempdir()?;
         std::fs::set_permissions(tape_dir.path(), std::fs::Permissions::from_mode(0o700))?;
         let tape_path = tape_dir.path().join("test.tape");
         let mut record_options = options.clone();
+        if decl.as_ref().is_ok_and(|decl| decl.parameters.is_empty()) {
+            clear_test_grants(&mut record_options);
+        }
         record_options.recording = true;
         record_options.replay = None;
         let built = self.build(test, &record_options)?;
-        let mut cmd = runner.command(&std::fs::canonicalize(&built.executable)?);
+        let mut cmd = runner.test_command(&std::fs::canonicalize(&built.executable)?);
         cmd.env("HIRSEL_RECORD", &tape_path);
         let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
         if timed_out || !output.status.success() {
@@ -361,8 +585,7 @@ impl CheckProduct {
         if record_stderr.contains("record: truncated at ") {
             return Err(NativeStop::Entry(record_stderr.trim().to_owned()));
         }
-        let mut replay_options = options.clone();
-        replay_options.recording = true;
+        let mut replay_options = record_options;
         replay_options.grant_mask = 0;
         replay_options.directories.clear();
         replay_options.net_rules.clear();
@@ -377,7 +600,7 @@ impl CheckProduct {
         });
         let replay_built = self.build(test, &replay_options)?;
         let (replay_output, replay_timed_out, replay_wall_time) = execute(
-            &mut runner.command(&std::fs::canonicalize(&replay_built.executable)?),
+            &mut runner.test_command(&std::fs::canonicalize(&replay_built.executable)?),
             timeout,
         )?;
         let wall_time = wall_time + replay_wall_time;
@@ -416,16 +639,6 @@ impl CheckProduct {
             replay_stderr.trim()
         )))
     }
-}
-
-fn test_outcome(test: &DefPath, command: &mut Command, timeout: Option<Duration>) -> TestResult {
-    let (output, timed_out, wall_time) = execute(command, timeout)?;
-    Ok(TestOutcome {
-        definition: test.clone(),
-        output,
-        timed_out,
-        wall_time,
-    })
 }
 
 fn execute(

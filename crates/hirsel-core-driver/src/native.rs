@@ -356,7 +356,7 @@ fn emit_unit(
 /// The environment every development object key starts with, encoded: the
 /// object schema, the compiler, the runtime ABI, the engine library, the
 /// target, the backend and the emission settings.
-fn environment(options: &NativeOptions, runtime: ContentHash) -> io::Result<Vec<u8>> {
+pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::Result<Vec<u8>> {
     encode(&(
         crate::native_object::SCHEMA,
         compiler_identity()?,

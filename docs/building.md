@@ -126,11 +126,15 @@ hirsel test app --limit 1048576 --grant Stdout
 ```
 
 `hirsel test` discovers each `@test` function ([PROG-4](spec/programs.md#prog-4-tests))
-in the package, builds it and runs it in its own process. `--limit BYTES` is
+in the package and runs each execution in its own process. `--limit BYTES` is
 mandatory and is each test run's root limit; `--dir` and `--grant` configure
-capabilities as for `run`. `--filter TEXT` selects the tests whose full definition
-path contains TEXT, and `--test-timeout SECONDS` bounds each test's execution. Every
-selected test runs whatever an earlier one did; no matching test exits 2.
+capabilities as for `run`. Parameterless tests receive no grants.
+`--filter TEXT` selects the tests whose full definition
+path contains TEXT, and `--test-timeout SECONDS` bounds each test's execution. An
+earlier failure does not stop later tests, and no matching test exits 2.
+Hirsel reuses passing results for capability-free native tests with matching code
+and configuration, and each row says `cached` or `executed`.
+Use `--rerun` to execute every selected test and refresh passing results.
 
 ## Limits
 

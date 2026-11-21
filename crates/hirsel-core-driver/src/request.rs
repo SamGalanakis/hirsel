@@ -205,6 +205,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut record_path = None;
     let mut replay_tape = None;
     let mut test_replay = false;
+    let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
     let mut directories = Vec::new();
@@ -233,6 +234,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
+            Opt::Rerun => test_rerun = true,
             Opt::ExpectVerdict => expect_verdict = Some(value),
             Opt::Diagnose => diagnose = true,
             Opt::Install => install_root = Some(PathBuf::from(value)),
@@ -866,6 +868,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         None
     };
     if test_command {
+        use crate::{Source, TestCache};
+
         let tests: Vec<_> = product
             .tests()
             .filter(|path| {
@@ -875,6 +879,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             })
             .cloned()
             .collect();
+        let cache = if !test_replay && matches!(runner, crate::Runner::Native) {
+            TestCache::open(&TestCache::default_root())
+        } else {
+            None
+        };
         let mut rows = Vec::new();
         let mut failed = false;
         let batch = crate::test_run::TestBatch {
@@ -883,38 +892,46 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             runner: &runner,
             replay: test_replay,
             expect_verdict: expect_verdict.as_deref(),
+            cache: cache.as_ref(),
+            rerun: test_rerun,
         };
         batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
             let row = match result {
-                Ok(outcome) => {
+                Ok((outcome, source)) => {
                     let passed = outcome.passed();
-                    let wall_ms = outcome.wall_time.as_secs_f64() * 1000.0;
+                    let wall_ms = (source == Source::Executed)
+                        .then(|| outcome.wall_time.as_secs_f64() * 1000.0);
+                    let source = source.as_str();
                     failed |= !passed;
                     if !json {
-                        if passed {
-                            println!("pass {test} ({wall_ms:.3} ms)");
-                        } else {
-                            let reason = if outcome.timed_out {
-                                "execution timed out".to_owned()
-                            } else if outcome.output.stderr.is_empty() {
-                                "error".to_owned()
+                        if let Some(wall_ms) = wall_ms {
+                            if passed {
+                                println!("pass {source} {test} ({wall_ms:.3} ms)");
                             } else {
-                                String::from_utf8_lossy(&outcome.output.stderr)
-                                    .lines()
-                                    .collect::<Vec<_>>()
-                                    .join(" | ")
-                            };
-                            println!("fail {test}: {reason} ({wall_ms:.3} ms)");
+                                let reason = if outcome.timed_out {
+                                    "execution timed out".to_owned()
+                                } else if outcome.output.stderr.is_empty() {
+                                    "error".to_owned()
+                                } else {
+                                    String::from_utf8_lossy(&outcome.output.stderr)
+                                        .lines()
+                                        .collect::<Vec<_>>()
+                                        .join(" | ")
+                                };
+                                println!("fail {source} {test}: {reason} ({wall_ms:.3} ms)");
+                            }
+                        } else {
+                            println!("pass {source} {test}");
                         }
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
+                    serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
                 }
                 Err(error) => {
                     failed = true;
                     if !json {
-                        println!("fail {test}: {error} (time unavailable)");
+                        println!("fail executed {test}: {error} (time unavailable)");
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":false,"stopped":error.to_string(),"wall_ms":null})
+                    serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null})
                 }
             };
             rows.push(row);

@@ -343,11 +343,8 @@ pub fn reservation(offer: Offer, out_cap: u64) -> u64 {
 }
 
 fn stop_producer(mut running: Option[Task[()]]) {
-    let current = replace(mut running, None)
-    if let Some(take active) = take current {
-        let mut producer = take active
+    if let Some(mut producer) = running {
         task.cancel(mut producer)
-        running = Some(take producer)
     }
 }
 

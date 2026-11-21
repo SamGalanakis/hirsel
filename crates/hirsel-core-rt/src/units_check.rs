@@ -425,7 +425,7 @@ pub(super) fn slot_taken(ix: usize) {
 pub(super) fn during_steal(ix: usize) {
     if me().is_some() && lock().case == "handoff_steal" && ix == 0 && !FLAG[3].raw() {
         FLAG[3].store(true, Ordering::SeqCst);
-        while pool().host_calls[ix].0.raw() > super::HOST_ARMED {
+        while pool().host_calls[ix].0.raw() > super::HOST_ACTIVITY {
             sleep_producer(now() + 100);
         }
     }
@@ -1789,6 +1789,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     n(addr(&p.last_poll), "last_poll".into());
     n(addr(&super::LIVE), "live".into());
     n(addr(&super::HOST_TICK.0), "host clock tick".into());
+    n(addr(&super::HOST_MONITOR_PARKED), "host monitor parked".into());
     n(addr(&p.stop), "stop".into());
     n(addr(&p.injector), "injector".into());
     n(addr(&p.idle), "idle list".into());

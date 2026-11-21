@@ -719,29 +719,19 @@ fn publish_private_slot(p: &Pool, ix: usize) {
     }
 }
 
-// 0 is idle, 1 is idle with a monitor wake armed. Larger values are
-// start ticks. Keep different workers' exchanges on separate lines.
-const HOST_ARMED: u64 = 1;
-const FIRST_HOST_TICK: u64 = HOST_ARMED + 1;
+// 0 is idle, 1 records a completed call since the last scan, and larger
+// values are start ticks. Keep different workers' exchanges on separate lines.
+const HOST_ACTIVITY: u64 = 1;
+const FIRST_HOST_TICK: u64 = HOST_ACTIVITY + 1;
 const HOST_TICK_US: u64 = 250;
+const HOST_IDLE_TICKS: u64 = 80;
 
 #[repr(align(64))]
 struct HostCall(AtomicU64);
 
 static HOST_TICK: HostCall = HostCall(AtomicU64::new(FIRST_HOST_TICK));
 
-impl HostCall {
-    fn arm_idle(&self) -> u64 {
-        let stamp = self.0.load(Ordering::Acquire);
-        if stamp == 0 {
-            self.0
-                .compare_exchange(0, HOST_ARMED, Ordering::AcqRel, Ordering::Acquire)
-                .unwrap_or_else(|raced| raced)
-        } else {
-            stamp
-        }
-    }
-}
+static HOST_MONITOR_PARKED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct Blocking {
     call: Option<(&'static HostCall, u64)>,
@@ -765,7 +755,8 @@ fn mark_blocking(publish_private: bool) -> Blocking {
         // A sole unit is the only thread that could admit a peer.
         if LIVE.load(Ordering::Acquire) > 1 {
             let stamp = HOST_TICK.0.load(Ordering::SeqCst);
-            if word.0.swap(stamp, Ordering::SeqCst) == HOST_ARMED {
+            word.0.store(stamp, Ordering::SeqCst);
+            if HOST_MONITOR_PARKED.load(Ordering::SeqCst) {
                 wake_host_monitor();
             }
             return Blocking { call: Some((word, stamp)) };
@@ -778,8 +769,10 @@ fn mark_blocking(publish_private: bool) -> Blocking {
 
 #[cold]
 fn wake_host_monitor() {
-    // Only the monitor arms a slot, after publishing its handle.
-    pool().monitor.get().unwrap().unpark();
+    // Only the first marker that consumes the parked flag sends a wake.
+    if HOST_MONITOR_PARKED.swap(false, Ordering::SeqCst) {
+        pool().monitor.get().unwrap().unpark();
+    }
 }
 
 #[cold]
@@ -797,7 +790,7 @@ impl Drop for Blocking {
         if let Some((call, stamp)) = self.call
             && call
                 .0
-                .compare_exchange(stamp, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(stamp, HOST_ACTIVITY, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         {
             // The monitor cleared our stamp. The new owner can already have
@@ -856,6 +849,9 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
     let _ = p.monitor.set(sync::thread::current());
     let mut tick = FIRST_HOST_TICK;
     let mut next_tick = None;
+    let mut last_activity = None;
+    let idle_ns = HOST_IDLE_TICKS * p.handoff_tick_ns;
+    let probe_ns = p.handoff_ticks.min(4) * p.handoff_tick_ns;
     while !p.stop.load(Ordering::Acquire) {
         let t = now();
         if next_tick.is_some_and(|at| t >= at) {
@@ -865,8 +861,8 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
             HOST_TICK.0.store(tick, Ordering::SeqCst);
             next_tick = None;
         }
-        let mut pending = false;
         let mut rescan = false;
+        let mut pending = false;
         for (ix, call) in p.host_calls.iter().enumerate() {
             // The tick publication and marked-slot operations share one
             // sequentially consistent order. If this load sees an old call,
@@ -874,19 +870,24 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
             // have cleared the old call before this load. It cannot reuse
             // the aged stamp while our claim is outstanding.
             let stamp = call.0.load(Ordering::SeqCst);
-            if stamp <= HOST_ARMED {
+            if stamp == 0 {
                 continue;
             }
+            last_activity = Some(t);
+            if stamp == HOST_ACTIVITY {
+                // A marker that starts and returns between ticks still counts.
+                let _ = call.0.compare_exchange(HOST_ACTIVITY, 0, Ordering::SeqCst, Ordering::SeqCst);
+                continue;
+            }
+            pending = true;
             let age = tick - stamp;
             if age < p.handoff_ticks {
-                pending = true;
                 continue;
             }
             let mut spares = p.spares.lock().unwrap();
             if spares.is_empty() {
                 let spare = Arc::new(Spare::new());
                 if !spawn(spare.clone()) {
-                    pending = true;
                     continue;
                 }
                 spares.push(spare);
@@ -909,19 +910,27 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
         if rescan {
             continue;
         }
-        if pending {
-            let at = *next_tick.get_or_insert_with(|| t.saturating_add(p.handoff_tick_ns));
+        if last_activity.is_some_and(|last| t.saturating_sub(last) < idle_ns) {
+            // When only completed calls were seen, probe less often for a
+            // live mark. A probe counts as one tick so a new call cannot
+            // inherit time spent waiting for the probe.
+            let interval = if pending { p.handoff_tick_ns } else { probe_ns };
+            let at = *next_tick.get_or_insert_with(|| t.saturating_add(interval));
             let delay = at.saturating_sub(now());
             if delay != 0 {
                 sync::thread::park_timeout(Duration::from_nanos(delay));
             }
         } else {
             next_tick = None;
-            if p.host_calls.iter().all(|call| call.arm_idle() <= HOST_ARMED) {
-                // A racing entry either leaves an active stamp in this pass
-                // or consumes an armed word and supplies an unpark token.
+            last_activity = None;
+            // Publish the parked flag before checking the slots again. In
+            // the shared SC order, a marker either sees the flag or its mark
+            // is visible to this check. A completed call leaves activity too.
+            HOST_MONITOR_PARKED.store(true, Ordering::SeqCst);
+            if p.host_calls.iter().all(|call| call.0.load(Ordering::SeqCst) == 0) {
                 sync::thread::park();
             }
+            HOST_MONITOR_PARKED.store(false, Ordering::SeqCst);
         }
     }
     let spares = std::mem::take(&mut *p.spares.lock().unwrap());

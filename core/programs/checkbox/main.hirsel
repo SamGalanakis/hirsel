@@ -136,8 +136,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             let Some(ip) = std.wsock.parse_ip(address) else {
                 return Error(invalid)
             }
-            let parsed: Result[u16, ParseError] = int.parse(port_text)
-            let Ok(port) = parsed else {
+            let Ok(port) = (int.parse(port_text) : Result[u16, ParseError]) else {
                 return Error(invalid)
             }
             listen = Addr(ip: ip, port: port)
@@ -147,8 +146,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             }
             result.unwrap(list.push(mut proxies, prefix))
         } else {
-            let parsed: Result[u64, ParseError] = int.parse(value)
-            let Ok(n) = parsed else {
+            let Ok(n) = (int.parse(value) : Result[u64, ParseError]) else {
                 return Error(invalid)
             }
             if n == 0u64 || n > 1000000000u64 {

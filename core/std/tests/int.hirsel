@@ -137,16 +137,14 @@ fn int_empty() -> u64 {
 // Core int.parse (core/core/int.hirsel), against core.md "Integers": the grammar is checked
 // to the end before the range.
 fn parsed_u8(s: String) -> u64 {
-    let r: Result[u8, ParseError] = int.parse(s)
-    match r {
+    match (int.parse(s) : Result[u8, ParseError]) {
         Ok(x) => int.widen(x),
         Error(e) => 1000 + unsigned_error(Error(e)),
     }
 }
 
 fn parsed_i8(s: String) -> i64 {
-    let r: Result[i8, ParseError] = int.parse(s)
-    match r {
+    match (int.parse(s) : Result[i8, ParseError]) {
         Ok(x) => int.widen(x),
         Error(e) => {
             let code: i64 = int.narrow(unsigned_error(Error(e)))
@@ -188,8 +186,7 @@ fn parse_i64_min() -> i64 {
 // A numeral that does not fit is still read to the end: the bad byte at 20 wins.
 // expect: run parse_grammar_before_range() = 120
 fn parse_grammar_before_range() -> u64 {
-    let r: Result[u64, ParseError] = int.parse("99999999999999999999x")
-    unsigned_error(r)
+    unsigned_error((int.parse("99999999999999999999x") : Result[u64, ParseError]))
 }
 
 // Both 18446744073709551609 and 18446744073709551610 fit. The last digit of

@@ -337,8 +337,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
     /// `n` is not a place; Err when it was refused or is not built.
     pub(super) fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
+        if self.ascribed_operand.is_some_and(|(source, _)| source == n) {
+            let (_, at) = self.ascribed_operand.take().unwrap();
+            self.anchors.place = Some((n, at));
+            return Ok(Some(at));
+        }
         let result = match self.kind(n) {
             NodeKind::Group => self.place(self.kids(n)[0]),
+            NodeKind::Ascription => {
+                let [value, written] = self.kids(n) else {
+                    unreachable!("an ascription has an operand and a type");
+                };
+                let ty = self.ty(*written);
+                if ty == ERROR {
+                    return Err(());
+                }
+                if let Some(at) = self.place(*value)? {
+                    if at.ty == ty {
+                        Ok(Some(at))
+                    } else {
+                        self.ascribed_operand = Some((*value, at));
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
             NodeKind::Path => {
                 let p: &'c Program<'a> = self.p;
                 let Some(u) = p.resolved(self.at, n) else {

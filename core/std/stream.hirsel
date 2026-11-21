@@ -113,8 +113,7 @@ fn next_event[P: codec + send, E](take previous: P, room: Bounds, next: fn(mut P
 
 pub fn produce[P: codec + send, E](take seed: Seed, next: fn(mut P) -> Result[Option[Bytes], E] waits) waits {
     let Seed(block: take block, at: at, inbox: take inbox, credits: take credits, room: room) = take seed
-    let coding: codec.Codec[P] = codec.of()
-    let decoded = codec.decode_at(coding, block, at)
+    let decoded = codec.decode_at((codec.of() : codec.Codec[P]), block, at)
     discard(take block)
     if let Ok(Ok(take initial)) = take decoded {
         let mut state = take initial

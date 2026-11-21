@@ -86,8 +86,7 @@ fn factor(source: String, mut pos: u64) -> Result[Node, helper.Error] {
         while int.is_ascii_digit(at(source, pos)) {
             pos += 1
         }
-        let parsed: Result[i64, ParseError] = int.parse(string.slice(source, start, pos))
-        return Ok(Number(match parsed {
+        return Ok(Number(match (int.parse(string.slice(source, start, pos)) : Result[i64, ParseError]) {
             Ok(n) => n,
             Error(_) => 0
         }))

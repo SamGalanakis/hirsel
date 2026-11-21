@@ -1835,43 +1835,35 @@ fn put_integer(op: u8, spelling: String, start: u64, mut d: ReadTyped, mut out: 
     }
     match op {
         3 => {
-            let parsed: Result[u8, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[u8, ParseError]), start, mut d)?
             typed_room(codec.put_u8(n, mut out))
         },
         4 => {
-            let parsed: Result[u16, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[u16, ParseError]), start, mut d)?
             typed_room(codec.put_u16(n, mut out))
         },
         5 => {
-            let parsed: Result[u32, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[u32, ParseError]), start, mut d)?
             typed_room(codec.put_u32(n, mut out))
         },
         6 => {
-            let parsed: Result[u64, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[u64, ParseError]), start, mut d)?
             typed_room(codec.put_u64(n, mut out))
         },
         7 => {
-            let parsed: Result[i8, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[i8, ParseError]), start, mut d)?
             typed_room(codec.put_i8(n, mut out))
         },
         8 => {
-            let parsed: Result[i16, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[i16, ParseError]), start, mut d)?
             typed_room(codec.put_i16(n, mut out))
         },
         9 => {
-            let parsed: Result[i32, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[i32, ParseError]), start, mut d)?
             typed_room(codec.put_i32(n, mut out))
         },
         _ => {
-            let parsed: Result[i64, ParseError] = int.parse(spelling)
-            let n = read_integer_value(take parsed, start, mut d)?
+            let n = read_integer_value((int.parse(spelling) : Result[i64, ParseError]), start, mut d)?
             typed_room(codec.put_i64(n, mut out))
         },
     }

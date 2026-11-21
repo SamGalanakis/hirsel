@@ -1270,6 +1270,7 @@ impl Parser<'_> {
                     sym::RBRACE
                         | sym::SEMICOLON
                         | sym::COMMA
+                        | sym::COLON
                         | sym::RPAREN
                         | sym::RBRACKET
                         | sym::FATARROW
@@ -1317,15 +1318,10 @@ impl Parser<'_> {
             return result;
         }
         if self.eat(sym::LPAREN) {
-            let c = self.list(sym::RPAREN, |p| p.expr(0))?;
-            let k = if c.is_empty() {
-                NodeKind::Unit
-            } else if c.len() == 1 && self.word_token_before() != sym::COMMA {
-                NodeKind::Group
-            } else {
-                NodeKind::Tuple
-            };
-            return Ok(self.node(s, k, None, &c));
+            self.whitespace += 1;
+            let result = self.parenthesized(s);
+            self.whitespace -= 1;
+            return result;
         }
         if self.eat(sym::IF) {
             let condition = self.condition()?;
@@ -1423,6 +1419,25 @@ impl Parser<'_> {
             ));
         }
         self.path(NodeKind::Path)
+    }
+    fn parenthesized(&mut self, start: usize) -> Parsed<NodeId> {
+        if self.eat(sym::RPAREN) {
+            return Ok(self.node(start, NodeKind::Unit, None, &[]));
+        }
+        let value = self.expr(0)?;
+        if self.at(sym::COLON) {
+            let colon = self.bump();
+            let ty = self.ty()?;
+            self.expect(sym::RPAREN)?;
+            return Ok(self.node(start, NodeKind::Ascription, Some(colon), &[value, ty]));
+        }
+        if self.eat(sym::RPAREN) {
+            return Ok(self.node(start, NodeKind::Group, None, &[value]));
+        }
+        self.expect(sym::COMMA)?;
+        let mut values = smallvec![value];
+        self.list_into(sym::RPAREN, &mut values, |p| p.expr(0))?;
+        Ok(self.node(start, NodeKind::Tuple, None, &values))
     }
     fn condition(&mut self) -> Parsed<NodeId> {
         if self.eat(sym::LET) {

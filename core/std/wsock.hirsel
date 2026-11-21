@@ -23,8 +23,7 @@ pub fn parse_prefix(s: String) -> Option[Prefix] {
     let Some((address, length)) = string.split_once(s, "/") else {
         return None
     }
-    let parsed: Result[u8, ParseError] = int.parse(length)
-    let Ok(bits) = parsed else {
+    let Ok(bits) = (int.parse(length) : Result[u8, ParseError]) else {
         return None
     }
     let Some(ip) = parse_ip(address) else {

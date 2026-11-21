@@ -1,0 +1,65 @@
+// LANG-11 and LANG-18. The declared type reaches parse through both ascriptions
+// and fixes the left operand of equality and the element type of an empty list.
+// expect: accept
+// expect: run parsed() = 42
+// expect: run empty() = true
+// expect: run writable() = 8
+// expect: run single_index() = 17
+// expect: run constant() = 7
+// expect: run propagated() = 42
+fn parsed() -> u64 {
+    match ((int.parse("42") : Result[u8, ParseError]) : Result[u8, ParseError]) {
+        Ok(n) => if n == 42 {
+            42
+        } else {
+            0
+        },
+        Error(_) => 0,
+    }
+}
+
+fn empty() -> bool {
+    (None : Option[u64]) == None && list.len((list.new() : List[u64])) == 0
+}
+
+fn writable() -> u64 {
+    let mut n = 3u64
+    (n : u64) += 5
+    n
+}
+
+fn index(mut calls: u64) -> u64 {
+    calls += 1
+    0
+}
+
+fn read(x: u64) -> u64 {
+    x
+}
+
+fn single_index() -> u64 {
+    let element = result.unwrap(box.new(7u64))
+    let xs =[take element]
+    let mut calls = 0u64
+    let result = read((xs[index(mut calls)] : u64))
+    calls * 10 + result
+}
+
+const SEVEN: u64 = (7 : u64)
+
+fn constant() -> u64 {
+    SEVEN
+}
+
+fn ready[E]() -> Result[u64, E] {
+    Ok(41)
+}
+
+fn try_result() -> Result[u64, ParseError] {
+    let n = (ready() : Result[u64, ParseError])?
+    Ok(n + 1)
+}
+
+fn propagated() -> u64 {
+    result.unwrap(try_result())
+}

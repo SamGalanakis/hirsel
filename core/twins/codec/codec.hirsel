@@ -142,8 +142,7 @@ fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
 }
 
 fn number(s: String) -> u64 {
-    let parsed: Result[u64, ParseError] = int.parse(s)
-    match parsed {
+    match (int.parse(s) : Result[u64, ParseError]) {
         Ok(v) => v,
         Error(_) => 0
     }

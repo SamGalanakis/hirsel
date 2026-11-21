@@ -1056,7 +1056,7 @@ impl<'a> Resolver<'a, '_> {
                 .unwrap()
                 .target = Target::Missing;
             self.out.diagnostics.push(Refusal::new("LANG-12", site,
-            "type arguments are not written at a call; give the type in the result annotation, e.g. `let value: ResultType = callee()`, or in a typed value argument"));
+            "type arguments are not written at a call; give the result type in an ascription `(callee() : ResultType)` or a binding, or give it in a typed argument"));
         } else {
             for &child in &c[1..] {
                 self.visit(child);

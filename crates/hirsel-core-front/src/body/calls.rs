@@ -531,7 +531,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 .result_parts(inferred)
                                 .is_some_and(|(_, ok, _)| self.holder_payload(ok).is_some())
                         {
-                            "a type parameter is determined twice differently; bind the holder with `let` first"
+                            "a type parameter is determined twice differently; ascribe the holder or bind it with a written type first"
                         } else {
                             "a type parameter is determined twice differently"
                         };
@@ -721,7 +721,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn region_argument_path(&self, mut n: NodeId) -> Option<NodeId> {
         loop {
             match self.kind(n) {
-                NodeKind::Group => n = self.kids(n)[0],
+                NodeKind::Group | NodeKind::Ascription => n = self.kids(n)[0],
                 NodeKind::Unary if matches!(self.token_text(n), "take" | "mut") => {
                     n = self.kids(n)[0];
                 }
@@ -970,6 +970,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match self.kind(n) {
             NodeKind::Path | NodeKind::Literal | NodeKind::Unit => true,
             NodeKind::Unary if matches!(self.token_text(n), "mut" | "take") => false,
+            NodeKind::Ascription => self.writes_nothing(self.kids(n)[0]),
             NodeKind::Group
             | NodeKind::Unary
             | NodeKind::Binary

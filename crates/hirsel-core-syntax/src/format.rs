@@ -40,6 +40,7 @@ struct Role {
     close: bool,
     unary: bool,
     attach: bool,
+    spaced_colon: bool,
     inline_semicolon: bool,
 }
 
@@ -69,6 +70,7 @@ fn item_text(item: &Item) -> String {
             }
             NodeKind::Attribute => roles[range.end - 1].line_after = true,
             NodeKind::Parameters => roles[range.start].attach = true,
+            NodeKind::Ascription => roles[node.token.unwrap().0 as usize].spaced_colon = true,
             NodeKind::RepeatArray => {
                 let end = tree.node(children[0]).origin.tokens.end as usize;
                 let semicolon = (end..range.end)
@@ -166,6 +168,9 @@ fn space(a: TokenKind, before: Role, b: TokenKind, role: Role) -> bool {
     use TokenKind::*;
     if role.attach {
         return false;
+    }
+    if role.spaced_colon {
+        return true;
     }
     if matches!(b, Comma | Colon | Semicolon | RParen | RBracket | Question) {
         return false;

@@ -271,9 +271,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let at = match self.place(place) {
             Ok(Some(at)) => at,
             Ok(None) => {
+                let mut target = place;
+                while matches!(
+                    self.kind(target),
+                    NodeKind::Group | NodeKind::Projection | NodeKind::Index
+                ) {
+                    target = self.kids(target)[0];
+                }
+                if self.kind(target) == NodeKind::Ascription {
+                    let refusals = self.out.refusals.len();
+                    self.expr(target, None);
+                    if self.out.refusals.len() != refusals {
+                        return false;
+                    }
+                }
                 // Classify an index's base even when it is a temporary, so the
                 // LANG-21 operand rule also owns invalid index assignments.
-                if self.kind(place) == NodeKind::Index {
+                else if self.kind(place) == NodeKind::Index {
                     let base = self.kids(place)[0];
                     let (mut ty, _) = self.expr(base, None);
                     while let Some(payload) = self.holder_payload(ty) {

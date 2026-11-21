@@ -1,0 +1,6 @@
+// LANG-11. The u8 operand is refused at its use inside the inner ascription.
+// expect: refuse LANG-11 at 5:7
+// expect: compared LANG-11 at 5:7 | u8 | u64
+fn mismatch(n: u8) -> u64 {
+    ((n : u64) : u64)
+}

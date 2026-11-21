@@ -1478,6 +1478,14 @@ fn float_contract() {
 }
 
 #[test]
+fn expression_ascription() {
+    for case in ["expression-ascription", "expression-ascription-refused"] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
 fn literal_aggregate_call_inference() {
     for case in ["generic-instances", "call-undetermined"] {
         let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));

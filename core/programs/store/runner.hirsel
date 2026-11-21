@@ -764,8 +764,7 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
         let choice = if name == "--hirsel-install" {
             Install
         } else if let Some(value) = std.string.strip_prefix(name, "--hirsel-activation=") {
-            let version: Result[u64, ParseError] = int.parse(value)
-            let Ok(v) = version else { return Error(Exit(status: 1u8)) }
+            let Ok(v) = (int.parse(value) : Result[u64, ParseError]) else { return Error(Exit(status: 1u8)) }
             Current(v)
         } else {
             continue

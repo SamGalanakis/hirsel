@@ -24,8 +24,7 @@ pub fn b1_main(n: Net, c: Clock, out: Stdout) -> Result[(), Exit] waits {
     let mut accepting = take listener
     let (socket, peer) = result.unwrap(host.accept(mut accepting, Never))
     let at = host.mono_ns(c)
-    let allocated: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(1)
-    let (tx, rx) = result.unwrap(take allocated)
+    let (tx, rx) = result.unwrap((channel.new(1) : Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity]))
     let mut routes: router.Builder[()] = router.builder()
     result.unwrap(router.add(mut routes, "GET", "/", router.raw(b1_handler)))
     let routing = result.unwrap(router.build(take routes))

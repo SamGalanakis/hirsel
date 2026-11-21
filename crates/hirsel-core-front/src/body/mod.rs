@@ -1209,6 +1209,9 @@ struct Cx<'c, 'a, 'e> {
     /// Freeze and reservation records, and the steps of their places.
     freezes: Vec<Freeze>,
     steps: Vec<PStep>,
+    /// A place already evaluated while testing whether an ascription denotes
+    /// it directly. A conversion reads this place without repeating its indices.
+    ascribed_operand: Option<(NodeId, At)>,
     /// Block depth, and the slots of the open blocks in declaration order.
     depth: u32,
     /// The type the last expression checked synthesised, before its expected type.
@@ -1377,6 +1380,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             dead: false,
             freezes: vec![],
             steps: vec![],
+            ascribed_operand: None,
             depth: 0,
             synth_ty: UNIT,
             tail_ty: UNIT,
@@ -2479,7 +2483,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn can_construct(&self, n: NodeId) -> bool {
         match self.kind(n) {
             NodeKind::Call | NodeKind::Tuple | NodeKind::Array | NodeKind::RepeatArray => true,
-            NodeKind::Group => self.can_construct(self.kids(n)[0]),
+            NodeKind::Group | NodeKind::Ascription => self.can_construct(self.kids(n)[0]),
             NodeKind::Block => self
                 .block_tail(n)
                 .is_some_and(|tail| self.can_construct(tail)),
@@ -2771,6 +2775,19 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         });
         match self.kind(n) {
             NodeKind::Group => self.result_expr(c[0], want),
+            NodeKind::Ascription => {
+                let ty = self.ty(c[1]);
+                if ty == ERROR {
+                    return (ERROR, None);
+                }
+                let to = self.destination.filter(|&(node, to, _)| {
+                    node == n
+                        && matches!(self.rep(ty), Ok(Rep::Place(id))
+                            if self.b.addresses[to.index()].ty == PlaceTy::Declared(id))
+                });
+                let (address, fresh) = to.map_or((None, false), |(_, to, fresh)| (Some(to), fresh));
+                self.expr_into_field(c[0], expect(ty), address, fresh)
+            }
             NodeKind::Literal => self.literal(n, want, false),
             NodeKind::Unit => (UNIT, None),
             NodeKind::Path => self.path(n, want),

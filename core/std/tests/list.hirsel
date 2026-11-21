@@ -38,8 +38,7 @@ fn first_of_five() -> u64 {
 
 // expect: run first_of_empty() = 99
 fn first_of_empty() -> u64 {
-    let xs: List[u64] = list.new()
-    present(list.first(xs))
+    present(list.first((list.new() : List[u64])))
 }
 
 // expect: run last_of_five() = 4
@@ -50,8 +49,7 @@ fn last_of_five() -> u64 {
 
 // expect: run last_of_empty() = 99
 fn last_of_empty() -> u64 {
-    let xs: List[u64] = list.new()
-    present(list.last(xs))
+    present(list.last((list.new() : List[u64])))
 }
 
 // Removes 6 and keeps the order of the rest: 6, then 5789.
@@ -482,8 +480,7 @@ fn fill_under_bound() -> u64 {
 
 // expect: run sum_empty() = 0
 fn sum_empty() -> u64 {
-    let xs: List[u64] = list.new()
-    list.sum(xs)
+    list.sum((list.new() : List[u64]))
 }
 
 // 250 + 5 is u8's maximum, 255.

@@ -67,7 +67,6 @@ fn main() {
         .map(|a| { let (k, v) = a.split_once('=').unwrap(); (k.to_string(), v.to_string()) }).collect();
     let get = |k: &str, d: &str| kv.get(k).cloned().unwrap_or(d.to_string());
     let port: u16 = get("port", "7700").parse().unwrap();
-    let nports: u64 = get("nports", "1").parse().unwrap();
     let sessions: u64 = get("sessions", "256").parse().unwrap();
     let ready_ack = get("ready_ack", "0") == "1";
     let reserved_hot: u64 = get("reserved_hot", "0").parse().unwrap();
@@ -83,12 +82,12 @@ fn main() {
     let burst_x: f64 = get("burst_x", "1.5").parse().unwrap();
     let f: u64 = get("f", "0").parse().unwrap();
     let par = get("par", "0") == "1";
-    let skew = get("skew", "0") == "1";
+    let skew_clients: u64 = get("skew_clients", &get("skew", "0")).parse().unwrap();
     let run: u64 = get("seed", "1").parse().unwrap();
     let threads: usize = get("threads", "4").parse().unwrap();
     let grace: u64 = get("grace", "10").parse::<u64>().unwrap() * 1_000_000_000;
     assert!(reserved_hot < sessions && (!hot || (ready_ack && reserved_hot > 0)));
-    assert!(reserved_hot == 0 || !skew);
+    assert!(skew_clients < sessions && (reserved_hot == 0 || skew_clients == 0));
     assert!(churn_per_s == 0 || (ready_ack && reserved_hot == 0 && !close_after_drain));
     let table = Arc::new(digest_table(&tool_data()));
 
@@ -97,8 +96,7 @@ fn main() {
     let streams: Vec<tokio::net::TcpStream> = rt.block_on(async {
         let mut v = Vec::new();
         for s in 0..sessions {
-            let p = port + (s % nports) as u16;
-            v.push(connect(p, s).await);
+            v.push(connect(port, s).await);
         }
         if ready_ack {
             // The server replies after setting up the session, including its
@@ -159,7 +157,7 @@ fn main() {
                             let live = churn.live.fetch_sub(1, Relaxed) - 1;
                             churn.minimum_live.fetch_min(live, Relaxed);
                             drop(st);
-                            st = connect(port + (client % nports) as u16, client).await;
+                            st = connect(port, client).await;
                             ready(&mut st, client).await;
                             churn.live.fetch_add(1, Relaxed);
                             churn.completed.fetch_add(1, Relaxed);
@@ -225,9 +223,13 @@ fn main() {
             }
             if t as u64 >= end { break; }
             x = splitmix(x);
-            let s = if skew {
-                if x & 1 == 0 { 0 } else { 1 + (x >> 1) % (sessions - 1) }
-            } else { reserved_hot + x % (sessions - reserved_hot) };
+            let s = if skew_clients == 0 {
+                reserved_hot + x % (sessions - reserved_hot)
+            } else if x & 1 == 0 {
+                (x >> 1) % skew_clients
+            } else {
+                skew_clients + (x >> 1) % (sessions - skew_clients)
+            };
             wait_for(t as u64);
             let turn = Turn::make(run, id, f, par);
             id += 1;
@@ -244,6 +246,8 @@ fn main() {
         v
     });
     let mut lat: Vec<u64> = Vec::new();
+    let mut skew_e2e = Vec::new();
+    let mut regular_e2e = Vec::new();
     let mut e2e: Vec<u64> = Vec::new();
     let mut max_added_turn: Option<(u64, &Rec)> = None;
     let mut last_reply = 0;
@@ -279,7 +283,15 @@ fn main() {
                 if max_added_turn.is_none_or(|(max, _)| added > max) {
                     max_added_turn = Some((added, r));
                 }
-                e2e.push((r.done - r.intended).saturating_sub(r.held));
+                let turn_e2e = (r.done - r.intended).saturating_sub(r.held);
+                e2e.push(turn_e2e);
+                if skew_clients != 0 {
+                    if (client as u64) < skew_clients {
+                        skew_e2e.push(turn_e2e);
+                    } else {
+                        regular_e2e.push(turn_e2e);
+                    }
+                }
             }
         }
     }
@@ -292,6 +304,17 @@ fn main() {
     let hot_turns_per_s = hot_completed as f64 / dur;
     let (max_ready, max_done) = max_added_turn.map_or((0, 0), |(_, r)| (r.ready, r.done));
     let first_close = results.iter().map(|r| r.3).min().unwrap_or(0);
+    let p99 = |samples: &mut Vec<u64>| {
+        samples.sort_unstable();
+        samples.get(samples.len() * 99 / 100).copied().unwrap_or(0)
+    };
+    let skew_fields = if skew_clients == 0 {
+        String::new()
+    } else {
+        let skew_p99 = p99(&mut skew_e2e);
+        let regular_p99 = p99(&mut regular_e2e);
+        format!(",\"skew_clients\":{skew_clients},\"skew_e2e_p99_ns\":{skew_p99},\"regular_e2e_p99_ns\":{regular_p99}")
+    };
     let detail_fields = if detail {
         format!(",\"first_close_ns\":{first_close},\"last_reply_ns\":{last_reply}")
     } else { String::new() };
@@ -305,9 +328,9 @@ fn main() {
         "\"measured\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{},\"e2e_p50_ns\":{},\"e2e_p99_ns\":{},",
         "\"hot_issued\":{},\"hot_completed_in_run\":{},\"hot_turns_per_s\":{},",
         "\"start_ns\":{},\"warm_ns\":{},\"end_ns\":{},\"completed_after_warm_in_run\":{},",
-        "\"max_added_ready_ns\":{},\"max_added_done_ns\":{}{}{}}}"
+        "\"max_added_ready_ns\":{},\"max_added_done_ns\":{}{}{}{}}}"
     ), issued, completed, failures, timeouts, late, rate,
         lat.len(), q(0.5), q(0.99), q(0.999), lat.last().copied().unwrap_or(0), qe(0.5), qe(0.99),
         hot_issued, hot_completed, hot_turns_per_s, start, warm_ns, end, in_window, max_ready, max_done,
-        detail_fields, churn_fields);
+        detail_fields, churn_fields, skew_fields);
 }

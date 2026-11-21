@@ -24,13 +24,12 @@ from part3u import LIMIT_NS, LOAD, PARTITIONS, RUN, SERVER, SYNCS, TOOL, TOOL_DE
 
 
 PORT = 28200
-# Session units of session_u, one listening port each.
+# Session units behind the single listening port.
 SESSION_UNITS = 8
 TOOL_PORT = 28190
 NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
 HOLDS_GAP_S = 15
-QUEUE_BUCKET_NS = 10_000_000
 LOAD_NAMES = {"loadgen", "loadgen_drain", "loadgen_detail", "loadgen_churn"}
 
 SCALE_SIDES = ("untied", "S3k7", "tokiow8")
@@ -207,12 +206,9 @@ class Runner:
         total_clients = cell["sessions"] + cell.get("churn_per_s", 0) * RUN["dur"]
         base = [PORT, total_clients, PARTITIONS, int(cell["par"]), TOOL_PORT]
         recorded = cell["rec"]
-        nports = 1
         if side == "tokiow8":
             argv = [self.bin / "twin", *base, 8, SYNCS, self.store]
         elif side.startswith("untied"):
-            # One root; K session units each listen on PORT + u (L4).
-            nports = SESSION_UNITS
             env |= {"HIRSEL_UNTIED": "8", "HIRSEL_XSTATS": "1"}
             if side == "untied (1 GiB)":
                 env["HIRSEL_RETENTION_MB"] = "1024"
@@ -224,7 +220,7 @@ class Runner:
         if cell["ready_ack"]:
             argv.append(1)
         env = {k: v for k, v in os.environ.items() if not k.startswith("HIRSEL_")} | env
-        return pinned(SERVER, argv), env, nports
+        return pinned(SERVER, argv), env
 
     def profile_setup(self, mode):
         event = ["-F", "999"] if mode == "cpu" else ["-e", "sched:sched_switch"]
@@ -273,7 +269,7 @@ class Runner:
                 profile["rc"] = profile_proc.wait(timeout=5)
 
     def trial(self, trial_id, side, cell, rate, seed, tool_pid, profile_mode):
-        assert_ports_free(range(PORT, PORT + max(7, SESSION_UNITS)))
+        assert_ports_free([PORT])
         for directory in (self.store, self.tapes):
             for file in directory.iterdir():
                 file.unlink()
@@ -281,7 +277,7 @@ class Runner:
         marker.unlink(missing_ok=True)
         server_pidfile = self.scratch / "server.pid"
         load_pidfile = self.scratch / "load.pid"
-        server_argv, env, nports = self.server_cmd(side, cell)
+        server_argv, env = self.server_cmd(side, cell)
         if cell.get("churn_per_s"):
             load_name = "loadgen_churn"
         elif cell.get("slow_turns"):
@@ -289,10 +285,11 @@ class Runner:
         else:
             load_name = "loadgen_drain" if profile_mode or "close_after_drain" in cell else "loadgen"
         lg_argv = [
-            self.bin / load_name, f"port={PORT}", f"nports={nports}", f"sessions={cell['sessions']}",
+            self.bin / load_name, f"port={PORT}", f"sessions={cell['sessions']}",
             f"rate={rate:.0f}", f"f={int(cell['f'] * 1000)}", f"par={int(cell['par'])}",
             f"seed={seed}", "threads=4", "grace=5", f"ready_ack={int(cell['ready_ack'])}",
-            f"reserved_hot={8 if 'hot' in cell else 0}", f"hot={int(cell.get('hot', False))}",
+            f"reserved_hot={int('hot' in cell and cell.get('skew_clients', 0) == 0)}",
+            f"hot={int(cell.get('hot', False))}", f"skew_clients={cell.get('skew_clients', 0)}",
             f"close_after_drain={int(cell.get('close_after_drain', False))}",
             f"phase_file={marker}", *(f"{k}={v}" for k, v in RUN.items()),
         ]
@@ -328,15 +325,12 @@ class Runner:
 
         ustats = None
         memory = None
-        queue = []
         ordinary_err = []
         for line in server_err:
             if line.startswith("untied-stats "):
                 ustats = {key: int(value) for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
             elif line.startswith("pool-memory "):
                 memory = {key: int(value) for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
-            elif line.startswith("queue-wait "):
-                queue.append(list(map(int, line.split()[1:])))
             else:
                 ordinary_err.append(line)
         full_pass = bool(
@@ -371,11 +365,6 @@ class Runner:
         )
         if cell["rec"] and full_pass and not tape_bytes:
             raise RuntimeError(f"{side} completed a recorded trial without producing a tape")
-        if queue and result:
-            a, b = result["warm_ns"], result["end_ns"]
-            r["queue_wait_buckets"] = queue
-            r["queue_wait_max_ns"] = max((wait for at, wait in queue if a <= at and at + QUEUE_BUCKET_NS <= b), default=None)
-            r["queue_wait_overlap_max_ns"] = max((wait for at, wait in queue if a < at + QUEUE_BUCKET_NS and at < b), default=None)
         if profile:
             r["profile"] = profile | {"path": profile["path"].name}
         l = result or {}

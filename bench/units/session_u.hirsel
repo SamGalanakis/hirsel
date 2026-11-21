@@ -3,10 +3,8 @@
 //
 // Arguments: port sessions partitions par tool_port k [ready_ack].
 // The root makes `partitions` partition units, one shared service unit and k
-// session units, and wires them with connections. Session unit u listens on
-// TCP port port+u and serves the clients that connect there, one task per
-// client; the load generator sends client s to port port + s % k. Sockets do
-// not cross, so each unit accepts its own clients.
+// session units, and wires them with connections. The root accepts on one
+// port and sends each socket to the next session unit in round-robin order.
 //
 // A turn request is 48 bytes: turn u64, seed u64, ncalls u8, par u8,
 // shared u8, pad to 24, then one size code per call (0 1 KiB, 1 8 KiB,
@@ -330,12 +328,11 @@ fn session(take job: Session) -> u64 waits {
     turns
 }
 
-// ---- session units: accept this unit's clients, one session task each.
+// Session units run one task per client.
 type Front: cross {
     tasks: Tasks,
     nw: Net,
     clock: Clock,
-    port: u64,
     mine: u64,
     sessions: u64,
     partitions: u64,
@@ -343,7 +340,12 @@ type Front: cross {
     par: bool,
     ready_ack: bool,
     svc: Client[SvcReq],
-    hello: Client[Client[Client[Commit]]]
+    hello: Client[FrontWiring]
+}
+
+type FrontWiring: cross {
+    commits: Client[Client[Commit]],
+    sockets: Client[Socket]
 }
 
 // The hello, tolerating a connection the client dropped (a retried connect
@@ -365,18 +367,17 @@ fn read_hello(mut s: ReadHalf, mut buf: Bytes) -> bool waits {
 }
 
 fn front(take job: Front) -> u64 waits {
-    let Front(tasks: tasks, nw: nw, clock: clock, port: port, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: svc, hello: hello,) = take job
+    let Front(tasks: tasks, nw: nw, clock: clock, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: svc, hello: hello,) = take job
     // An inbox does not cross: the root sends the partitions' clients here.
     let (c, wiring): (Client[Client[Commit]], Inbox[Client[Commit]]) = result.unwrap(conn.new(partitions, bytes 0))
-    result.unwrap(conn.send(hello, take c))
+    let (sockets, incoming): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(if mine == 0 { 1 } else { mine }, bytes 0))
+    result.unwrap(conn.send(hello, FrontWiring(commits: take c, sockets: take sockets)))
     let _ = take hello
     let mut commits: List[Client[Commit]] = list.new()
     for _ in 0 .. partitions {
         result.unwrap(list.push(mut commits, result.unwrap(conn.receive(wiring))))
     }
     let _ = take wiring
-    let (take l, _) = result.unwrap(host.listen(nw, local_addr(port), 4096))
-    let mut listener = take l
     let per = if par {
         PAR_SESSION_BYTES
     } else {
@@ -384,8 +385,8 @@ fn front(take job: Front) -> u64 waits {
     }
     let mut jobs: List[Task[u64]] = list.new()
     let mut hello_buf: Bytes = result.unwrap(list.with_capacity(8))
-    while list.len(jobs) < mine {
-        let (take s, _) = result.unwrap(host.accept(mut listener, Never))
+    for _ in 0 .. mine {
+        let s = result.unwrap(conn.receive(incoming))
         let (rh, wh) = net.split(take s)
         let mut r = take rh
         if !read_hello(mut r, mut hello_buf) {
@@ -448,18 +449,20 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     let (sh, sh_in): (Client[Client[SvcReq]], Inbox[Client[SvcReq]]) = result.unwrap(conn.new(1, bytes 0))
     let svc_task = result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES, Service(hello: take sh), service))
     let svc = result.unwrap(conn.receive(sh_in))
-    let (fh, fh_in): (Client[Client[Client[Commit]]], Inbox[Client[Client[Commit]]]) = result.unwrap(conn.new(1, bytes 0))
+    let (fh, fh_in): (Client[FrontWiring], Inbox[FrontWiring]) = result.unwrap(conn.new(1, bytes 0))
     let per = if par {
         PAR_SESSION_BYTES
     } else {
         SESSION_BYTES
     }
     let mut fronts: List[Task[u64]] = list.new()
+    let mut clients: List[Client[Socket]] = list.new()
     for u in 0 .. k {
         let mine = (sessions + k - 1 - u) / k
-        let job = Front(tasks: tasks, nw: nw, clock: clock, port: port + u, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: conn.client(svc), hello: conn.client(fh),)
+        let job = Front(tasks: tasks, nw: nw, clock: clock, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: conn.client(svc), hello: conn.client(fh),)
         result.unwrap(list.push(mut fronts, result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES + mine * per, take job, front))))
-        let wiring = result.unwrap(conn.receive(fh_in))
+        let FrontWiring(commits: wiring, sockets: sockets) = result.unwrap(conn.receive(fh_in))
+        result.unwrap(list.push(mut clients, take sockets))
         for p in 0 .. partitions {
             let Some(c) = list.get(commits, p) else {
                 fail("no partition")
@@ -467,6 +470,17 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
             result.unwrap(conn.send(wiring, conn.client(c)))
         }
     }
+    let (take l, _) = result.unwrap(host.listen(nw, local_addr(port), 4096))
+    let mut listener = take l
+    for i in 0 .. sessions {
+        let (take socket, _) = result.unwrap(host.accept(mut listener, Never))
+        let Some(client) = list.get(clients, i % k) else {
+            fail("no session unit")
+        }
+        result.unwrap(conn.send(client, take socket))
+    }
+    let _ = take listener
+    let _ = take clients
     let _ = take commits
     let _ = take svc
     let turns = join_all(take fronts)

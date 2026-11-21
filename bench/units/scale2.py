@@ -14,12 +14,12 @@ class Runner(scale.Runner):
     def server_cmd(self, side, cell):
         if side == "tokiow8":
             return super().server_cmd(side, cell)
-        argv, env, ports = super().server_cmd("untied", cell)
+        argv, env = super().server_cmd("untied", cell)
         exe = self.scratch / side / "session_u"
         if not exe.is_file():
             raise FileNotFoundError(exe)
         argv[argv.index(str(self.bin / "session_u"))] = str(exe)
-        return argv, env, ports
+        return argv, env
 
     def profile_setup(self, mode):
         if mode == "drain":

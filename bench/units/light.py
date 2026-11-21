@@ -27,14 +27,23 @@ CELLS = {
     "A1-8192": scale.SCALE_CELLS["A1-8192"],
     "F1-256": dict(sessions=256, f=1.0, par=False, rec=False, ready_ack=False),
     "P01-256": dict(sessions=256, f=0.1, par=True, rec=False, ready_ack=False),
-    # The fairness arms (queue waits recorded), for repeats outside the pair.
-    "A2-0": scale.SCALE_CELLS["A1-8192"] | {"hot": False},
+    # Exercise a skewed open-loop workload and one closed-loop hot client.
+    "A2-0": scale.SCALE_CELLS["A1-8192"] | {"skew_clients": 512},
     "A2-1": scale.SCALE_CELLS["A1-8192"] | {"hot": True},
     # The same cells with every turn over 20 ms written out (loadgen_detail).
     "A1-256s": scale.SCALE_CELLS["A1-256"] | {"slow_turns": True},
     "A1-8192s": scale.SCALE_CELLS["A1-8192"] | {"slow_turns": True},
 }
-GUESS = {"A1-256s": (19000, 20000), "A1-8192s": (16000, 21000), "A1-256": (20000, 23000), "A1-8192": (14000, 18000), "F1-256": (18000, 19000), "P01-256": (2500, 1200)}
+GUESS = {
+    "A1-256": (20000, 23000),
+    "A1-8192": (14000, 18000),
+    "A1-256s": (19000, 20000),
+    "A1-8192s": (16000, 21000),
+    "F1-256": (18000, 19000),
+    "P01-256": (2500, 1200),
+    "A2-0": (5500, 5500),
+    "A2-1": (5500, 5500),
+}
 
 
 SERVER_CPUS = [c for part in part3u.SERVER.split(",") for c in (
@@ -68,11 +77,11 @@ class Runner(scale2.Runner):
 
     def server_cmd(self, side, cell):
         # A side directory may add `env.json`: runtime settings for that side.
-        argv, env, ports = super().server_cmd(side, cell)
+        argv, env = super().server_cmd(side, cell)
         extra = self.scratch / side / "env.json"
         if side != "tokiow8" and extra.is_file():
             env |= json.loads(extra.read_text())
-        return argv, env, ports
+        return argv, env
 
     def profile_setup(self, mode):
         if mode == "sched-late":
@@ -130,8 +139,9 @@ def main():
     f.add_argument("--repeat", type=int, default=1)
     f.add_argument("--seed", type=int, default=12345)
     fa = commands.add_parser("fairness")
-    fa.add_argument("side")
-    fa.add_argument("best_rate", type=int)
+    fa.add_argument("rate", type=int)
+    fa.add_argument("sides", nargs="+")
+    fa.add_argument("--repeat", type=int, default=1)
     sm = commands.add_parser("smoke")
     sm.add_argument("cell", choices=CELLS)
     sm.add_argument("rate", type=int)
@@ -157,10 +167,13 @@ def main():
                     runner.run_set(out, f"fixed-{args.profile or 'plain'}", args.cell, CELLS[args.cell], 0,
                                    [(side, args.rate, args.seed) for side in sides], args.profile)
             elif args.command == "fairness":
-                for hot in (False, True):
-                    cell = CELLS["A1-8192"] | {"hot": hot}
-                    runner.run_set(out, "fairness", f"A2-{int(hot)}", cell, 1,
-                                   [(args.side, args.best_rate / 2, 732242)])
+                for i in range(args.repeat):
+                    for arm in range(2):
+                        cell = f"A2-{arm}"
+                        first = (i + arm) % len(args.sides)
+                        sides = args.sides[first:] + args.sides[:first]
+                        runner.run_set(out, "fairness", cell, CELLS[cell], i + 1,
+                                       [(side, args.rate, 732242) for side in sides])
             else:
                 smoke(runner, out, args.side, CELLS[args.cell], args.rate)
     except scale.Deadline:

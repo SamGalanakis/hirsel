@@ -4,8 +4,8 @@
 //! benchmark drives the connection calls.
 //!
 //! Handles:
-//! - a unit: `*mut UnitCtx`, from `hirsel_unit_root` or a helper spawn, used
-//!   only by the pool unit that runs it;
+//! - a unit: `*mut UnitCtx`, from `hirsel_unit_root`, used only by the pool
+//!   unit that runs it;
 //! - a value: a caller-owned slot of `HIRSEL_UNIT_VALUE_SIZE` bytes, aligned
 //!   to `HIRSEL_UNIT_VALUE_ALIGN`. A call that takes a value reads it out of
 //!   the slot (the slot is then empty); a call that gives one writes it in.
@@ -394,81 +394,6 @@ pub(crate) unsafe extern "C" fn hirsel_unit_inbox_free(inbox: *mut Inbox) {
 pub(crate) unsafe extern "C" fn hirsel_unit_client_drop(u: *mut UnitCtx, c: *mut Client) {
     // SAFETY: by the contract.
     unsafe { (*u).drop_client(*Box::from_raw(c)) };
-}
-
-// -- helpers --------------------------------------------------------------------
-
-/// Spawn an owned helper with limit `n` and a result slot of `r` bytes. The
-/// argument in `arg` (if `has_arg`) moves into the helper's root and is
-/// written back to `arg` rebased; the helper's index is written to `k`. The
-/// returned helper unit is placed on a pool unit by the caller, which binds
-/// it there. Null on refusal, with the argument back in `arg`.
-/// # Safety
-/// `u` is live and owned by the caller; `arg` holds a value if `has_arg`;
-/// `k` is writable; `cap` is null or writable.
-pub(crate) unsafe extern "C" fn hirsel_unit_helper_spawn(
-    u: *mut UnitCtx,
-    n: u64,
-    r: u64,
-    arg: *mut ValueSlot,
-    has_arg: bool,
-    k: *mut usize,
-    cap: *mut Capacity,
-) -> *mut UnitCtx {
-    // SAFETY: by the contract.
-    let a = has_arg.then(|| unsafe { take_value(arg) });
-    // SAFETY: by the contract.
-    match unsafe { (*u).spawn_helper(n, r, a) } {
-        Ok((index, h, a)) => {
-            if let Some(a) = a {
-                put_value(arg, a);
-            }
-            // SAFETY: by the contract.
-            unsafe { k.write(index) };
-            Box::into_raw(h)
-        }
-        Err((c, a)) => {
-            if let Some(a) = a {
-                put_value(arg, a);
-            }
-            cap_out(cap, c);
-            ptr::null_mut()
-        }
-    }
-}
-
-/// End a helper with its result (if `has_ret`), its primary cell joining the
-/// result as a cause chain if `with_cell`. The helper unit is handed to its
-/// owner, which applies the end at its take (`TOOK_HELPER_END`).
-/// # Safety
-/// `h` is a live helper from `hirsel_unit_helper_spawn`, owned by the caller
-/// and not used again; `ret` holds a value of the helper if `has_ret`.
-pub(crate) unsafe extern "C" fn hirsel_unit_helper_end(h: *mut UnitCtx, ret: *mut ValueSlot, has_ret: bool, with_cell: bool) {
-    // SAFETY: by the contract.
-    let ret = has_ret.then(|| unsafe { take_value(ret) });
-    // SAFETY: by the contract.
-    let _ = unsafe { Box::from_raw(h) }.end_helper(ret, with_cell);
-}
-
-/// Join (`drop_result` false: the result goes to `out`, true returned if
-/// there was one) or abandon a helper whose end was taken.
-/// # Safety
-/// `u` took helper `k`'s end and has not consumed it; `out` is a writable,
-/// empty slot.
-pub(crate) unsafe extern "C" fn hirsel_unit_helper_consume(
-    u: *mut UnitCtx,
-    k: usize,
-    drop_result: bool,
-    out: *mut ValueSlot,
-) -> bool {
-    // SAFETY: by the contract.
-    match unsafe { (*u).consume_helper(k, drop_result) } {
-        Some(v) => {
-            put_value(out, v);
-            true
-        }
-        None => false,
-    }
 }
 
 // -- shared nodes and boards ----------------------------------------------------

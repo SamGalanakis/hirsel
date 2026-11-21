@@ -1339,3 +1339,24 @@ fn granted_denied(token: Secret, tasks: Tasks) -> bool waits {
     }
     denied && result.unwrap(task.join(take server))
 }
+
+fn seal_for_unit(_: ()) -> Secret {
+    sealed_pencil("beta.test")
+}
+
+// Each unit can resolve both secrets with their original policy.
+// expect: run sealed_secret_from_unit(tasks) = true
+fn sealed_secret_from_unit(tasks: Tasks) -> bool waits {
+    let local = sealed_pencil("alpha.test")
+    let worker = result.unwrap(task.spawn_unit(tasks, bytes 4096, (), seal_for_unit))
+    let received = result.unwrap(task.join(take worker))
+    let local_denies = match secret.narrow(local, string.from("beta.test")) {
+        Ok(_) => false,
+        Error(_) => true
+    }
+    let received_permits = match secret.narrow(received, string.from("beta.test")) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    local_denies && received_permits
+}

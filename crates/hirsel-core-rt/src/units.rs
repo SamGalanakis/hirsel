@@ -1244,7 +1244,7 @@ fn poll_due(p: &Pool, t: u64, every: u64) {
 }
 
 /// Run one queued unit until it parks, yields or ends.
-unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
+unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     // SAFETY: the dequeued record is live; this worker alone dequeued it.
     unsafe {
         let u = &*up.0;
@@ -1252,7 +1252,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
             start_stack(p, u);
             if WORKER_IX.get() != ix {
                 publish(p, &p.locals[ix], up);
-                return false;
+                return;
             }
         }
         // Acquire readiness published while this entry was already queued.
@@ -1278,7 +1278,6 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
         CUR.set(std::ptr::null_mut());
         let after = u.after.replace(After::Run);
         u.inside.store(false, Ordering::Release);
-        let mut owns_slot = WORKER_IX.get() == ix;
         match after {
             After::Done => {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1291,7 +1290,6 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
-                owns_slot = WORKER_IX.get() == ix;
                 *u.sp.get() = std::ptr::null_mut();
                 if u.helper {
                     SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).push(up);
@@ -1312,7 +1310,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
             }
             After::Yield => {
                 u.state.swap(QUEUED, Ordering::SeqCst);
-                let q = if owns_slot {
+                let q = if WORKER_IX.get() == ix {
                     &p.injector
                 } else {
                     &p.locals[ix]
@@ -1338,10 +1336,12 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
         }
         // Busy workers poll now and then when no idle worker is blocked in
         // the poller.
-        if owns_slot && !p.poller_blocked.load(Ordering::Relaxed) && has_poll_sources(p) {
+        if !p.poller_blocked.load(Ordering::Relaxed)
+            && has_poll_sources(p)
+            && WORKER_IX.get() == ix
+        {
             poll_due(p, now(), p.poll_every_ns);
         }
-        owns_slot
     }
 }
 
@@ -1361,7 +1361,8 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
         if !handed && let Some(u) = find(p, ix) {
             keep_poller(p);
             // SAFETY: a dequeued unit.
-            if !unsafe { run_unit(p, ix, u, &mut host) } {
+            unsafe { run_unit(p, ix, u, &mut host) };
+            if WORKER_IX.get() != ix {
                 return true;
             }
             continue;
@@ -1407,7 +1408,8 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
                 keep_poller(p);
             }
             // SAFETY: a dequeued unit.
-            if !unsafe { run_unit(p, ix, u, &mut host) } {
+            unsafe { run_unit(p, ix, u, &mut host) };
+            if WORKER_IX.get() != ix {
                 return true;
             }
             continue;

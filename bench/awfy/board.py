@@ -560,14 +560,15 @@ def compile_rows(board, out, prepared, fixture, tools):
         samples = {}
         label = f"LangArena {mode}"
         fixture_id = receipt.fixture_identity(out / "inputs.json", config)
-        provenance = build.native_provenance(hirsel, out / "inputs.json", cwd=out)
+        sample_env = cargo_scope(env)
+        provenance = build.native_provenance(hirsel, out / "inputs.json", env=sample_env, cwd=out)
         commands = [("hirsel", hirsel, out, exe), ("rust", cargo_build, rust, rust_exe)]
         if mode == "edit":
             commands.reverse()
         for side, command, cwd, executable in commands:
             target = out / f"{mode}-{side}"
             with smt_activity(siblings, f"{label}/{side}") as busy:
-                sample = measure.core_measure.sample(command, target, env=cargo_scope(env), cycles=True,
+                sample = measure.core_measure.sample(command, target, env=sample_env, cycles=True,
                                                      cwd=cwd, pmu_times=True)
             sample["smt_busy_percent"] = busy
             samples[side] = sample
@@ -602,7 +603,8 @@ def compile_rows(board, out, prepared, fixture, tools):
             if side == "hirsel":
                 board.report["instruction_receipt"]["rows"].append({
                     "key": f"compile/{label}", "suite": "compile", "mode": mode,
-                    "flags": provenance["flags"], "argv": list(map(str, command)),
+                    "flags": provenance["flags"], build.STD_SEPARATE: provenance[build.STD_SEPARATE],
+                    "argv": list(map(str, command)),
                     "build_record": record, "image_sha256": record["image_sha256"],
                     "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",
                     "stdout": verify.stdout, "sample": sample, **fixture_id, **tools,

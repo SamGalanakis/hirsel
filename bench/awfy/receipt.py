@@ -30,7 +30,8 @@ INSTRUCTION_LIMIT = Decimal("0.5")
 GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
-CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256")
+CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256", "image_sha256")
+CANDIDATE_FIELDS = (*CANDIDATE_HASHES, build.STD_SEPARATE)
 WORKLOAD_IDENTITY = ("suite", "mode", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
 
@@ -104,7 +105,7 @@ def verified_build(row):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
-    return record.get("flags") == row["flags"]
+    return record.get("flags") == row["flags"] and record.get(build.STD_SEPARATE) == row.get(build.STD_SEPARATE)
 
 
 def runtime_case(suite, name, directory, command, marker, fixture, tools):
@@ -145,6 +146,7 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         "image_sha256": image,
         "build_record": build_record(report),
         "marker": marker.decode(),
+        **({build.STD_SEPARATE: provenance[build.STD_SEPARATE]} if build.STD_SEPARATE in provenance else {}),
         **fixture,
         **tools,
     }
@@ -322,6 +324,7 @@ def validate_row(key, row):
                 else mode != "release")
             or any(not re.fullmatch("[a-f0-9]{64}", row[field])
                    for field in (*CANDIDATE_HASHES, "fixture_sha256"))
+            or (build.STD_SEPARATE in row and row[build.STD_SEPARATE] not in ("on", "off"))
             or not all(isinstance(row[field], list)
                        and all(isinstance(value, str) and value for value in row[field])
                        for field in ("argv", "flags"))
@@ -348,12 +351,17 @@ def rows_from(path):
     return rows
 
 
+def candidate_identity(row):
+    hashes = tuple(row[field] for field in CANDIDATE_HASHES)
+    return (*hashes, row.get(build.STD_SEPARATE, "unrecorded"))
+
+
 def match_rows(key, left, right):
     fields = [field for field in (*WORKLOAD_IDENTITY, "marker", "stdout") if left[field] != right[field]]
     if fields:
         raise ValueError(f"identity differs: {key}: {', '.join(fields)}")
-    base_hashes = tuple(left[field] for field in CANDIDATE_HASHES)
-    candidate_hashes = tuple(right[field] for field in CANDIDATE_HASHES)
+    base_hashes = candidate_identity(left)
+    candidate_hashes = candidate_identity(right)
     if base_hashes != candidate_hashes and not all(verified_build(row) for row in (left, right)):
         raise ValueError(f"{key} requires a verified build record for a candidate pair")
     return base_hashes, candidate_hashes
@@ -387,14 +395,14 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
 
     changed_pairs = sorted((left, right) for left, right in candidate_pairs if left != right)
     if aa and changed_pairs:
-        fields = [field for index, field in enumerate(CANDIDATE_HASHES)
+        fields = [field for index, field in enumerate(CANDIDATE_FIELDS)
                   if any(left[index] != right[index] for left, right in changed_pairs)]
         print(f"--aa requires identical candidate hashes. Differing hashes: {', '.join(fields)}", file=sys.stderr)
         return REFUSED
     if not aa and not changed_pairs and not refusals:
         print("nothing differs: A/A. Use --aa for deliberate A/A comparisons.", file=sys.stderr)
         for hashes, _ in sorted(candidate_pairs):
-            print(", ".join(f"{field}={value}" for field, value in zip(CANDIDATE_HASHES, hashes)), file=sys.stderr)
+            print(", ".join(f"{field}={value}" for field, value in zip(CANDIDATE_FIELDS, hashes)), file=sys.stderr)
         return REFUSED
 
     failed = False
@@ -405,17 +413,13 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
-    for (base_compiler, base_runtime, base_std, base_sources), (
-        candidate_compiler, candidate_runtime, candidate_std, candidate_sources
-    ) in changed_pairs:
-        if base_compiler != candidate_compiler:
-            print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
-        runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
-        print(f"Paired runtime_archive_sha256 {runtime}")
-        if base_std != candidate_std:
-            print(f"Variable std_sha256 {base_std} -> {candidate_std}")
-        if base_sources != candidate_sources:
-            print(f"Variable workload_sources_sha256 {base_sources} -> {candidate_sources}")
+    for index, field in enumerate(CANDIDATE_FIELDS):
+        values = sorted({(left[index], right[index]) for left, right in changed_pairs})
+        for left, right in values:
+            if field == "runtime_archive_sha256":
+                print(f"Paired {field} " + ("unchanged" if left == right else f"{left} -> {right}"))
+            elif left != right:
+                print(f"Variable {field} {left} -> {right}")
     if ratios:
         geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
         print(f"{len(ratios)} rows compared, geomean {geomean:+.3f}%, threshold +{threshold}%")
@@ -564,8 +568,8 @@ def cycle_pairs(args):
                         status = max(status, peer_cycle_pairs(key, left, args, siblings, env, report))
                         continue
                     right = cycle_row(key, after[key], "candidate", args.cpu)
-                    match_rows(key, left, right)
-                    same = all(left[field] == right[field] for field in (*CANDIDATE_HASHES, "image_sha256"))
+                    base_identity, candidate = match_rows(key, left, right)
+                    same = base_identity == candidate
                     if same != args.aa:
                         raise ValueError("--aa requires identical builds and images" if args.aa
                                          else "identical builds and images; pass --aa for a deliberate A/A run")
@@ -711,10 +715,9 @@ def aa_spread(key, pairs, baseline, cpu, count):
         values = []
         for row in sides:
             values.append(cycle_count(key, row))
-            if row["affinity"] != [cpu] or any(
-                row[field] != baseline[field] for field in (*IDENTITY, "image_sha256", "marker")
-                if field != "affinity"
-            ):
+            if (row["affinity"] != [cpu] or candidate_identity(row) != candidate_identity(baseline)
+                    or any(row[field] != baseline[field] for field in (*WORKLOAD_IDENTITY, "marker")
+                           if field != "affinity")):
                 raise ValueError(f"{key}: A/A does not match the baseline workload, image and CPU")
         changes.append(change(*values))
     return min(changes), max(changes)
@@ -827,7 +830,7 @@ def profile(args):
     left, right = before[args.row], after[args.row]
     if left["suite"] == "compile":
         raise ValueError("profile-diff requires a runtime row")
-    match_rows(args.row, left, right)
+    base_identity, candidate = match_rows(args.row, left, right)
     affinity = set(left["affinity"])
     assigned = os.sched_getaffinity(0)
     if not affinity <= assigned:
@@ -839,9 +842,9 @@ def profile(args):
     candidate = right["sample"]["instructions"]
     percent = Decimal(100) * (candidate - baseline) / baseline
     print(f"{args.row} PMU instructions:u {baseline:,} -> {candidate:,} ({percent:+.3f}%)", flush=True)
-    for field in CANDIDATE_HASHES:
-        if left[field] != right[field]:
-            print(f"{field} {left[field]} -> {right[field]}")
+    for field, before_value, after_value in zip(CANDIDATE_FIELDS, base_identity, candidate):
+        if before_value != after_value:
+            print(f"{field} {before_value} -> {after_value}")
     sides = []
     for label, row in (("baseline", left), ("candidate", right)):
         sides.append((out / label, row, verify_runtime_files(row, label)))
@@ -906,7 +909,7 @@ def main():
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
-    comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and source hashes")
+    comparison.add_argument("--aa", action="store_true", help="require identical candidate identities")
     cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with interleaved counter pairs")
     cycles.add_argument("baseline", type=Path, help="base receipt directory or --multicore build directory")
     cycles.add_argument("candidate", nargs="?", type=Path,

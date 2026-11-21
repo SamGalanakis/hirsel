@@ -137,6 +137,7 @@ class BoardCompletion(unittest.TestCase):
                                     "affinity": [10], "compiler_sha256": "a" * 64,
                                     "runtime_archive_sha256": "b" * 64, "fixture_sha256": "c" * 64,
                                     "std_sha256": "d" * 64, "workload_sources_sha256": "e" * 64,
+                                    "image_sha256": "f" * 64,
                                     "fixture_files": {"fixture.json": "c" * 64},
                                     "marker": "verified\n", "stdout": "verified\n",
                                     "sample": samples["hirsel"],
@@ -224,8 +225,11 @@ class PairedSampling(unittest.TestCase):
             "compiler_sha256": "a" * 64, "runtime_archive_sha256": "b" * 64,
             "fixture_sha256": "c" * 64, "image_sha256": "d" * 64, "std_sha256": "e" * 64,
             "fixture_files": {"rebench.conf": "c" * 64}, "workload_sources_sha256": "f" * 64,
+            "manifest_sha256": "1" * 64,
         }
-        candidate = base | {"image_sha256": "e" * 64}
+        base["build_record"] = base | {"accepted": True, "linked": True}
+        candidate = base | {"image_sha256": "e" * 64,
+                            "build_record": base["build_record"] | {"image_sha256": "e" * 64}}
         cpu = min(os.sched_getaffinity(0))
         events = ("instructions:u", "cycles:u")
         counts = iter((100, 96, 101, 100, 100, 104) + (100, 103, 103, 100, 100, 103) * 2)

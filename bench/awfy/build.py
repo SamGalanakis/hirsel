@@ -13,6 +13,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 MANIFEST_HASHES = ("manifest_sha256", "workload_sources_sha256", "std_sha256")
+STD_SEPARATE = "HIRSEL_STD_SEPARATE"
 sys.path.append(str(ROOT / "core/tools"))
 from langarena import inputs
 
@@ -52,7 +53,7 @@ def manifest_digests(manifest):
     }
 
 
-def native_provenance(command, manifest, *, cwd=None):
+def native_provenance(command, manifest, *, env, cwd=None):
     # Keep every option, with private directory paths represented by their
     # roles. The files that affect the build have separate content identities.
     if cwd is None:
@@ -67,6 +68,7 @@ def native_provenance(command, manifest, *, cwd=None):
             flags[index + 1] = sha256(cwd / flags[index + 1])
     return {
         "flags": flags,
+        STD_SEPARATE: "on" if STD_SEPARATE in env else "off",
         **manifest_digests(manifest),
         "compiler_sha256": sha256(cwd / command[0]),
         "runtime_archive_sha256": sha256(cwd / command[command.index("--runtime") + 1]),
@@ -115,6 +117,7 @@ def hirsel(args, matched=False):
     out = args.out
     manifest = out / "hirsel-inputs.json"
     manifest.write_text(json.dumps(spec))
+    env = getattr(args, "env", capped_env(out))
     for module in args.hirsel_entries:
         binary = out / f"hirsel-{module}"
         command = [
@@ -124,9 +127,9 @@ def hirsel(args, matched=False):
             "--cc", str(llvm_path() / "bin/clang"),
             "--grant", "Stdout", "--json", "-o", str(binary),
         ]
-        provenance = native_provenance(command, manifest) | {"rap_sha256": rap_digest}
+        provenance = native_provenance(command, manifest, env=env) | {"rap_sha256": rap_digest}
         result = subprocess.run([ROOT / "tools/capped", *command],
-                                env=getattr(args, "env", capped_env(out)), stdout=subprocess.PIPE)
+                                env=env, stdout=subprocess.PIPE)
         if result.returncode:
             sys.stderr.buffer.write(result.stdout)
             result.check_returncode()

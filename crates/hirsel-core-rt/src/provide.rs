@@ -128,6 +128,7 @@ const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
 /// NetOp variants in declaration order.
 const NET_CONNECT: u64 = 0;
+const NET_RESOLVE: u64 = 1;
 const NET_LISTEN: u64 = 2;
 const NET_ACCEPT: u64 = 3;
 const NET_RECV: u64 = 4;
@@ -314,6 +315,18 @@ impl Port {
                 w[0] = NET_CONNECT;
                 w[1..5].copy_from_slice(&address);
             }
+            RESOLVE => {
+                // The name as the caller wrote it, which its rules covered,
+                // and room for that many address records (NOTES 34).
+                // SAFETY: RESOLVE pins its ResolveRequest in `path`.
+                let name = unsafe {
+                    (*request.path.cast::<crate::resolve::ResolveRequest>())
+                        .raw_name
+                        .len
+                };
+                let room = spare.saturating_mul(hirsel_core_net::IP_RECORD_LEN as u64);
+                w[..3].copy_from_slice(&[NET_RESOLVE, name as u64, room]);
+            }
             LISTEN => {
                 w[0] = NET_LISTEN;
                 w[1..5].copy_from_slice(&address);
@@ -437,6 +450,9 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
             (Vocab::Dir, 2 | 12, 1) | (Vocab::Dir, 13, 2) => buffer,
             (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
             (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
+            (Vocab::Net, NET_RESOLVE, 0) => {
+                crate::tls::bytes(&(*r.path.cast::<crate::resolve::ResolveRequest>()).raw_name)
+            }
             (Vocab::Net, NET_SEND | NET_SEND_SECRET, 1) => buffer,
             (Vocab::Net, NET_SEND | NET_SEND_SECRET, 2) => {
                 let n = &*r.path.cast::<crate::net::NetworkRequest>();
@@ -460,7 +476,7 @@ fn call_room(vocab: Vocab, words: &[u64; 8]) -> u64 {
     match (vocab, words[0]) {
         (Vocab::Dir, 10 | 19) => words[2],
         (Vocab::Dir, 2 | 11) => words[3],
-        (Vocab::Net, NET_RECV) => words[2],
+        (Vocab::Net, NET_RECV | NET_RESOLVE) => words[2],
         _ => 0,
     }
 }
@@ -487,7 +503,7 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                 || match op {
                     NET_CONNECT | NET_ACCEPT => reply == R_SOCKET,
                     NET_LISTEN => reply == R_LISTENER,
-                    NET_RECV | NET_SEND => reply == R_COUNT,
+                    NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
                     NET_HANDSHAKE => reply == R_SECURED,
                     NET_SEND_SECRET => reply == R_DONE,
                     _ => false,
@@ -1185,8 +1201,9 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
     }
     let mut root = 0;
     if vocab == Vocab::Net {
-        // Every address in either direction and family (NOTES 31), and a
-        // handshake to any name and port under any trust (NOTES 32).
+        // Every address in either direction and family (NOTES 31), a
+        // handshake to any name and port under any trust (NOTES 32), and a
+        // lookup of any name (NOTES 34).
         let addresses = (0..2).flat_map(|dir| {
             (0..2).map(move |family| {
                 hirsel_core_net::GrantRule::Address(hirsel_core_net::Rule {
@@ -1201,7 +1218,8 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
             })
         });
         let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
-        let rules = crate::net::RulesStorage::new(addresses.chain([tls]));
+        let resolve = hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
+        let rules = crate::net::RulesStorage::new(addresses.chain([tls, resolve]));
         root = rules.handle();
         port.rules = Some(rules);
     }
@@ -1585,6 +1603,15 @@ fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
             }
             out.value = w[0];
         }
+        R_COUNT if p.vocab == Vocab::Net && op == NET_RESOLVE => {
+            // A resolve's count is its staged records, each well formed and
+            // distinct (NOTES 34).
+            let records = hirsel_core_net::ip_records(&call.staged)?;
+            if w[0] != records.len() as u64 {
+                return None;
+            }
+            out.value = w[0];
+        }
         R_COUNT => {
             // A read's count is the bytes it staged; a listing's, its entries.
             if op != 19 && w[0] != call.staged.len() as u64 {
@@ -1781,8 +1808,14 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         // SAFETY: the call is unsettled, so its caller's request is pinned.
         unsafe {
             let b = &mut (*c.request).buffer;
-            ptr::copy_nonoverlapping(c.staged.as_ptr(), b.data.add(b.len), c.staged.len());
-            b.len += c.staged.len();
+            if (p.vocab, c.words[0]) == (Vocab::Net, NET_RESOLVE) {
+                // Records become the caller's Ip elements; `answer` checked them.
+                let addresses = hirsel_core_net::ip_records(&c.staged).expect("checked records");
+                crate::resolve::append(b, &addresses);
+            } else {
+                ptr::copy_nonoverlapping(c.staged.as_ptr(), b.data.add(b.len), c.staged.len());
+                b.len += c.staged.len();
+            }
         }
     }
     let token = p.settle(id, outcome);

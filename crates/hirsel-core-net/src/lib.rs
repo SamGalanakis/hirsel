@@ -118,7 +118,7 @@ impl Rule {
 }
 
 mod ip;
-pub use ip::Ip;
+pub use ip::{IP_RECORD_LEN, Ip, ip_record, ip_records};
 mod grant;
 pub use grant::{GrantRule, ResolveRule, RuleView};
 mod reactor;

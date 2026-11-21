@@ -246,7 +246,8 @@ extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept 
   runLoopPass(static_cast<TargetMachine *>(Machine), M, "checked-copy", [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
     FunctionPassManager PM;
     PM.addPass(CheckedCopyPass(PB));
-    for (Function &F : M) if (!F.isDeclaration()) PM.run(F, FAM);
+    for (Function &F : M)
+      if (!F.isDeclaration() && !F.hasAvailableExternallyLinkage()) PM.run(F, FAM);
   });
 }
 
@@ -967,7 +968,8 @@ static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
 // pass spent its whole budget on 41 copies of one helper.
 static void inlineLoopHelpers(Module &M) {
   for (Function &F : M) {
-    if (F.isDeclaration()) continue;
+    // A lent body is a helper here, never a caller.
+    if (F.isDeclaration() || F.hasAvailableExternallyLinkage()) continue;
     DominatorTree DT(F);
     LoopInfo LI(DT);
     // Each inlined callee with the History index of the copy it was inlined
@@ -1073,7 +1075,7 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
   auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
   inlineLoopHelpers(M);
   for (Function &F : M) {
-    if (F.isDeclaration() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
+    if (F.isDeclaration() || F.hasAvailableExternallyLinkage() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
     SmallVector<Instruction *, 16> Accesses;
     SmallVector<CallInst *, 16> Calls;
     SmallVector<ReturnInst *, 8> Returns;

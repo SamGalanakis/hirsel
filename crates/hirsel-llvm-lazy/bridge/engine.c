@@ -31,7 +31,9 @@ typedef void (*HirselLlvmCounterRangeReport)(void *, const char *, size_t, unsig
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
     LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, void *receiver,
     const uint8_t *lent, size_t lent_len);
-extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
+extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
+    const uint8_t *lent, size_t lent_len);
+extern LLVMErrorRef hirsel_llvm_drop_lent(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_sweep_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -541,11 +543,14 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
                                                       refill && LLVMGetFirstUse(refill), report, receiver,
                                                       lent, lent_len);
-        if (!e) e = hirsel_llvm_specialize_release(module, machine);
+        if (!e) e = hirsel_llvm_specialize_release(module, machine, lent, lent_len);
         if (!e) {
             hirsel_llvm_inline_recursive_leaves(module);
             hirsel_llvm_guard_copy_loops(module, machine);
             hirsel_llvm_promote_step_window(module);
+            if (lent_len) e = hirsel_llvm_drop_lent(module, machine);
+        }
+        if (!e) {
             hirsel_scalarize_aggregate_phis(module, context);
             e = hirsel_llvm_cleanup_release(module, machine);
         }

@@ -208,6 +208,8 @@ impl<'context> Module<'context> {
                 fn hirsel_llvm_specialize_release(
                     module: LLVMModuleRef,
                     machine: LLVMTargetMachineRef,
+                    lent: *const u8,
+                    lent_len: usize,
                 ) -> LLVMErrorRef;
                 fn hirsel_llvm_cleanup_release(
                     module: LLVMModuleRef,
@@ -247,7 +249,7 @@ impl<'context> Module<'context> {
                 unsafe extern "C" {
                     fn hirsel_llvm_inline_recursive_leaves(module: LLVMModuleRef);
                 }
-                error = hirsel_llvm_specialize_release(self.raw, machine.raw);
+                error = hirsel_llvm_specialize_release(self.raw, machine.raw, ptr::null(), 0);
                 if !error.is_null() {
                     let message = LLVMGetErrorMessage(error);
                     let text = CStr::from_ptr(message).to_string_lossy().into_owned();

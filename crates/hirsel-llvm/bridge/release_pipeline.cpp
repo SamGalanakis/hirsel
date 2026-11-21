@@ -67,7 +67,9 @@ void limit_recursive_entry_inlining(Module &module) {
 // inliner: each body a definition calls, and those they call, comes in
 // `available_externally`. Its own passes do not run over it, the inliner may
 // copy it into a caller, and `elim-avail-extern` then drops it, so each call
-// left reaches the library's part.
+// left reaches the library's part. The release inliner drops them at its end;
+// the specialize inliner takes them again, for itself and the loop helpers
+// after it, until `hirsel_llvm_drop_lent`.
 class LendPass : public PassInfoMixin<LendPass> {
     StringRef lent;
     std::string *failure;
@@ -460,9 +462,30 @@ extern "C" LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module,
     return LLVMErrorSuccess;
 }
 
+// A composed program's specialize inliner and loop helpers
+// (`hirsel_llvm_promote_step_window`) see the library's bodies; a program over
+// a separate library takes its lent bodies (`LendPass`) again for them.
 extern "C" LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module,
-                                                      LLVMTargetMachineRef machine) {
-    return runPasses(module, machine, "specialize", "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)");
+                                                      LLVMTargetMachineRef machine,
+                                                      const uint8_t *lent, size_t lent_len) {
+    ReleasePipeline release(module, machine);
+    std::string lend_failure;
+    ModulePassManager pipeline;
+    if (lent_len) {
+        release.skip_lent();
+        pipeline.addPass(LendPass(StringRef((const char *)lent, lent_len), &lend_failure));
+    }
+    if (auto error = release.builder.parsePassPipeline(pipeline,
+        "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)"))
+        return wrap(std::move(error));
+    release.run(pipeline, "specialize");
+    if (!lend_failure.empty())
+        return wrap(make_error<StringError>(lend_failure, inconvertibleErrorCode()));
+    return LLVMErrorSuccess;
+}
+
+extern "C" LLVMErrorRef hirsel_llvm_drop_lent(LLVMModuleRef module, LLVMTargetMachineRef machine) {
+    return runPasses(module, machine, "specialize", "elim-avail-extern");
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module,

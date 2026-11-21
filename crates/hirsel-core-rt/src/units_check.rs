@@ -63,10 +63,8 @@
 //! expired deadline fires within `BOUND` scheduler steps. A run fails when
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
-#[cfg(feature = "record")]
-use super::LOGS;
 use super::{
-    BASE, Base, Memory, NONE, POOL, Pool, ROLE_INITIAL, RUN, RunFn, STATS, TABLE, UNTIED_ON,
+    BASE, Base, Memory, NONE, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON,
     USTATS, create_unit, cur, maybe_yield, park as unit_park, pool, take_xready, wake_id,
     worker_main,
 };
@@ -1455,7 +1453,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     NEEDED.store(case.goals, Ordering::Relaxed);
     let _ = POOL.set(Pool {
         w,
-        k: case.units,
         locals: (0..w).map(|_| super::Mutex::new(VecDeque::new())).collect(),
         lifo: (0..w)
             .map(|_| super::AtomicPtr::new(std::ptr::null_mut()))
@@ -1481,14 +1478,11 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         next_timer: super::AtomicU64::new(u64::MAX),
         live: super::AtomicUsize::new(case.units as usize),
         stop: super::AtomicBool::new(false),
-        front: -1,
-        next_session: super::AtomicU32::new(case.units),
         last_poll: super::AtomicU64::new(0),
         spin_ns: 5_000,
         spin_poll_ns: 20_000,
         slice_ns: 500_000,
         poll_every_ns: 100_000,
-        queue_waits: None,
     });
     static BODY: std::sync::OnceLock<fn(u32) -> u8> = std::sync::OnceLock::new();
     let _ = BODY.set(case.body);
@@ -1500,7 +1494,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     let p = pool();
     std::mem::forget(p.memory.start());
     for id in 0..case.units {
-        create_unit(id, ROLE_INITIAL);
+        create_unit(id);
     }
     // Names for the trace.
     fn addr<T>(x: &T) -> usize {
@@ -1543,13 +1537,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     // Statistics counters and the untied switch are not protocol state.
     st.quiet
         .push((addr(&USTATS), addr(&USTATS) + size_of_val(&USTATS)));
-    st.quiet
-        .push((addr(&STATS), addr(&STATS) + size_of_val(&STATS)));
     st.quiet.push((addr(&UNTIED_ON), addr(&UNTIED_ON) + 1));
-    // The per-unit record log is diagnostics, not scheduling state.
-    #[cfg(feature = "record")]
-    st.quiet
-        .push((addr(&LOGS), addr(&LOGS) + size_of_val(&LOGS)));
     let nthreads = w + case.producers.len();
     for i in 0..nthreads {
         let (name, producer) = if i < w {

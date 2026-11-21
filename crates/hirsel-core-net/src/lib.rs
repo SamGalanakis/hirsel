@@ -119,7 +119,7 @@ pub use ip::Ip;
 mod grant;
 pub use grant::{GrantRule, ResolveRule, RuleView};
 mod reactor;
-pub use reactor::{Crossing, Poller, SHARED_UNIT_SHIFT, Sockets, share_poller};
+pub use reactor::{Poller, SHARED_UNIT_SHIFT, Sockets, share_poller};
 /// mc-units-untied: epoll_wait calls made by run reactors.
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub mod model;

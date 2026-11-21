@@ -2599,9 +2599,6 @@ unsafe fn parked(
             }
         };
         (*task).operation = ptr::null_mut();
-        // mc-units-proto: a crossing delivery a retry consumed is observed now.
-        #[cfg(feature = "record")]
-        crate::units::observed(request as usize);
         produced
     }
 }

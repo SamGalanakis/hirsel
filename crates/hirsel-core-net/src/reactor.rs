@@ -255,15 +255,6 @@ impl Drop for ModeledSockets {
     }
 }
 
-/// mc-units-proto: an in-process crossing endpoint attached to a socket slot.
-/// The registry tells it when the program releases its write half or the
-/// whole endpoint, so the peer unit observes end of stream.
-pub trait Crossing: Send + Sync {
-    fn shutdown_write(&self);
-    fn close(&self);
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
 /// O(1) host storage per live descriptor. No table is sized from the fd limit.
 #[derive(Default)]
 pub struct Sockets {
@@ -273,10 +264,6 @@ pub struct Sockets {
     live: usize,
     waiting: usize,
     model: Option<Box<dyn ModelResources>>,
-    /// mc-units-proto: crossing endpoints by slot index.
-    pub crossings: std::collections::HashMap<u32, Arc<dyn Crossing>>,
-    /// mc-units-proto: this registry's unit, set by its first crossing.
-    pub unit: Option<u32>,
     /// mc-units-light: registered in the pool's shared poller as this unit.
     shared: Option<u32>,
 }
@@ -292,20 +279,8 @@ impl Sockets {
             live: 0,
             waiting: 0,
             model: Some(Box::new(ModeledSockets::new(model))),
-            crossings: Default::default(),
-            unit: None,
             shared: None,
         }
-    }
-    /// mc-units-proto: the crossing attached to a live key, if any.
-    pub fn crossing(&self, key: u64) -> Option<&Arc<dyn Crossing>> {
-        if self.crossings.is_empty() || Model::owns(key) {
-            return None;
-        }
-        self.crossings.get(&((key >> 2) as u32))
-    }
-    pub fn attach_crossing(&mut self, key: u64, crossing: Arc<dyn Crossing>) {
-        self.crossings.insert((key >> 2) as u32, crossing);
     }
     pub fn adopt_model(&mut self, model: &Model, key: u64) {
         self.model
@@ -520,16 +495,9 @@ impl Sockets {
             self.model.as_mut().unwrap().release(key);
             return !self.model().unwrap().contains(key);
         }
-        let index = (key >> 2) as u32;
-        let crossing = self.crossings.get(&index).cloned();
         let r = self.record_mut(key);
         let direction = key & 3;
-        if let Some(c) = &crossing
-            && direction == 2
-        {
-            c.shutdown_write();
-        }
-        if direction == 2 && crossing.is_none() {
+        if direction == 2 {
             // SAFETY: the record owns the connected descriptor through final release.
             unsafe {
                 libc::shutdown(r.fd.as_raw_fd(), libc::SHUT_WR);
@@ -539,9 +507,6 @@ impl Sockets {
         let last = r.owners == 0;
         let fd = r.fd.as_raw_fd();
         let waiting = r.waiters.iter().flatten().count();
-        if last && let Some(c) = self.crossings.remove(&index) {
-            c.close();
-        }
         if last {
             self.waiting -= waiting;
             let index = ((key >> 2) as u32) as usize;

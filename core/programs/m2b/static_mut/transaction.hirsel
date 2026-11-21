@@ -6,13 +6,13 @@ scoped type Tx {
     writes: u64
 }
 
-pub type Outcome = Returned(Bytes) | Aborted(Bytes) | Malformed | Full(Capacity)
+pub type Outcome = Returned(Bytes) | Aborted(Bytes) | Malformed
 
 type Slot {
     run: own fn(mut Tx, Bytes) -> Outcome
 }
 
-fn slot[A, R, E](f: StaticFn[fn(mut Tx, take A) -> Result[R, E]], take ca: std.codec.Codec[A], take cr: std.codec.Codec[R], take ce: std.codec.Codec[E]) -> Result[Slot, Capacity] {
+fn slot[A, R, E](f: StaticFn[fn(mut Tx, take A) -> Result[R, E]], take ca: std.codec.Codec[A], take cr: std.codec.Codec[R], take ce: std.codec.Codec[E]) -> Slot {
     let made = fn(mut tx: Tx, arg: Bytes) -> Outcome {
         let body = code.callable(f)
         match std.codec.decode(ca, arg) {
@@ -32,10 +32,7 @@ fn slot[A, R, E](f: StaticFn[fn(mut Tx, take A) -> Result[R, E]], take ca: std.c
             Error(_) => Malformed,
         }
     }
-    match made {
-        Ok(take g) => Ok(Slot(run: take g)),
-        Error((c, _)) => Error(c),
-    }
+    Slot(run: take made)
 }
 
 fn flip(mut tx: Tx, take i: u32) -> Result[bool, u32] {
@@ -47,7 +44,7 @@ fn flip(mut tx: Tx, take i: u32) -> Result[bool, u32] {
 }
 
 pub fn main() -> Result[(), Exit] {
-    let s = result.unwrap(slot(code.describe(flip), std.codec.of_u32(), std.codec.of_bool(), std.codec.of_u32()))
+    let s = slot(code.describe(flip), std.codec.of_u32(), std.codec.of_bool(), std.codec.of_u32())
     let base: Bytes = list.new()
     let mut tx = Tx(base: view base, writes: 0u64)
     let mut arg: Bytes = list.new()

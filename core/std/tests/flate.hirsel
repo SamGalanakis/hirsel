@@ -186,3 +186,46 @@ fn hostile_decode() -> bool {
         _ => false
     }) && malformed(result.unwrap(b"\x07")) && malformed(result.unwrap(b"\xfc\xfe\x36")) && malformed(result.unwrap(b"\x01\x00\x00\x00\x00")) && truncated(Raw(), raw, 0) && truncated(Zlib(), zlib, 2) && truncated(Gzip(), gzip, 0) && truncated(Gzip(), old_gzip, 12)
 }
+
+fn split_encode(format: flate.Format, data: Bytes, level: u8) -> Bytes {
+    let mut e = result.unwrap(flate.encoder(format, level))
+    let mut piece: Bytes = result.unwrap(list.with_capacity(1))
+    let mut out: Bytes = list.new()
+    let end = list.len(data)
+    let mut at: u64 = 0
+    while at < end {
+        list.clear(mut piece)
+        let step = flate.encode_step(mut e, data, at, at + 1, mut piece)
+        at += step.consumed
+        result.unwrap(list.append(mut out, piece))
+    }
+    while true {
+        list.clear(mut piece)
+        let step = flate.finish_step(mut e, mut piece)
+        result.unwrap(list.append(mut out, piece))
+        if step.ended {
+            return take out
+        }
+    }
+    take out
+}
+
+// Whole-buffer and one-byte streams agree and decode to their input at every
+// level.
+// expect: run encode_roundtrip() = true
+fn encode_roundtrip() -> bool {
+    let items = originals()
+    for index in 0u64 .. 4 {
+        let input = items[index]
+        for id in 0u8 .. 3 {
+            let format = framing(id)
+            for level in 0u8 .. 10 {
+                let output = result.unwrap(flate.encode(format, input, level))
+                if output != split_encode(format, input, level) || result.unwrap(flate.decode(format, output, list.len(input))) != input {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}

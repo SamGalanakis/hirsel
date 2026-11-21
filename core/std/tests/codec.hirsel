@@ -1193,8 +1193,28 @@ fn recursive_tree() -> (bool, bool, u64, u64) {
 // A chain of depth d, label i and one kid down to a leaf, decoded directly and, written
 // by the swapped version, through resolution; each the depth counted iteratively (the
 // chain taken apart the same way) or a decode error's code, 9999 for Capacity.
+// A deep decode refused for room raises Capacity (SEM-10); it reads as 9999. Any other
+// failure, or isolate's own entry refusal, reads as 0.
+fn capacity_code(r: Result[Result[u64, Causes], Capacity]) -> u64 {
+    match r {
+        Ok(Ok(d)) => d,
+        Ok(Error(causes)) => {
+            for cause in causes {
+                return match cause.kind {
+                    Capacity(_) => 9999,
+                    _ => 0,
+                }
+            }
+            0
+        },
+        Error(_) => 0,
+    }
+}
+
 fn deep(depth: u64) -> (u64, u64) {
-    let a = deep_decode(depth)
+    let a = capacity_code(isolate(fn() -> u64 {
+        deep_decode(depth)
+    }))
     let mut w: Bytes = list.with_capacity(12 * depth + 12)
     let mut i: u64 = 0
     while i < depth {
@@ -1207,10 +1227,12 @@ fn deep(depth: u64) -> (u64, u64) {
         i -= 1
         list.put_word_le(mut w, i)
     }
-    let c = match through(trees(), result.unwrap(codec.schema(swapped_trees())), w) {
-        Ok(t) => chain(take t),
-        Error(k) => k
-    }
+    let c = capacity_code(isolate(fn() -> u64 {
+        match through(trees(), result.unwrap(codec.schema(swapped_trees())), w) {
+            Ok(t) => chain(take t),
+            Error(k) => k
+        }
+    }))
     (a, c)
 }
 
@@ -1954,19 +1976,21 @@ fn dchain(depth: u64) -> u64 {
     list.put_word_le(mut b, depth)
     result.unwrap(codec.put_u32(0, mut b))
     let c: codec.Codec[DTree] = codec.of()
-    match codec.decode(c, b) {
-        Ok(Ok(t)) => {
-            let mut x = take t
-            let mut d: u64 = 0
-            while let Some(k) = list.pop(mut x.kids) {
-                x = take k
-                d += 1
+    capacity_code(isolate(fn() -> u64 {
+        match codec.decode(c, b) {
+            Ok(Ok(t)) => {
+                let mut x = take t
+                let mut d: u64 = 0
+                while let Some(k) = list.pop(mut x.kids) {
+                    x = take k
+                    d += 1
+                }
+                d
             }
-            d
+            Ok(Error(e)) => code(e),
+            Error(_) => 9999
         }
-        Ok(Error(e)) => code(e),
-        Error(_) => 9999
-    }
+    }))
 }
 
 // DTree against the twin trees(): the twin's schema at the derived path (the kids'

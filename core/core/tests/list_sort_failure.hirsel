@@ -146,14 +146,31 @@ fn comparator_fail_8(out: Stdout) -> u64 {
 
 // Admission of five resource holders is exactly 5*8. It precedes every comparator
 // call and element move, so the audit's cleanup sees the source order intact.
+resource type SourceOrderAudit {
+    out: Stdout,
+    values: List[SortItem]
+} drop(t) {
+    let mut ids: u64 = 0
+    for x in t.values {
+        ids = ids * 10 + x.id
+    }
+    let _ = stdout.write(t.out, if list.len(t.values) == 5 && ids == 1234 {
+        "ok"
+    } else {
+        "bad"
+    })
+}
+
 // expect: stdout "okXXXXX"
 // expect: run scratch_capacity_atomic(out) = 40
 fn scratch_capacity_atomic(out: Stdout) -> u64 {
     refused_request(isolate(fn() -> Result[(), Capacity] {
-        let mut audit = sort_audit(out)
+        let SortAudit(out: o, values: take values) = sort_audit(out)
+        let mut audit = result.unwrap(SourceOrderAudit(out: o, values: take values))
         bound bytes 0 {
             list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
-                let _ = option.unwrap(None)
+                let called: Option[u64] = None
+                let _ = option.unwrap(called)
                 Equal
             })
         }

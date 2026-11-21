@@ -1,7 +1,7 @@
 fn input(d: Dir, s: String, cap: u64) -> io.Lines waits {
     result.unwrap(file.write(d, "input", string.as_bytes(s)))
     let f = result.unwrap(file.open(d, "input", Read))
-    result.unwrap(io.lines(take f, cap))
+    result.unwrap(io.lines(File(take f), cap))
 }
 
 // cap4: first read abLFc, second defLF, final gh without terminator.
@@ -124,10 +124,10 @@ fn lines_capacity_hands_back(d: Dir) -> bool waits {
     result.unwrap(file.write(d, "input", string.as_bytes("abc")))
     let f = result.unwrap(file.open(d, "input", Read))
     let r = bound bytes 0 {
-        io.lines(take f, 3)
+        io.lines(File(take f), 3)
     }
     let mut back = match take r {
-        Ok(Error((_, take returned))) => take returned,
+        Ok(Error((_, File(take returned)))) => take returned,
         _ => return false
     }
     let mut b: Bytes = result.unwrap(list.with_capacity(3))
@@ -220,10 +220,10 @@ fn lines_second_capacity_hands_back(d: Dir) -> bool waits {
     result.unwrap(file.write(d, "input", string.as_bytes("abc")))
     let f = result.unwrap(file.open(d, "input", Read))
     let r = bound bytes 8 {
-        io.lines(take f, 3)
+        io.lines(File(take f), 3)
     }
     let mut back = match take r {
-        Ok(Error((c, take returned))) => {
+        Ok(Error((c, File(take returned)))) => {
             if c.requested != 8 || c.available != 0 {
                 return false
             }
@@ -243,7 +243,7 @@ fn invalid_utf8_then_next(d: Dir) -> bool waits {
     result.unwrap(list.append(mut raw, string.as_bytes("\nok\n")))
     result.unwrap(file.write(d, "input", raw))
     let f = result.unwrap(file.open(d, "input", Read))
-    let mut l = result.unwrap(io.lines(take f, 4))
+    let mut l = result.unwrap(io.lines(File(take f), 4))
     let mut line = string.new()
     match io.read_line(mut l, mut line) {
         Error(NotUtf8) => {},
@@ -383,7 +383,7 @@ fn buffered_raw_lines(d: Dir) -> bool waits {
     result.unwrap(list.append(mut raw, string.as_bytes("ab\nz")))
     result.unwrap(file.write(d, "input", raw))
     let f = result.unwrap(file.open(d, "input", Read))
-    let mut reader = result.unwrap(io.buffered_input(take f, 3))
+    let mut reader = result.unwrap(io.buffered_input(File(take f), 3))
     let mut output: Bytes = list.new()
     result.unwrap(list.push(mut output, b'!'))
     if !result.unwrap(io.read_until_lf(mut reader, mut output)) || list.len(output) != 5 || output[0] != b'!' || output[1] != 255u8 || output[2] != b'a' || output[3] != b'b' || output[4] != b'\n' {

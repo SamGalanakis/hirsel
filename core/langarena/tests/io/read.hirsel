@@ -4,7 +4,7 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 1))
     }
     let file = result.unwrap(std.file.open(d, path, Read))
-    let mut reader = result.unwrap(std.io.lines(take file, 4096))
+    let mut reader = result.unwrap(std.io.lines(File(take file), 4096))
     let mut line = result.unwrap(string.with_capacity(4096))
     let mut count: u64 = 0
     let mut length: u64 = 0

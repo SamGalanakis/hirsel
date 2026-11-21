@@ -19,7 +19,7 @@ fn base(c: u8) -> u8 {
 }
 
 fn extract(take file: HostFile) -> Bytes waits {
-    let mut input = result.unwrap(std.io.buffered_input(take file, 8192))
+    let mut input = result.unwrap(std.io.buffered_input(File(take file), 8192))
     let mut dna: Bytes = result.unwrap(list.with_capacity(65536))
     let mut line: Bytes = result.unwrap(list.with_capacity(64))
     while result.unwrap(std.io.read_until_lf(mut input, mut line)) {

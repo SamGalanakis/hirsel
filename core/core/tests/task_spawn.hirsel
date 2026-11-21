@@ -1,0 +1,28 @@
+type SpawnInput: send {
+    tasks: Tasks,
+    to: Sender[()]
+}
+
+fn refused_child(take input: SpawnInput) {
+    fail("refused child ran")
+}
+
+fn spawn_over_limit(take input: SpawnInput) {
+    let tasks = input.tasks
+    let _ = task.spawn(tasks, bytes 4096, take input, refused_child)
+}
+
+// expect: run refused_spawn_drops_its_input(tasks) = true
+fn refused_spawn_drops_its_input(tasks: Tasks) -> bool waits {
+    let (to, from): (Sender[()], Receiver[()]) = channel.new(1)
+    let parent = task.spawn(tasks, bytes 1024, SpawnInput(tasks: tasks, to: take to), spawn_over_limit)
+    if let Error(Failed(causes)) = task.join(take parent) {
+        for cause in causes {
+            return match (cause.kind, channel.try_receive(from)) {
+                (Capacity(_), Error(Closed)) => true,
+                _ => false
+            }
+        }
+    }
+    false
+}

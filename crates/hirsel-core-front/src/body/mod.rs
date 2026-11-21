@@ -2070,6 +2070,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if self.e.needs_drop(id) {
             self.consume(Some(from), n);
         }
+        self.copy_bytes_to(to, from, id, n);
+    }
+
+    /// Copy carrier bytes while leaving their owner in place.
+    fn copy_bytes_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
         if self.pointer_address(from) == Some(to) {
             return;
         }

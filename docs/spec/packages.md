@@ -346,13 +346,33 @@ Resolution turns the members' effective manifests into the workspace's **closure
 `name@major` reached from any member, each bound once. It runs in this order, and the first
 refusal stops it:
 
-1. **Manifests.** Read and validate every member's manifest and the root's (sections 2 to 4).
-2. **Member files.** Read every member's `[sources]` and `[tests.sources]` once, under the
-   path and symlink rules of section 1. These bytes are the ones the compiler is handed and
-   the ones a member's root is computed from.
-3. **Content.** For each published root reached so far, open its `C` from the package store,
-   or fetch it from its source (section 7). Decode it, and add its bindings to the walk. This
-   repeats until no new root appears.
+1. **Manifests.** Read, capture and validate every member's manifest and the root's (sections
+   2 to 4).
+2. **Member files.** Read and capture every member's `[sources]`, `[tests.sources]` and
+   `[foreign]` archive files once, every target's, under the reading rule of section 1. These
+   bytes are the ones the compiler is handed, the ones a member's root is computed from and
+   the ones a build links.
+3. **Content.** Acquire the `C` of every published root reached, in rounds, until no new root
+   appears. A **pending** root is one reached and not yet decoded, and pending roots are taken
+   in order of identity and then root. In each round:
+   1. each pending root whose store entry is present and undamaged is opened from the store;
+   2. each pending root left that has a declared source, a `url` or `archive` in a
+      declaration that binds it, is fetched from its lock source (section 8), the first such
+      declaration in identity order of the declaring packages. Only that source is tried, and
+      its failure is the refusal. A fetched archive puts all its entries in the store
+      (section 7), so it can satisfy other pending roots;
+   3. only when the first two steps have nothing left to do, each pending root left is
+      fetched from the declared source of a published package whose `C` binds it, the first
+      such package in identity order, even when that package itself came from the store,
+      because its archive holds its whole closure;
+   4. a root still pending is refused as `no source`, the least first.
+
+   Each `C` opened is decoded (section 1) once per root, and its bindings join the walk. Then,
+   for **every** incoming published edge, a binding of `name@major` to root P by any package,
+   the decoded package at P must be `name@major`, whether P came from the store, an archive's
+   head or another of its entries, and however many edges reached P first; otherwise the edge
+   is refused as `fetched identity`. Under `--frozen` steps 2 and 3 never run: the first
+   pending root that the store cannot open is refused.
 4. **Binding.** Bind each `name@major` once:
    - toolchain packages bind to the toolchain;
    - a member binds to the member;
@@ -375,8 +395,24 @@ each by name bytewise and then by major numerically. A path is written with ` ->
 reachable from X and nothing else from the workspace, as today's compiler input (the
 `CorpusManifest` of `--inputs`). Each package has its identity, its sources (a member's files,
 or a published package's verified bytes) and its dependencies: its bindings and `core@1`.
-X's `[tests.sources]` join in X's test runs only. A request never holds two packages with one
-`name@major`, so name resolution reads each identity once.
+X's `[tests.sources]` join X's modules in X's test runs and in the queries about X's tests
+(`hirsel inspect --affected-tests`), and in no other build. The tests a command runs or
+inspects are the parameterless tests declared in X's own files, `[sources]` and
+`[tests.sources]`; a dependency's tests are compiled as its other declarations are, for the
+ordinary checks, and are never selected, run or given a per-test configuration. A request
+never holds two packages with one `name@major`, so name resolution reads each identity once.
+
+**Toolchain packages and images.** Resolution comes first, before any image is chosen. The
+toolchain packages a request holds are exactly those X's closure binds: a member that binds
+only the implicit `core@1` gets no `std`, on the source path and the installed path alike,
+while a directory-convention package keeps its default `std@1` binding. An image is admitted
+to supply a package's code only when it was produced for the same toolchain and holds exactly
+the packages it is asked to supply: for each, the same identity, the same root for a
+published package, the same image stamp (section 10) for a member, and the same bindings. An
+image that holds any other package, such as a std image for a core-only request, is not used,
+so no namespace reaches the compiler from outside the closure. An explicit `--image` follows
+the same rule and is refused with `hirsel: --image <path> does not hold exactly this request's
+packages` when it fails.
 
 ## 6. Publishing a library
 
@@ -389,11 +425,14 @@ command does, then computes the member's root:
 - A binding to a published library is encoded as its root.
 - A binding to `std` is encoded as a toolchain binding.
 
-The member's `C` holds its `[sources]` files read through the symlink rule, and nothing of
-`[tests]`, `[program]` or `[tool]`. `pack` then writes a package archive (section 7) holding
+The member's `C` holds its captured `[sources]` files and `[foreign]` archives, every target's,
+and nothing of `[tests]`, `[program]` or `[tool]`. Each archive's captured bytes must match its
+pin here (the `member pin` refusal of section 9). `pack` then writes a package archive (section 7) holding
 that `C` and the `C` of every package its bindings reach, other than toolchain packages:
 members encoded the same way, and published libraries copied from the store. Before writing,
-`pack` decodes the archive it produced and verifies every root again as a fetch would. It puts
+`pack` decodes the archive it produced and verifies every root again as a fetch would, and it
+refuses an `--out` that names, by file identity, a manifest, a captured file, the lock or a
+store entry. It puts
 every package into the package store and prints one line per package of the archive, head
 first:
 
@@ -412,7 +451,11 @@ A member and a published root may meet in one closure under one `name@major`. Th
 when a workspace holds library `b` as a member while a published library it uses binds an
 earlier publication of `b`. They coalesce exactly when the member's root, computed as above,
 equals the published root: the content is then identical, and the member's files are used. A
-member edited since that publication has another root, and the pair is a diamond refusal.
+member edited since that publication has another root, and the pair is a diamond refusal. The
+coalesced package keeps the published binding's obligation: its lock row carries that root
+(section 8), and its root is in the check environment as a published package's is (section
+10). So a later edit that moves the member and the published pin together, from X to Y,
+changes the lock, and so does replacing the root binding with a path.
 
 ## 7. Package archives, fetching and the store
 
@@ -450,13 +493,19 @@ bytes and, before keeping or using anything:
 A failure at any step keeps nothing from the archive, not even under the root it actually
 has. So a mismatched fetch never fills the store under some other name.
 
+Steps 2 and 3 apply to every entry, the head's children as much as the head, and to the
+edges between them. An entry's place is earned only by an edge of this archive: a child that
+the store already holds does not make up for its absence from the archive, and an entry no
+edge reaches is refused as extra. A refused archive leaves the store exactly as it was.
+
 **Store.** The **package store** is the directory `--package-store DIR` names. By default it is
 `hirsel/packages` under the user cache (`$XDG_CACHE_HOME`, else `$HOME/.cache`), beside
 today's `hirsel/core-packages`. It holds each verified package as the file
 `<64 hex digits of P>`, whose bytes are `C`. A write goes to a temporary file in the store
 directory and is renamed into place, so a reader sees a whole entry or none. Every open
 re-hashes the entry before decoding it, so the tool never trusts a store entry by its name. An
-entry whose bytes do not hash to its name is **damaged**. It is treated as missing: a fetch may
+entry whose bytes do not hash to its name, or that hashes to its name but does not decode under
+section 1, is **damaged**. It is treated as missing: a fetch may
 replace it, and under `--frozen` its refusal says it is damaged (section 9). A store shared by
 several workspaces is safe, because its names are its contents.
 
@@ -471,7 +520,8 @@ from it, so it is never a second source of truth.
 then by major numerically. `core@1` has no row and appears in no edge list. A row has:
 
 - `id`, the `name@major`;
-- `root`, for a published library only: its root;
+- `root`, for a published library, and for a member that coalesced with a published binding
+  (section 6): the published root;
 - `source`, which is one of:
   - `toolchain`;
   - `member:<dir>`, the member's directory relative to the root, or `.` for the root;
@@ -486,11 +536,14 @@ store happened to hold or which archive was opened. It is the first `url` or `ar
 declarations that bind that root, taking declaring packages in identity order; a declaration
 with `root` alone names no source. With no such declaration, it is `via:<id>`, the first
 published package, in identity order, whose `C` binds that root. With neither, it is
-`store`. A member
-row has no root, because a member's bytes change with every edit. The member's files enter
+`store`. A member row's source is always `member:<dir>`. A member row that no published binding
+names has no root, because a member's bytes change with every edit. The member's files enter
 every key through their content (section 10), and a member's root is computed when it is
-packed. All paths use `/` and are normalised, with no `.` or `..` components and no trailing
-`/`.
+packed. A coalesced member row has the root its published binding pins, so the pin
+obligation is visible and compared. All paths use `/` and are normalised, with no `.` or `..`
+components and no trailing `/`. An `archive:` path is the lexical spelling of section 2,
+derived from the declaration and the declaring manifest's place alone: deriving or comparing a
+lock never opens, resolves or inspects an archive path or a link on it.
 
 **Bytes.** The lock has exactly one encoding, so comparing locks is comparing bytes:
 
@@ -517,8 +570,10 @@ edges = []
 
 The lock holds the comment line, `version = 1`, then one blank line before each row. A row's
 keys are always in the order `id`, `root`, `source`, `edges`, and the file ends with one line
-feed. TOML strings use basic-string escapes (`\"`, `\\`, `\u` for control characters) and
-nothing else. Lines end with a line feed alone.
+feed. A TOML string is a basic string. In it `"` is written `\"`, `\` is written `\\`, each of
+U+0000 to U+001F and U+007F is written `\u` and four upper-case hex digits (`\u001B`), and
+every other character is written as itself, with no other escape. Lines end with a line feed
+alone.
 
 **Staleness.** A lock is **stale** when its bytes differ from the derived lock. The tool then
 parses the old lock and reports what changed, one line per difference, rows in order and, within
@@ -528,20 +583,37 @@ a row, `root`, then `source`, then `edges`:
   json@1: root sha256:<old> -> sha256:<new>
   json@1: source archive:vendor/jx.hpkg -> archive:vendor/jy.hpkg
   json@1: edges [] -> ["util@1"]
+  lib@1: root none -> sha256:<new>
   util@1: added
   yaml@2: removed
 ```
 
+A row that gains or loses its `root`, as when a member starts or stops coalescing with a
+published binding, writes the missing side as `none`.
 An old lock that does not parse as a version 1 lock, or whose bytes differ while its parsed
 rows are equal, is reported as one line, `  hirsel.lock is not in the form this hirsel
 writes`.
 
 **Who writes it.** Every command that resolves a workspace (check, build, publish, run, test,
-inspect, pack, fetch and lock) derives the lock. Without `--locked` or `--frozen`, a command
+inspect, replay, sdk, pack, fetch and lock) derives the lock. Without `--locked` or `--frozen`, a command
 whose derived lock differs from the file writes the derived lock, through a temporary file and
-a rename. It writes `hirsel: created hirsel.lock` to stderr when there was none, or
+a rename, at its **commit point**. For every command but `pack` that is when resolution has
+succeeded, before the command's own work: a later compile error or failing test leaves the
+written lock, which describes the resolved workspace correctly. `pack` first builds and
+verifies its whole archive, its limits included, and then writes the lock, puts the entries in
+the store and installs its output, in that order. A refusal before the commit point writes no
+lock. Each write is atomic on its own, and a later I/O failure can leave earlier writes, which
+are correct by content; nothing is rolled back. It writes `hirsel: created hirsel.lock` to stderr when there was none, or
 `hirsel: updated hirsel.lock:` followed by the change lines, and then goes on. `hirsel lock`
 does only this, and `hirsel new` writes the first lock with the package.
+
+**Input modes.** Only a command given a package directory inside a workspace has a lock. With
+`--locked` or `--frozen`, a directory without a manifest, `--inputs`, a `--recipe` build and an
+SDK request for an executable are refused with `hirsel: --locked needs a workspace lock; <what
+was given> has none` (or `--frozen`), and never fall back to the directory convention.
+`hirsel replay PACKAGE` and `hirsel sdk` given a package directory resolve through this chapter
+like `check`, honour the flags and the package store, and `sdk` passes them on to the build it
+runs.
 
 **`--locked`.** Any of those commands refuses a missing or stale lock and writes nothing. It
 may still fetch pinned content that the store lacks, because a fetch only fills the store with
@@ -554,7 +626,8 @@ before any source is touched, so a `--frozen` command never opens a URL or an ar
 ## 9. Diagnostics
 
 A tool refusal is one block on stderr with exit status 2, like every other `hirsel:` error.
-The command writes no lock and no build output. The only thing a refused command can leave
+A refusal in resolution or in `pack`'s staging comes before the commit point (section 8), so
+the command writes no lock and no build output. The only thing a refused command can leave
 behind is store entries that were fetched and verified before a later step refused, as under
 `--locked` with a stale lock; an entry is named by its content, so keeping it is harmless.
 Manifest refusals
@@ -571,6 +644,14 @@ Roots are always written in full.
 | source missing | `hirsel: <manifest>: sources: "<path>" does not exist` |
 | symlink escapes | `hirsel: <manifest>: sources: "<path>" resolves outside the package` |
 | not a regular file | `hirsel: <manifest>: sources: "<path>" does not resolve to a regular file` |
+| no containment | `hirsel: <manifest>: sources: "<path>" cannot be opened relative to the package directory on this host` |
+| archive file | the four rows above with `foreign.<module>: archive "<file>"` in place of `sources: "<path>"` |
+| member pin | `hirsel: <manifest>: foreign.<module>: archive "<file>" for <target> does not match its pin: expected sha256 <E>, found sha256 <O>` (when the member's root is computed) |
+| no sources | `hirsel: <manifest>: sources: a package lists at least one source` |
+| member outside | `hirsel: <root manifest>: workspace.members: "<dir>" resolves outside the workspace` |
+| member claimed | `hirsel: <root manifest>: workspace.members: "<dir>" belongs to the workspace at <other root manifest>` |
+| output alias | `hirsel: --out <path> is an input of this command` (a manifest, a captured file, the lock or a store entry, compared by file identity) |
+| no lock in this mode | `hirsel: --locked needs a workspace lock; <what was given> has none` (or `--frozen`) |
 | two dependency forms | `hirsel: <manifest>: dependencies.<name>: give exactly one of path, root, workspace or a toolchain major` |
 | toolchain major | `hirsel: <manifest>: dependencies.std: the toolchain has std@1, not std@<n>` |
 | declared core | `hirsel: <manifest>: dependencies.core: core@1 is bound in every package and is not declared` |
@@ -582,9 +663,11 @@ Roots are always written in full.
 | inherit missing | `hirsel: <manifest>: dependencies.<name>: the workspace declares no <name>` |
 | no source | `hirsel: <id> sha256:<P> is not in the package store and its binding names no source` |
 | archive outside | `hirsel: <manifest>: dependencies.<name>: archive "<path>" is not inside the workspace root` |
+| archive incomplete | `hirsel: <id>: <source> lacks sha256:<P>, which <binder> binds as <name>@<major>`, the least such edge |
+| archive extra | `hirsel: <id>: <source> holds sha256:<Q>, which nothing in it binds`, the least such root |
 | fetch mismatch | `hirsel: <id>: <source> holds sha256:<Q>, but the binding pins sha256:<P>` |
-| fetched identity | `hirsel: <id>: sha256:<P> is <other>@<m>` |
-| malformed | `hirsel: <id>: <source> is not a package archive: <first decoding failure>` |
+| fetched identity | `hirsel: <id>: sha256:<P> is <other>@<m>`, for every edge whatever the content's origin |
+| malformed | `hirsel: <id>: <source> is not a package archive: <first decoding failure>`, the failure in the words of section 1, and `<source>` the archive or url the bytes came from |
 | fetch failed | `hirsel: <id>: fetching <url> failed: <cause>` |
 | diamond | `hirsel: <id> is bound to more than one root:` then one line per distinct root, each `  <path> = sha256:<root>`, in path order, each with its first path |
 | member and root | `hirsel: <id> is a member and is also bound to sha256:<P>, which is not the member's root:` then `  <path> = member` and `  <path> = sha256:<P>`, in path order |
@@ -605,7 +688,8 @@ dependency's content reaches each key, so a stale reuse is impossible.
 hash the body's bytes, the signature closure of every name it reads, its lookups and the
 environment (the driver's reuse keys, which PROG-10 keeps out of every address). The **environment** is
 the compiler identity, `core`, and each package's namespace: its identity and its dependency
-identities. It gains each published package's library root. So a record checked against one
+identities. It gains each published package's library root, a coalesced member's included
+(section 6), and each package's foreign stamp (below). So a record checked against one
 pin of `json@1` is never found under another, even for a body whose own bytes and named
 headers are equal. That holds whatever reads a future key might fail to list, at no cost to
 reuse within one pin, because a root never changes. A member contributes no root: its files
@@ -632,30 +716,51 @@ command's capture and checks them against the pin (FFI-3), so a replaced archive
 unchanged pin is refused on a warm build exactly as on a cold one.
 
 **Test results.** A reused pass is keyed by the test's code address
-([PROG-10](programs.md#prog-10-code-addresses)) and its run configuration (PROG-4). The
-address covers the checked IR of every instance the test reaches, in any package, so a
-dependency's content reaches the key through every body the test can run. A changed body in a
-reached dependency changes the address, and the test runs again. A changed file in a
-dependency that the test never reaches leaves the pass reused, which is correct, because the
-outcome depends only on code that runs. Nothing new enters the test key. A test whose reach
+([PROG-10](programs.md#prog-10-code-addresses)), its run configuration (PROG-4) and its
+**site digest**: SHA-256 over the annex hash of every body the test reaches, in ascending
+order of body hash. The address covers the checked IR of every instance the test reaches, in
+any package, so a dependency's content reaches the key through every body the test can run.
+The annexes hold the site maps, so a test that compares `Cause.site` values, or prints a
+failure's site, is keyed on them as PROG-10 requires; a test's caller is the test runner,
+whose site context is fixed by the toolchain already in the key. A changed body in a reached
+dependency changes the address, and an edit that keeps the IR but moves a reached site, such
+as regrouping `x / y / z` as `(x / y) / z`, changes the site digest. Either way the test
+runs again. A changed file in a dependency that the test never reaches changes neither, and
+the pass is reused, which is correct, because the outcome depends only on code that runs. A test whose reach
 holds a foreign function has no key ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)).
 
 **`hirsel inspect --affected-tests`.** The argument is a definition path in any package of the
-member's closure (`json@1/json/version`), or a package identity alone (`json@1`). For a
-package, the answer is every parameterless test of the member whose coverage includes any
-definition of that package. So after a lock change from `json@1 sha256:A` to `sha256:B`,
-`--affected-tests json@1` lists exactly the tests whose reuse the change can end.
+member's closure (`json@1/json/version`), or a package identity alone (`json@1`). A test's
+**coverage** is today's: the instances it reaches, the declarations they read transitively,
+the constants folded into them and their implicit reads, in any package. For a definition, the
+answer is every parameterless test of the member whose coverage includes it. For a package, it
+is the union of those answers over the package's definitions. It is a **candidate** list: it
+holds every test whose reuse a change to that package can end, and it can hold more. A rebind
+that changes nothing a test reaches, such as adding an unused file, leaves the test listed
+and its pass reused. A foreign-reaching test is listed when its coverage meets the package,
+though it never has a pass to reuse (FFI-8). Saying which passes a particular rebind ended
+needs both revisions and is not this query.
 
 **The recipe.** R already covers everything a dependency contributes to an executable: every
 reached body and its annex is in the recipe, and a body's hash covers its checked IR. The
 recipe's foreign parts ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking))
 hold a foreign leaf for each reached foreign module, from which a reader recomputes its
 addresses, and each linked archive by its digest. A dependency's file names in annexes are `name@major/path`
-(section 1), so R never depends on where the package store is. Two builds of one program
-over one closure give one R, on any machine and with any store path.
+(section 1), whether the dependency is published, a member or a coalesced member, so R never
+depends on where the package store or the workspace is. Two builds of one program over one
+closure, with the same target, backend, grants, root limit and place count, give one R, on
+any machine and with any store path, and whether a dependency's equal content comes from a
+member or from a published root.
 
-**Images.** A package image of the closure keys its sources by their content, as today. A
-published package's sources are its verified bytes, so its image is keyed by them.
+**Images.** A package image is keyed by each package's **image stamp**, and its file table
+is built from the same capture as the stamp, so the two cannot disagree. The stamp of a
+package is its identity, its bindings (a published binding by its root), its foreign stamp,
+and each file in the order of item 5: its logical name (section 1), its module path, its
+parse mode (source or test) and its bytes. A published package's files are its verified
+bytes. So renaming a file, even with its module and bytes unchanged, changes the stamp, and
+an image built before the rename is never used after it. A producer that misses the image
+takes the names from the capture and never synthesises one, so an image's site names, and the
+R built from it, equal those of a build from fresh source.
 
 ## 11. Commands
 
@@ -667,7 +772,8 @@ published package's sources are its verified bytes, so its image is keyed by the
 | `hirsel new NAME` | writes `NAME/hirsel.toml`, its sources, its tests and its first lock |
 
 `--locked`, `--frozen` and `--package-store DIR` apply to `check`, `build`, `publish`, `run`,
-`test`, `inspect`, `lock`, `fetch` and `pack`. `hirsel lock --locked` checks the lock without
+`test`, `inspect`, `replay`, `sdk`, `lock`, `fetch` and `pack`, when the command is given a
+package directory; section 8's input modes say what each does without one. `hirsel lock --locked` checks the lock without
 writing it, which is the CI freshness check. `hirsel fetch --locked` followed by a later
 `--frozen` build over the same store is the offline build. `hirsel publish` keeps its meaning:
 it prints an executable's R ([launch](launch.md#release-recipe-and-host-assembly)), and a
@@ -682,7 +788,9 @@ implementation. They are cases in the package-directory harness of
 directories. Fixture archives are packed with a fixture store F of their own. Every command of
 a law runs with `--package-store` naming that law's own store, empty when the law starts unless
 the law says otherwise, so no law's outcome depends on what an earlier command left in a
-store.
+store. Each law also has its own user cache (`XDG_CACHE_HOME`), so its own pass cache and
+check records, and its own code store, all empty when it starts and kept across that law's
+steps, so a step's `reused` or `executed` can only come from an earlier step of the same law.
 
 **Known roots.** Two one-file packages, `jx` and `jy`:
 
@@ -844,7 +952,12 @@ hirsel: json@1 sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb4
 instead. With the store holding the X entry with one byte flipped, the line says `is damaged
 in` in place of `is not in`. With the source changed to `archive = "vendor/jx.hpkg"` and the
 lock rewritten, `hirsel check app --locked` against a new empty store S3 fills S3 with X and
-passes, because `--locked` fetches.
+passes, because `--locked` fetches. Then, with that `archive` source and lock and with S2 empty
+again, make `vendor/jx.hpkg` a FIFO and have the harness block opening its write end on
+another thread: `hirsel check app --frozen --package-store S2` gives the `is not in` line
+with `(source archive:vendor/jx.hpkg)`, and the harness's open has not returned when the
+command exits, so the command never opened the archive. (The harness then opens the read end
+itself to release its thread.)
 
 **L4. A symlink escaping the package.** Package `p` lists `"a.hirsel" = "a"`, where `a.hirsel`
 is a symbolic link to `../outside.hirsel`, a regular file beside `p`, and `p` has no lock.
@@ -872,6 +985,22 @@ inventory that walks the directory, and one that keys exclusion by module instea
 `hirsel: json@1: archive:vendor/jy.hpkg holds sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99, but the binding pins sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58`,
 and the store has no entry named by Y or by X.
 
+A non-leaf bundle is checked edge by edge. Package `wrap@1` is the review fixture of section 1's
+vectors: one file `wrap.hirsel`, module `wrap`, holding `pub fn one() -> u64 { 1u64 }` and a
+line feed, and one binding, `json = { major = 1, root = "<X>", archive = "../vendor/jx.hpkg" }`.
+Its `C` is 107 bytes and its root is W = `sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689`. `hirsel pack wrap
+--out wrap.hpkg` prints `wrap@1 <W>` and then `json@1 <X>`. `app` binds
+`wrap = { major = 1, root = "<W>", archive = "vendor/wrap.hpkg" }`, and `hirsel check app`
+passes with the store holding W and X. Three archives built by hand from the same entries are
+refused, each leaving the store as it was:
+
+- head W with the entry Y in place of X: `hirsel: wrap@1: archive:vendor/wrap.hpkg lacks
+  sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58, which wrap@1 binds as json@1`;
+- head W alone, with the store already holding X: the same line, because the store never
+  completes an archive;
+- head W with entries X and Y: `hirsel: wrap@1: archive:vendor/wrap.hpkg holds
+  sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99, which nothing in it binds`.
+
 **L7. A dependency change reaches each key.** `app`'s test calls `json.version()`, and the lock
 binds X.
 
@@ -882,7 +1011,9 @@ binds X.
 - No body record checked under X is reused under Y. The environment holds the root, so the
   check of `app` under Y reuses no record, `json@1`'s included, even though `json.hirsel`'s
   bytes differ in one body only.
-- `hirsel publish` of a program over X prints the same R from a store at two different paths.
+- `hirsel publish` of a program over X prints the same R from a store at two different paths,
+  and the same R again when `json` is instead a workspace member holding `jx`'s files, bound by
+  path, so equal content gives equal names whatever supplies it.
 
 **L8. Foreign metadata reaches every reuse key.** Workspace members `app` and `math`; `app`
 binds `math = { major = 1, path = "../math" }`, and its entry calls `math.ping`, a wrapper in
@@ -905,3 +1036,81 @@ same command run cold, with an empty cache and an empty code store, on the same 
 The law catches a whole-request record, image key or definition key that hashes only source
 files, and a warm build that links an archive without checking it.
 
+
+**L9. A moved site ends a cached pass.** Two published pins of `math@1`, one file
+`math.hirsel`, module `math`: in A it holds `pub fn quot(x: u64, y: u64, z: u64) -> u64 { x / y / z }`,
+and in B the body is `(x / y) / z`. Both lower to the same two divisions with the same slots,
+so A and B give `quot` one code address. `app`'s parameterless test calls `quot(8, 0, 1)` and
+`quot(8, 1, 0)`, each inside an `isolate`, and returns `Ok(())` exactly when the two failures'
+`Cause.site` values are equal. Under A both sites start at `x`, and the test passes. Rebind
+`app` to B: the outer division's site now starts at `(`, and `hirsel test app` reports the
+test executed and failed, as a cold run under B does, instead of reusing A's pass. The law
+catches a pass key that holds the address but not the reached annexes.
+
+**L10. A coalesced member keeps its pin.** Workspace members `app` and `json`, where `json`
+is `jx` and `app` binds `json = { major = 1, root = "<X>", archive = "../vendor/jx.hpkg" }`.
+The member and the pin coalesce, and `hirsel lock` writes exactly:
+
+```text
+# hirsel.lock: written by hirsel; do not edit.
+version = 1
+
+[[package]]
+id = "app@1"
+source = "member:app"
+edges = ["json@1"]
+
+[[package]]
+id = "json@1"
+root = "sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58"
+source = "member:json"
+edges = []
+```
+
+Change the member to `jy` and the binding to `<Y>` with `jy.hpkg` in one edit:
+`hirsel check app --locked` exits 2, leaves the lock byte-identical and writes exactly
+
+```text
+hirsel: hirsel.lock is stale under --locked:
+  json@1: root sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 -> sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99
+```
+
+Instead replacing the binding by `json = { major = 1, path = "../json" }` gives the one change
+line `  json@1: root sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 -> none`. The law catches a lock that drops the
+published obligation when a member satisfies it.
+
+**L11. Every edge checks the identity it binds.** Fill the law's store with `jx` by
+`hirsel pack jx`. `app` binds `yaml = { major = 1, root = "<X>" }` and nothing else, so X is
+opened from the store and no archive is read. `hirsel lock app` exits 2 with exactly
+`hirsel: yaml@1: sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 is json@1`. With `app` binding
+`json = { major = 1, root = "<X>", archive = "vendor/jx.hpkg" }` as well, so X is visited first
+under the right identity, the refusal is the same line. The law catches a resolver that checks
+identity only on a cold archive head, or once per root instead of once per edge.
+
+**L12. Member files are read inside their directories.** Workspace root `W` lists `app` and
+`lib`, where `W/lib` is a symbolic link to `../elsewhere/lib`, a valid package outside `W`.
+`hirsel lock W` exits 2 with exactly
+`hirsel: W/hirsel.toml: workspace.members: "lib" resolves outside the workspace`. Separately,
+package `p` lists `"a.hirsel" = "a"`, where `p/up` is a link to `..` and `a.hirsel` is a
+link to `up/p/real.hirsel`, which names `p/real.hirsel` again: `hirsel check p`, run from
+`p`'s parent, exits 2 with `hirsel: p/hirsel.toml: sources: "a.hirsel" resolves outside the
+package`, because the walk left the package although the final file is inside. The law catches
+containment checked on a normalised pathname instead of on the walk actually opened. The
+concurrent-replacement case that the capture rule closes has no deterministic CLI oracle, and
+no law claims it.
+
+**L13. An image supplies only the closure.** Member `core_only` binds nothing, and its module
+`main` holds `pub fn main() -> u64 { std.x }` for any std name `x`. `hirsel check core_only`
+is refused by name resolution because `core_only@1` does not bind `std`, with the same
+diagnostic from a source checkout and from an installed toolchain whose std image is
+registered. Given `--image` naming an image of `core_only@1` and `std@1`, the command exits 2
+with exactly `hirsel: --image <path> does not hold exactly this request's packages`. The law
+catches a toolchain image chosen before resolution.
+
+**L14. A rename reaches the image and the names.** Member `json@1` has one file, `old.hirsel`
+in module `json`, holding `pub fn half(x: u64) -> u64 { 8u64 / x }` and a line feed, and `app`
+binds it by path; `app`'s entry calls `json.half(0)`. `hirsel check app` builds the closure
+image. Rename the file to `new.hirsel`, module and bytes unchanged. The failure `hirsel run
+app` reports now names its site in `json@1/new.hirsel`, and `hirsel publish app`
+prints the R of a cold run with no image, on the warm image path as on the cold one. The law
+catches an image keyed without file names and a producer that synthesises names.

@@ -398,6 +398,7 @@ language switches. The one exception is an implementation's resource refusal: a 
 whose checking exceeds the implementation's resources (for example unbounded generic
 instantiation, or instantiation past a depth or count) may be refused with a message that
 names no rule; such a refusal is not a meaning of the program.
-A package's dependencies are fixed by their library roots before the compiler runs
-([packages](packages.md)), so `--locked` and `--frozen` decide only whether a command
+A package's dependencies are fixed before the compiler runs ([packages](packages.md)): a
+published library by its root, a workspace member by its captured files, and a toolchain
+package by the toolchain, so `--locked` and `--frozen` decide only whether a command
 proceeds.

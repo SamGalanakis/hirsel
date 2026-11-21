@@ -1945,6 +1945,141 @@ fn request_sequences_answer_as_an_empty_store() {
     assert!(stale.is_empty(), "gate classes of no sequence: {stale:?}");
     run_sequences(seqs, None, UNEQUAL_ROOTS);
 }
+
+enum Edit {
+    Trivia,
+    Body(&'static str),
+    HeaderSameType(&'static str),
+    HeaderNewType {
+        body: &'static str,
+        readers: &'static [&'static str],
+    },
+    Add(&'static str),
+    Delete,
+    Rename(&'static str),
+    Move,
+}
+
+impl Edit {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Trivia => "trivia",
+            Self::Body(_) => "body",
+            Self::HeaderSameType(_) => "header-same-type",
+            Self::HeaderNewType { .. } => "header-new-type",
+            Self::Add(_) => "add",
+            Self::Delete => "delete",
+            Self::Rename(_) => "rename",
+            Self::Move => "move",
+        }
+    }
+
+    fn violation(&self, checked: &CheckProduct) -> Option<String> {
+        let actual = checked.rechecked_paths();
+        let path = |name| DefPath::from_full(name).unwrap();
+        let expected = match self {
+            Self::Trivia | Self::Delete | Self::Move => BTreeSet::new(),
+            Self::Body(body)
+            | Self::HeaderSameType(body)
+            | Self::Add(body)
+            | Self::Rename(body) => BTreeSet::from([path(body)]),
+            Self::HeaderNewType { body, readers } => {
+                readers.iter().copied().chain([*body]).map(path).collect()
+            }
+        };
+        let matches = if matches!(self, Self::HeaderNewType { .. }) {
+            expected.iter().all(|path| actual.contains(path))
+        } else {
+            expected.iter().eq(actual)
+        };
+        (!matches).then(|| format!("expected {expected:?}, rechecked {:?}", checked.rechecked))
+    }
+}
+
+#[test]
+fn request_sequences_recheck_edit_paths() {
+    const VALUE: &str = "app@1/api/value";
+    const READERS: &[&str] = &["app@1/read/first", "app@1/read/second"];
+    const BASE: &str = "pub fn value(x: u8) -> u8 { 1u8 }\nfn old() {}";
+    const TRIVIA: &str = "pub fn value(x: u8) -> u8 {    1u8 }\nfn old() {}";
+    const BODY: &str = "pub fn value(x: u8) -> u8 {    2u8 }\nfn old() {}";
+    const SAME_TYPE: &str = "pub fn value(y: u8) -> u8 {    2u8 }\nfn old() {}";
+    const NEW_TYPE: &str = "pub fn value(y: u8) -> u64 {    2u64 }\nfn old() {}";
+    const ADDED: &str = "pub fn value(y: u8) -> u64 {    2u64 }\nfn old() {}\nfn extra() {}";
+    const RENAMED: &str = "pub fn value(y: u8) -> u64 {    2u64 }\nfn new() {}";
+    let edits = [
+        (Edit::Trivia, "api.hirsel", TRIVIA),
+        (Edit::Body(VALUE), "api.hirsel", BODY),
+        (Edit::HeaderSameType(VALUE), "api.hirsel", SAME_TYPE),
+        (
+            Edit::HeaderNewType {
+                body: VALUE,
+                readers: READERS,
+            },
+            "api.hirsel",
+            NEW_TYPE,
+        ),
+        (Edit::Add("app@1/api/extra"), "api.hirsel", ADDED),
+        (Edit::Delete, "api.hirsel", NEW_TYPE),
+        (Edit::Rename("app@1/api/new"), "api.hirsel", RENAMED),
+        (Edit::Move, "moved.hirsel", RENAMED),
+    ];
+    let req = |file, text| {
+        check(app(&[
+            (file, "api", text),
+            (
+                "read.hirsel",
+                "read",
+                "fn first() { let _ = api.value(0u8) }\nfn second() { let _ = api.value(1u8) }",
+            ),
+            ("spare.hirsel", "spare", "fn value() -> u8 { 9u8 }"),
+        ]))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    let mut written = BTreeSet::new();
+    let mut resident = Driver::default();
+    for (edit, req) in std::iter::once((None, req("api.hirsel", BASE))).chain(
+        edits
+            .iter()
+            .map(|(edit, file, text)| (Some(edit), req(file, text))),
+    ) {
+        let inputs = materialize(&req, false, dir.path(), &mut written);
+        for (store, driver) in [
+            ("resident", &mut resident),
+            ("disk", &mut Driver::default()),
+        ] {
+            let checked = driver
+                .check(
+                    CheckRequest {
+                        manifest: None,
+                        inputs: inputs.clone(),
+                        store: dir.path().join(store),
+                        library: LibraryInput::Sources,
+                        entry: None,
+                    },
+                    &mut Meter::new(false),
+                )
+                .unwrap();
+            assert!(
+                checked.accepted(),
+                "{store}: {}",
+                serde_json::json!({
+                    "diagnostics": checked.machine_diagnostics().unwrap(),
+                    "incomplete": checked.machine_incomplete().unwrap(),
+                    "resources": checked.machine_resources().unwrap(),
+                })
+            );
+            if let Some(edit) = edit
+                && let Some(violation) = edit.violation(&checked)
+            {
+                failures.push(format!("{} ({store}): {violation}", edit.name()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 #[ignore = "explicit native integration target"]
 fn request_sequences_build_as_an_empty_store() {

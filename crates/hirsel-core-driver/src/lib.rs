@@ -397,6 +397,7 @@ pub struct CheckProduct {
     pub incomplete: Vec<Incomplete>,
     pub resources: Vec<ResourceRefusal>,
     pub bytes: usize,
+    /// Definition paths whose body products were recomputed by this request.
     pub rechecked: Vec<DefPath>,
     pub root: ContentHash,
     pub snapshot: ContentHash,
@@ -428,6 +429,10 @@ impl CheckProduct {
     }
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty()
+    }
+    /// The identities of the rechecked bodies, independent of traversal order.
+    pub fn rechecked_paths(&self) -> BTreeSet<&DefPath> {
+        self.rechecked.iter().collect()
     }
     pub fn demand_body(&self, definition: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
         if let Some(body) = self.definitions.get(definition) {

@@ -13,11 +13,14 @@ the compiler and its subprocesses.
 
 import argparse
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from typing import NamedTuple
+
+ROOT = Path(__file__).resolve().parents[2]
 
 SHIM = r"""
 #define _GNU_SOURCE
@@ -115,9 +118,80 @@ def syncs(args, shim, log):
     return run, calls
 
 
+def tree(root, allowed=()):
+    """Snapshot entries without following symlinks or reading allowed outputs."""
+    entries = {}
+    for path in root.iterdir():
+        if path in allowed:
+            continue
+        info = path.lstat()
+        identity = (info.st_mode, info.st_ino)
+        if stat.S_ISDIR(info.st_mode):
+            entries[path] = identity
+            entries.update(tree(path, allowed))
+        else:
+            content = (os.readlink(path) if stat.S_ISLNK(info.st_mode)
+                       else path.read_bytes() if stat.S_ISREG(info.st_mode) else None)
+            entries[path] = (*identity, info.st_mtime_ns, info.st_ctime_ns, content)
+    return entries
+
+
+def changed_paths(before, after):
+    return {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
+
+
 class StoreNoSync(unittest.TestCase):
     def setUp(self):
         self.compiler = str(Path(os.environ["HIRSEL_SYNC_COMPILER"]).resolve())
+
+    def test_cli_footprint(self):
+        with tempfile.TemporaryDirectory(prefix="hirsel-footprint-") as scratch:
+            root = Path(scratch).resolve()
+            work = root / "work"
+            source = work / "source"
+            source.mkdir(parents=True)
+            main = source / "main.hirsel"
+            main.write_text("pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n")
+            dirty = source / "needs_formatting.hirsel"
+            dirty.write_text("fn helper( ) { }\n")
+            (work / "outside.hirsel").write_text("fn outside( ) { }\n")
+            (source / "notes.txt").write_text("keep this file\n")
+            home, xdg, tmp = (root / name for name in ("home", "xdg", "tmp"))
+            for directory in (home, xdg / "hirsel", tmp):
+                directory.mkdir(parents=True)
+            env = dict(os.environ, HOME=str(home), XDG_CACHE_HOME=str(xdg), TMPDIR=str(tmp))
+
+            def cli(*args):
+                return subprocess.run([self.compiler, *args], cwd=work, env=env,
+                                      capture_output=True, text=True)
+
+            with self.subTest(command="check"):
+                store = work / "check-store"
+                metrics = work / "metrics.json"
+                cache = xdg / "hirsel/core-packages"
+                allowed = (store, metrics, cache)
+                before = tree(root, allowed)
+                checked = cli("check", source, "--libraries", ROOT / "core",
+                              "--core-product", cache, "--store", store,
+                              "--metrics", metrics)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                self.assertTrue(store.is_dir() and metrics.is_file())
+                self.assertEqual(changed_paths(before, tree(root, allowed)), set())
+
+            with self.subTest(command="fmt --check"):
+                before = tree(root)
+                checked = cli("fmt", "--check", source)
+                self.assertEqual((checked.returncode, checked.stderr), (1, ""))
+                self.assertEqual(changed_paths(before, tree(root)), set())
+
+            with self.subTest(command="fmt"):
+                before = tree(root)
+                formatted = cli("fmt", source)
+                self.assertEqual((formatted.returncode, formatted.stderr), (0, ""))
+                reported = [Path(line) for line in formatted.stdout.splitlines()]
+                self.assertEqual(reported, [dirty])
+                self.assertEqual(changed_paths(before, tree(root)), set(reported))
+                self.assertEqual(dirty.read_text(), "fn helper() {}\n")
 
     def assert_publication_syncs(self, calls, root, *, staging=None):
         objects = {}
@@ -295,5 +369,6 @@ class StoreNoSync(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-threads", type=int, choices=[1], default=1)
-    parser.parse_args()
-    unittest.main(argv=[__file__], verbosity=2)
+    parser.add_argument("tests", nargs="*")
+    args = parser.parse_args()
+    unittest.main(argv=[__file__, *args.tests], verbosity=2)

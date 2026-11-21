@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hirsel</title>
+  <meta name="description" content="Good fences make fast systems. A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.">
+  <meta name="theme-color" content="#FBF6EC">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="canonical" href="https://samgalanakis.github.io/hirsel/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="hirsel">
+  <meta property="og:title" content="hirsel: Good fences make fast systems.">
+  <meta property="og:description" content="A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.">
+  <meta property="og:url" content="https://samgalanakis.github.io/hirsel/">
+  <meta property="og:image" content="https://samgalanakis.github.io/hirsel/social-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The hirsel ram mark and wordmark with the line: Good fences make fast systems.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preload" href="fonts/archivo-black-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+@font-face{font-family:'Archivo Black';font-style:normal;font-weight:400;font-display:swap;src:url(fonts/archivo-black-latin.woff2) format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:400 600;font-display:swap;src:url(fonts/inter-latin.woff2) format('woff2')}
+</style>
+<!--
+  Heft. One hill, one flock, one red. Every view is the same flock re-arranged;
+  the behaviour on screen is the property.
+-->
+<style>
+:root{--ink:#11110F;--cream:#FBF6EC;--red:#CB271F;--mute:#5E5A50;--rule:rgba(17,17,15,.14)}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--cream);color:var(--ink)}
+body{font:400 16px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+button:disabled{cursor:default;opacity:.38}
+a{color:inherit}
+canvas#c{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+.wmfont{font-family:"Archivo Black","Arial Black","Inter",system-ui,sans-serif;font-weight:900;letter-spacing:-.035em}
+
+header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:28px;padding:18px 48px;z-index:3}
+header .wm{font-size:22px;line-height:1}
+header .idx{flex:1;min-width:0}
+header .strip{position:relative;display:flex;gap:18px;font-size:13.5px;font-weight:500;white-space:nowrap}
+header .strip button{color:var(--mute);padding:4px 0;border-bottom:1.5px solid transparent;transition:color .3s,border-color .3s;flex:none}
+header .strip button:hover{color:var(--ink)}
+header .strip button.on{color:var(--ink);border-bottom-color:var(--ink)}
+header .stepper{display:none}
+header .links{margin-left:auto;display:flex;align-items:center}
+header .gh{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;margin-right:-8px;border-radius:50%;color:var(--ink);opacity:.82;transition:opacity .25s,background-color .25s}
+header .gh:hover{opacity:1;background:rgba(17,17,15,.06)}
+header .gh svg{width:20px;height:20px;display:block}
+
+.land{position:fixed;left:48px;bottom:52px;z-index:2;pointer-events:none}
+.land>*{pointer-events:auto}
+.land h1{margin:0;font-size:clamp(76px,12.5vw,176px);line-height:.8}
+.land .head{margin:22px 0 0 4px;font-size:24px;line-height:1.2;font-weight:600;letter-spacing:-.015em;color:var(--ink)}
+.land .tag{margin:8px 0 0 5px;max-width:42ch;font-size:14px;line-height:1.5;font-weight:400;color:#3d3b35}
+.land .in{margin:22px 0 0 4px;font-size:15px;font-weight:500;display:inline-flex;gap:10px;align-items:center;border-bottom:1.5px solid var(--ink);padding-bottom:3px}
+.land .in span{transition:transform .5s cubic-bezier(.2,.7,.2,1)}
+.land .in:hover span{transform:translateX(6px)}
+
+.panel{position:fixed;left:48px;top:50%;transform:translateY(-50%);width:340px;z-index:2}
+.panel .eyebrow{margin:0 0 10px;font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--mute)}
+.panel h2{margin:0;font:400 31px/1.12 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;letter-spacing:-.025em}
+.panel .body{margin:18px 0 0;font-size:16px;line-height:1.6;color:#2b2a26;max-width:34ch}
+.panel .body p{margin:0}
+.panel .body .half{margin-top:12px}
+.panel .body .half b{display:block;margin-bottom:1px;font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--mute)}
+.det{margin-top:14px}
+.det button{font-size:13px;font-weight:500;color:var(--mute);border-bottom:1px solid var(--rule);padding-bottom:1px;transition:color .25s,border-color .25s}
+.det button:hover{color:var(--ink);border-bottom-color:var(--ink)}
+.walk{display:flex;justify-content:space-between;gap:16px;margin-top:30px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
+.walk button{color:var(--mute)} .walk button:hover{color:var(--ink)}
+.walk .nx{margin-left:auto}
+:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+
+@media (max-width:700px){
+  header{padding:12px 16px 0;gap:12px}
+  header .wm{font-size:19px}
+  header .idx{display:flex;justify-content:center}
+  header .strip{display:none}
+  header .stepper{display:flex;align-items:center;gap:2px;font-size:14px;font-weight:600;white-space:nowrap}
+  header .stepper button{width:32px;height:32px;font-size:20px;line-height:1;color:var(--mute);border-radius:50%}
+  header .stepper button:not(:disabled):hover{color:var(--ink);background:rgba(17,17,15,.06)}
+  header .stepper span{min-width:0;text-align:center;padding:0 2px}
+  .land{left:16px;right:16px;bottom:34px}
+  .land h1{font-size:84px}
+  .land .head{font-size:20px;margin-top:16px;margin-left:3px}
+  .land .tag{font-size:13px;margin-top:6px;margin-left:3px}
+  .land .in{margin-top:16px}
+  .panel{left:16px;right:16px;top:auto;bottom:14px;transform:none;width:auto;max-height:52vh;overflow:auto}
+  .panel .eyebrow{margin-bottom:6px}
+  .panel h2{font-size:23px}
+  .panel .body{margin-top:10px;font-size:15px;line-height:1.5;max-width:none}
+  .panel .body .half{margin-top:7px}
+  .panel .body .half b{font-size:11px}
+  .det{margin-top:8px}
+  .walk{margin-top:14px;padding-top:10px}
+}
+</style>
+</head>
+<body>
+<canvas id="c" aria-hidden="true"></canvas>
+
+<header>
+  <button class="wm wmfont" id="wm" aria-label="hirsel, back to the hill" hidden>hirsel</button>
+  <nav class="idx" id="idx" aria-label="Properties" hidden>
+    <div class="strip" id="strip">
+      <button data-v="safe">Safe</button>
+      <button data-v="parallel">Parallel</button>
+      <button data-v="memory">Memory</button>
+      <button data-v="bounded">Bounded</button>
+      <button data-v="deterministic">Deterministic</button>
+      <button data-v="authority">Explicit authority</button>
+      <button data-v="local">Local</button>
+      <button data-v="fast">Fast</button>
+    </div>
+    <div class="stepper">
+      <button id="sPrev" aria-label="Previous property">&lsaquo;</button>
+      <span id="sName" aria-current="page"></span>
+      <button id="sNext" aria-label="Next property">&rsaquo;</button>
+    </div>
+  </nav>
+  <nav class="links" aria-label="Site">
+    
+    <a class="gh" id="gh" href="https://github.com/samgalanakis/hirsel" aria-label="Source on GitHub" title="Source on GitHub">
+      <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    </a>
+  </nav>
+</header>
+
+<section class="land" id="land">
+  <h1 class="wmfont">hirsel</h1>
+  <p class="head">Good fences make fast systems.</p>
+  <p class="tag">A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.</p>
+  <button class="in" id="walkIn">walk the hill <span aria-hidden="true">&rarr;</span></button>
+</section>
+
+<section class="panel" id="panel" aria-live="polite" hidden>
+  <p class="eyebrow" id="pName"></p>
+  <h2 id="pTitle"></h2>
+  <div class="body" id="pBody"></div>
+  <div class="det" id="det" hidden>
+    <!-- On the real site the run could be streamed over SSE from a seeded simulation on the server. -->
+    <button id="replayBtn">&#8634; replay</button>
+  </div>
+  <div class="walk">
+    <button id="prevBtn">&larr; <span></span></button>
+    <button class="nx" id="nextBtn"><span></span> &rarr;</button>
+  </div>
+</section>
+
+<script>
+/* ---------- content ---------- */
+const VIEWS = ['hill', 'safe', 'parallel', 'memory', 'bounded', 'deterministic', 'authority', 'local', 'fast'];
+/* One meaning folded into Deterministic; old links land there */
+const ALIAS = { meaning: 'deterministic' };
+const viewOf = h => ALIAS[h] || h;
+const COPY = {
+  hill: ['The hill', '', ''],
+  safe: ['Safe', 'Nothing is left lying on the hill.',
+    'An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. When a sheep leaves, its ground goes with it.'],
+  parallel: ['Parallel', 'Every task keeps to its own ground.',
+    'Tasks share nothing. A value passes from one task to another only by moving through a spawn, a channel or a join. The only memory two tasks can both read is the immutable payload of an Arc.'],
+  memory: ['Memory', 'The type decides who frees.',
+    'An ordinary type has one owner, and its value is freed when the owner goes away. Data that dies together lives in one region and is freed at once. Sharing is opt-in and counted, and a move never copies the data a value owns.'],
+  bounded: ['Bounded', 'A full patch refuses the next mouthful.',
+    'Every allocation is made against a limit. Running out is the ordinary failure Capacity, which the program catches and handles, and then it carries on. Bound scopes nest one limit inside another.'],
+  deterministic: ['Deterministic', 'One run, every time.',
+    'Given the same outside inputs and limits, a program behaves identically on every engine and build, down to the moment it runs out of memory. No flag, build mode, optimiser or engine changes what a program means. A run can also be recorded from outside, without altering the program, and replayed.'],
+  authority: ['Explicit authority', 'Only a sheep handed the key goes through the gate.',
+    'Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed, and nothing else.'],
+  local: ['Local', 'Each sheep needs only its own ground.',
+    'Correct code needs no global knowledge. Checking a definition reads only its own body and the declarations it names, and each refusal names one rule and one site.'],
+  fast: ['Fast', 'A straight line across the hill.',
+    ['Hirsel is a compiled systems language.',
+      ['build', 'The compiler checks and lowers each definition once, reading only its own body and the declarations it names. It keeps checked definitions by their content, so a change rechecks only that definition and the ones that name a signature it changed.'],
+      ['run', 'Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.']]],
+};
+
+/* ---------- seeded randomness ---------- */
+function mb(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function hh(a, b) { let x = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b + 0x632be5ab | 0, 0xc2b2ae35); x ^= x >>> 15; x = Math.imul(x, 0x2c1b3c6d); x ^= x >>> 12; x = Math.imul(x, 0x297a2d39); x ^= x >>> 15; return (x >>> 0) / 4294967296; }
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const sm = t => t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
+const lerp = (a, b, t) => a + (b - a) * t;
+const cl01 = t => t < 0 ? 0 : t > 1 ? 1 : t;
+/* a hefted sheep's grazing: pause, step to a new seeded spot inside its own diamond, pause. Pure in (key, tick). */
+function graze(key, t) {
+  const P = 170 + Math.floor(hh(key, 1) * 150), ph = Math.floor(hh(key, 2) * P), tt = t + ph;
+  const e = Math.floor(tt / P), f = (tt % P) / P;
+  const pt = k => { const a = hh(key, k * 2 + 11) * 2 - 1, b = hh(key, k * 2 + 12) * 2 - 1; return [(a + b) / 2, (a - b) / 2]; };
+  const A = pt(e - 1), B = pt(e), m = f < .4 ? ease(f / .4) : 1;
+  const bob = f >= .4 ? Math.max(0, Math.sin((f - .4) * 40)) * .5 : 0;
+  return [lerp(A[0], B[0], m), lerp(A[1], B[1], m), B[0] >= A[0] ? 1 : -1, bob];
+}
+
+/* ---------- drawing primitives ---------- */
+const MARK = new Path2D("M96.91,16.08 Q95.84,15.44 94.76,16.07 L27.58,55.01 Q26.50,55.64 26.50,56.89 L26.50,122.73 Q26.50,123.98 27.54,124.67 L63.64,148.42 Q64.69,149.11 64.69,150.36 L64.69,204.13 Q64.69,205.38 65.76,206.02 L80.69,214.80 Q81.77,215.44 83.00,215.23 L86.57,214.64 Q87.80,214.43 87.84,213.18 L88.77,183.52 Q88.81,182.27 90.04,182.45 L94.60,183.10 Q95.84,183.27 96.88,183.97 L112.89,194.64 Q113.93,195.33 113.93,196.58 L113.93,231.27 Q113.93,232.52 114.97,233.21 L125.03,239.92 Q125.99,240.56 127.15,240.56 L129.86,240.56 Q131.01,240.56 131.96,239.90 L140.04,234.24 Q141.06,233.52 141.06,232.27 L141.06,200.61 Q141.06,199.36 142.15,198.74 L200.64,165.60 Q201.36,165.19 202.06,165.65 L203.69,166.73 Q204.38,167.19 204.38,168.03 L204.38,202.13 Q204.38,203.38 205.54,203.84 L208.25,204.92 Q209.40,205.38 210.51,204.81 L227.39,195.92 Q228.50,195.33 228.52,194.09 L229.48,135.28 Q229.50,134.03 228.44,133.38 L186.27,107.50 Q185.28,106.89 184.13,106.89 L181.42,106.89 Q180.26,106.89 179.26,107.47 L116.02,143.46 Q114.94,144.08 113.88,143.41 L63.38,111.36 Q62.67,110.92 62.21,110.22 L61.13,108.59 Q60.66,107.90 60.69,107.07 L61.64,71.96 Q61.67,70.72 62.73,70.06 L94.78,50.27 Q95.84,49.61 96.93,50.22 L119.87,63.07 Q120.96,63.68 120.96,64.93 L120.96,80.52 Q120.96,81.77 119.92,82.46 L106.71,91.28 Q105.89,91.82 105.20,91.13 L103.57,89.50 Q102.88,88.81 102.88,87.82 L102.88,76.90 Q102.88,75.74 101.95,75.05 L99.78,73.42 Q98.85,72.73 97.72,72.95 L94.99,73.50 Q93.83,73.73 92.84,74.36 L83.83,80.09 Q82.78,80.77 82.83,82.01 L83.72,101.63 Q83.78,102.88 84.84,103.54 L101.90,114.32 Q102.88,114.94 104.03,114.94 L106.74,114.94 Q107.90,114.94 108.89,114.34 L145.02,92.47 Q146.09,91.82 146.09,90.57 L146.09,46.84 Q146.09,45.59 145.02,44.95 L96.91,16.08 Z");
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const INK = '#11110F', RED = '#CB271F', BG = '#FBF6EC';
+/* the hill's tonal ramp: cream > oat > straw > peat > ink. Moss is the one quiet secondary, kept
+   to grazing ground inside a wall; red stays with the one red ram and Capacity. */
+const GROUND = '#ECE3CF', GROUND2 = '#E2D7BE', HILL = '#F3EBDB', USED = '#4A463D';
+const OAT = '#E6DCC4', STRAW = '#D3C4A2', PEAT = '#8C7458', PEAT_D = '#4E3E2E', MOSS = '#DFDCC0';
+function sheep(x, y, s, face, red, a) {
+  if (a <= .01) return;
+  if (s > 14) { ctx.save(); ctx.globalAlpha = a * .085; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x + (face > 0 ? -1 : 1) * s * .02, y + s * .02, s * .4, s * .095, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y);
+  const k = s / 225; ctx.scale(face > 0 ? -k : k, k); ctx.translate(-128, -236);
+  ctx.fillStyle = red ? RED : INK; ctx.fill(MARK); ctx.restore();
+}
+function dia(x, y, hw, hh2) { ctx.beginPath(); ctx.moveTo(x, y - hh2); ctx.lineTo(x + hw, y); ctx.lineTo(x, y + hh2); ctx.lineTo(x - hw, y); ctx.closePath(); }
+function fillDia(x, y, hw, hh2, col, a) { ctx.globalAlpha = a; ctx.fillStyle = col; dia(x, y, hw, hh2); ctx.fill(); ctx.globalAlpha = 1; }
+/* a grazing patch: flat cream diamond with a hair of shade along its two lower edges */
+function patch(x, y, hw, hh2, a, col) {
+  if (a <= .01) return;
+  ctx.save(); ctx.globalAlpha = a * .07; ctx.fillStyle = INK; dia(x, y + 1.6, hw, hh2); ctx.fill(); ctx.restore();
+  fillDia(x, y, hw, hh2, col || GROUND, a);
+}
+function label(txt, x, y, a, align, size, weight, col) {
+  ctx.globalAlpha = a; ctx.fillStyle = col || INK; ctx.font = (weight || 500) + ' ' + (size || 11.5) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, x, y); ctx.globalAlpha = 1;
+}
+/* every in-scene callout: small type set straight on the ground, cut out of whatever lies under
+   it by a cream halo, and, where it names a thing, a short hairline pinned to that thing with a
+   dot. o: { align, size, col (red only for Capacity), to: [x, y] pin, sub: second line, subA } */
+function note(txt, x, y, a, o) {
+  if (a <= .01) return;
+  o = o || {};
+  const size = o.size || (MOB ? 11.5 : 12.5), align = o.align || 'center', col = o.col || INK;
+  const f1 = '600 ' + size + 'px Inter, system-ui, sans-serif', f2 = '500 ' + (size - 1.5) + 'px Inter, system-ui, sans-serif';
+  ctx.save(); ctx.font = f1; const w = ctx.measureText(txt).width;
+  if (o.to) {
+    const ex = align === 'left' ? x - 5 : align === 'right' ? x + 5 : x, ey = align === 'center' ? (o.to[1] > y ? y + (o.sub ? size * 1.75 + 3 : size * .75) : y - size * .75) : y;
+    ctx.globalAlpha = a * .7; ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(o.to[0], o.to[1]); ctx.stroke();
+    ctx.globalAlpha = a; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(o.to[0], o.to[1], 2.2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.textAlign = align; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  const halo = (t, yy, al) => { ctx.globalAlpha = al; ctx.strokeStyle = BG; ctx.lineWidth = 5; ctx.strokeText(t, x, yy); };
+  halo(txt, y, a * .92); ctx.globalAlpha = a * (col === INK ? .84 : 1); ctx.fillStyle = col; ctx.fillText(txt, x, y);
+  if (o.sub && (o.subA ?? 1) > .01) {
+    const sy = y + size + 3, sa = a * (o.subA ?? 1); ctx.font = f2;
+    halo(o.sub, sy, sa * .92); ctx.globalAlpha = sa * .72; ctx.fillStyle = INK; ctx.fillText(o.sub, x, sy);
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+  return w;
+}
+function dashed(pts, a, quad) {
+  ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = INK; ctx.lineWidth = 1.25; ctx.setLineDash([3, 5]); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  if (quad) ctx.quadraticCurveTo(pts[1][0], pts[1][1], pts[2][0], pts[2][1]); else for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.stroke(); ctx.restore();
+}
+const qpt = (p, c, q, t) => [(1 - t) * (1 - t) * p[0] + 2 * (1 - t) * t * c[0] + t * t * q[0], (1 - t) * (1 - t) * p[1] + 2 * (1 - t) * t * c[1] + t * t * q[1]];
+function token(x, y, a, col) { fillDia(x, y, 6.5, 6.5, col || INK, a); ctx.save(); ctx.globalAlpha = a * .35; ctx.strokeStyle = col || INK; ctx.lineWidth = 1; dia(x, y, 11, 11); ctx.stroke(); ctx.restore(); }
+
+/* a dry-stone wall from A to B: a hair of shade along its foot, then a run of small stones
+   of uneven height. k scales the stones (nearer walls are bigger), seed keeps the run fixed. */
+function wallStones(A, B, k, seed) {
+  const len = Math.hypot(B[0] - A[0], B[1] - A[1]), n = Math.max(1, Math.round(len / (3.4 * k))), out = [];
+  for (let j = 0; j < n; j++) {
+    const f = (j + .5) / n, x = lerp(A[0], B[0], f), y = lerp(A[1], B[1], f), h = (1.9 + hh(seed + j, 31) * 1.7) * k, w = 2.5 * k;
+    out.push([x - w / 2, y - h + (hh(seed + j, 32) - .5) * .7 * k, w, h, .62 + hh(seed + j, 33) * .38]);
+  }
+  return out;
+}
+function drawWall(A, B, st, a, k) {
+  if (a <= .01) return;
+  ctx.save(); ctx.globalAlpha = a * .16; ctx.strokeStyle = INK; ctx.lineWidth = 2.4 * k; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(A[0], A[1] + .8 * k); ctx.lineTo(B[0], B[1] + .8 * k); ctx.stroke();
+  ctx.fillStyle = INK; for (const q of st) { ctx.globalAlpha = a * q[4]; ctx.fillRect(q[0], q[1], q[2], q[3]); }
+  ctx.restore();
+}
+function wall(A, B, a, k, seed) { drawWall(A, B, wallStones(A, B, k, seed || 0), a, k); }
+/* a gate post: the same post the gate in Explicit authority hangs on, smaller */
+function post(x, y, a, k) { if (a <= .01) return; ctx.globalAlpha = a; ctx.fillStyle = INK; ctx.fillRect(x - 1.5 * k, y - 6.5 * k, 3 * k, 7.5 * k); ctx.globalAlpha = 1; }
+/* a shepherd's crook: the owner. Staff from the ground at (x, y), hook over to the right */
+function crook(x, y, h, a) {
+  if (a <= .01) return;
+  const r = h * .17;
+  ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = INK; ctx.lineWidth = Math.max(2, h * .045); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y - h); ctx.arc(x + r, y - h, r, Math.PI, Math.PI * 2.3); ctx.stroke();
+  ctx.globalAlpha = a * .1; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x + 1, y + 1, 5, 1.8, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+}
+
+/* ---------- the flock ---------- */
+const N = 72, REDI = 0;
+const ORD = (() => { const r = mb(7), o = []; for (let i = 1; i < N; i++) o.push(i); for (let i = o.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [o[i], o[j]] = [o[j], o[i]]; } return o; })();
+
+/* ---------- the landscape ---------- */
+let W = 0, H = 0, DPR = 1, MOB = false;
+let pan = 0, panA = 0, panB = 0, rb = 0, rbA = 0, rbB = 0;
+const rY = (x, p, r) => { const X = x + p; return r + Math.sin(X * .0041) * 16 + Math.sin(X * .0107 + 1.3) * 8; };
+/* far ridges: each paler than the one in front, as the air between thickens */
+const FARS = [
+  { par: .18, up: 118, a1: 9, f1: .0019, p1: 2.4, a2: 5, f2: .0057, p2: .3, col: '#F9F4E9' },
+  { par: .3, up: 80, a1: 12, f1: .0027, p1: 4.1, a2: 6, f2: .0071, p2: 1.9, col: '#F7F0E4' },
+  { par: .45, up: 42, a1: 14, f1: .0033, p1: .7, a2: 7, f2: .0089, p2: 3.3, col: '#F5EEE0' },
+];
+const farY = (L, x) => { const X = x + pan * L.par; return rb - L.up + Math.sin(X * L.f1 + L.p1) * L.a1 + Math.sin(X * L.f2 + L.p2) * L.a2; };
+let GRAIN = null;
+function makeGrain() {
+  const c = document.createElement('canvas'), S = 220; c.width = c.height = S; const g = c.getContext('2d'), r = mb(31);
+  for (let i = 0; i < 2600; i++) { const x = r() * S, y = r() * S, d = r(); g.fillStyle = d < .7 ? 'rgba(60,50,30,' + (.05 + r() * .07).toFixed(3) + ')' : 'rgba(255,255,250,' + (.25 + r() * .3).toFixed(3) + ')'; g.fillRect(x, y, d < .9 ? 1 : 1.5, d < .9 ? 1 : 1.5); }
+  GRAIN = ctx.createPattern(c, 'repeat');
+}
+/* a dry-stone dyke: a run of small stones along a far slope, then down it */
+function dyke(L, X0, X1, Xturn, drop, a) {
+  ctx.fillStyle = INK;
+  for (let x = -4; x < W + 4; x += 3.1) {
+    const X = x + pan * L.par, Xm = ((X % 2600) + 2600) % 2600; if (Xm < X0 || Xm > X1) continue;
+    const y = farY(L, x) + 9 + Math.max(0, Xm - Xturn) * drop, n = Math.floor(X / 3.1);
+    const h = 1.3 + hh(n, 21) * 1.1; ctx.globalAlpha = a * (.7 + hh(n, 22) * .3); ctx.fillRect(x, y - h, 2.2, h);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawHill() {
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+  FARS.forEach((L, k) => {
+    ctx.fillStyle = L.col; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W + 8; x += 8) ctx.lineTo(x, farY(L, x));
+    ctx.lineTo(W, H); ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.globalAlpha = .035 + k * .015; ctx.beginPath();
+    for (let x = 0; x <= W + 8; x += 8) { const y = farY(L, x); x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke(); ctx.globalAlpha = 1;
+  });
+  dyke(FARS[1], 300, 1500, 1100, .05, .11);
+  dyke(FARS[2], 1500, 2400, 2050, .09, .14);
+  ctx.fillStyle = HILL; ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W + 8; x += 8) ctx.lineTo(x, rY(x, pan, rb));
+  ctx.lineTo(W, H); ctx.fill();
+  /* air over the near brow: the hill pales toward its own ridge line */
+  const top = rb - 26, hz = ctx.createLinearGradient(0, top, 0, top + 150);
+  hz.addColorStop(0, 'rgba(250,245,235,.75)'); hz.addColorStop(1, 'rgba(250,245,235,0)');
+  ctx.save(); ctx.beginPath(); ctx.moveTo(0, H); for (let x = 0; x <= W + 8; x += 8) ctx.lineTo(x, rY(x, pan, rb)); ctx.lineTo(W, H); ctx.clip();
+  ctx.fillStyle = hz; ctx.fillRect(0, top, W, 152); ctx.restore();
+  ctx.strokeStyle = INK; ctx.lineWidth = 1;
+  ctx.globalAlpha = .13; ctx.beginPath(); for (let x = 0; x <= W + 8; x += 8) { const y = rY(x, pan, rb); x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke();
+  for (let k = 1; k < 26; k++) {
+    const off = 11 * k + 1.25 * k * k; if (rb + off - 40 > H) break;
+    ctx.globalAlpha = .022 + Math.min(k, 8) * .0035; ctx.beginPath();
+    for (let x = 0; x <= W + 10; x += 10) { const y = rY(x, pan, rb) + off + Math.sin((x + pan) * .0052 + k * 1.9) * (2 + k * .6); x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  if (GRAIN) { ctx.fillStyle = GRAIN; ctx.fillRect(0, 0, W, H); }
+}
+
+/* ---------- slots: every scene asks for N places; who stands where is decided at the cut ---------- */
+function geom(view) {
+  const g = { vi: VIEWS.indexOf(view) };
+  g.pTo = g.vi * W * .55;
+  if (view === 'hill') { g.rTo = H * (MOB ? .2 : .23); return g; }
+  const hd = document.querySelector('header').getBoundingClientRect();
+  g.rTo = hd.bottom + (MOB ? 36 : 64);
+  /* the text column is centred on the scene box, so the two halves of a view share one middle */
+  const pe = document.getElementById('panel'), by = g.rTo + (MOB ? 46 : 60);
+  pe.style.top = MOB ? '' : Math.round((by + H - 52) / 2) + 'px';
+  const pn = pe.getBoundingClientRect();
+  if (MOB) g.box = { x: 16, y: by, w: W - 32, h: pn.top - 14 - by };
+  else { const x0 = pn.right + 64; g.box = { x: x0, y: by, w: W - 48 - x0, h: H - 52 - by }; }
+  return g;
+}
+/* sheep not in a scene go up to the ridge: the rest of the flock, still hefted, further off.
+   On a phone only one thin row shows; the rest are over the brow. */
+function ridgeSlots(g, count) {
+  const out = [], vis = Math.min(count, MOB ? 18 : 60), rows = MOB ? 1 : 2, per = Math.ceil(vis / rows), sp = (W - 40) / per;
+  for (let j = 0; j < count; j++) {
+    if (j < vis) {
+      const r = j % rows, c = Math.floor(j / rows), x = 20 + sp * (c + .5) + (r % 2 ? sp * .5 : 0) - sp * .25 + (hh(j, 4) - .5) * sp * .3;
+      out.push({ x, y: rY(x, g.pTo, g.rTo) + 8 + r * 11 + hh(j, 5) * (MOB ? 2 : 4), s: MOB ? 9 : 12, a: .5, rx: 3, ry: 1.2, ridge: true });
+    } else {
+      const x = 20 + (W - 40) * ((j - vis + .5) / (count - vis));
+      out.push({ x, y: rY(x, g.pTo, g.rTo) + 3, s: MOB ? 9 : 12, a: 0, rx: 0, ry: 0, ridge: true });
+    }
+  }
+  return out;
+}
+function isoGrid(cx, cy, cols, rows, cw) {
+  const ch = cw * .5, out = [];
+  for (let v = 0; v < rows; v++) for (let u = 0; u < cols; u++)
+    out.push([cx + (u - v) * cw / 2 - ((cols - 1) - (rows - 1)) * cw / 4, cy + (u + v) * ch / 2 - ((cols - 1) + (rows - 1)) * ch / 4]);
+  return out;
+}
+const SC = {};
+
+SC.hill = (g) => {
+  const land = document.getElementById('land').getBoundingClientRect();
+  const ex = { l: land.left - 30, r: land.right + 40, t: land.top - 34 };
+  /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it */
+  let cw = Math.max(W, H) / 9, cells;
+  for (let it = 0; it < 60; it++) {
+    const ch = cw * .5, cand = [];
+    for (let j = 0; ; j++) {
+      const y = g.rTo + ch * .9 + j * ch * .5; if (y > H - ch * .6) break;
+      for (let i = 0; ; i++) {
+        const x = cw * .5 + i * cw * .5; if (x > W - cw * .4) break;
+        if ((i + j) % 2) continue;
+        if (y < rY(x, g.pTo, g.rTo) + ch * .9) continue;
+        if (x > ex.l && x < ex.r && y > ex.t) continue;
+        cand.push([x, y]);
+      }
+    }
+    const r = mb(11); for (let i = cand.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]]; }
+    cells = [];
+    for (const c of cand) { if (cells.length >= N) break; if (!cells.some(q => Math.abs(q[0] - c[0]) < cw * .6 && Math.abs(q[1] - c[1]) < ch * .6)) cells.push(c); }
+    if (cells.length >= N && cand.length >= N / .3) break; cw *= .95;
+  }
+  const ch = cw * .5, s = Math.min(cw * .36, 46), slots = [];
+  for (let i = 0; i < N; i++) { const [x, y] = cells[i]; slots.push({ x, y: y + ch * .12, s, a: 1, rx: cw * .19, ry: ch * .19, cx: x, cy: y }); }
+  /* walled fields: dykes run along the cell lattice, between patches, every few cells in each
+     direction. A run breaks off here and there, and some breaks are gates between two posts. */
+  const Y0 = g.rTo + ch * .9, cp = (A, B) => [cw * .5 + (A - B) * cw * .5, Y0 + (A + B) * ch * .5];
+  const segs = [], posts = [], top = g.rTo + 30;
+  const inside = p => p[0] > -cw && p[0] < W + cw && p[1] > top && p[1] < H + ch && !(p[0] > ex.l - 12 && p[0] < ex.r && p[1] > ex.t - 12);
+  const dir = [[1, 0], [0, 1]], lim = Math.ceil((W / cw + H / ch) * 1.2) + 4;
+  dir.forEach(([dA, dB], d) => {
+    for (let m = -lim, gap = 0; m < lim; m += 4 + (hh(m, 40 + d) > .5 ? 1 : 0)) {
+      const run = hh(m, 50 + d);
+      for (let n = -lim; n < lim; n++) {
+        const A0 = d ? n - .5 : m + .5, B0 = d ? m + .5 : n - .5, P0 = cp(A0, B0), P1 = cp(A0 + (d ? 1 : 0), B0 + (d ? 0 : 1));
+        if (!inside(P0) || !inside(P1)) continue;
+        const r = hh(m * 131 + n, 60 + d);
+        if (r < .2 + run * .22) { if (r < .07) { posts.push(P0, P1); } continue; }
+        const mid = (P0[1] + P1[1]) / 2, k = (MOB ? .5 : .6) + .3 * cl01((mid - g.rTo) / (H - g.rTo)), fa = sm((mid - top) / 220);
+        segs.push({ A: P0, B: P1, k, fa, st: wallStones(P0, P1, k, (m * 977 + n * 31) * 3 + d) });
+      }
+    }
+  });
+  return {
+    slots, redSlot: 0, ids: [], key: 0,
+    ground(t, a) {
+      for (const w of segs) drawWall(w.A, w.B, w.st, a * .19 * w.fa, w.k);
+      for (const p of posts) { const k = (MOB ? .5 : .6) + .3 * cl01((p[1] - g.rTo) / (H - g.rTo)); post(p[0], p[1], a * .3 * sm((p[1] - top) / 220), k); }
+      for (const l of slots) patch(l.cx, l.cy, cw * .43, ch * .43, a * .85);
+    },
+  };
+};
+
+SC.safe = (g) => {
+  const b = g.box, ids = [];
+  const cw = Math.min(b.w / (MOB ? 3.05 : 3.3), (b.h - 30) / 1.7), ch = cw * .5, s = Math.min(cw * (MOB ? .27 : .34), 44);
+  const P = isoGrid(b.x + b.w / 2, b.y + b.h * .56, 3, 3, cw);
+  const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .1, s, a: 1, rx: cw * .17, ry: ch * .17, slot: k }));
+  const order = [1, 5, 7, 3, 8, 0, 2, 6, 4], C = 170;
+  const phase = (k, t) => { const c = Math.floor(t / C) % 9; return order[c] === k ? (t % C) / C : -1; };
+  return {
+    slots, redSlot: 4, ids, key: 175, start: 130,
+    pose(i, l, t) {
+      const f = phase(l.slot, t); if (f < 0) return null;
+      const out = sm((f - .02) / .3), back = sm((f - .62) / .3), d = out * (1 - back);
+      const g2 = graze(i * 7 + 3, gT);
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - d * ch * .22, a: 1 - d, face: g2[2] };
+    },
+    ground(t, a) {
+      P.forEach((p, k) => {
+        const f = phase(k, t); let ga = 1;
+        if (f >= 0) ga = 1 - sm((f - .12) / .3) * (1 - sm((f - .66) / .28));
+        patch(p[0], p[1], cw * .44, ch * .44, a * ga);
+      });
+    },
+  };
+};
+
+SC.parallel = (g) => {
+  const b = g.box, ids = [];
+  const cw = Math.min(b.w / 4.2, b.h / 2.3), ch = cw * .5, s = Math.min(cw * .36, 42);
+  const N2 = [[.16, .5], [.54, .16], [.86, .46], [.5, .55], [.2, .08], [.86, .92]];
+  if (MOB) { N2[4] = [.14, .1]; N2[5] = [.82, .93]; }
+  const P = N2.map(([u, v]) => [b.x + b.w * u, b.y + 16 + (b.h - 30) * v]);
+  const slots = P.map((p, k) => ({ x: p[0], y: p[1], s, a: 1, rx: cw * .16, ry: ch * .16, slot: k }));
+  const legs = [
+    { from: 0, to: 1, name: 'spawn', c: () => [P[0][0], P[1][1]] },
+    { from: 1, to: 2, name: 'channel', c: () => [P[2][0], P[1][1]] },
+    { from: 2, to: 0, name: 'join', c: () => [b.x + b.w * .5, b.y + b.h * 1.02] },
+  ];
+  const ep = (k) => [P[k][0], P[k][1] - 2];
+  const cen = [(P[0][0] + P[1][0] + P[2][0]) / 3, (P[0][1] + P[1][1] + P[2][1]) / 3];
+  /* each leg's name sits just outside its curve, on its own ground, never on the dashes */
+  const tagAt = legs.map(l => {
+    const p = ep(l.from), q = ep(l.to), c = l.c(), m = qpt(p, c, q, .5);
+    let nx = m[0] - cen[0], ny = m[1] - cen[1]; const d = Math.hypot(nx, ny) || 1; nx /= d; ny /= d;
+    const off = MOB ? 17 : 21;
+    return [m[0] + nx * off, m[1] + ny * off];
+  });
+  const C = 130, TR2 = 78;
+  return {
+    slots, redSlot: 3, ids, key: 175,
+    ground(t, a) {
+      P.forEach(p => patch(p[0], p[1], cw * .4, ch * .4, a));
+      legs.forEach(l => { const p = ep(l.from), q = ep(l.to), c = l.c(); dashed([p, c, q], .38 * a, true); });
+    },
+    over(t, a) {
+      const lg = Math.floor(t / C) % 3, f = t % C, L2 = legs[lg];
+      let x, y;
+      if (f < TR2) { const p = ep(L2.from), q = ep(L2.to), c = L2.c(), m = qpt(p, c, q, ease(f / TR2)); x = m[0]; y = m[1]; }
+      else { const r = rend[ids[L2.to]]; x = r.x + s * .5; y = r.y - s * .95; }
+      token(x, y, a);
+      legs.forEach((l, k) => note(l.name, tagAt[k][0], tagAt[k][1], a * (k === lg ? 1 : .62)));
+    },
+  };
+};
+
+/* Bounded: one outer limit; inside it, a bound scope. The red sheep fills the bound; the next
+   mouthful is refused with Capacity; it is caught, the sheep carries on in the outer limit, and
+   when the bound scope ends its ground comes back. */
+SC.bounded = (g) => {
+  const b = g.box, ids = [];
+  const OC = 7, OR = 5;
+  const ts = Math.min(b.w * .9 / ((OC + OR) / 2), b.h * .62 / ((OC + OR) / 4), MOB ? 62 : 106);
+  const cx = b.x + b.w * .5, cy = b.y + b.h * (MOB ? .53 : .5);
+  const K = (U, V) => [cx + (U - V - (OC - OR) / 2) * ts / 2, cy + (U + V - (OC + OR) / 2) * ts / 4];
+  const tiles = [];
+  for (let v = 0; v < OR; v++) for (let u = 0; u < OC; u++) tiles.push({ u, v, c: K(u + .5, v + .5), inner: u >= 1 && u <= 3 && v >= 1 && v <= 2 });
+  const inner = tiles.filter(q => q.inner).sort((p, q) => (q.u + q.v) - (p.u + p.v) || p.u - q.u);
+  const outerT = tiles.filter(q => !q.inner), r = mb(5);
+  for (let i = outerT.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [outerT[i], outerT[j]] = [outerT[j], outerT[i]]; }
+  const s = MOB ? 30 : 46;
+  const HOME = K(.95, 2.05), OUT = K(2.6, 4.45);
+  const slots = [
+    { x: HOME[0], y: HOME[1], s, a: 1, rx: 0, ry: 0, slot: 0 },
+    { ...(() => { const p = K(6.1, .7); return { x: p[0], y: p[1] }; })(), s, a: 1, rx: ts * .14, ry: ts * .05, slot: 1 },
+    { ...(() => { const p = K(5.9, 3.9); return { x: p[0], y: p[1] }; })(), s, a: 1, rx: ts * .14, ry: ts * .05, slot: 2 },
+    { ...(() => { const p = K(.55, 4.5); return { x: p[0], y: p[1] }; })(), s, a: 1, rx: ts * .12, ry: ts * .04, slot: 3 },
+  ];
+  const C = 480, F0 = 24, FS = 22, REF = 156, WALK1 = [214, 268], CLR = [352, 380], WALK2 = [400, 452];
+  const innerN = t => t >= CLR[0] ? (t < CLR[1] ? 6 : 0) : Math.max(0, Math.min(6, Math.floor((t - F0) / FS) + 1));
+  const innerFade = t => t >= CLR[0] && t < CLR[1] ? 1 - sm((t - CLR[0]) / (CLR[1] - CLR[0])) : 1;
+  const outerN = t => Math.min(outerT.length, 2 + Math.floor(t / 40));
+  const outerFade = t => 1 - sm((t - 456) / 22);
+  const capA = t => sm((t - REF - 8) / 12) * (1 - sm((t - 326) / 20));
+  const outline = (U0, V0, U1, V1, a, w, dash) => {
+    const A = K(U0, V0), B = K(U1, V0), Cc = K(U1, V1), D = K(U0, V1);
+    ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = INK; ctx.lineWidth = w; if (dash) ctx.setLineDash(dash); ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.lineTo(Cc[0], Cc[1]); ctx.lineTo(D[0], D[1]); ctx.closePath(); ctx.stroke(); ctx.restore();
+  };
+  return {
+    slots, redSlot: 0, ids, key: 232, start: 468,
+    pose(i, l, t) {
+      if (l.slot !== 0) return null;
+      t %= C; const g2 = graze(77, gT);
+      let p = HOME, face = -1;
+      if (t >= WALK1[0] && t < WALK1[1]) { const e = ease((t - WALK1[0]) / (WALK1[1] - WALK1[0])); p = [lerp(HOME[0], OUT[0], e), lerp(HOME[1], OUT[1], e)]; face = OUT[0] >= HOME[0] ? 1 : -1; }
+      else if (t >= WALK1[1] && t < WALK2[0]) { p = OUT; face = g2[2]; }
+      else if (t >= WALK2[0] && t < WALK2[1]) { const e = ease((t - WALK2[0]) / (WALK2[1] - WALK2[0])); p = [lerp(OUT[0], HOME[0], e), lerp(OUT[1], HOME[1], e)]; face = HOME[0] >= OUT[0] ? 1 : -1; }
+      else face = 1;
+      const still = !(t >= WALK1[0] && t < WALK1[1]) && !(t >= WALK2[0] && t < WALK2[1]);
+      return { x: p[0] + (still ? g2[0] * ts * .06 : 0), y: p[1] + (still ? g2[1] * ts * .02 - g2[3] : 0), face };
+    },
+    ground(t, a) {
+      t %= C;
+      /* the outer limit */
+      const O = [K(0, 0), K(OC, 0), K(OC, OR), K(0, OR)];
+      ctx.save(); ctx.globalAlpha = a * .07; ctx.fillStyle = INK; ctx.beginPath(); O.forEach((p, j) => j ? ctx.lineTo(p[0], p[1] + 2) : ctx.moveTo(p[0], p[1] + 2)); ctx.closePath(); ctx.fill(); ctx.restore();
+      ctx.globalAlpha = a; ctx.fillStyle = '#EAE5CF'; ctx.beginPath(); O.forEach((p, j) => j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+      const on = outerN(t), of = outerFade(t), inN = innerN(t), inF = innerFade(t);
+      /* free ground is moss-oat; grazed ground is bare peat, solid, so it reads the same on any hill */
+      const cell = (q, used, k) => { fillDia(q.c[0], q.c[1], ts * .46, ts * .23, MOSS, a); if (k > .01) fillDia(q.c[0], q.c[1], ts * .46, ts * .23, used, a * k); };
+      outerT.forEach((q, j) => cell(q, PEAT, j < on ? of : 0));
+      ctx.globalAlpha = a; ctx.fillStyle = '#F0EBD8'; const I = [K(1, 1), K(4, 1), K(4, 3), K(1, 3)]; ctx.beginPath(); I.forEach((p, j) => j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+      inner.forEach((q, j) => cell(q, PEAT_D, j < inN ? inF : 0));
+      outline(0, 0, OC, OR, a * .14, 1);
+      outline(1, 1, 4, 3, a * .5, 1.2);
+      const ring = (U0, V0, U1, V1, al, k, sd) => [[U0, V0, U1, V0], [U1, V0, U1, V1], [U1, V1, U0, V1], [U0, V1, U0, V0]].forEach((e, j) => wall(K(e[0], e[1]), K(e[2], e[3]), al, k, sd + j * 97));
+      ring(0, 0, OC, OR, a * .42, MOB ? .8 : 1, 500);
+      ring(1, 1, 4, 3, a * .8, MOB ? 1 : 1.25, 900);
+      /* each name stands off its wall along the grid's own axis, clear of the field */
+      const lpin = MOB ? K(1.2, 0) : K(OC, 1.6), lat = MOB ? K(1.2, -.95) : K(OC + .9, 1.6);
+      note('limit', lat[0] + 5, lat[1], a * .8, { align: 'left', to: lpin });
+      const bpin = K(3.2, 1), bat = K(3.2, MOB ? -.85 : -.8);
+      note('bound', bat[0] + 5, bat[1], a, { align: 'left', to: bpin });
+    },
+    over(t, a) {
+      t %= C; const r = rend[ids[0]];
+      if (t >= REF && t < REF + 34) {
+        /* the next mouthful: thrown at the full bound, it does not land */
+        const f = (t - REF) / 34, tgt = K(3.3, 1.6), ox = r.x + s * .1, oy = r.y - s * .55;
+        const go = Math.min(1, f / .55), back = f > .55 ? (f - .55) / .45 : 0;
+        const x = lerp(ox, tgt[0], ease(go) * (1 - back * .55)), y = lerp(oy, tgt[1] - ts * .2, ease(go)) + back * back * ts * .25;
+        token(x, y, a * (1 - back * .8), RED);
+      }
+      const ca = capA(t);
+      if (ca > .01) {
+        /* the failure is named off the field, up the grid's own axis from the red ram's head */
+        const pin = [r.x + (r.face > 0 ? s * .12 : -s * .12), r.y - s * .98], at = MOB ? [pin[0] - ts * .1, pin[1] - ts * .95] : [pin[0] - ts * .55, pin[1] - ts * .3];
+        note('Capacity', at[0], at[1], a * ca, { align: MOB ? 'center' : 'right', col: RED, size: MOB ? 12.5 : 14, to: pin, sub: 'caught, carries on', subA: sm((t - REF - 50) / 16) });
+      }
+    },
+  };
+};
+
+/* Deterministic: one patch, five sheep. The first run leaves faint footprints; then the run is
+   wound back and played again, and every sheep steps into its own prints, every time. The whole
+   scene is pure in the scene clock: the walk is fixed by a seed, and where each sheep stands at
+   any tick is read straight off it. */
+const DET = (() => {
+  const C = 6, R = 4, start = [[1, 1], [3, 0], [4, 2], [0, 3], [2, 3]], order = [1, 0, 3, 2, 4, 0, 1, 3];
+  const r = mb(21), pos = start.map(p => p.slice()), worn = new Set(start.map(p => p + '')), steps = [];
+  const optsOf = k => {
+    const [u, v] = pos[k], opts = [];
+    for (const [du, dv] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1]]) {
+      const q = [u + du, v + dv];
+      if (q[0] < 0 || q[1] < 0 || q[0] >= C || q[1] >= R || worn.has(q + '')) continue;
+      if (pos.some((p, j) => j !== k && Math.abs(p[0] - q[0]) <= 1 && Math.abs(p[1] - q[1]) <= 1)) continue;
+      opts.push(q);
+    }
+    return opts;
+  };
+  /* every step really moves: a sheep with nowhere fresh to go hands its turn to the next */
+  for (const k0 of order) {
+    let k = k0, opts = optsOf(k);
+    for (let d = 1; !opts.length && d < start.length; d++) { k = (k0 + d) % start.length; opts = optsOf(k); }
+    if (!opts.length) break;
+    const q = opts[Math.floor(r() * opts.length)];
+    steps.push({ k, from: pos[k].slice(), to: q }); pos[k] = q; worn.add(q + '');
+  }
+  const RUN0 = 120, STEP = 54, MOVE = 30, NS = steps.length, RUN_END = RUN0 + NS * STEP;
+  const P1 = 50, RWS = 11, P2 = 40, HOLD = 80, CYC = P1 + NS * RWS + P2 + NS * STEP + HOLD;
+  /* where the clock is: which pass, and how far along the walk (0..NS, fractional mid-step) */
+  function at(t) {
+    if (t < RUN_END) { const u = Math.max(0, t - RUN0), j = Math.floor(u / STEP); return { ph: 'run', prog: Math.min(NS, j + ease(cl01((u - j * STEP) / MOVE))), u }; }
+    let u = (t - RUN_END) % CYC;
+    if (u < P1) return { ph: 'run', prog: NS };
+    u -= P1; if (u < NS * RWS) return { ph: 'rewind', prog: NS - ease(cl01(u / (NS * RWS))) * NS };
+    u -= NS * RWS; if (u < P2) return { ph: 'replay', prog: 0, u: -1 };
+    u -= P2; if (u < NS * STEP) { const j = Math.floor(u / STEP); return { ph: 'replay', prog: j + ease(cl01((u - j * STEP) / MOVE)), u }; }
+    return { ph: 'replay', prog: NS, u };
+  }
+  /* replay from wherever the sheep stand: enter the rewind at the tick that matches */
+  function rewindFrom(t) {
+    const p = at(t).prog; let lo = 0, hi = NS * RWS;
+    for (let i = 0; i < 24; i++) { const m = (lo + hi) / 2; if (NS - ease(cl01(m / (NS * RWS))) * NS > p) lo = m; else hi = m; }
+    return RUN_END + P1 + Math.round(lo);
+  }
+  return { C, R, start, steps, NS, STEP, MOVE, RUN_END, P1, RWS, P2, at, rewindFrom,
+    /* first load and the still frame both sit in a replay, a few steps in */
+    replayAt: (k, f) => RUN_END + P1 + NS * RWS + P2 + k * STEP + f };
+})();
+SC.deterministic = (g) => {
+  const b = g.box, ids = [], { C, R, start, steps, NS, STEP, MOVE } = DET;
+  const ts = Math.min(b.w * .86 / ((C + R) / 2), b.h * .7 / ((C + R) / 4), MOB ? 62 : 102);
+  const cx = b.x + b.w * .5, cy = b.y + b.h * (MOB ? .52 : .47);
+  const K = (U, V) => [cx + (U - V - (C - R) / 2) * ts / 2, cy + (U + V - (C + R) / 2) * ts / 4];
+  const cell = p => K(p[0] + .5, p[1] + .5);
+  const s = MOB ? 30 : 42;
+  const slots = start.map((p, k) => { const c = cell(p); return { x: c[0], y: c[1], s, a: 1, rx: 0, ry: 0, slot: k }; });
+  /* every sheep's place at a point on the walk; the one mid-step hops a little */
+  function placeAll(prog) {
+    const P = start.map(p => { const c = cell(p); return { x: c[0], y: c[1], face: -1 }; });
+    for (let j = 0; j < NS; j++) {
+      const f = cl01(prog - j); if (f <= 0) break;
+      const st = steps[j], A = cell(st.from), B = cell(st.to), q = P[st.k];
+      q.x = lerp(A[0], B[0], f); q.y = lerp(A[1], B[1], f) - Math.sin(f * Math.PI) * s * .14;
+      if (Math.abs(B[0] - A[0]) > 1) q.face = B[0] > A[0] ? 1 : -1;
+    }
+    return P;
+  }
+  const prints = [start.map(cell)].concat(steps.map(st => cell(st.to)));
+  function print(p, a) {
+    if (a <= .01) return;
+    ctx.save(); ctx.globalAlpha = a * .16; ctx.fillStyle = PEAT; ctx.beginPath(); ctx.ellipse(p[0], p[1], ts * .2, ts * .085, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = a * .38; ctx.fillStyle = PEAT_D;
+    for (const [dx, dy] of [[-.11, -.025], [.11, -.025], [-.05, .035], [.06, .035]]) { ctx.beginPath(); ctx.ellipse(p[0] + dx * ts, p[1] + dy * ts, 1.9, 1.1, 0, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  return {
+    slots, redSlot: 0, ids, key: DET.replayAt(5, MOVE + 14), start: DET.replayAt(0, 30),
+    pose(i, l, t) { const P = placeAll(DET.at(t).prog)[l.slot]; return { x: P.x, y: P.y, face: P.face }; },
+    ground(t, a) {
+      const O = [K(0, 0), K(C, 0), K(C, R), K(0, R)];
+      ctx.save(); ctx.globalAlpha = a * .07; ctx.fillStyle = INK; ctx.beginPath(); O.forEach((p, j) => j ? ctx.lineTo(p[0], p[1] + 2) : ctx.moveTo(p[0], p[1] + 2)); ctx.closePath(); ctx.fill(); ctx.restore();
+      ctx.globalAlpha = a; ctx.fillStyle = OAT; ctx.beginPath(); O.forEach((p, j) => j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+      const st = DET.at(t), first = t < DET.RUN_END;
+      prints[0].forEach(p => print(p, a));
+      steps.forEach((x, j) => print(prints[j + 1], a * (first ? sm((st.prog - j - .55) / .45) : 1)));
+      /* on the replay, a print gives a small ring as its sheep lands back in it */
+      if (st.ph === 'replay' && st.u >= 0) {
+        const j = Math.floor(st.u / STEP), f = (st.u - j * STEP - MOVE) / 22;
+        if (j < NS && f > 0 && f < 1) { const p = prints[j + 1]; ctx.save(); ctx.globalAlpha = a * .45 * (1 - f); ctx.strokeStyle = steps[j].k === 0 ? RED : INK; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.ellipse(p[0], p[1], ts * (.2 + f * .08), ts * (.085 + f * .04), 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+      }
+    },
+    over(t, a) {
+      /* the step row: one quiet tick per step of the run */
+      const st = DET.at(t), bt = K(C, R), gap = 13, x0 = bt[0] - (NS - 1) * gap / 2, y = bt[1] + (MOB ? 26 : 34);
+      for (let j = 0; j < NS; j++) {
+        const done = st.prog >= j + 1 - 1e-6, x = x0 + j * gap;
+        ctx.save(); ctx.globalAlpha = a * (done ? .7 : .22); ctx.fillStyle = done && steps[j].k === 0 ? RED : INK;
+        ctx.beginPath(); ctx.arc(x, y, done ? 2.6 : 1.8, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+      }
+      note(st.ph === 'rewind' ? 'rewind' : t < DET.RUN_END ? 'first run' : 'replay', x0 - 14, y, a * .8, { align: 'right' });
+    },
+  };
+};
+
+SC.authority = (g) => {
+  const b = g.box, ids = [];
+  const xd = b.x + b.w * (MOB ? .58 : .56), sl = b.h * .07;
+  const top = [xd + sl, b.y], bot = [xd - sl, b.y + b.h], gy0 = .44, gy1 = .6;
+  const onL = f => [lerp(top[0], bot[0], f), lerp(top[1], bot[1], f)];
+  const G = onL((gy0 + gy1) / 2);
+  const cw = Math.min(b.w / 4.4, b.h / 2.4), ch = cw * .5, s = Math.min(cw * .36, 40);
+  const rel = MOB ? [[.13, .12], [.36, .3], [.12, .58], [.38, .74], [.14, .93]] : [[.1, .14], [.34, .3], [.13, .56], [.36, .76], [.12, .93]];
+  const P = rel.map(([u, v]) => [b.x + b.w * u, b.y + b.h * v]);
+  const D = [[b.x + b.w * (MOB ? .82 : .8), b.y + b.h * .26], [b.x + b.w * (MOB ? .82 : .82), b.y + b.h * .8]];
+  const slots = P.map((p, k) => ({ x: p[0], y: p[1], s, a: 1, rx: cw * .16, ry: ch * .16, slot: k }));
+  const holders = { 1: [0, 0], 3: [150, 1] };
+  const gin = [G[0] - cw * .42, G[1] + 4], gout = [G[0] + cw * .42, G[1] + 4];
+  const route = (home, dest) => [[0, 70, home, gin], [70, 116, gin, gout], [116, 176, gout, dest], [176, 236, dest, dest], [236, 296, dest, gout], [296, 342, gout, gin], [342, 410, gin, home]];
+  return {
+    slots, redSlot: 2, ids, key: 93, start: 329,
+    pose(i, l, t) {
+      const h = holders[l.slot]; if (!h) return null;
+      const u = (t + h[0]) % 480, R = route(P[l.slot], D[h[1]]);
+      for (const [t0, t1, A, B] of R) if (u >= t0 && u < t1) {
+        const e = ease((u - t0) / (t1 - t0)), g2 = graze(i * 7 + 3, gT);
+        const wob = A === B ? 1 : 0;
+        return { x: lerp(A[0], B[0], e) + g2[0] * cw * .14 * wob, y: lerp(A[1], B[1], e) + g2[1] * ch * .14 * wob, face: A === B ? g2[2] : (B[0] >= A[0] ? 1 : -1) };
+      }
+      return null;
+    },
+    ground(t, a) {
+      P.forEach(p => patch(p[0], p[1], cw * .4, ch * .4, a));
+      D.forEach(p => patch(p[0], p[1], cw * .4, ch * .4, a * .7));
+      /* the same dry-stone wall as every field on the hill, nearer and higher, with a gate */
+      const wk = MOB ? 2.2 : 2.9;
+      ctx.save(); ctx.globalAlpha = a * .5; ctx.strokeStyle = PEAT_D; ctx.lineWidth = 2.2 * wk; ctx.lineCap = 'round'; ctx.beginPath();
+      for (const [f0, f1] of [[0, gy0 - .015], [gy1 + .015, 1]]) { const A = onL(f0), B = onL(f1); ctx.moveTo(A[0], A[1] - 2); ctx.lineTo(B[0], B[1] - 2); }
+      ctx.stroke(); ctx.restore();
+      /* seen near end-on, so its stones sit in uneven courses, some wide, some set off the line */
+      const course = (A, B, sd) => drawWall(A, B, wallStones(A, B, wk, sd).map((q, j) => { const w = q[2] * (.75 + hh(sd + j, 34) * .7); return [q[0] + q[2] / 2 - w / 2 + (hh(sd + j, 35) - .5) * 2.4, q[1], w, q[3], q[4]]; }), a * .9, wk);
+      course(onL(0), onL(gy0 - .015), 700); course(onL(gy1 + .015), onL(1), 800);
+      [gy0, gy1].forEach(f => { const [x, y] = onL(f); post(x, y + 4, a, MOB ? 2.6 : 3.2); });
+    },
+    over(t, a) {
+      ids.forEach((id, k) => {
+        if (!holders[k]) return; const r = rend[id];
+        const x = r.x + (r.face > 0 ? s * .34 : -s * .34), y = r.y - s * 1.12;
+        ctx.save(); ctx.globalAlpha = a * r.a; ctx.strokeStyle = INK; ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.moveTo(x + 4, y); ctx.lineTo(x + 12.5, y); ctx.moveTo(x + 9.5, y); ctx.lineTo(x + 9.5, y + 4); ctx.moveTo(x + 12.5, y); ctx.lineTo(x + 12.5, y + 4); ctx.stroke(); ctx.restore();
+        /* the key is what the ram was handed */
+        if (k === 1) { const rt = x > W - 100; note('capability', rt ? x - 8 : x + 12, y - 22, a * r.a * .9, { align: rt ? 'right' : 'left', to: [x + (rt ? -2 : 2), y - 4] }); }
+      });
+    },
+  };
+};
+
+SC.local = (g) => {
+  const b = g.box, ids = [];
+  const cw = Math.min(b.w * .78 / 3.5, b.h * .72 / 1.75), ch = cw * .5, s = Math.min(cw * .34, 40);
+  const P = isoGrid(b.x + b.w * .5, b.y + b.h * .55, 4, 3, cw);
+  const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .1, s, a: 1, rx: cw * .16, ry: ch * .16, slot: k }));
+  const cairn = [[.06, .14], [.95, .12], [.96, .9], [.05, .92]].map(([u, v]) => [b.x + b.w * u, b.y + b.h * v]);
+  const C = 150, order = [5, 2, 9, 0, 7, 11, 4, 1, 10, 6, 3, 8];
+  const focus = t => order[Math.floor(t / C) % 12];
+  const names = k => { const a = Math.floor(hh(k, 3) * 4); return [a, (a + 1 + Math.floor(hh(k, 6) * 3)) % 4]; };
+  const fa = t => { const u = (t % C) / C; return sm(u / .18) * (1 - sm((u - .82) / .18)); };
+  return {
+    slots, redSlot: 5, ids, key: 40,
+    pose(i, l, t) {
+      const g2 = graze(i * 7 + 3, gT), f = focus(t) === l.slot ? fa(t) : 0;
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: g2[2], a: (i === REDI ? .6 : .32) + (i === REDI ? .4 : .68) * f };
+    },
+    ground(t, a) {
+      const fk = focus(t), f = fa(t);
+      P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (k === fk ? .6 + .4 * f : .6), k === fk ? GROUND2 : GROUND));
+      const nm = names(fk), r = rend[ids[fk]];
+      nm.forEach(c => dashed([[r.x, r.y - s * .4], cairn[c]], a * f * .5));
+      cairn.forEach((c, k) => {
+        const on = nm.includes(k) ? f : 0; ctx.globalAlpha = a * (.35 + .65 * on); ctx.fillStyle = INK;
+        ctx.fillRect(c[0] - 7, c[1] - 3, 14, 5); ctx.fillRect(c[0] - 5, c[1] - 8, 10, 4.5); ctx.fillRect(c[0] - 3, c[1] - 12.5, 6, 4); ctx.globalAlpha = 1;
+      });
+    },
+  };
+};
+
+/* Fast, in two halves. Build: a row of definitions; the checker visits each once and a kept
+   stone marks its record. Then the red one changes: its stone lifts, and so does the stone of the
+   one that names its signature; the checker visits just those two. Run: rams walk straight lanes. */
+SC.fast = (g) => {
+  const b = g.box, ids = [], n = 5;
+  const bh = b.h * .5, cw = Math.min(b.w / 5.7, bh * .9, MOB ? 78 : 118), ch = cw * .5, s = Math.min(cw * .36, 38);
+  const stepX = cw * 1.06, x0 = b.x + b.w * .5 - (n - 1) * stepX / 2, y0 = b.y + bh * (MOB ? .5 : .46);
+  const P = []; for (let k = 0; k < n; k++) P.push([x0 + k * stepX, y0 + (k - (n - 1) / 2) * stepX * .16]);
+  const CH = 1, NM = 3;                       /* the red definition changes; definition 3 names its signature */
+  const FIRST = 40, VIS = 34, F_END = FIRST + n * VIS + 40;
+  const E = 50, LIFT = 26, RV = [E + 60, E + 60 + VIS * 1.6], HOLD = 170, CYC = RV[1] + VIS + HOLD;
+  /* where the checker is (patch index, fractional between visits) and which records are kept */
+  function at(t) {
+    if (t < F_END) {
+      const u = t - FIRST, pr = u / VIS;
+      return { tok: u < 0 ? -1 : Math.min(n - 1, pr), ta: u < 0 ? 0 : 1 - sm((u - n * VIS + 10) / 24), kept: k => sm(pr - k - .45) * (u < 0 ? 0 : 1), lift: 0 };
+    }
+    const u = (t - F_END) % CYC, lift = sm((u - E) / LIFT);
+    const v1 = sm((u - RV[0] - VIS * .45) / 8), v2 = sm((u - RV[1] - VIS * .45) / 8);
+    let tok = -1, ta = 0;
+    if (u >= RV[0] - 16 && u < RV[1] + VIS + 20) {
+      ta = sm((u - RV[0] + 16) / 16) * (1 - sm((u - RV[1] - VIS) / 20));
+      tok = u < RV[0] + VIS ? CH : u < RV[1] ? lerp(CH, NM, ease((u - RV[0] - VIS) / (RV[1] - RV[0] - VIS))) : NM;
+    }
+    return { tok, ta, lift, kept: k => k === CH ? 1 - lift * (1 - v1) : k === NM ? 1 - lift * (1 - v2) : 1, edit: u >= E - 6 && u < E + 20 ? (u - E + 6) / 26 : -1, tie: lift * (1 - sm((u - RV[1] - VIS - 40) / 40)) };
+  }
+  const tokXY = f => { const k = Math.floor(f), e = f - k, A = P[k], B = P[Math.min(n - 1, k + 1)]; return [lerp(A[0], B[0], e), lerp(A[1], B[1], e) - s * 1.45 - Math.sin(e * Math.PI) * 10]; };
+  /* run: one straight track from post to post, parallel to the build row; rams walk it in file
+     at one steady pace, no turn, no stop */
+  const slope = .16, L = 3, RUNP = 300;
+  const tA = [b.x + b.w * (MOB ? .04 : .06), b.y + b.h * (MOB ? .78 : .8) - slope * b.w * .44], tB = [b.x + b.w * (MOB ? .96 : .94), 0];
+  tB[1] = tA[1] + slope * (tB[0] - tA[0]);
+  const runAt = (k, t) => { const d = ((t / RUNP + k / L) % 1 + 1) % 1; return [lerp(tA[0], tB[0], d), lerp(tA[1], tB[1], d), d]; };
+  const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .08, s, a: 1, rx: cw * .14, ry: ch * .14, slot: k }));
+  for (let k = 0; k < L; k++) { const q = runAt(k, 0); slots.push({ x: q[0], y: q[1], s, a: 1, rx: 0, ry: 0, slot: n + k }); }
+  const stone = (x, y, a) => { if (a <= .01) return; ctx.globalAlpha = a * .75; ctx.fillStyle = INK; ctx.fillRect(x - 5, y - 3, 10, 4.5); ctx.fillRect(x - 3, y - 7, 6, 4); ctx.globalAlpha = 1; };
+  return {
+    slots, redSlot: CH, ids, key: F_END + E + LIFT + 20, start: F_END + E - 230,
+    pose(i, l, t) {
+      if (l.slot >= n) {
+        const p = runAt(l.slot - n, t), edge = sm(p[2] / .05) * sm((1 - p[2]) / .05);
+        return { x: p[0], y: p[1] - Math.abs(Math.sin(t * .2 + l.slot)) * 1.6, face: 1, a: edge };
+      }
+      const g2 = graze(i * 7 + 3, gT), st = at(t), hop = l.slot === CH && st.edit >= 0 ? Math.sin(st.edit * Math.PI) * s * .16 : 0;
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3] - hop, face: g2[2] };
+    },
+    ground(t, a) {
+      const st = at(t);
+      P.forEach((p, k) => { patch(p[0], p[1], cw * .44, ch * .44, a); stone(p[0] + cw * .3, p[1] + ch * .2, a * st.kept(k)); });
+      if (st.tie > .01) { const A = [P[NM][0], P[NM][1] - s * .5], B = [P[CH][0], P[CH][1] - s * .5]; dashed([A, [(A[0] + B[0]) / 2, Math.min(A[1], B[1]) - s * 1.1], B], a * .45 * st.tie, true); }
+      /* the track: a worn strip of straw with a hairline either side, a post at each end */
+      const hw = MOB ? 6 : 8;
+      ctx.save(); ctx.globalAlpha = a * .07; ctx.fillStyle = INK; ctx.beginPath(); ctx.moveTo(tA[0], tA[1] - hw + 2); ctx.lineTo(tB[0], tB[1] - hw + 2); ctx.lineTo(tB[0], tB[1] + hw + 2); ctx.lineTo(tA[0], tA[1] + hw + 2); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = a; ctx.fillStyle = OAT; ctx.beginPath(); ctx.moveTo(tA[0], tA[1] - hw); ctx.lineTo(tB[0], tB[1] - hw); ctx.lineTo(tB[0], tB[1] + hw); ctx.lineTo(tA[0], tA[1] + hw); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = a * .22; ctx.strokeStyle = PEAT_D; ctx.lineWidth = 1; ctx.beginPath();
+      ctx.moveTo(tA[0], tA[1] - hw); ctx.lineTo(tB[0], tB[1] - hw); ctx.moveTo(tA[0], tA[1] + hw); ctx.lineTo(tB[0], tB[1] + hw); ctx.stroke(); ctx.restore();
+      post(tA[0], tA[1] + 1, a * .85, MOB ? 1.5 : 1.9); post(tB[0], tB[1] + 1, a * .85, MOB ? 1.5 : 1.9);
+      note('build', b.x, Math.min(...P.map(p => p[1])) - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
+      note('run', b.x, tA[1] - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
+    },
+    over(t, a) { const st = at(t); if (st.tok >= 0 && st.ta > .01) { const q = tokXY(st.tok); token(q[0], q[1], a * st.ta); } },
+  };
+};
+
+/* Memory: four small folds on one hill. One owner: a ram stands by its crook and leaves when the
+   crook goes. One region: rams that came in together are let go at once. Counted: one ram, three
+   crooks and a tally; it leaves when the last crook goes. A move: the red ram changes patches and
+   leaves nothing behind. Every part also reads standing still. */
+SC.memory = (g) => {
+  const b = g.box, ids = [];
+  const cw = Math.min(b.w * .2, b.h * .3, 150), ch = cw * .5, s = Math.min(cw * .36, 46), fs = s * .74, ts = cw * .66;
+  const cols = MOB ? [.26, .76] : [.25, .74], rows = MOB ? [.3, .78] : [.3, .72];
+  const C4 = [[cols[0], rows[0]], [cols[1], rows[0]], [cols[0], rows[1]], [cols[1], rows[1]]].map(([u, v]) => [b.x + b.w * u, b.y + b.h * v]);
+  const CY = 480;
+  /* one owner */
+  const O = C4[0], crO = [O[0] + cw * .4, O[1] + ch * .12];
+  /* one region: a 2 x 2 fold */
+  const F = C4[1], FK = (U, V) => [F[0] + (U - V) * ts / 2, F[1] + (U + V - 2) * ts / 4];
+  const FP = [[.5, .5], [1.5, .5], [.5, 1.5], [1.5, 1.5]].map(([U, V]) => FK(U, V));
+  /* counted */
+  const S = C4[2], crS = [[-.56, -.04], [-.3, .32], [.56, -.04]].map(([u, v]) => [S[0] + u * cw, S[1] + v * ch]);
+  /* a move */
+  const M = C4[3], dx = cw * (MOB ? .62 : .66), MA = [M[0] - dx, M[1]], MB = [M[0] + dx, M[1] + ch * .05];
+  const slots = [
+    { x: O[0], y: O[1] + ch * .08, s, a: 1, rx: cw * .12, ry: ch * .12, slot: 0 },
+    ...FP.map((p, k) => ({ x: p[0], y: p[1] + ts * .06, s: fs, a: 1, rx: ts * .06, ry: ts * .03, slot: 1 + k })),
+    { x: S[0], y: S[1] + ch * .08, s, a: 1, rx: cw * .12, ry: ch * .12, slot: 5 },
+    { x: MA[0], y: MA[1] + ch * .08, s, a: 1, rx: 0, ry: 0, slot: 6 },
+  ];
+  /* clocks, each vignette on its own phase so no two let go at once */
+  const uO = t => t % CY, uF = t => (t + 200) % CY, uS = t => t % CY, uM = t => (t + 150) % CY;
+  const ownA = t => { const u = uO(t); return { cr: 1 - sm((u - 200) / 36) + sm((u - 400) / 40), cx: sm((u - 200) / 36) * (1 - sm((u - 400) / 40)) * cw * .25, ram: 1 - sm((u - 240) / 34) + sm((u - 410) / 40) }; };
+  const foldIn = (k, t) => { const u = uF(t); return sm((u - 20 - k * 30) / 24) * (1 - sm((u - 320) / 30)); };
+  const cntA = t => { const u = uS(t), out = [120, 200, 280].map(t0 => 1 - sm((u - t0) / 30) + sm((u - 420) / 40)); return { cr: out, ram: 1 - sm((u - 316) / 34) + sm((u - 430) / 40) }; };
+  const mvAt = t => { const u = uM(t); const e1 = ease(cl01((u - 160) / 70)), e2 = ease(cl01((u - 400) / 70)), e = e1 - e2; return { e, moving: (u > 160 && u < 230) || (u > 400 && u < 470), u }; };
+  const arcC = [M[0], M[1] - ch * 1.15];
+  const lifted = (l, a, i) => { const g2 = graze(i * 7 + 3, gT); return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3] - (1 - a) * ch * .3, face: g2[2], a }; };
+  return {
+    slots, redSlot: 6, ids, key: 100, start: 350,
+    pose(i, l, t) {
+      if (l.slot === 0) return lifted(l, cl01(ownA(t).ram), i);
+      if (l.slot >= 1 && l.slot <= 4) { const f = foldIn(l.slot - 1, t); return lifted(l, f, i); }
+      if (l.slot === 5) return lifted(l, cl01(cntA(t).ram), i);
+      const m = mvAt(t), A = [MA[0], MA[1] + ch * .08], B = [MB[0], MB[1] + ch * .08];
+      if (m.moving) { const q = qpt(A, arcC, B, m.e); return { x: q[0], y: q[1], face: m.u < 300 ? 1 : -1 }; }
+      const g2 = graze(77, gT), p = m.e > .5 ? B : A;
+      return { x: p[0] + g2[0] * cw * .1, y: p[1] + g2[1] * ch * .1 - g2[3], face: g2[2] };
+    },
+    ground(t, a) {
+      const lab = (txt, p, dy) => note(txt, p[0], p[1] + dy, a * .8);
+      /* one owner */
+      const oa = ownA(t);
+      patch(O[0], O[1], cw * .44, ch * .44, a * (.35 + .65 * cl01(oa.ram)));
+      crook(crO[0] + oa.cx, crO[1], s * 1.4, a * .9 * cl01(oa.cr));
+      lab('one owner', O, ch * .5 + (MOB ? 16 : 22));
+      /* one region */
+      const fl = Math.max(...[0, 1, 2, 3].map(k => foldIn(k, t))), Q = [FK(0, 0), FK(2, 0), FK(2, 2), FK(0, 2)];
+      ctx.save(); ctx.globalAlpha = a * .07; ctx.fillStyle = INK; ctx.beginPath(); Q.forEach((p, j) => j ? ctx.lineTo(p[0], p[1] + 2) : ctx.moveTo(p[0], p[1] + 2)); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = a; ctx.fillStyle = GROUND; ctx.beginPath(); Q.forEach((p, j) => j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = a * .55 * fl; ctx.fillStyle = GROUND2; ctx.fill(); ctx.restore();
+      const kk = MOB ? .85 : 1.05;
+      wall(Q[0], Q[1], a * .7, kk, 11); wall(Q[3], Q[0], a * .7, kk, 22);
+      wall(Q[1], FK(2, .7), a * .7, kk, 33); wall(FK(2, 1.3), Q[2], a * .7, kk, 44); wall(Q[2], Q[3], a * .7, kk, 55);
+      const g1 = FK(2, .7), g2 = FK(2, 1.3); post(g1[0], g1[1], a * .75, kk); post(g2[0], g2[1], a * .75, kk);
+      lab('one region', [F[0], FK(2, 2)[1]], MOB ? 16 : 22);
+      /* counted */
+      const ca = cntA(t), ra = cl01(ca.ram);
+      patch(S[0], S[1], cw * .44, ch * .44, a * (.35 + .65 * ra));
+      crS.forEach((p, k) => crook(p[0] - (1 - cl01(ca.cr[k])) * cw * .2 * (k === 2 ? -1 : 1), p[1], s * 1.15, a * .85 * cl01(ca.cr[k])));
+      lab('shared, counted', S, ch * .5 + (MOB ? 16 : 22));
+      /* a move */
+      const m = mvAt(t), at2 = m.e;
+      patch(MA[0], MA[1], cw * .4, ch * .4, a); patch(MB[0], MB[1], cw * .4, ch * .4, a);
+      const tr = m.moving ? .5 : .5 * (1 - sm(((m.u > 300 ? m.u - 470 : m.u - 230 + (m.u < 160 ? CY : 0))) / 90));
+      if (tr > .01) dashed([[MA[0], MA[1] - 3], arcC, [MB[0], MB[1] - 3]], a * tr, true);
+      lab('moved, not copied', [M[0], M[1]], ch * .45 + (MOB ? 16 : 22));
+    },
+    over(t, a) {
+      /* the tally: one stroke a holder, struck off as each crook goes */
+      const ca = cntA(t), r = rend[ids[5]], x0 = S[0] + cw * .3, y0 = S[1] - s * 1.25;
+      ctx.save(); ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+      ca.cr.forEach((v, k) => { const al = cl01(v); if (al <= .01) return; ctx.globalAlpha = a * .75 * al; ctx.beginPath(); ctx.moveTo(x0 + k * 5.5, y0 - 5); ctx.lineTo(x0 + k * 5.5, y0 + 5); ctx.stroke(); });
+      ctx.restore();
+      /* the tie: the owner's crook to its ram */
+      const oa = ownA(t), ro = rend[ids[0]], tieA = a * .6 * Math.min(cl01(oa.cr), ro.a);
+      if (tieA > .01) dashed([[crO[0] + oa.cx + s * .24, crO[1] - s * 1.3], [ro.x + s * .3, ro.y - s * .7]], tieA);
+    },
+  };
+};
+
+/* ---------- who goes where ----------
+   The flock sets off together and arrives together, each sheep on a straight line. Places are
+   matched to sheep so that the summed distance is least (Hungarian method): two crossing paths
+   could always be swapped for a shorter pair, so the least total has no crossings, and on one
+   shared clock no two of them meet. The red sheep keeps its own place, so its line may cut
+   across others; it takes its own stretch of the clock, chosen from a small fixed set as the
+   one that keeps it furthest from every other sheep. All of it is pure in the positions. */
+function hungarian(a) {
+  const n = a.length, INF = 1e18, u = new Float64Array(n + 1), v = new Float64Array(n + 1), p = new Int32Array(n + 1), way = new Int32Array(n + 1);
+  for (let i = 1; i <= n; i++) {
+    p[0] = i; let j0 = 0; const minv = new Float64Array(n + 1).fill(INF), used = new Uint8Array(n + 1);
+    do {
+      used[j0] = 1; const i0 = p[j0]; let delta = INF, j1 = 0;
+      for (let j = 1; j <= n; j++) if (!used[j]) { const cur = a[i0 - 1][j - 1] - u[i0] - v[j]; if (cur < minv[j]) { minv[j] = cur; way[j] = j0; } if (minv[j] < delta) { delta = minv[j]; j1 = j; } }
+      for (let j = 0; j <= n; j++) if (used[j]) { u[p[j]] += delta; v[j] -= delta; } else minv[j] -= delta;
+      j0 = j1;
+    } while (p[j0] !== 0);
+    do { const j1 = way[j0]; p[j0] = p[j1]; j0 = j1; } while (j0);
+  }
+  const ans = new Array(n); for (let j = 1; j <= n; j++) ans[p[j] - 1] = j - 1; return ans;
+}
+function assign(sc, from) {
+  const rof = new Array(N), rs = sc.rs; rof[rs] = REDI;
+  const slotsLeft = []; for (let s = 0; s < N; s++) if (s !== rs) slotsLeft.push(s);
+  if (!from) { const k = sc.g.vi * 13; slotsLeft.forEach((s, j) => rof[s] = ORD[(k + j) % ORD.length]); return rof; }
+  const rams = []; for (let i = 0; i < N; i++) if (i !== REDI) rams.push(i);
+  const cost = rams.map(r => slotsLeft.map(s => Math.hypot(from[r].x - sc.all[s].x, from[r].y - sc.all[s].y)));
+  const m = hungarian(cost);
+  rams.forEach((r, j) => rof[slotsLeft[m[j]]] = r);
+  return rof;
+}
+function bindScene(sc, rof) {
+  sc.rof = rof; sc.L = new Array(N);
+  rof.forEach((ram, si) => sc.L[ram] = sc.all[si]);
+  sc.ids.length = 0; for (let k = 0; k < sc.slots.length; k++) sc.ids.push(rof[k]);
+}
+
+/* ---------- engine: fixed-step ticks, so every run of the page is the same run ---------- */
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let scene = null, prevScene = null, prevT = 0, view = null;
+let gT = 0, sT = 0, tr = 1;
+const TR = 104;
+const rend = Array.from({ length: N }, () => ({ x: 0, y: 0, s: 0, a: 0, face: 1 }));
+let snap = null, hop = new Float32Array(N);
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1); W = innerWidth; H = innerHeight; MOB = W <= 700;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  makeGrain();
+}
+function build(v) {
+  const g = geom(v), sc = SC[v](g); sc.g = g;
+  sc.all = sc.slots.concat(ridgeSlots(g, N - sc.slots.length));
+  if (sc.redSlot >= 0) sc.rs = sc.redSlot;
+  else { let best = -1, bd = 1e9; sc.all.forEach((l, j) => { if (j >= sc.slots.length && l.a > 0) { const d = Math.abs(l.x - W * (MOB ? .5 : .62)); if (d < bd) { bd = d; best = j; } } }); sc.rs = best; }
+  return sc;
+}
+const progOf = (i, T) => ease(i === REDI ? cl01((T - rw[0]) / (rw[1] - rw[0])) : cl01(T));
+/* one step of a move: along the line, bowed a little to one side where two sheep would otherwise
+   brush, with a size that shrinks early and grows late, so sheep are small wherever the flock is
+   close-packed */
+const bv = Array.from({ length: N }, () => [0, 0]);
+function moveAt(i, T, o, qx, qy, qs, qa) {
+  const e = progOf(i, T), shrink = qs < o.s, es = ease(shrink ? cl01(T / .6) : cl01((T - .4) / .6)), b = Math.sin(e * Math.PI);
+  return [lerp(o.x, qx, e) + bv[i][0] * b, lerp(o.y, qy, e) - b * hop[i] + bv[i][1] * b, lerp(o.s, qs, es), lerp(o.a, qa, shrink ? es : e)];
+}
+function pathAt(i, T) { const q = scene.L[i]; return moveAt(i, T, snap[i], q.x, q.y, q.s, q.a); }
+const RW = [[0, 1], [0, .7], [.3, 1], [.15, .85]], KS = 60;
+let rw = RW[0];
+function table() { const S = []; for (let k = 0; k <= KS; k++) { const row = []; for (let j = 0; j < N; j++) row.push(pathAt(j, k / KS)); S.push(row); } return S; }
+function plan() {
+  for (let i = 0; i < N; i++) { const o = snap[i], q = scene.L[i]; hop[i] = Math.min(6, Math.hypot(q.x - o.x, q.y - o.y) * .02); bv[i][0] = bv[i][1] = 0; }
+  /* the red sheep: its own stretch of the clock */
+  let S = table(), best = -1e9, bw = RW[0];
+  for (const w of RW) {
+    rw = w; let m = 9;
+    for (let k = 1; k < KS; k++) {
+      const A = pathAt(REDI, k / KS); if (A[3] < .2) continue;
+      for (let j = 1; j < N; j++) { const B = S[k][j]; if (B[3] < .2 || Math.max(A[2], B[2]) < 15) continue; m = Math.min(m, Math.hypot(A[0] - B[0], A[1] - B[1]) / ((A[2] + B[2]) / 2)); }
+    }
+    const v = Math.min(m, 1.1) - (w[1] - w[0] < 1 ? .04 : 0);
+    if (v > best + 1e-6) { best = v; bw = w; }
+  }
+  rw = bw;
+  /* then any pair that would still brush each bows gently away from the other */
+  const rel = []; for (let i = 0; i < N; i++) { const o = snap[i], q = scene.L[i]; if (Math.max(o.s, q.s) >= 15 && Math.max(o.a, q.a) > .2) rel.push(i); }
+  for (let pass = 0; pass < 24; pass++) {
+    S = table(); let any = false;
+    for (let p = 0; p < rel.length; p++) for (let r = p + 1; r < rel.length; r++) {
+      const i = rel[p], j = rel[r], A0 = S[0][i], B0 = S[0][j], A1 = S[KS][i], B1 = S[KS][j];
+      const fl = Math.min(.9, Math.hypot(A0[0] - B0[0], A0[1] - B0[1]) / ((A0[2] + B0[2]) / 2 || 1), Math.hypot(A1[0] - B1[0], A1[1] - B1[1]) / ((A1[2] + B1[2]) / 2 || 1));
+      let m = 9, mk = 0;
+      for (let k = 1; k < KS; k++) { const A = S[k][i], B = S[k][j]; if (A[3] < .2 || B[3] < .2 || Math.max(A[2], B[2]) < 15) continue; const d = Math.hypot(A[0] - B[0], A[1] - B[1]) / ((A[2] + B[2]) / 2); if (d < m) { m = d; mk = k; } }
+      if (m >= fl - .02) continue;
+      any = true;
+      const A = S[mk][i], B = S[mk][j], Sz = (A[2] + B[2]) / 2; let ux = A[0] - B[0], uy = A[1] - B[1], ul = Math.hypot(ux, uy);
+      if (ul < 1e-3) { const dx = scene.L[i].x - snap[i].x, dy = scene.L[i].y - snap[i].y, dl = Math.hypot(dx, dy) || 1; ux = -dy / dl; uy = dx / dl; } else { ux /= ul; uy /= ul; }
+      const push = (fl - m) * Sz * .75 + 1;
+      /* whichever is further from either end of its walk gives way more: the bow costs it least */
+      const si = Math.sin(progOf(i, mk / KS) * Math.PI), sj = Math.sin(progOf(j, mk / KS) * Math.PI), f = push / Math.max(.1, si + sj);
+      bv[i][0] += ux * f; bv[i][1] += uy * f; bv[j][0] -= ux * f; bv[j][1] -= uy * f;
+    }
+    for (const i of rel) { const q = scene.L[i], lim = Math.max(snap[i].s, q.s) * 2, l = Math.hypot(bv[i][0], bv[i][1]); if (l > lim) { bv[i][0] *= lim / l; bv[i][1] *= lim / l; } }
+    if (!any) break;
+  }
+}
+function setView(v, first) {
+  if (v === view) return;
+  view = v;
+  renderDom(v);
+  const instant = first || reduced;
+  try { history.replaceState(null, '', v === 'hill' ? location.pathname : '#' + v); } catch (e) {}
+  prevScene = instant ? null : scene; prevT = sT;
+  snap = rend.map(r => ({ ...r }));
+  scene = build(v);
+  bindScene(scene, assign(scene, first ? null : snap));
+  panA = pan; rbA = rb; panB = scene.g.pTo; rbB = scene.g.rTo;
+  sT = first ? (scene.start || 0) : 0; tr = instant ? 1 : 0;
+  if (instant) { pan = panB; rb = rbB; }
+  if (!instant) plan();
+  if (reduced) still();
+  if (first) { pose(); snap = rend.map(r => ({ ...r })); }
+}
+function still() {
+  /* reduced motion: advance the seeded scene to its telling moment and draw one frame */
+  sT = scene.key || 0; gT = 0;
+  tr = 1; pose(); draw();
+}
+function pose() {
+  const moving = tr < 1 && snap;
+  for (let i = 0; i < N; i++) {
+    const l = scene.L[i]; let p = scene.pose && !l.ridge ? scene.pose(i, l, sT) : null;
+    if (!p) { const g2 = graze(i * 7 + 3, gT); p = { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: g2[2] }; }
+    const s = p.s ?? l.s, a = (p.a ?? 1) * l.a, r = rend[i];
+    if (moving) {
+      const e = progOf(i, tr), o = snap[i];
+      r.face = Math.abs(p.x - o.x) > 4 && e > 0 && e < 1 ? (p.x > o.x ? 1 : -1) : (e >= 1 ? p.face : o.face);
+      const m = moveAt(i, tr, o, p.x, p.y, s, a); r.x = m[0]; r.y = m[1]; r.s = m[2]; r.a = m[3];
+    } else { r.x = p.x; r.y = p.y; r.s = s; r.a = a; r.face = p.face; }
+  }
+}
+function draw() {
+  const e = ease(Math.min(1, tr));
+  if (tr < 1) { pan = lerp(panA, panB, e); rb = lerp(rbA, rbB, e); } else { pan = panB; rb = rbB; }
+  drawHill();
+  if (prevScene && tr < 1) { prevScene.ground && prevScene.ground(prevT, 1 - sm(e * 1.6)); }
+  scene.ground && scene.ground(sT, sm((e - .35) / .65));
+  const order = rend.map((r, i) => i).sort((p, q) => rend[p].y - rend[q].y);
+  for (const i of order) { const r = rend[i]; sheep(r.x, r.y, r.s, r.face, i === REDI, r.a); }
+  if (prevScene && tr < 1 && prevScene.over) prevScene.over(prevT, 1 - sm(e * 1.5));
+  scene.over && scene.over(sT, sm((e - .5) / .5));
+}
+function tick() {
+  gT++; sT++; if (tr < 1) tr = Math.min(1, tr + 1 / TR);
+  if (prevScene && tr < 1) prevT++;
+}
+let last = null, acc = 0, lastFrame = 0;
+function advance(now) {
+  if (last === null) last = now;
+  acc += Math.min(120, now - last); last = now;
+  let n = 0; while (acc >= 1000 / 60 && n < 8) { tick(); acc -= 1000 / 60; n++; }
+  pose(); draw();
+}
+function frame() { lastFrame = performance.now(); advance(lastFrame); requestAnimationFrame(frame); }
+/* watchdog: where frames are not being produced (headless capture), keep the fixed-step clock going */
+setInterval(() => { const now = performance.now(); if (!reduced && now - lastFrame > 60) advance(now); }, 33);
+
+/* ---------- page ---------- */
+const $ = id => document.getElementById(id);
+const strip = $('strip'), idxBtns = [...strip.querySelectorAll('button')];
+function renderDom(v) {
+  const hill = v === 'hill', i = VIEWS.indexOf(v), c = COPY[v];
+  $('wm').hidden = hill; $('idx').hidden = hill; $('land').hidden = !hill; $('panel').hidden = hill;
+  idxBtns.forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  if (!hill) {
+    $('pName').textContent = c[0]; $('pTitle').textContent = c[1];
+    /* a body is one paragraph, or a lead and labelled halves */
+    const pb = $('pBody'); pb.replaceChildren();
+    for (const part of [].concat(Array.isArray(c[2]) ? c[2] : [c[2]])) {
+      if (typeof part === 'string') { const p = document.createElement('p'); p.textContent = part; pb.append(p); continue; }
+      const d = document.createElement('div'), b = document.createElement('b'), p = document.createElement('p');
+      d.className = 'half'; b.textContent = part[0]; p.textContent = part[1]; d.append(b, p); pb.append(d);
+    }
+    const pv = i > 0 ? VIEWS[i - 1] : null, nx = i < VIEWS.length - 1 ? VIEWS[i + 1] : null;
+    $('prevBtn').hidden = !pv; $('prevBtn').querySelector('span').textContent = pv ? COPY[pv][0] : '';
+    $('nextBtn').hidden = !nx; $('nextBtn').querySelector('span').textContent = nx ? COPY[nx][0] : '';
+    $('sName').textContent = c[0]; $('sPrev').disabled = !pv; $('sNext').disabled = !nx;
+  }
+  $('det').hidden = v !== 'deterministic' || reduced;
+}
+function go(d) { setView(VIEWS[Math.max(0, Math.min(VIEWS.length - 1, VIEWS.indexOf(view) + d))]); }
+
+resize();
+const h0 = location.hash.slice(1);
+setView(VIEWS.includes(viewOf(h0)) ? viewOf(h0) : 'hill', true);
+if (!reduced) requestAnimationFrame(frame); else still();
+const rebuild = () => {
+  resize(); const keepT = sT, rof = scene.rof;
+  renderDom(view);
+  scene = build(view); bindScene(scene, rof);
+  panB = pan = scene.g.pTo; rbB = rb = scene.g.rTo; prevScene = null; tr = 1; sT = keepT;
+  if (reduced) still(); else { pose(); draw(); }
+};
+addEventListener('resize', rebuild);
+/* headings reflow when the web fonts arrive; re-measure the panel and landing block then */
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (tr >= 1) rebuild(); });
+
+$('wm').addEventListener('click', () => setView('hill'));
+$('walkIn').addEventListener('click', () => go(1));
+$('prevBtn').addEventListener('click', () => go(-1));
+$('nextBtn').addEventListener('click', () => go(1));
+idxBtns.forEach(b => b.addEventListener('click', () => setView(b.dataset.v)));
+$('sPrev').addEventListener('click', () => go(-1));
+$('sNext').addEventListener('click', () => go(1));
+/* replay: wind the run back and play it again over the prints already on the ground */
+$('replayBtn').addEventListener('click', () => { if (view === 'deterministic' && tr >= 1) sT = DET.rewindFrom(sT); });
+addEventListener('hashchange', () => { const h = viewOf(location.hash.slice(1)); if (VIEWS.includes(h)) setView(h); });
+addEventListener('keydown', e => { if (e.target.closest && e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1); });
+const nearRed = (x, y) => { const r = rend[REDI]; return Math.hypot(x - r.x, y - (r.y - r.s * .45)) < Math.max(18, r.s * .6); };
+cv.addEventListener('click', e => { if (view === 'hill' && nearRed(e.clientX, e.clientY)) go(1); });
+cv.addEventListener('mousemove', e => { cv.style.cursor = view === 'hill' && nearRed(e.clientX, e.clientY) ? 'pointer' : ''; });
+
+</script>
+</body>
+</html>

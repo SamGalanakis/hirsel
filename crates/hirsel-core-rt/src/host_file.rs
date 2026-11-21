@@ -22,8 +22,7 @@ unsafe impl Send for File {}
 unsafe impl Sync for File {}
 
 pub(crate) const DYNAMIC_GRANT: u64 = 1 << 63;
-/// A substitute Args vector (tape.rs): pinned for the run, so its views stay
-/// valid after the tape ends.
+/// A tape's Args vector, pinned for the lifetime of the run.
 struct Vector {
     _bytes: Vec<Vec<u8>>,
     views: Vec<Buffer>,
@@ -326,8 +325,7 @@ pub unsafe extern "C" fn hirsel_core_hostfile_drop(context: *mut Context, file: 
     }
 }
 
-/// The argument vector `args` designates: a substitute's (tape/abi.rs), or
-/// the run's own.
+/// The argument vector for a live run or its recording provider.
 /// # Safety
 /// A live run context; `args` is a live Args operand of the run.
 pub(crate) unsafe fn args<'a>(context: *const Context, args: u64) -> &'a [Buffer] {

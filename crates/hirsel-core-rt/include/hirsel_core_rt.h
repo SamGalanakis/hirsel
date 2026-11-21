@@ -143,7 +143,7 @@ void hirsel_core_finalizer_begin(HirselCoreContext *, void *resource);
 void hirsel_core_finalizer_end(HirselCoreContext *, void *resource);
 void hirsel_core_resource_free(void *resource, uint64_t logical_field_storage);
 /* Cause kinds: 0 Overflow, 1 Bounds, 2 Division, 3 Unwrap, 4 Fail,
-   5 Cancelled, 6 Capacity, 7 Tape, 8 OutOfTime. The kind is Fail's message's niche (FORM #75): kind k
+   5 Cancelled, 6 Capacity, 7 OutOfTime. The kind is Fail's message's niche (FORM #75): kind k
    other than Fail is message.capacity == HIRSEL_CORE_CAUSE_KIND_START + k; a Fail's
    capacity is below that. Message ownership transfers to raise. */
 typedef struct { uint8_t *data; uint64_t len, capacity; } HirselCoreStringMessage;

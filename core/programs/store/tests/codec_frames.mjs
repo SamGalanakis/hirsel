@@ -6,7 +6,7 @@ const bytes = hex => Uint8Array.from(Buffer.from(hex.replaceAll(' ',''),'hex'));
 export async function vectors(c,frame,entries) {
   assert.equal(frame.subprotocol,'hirsel.2');
   assert.strictEqual(frame.Frame,c.Frame);
-  assert.deepEqual(frame.Raised,{Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8,Tape:9});
+  assert.deepEqual(frame.Raised,{Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});
   assert.deepEqual(frame.BadKind,{Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6});
   assert.deepEqual(entries.identity,{digest:bytes('0102'),target:'t',n_place:16777216n});
   assert.equal(entries.want[0].args_fp,9007199254740993n);

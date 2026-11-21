@@ -20,6 +20,18 @@ pub struct Kind {
     pub waits: bool,
 }
 
+/// A slot in the checked foreign signature. A Dir is independent of handle kinds.
+#[repr(C)]
+pub struct Parameter {
+    pub kind: *const Kind,
+    pub dir: bool,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<Parameter>() == crate::abi_layout::FOREIGN_PARAMETER_BYTES);
+    assert!(std::mem::offset_of!(Parameter, dir) == crate::abi_layout::FOREIGN_PARAMETER_DIR);
+};
+
 /// A thunk takes a pair of words per argument. Scalars use the first,
 /// loans use both, and handles start with the ordinal in the first word and
 /// are passed to C using the pointer resolved into the second.
@@ -29,6 +41,7 @@ pub const RELEASED: u8 = 2;
 pub const IN_USE: u8 = 3;
 pub const WRONG_KIND: u8 = 4;
 pub const ALREADY_HELD: u8 = 5;
+pub const NEEDS_HOST_DIR: u8 = 6;
 pub(crate) const RELEASE_WAIT_OP: u8 = u8::MAX - 1;
 
 #[derive(Default)]
@@ -56,7 +69,7 @@ struct Handle {
 pub(crate) struct Operands {
     pub table: *const Handles,
     pub arguments: *mut Argument,
-    pub kinds: *const *const Kind,
+    pub parameters: *const Parameter,
     pub count: usize,
     pub result: Option<&'static Kind>,
     pub release: bool,
@@ -70,7 +83,7 @@ impl Operands {
         for i in 0..self.count {
             // SAFETY: the descriptor and words have the same, live extent.
             unsafe {
-                if let Some(kind) = (*self.kinds.add(i)).as_ref() {
+                if let Some(kind) = (*self.parameters.add(i)).kind.as_ref() {
                     apply(self.arguments.add(i), kind);
                 }
             }
@@ -83,9 +96,21 @@ impl Operands {
         // SAFETY: the pinned run owns the handle table.
         let table = unsafe { &*self.table };
         {
+            // SAFETY: the descriptor supplies exactly count immutable parameter rows.
+            let params = if self.count == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(self.parameters, self.count) }
+            };
+            // A host root lookup reads the OS provider under the same commit
+            // token as its directory operations. Drop it before any release wait.
+            let _commit = params
+                .iter()
+                .any(|parameter| parameter.dir)
+                .then(crate::sequencer::enter);
             let mut state = table.0.lock().unwrap();
             // SAFETY: descriptor and args are the caller's pinned operands.
-            match unsafe { state.preflight(self) } {
+            match unsafe { state.preflight(context, self, params) } {
                 Preflight::Ready => return 0,
                 Preflight::Refused(status) => return status,
                 Preflight::Wait => {}
@@ -118,6 +143,21 @@ impl Operands {
             unsafe {
                 let mut state = (*self.table).0.lock().unwrap();
                 state.pointers.remove(&(*self.arguments)[1]);
+            }
+        }
+        for i in 0..self.count {
+            // SAFETY: preflight pinned this open directory in the run, and the
+            // issued thunk alone receives and owns the new descriptor.
+            unsafe {
+                if (*self.parameters.add(i)).dir {
+                    let word = &mut *self.arguments.add(i);
+                    let fd = libc::openat(
+                        word[0] as i32,
+                        c".".as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    );
+                    word[0] = fd as i64 as u64;
+                }
             }
         }
     }
@@ -188,33 +228,40 @@ impl Handle {
 impl Table {
     /// # Safety
     /// The queue and words are pinned and this call is entering preflight.
-    unsafe fn preflight(&mut self, call: Operands) -> Preflight {
-        let mut outcome = Preflight::Ready;
+    unsafe fn preflight(
+        &mut self,
+        context: *mut Context,
+        call: Operands,
+        params: &[Parameter],
+    ) -> Preflight {
         // SAFETY: preflight examines the words only. No state changes unless
         // the left-to-right check succeeds for every argument.
         unsafe {
-            call.for_handles(|word, kind| {
-                if !matches!(outcome, Preflight::Ready) {
-                    return;
+            for (i, parameter) in params.iter().enumerate() {
+                let word = call.arguments.add(i);
+                if parameter.dir {
+                    let Some((fd, rights)) = crate::os::foreign_root(context, (*word)[0]) else {
+                        return Preflight::Refused(NEEDS_HOST_DIR);
+                    };
+                    word.write([fd as u64, u64::from(rights)]);
                 }
+                let Some(kind) = parameter.kind.as_ref() else {
+                    continue;
+                };
                 let ordinal = (*word)[0];
                 let Some(handle) = self.entries.get(&ordinal) else {
-                    outcome = Preflight::Refused(RELEASED);
-                    return;
+                    return Preflight::Refused(RELEASED);
                 };
-                let duplicate = (0..word.offset_from(call.arguments) as usize).any(|i| {
-                    !(*call.kinds.add(i)).is_null() && (*call.arguments.add(i))[0] == ordinal
+                let duplicate = (0..i).any(|prior| {
+                    !params[prior].kind.is_null() && (*call.arguments.add(prior))[0] == ordinal
                 });
                 if duplicate || (handle.in_flight && !call.release) {
-                    outcome = Preflight::Refused(IN_USE);
+                    return Preflight::Refused(IN_USE);
                 } else if !ptr::eq(handle.kind, kind) {
-                    outcome = Preflight::Refused(WRONG_KIND);
+                    return Preflight::Refused(WRONG_KIND);
                 } else if handle.in_flight {
-                    outcome = Preflight::Wait;
+                    return Preflight::Wait;
                 }
-            });
-            if !matches!(outcome, Preflight::Ready) {
-                return outcome;
             }
             if call.result.is_some() {
                 self.reserve();
@@ -301,6 +348,7 @@ impl Handles {
 }
 
 struct ReleaseWait {
+    context: *mut Context,
     operands: Operands,
     outcome: Outcome,
     outside: Option<Outside>,
@@ -326,7 +374,13 @@ unsafe fn wait_for_use(context: *mut Context, operands: Operands, site: u64) -> 
         unsafe {
             let mut state = (*(*link.0).operands.table).0.lock().unwrap();
             let frame = &mut *link.0;
-            match state.preflight(frame.operands) {
+            let parameter = &*frame.operands.parameters;
+            debug_assert!(!parameter.dir && frame.operands.count == 1);
+            match state.preflight(
+                frame.context,
+                frame.operands,
+                std::slice::from_ref(parameter),
+            ) {
                 Preflight::Ready => Wait::default(),
                 Preflight::Refused(status) => {
                     frame.outcome.status = status;
@@ -369,6 +423,7 @@ unsafe fn wait_for_use(context: *mut Context, operands: Operands, site: u64) -> 
     }
 
     let mut frame = ReleaseWait {
+        context,
         operands,
         outcome: Outcome::default(),
         outside: None,

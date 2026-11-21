@@ -5,7 +5,7 @@ pub(crate) mod handles;
 pub(crate) mod helpers;
 
 use crate::{Context, provider::Outcome};
-pub use handles::{Argument, Kind};
+pub use handles::{Argument, Kind, Parameter};
 
 /// A C thunk takes an initialized array of argument words and returns the
 /// result bits. Its caller retains custody of the words and every loan.
@@ -74,12 +74,12 @@ pub unsafe extern "C" fn hirsel_core_foreign_wait(
     }
 }
 
-/// One checked foreign call's link-time descriptor. kinds has one row per
-/// packed argument and contains null for scalar and byte-loan arguments.
+/// One checked foreign call's link-time descriptor, with one parameter row
+/// per packed argument.
 #[repr(C)]
 pub struct Call {
     pub thunk: Thunk,
-    pub kinds: *const *const Kind,
+    pub parameters: *const Parameter,
     pub count: usize,
     pub new_kind: *const Kind,
     pub result_tag: u8,
@@ -95,7 +95,7 @@ const _: () = {
     assert!(offset_of!(Kind, waits) == FOREIGN_KIND_WAITS);
     assert!(size_of::<Call>() == FOREIGN_CALL_BYTES);
     assert!(offset_of!(Call, thunk) == FOREIGN_CALL_THUNK as usize);
-    assert!(offset_of!(Call, kinds) == FOREIGN_CALL_KINDS as usize);
+    assert!(offset_of!(Call, parameters) == FOREIGN_CALL_PARAMETERS as usize);
     assert!(offset_of!(Call, count) == FOREIGN_CALL_COUNT);
     assert!(offset_of!(Call, new_kind) == FOREIGN_CALL_NEW as usize);
     assert!(offset_of!(Call, result_tag) == FOREIGN_CALL_RESULT);
@@ -163,11 +163,14 @@ impl Run {
             return;
         };
         let mut argument = [ordinal, 0];
-        let kinds = [std::ptr::from_ref(kind)];
+        let parameters = [Parameter {
+            kind: std::ptr::from_ref(kind),
+            dir: false,
+        }];
         let handles = handles::Operands {
             table: &raw const self.handles,
             arguments: &raw mut argument,
-            kinds: kinds.as_ptr(),
+            parameters: parameters.as_ptr(),
             count: 1,
             result: None,
             release: true,
@@ -278,7 +281,7 @@ impl Invocation {
 ///
 /// # Safety
 /// Context belongs to the current foreign-enabled run. The checked descriptor
-/// and its kinds table are pinned through the call. The kind descriptors are
+/// and its parameter table are pinned through the call. The kind descriptors are
 /// static. The argument words and loans remain live and pinned through
 /// delivery. The thunk follows the native contract. The result word is an
 /// exclusive destination, written only on success.
@@ -302,7 +305,7 @@ pub unsafe extern "C" fn hirsel_core_foreign_call(
         let handles = handles::Operands {
             table: &raw const run.handles,
             arguments,
-            kinds: call.kinds,
+            parameters: call.parameters,
             count: call.count,
             result: call.new_kind.as_ref(),
             release: call.release,
@@ -335,6 +338,7 @@ unsafe fn refuse(context: *mut Context, site: u64, status: u8) -> u8 {
         handles::IN_USE => b"foreign handle in use",
         handles::WRONG_KIND => b"foreign handle of another kind",
         handles::ALREADY_HELD => b"foreign pointer already held",
+        handles::NEEDS_HOST_DIR => b"foreign call needs a host Dir",
         _ => unreachable!("foreign handle refusal"),
     };
     // SAFETY: the literal lends a permanent String carrier to the cause.

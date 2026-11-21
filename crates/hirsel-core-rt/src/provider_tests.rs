@@ -1190,11 +1190,17 @@ fn foreign_handles_retire_ordinals_and_release_remaining_owners_in_reverse_order
         _: *const Config,
         result: *mut MainResult,
     ) -> u8 {
-        let scalar = [ptr::null()];
-        let handle = [&raw const KIND];
+        let scalar = [crate::foreign::Parameter {
+            kind: ptr::null(),
+            dir: false,
+        }];
+        let handle = [crate::foreign::Parameter {
+            kind: &raw const KIND,
+            dir: false,
+        }];
         let maker = Call {
             thunk: make,
-            kinds: scalar.as_ptr(),
+            parameters: scalar.as_ptr(),
             count: 1,
             new_kind: &KIND,
             waits: false,
@@ -1203,7 +1209,7 @@ fn foreign_handles_retire_ordinals_and_release_remaining_owners_in_reverse_order
         };
         let closer = Call {
             thunk: release,
-            kinds: handle.as_ptr(),
+            parameters: handle.as_ptr(),
             count: 1,
             new_kind: ptr::null(),
             waits: true,

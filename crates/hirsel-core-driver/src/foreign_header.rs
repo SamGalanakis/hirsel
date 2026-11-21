@@ -14,6 +14,7 @@ pub(crate) enum Argument<'a> {
     Scalar(Scalar),
     Bytes { mutable: bool },
     Handle { kind: &'a str, release: bool },
+    Dir,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +93,7 @@ impl<'a> Abi<'a> {
                 Argument::Scalar(s) => s.name().to_owned(),
                 Argument::Bytes { mutable: false } => "bytes".into(),
                 Argument::Bytes { mutable: true } => "mut bytes".into(),
+                Argument::Dir => "dir".into(),
                 Argument::Handle { kind, release } => {
                     let mode = if release { "take" } else { "handle" };
                     format!("{mode} {kind}")
@@ -117,7 +119,7 @@ impl<'a> Abi<'a> {
         }
         if !params.iter().zip(self.arguments()).all(|(&param, arg)| match arg {
             Argument::Scalar(s) => param == Param::Value(Ty::Scalar(s)),
-            Argument::Handle { .. } => param == Param::Value(Ty::Scalar(Scalar::U64)),
+            Argument::Handle { .. } | Argument::Dir => param == Param::Value(Ty::Scalar(Scalar::U64)),
             Argument::Bytes { mutable } => {
                 let Param::Address { place: PlaceTy::Declared(ty), loan } = param else {
                     return false;
@@ -161,6 +163,7 @@ impl<'a> Abi<'a> {
 fn argument_kind(text: &str) -> Option<Argument<'_>> {
     match text {
         BYTES => Some(Argument::Bytes { mutable: false }),
+        "core@1/core/Dir" => Some(Argument::Dir),
         "mut core@1/core/List[u8]" => Some(Argument::Bytes { mutable: true }),
         scalar if ffi_scalar(scalar).is_some() => Some(Argument::Scalar(ffi_scalar(scalar)?)),
         handle => {
@@ -319,6 +322,11 @@ pub(crate) fn header(inputs: CorpusManifest, module: &DefPath, prefix: &str) -> 
                     c_params.push("void *".into());
                     let mode = if *release { "take" } else { "handle" };
                     abi_params.push(format!("{mode} {}", kind.definition_identity()));
+                }
+                AbiParameter::Dir => {
+                    c_params.push(format!("int {name}_fd"));
+                    c_params.push(format!("uint32_t {name}_flags"));
+                    abi_params.push("dir".into());
                 }
             }
         }

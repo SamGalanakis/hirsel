@@ -17,10 +17,18 @@ capabilities. To work on the compiler, runtime or libraries, see
 
 ## The installation
 
-An installation is one self-contained prefix: the `hirsel` executable, the published
-core and std packages (`core-packages`), the runtime archive for each supported target
-(`runtime/`), the link kit, a static `bin/ld.lld` and the shared libraries the compiler
-loads (`lib/`). It reads nothing outside its prefix and may be copied or moved.
+An installation is a relocatable prefix containing `hirsel`, the published core and
+std packages, target runtime archives, the native link recipe, `bin/ld.lld` and
+the LLVM libraries shipped with the compiler. Linux supplies the dynamic loader
+and system shared libraries. Native links also need the glibc CRT objects and GCC
+support libraries at the paths selected by the distribution's link recipe.
+
+On Debian and Ubuntu install `libc6-dev` and `libgcc-N-dev`, where `N` is the GCC
+major version in that recipe. On Fedora install `glibc-devel` and `gcc`. If these
+files are missing, Hirsel names the first missing input before invoking the linker.
+
+`hirsel --version` prints the toolchain version, compiler identity and registered
+runtime archive identities by target.
 `hirsel env` reports the compiler, installed root, package cache, target and runtime a
 request would use; `--json` prints the same as JSON and `--target` selects another
 target's runtime.
@@ -32,12 +40,19 @@ exits 2 with `hirsel: unknown command`.
 ## Start a program
 
 ```sh
-hirsel new app          # app/main.hirsel, a runnable main
-hirsel new tools --lib  # tools/lib.hirsel and a main.hirsel that exercises it
-hirsel run app
+hirsel new app
+cd app
+hirsel check
+hirsel test
+hirsel run
+hirsel build
+./program
 ```
 
-A package is a directory of `.hirsel` files. `hirsel check DIR` checks every
+A package is a directory of `.hirsel` files. `check`, `test`, `run` and `build`
+default to the current directory. `new` creates a runnable `main`, a test and its
+limit in `manifest.json`. With `--lib` it also creates `lib.hirsel`.
+`hirsel check DIR` checks every
 definition and declaration in it; `--json` prints the outcome, its diagnostics, its
 incomplete features and its resource refusals. `hirsel explain RULE` prints a
 specification rule (for example `hirsel explain CAP-4`), and `hirsel explain --list`
@@ -73,8 +88,9 @@ with explicit rules ([Net sockets](spec/net.md)). Env requires
 followed by `*` ([Env](../core/std/api/env.md)). A missing grant is refused before native code is emitted, naming the parameter
 and the option it needs. Everything after `--` is passed to the program as `Args`.
 
-The installation links with its own `bin/ld.lld` through the C driver it recorded at
-install; `--cc PROGRAM` selects another. `--target aarch64-unknown-linux-gnu` builds
+The installation invokes its own `bin/ld.lld` using the link recipe captured at
+packaging. `--cc PROGRAM` selects a C driver to supply another recipe.
+`--target aarch64-unknown-linux-gnu` builds
 for AArch64; `run` and `test` then need `--emulator QEMU` and `--sysroot DIR` for the
 AArch64 runtime libraries.
 

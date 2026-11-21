@@ -144,7 +144,12 @@ pub(crate) struct Closure {
 /// The closure of `args`, with `support` (libraries the link appends at the
 /// input marker) read where the marker stands. The marker's own inputs are
 /// the request's objects, keyed by the request.
-pub(crate) fn closure(args: &[String], marker: &str, support: &[&str]) -> io::Result<Closure> {
+pub(crate) fn closure(
+    args: &[String],
+    marker: &str,
+    support: &[&str],
+    require_libraries: bool,
+) -> io::Result<Closure> {
     let refuse = |what: String| io::Error::other(format!("link recipe refused: {what}"));
     // First pass: the options, the search directories and the sysroot,
     // which hold for every library wherever they stand.
@@ -239,6 +244,7 @@ pub(crate) fn closure(args: &[String], marker: &str, support: &[&str]) -> io::Re
         files: Vec::new(),
         absent: Vec::new(),
         stack: Vec::new(),
+        require_libraries,
     };
     let mut statics = vec![false];
     for (kind, word) in words {
@@ -265,10 +271,10 @@ pub(crate) fn closure(args: &[String], marker: &str, support: &[&str]) -> io::Re
             }
             Kind::Script => match walk.script_name(word)? {
                 Some(path) => walk.input(&path, true)?,
-                None => return Err(refuse(format!("linker script {word} not found"))),
+                None => return Err(missing(word)),
             },
             Kind::Library => {
-                if let Some(path) = walk.library(word, *statics.last().unwrap()) {
+                if let Some(path) = walk.library(word, *statics.last().unwrap())? {
                     walk.input(&path, false)?;
                 }
             }
@@ -285,6 +291,13 @@ pub(crate) fn closure(args: &[String], marker: &str, support: &[&str]) -> io::Re
     })
 }
 
+fn missing(input: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("missing recipe inputs: {input}"),
+    )
+}
+
 struct Walk {
     search: Vec<PathBuf>,
     sysroot: Option<PathBuf>,
@@ -292,6 +305,7 @@ struct Walk {
     absent: Vec<PathBuf>,
     /// The scripts being read, so an `INCLUDE` cycle ends.
     stack: Vec<PathBuf>,
+    require_libraries: bool,
 }
 
 impl Walk {
@@ -307,7 +321,7 @@ impl Walk {
         None
     }
 
-    fn library(&mut self, name: &str, statics: bool) -> Option<PathBuf> {
+    fn library(&mut self, name: &str, statics: bool) -> io::Result<Option<PathBuf>> {
         let search = self.search.clone();
         let candidates: Vec<PathBuf> = match name.strip_prefix(':') {
             Some(file) => search.iter().map(|dir| dir.join(file)).collect(),
@@ -319,7 +333,16 @@ impl Walk {
                 })
                 .collect(),
         };
-        self.first(candidates)
+        let found = self.first(candidates);
+        if found.is_none() && self.require_libraries {
+            let files = match name.strip_prefix(':') {
+                Some(file) => file.to_owned(),
+                None if statics => format!("lib{name}.a"),
+                None => format!("lib{name}.so or lib{name}.a"),
+            };
+            return Err(missing(files));
+        }
+        Ok(found)
     }
 
     /// A `-T` or `INCLUDE` name: as given (absolute, or relative to the
@@ -336,10 +359,7 @@ impl Walk {
     /// Key `path`, a file read as data.
     fn read(&mut self, path: &Path) -> io::Result<()> {
         if !path.is_file() {
-            return Err(io::Error::other(format!(
-                "missing recipe inputs: {}",
-                path.display()
-            )));
+            return Err(missing(path.display()));
         }
         self.files.push(path.to_owned());
         Ok(())
@@ -410,7 +430,7 @@ impl Walk {
                         .clone();
                     match self.script_name(&name)? {
                         Some(found) => self.input(&found, true)?,
-                        None => return Err(refuse(format!("includes missing {name}"))),
+                        None => return Err(missing(name)),
                     }
                     i += 2;
                 }
@@ -442,7 +462,7 @@ impl Walk {
     /// One `INPUT` or `GROUP` operand of the script at `script`.
     fn script_file(&mut self, script: &Path, name: &str, under_sysroot: bool) -> io::Result<()> {
         let found = if let Some(library) = name.strip_prefix("-l") {
-            self.library(library, false)
+            self.library(library, false)?
         } else if name.starts_with('/') {
             match (&self.sysroot, under_sysroot) {
                 (Some(root), true) => Some(root.join(name.trim_start_matches('/'))),
@@ -464,6 +484,7 @@ impl Walk {
         };
         match found {
             Some(found) => self.input(&found, false),
+            None if self.require_libraries => Err(missing(name)),
             None => Ok(()),
         }
     }

@@ -371,8 +371,14 @@ fn installed_toolchain(
             linker.display()
         )));
     }
-    let closure = crate::link_closure::closure(&installed.args, INPUT_MARKER, SUPPORT_LIBS)
-        .map_err(|error| refused(error.to_string()))?;
+    let closure = crate::link_closure::closure(&installed.args, INPUT_MARKER, SUPPORT_LIBS, true)
+        .map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            host_link_input_error(error)
+        } else {
+            refused(error.to_string())
+        }
+    })?;
     let mut paths = closure.files;
     paths.push(linker.clone());
     let store = host_tools()?;
@@ -1034,7 +1040,14 @@ fn recipe_files(
     args: &[String],
     configuration: impl Iterator<Item = PathBuf>,
 ) -> io::Result<(Vec<RecipeFile>, Vec<PathBuf>)> {
-    let closure = crate::link_closure::closure(args, INPUT_MARKER, SUPPORT_LIBS)?;
+    let closure =
+        crate::link_closure::closure(args, INPUT_MARKER, SUPPORT_LIBS, false).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                host_link_input_error(error)
+            } else {
+                error
+            }
+        })?;
     let mut paths = closure.files;
     paths.push(linker.to_owned());
     paths.extend(configuration);
@@ -1060,6 +1073,15 @@ fn recipe_files(
         .map(|path| recipe_file(&path))
         .collect::<io::Result<_>>()?;
     Ok((files, closure.absent))
+}
+
+fn host_link_input_error(error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "{error}; install the target's glibc and GCC development files (libc6-dev and libgcc-N-dev on Debian/Ubuntu, glibc-devel and gcc on Fedora). Match the GCC version and paths in the link recipe, or select a configured C driver with --cc"
+        ),
+    )
 }
 
 /// The recipe's identity: the driver's and the link editor's bytes, wherever
@@ -1617,6 +1639,10 @@ mod tests {
         let crt = work.path().join("system/crt1.o");
         std::fs::create_dir(crt.parent().unwrap()).unwrap();
         std::fs::write(&crt, b"crt").unwrap();
+        let system = crt.parent().unwrap();
+        for library in ["gcc_s", "pthread", "dl", "m", "rt", "util"] {
+            std::fs::write(system.join(format!("lib{library}.a")), b"!<arch>\n").unwrap();
+        }
         let target = "x86_64-unknown-linux-gnu";
         let keyed = |root: &str| {
             let root = work.path().join(root);
@@ -1631,7 +1657,11 @@ mod tests {
             let installed = InstalledRecipe {
                 schema: INSTALLED_RECIPE_SCHEMA,
                 target: target.into(),
-                args: vec![crt.display().to_string(), INPUT_MARKER.into()],
+                args: vec![
+                    crt.display().to_string(),
+                    format!("-L{}", system.display()),
+                    INPUT_MARKER.into(),
+                ],
             };
             std::fs::write(&recipe, serde_json::to_vec(&installed).unwrap()).unwrap();
             let (toolchain, recipe) = installed_toolchain(&recipe, target, &runtime).unwrap();

@@ -862,15 +862,15 @@ pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
     }
     std::fs::create_dir(directory)?;
     let main = if library {
-        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 { Ok(()) } else { Error(Exit(status: 1)) }\n}\n"
+        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(Exit(status: 1))\n    }\n}\n"
     } else {
         "pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n\npub fn twice(n: u64) -> u64 {\n    n + n\n}\n"
     };
     let lib = "pub fn answer() -> u64 {\n    42\n}\n";
     let test = if library {
-        "@test\nfn test_answer() -> Result[(), ()] {\n    if lib.answer() == 42 { Ok(()) } else { Error(()) }\n}\n"
+        "@test\nfn test_answer() -> Result[(), ()] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
     } else {
-        "@test\nfn test_twice() -> Result[(), ()] {\n    if main.twice(21) == 42 { Ok(()) } else { Error(()) }\n}\n"
+        "@test\nfn test_twice() -> Result[(), ()] {\n    if main.twice(21) == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
     };
     let sources = ["main.hirsel"]
         .into_iter()

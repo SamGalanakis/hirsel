@@ -53,6 +53,9 @@ def main():
                     new = self.progress.run([str(compiler), 'new', str(app), *(['--lib'] if library else [])],
                                          cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(new.returncode, 0, new.stderr)
+                    formatted = self.progress.run([str(compiler), 'fmt', '--check', str(app)],
+                                                  cwd=ROOT, capture_output=True, text=True)
+                    self.assertEqual(formatted.returncode, 0, formatted.stdout + formatted.stderr)
                     check = self.progress.run([str(compiler), 'check', '--libraries', str(ROOT / 'core'), '--json'],
                                               cwd=app, capture_output=True, text=True)
                     self.assertEqual(check.returncode, 0, check.stdout + check.stderr)

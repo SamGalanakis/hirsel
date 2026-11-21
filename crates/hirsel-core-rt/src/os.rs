@@ -23,6 +23,8 @@ pub struct DirectoryOperations {
     pub(crate) probe: fn(&OsProvider, u64) -> io::Result<()>,
     pub(crate) issue: IssueFile,
     pub(crate) sync: SyncFile,
+    resume: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step,
+    abort: unsafe extern "C" fn(*mut u8, *mut Request, u64, u8) -> Outcome,
 }
 
 #[unsafe(no_mangle)]
@@ -31,6 +33,8 @@ pub static hirsel_core_os_directory_ops: DirectoryOperations = DirectoryOperatio
     probe: OsProvider::probe_directory,
     issue: issue_file,
     sync: sync_file,
+    resume: resume_with_directory,
+    abort: abort_with_directory,
 };
 
 pub struct OsProvider {
@@ -113,8 +117,8 @@ impl OsProvider {
             state: (self as *mut Self).cast(),
             wait,
             issue,
-            resume,
-            abort,
+            resume: directory.map_or(resume, |ops| ops.resume),
+            abort: directory.map_or(abort, |ops| ops.abort),
             deliver,
         }
     }
@@ -572,18 +576,39 @@ pub(crate) mod probe {
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
     unsafe { (*(*request).path.cast::<crate::net::NetworkRequest>()).os }
 }
-/// Only socket operations enter I under the OS provider.
+/// The OS provider without directory operations parks only socket requests.
 unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
-    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
-        return crate::os_sync::resume(token);
-    }
+    // SAFETY: an outstanding socket request pins its Net extension.
     unsafe { (socket_operations(request).step)(request, token, false) }
 }
 unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
+    // SAFETY: an outstanding socket request pins its Net extension.
+    unsafe { (socket_operations(request).abort)(request, token, reason) }
+}
+unsafe extern "C" fn resume_with_directory(
+    state: *mut u8,
+    request: *mut Request,
+    token: u64,
+) -> Step {
+    // SAFETY: the scheduler pins the pending request through resume.
+    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
+        return crate::os_sync::resume(token);
+    }
+    // SAFETY: only sync or socket requests reach this callback.
+    unsafe { resume(state, request, token) }
+}
+unsafe extern "C" fn abort_with_directory(
+    state: *mut u8,
+    request: *mut Request,
+    token: u64,
+    reason: u8,
+) -> Outcome {
+    // SAFETY: the scheduler pins the pending request through abort.
     if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
         return crate::os_sync::abort();
     }
-    unsafe { (socket_operations(request).abort)(request, token, reason) }
+    // SAFETY: only sync or socket requests reach this callback.
+    unsafe { abort(state, request, token, reason) }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.

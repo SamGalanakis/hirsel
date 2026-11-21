@@ -1,0 +1,96 @@
+// test-env-fixture: {"MISSING": null, "RAW": [255], "BAD": "invalid", "EMPTY": "", "SINT": "-9223372036854775808", "UINT": "18446744073709551615", "TRUE": "true", "FALSE": "false", "PORT_LOW": "1", "PORT_HIGH": "65535", "PORT_ZERO": "0", "PORT_OVER": "65536", "MILLIS": "1250", "DURATION_SUFFIX": "1s"}
+// The call order deliberately differs from key order.
+// expect: run read_errors(env) = true
+fn read_errors(e: Env) -> bool {
+    let mut r = config.new(e, 3)
+    let missing = config.string(mut r, "MISSING")
+    let denied = config.bool_or(mut r, "DENIED", true)
+    let raw = config.string_or(mut r, "RAW", "fallback")
+    let Error(errors) = config.finish(take r) else {
+        return false
+    }
+    if missing != "" || denied || raw != "" || list.len(errors) != 3 {
+        return false
+    }
+    let KeyError(a, Missing) = errors[0] else {
+        return false
+    }
+    let KeyError(b, Denied) = errors[1] else {
+        return false
+    }
+    let KeyError(c, NonUtf8) = errors[2] else {
+        return false
+    }
+    a == "MISSING" && b == "DENIED" && c == "RAW" && config.format_errors(errors) == "MISSING: missing\nDENIED: read denied\nRAW: not UTF-8"
+}
+
+// expect: run defaults_and_success(env) = true
+fn defaults_and_success(e: Env) -> bool {
+    let mut r = config.new(e, 0)
+    let empty = config.string_or(mut r, "EMPTY", "fallback")
+    let text = config.string(mut r, "BAD")
+    let fallback = config.string_or(mut r, "MISSING", "fallback")
+    let big = config.u64(mut r, "UINT")
+    let small = config.i64(mut r, "SINT")
+    let yes = config.bool(mut r, "TRUE")
+    let no = config.bool_or(mut r, "FALSE", true)
+    let elapsed = config.duration_ms(mut r, "MILLIS")
+    let ud = config.u64_or(mut r, "MISSING", 11)
+    let id = config.i64_or(mut r, "MISSING", -12)
+    let bd = config.bool_or(mut r, "MISSING", true)
+    let pd = config.port_or(mut r, "MISSING", 8080)
+    let dd = config.duration_ms_or(mut r, "MISSING", 13)
+    let Ok(()) = config.finish(take r) else {
+        return false
+    }
+    empty == "" && text == "invalid" && fallback == "fallback" && big == 18446744073709551615 && small == -9223372036854775808 && yes && !no && elapsed == 1250 && ud == 11 && id == -12 && bd && pd == 8080 && dd == 13
+}
+
+// expect: run invalid_values_and_ports(env) = true
+fn invalid_values_and_ports(e: Env) -> bool {
+    let mut r = config.new(e, 5)
+    let bad_unsigned = config.u64_or(mut r, "BAD", 9)
+    let bad_signed = config.i64_or(mut r, "UINT", -9)
+    let bad_time = config.duration_ms_or(mut r, "DURATION_SUFFIX", 10)
+    let low = config.port(mut r, "PORT_LOW")
+    let high = config.port_or(mut r, "PORT_HIGH", 8080)
+    let zero = config.port(mut r, "PORT_ZERO")
+    let over = config.port_or(mut r, "PORT_OVER", 8080)
+    let Error(errors) = config.finish(take r) else {
+        return false
+    }
+    if bad_unsigned != 0 || bad_signed != 0 || bad_time != 0 || low != 1 || high != 65535 || zero != 0 || over != 0 || list.len(errors) != 5 {
+        return false
+    }
+    let KeyError(key, Invalid(reason)) = errors[0] else {
+        return false
+    }
+    key == "BAD" && reason == "expected an unsigned 64-bit decimal integer" && config.format_errors(errors) == "BAD: expected an unsigned 64-bit decimal integer\nUINT: expected a signed 64-bit decimal integer\nDURATION_SUFFIX: expected a decimal millisecond count\nPORT_ZERO: expected a decimal port in 1..65535\nPORT_OVER: expected a decimal port in 1..65535"
+}
+
+// expect: run bounded_errors(env) = true
+fn bounded_errors(e: Env) -> bool {
+    let mut r = config.new(e, 1)
+    let _ = config.port(mut r, "PORT_ZERO")
+    let bad = config.bool_or(mut r, "BAD", true)
+    let _ = config.string(mut r, "MISSING")
+    let after = config.port(mut r, "PORT_HIGH")
+    let Error(errors) = config.finish(take r) else {
+        return false
+    }
+    let mut none = config.new(e, 0)
+    let _ = config.string(mut none, "MISSING")
+    let Error(omitted) = config.finish(take none) else {
+        return false
+    }
+    if bad || after != 65535 || list.len(errors) != 2 || list.len(omitted) != 1 {
+        return false
+    }
+    let More(2) = errors[1] else {
+        return false
+    }
+    let More(1) = omitted[0] else {
+        return false
+    }
+    config.format_errors(errors) == "PORT_ZERO: expected a decimal port in 1..65535\nand 2 more" && config.format_errors(omitted) == "and 1 more"
+}

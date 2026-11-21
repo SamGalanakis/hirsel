@@ -200,7 +200,8 @@ choice. A build without the switch contains no recording machinery. A recording 
 the same program, for the same target and engine at the same optimisation, with that
 machinery added; it runs with recording off or on. There is no other build split: no build
 mode, optimisation level or debug setting turns recording on or off, or changes what a
-program means ([PROG-6](programs.md#prog-6-one-meaning)). In all three, a run given the same values at the replay point
+program means ([PROG-6](programs.md#prog-6-one-meaning)). In all three (no switch, the
+switch with recording off, and with it on), a run given the same values at the replay point
 (CAP-8) in the same order makes the same observations
 ([SEM-8](semantics.md#sem-8-determinism)): its values, output and outcome, its causes and
 their sites, its charges and `Capacity` refusals, its steps and slice ends, its events, and
@@ -219,3 +220,20 @@ crash. `host.sync` and `host.sync_dir` are the host barriers beneath it
 a crash without repeating an outside effect wraps each such effect in the store's step
 library, which commits a started row before the effect and its result before the result is
 used ([runner](../../core/std/api/runner.md#store-triggers)).
+
+**Simulation.** A test that needs controlled inputs grants a simulation provider (CAP-5);
+it never records from inside the program, since no program type is a tape. The simulation
+provider is the **model world**. On the evaluator it is the whole host: `Args`, `Stdout`,
+`Stderr`, a virtual `Clock`, `Dir` and its files, `Random` and `Net`, each capability
+parameter of a law or case bound to a fresh one (`crates/hirsel-core-ir/src/eval.rs`). Its
+network and clock are the deterministic model of `crates/hirsel-core-net` (`model`), which
+native runs select through the runtime's model provider for `Net` and `Clock`, with every
+other operation going to the host. The program-held `Tape`, removed with `CauseKind::Tape`
+(whose wire number stays retired), is replaced use by use:
+
+| use of the program-held `Tape` | replacement |
+|---|---|
+| a substitute `Clock`, `Args`, `Stdout`, `Stderr` or `Dir` for a test | the model world on the evaluator; natively, a granted scratch directory and the host's streams |
+| controlled network input and time | the model world's network and virtual clock, on the evaluator and natively |
+| recording a run, its scheduling (`tape.tasks`) included, and replaying it with no host | a recording build and replay (above) |
+| a program's own record of its calls, for re-execution | ordinary code over the store, as the replay corpus (`core/corpus/m2b/replay`, `m2b.journal`) and the runner's durable replies do |

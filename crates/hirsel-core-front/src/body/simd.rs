@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum SimdCall {
     Value(SimdOp),
     PutLanes,
+    SetLanes,
 }
 
 impl Cx<'_, '_, '_> {
@@ -64,9 +65,21 @@ impl Cx<'_, '_, '_> {
                 &mut [],
                 &mut header,
             );
-            let (ty, value) = self.expr(args[1], None);
-            let shape = self.require_vector(ty, args[1]);
-            let (_, count) = self.expr(args[2], expect(scalar(Scalar::U64)));
+            let (value_arg, value, other, shape, label) = match op {
+                SimdCall::PutLanes => {
+                    let (ty, value) = self.expr(args[1], None);
+                    let shape = self.require_vector(ty, args[1]);
+                    let (_, count) = self.expr(args[2], expect(scalar(Scalar::U64)));
+                    (args[1], value, count, shape, "put_lanes")
+                }
+                SimdCall::SetLanes => {
+                    let (_, at) = self.expr(args[1], expect(scalar(Scalar::U64)));
+                    let (ty, value) = self.expr(args[2], None);
+                    let shape = self.require_vector(ty, args[2]);
+                    (args[2], value, at, shape, "set_lanes")
+                }
+                SimdCall::Value(_) => unreachable!(),
+            };
             self.unfreeze(held, |h| match h {
                 Hold::CallView(c, _) | Hold::CallMut(c, _) if c == call => None,
                 _ => Some(h),
@@ -75,13 +88,21 @@ impl Cx<'_, '_, '_> {
                 return (ERROR, None);
             };
             if shape.lane() != Scalar::U8 {
-                self.refuse("SEM-11", args[1], "put_lanes takes a vector of u8 lanes");
+                self.refuse(
+                    "SEM-11",
+                    value_arg,
+                    format!("{label} takes a vector of u8 lanes"),
+                );
                 return (ERROR, None);
             }
             self.builtin_use(f, n);
             self.source_step(n);
             let result = g.result;
-            let value = self.put_lanes(header, value, count, shape, result, n);
+            let value = match op {
+                SimdCall::PutLanes => self.put_lanes(header, value, other, shape, result, n),
+                SimdCall::SetLanes => self.set_lanes(header, other, value, shape, n),
+                SimdCall::Value(_) => unreachable!(),
+            };
             return (result, value);
         };
         use SimdOp::*;
@@ -348,5 +369,44 @@ impl Cx<'_, '_, '_> {
         self.jump(done, &[], n);
         self.start(done);
         Some(reserved)
+    }
+
+    fn set_lanes(
+        &mut self,
+        header: Option<ValueId>,
+        at: Option<ValueId>,
+        vector: Option<ValueId>,
+        shape: Vector,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let (header, at, vector) = (header?, at?, vector?);
+        let u64_ty = Ty::Scalar(Scalar::U64);
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let width = self.konst(u64_ty, shape.lanes(), n)?;
+        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
+        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let within = self.list_compare(CompareOp::Le, end, len, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
+        self.simd_bounds(valid, n);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        let to = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(at)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        self.inst(
+            Inst::PutLanes {
+                to,
+                vector,
+                count: width,
+            },
+            n,
+        );
+        None
     }
 }

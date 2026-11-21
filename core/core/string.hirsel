@@ -38,35 +38,70 @@ fn base64_symbol(x: u8) -> u8 {
     ALPHABET[int.widen(x & 63)]
 }
 
-// Arrange each triple a,b,c as b,a,c,b. Two adjacent byte pairs supply the middle digits.
-const ENCODE_PICK: Inline[u8, 32] =[1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10, 13, 12, 14, 13, 16, 15, 17, 16, 19, 18, 20, 19, 22, 21, 23, 22]
+// ADAPTED from base64-simd 0.8.0 src/encode.rs:128-268.
+// Load 32 bytes at src - 4 so each 128-bit half holds four complete triples
+// without crossing the 128-bit lane boundary: low half reads 4..15, high half
+// reads 16..27. Each triple a,b,c becomes b,a,c,b in a u32 lane.
+const ENCODE_PICK: Inline[u8, 32] =[5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14, 17, 16, 18, 17, 20, 19, 21, 20, 23, 22, 24, 23, 26, 25, 27, 26]
 
-// The first two six-bit digits are reversed by the shifts.
-const ENCODE_ORDER: Inline[u8, 32] =[1, 0, 2, 3, 5, 4, 6, 7, 9, 8, 10, 11, 13, 12, 14, 15, 17, 16, 18, 19, 21, 20, 22, 23, 25, 24, 26, 27, 29, 28, 30, 31]
-
-// Offsets for uppercase, lowercase, ten digits, '+', and '/'.
+// Offsets for uppercase (0..25), lowercase (26..51), ten digits (52..61), '+', '/'.
 const ENCODE_ROLL: Inline[u8, 16] =[65, 71, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 237, 240, 0, 0]
 
-fn append_base64_blocks(b: Bytes, mut out: Bytes, n: u64) -> Result[u64, Capacity] {
-    let mut src: u64 = 0
-    // A 32-byte load covers eight triples and eight bytes of lookahead.
-    while n - src >= 32 {
-        let input: Simd[u8, 32] = list.lanes(b, src)
-        let triples: Simd[u32, 8] = simd.cast(simd.swizzle(input, simd.from(ENCODE_PICK)))
-        let a = (triples >> 2) & simd.splat(0x00003f00)
-        let digit_b = (triples >> 4) & simd.splat(0x0000003f)
-        let c = (triples >> 6) & simd.splat(0x003f0000)
-        let d = (triples << 8) & simd.splat(0x3f000000)
-        let digits: Simd[u8, 32] = simd.cast(a | digit_b | c | d)
-        let signed_digits: Simd[i8, 32] = simd.cast(digits)
-        let edge: Simd[i8, 32] = simd.splat(25)
-        let above_uppercase: Simd[u8, 32] = simd.cast(simd.lt(edge, signed_digits))
-        let class = simd.wrapping_sub(simd.saturating_sub(digits, simd.splat(51)), above_uppercase) & simd.splat(15)
-        let ascii = simd.wrapping_add(digits, simd.swizzle(simd.from(ENCODE_ROLL), class))
-        list.put_lanes(mut out, simd.swizzle(ascii, simd.from(ENCODE_ORDER)), 32)?
-        src += 24
+fn append_base64_blocks(b: Bytes, mut out: Bytes, n: u64, dst_start: u64) -> u64 {
+    let mut at: u64 = 2
+    let mut dst = dst_start
+    let out_len = list.len(out)
+    let pick: Simd[u8, 32] = simd.from(ENCODE_PICK)
+    let roll: Simd[u8, 16] = simd.from(ENCODE_ROLL)
+    let edge: Simd[i8, 32] = simd.splat(25)
+    let m_a: Simd[u32, 8] = simd.splat(0x0000003f)
+    let m_b: Simd[u32, 8] = simd.splat(0x00003f00)
+    let m_c: Simd[u32, 8] = simd.splat(0x003f0000)
+    let m_d: Simd[u32, 8] = simd.splat(0x3f000000)
+    let sub51: Simd[u8, 32] = simd.splat(51)
+    // Load 32 bytes at `at` (= src - 4) so bytes 4..27 hold eight triples
+    // without crossing the 128-bit lane boundary. Write directly into the
+    // pre-filled output tail with set_lanes.
+    if n >= 58 && out_len >= 64 {
+        let limit2 = n - 56
+        let dst_limit2 = out_len - 64
+        while at <= limit2 && dst <= dst_limit2 {
+            let chunk = list.slice(b, at, at + 56)
+            let i0: Simd[u8, 32] = list.lanes(chunk, 0)
+            let i1: Simd[u8, 32] = list.lanes(chunk, 24)
+            let t0: Simd[u32, 8] = simd.cast(simd.swizzle(i0, pick))
+            let t1: Simd[u32, 8] = simd.cast(simd.swizzle(i1, pick))
+            let d0: Simd[u8, 32] = simd.cast(((t0 >> 10) & m_a) | ((t0 << 4) & m_b) | ((t0 >> 6) & m_c) | ((t0 << 8) & m_d))
+            let d1: Simd[u8, 32] = simd.cast(((t1 >> 10) & m_a) | ((t1 << 4) & m_b) | ((t1 >> 6) & m_c) | ((t1 << 8) & m_d))
+            let s0: Simd[i8, 32] = simd.cast(d0)
+            let s1: Simd[i8, 32] = simd.cast(d1)
+            let u0: Simd[u8, 32] = simd.cast(simd.lt(edge, s0))
+            let u1: Simd[u8, 32] = simd.cast(simd.lt(edge, s1))
+            let c0 = simd.wrapping_sub(simd.saturating_sub(d0, sub51), u0)
+            let c1 = simd.wrapping_sub(simd.saturating_sub(d1, sub51), u1)
+            list.set_lanes(mut out, dst, simd.wrapping_add(d0, simd.swizzle(roll, c0)))
+            list.set_lanes(mut out, int.wrapping_add(dst, 32), simd.wrapping_add(d1, simd.swizzle(roll, c1)))
+            at = int.wrapping_add(at, 48)
+            dst = int.wrapping_add(dst, 64)
+        }
     }
-    Ok(src)
+    let limit = n - 32
+    if out_len >= 32 {
+        let dst_limit = out_len - 32
+        while at <= limit && dst <= dst_limit {
+            let input: Simd[u8, 32] = list.lanes(b, at)
+            let triples: Simd[u32, 8] = simd.cast(simd.swizzle(input, pick))
+            let digits: Simd[u8, 32] = simd.cast(((triples >> 10) & m_a) | ((triples << 4) & m_b) | ((triples >> 6) & m_c) | ((triples << 8) & m_d))
+            let signed_digits: Simd[i8, 32] = simd.cast(digits)
+            let above_uppercase: Simd[u8, 32] = simd.cast(simd.lt(edge, signed_digits))
+            let class = simd.wrapping_sub(simd.saturating_sub(digits, sub51), above_uppercase)
+            let ascii = simd.wrapping_add(digits, simd.swizzle(roll, class))
+            list.set_lanes(mut out, dst, ascii)
+            at = int.wrapping_add(at, 24)
+            dst = int.wrapping_add(dst, 32)
+        }
+    }
+    at + 4
 }
 
 /// Appends RFC 4648's standard alphabet with '=' padding. O(n).
@@ -80,11 +115,28 @@ pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
     } else {
         1
     }) * 4
-    list.reserve(mut out, size)?
-    let mut src = append_base64_blocks(b, mut out, n)?
-    let written = src / 3 * 4
-    let mut dst = list.len(out)
-    list.fill(mut out, size - written, b'=')?
+    let dst0 = list.len(out)
+    list.fill(mut out, size, b'=')?
+    let mut src: u64 = 0
+    if n >= 34 {
+        // Encode two leading triples (6 bytes -> 8 bytes) so the 32-byte SIMD
+        // loop can safely load at src - 4.
+        let mut head: u64 = 0
+        let mut d0 = dst0
+        while head < 6 {
+            let a = b[head]
+            let c = b[head + 1]
+            let d = b[head + 2]
+            out[d0] = base64_symbol(a >> 2)
+            out[d0 + 1] = base64_symbol(((a & 3) << 4) | (c >> 4))
+            out[d0 + 2] = base64_symbol(((c & 15) << 2) | (d >> 6))
+            out[d0 + 3] = base64_symbol(d & 63)
+            head += 3
+            d0 += 4
+        }
+        src = append_base64_blocks(b, mut out, n, dst0 + 8)
+    }
+    let mut dst = dst0 + src / 3 * 4
     while src < full {
         let a = b[src]
         let c = b[src + 1]

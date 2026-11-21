@@ -158,6 +158,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("list", "pop", 1),
     ("list", "push", 1),
     ("list", "put_lanes", 1),
+    ("list", "set_lanes", 1),
     ("list", "put_word_be", 1),
     ("list", "put_word_le", 1),
     ("list", "reserve", 1),

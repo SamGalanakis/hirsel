@@ -27,6 +27,9 @@ pub fn lanes(b: Bytes, at: u64) -> Simd[u8, 16]
 // Appends exactly k lanes. Capacity leaves the buffer unchanged (SEM-11).
 pub fn put_lanes(mut b: Bytes, v: Simd[u8, 16], k: u64) -> Result[(), Capacity]
 
+// Overwrites the lanes of v starting at at. Fails with Bounds unless at + len(v) <= len(b).
+pub fn set_lanes(mut b: Bytes, at: u64, v: Simd[u8, 16])
+
 // Append the little-endian bytes of a u16, u32 or u64 atomically.
 // Capacity leaves the buffer unchanged.
 pub fn put_word_le[T: integer](mut b: Bytes, x: T) -> Result[(), Capacity]

@@ -908,11 +908,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         fd.anchors.clear();
         fd.region_anchors.clear();
         fd.outlives.clear();
-        fd.path.0.name = format!(
-            "{}$closure{}",
-            fd.path.0.name,
-            n.0 - self.item.range.nodes.start
-        );
+        fd.path.0.name = self.generated_name(GeneratedKind::Closure, n);
         fd.site = self.p.site(self.at, n);
         let expected = want
             .filter(|w| w.payload == 0)

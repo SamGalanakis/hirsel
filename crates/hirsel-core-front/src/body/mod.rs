@@ -1141,6 +1141,13 @@ impl ClosedTypeFacts {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GeneratedKind {
+    Closure,
+    TaskEntry,
+    FlowTransform,
+}
+
 struct Cx<'c, 'a, 'e> {
     p: &'c Program<'a>,
     at: ItemRef,
@@ -1214,6 +1221,7 @@ struct Cx<'c, 'a, 'e> {
     allocations: Vec<AllocationLayout>,
     numeric_sites: Vec<scalar_abi::NumericSite>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
+    generated_ordinals: [HashMap<NodeId, usize>; 3],
     call_seq: u32,
     /// The call whose copyable view arguments are passed by address rather than
     /// snapshotted, and the arguments so passed.
@@ -1378,6 +1386,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             allocations: vec![],
             numeric_sites: vec![],
             nested: Default::default(),
+            generated_ordinals: Default::default(),
             call_seq: 0,
             direct_call: None,
             direct_args: vec![],
@@ -1436,6 +1445,20 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             frame_binders: None,
             frame_slots: HashMap::default(),
         }
+    }
+
+    fn generated_name(&mut self, kind: GeneratedKind, site: NodeId) -> String {
+        // First visits follow the body's lowering order.
+        // A syntax node is only a key for recognizing a repeat visit.
+        let ordinals = &mut self.generated_ordinals[kind as usize];
+        let next = ordinals.len();
+        let ordinal = ordinals.entry(site).or_insert(next);
+        let suffix = match kind {
+            GeneratedKind::Closure => "$closure",
+            GeneratedKind::TaskEntry => "$task_entry",
+            GeneratedKind::FlowTransform => "$flow_transform",
+        };
+        format!("{}{suffix}{ordinal}", self.fd.path.0.name)
     }
 
     // ---- syntax

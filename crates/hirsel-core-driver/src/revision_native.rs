@@ -4,8 +4,8 @@
 //   (s01, s02, s03, s04, s51; d1 an edge out of an instance that carries a
 //   dictionary). Oracle: the executables' exits, run here.
 // - L2 invariance: an edit the language defines as non-semantic leaves the
-//   revision equal (c01-c05: local name, parameter name, unreached item,
-//   comment, item order; l1 lines above, l2 re-indent). Oracle: the language
+//   revision equal (c01-c06: local name, parameter name, unreached item,
+//   comment, item order, grouping; l1 lines above, l2 re-indent). Oracle: the language
 //   rules, and equal exits.
 // - L4 reach: an edit to an item main does not reach leaves it equal (c03,
 //   r1); an edit inside the reach changes it (s03, s04).
@@ -46,6 +46,113 @@ const WRAP_8: &str = "pub fn main() -> Result[(), Exit] { if entry() == 8 { Ok((
 const WRAP_1002: &str = "pub fn main() -> Result[(), Exit] { if entry(1) == 1002 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
 const LINES: &str = "fn entry(x: u64) -> u64 {\n    let xs = [1u64, 2u64, 3u64];\n    xs[x] + x * 1000u64\n}\n";
 const S45: &str = "fn entry() -> u64 { let r: Result[List[u64], Capacity] = list.with_capacity(1); match r { Ok(_) => 7, Error(_) => 8 } }\n";
+
+const GENERATED_CLOSURE: &str =
+    "fn entry() -> u64 { let x = 7u64; let f = fn(n: u64) -> u64 { n }; f(x) }\n";
+
+#[test]
+fn generated_names_and_revisions_ignore_parentheses() {
+    let observe = |source: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let product = record_check(
+            &format!("{source}{WRAP_7}"),
+            &core_sources(),
+            dir.path(),
+            "store",
+        );
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let reached = product.reachable(&entry, 256).unwrap();
+        let identity = Identity::plain(DefPath::from_full("app@1/main/entry").unwrap());
+        let module = reached.materialized.get(&identity).ir().unwrap();
+        (closure_names(module), reached.revision(&entry).unwrap())
+    };
+    let a = observe(GENERATED_CLOSURE);
+    let b = observe(&GENERATED_CLOSURE.replace("7u64", "(7u64)"));
+    assert_eq!(a.0, b.0, "grouping leaves the generated name equal");
+    assert_eq!(a.1, b.1, "grouping leaves the code revision equal");
+    assert_eq!(a.0, ["entry$closure0"]);
+
+    let earlier = GENERATED_CLOSURE.replace("let f =", "let first = fn() -> u64 { 3 }; let f =");
+    let earlier = earlier.replace("f(x)", "first() + f(x)");
+    let control = observe(&earlier);
+    assert_eq!(control.0, ["entry$closure0", "entry$closure1"]);
+    assert_ne!(control.1, a.1, "the earlier closure adds executable code");
+}
+
+fn closure_names(module: &Module) -> Vec<String> {
+    module
+        .functions
+        .iter()
+        .filter(|f| f.body.is_some())
+        .map(|f| &module.instances[f.instance.index()].definition.0.name)
+        .filter(|name| name.contains("$closure") && !name.contains("$callable"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn generated_names_survive_lowering_again_and_specialization() {
+    const APP: &str = "fn pass[T: plain](x: T) -> T { let f = fn(y: T) -> T { copy y }; f(x) }\n\
+        fn entry() -> u64 { if pass(true) { pass(7u64) } else { 0u64 } }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app = format!("{APP}{WRAP_7}");
+    let product = record_check(&app, &core_sources(), dir.path(), "store");
+    let main = DefPath::from_full("app@1/main/main").unwrap();
+    let reached = product.reachable(&main, 256).unwrap();
+    let pass = DefPath::from_full("app@1/main/pass").unwrap();
+    let instances: Vec<_> = reached
+        .require()
+        .unwrap()
+        .iter()
+        .filter(|i| i.definition == pass)
+        .collect();
+    assert_eq!(
+        instances.len(),
+        2,
+        "main reaches both pass[bool] and pass[u64]"
+    );
+    assert_ne!(instances[0].closures, instances[1].closures);
+    for instance in instances {
+        let module = reached.materialized.get(instance).ir().unwrap();
+        assert_eq!(closure_names(module), ["pass$closure0"]);
+    }
+
+    // Lower the same definition twice into one emitter, as opposed to reusing
+    // its checked body from the driver's store.
+    let request = crate::tests::request(APP, dir.path());
+    let mut symbols = hirsel_core_syntax::Symbols::default();
+    let parsed = request.inputs.packages[0]
+        .read(&mut symbols)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(parsed.parsed.diagnostics.is_empty());
+    let mut index = hirsel_core_resolve::NameIndex::new(Arc::new(symbols));
+    index.add_manifests(&request.inputs.packages);
+    let input = hirsel_core_front::ModuleInput {
+        id: index.module(&parsed.module).unwrap(),
+        source: index.add_source(),
+        syntax: parsed.parsed.syntax,
+    };
+    for (i, item) in input.syntax.items().enumerate() {
+        index.index_item(input.id, input.source, i as u32, item);
+    }
+    let inputs = [input];
+    let program = hirsel_core_front::Program::declare(&index, &inputs);
+    let mut emitter = hirsel_core_front::Emitter::new();
+    let f = program.function_id(&pass).unwrap();
+    let first = program.check_lower(f, &mut emitter);
+    let second = program.check_lower(f, &mut emitter);
+    for check in [&first, &second] {
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        assert!(check.function.is_some());
+    }
+    assert_eq!(first.function, second.function);
+    assert_eq!(closure_names(&emitter.module), ["pass$closure0"]);
+}
 
 const OWN_LAYOUT: &str = r#"
 type Key: key + ordered { a: u8, b: u64, c: u16 }
@@ -154,6 +261,13 @@ fn revision_cases() -> Vec<RevisionCase> {
             "c05 item order",
             "fn helper() -> u64 { 7 }\nfn entry() -> u64 { helper() }\n",
             "fn entry() -> u64 { helper() }\nfn helper() -> u64 { 7 }\n",
+            WRAP_7,
+            Equal,
+        ),
+        s(
+            "c06 grouping before a closure",
+            GENERATED_CLOSURE,
+            &GENERATED_CLOSURE.replace("7u64", "(7u64)"),
             WRAP_7,
             Equal,
         ),
@@ -269,6 +383,7 @@ fn revision_laws_and_reuse() {
 #[test]
 #[ignore = "explicit native integration target"]
 fn revision_engines_agree() {
+    weak_adapter_link_orders();
     for case in revision_cases() {
         for (side, app, std) in [("a", case.a, case.std.0), ("b", case.b, case.std.1)] {
             let dir = tempfile::tempdir().unwrap();
@@ -287,6 +402,167 @@ fn revision_engines_agree() {
             assert_eq!(revisions[2], revisions[0], "{name} {side}: LLVM release is Cranelift's");
         }
     }
+}
+
+fn weak_adapter_link_orders() {
+    use hirsel_core_ir::FuncId;
+    use hirsel_core_materialize::{Unit, children, join};
+
+    const APP: &str = "fn target(x: u64) -> u64 { x + 1u64 }\n\
+        fn shift(x: u64) -> u64 { x + 2u64 }\n\
+        fn left(x: u64) -> u64 { let f: fn(u64) -> u64 = target; f(x) }\n\
+        fn right(x: u64) -> u64 { let shifted = shift(x); let f: fn(u64) -> u64 = target; f(shifted) }\n\
+        pub fn main() -> Result[(), Exit] { if left(4) == 5 && right(5) == 8 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let product = record_check(APP, &core_sources(), dir.path(), "store");
+    let plain = |name| Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap());
+    let [main, left, right, target] = ["main", "left", "right", "target"].map(plain);
+    let reached = product.reachable(&main.definition, 256).unwrap();
+    assert!(reached.accepted());
+    let units = [&left, &right].map(|owner| {
+        let body = reached.materialized.get(owner);
+        Unit {
+            identity: owner,
+            module: body.ir().unwrap(),
+            function: body.function,
+        }
+    });
+    let adapters = units.map(|unit| {
+        let mut generated = unit.module.functions.iter().enumerate().filter(|(_, f)| {
+            f.body.is_some()
+                && unit.module.instances[f.instance.index()]
+                    .definition
+                    .0
+                    .name
+                    .starts_with("target$callable[")
+        });
+        let (row, adapter) = generated.next().expect("owner defines a callable adapter");
+        assert!(generated.next().is_none());
+        let row = FuncId(row as u32);
+        let bindings: Vec<_> = children(unit.module, row)
+            .into_iter()
+            .map(|child| child.identity)
+            .collect();
+        assert_eq!(bindings.as_slice(), std::slice::from_ref(&target));
+        let symbols = reached
+            .materialized
+            .link_symbols(unit.identity, &mut Vec::new())
+            .unwrap();
+        (
+            row,
+            unit.module.identity(adapter.instance),
+            symbols[row.index()].clone(),
+        )
+    });
+    assert_ne!(
+        adapters[0].0, adapters[1].0,
+        "shift changes unit-local numbering"
+    );
+    assert_eq!(adapters[0].1, adapters[1].1);
+    assert_eq!(adapters[0].2, adapters[1].2);
+    for order in [units, [units[1], units[0]]] {
+        // The IR linker remaps both copies into one set of tables and compares
+        // their bodies and signatures under the shared identity.
+        join(&order, &left).expect("remapped copies of the shared adapter agree");
+    }
+
+    let mut expected = None;
+    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, true)] {
+        for reverse in [false, true] {
+            let at = dir.path().join(format!("{backend:?}-{reverse}"));
+            let options = NativeOptions {
+                optimize,
+                ..native_options(backend, &at)
+            };
+            let built =
+                link_weak_adapter_order(&product, &main, [&left, &right], reverse, &options);
+            run_clean(&built.executable, 0);
+            assert_eq!(built.revision, *expected.get_or_insert(built.revision));
+        }
+    }
+}
+
+fn link_weak_adapter_order(
+    product: &CheckProduct,
+    main: &Identity,
+    owners: [&Identity; 2],
+    reverse: bool,
+    options: &NativeOptions,
+) -> BuildProduct {
+    let entry = &main.definition;
+    let reached = product.reachable_for(entry, options).unwrap();
+    let instances = reached.require().unwrap();
+    let inputs = reached.native.as_ref().unwrap();
+    let [a, b] = owners.map(|owner| instances.iter().position(|i| i == owner).unwrap());
+    assert!(a < b);
+    // The reach walk keeps its sorted table. Reverse just the inputs to the
+    // native object link or to LLVM's release composition.
+    let mut emitted = if options.optimize {
+        let mut order = instances.to_vec();
+        if reverse {
+            order.swap(a, b);
+        }
+        product
+            .emit_release(
+                entry,
+                &order,
+                &reached.materialized,
+                options,
+                inputs.toolchain.runtime,
+                &Store::new(&options.store).unwrap(),
+                inputs.recipe.uses_hirsel_launcher(),
+            )
+            .unwrap()
+    } else {
+        let mut emitted = product
+            .emit_reached(entry, &reached, options, true)
+            .unwrap();
+        assert_eq!(&emitted.objects[a].instance, owners[0]);
+        assert_eq!(&emitted.objects[b].instance, owners[1]);
+        if reverse {
+            emitted.objects.swap(a, b);
+        }
+        emitted
+    };
+    let items: Vec<_> = instances
+        .iter()
+        .flat_map(|i| reached.materialized.items(i).unwrap())
+        .collect();
+    let rows = product.source_rows(&items).unwrap();
+    let (abi, cleanup) = product
+        .bind_entry_native(entry, options, inputs, &BTreeSet::new())
+        .unwrap();
+    let plan = crate::native_entry::Plan::new(
+        main.symbol(),
+        entry.to_string(),
+        &abi,
+        cleanup.as_ref().map(|o| o.instance.symbol()),
+        emitted.launch_digest_unused,
+        options,
+    )
+    .unwrap()
+    .with_release_sites(&emitted.release_sites);
+    emitted.objects.extend(cleanup);
+    let linked = link_objects(
+        &plan,
+        &emitted.objects,
+        None,
+        options,
+        crate::reach::sources_digest(product, &rows).unwrap(),
+        || product.source_map(&rows),
+        inputs.toolchain.image,
+        inputs.recipe.clone(),
+        emitted.step_charging_elided,
+        reached.counters,
+        |_| Ok(0),
+        reached.revision(entry).unwrap(),
+        || reached.revisions(),
+    )
+    .unwrap();
+    let Linked::Built(built) = linked else {
+        panic!("fresh objects failed verification");
+    };
+    built
 }
 
 /// A program printing the revisions of `f` (body `f`), `g`, `main` and the

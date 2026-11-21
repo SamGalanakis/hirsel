@@ -42,27 +42,6 @@ fn wire_wrong(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
     flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(wrong_output))
 }
 
-type Reading: codec via u64(to: reading_value, from: missing_reading) {
-    n: u64,
-    c: Clock
-}
-
-fn reading_value(reading: Reading) -> View[u64] in reading { view reading.n }
-
-fn missing_reading(take n: u64) -> Result[Reading, ()] { Error(()) }
-
-fn wire_reading_port(mut f: Flow, input: Into[Reading]) -> Result[Port[Reading], Wire] {
-    flow.port(mut f, input, 1)
-}
-
-fn reading_state(take state: Reading, key: u64, value: u64) -> (Reading, Option[u64]) {
-    (state, Some(value))
-}
-
-fn wire_reading_state(mut f: Flow, output: Into[u64], state: Reading) -> Result[Into[u64], Wire] {
-    flow.stage(mut f, output, 1, bytes 0, steps 100, state, code.describe(reading_state))
-}
-
 type Clean: codec via u64(to: clean_value, from: make_clean) { a: u64, b: u64 }
 
 fn clean_value(clean: Clean) -> View[u64] in clean { view clean.a }
@@ -128,9 +107,7 @@ fn wire_closure_flow(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] 
 // expect: refuse CONC-14 at 34:57
 // expect: refuse CONC-14 at 38:57
 // expect: refuse LANG-11 at 42:57
-// expect: refuse CONC-14 at 55:5
-// expect: refuse CONC-14 at 63:54
-// expect: refuse CONC-14 at 97:57
-// expect: refuse CONC-14 at 115:57
-// expect: refuse CONC-14 at 124:57
+// expect: refuse CONC-14 at 76:57
+// expect: refuse CONC-14 at 94:57
+// expect: refuse CONC-14 at 103:57
 // expect: compared LANG-11 at 42:57 | core@1/core/StaticFn[fn(take u64, u64, u64) -> (u64, core@1/core/Option[i64])] | core@1/core/StaticFn[fn(take u64, u64, u64) -> (u64, core@1/core/Option[u64])]

@@ -457,7 +457,8 @@ class GeneratedParts(unittest.TestCase):
         cls.root = Path(cls.temp.name).resolve()
         archive = subprocess.run(['git', 'archive', 'HEAD', '--', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                                   'crates', 'third-party', 'tools/buck2', 'tools/native-toolchain',
-                                  'tools/toolchain-dist', 'NOTICES.md', 'README.md'], cwd=sync.ROOT, check=True, capture_output=True).stdout
+                                  'tools/toolchain-dist', 'NOTICES.md', 'README.md', 'deny.toml'],
+                                 cwd=sync.ROOT, check=True, capture_output=True).stdout
         subprocess.run(['tar', '-x', '-C', str(cls.root)], input=archive, check=True)
         cls.addClassCleanup(cls.temp.cleanup)
         cls.patches = [patch.object(sync, 'ROOT', cls.root), patch.object(sync, 'HERE', cls.root / 'tools/buck2'),

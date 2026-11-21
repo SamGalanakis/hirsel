@@ -7,6 +7,12 @@
     "archive_sha256": "631eb84a8925d19146e0f5d594b9f2d0b1f0864e63f24e0d5914a75a6a0a4dea",
     "executable_sha256": "8d91d8d3654531f137ee1a0f2752cd67446065c8a2c65a02ee2c810b7899a4c9"
   },
+  "cargo-deny": {
+    "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.22.0/cargo-deny-0.22.0-x86_64-unknown-linux-musl.tar.gz",
+    "member": "cargo-deny-0.22.0-x86_64-unknown-linux-musl/cargo-deny",
+    "archive_sha256": "98c56e6a408bfa5c3c60744b6015aaa6aa08f743fdeb88386d06fca035bb1786",
+    "executable_sha256": "8ba0f5bf9771837ec22538dee295ddf460a9c6887c14305ed9a741ea6d969d63"
+  },
   "prelude_overlay": {
     "inputs": {
       "rust/build.bzl": "2a221551779f2e4668ec3e7acac0e97fc9d557126898a6d32843647bf19546ea",

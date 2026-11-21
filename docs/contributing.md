@@ -154,6 +154,9 @@ command in a clean environment. `tools/sweep` runs the longer suites on a schedu
 
 A change to LLVM emission must carry the matching Cranelift change.
 
-Regenerate ignored build files with `python3 tools/buck2/sync.py --if-stale`
-and keep them out of commits. See [concurrent registrations](hot-files.md)
+Regenerate ignored build files with `python3 tools/buck2/sync.py --if-stale`.
+When the dependency inputs change, sync checks the locked Rust workspace
+against `deny.toml` before publishing the generated dependency graph. RustSec
+findings appear in the weekly Rust dependency advisories workflow.
+Keep generated build files out of commits. See [concurrent registrations](hot-files.md)
 for the Git merge driver used by notices and test module lists.

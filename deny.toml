@@ -1,0 +1,46 @@
+[graph]
+all-features = true
+
+[licenses]
+# SPDX choices for the Rust dependencies listed in NOTICES.md.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "deny"
+multiple-versions-include-dev = true
+deny = [
+    { crate = "openssl", use-instead = "rustls" },
+    { crate = "openssl-sys", use-instead = "rustls" },
+]
+skip = [
+    # supply-chain-1546: ring requires 0.2; tempfile requires 0.4.
+    "getrandom@=0.2.17",
+    # supply-chain-1546: gimli and the front end use 0.16; Cranelift uses 0.17.
+    "hashbrown@=0.16.1",
+    # supply-chain-1546: diagnostic tests use the syn 2 API; serde_derive uses syn 3.
+    "syn@=2.0.119",
+    # supply-chain-1546: ring needs these Windows bindings; rustix and tempfile use 0.61.
+    "windows-sys@=0.52.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+# supply-chain-1546: keep reporting bincode pending a replacement for its persisted format.
+# supply-chain-1546: keep reporting rustix pending an upgrade. Its only consumer,
+# tempfile, does not use the affected extended-attribute API.
+ignore = []

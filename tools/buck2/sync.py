@@ -52,6 +52,7 @@ from action_sizes_from_log import CALIBRATED_CPUS, CPU_CLASSES, MAX_CPUS, compil
 import generated
 import prepare
 import rust_environment
+import supply_chain
 from cargo_units import Resolution, configured, relocate
 from test_sizes_from_usage import requests_bzl
 
@@ -215,6 +216,10 @@ def write_third_party(meta: dict, out: pathlib.Path, resolution: Resolution,
     changed; returns what it read."""
     reads = generated.Reads(ROOT)
     cargo_reads(reads, meta, layout=False)
+    reads.bytes(ROOT / "deny.toml")
+    deny_pin = json.loads(reads.text(HERE / "pins.json"))["cargo-deny"]
+    if supply_chain.check(ROOT, deny_pin, ("bans", "licenses", "sources"), env, offline=True):
+        raise SystemExit("Cargo dependency policy failed (deny.toml)")
     reads.bytes(HERE / "reindeer-lock.json")  # the Reindeer that bootstrap installed
     with tempfile.TemporaryDirectory(prefix="hirsel-third-party-") as scratch:
         work = pathlib.Path(scratch)
@@ -507,7 +512,8 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
-                                 "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py"]))
+                                 "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py",
+                                 "//tools/buck2:supply_chain.py", "//tools/buck2:bootstrap_store.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py",
                            data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py",

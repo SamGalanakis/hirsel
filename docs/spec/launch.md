@@ -161,8 +161,9 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   registry and reports it on the status route.
 - `grants` is every grant baked into the executable, one canonical string each,
   sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
-  `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, and `Dir=`
-  followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
+  `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, `Foreign=`
+  followed by the interface's definition path `D` (`Foreign=sqlite@1/sqlite/Sqlite`), and
+  `Dir=` followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
   (below), which say which parameter receives each one. A directory path stays as
   given. It is resolved against the launch's working directory at startup, which
   the manifest does not know.
@@ -235,7 +236,10 @@ deployment service that only schedules deploys for others, never forwards a raw 
 selects a publication the host has recorded, by its R, or submits source, which the host
 publishes itself with the normal checker, using the host's own compiler caches and package
 images and the bounds below. The operator still approves the grant bindings each deploy would
-give, as the preview shows them. One local principal that both publishes and deploys needs no
+give, as the preview shows them. A recipe that grants `Foreign=D` is deployed only when the
+request passes `--grant Foreign=D` itself, and the deploy's output shows, before any child runs,
+the interface, target, selected archive digest and recipe of each such grant
+([FFI-4](foreign.md#ffi-4-the-foreign-capability)). One local principal that both publishes and deploys needs no
 signature. A request from another machine would add publisher authentication at this point: a
 signature over R by a key the host is configured to trust establishes who vouched for R, and
 the operator still decides whether to deploy it.
@@ -328,12 +332,15 @@ so the store's `releases` rows keep their format, and a recording pin names the 
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
-`hirsel host --record DIRECTORY` assembles with the recording runtime. The host
+`hirsel host --record DIRECTORY` assembles with the recording runtime, and refuses at
+admission any recipe with a foreign leaf
+([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)). The host
 assigns each serving process a recording ID and syncs its pin before launching
 the process. A pin names the assembly record and carries its expiry. The
 default retention period is 30 days, set by `--tape-retention DAYS`.
 `hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
-the pin and runs the verified image from the host image store. Replay takes the
+the pin, refuses a recipe with a foreign leaf before reading any record of the tape
+(FFI-8), and runs the verified image from the host image store. Replay takes the
 arguments and launch metadata from the recording.
 
 When the host starts, before any collection, it reconciles every attempt. Staging with no

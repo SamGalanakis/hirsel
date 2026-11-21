@@ -101,7 +101,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
 | `Secret` | plain | `shareable`, `send` | 8 | capability |
 | `Foreign[I]` (unbuilt, [FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
-| `foreign.Ptr` (unbuilt, [FFI-6](foreign.md#ffi-6-handles)) | plain | `send` | 8 | a handle-table ordinal |
+| `foreign.Ptr[K]` (unbuilt, [FFI-6](foreign.md#ffi-6-handles)) | plain | `send` | 8 | a handle-table ordinal of kind `K`; holds a raw handle (OWN-2) |
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |

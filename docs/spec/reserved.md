@@ -46,8 +46,12 @@ outside replay unless an explicit model/provider contract admits them." *v1:* FF
 ([foreign](foreign.md)): audited archives pinned per target, entry-granted `Foreign[I]`,
 call-scoped loans, checked handles, and no recording, replay or reused pass for a program that
 reaches foreign code; FAIL-15 makes Hirsel stack exhaustion a run stop. *Later:* callbacks
-into Hirsel; contained execution of untrusted native code, compiled to Wasm or run out of
-process; a provider contract that records a foreign call so that replay admits it; native time
+into Hirsel; a **contained boundary** for native code: each interface's or package's native
+code in one restricted worker process, or compiled to Wasm. It is required before Hirsel admits
+any foreign package that has not been audited under FFI-1; v1 admits audited, pinned packages
+only, and runs them in process with no containment. Moving only the `waits` calls out of
+process is not such a boundary, because one package may use a handle from both kinds of
+call, and neither process could use the other's C pointers or byte loans; a provider contract that records a foreign call so that replay admits it; native time
 and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a cause of its own
 for a refused handle, in place of `Fail` texts; varargs, arbitrary pointers, dynamic loading and
 macOS.

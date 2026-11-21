@@ -4637,49 +4637,31 @@ pub(crate) unsafe fn host_operation(
         *mut crate::provider::Request,
     ) -> crate::provider::Outcome,
 ) -> crate::provider::Outcome {
-    struct Call {
-        state: *mut u8,
-        request: *mut crate::provider::Request,
-        operation: unsafe extern "C" fn(
-            *mut u8,
-            *mut crate::provider::Request,
-        ) -> crate::provider::Outcome,
-        saved: *mut u8,
-        result: std::mem::MaybeUninit<crate::provider::Outcome>,
-    }
-    unsafe extern "C" fn invoke(first: *mut u8, _: *mut u8) -> ! {
-        // SAFETY: caller pins this call frame; OS operation cannot suspend.
-        unsafe {
-            let call = first.cast::<Call>();
-            (*call)
-                .result
-                .write(((*call).operation)((*call).state, (*call).request));
-            let mut discard = ptr::null_mut();
-            hirsel_stack::switch(&mut discard, (*call).saved);
-            std::hint::unreachable_unchecked();
-        }
-    }
+    // SAFETY: the provider's operands remain live and its callback cannot suspend.
+    unsafe { on_host_stack(false, || operation(state, request)) }
+}
+
+/// # Safety
+/// The callback cannot re-enter the scheduler, suspend or unwind across its
+/// host-stack frame. All borrowed operands stay live until the call returns.
+pub(crate) unsafe fn on_host_stack<T>(require_stack: bool, call: impl FnOnce() -> T) -> T {
     let task = CURRENT.get();
-    // SAFETY: task owns the shared host stack until this non-suspending call completes.
-    unsafe {
-        if task.is_null() {
-            return operation(state, request);
+    if task.is_null() {
+        if !require_stack {
+            return call();
         }
-        let run = (*task).run;
-        let mut call = Call {
-            state,
-            request,
-            operation,
-            saved: ptr::null_mut(),
-            result: std::mem::MaybeUninit::uninit(),
-        };
-        let host = (*worker_stock(run)).take();
-        let target = host.prepare(invoke, (&mut call as *mut Call).cast(), ptr::null_mut());
-        crate::fiber::guard(host.bounds());
-        hirsel_stack::switch(&mut call.saved, target);
-        crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-        (*worker_stock(run)).recycle(host);
-        call.result.assume_init()
+        crate::fiber::arm();
+        // SAFETY: this fresh stack belongs to this call alone.
+        return unsafe { crate::fiber::Stack::new().call(call) };
+    }
+    // SAFETY: the current task pins the worker's stock and no other task can
+    // take this stack until the synchronous call returns.
+    unsafe {
+        let stock = worker_stock((*task).run);
+        let host = (*stock).take();
+        let result = host.call(call);
+        (*stock).recycle(host);
+        result
     }
 }
 

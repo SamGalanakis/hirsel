@@ -129,6 +129,47 @@ impl Stack {
     pub(crate) fn bounds(&self) -> (usize, usize) {
         (self.base.as_ptr().addr(), self.guard_end)
     }
+
+    /// # Safety
+    /// The caller exclusively owns the idle stack. The callback must finish
+    /// synchronously and must not switch or unwind across the stack boundary.
+    pub(crate) unsafe fn call<T, F: FnOnce() -> T>(&self, call: F) -> T {
+        struct Frame<T, F> {
+            call: Option<F>,
+            previous: *mut u8,
+            result: std::mem::MaybeUninit<T>,
+        }
+        unsafe extern "C" fn invoke<T, F: FnOnce() -> T>(first: *mut u8, _: *mut u8) -> ! {
+            // SAFETY: the original stack pins the frame and is idle while we
+            // own it. The single invocation initializes the result.
+            unsafe {
+                let frame = first.cast::<Frame<T, F>>();
+                let call = (*frame).call.take().unwrap();
+                (*frame).result.write(call());
+                let mut discard = std::ptr::null_mut();
+                hirsel_stack::switch(&mut discard, (*frame).previous);
+                std::hint::unreachable_unchecked();
+            }
+        }
+        let mut frame = Frame {
+            call: Some(call),
+            previous: std::ptr::null_mut(),
+            result: std::mem::MaybeUninit::uninit(),
+        };
+        // SAFETY: the borrowed stack is idle. Only invoke can switch back,
+        // after writing the result and ceasing access to the frame.
+        unsafe {
+            let start = self.prepare(
+                invoke::<T, F>,
+                (&raw mut frame).cast(),
+                std::ptr::null_mut(),
+            );
+            let previous = GUARD.replace(self.bounds());
+            hirsel_stack::switch(&raw mut frame.previous, start);
+            GUARD.set(previous);
+            frame.result.assume_init()
+        }
+    }
     /// # Safety
     /// Stack is idle, entry never returns, and its operands remain live until completion.
     pub(crate) unsafe fn prepare(

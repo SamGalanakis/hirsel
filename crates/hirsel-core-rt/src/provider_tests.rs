@@ -974,6 +974,96 @@ fn guarded_root_routes_real_os_calls_through_the_separate_host_stack() {
     assert!(!fixture.root.path().join("from-main").exists());
 }
 #[test]
+fn foreign_host_call_canonicalizes_nan_and_restores_floats() {
+    use crate::foreign::{RESULT_F32, RESULT_F64, hirsel_core_foreign_stack, invoke};
+
+    unsafe extern "C" fn poison(args: *mut u64) -> u64 {
+        let here = 0u8;
+        assert!(crate::fiber::room(1 << 20));
+        // SAFETY: the fixture lends one pinned argument word.
+        unsafe { args.write(std::hint::black_box(&here as *const u8).addr() as u64) };
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mxcsr: u32 = 0xdfc0;
+            let x87: u16 = 0x0f7f;
+            // SAFETY: both words are readable and use supported control bits.
+            unsafe {
+                core::arch::asm!(
+                    "ldmxcsr [{mxcsr}]",
+                    "fldcw [{x87}]",
+                    mxcsr = in(reg) &mxcsr,
+                    x87 = in(reg) &x87,
+                    options(nostack, preserves_flags, readonly),
+                );
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: FPCR is writable in userspace. These bits change rounding and flushing.
+        unsafe {
+            core::arch::asm!("msr fpcr, {fpcr}", fpcr = in(reg) 0x0180_0000u64);
+        }
+        0xfff0_789a_ff80_1234
+    }
+
+    unsafe extern "C" fn main(
+        _: *mut crate::Context,
+        _: *const Config,
+        result: *mut MainResult,
+    ) -> u8 {
+        let mut word = 0;
+        // SAFETY: the fixture pins its argument and result. The thunk is bounded
+        // and returns without retaining the argument or switching control.
+        unsafe {
+            *result = MainResult::default();
+            assert_eq!(
+                hirsel_core_foreign_stack(poison, &mut word, RESULT_F64),
+                0x7ff8_0000_0000_0000
+            );
+            assert!((&raw const word).addr().abs_diff(word as usize) >= 1 << 20);
+        }
+        0
+    }
+
+    let mut stderr = vec![];
+    let config = config(std::ptr::null(), 0, &mut stderr);
+    // SAFETY: the fixture pins its configuration through the root task.
+    assert_eq!(unsafe { hirsel_core_run(&config, main) }, 0);
+    assert!(stderr.is_empty());
+
+    // Drive the helper-side call form on a native thread. Reading its control
+    // words after return detects restoration even without a stack switch.
+    let mut word = 0;
+    // SAFETY: this test thread has a native stack and lends the thunk one word.
+    assert_eq!(
+        unsafe { invoke(poison, &mut word, RESULT_F32) },
+        0x7fc0_0000
+    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut mxcsr = 0u32;
+        let mut x87 = 0u16;
+        // SAFETY: both destinations are writable and fit their control word.
+        unsafe {
+            core::arch::asm!(
+                "stmxcsr [{mxcsr}]",
+                "fnstcw [{x87}]",
+                mxcsr = in(reg) &raw mut mxcsr,
+                x87 = in(reg) &raw mut x87,
+                options(nostack, preserves_flags),
+            );
+        }
+        assert_eq!((mxcsr, x87), (0x1f80, 0x037f));
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let fpcr: u64;
+        // SAFETY: FPCR is readable in userspace.
+        unsafe { core::arch::asm!("mrs {fpcr}, fpcr", fpcr = out(reg) fpcr) };
+        assert_eq!(fpcr, 0);
+    }
+}
+
+#[test]
 fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_site() {
     unsafe extern "C" fn main(
         context: *mut crate::Context,

@@ -18,6 +18,7 @@ pub mod entry;
 mod env;
 mod fiber;
 pub mod flow;
+pub mod foreign;
 mod growth;
 pub mod host_file;
 pub mod host_ops;

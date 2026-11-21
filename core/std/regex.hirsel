@@ -4509,7 +4509,11 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
     let mut matched: Option[u64] = None
     let mut at_start = query.entry == re.start
     let target_mask = DFA_TARGET ^ d.start_bit
-    let tags = DFA_MATCH | d.start_bit
+    let last_ordinary_edge = if d.start_bit == 0 {
+        DFA_MATCH - 1
+    } else {
+        DFA_START - 1
+    }
     let mut scanned: u64 = 0
     while state != DFA_DEAD {
         if state == DFA_UNKNOWN {
@@ -4557,7 +4561,9 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
                 // Live ids are at least `columns` and below DFA_TARGET_LIMIT.
                 let offset: u64 = int.widen(int.wrapping_add(int.wrapping_sub(state, columns), col))
                 let transition = work[d.transitions + offset]
-                if transition == DFA_DEAD || (transition & tags) != 0 {
+                // Ordinary edges occupy 1 through last_ordinary_edge.
+                // Subtracting one folds the dead edge into the tagged range.
+                if int.wrapping_sub(transition, 1) >= last_ordinary_edge {
                     // Only a match into a live, non-start state stays here.
                     let untagged = transition ^ DFA_MATCH
                     if untagged == DFA_DEAD || (transition & DFA_MATCH) == 0 || (untagged & d.start_bit) != 0 || transition == DFA_UNKNOWN {

@@ -24,6 +24,7 @@ pub enum OptionId {
     Filter,
     TestJobs,
     Interface,
+    ForeignHeader,
     Dependents,
     Transitive,
     AffectedTests,
@@ -115,7 +116,7 @@ commands! {
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process.";
-    "inspect", "inspect [package-dir | --std] (--interface [--json] | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
+    "inspect", "inspect [package-dir | --std] (--interface [--json] | --foreign-header MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
@@ -175,6 +176,13 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["inspect"],
         "Print public declarations."
+    ),
+    option!(
+        ForeignHeader,
+        ["--foreign-header"],
+        Some("MODULE"),
+        ["inspect"],
+        "Print the C header of a foreign module by its full definition path."
     ),
     option!(
         Dependents,

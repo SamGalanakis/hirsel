@@ -18,6 +18,7 @@ pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod defaults;
 mod foreign;
+pub use foreign::{AbiParameter, AbiResult, AbiSignature};
 mod identity;
 mod layer;
 pub use layer::Declared;

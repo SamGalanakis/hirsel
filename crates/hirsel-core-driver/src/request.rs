@@ -219,7 +219,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
     let inspect_std = inspection.as_ref().is_some_and(|option| option.std);
-    let dir = invocation.positional.map(PathBuf::from);
+    let inspect_foreign = inspection
+        .as_ref()
+        .and_then(crate::inspect::Inspection::foreign_module);
+    let dir = invocation
+        .positional
+        .map(PathBuf::from)
+        .or_else(|| inspect_foreign.map(|_| PathBuf::from(".")));
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut libraries_explicit = false;
     let mut store = None;
@@ -367,6 +373,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help
             | Opt::Interface
+            | Opt::ForeignHeader
             | Opt::Dependents
             | Opt::Transitive
             | Opt::AffectedTests
@@ -415,6 +422,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .then(|| PathBuf::from("."))
     });
     let mut workspace_app = None;
+    let mut foreign_symbols = None;
     if manifest.is_some() {
         package_mode.require_workspace("--inputs")?;
     } else if recipe_root.is_some() {
@@ -433,6 +441,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     package_store,
                     package_mode == crate::package_lock::Mode::Frozen,
                 )?;
+                if let Some(path) = inspect_foreign {
+                    foreign_symbols = Some(crate::foreign_header::symbol_prefix(&resolved, path)?);
+                }
                 crate::package_lock::Lock::compare(&resolved, package_mode)?
                     .commit(&resolved.workspace)?;
                 let include_tests = test_command
@@ -843,6 +854,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     };
     if entry.is_some() {
         request.entry = entry;
+    }
+    if let Some(module) = inspect_foreign {
+        let symbols =
+            foreign_symbols.ok_or("inspect --foreign-header requires a foreign manifest")?;
+        print!(
+            "{}",
+            crate::foreign_header::header(request.inputs, module, &symbols)?
+        );
+        std::process::exit(0);
     }
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.

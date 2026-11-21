@@ -4,10 +4,30 @@ use crate::{
     DeclBody, DeclId, Def, ERROR, FnDecl, H_RAW_HANDLE, Mode, Program, Repr, Role, Rows, TyId,
     TyKind, TyRead, TypeDecl, UNIT, refusal,
 };
+use hirsel_core_ids::DefPath;
 use hirsel_core_layout::Scalar;
 use hirsel_core_resolve::{ModuleId, Refusal, Site, Target};
 use hirsel_core_syntax::{NodeId, NodeKind};
 use std::collections::BTreeMap;
+
+pub enum AbiParameter {
+    Scalar(Scalar),
+    Bytes { mutable: bool },
+    Handle { kind: DefPath, release: bool },
+}
+
+pub enum AbiResult {
+    Unit,
+    Scalar(Scalar),
+    New(DefPath),
+}
+
+pub struct AbiSignature {
+    pub name: String,
+    pub waits: bool,
+    pub params: Vec<(String, AbiParameter)>,
+    pub result: AbiResult,
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Marker {
@@ -87,6 +107,60 @@ struct KindUse {
 }
 
 impl Program<'_> {
+    /// The C ABI of a module whose declarations have passed FFI-2 and FFI-4 to FFI-6.
+    pub fn foreign_abi(&self, module: ModuleId) -> Option<Vec<AbiSignature>> {
+        if !self.index.modules[module.0 as usize].foreign || !self.refusals.is_empty() {
+            return None;
+        }
+        let kind_name = |ty| {
+            let TyKind::Adt(d, _) = self.types.kind(ty) else {
+                unreachable!("a checked handle kind is a nominal type");
+            };
+            self.decls[d.index()].path.clone()
+        };
+        Some(
+            self.fns
+                .iter()
+                .filter(|fd| fd.site.module == module)
+                .map(|fd| {
+                    let params = fd.params[1..]
+                        .iter()
+                        .map(|p| {
+                            let abi = if self.foreign_bytes(p.ty) {
+                                AbiParameter::Bytes {
+                                    mutable: p.mode == Mode::Mut,
+                                }
+                            } else if let Some(kind) = Marker::Handle.argument(self, p.ty) {
+                                AbiParameter::Handle {
+                                    kind: kind_name(kind),
+                                    release: p.mode == Mode::Take,
+                                }
+                            } else if let TyKind::Scalar(scalar) = self.types.kind(p.ty) {
+                                AbiParameter::Scalar(*scalar)
+                            } else {
+                                unreachable!("a checked foreign parameter has an ABI form")
+                            };
+                            (self.index.symbols.text(p.name).to_owned(), abi)
+                        })
+                        .collect();
+                    let result = if let Some(kind) = self.foreign_result_kind(fd.result) {
+                        AbiResult::New(kind_name(kind))
+                    } else if let TyKind::Scalar(scalar) = self.types.kind(fd.result) {
+                        AbiResult::Scalar(*scalar)
+                    } else {
+                        AbiResult::Unit
+                    };
+                    AbiSignature {
+                        name: fd.path.0.name.clone(),
+                        waits: fd.waits,
+                        params,
+                        result,
+                    }
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) fn check_foreign_signatures(&mut self) {
         let (names, refusals) = self.foreign_headers();
         self.foreign_names.get_or_init(|| names);

@@ -10,6 +10,7 @@ use std::io;
 
 enum Query {
     Interface,
+    ForeignHeader(DefPath),
     Dependents(String),
     AffectedTests(String),
     Unused,
@@ -33,6 +34,7 @@ impl Inspection {
             matches!(
                 option,
                 Interface
+                    | ForeignHeader
                     | Dependents
                     | AffectedTests
                     | Unused
@@ -43,6 +45,12 @@ impl Inspection {
         }) {
             match option {
                 Interface => queries.push(Query::Interface),
+                ForeignHeader => {
+                    let value = value.unwrap();
+                    let path = DefPath::from_full(&value)
+                        .ok_or_else(|| format!("invalid foreign module path {value:?}"))?;
+                    queries.push(Query::ForeignHeader(path));
+                }
                 Dependents => queries.push(Query::Dependents(value.unwrap())),
                 AffectedTests => queries.push(Query::AffectedTests(value.unwrap())),
                 Unused => queries.push(Query::Unused),
@@ -53,7 +61,7 @@ impl Inspection {
             }
         }
         let [query]: [Query; 1] = queries.try_into().map_err(|_| {
-            "inspect requires exactly one of --interface, --dependents, --affected-tests or --unused"
+            "inspect requires exactly one of --interface, --foreign-header, --dependents, --affected-tests or --unused"
         })?;
         let json = invocation.options.iter().any(|(id, _)| *id == Json);
         if json && !matches!(query, Query::Interface) {
@@ -68,7 +76,12 @@ impl Inspection {
         if std && invocation.positional.is_some() {
             return Err("inspect --std selects its sources through --libraries".into());
         }
-        if !std && invocation.positional.is_none() {
+        if std && matches!(query, Query::ForeignHeader(_)) {
+            return Err(
+                "inspect --foreign-header requires a package with a foreign manifest".into(),
+            );
+        }
+        if !std && !matches!(query, Query::ForeignHeader(_)) && invocation.positional.is_none() {
             return Err("inspect requires a package directory or --std".into());
         }
         Ok(Self {
@@ -80,7 +93,14 @@ impl Inspection {
     }
 
     pub(crate) fn includes_tests(&self) -> bool {
-        !matches!(self.query, Query::Interface)
+        !matches!(self.query, Query::Interface | Query::ForeignHeader(_))
+    }
+
+    pub(crate) fn foreign_module(&self) -> Option<&DefPath> {
+        match &self.query {
+            Query::ForeignHeader(path) => Some(path),
+            _ => None,
+        }
     }
 
     pub(crate) fn write(
@@ -106,7 +126,7 @@ impl Inspection {
                     graph.affected_tests(definition)?
                 }
                 Query::Unused => graph.unused(entry, self.library),
-                Query::Interface => unreachable!(),
+                Query::Interface | Query::ForeignHeader(_) => unreachable!(),
             };
             for path in paths {
                 println!("{path}");

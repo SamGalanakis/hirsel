@@ -7,6 +7,7 @@ pub mod code_admission;
 pub mod code_store;
 pub mod describe;
 mod diagnostics;
+mod foreign_header;
 mod host;
 mod image;
 mod image_index;

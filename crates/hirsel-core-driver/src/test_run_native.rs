@@ -603,6 +603,65 @@ const PACKAGE_X_SOURCE: &str = "pub fn version() -> u64 { 1u64 }\n";
 const PACKAGE_Y_SOURCE: &str = "pub fn version() -> u64 { 2u64 }\n";
 const PACKAGE_MAIN: &str = "pub fn main() -> Result[(), Exit] { Ok(()) }\n";
 
+#[test]
+fn inspect_foreign_header_matches_the_c_adapter() {
+    use object::{Object, ObjectSection};
+
+    let law = PackageLaw::new();
+    law.manifest("ffi_laws", "ffi_laws", 1, r#"
+[sources]
+"laws.hirsel" = "laws"
+"native.hirsel" = "native"
+[foreign.native]
+symbols = "hfl_"
+archives = []
+"#);
+    law.write("ffi_laws/laws.hirsel", "pub opaque type Laws {}\npub opaque type Obj {}\n");
+    law.write("ffi_laws/native.hirsel", "\
+pub fn release(f: Foreign[laws.Laws], take p: foreign.Ptr[laws.Obj]) -> i32 waits
+pub fn create(f: Foreign[laws.Laws]) -> Option[foreign.Ptr[laws.Obj]]
+pub fn edit(f: Foreign[laws.Laws], p: foreign.Ptr[laws.Obj], src: Bytes, mut dst: Bytes, x: f32) -> f64 waits
+pub fn done(f: Foreign[laws.Laws])
+");
+    let header = PackageLaw::pass(law.run(&[
+        "inspect", law.path("ffi_laws").to_str().unwrap(), "--foreign-header", "ffi_laws@1/native",
+    ]));
+    law.write("ffi_laws/native.h", header);
+    law.write("ffi_laws/native.c", r#"
+#include "native.h"
+HIRSEL_ABI_TEXT
+static uint8_t cell;
+int32_t hfl_release(void *p) { return p == &cell ? 0 : 1; }
+void *hfl_create(void) { return &cell; }
+double hfl_edit(void *p, const uint8_t *src, uint64_t src_len,
+                uint8_t *dst, uint64_t dst_len, float x) {
+    return p == &cell && src != dst ? x + src_len + dst_len : 0;
+}
+void hfl_done(void) {}
+"#);
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else { unreachable!() };
+    let output = Command::new(cc)
+        .arg("-std=c11")
+        .arg("-c")
+        .arg(law.path("ffi_laws/native.c"))
+        .arg("-o")
+        .arg(law.path("native.o"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let bytes = std::fs::read(law.path("native.o")).unwrap();
+    let object = object::File::parse(bytes.as_slice()).unwrap();
+    let section = object.section_by_name(".hirsel_abi").unwrap();
+    assert_eq!(
+        section.data().unwrap(),
+        b"hfl_create stack () -> new ffi_laws@1/laws/Obj\n\
+hfl_done stack () -> ()\n\
+hfl_edit waits (handle ffi_laws@1/laws/Obj, bytes, mut bytes, f32) -> f64\n\
+hfl_release waits (take ffi_laws@1/laws/Obj) -> i32\n"
+    );
+}
+
 struct PackageLaw {
     dir: tempfile::TempDir,
     libraries: PathBuf,

@@ -156,6 +156,7 @@ mod tests {
             );
             let path = hirsel_core_ids::DefPath::core("site_binding");
             let sources = SourceMap {
+                points: Default::default(),
                 files: vec![hirsel_core_ir::source::SourceFile {
                     path: "site.hirsel".into(),
                     text: String::new(),

@@ -130,7 +130,11 @@ pub(super) fn write(
     // The versioned symbol binds the source layout to the supplied runtime.
     let decoder = object
         .declare_data(
-            source_positions::TABLE_SYMBOL,
+            if sources.points.is_empty() {
+                source_positions::TABLE_SYMBOL
+            } else {
+                source_positions::POINTS_TABLE_SYMBOL
+            },
             Linkage::Import,
             false,
             false,
@@ -167,10 +171,18 @@ fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Result<Vec<u8>> 
     let mut files = vec![0; 40 * sources.files.len()];
     for ((row, file), start) in sources.files.iter().enumerate().zip(sources.site_starts()?) {
         files[40 * row + 32..40 * row + 40].copy_from_slice(&start.to_le_bytes());
-        for (view, content) in [file.path.as_bytes(), &source_positions::encode(&file.text)]
-            .into_iter()
-            .enumerate()
-        {
+        let positions = match sources.points.get(&file.path) {
+            Some(points) => {
+                let mut bytes = vec![source_positions::POINTS_TAG];
+                for &(line, column) in points {
+                    bytes.extend_from_slice(&line.to_le_bytes());
+                    bytes.extend_from_slice(&column.to_le_bytes());
+                }
+                bytes
+            }
+            None => source_positions::encode(&file.text),
+        };
+        for (view, content) in [file.path.as_bytes(), &positions].into_iter().enumerate() {
             let field = 40 * row + 16 * view;
             let offset = files.len() as u64;
             files[field..field + 8].copy_from_slice(&offset.to_le_bytes());

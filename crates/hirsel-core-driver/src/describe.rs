@@ -1,4 +1,4 @@
-//! One bounded describe child, shared by SDK generators.
+//! Bounded describe and preview child requests.
 use std::{
     fmt,
     io::{self, Read},
@@ -58,6 +58,30 @@ pub fn describe_child(
     n_place: u64,
     timeout: Duration,
 ) -> Result<Vec<u8>, DescribeError> {
+    child(executable, n_place, timeout, None)
+}
+
+pub fn preview_child(
+    executable: &Path,
+    n_place: u64,
+    timeout: Duration,
+    old: &[u8],
+) -> Result<Vec<u8>, DescribeError> {
+    if old.len() as u64 > n_place {
+        return Err(DescribeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "preview input exceeds n_place",
+        )));
+    }
+    child(executable, n_place, timeout, Some(old))
+}
+
+fn child(
+    executable: &Path,
+    n_place: u64,
+    timeout: Duration,
+    old: Option<&[u8]>,
+) -> Result<Vec<u8>, DescribeError> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "place timeout is too large"))?;
@@ -67,11 +91,20 @@ pub fn describe_child(
             "n_place does not fit this host",
         )
     })?;
-    let mut command = Command::new(executable);
+    let (kind, stdin) = if let Some(old) = old {
+        use std::io::{Seek, Write};
+        let mut input = tempfile::tempfile()?;
+        input.write_all(old)?;
+        input.rewind()?;
+        ("--hirsel-preview", Stdio::from(input))
+    } else {
+        ("--hirsel-describe", Stdio::null())
+    };
+    let mut command = Command::new(std::path::absolute(executable)?);
     command
-        .arg("--hirsel-describe")
+        .arg(kind)
         .arg(format!("--hirsel-n-place={n_place}"))
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env_remove("LISTEN_PID")

@@ -456,6 +456,8 @@ impl Hit {
             executable: output.to_owned(),
             identity: n.identity,
             address: n.address,
+            recipe: None,
+            assembly: None,
             revision: hirsel_core_ir::code_revision(n.address),
             compiled: 0,
             linked: false,

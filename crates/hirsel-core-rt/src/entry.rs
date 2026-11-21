@@ -255,10 +255,15 @@ impl OsProcess {
             }
             let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
             let mut describe_mode = false;
+            let mut preview_mode = false;
             let mut prefix = 0;
             for argument in argv.clone() {
-                if argument == b"--hirsel-describe" {
+                if argument == b"--hirsel-describe" || argument == b"--hirsel-preview" {
+                    if describe_mode {
+                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                    }
                     describe_mode = true;
+                    preview_mode = argument == b"--hirsel-preview";
                 } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
                     n_place = std::str::from_utf8(value)
                         .ok()
@@ -284,7 +289,20 @@ impl OsProcess {
             };
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
-            let launch = Box::new(launch_metadata(target, n_place, describe_mode));
+            let mut launch = launch_metadata(target, n_place, describe_mode);
+            if preview_mode {
+                use std::io::Read;
+                let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
+                let mut old = Vec::new();
+                input
+                    .take(n_place.saturating_add(1))
+                    .read_to_end(&mut old)?;
+                if old.len() as u64 > n_place {
+                    return Err(io::Error::from_raw_os_error(libc::EFBIG).into());
+                }
+                launch = launch.with_preview(old);
+            }
+            let launch = Box::new(launch);
             // Receive before the first dup/open can reuse a missing activation fd.
             let net_ops = input.socket_activation.as_ref();
             let inherited = if let Some(activation) = net_ops

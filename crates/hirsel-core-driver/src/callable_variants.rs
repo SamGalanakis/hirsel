@@ -36,25 +36,40 @@ pub(crate) fn prepare<'m>(
     entry: &DefPath,
     limit: usize,
 ) -> Result<Vec<ContentHash>, NativeStop> {
+    prepare_inputs(modules, reached, entry, limit, |instance| {
+        let body = materialized.get(instance);
+        let product = body.product.as_ref();
+        let owner = crate::native::key("hirsel.callable-owner.v1", &product.map(|p| &p.key))?;
+        Ok((
+            body.function,
+            owner,
+            product.is_some_and(|p| p.check.template.is_some()),
+        ))
+    })
+}
+
+pub(crate) fn prepare_inputs<'m>(
+    modules: &mut Vec<Cow<'m, Module>>,
+    reached: &[Identity],
+    entry: &DefPath,
+    limit: usize,
+    mut input: impl FnMut(&Identity) -> Result<(FuncId, ContentHash, bool), NativeStop>,
+) -> Result<Vec<ContentHash>, NativeStop> {
     let mut originals = BTreeMap::new();
     let mut bodies = BTreeMap::new();
     let mut eligible = BTreeSet::new();
     let mut owners = Vec::with_capacity(modules.len());
     for (unit, (m, instance)) in modules.iter().zip(reached).enumerate() {
-        let body = materialized.get(instance);
-        let product = body.product.as_ref();
-        owners.push(crate::native::key(
-            "hirsel.callable-owner.v1",
-            &product.map(|p| &p.key),
-        )?);
-        if product.is_some_and(|p| p.check.template.is_some()) {
+        let (root, owner, generic) = input(instance)?;
+        owners.push(owner);
+        if generic {
             eligible.insert(instance.clone());
         }
         // A unit's root is its instance; every other body is the unit's own copy,
         // found by its private code identity.
         for (i, f) in m.functions.iter().enumerate() {
             let function = FuncId(i as u32);
-            if function == body.function {
+            if function == root {
                 originals.insert(m.identity(f.instance), Target { unit, function });
             }
             if f.body.is_some() {

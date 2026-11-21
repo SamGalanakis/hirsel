@@ -10,6 +10,8 @@ pub use native::*;
 pub struct SourceMap {
     pub files: Vec<SourceFile>,
     pub items: BTreeMap<DefPath, ItemSource>,
+    /// Exact coordinates of annex positions, by file and then dense ordinal.
+    pub points: BTreeMap<String, Vec<(u32, u32)>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -36,7 +38,10 @@ impl SourceMap {
             .iter()
             .map(|file| {
                 let start = next;
-                next += file.text.len() as u64 + 1;
+                next += self
+                    .points
+                    .get(&file.path)
+                    .map_or_else(|| file.text.len() as u64 + 1, |points| points.len() as u64);
                 start
             })
             .collect();
@@ -68,7 +73,12 @@ impl SourceMap {
     pub fn position(&self, item: &DefPath, start: u32) -> Option<(&SourceFile, u32, u32)> {
         let binding = self.items.get(item)?;
         let file = &self.files[binding.file as usize];
-        let prefix = &file.text[..(binding.file_offset + start) as usize];
+        let offset = (binding.file_offset + start) as usize;
+        if let Some(points) = self.points.get(&file.path) {
+            let &(line, column) = points.get(offset)?;
+            return Some((file, line, column));
+        }
+        let prefix = &file.text[..offset];
         let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32 + 1;
         let column = prefix.rsplit('\n').next().unwrap().chars().count() as u32 + 1;
         Some((file, line, column))
@@ -107,6 +117,7 @@ pub fn module_sources(module: &crate::Module) -> SourceMap {
         }
     }
     SourceMap {
+        points: BTreeMap::new(),
         files: module
             .items
             .iter()
@@ -192,6 +203,7 @@ mod tests {
         let item = DefPath::core("source_test");
         let symbol = site_symbol(&item);
         let mut map = SourceMap {
+            points: Default::default(),
             files: vec![SourceFile {
                 path: "test.hirsel".into(),
                 text: "\n\tλ + 1".into(),

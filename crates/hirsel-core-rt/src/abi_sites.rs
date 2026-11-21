@@ -8,6 +8,9 @@ use hirsel_core_layout::source_positions;
 #[unsafe(export_name = "hirsel_core_relative_source_table_v2")]
 pub static RELATIVE_SOURCE_TABLE_V1: u8 = source_positions::TAG;
 
+#[unsafe(export_name = "hirsel_core_annex_source_table_v1")]
+pub static ANNEX_SOURCE_TABLE_V1: u8 = source_positions::POINTS_TAG;
+
 #[repr(C)]
 pub struct SourceView {
     pub offset: usize,
@@ -78,6 +81,11 @@ pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) ->
         let source = file.source.bytes(sources.files);
         let (line, column) = if let Some(markers) = source.strip_prefix(&[source_positions::TAG]) {
             source_positions::position(markers, offset)
+        } else if let Some(points) = source.strip_prefix(&[source_positions::POINTS_TAG]) {
+            let at = offset * 8;
+            let line = u32::from_le_bytes(points[at..at + 4].try_into().unwrap()) as usize;
+            let column = u32::from_le_bytes(points[at + 4..at + 8].try_into().unwrap()) as usize;
+            (line, column)
         } else {
             let prefix = &source[..offset];
             let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;

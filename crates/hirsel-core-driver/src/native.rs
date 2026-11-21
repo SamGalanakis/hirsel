@@ -10,13 +10,15 @@ use std::process::Command;
 
 #[path = "entry_cleanup.rs"]
 mod cleanup;
+#[path = "recipe_native.rs"]
+pub(crate) mod recipe_build;
 #[path = "release_native.rs"]
 mod release;
 use cleanup::result_cleanup;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 use crate::tool_inputs::SUPPORT_LIBS as DIRECT_LINK_SUPPORT_LIBS;
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum Backend {
     Cranelift,
     Llvm,
@@ -75,6 +77,7 @@ pub struct RunTape {
 }
 
 /// Runtime and linker inputs are explicit, independently produced artifacts.
+#[derive(Clone)]
 pub struct NativeOptions {
     pub tape: Option<RunTape>,
     pub backend: Backend,
@@ -255,6 +258,10 @@ pub struct BuildProduct {
     pub identity: ContentHash,
     /// The entry's PROG-10 code address.
     pub address: ContentHash,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<ContentHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<recipe_build::AssemblyRecord>,
     /// The entry's PROG-9 revision.
     pub revision: ContentHash,
     pub compiled: usize,
@@ -971,6 +978,7 @@ impl CheckProduct {
             record,
             address,
             || reached.revisions(),
+            None,
         )
     }
     /// The entry's declaration part, bound by check.
@@ -1267,32 +1275,54 @@ fn entry_abi(
     product: &DefinitionProduct,
     module: &Module,
 ) -> Result<(EntryAbi, Option<Module>), String> {
+    let function = product
+        .check
+        .function
+        .ok_or("entry body is not fully lowered")?;
+    bound_entry_abi(decl, entry, module, function)
+}
+
+fn bound_entry_abi(
+    decl: &EntryDecl,
+    entry: &DefPath,
+    module: &Module,
+    function: hirsel_core_ir::FuncId,
+) -> Result<(EntryAbi, Option<Module>), String> {
     let binding = (|| {
-        let function = product
-            .check
-            .function
-            .ok_or("entry body is not fully lowered")?;
         let signature = &module.signatures[module.functions[function.index()].signature.index()];
         let dest = signature
             .dest
             .ok_or("entry result has no emitted destination")?;
-        let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
+        let recipes =
+            hirsel_core_layout::compute(&module.types).map_err(|_| "invalid entry layout")?;
         let recipe = recipes[dest.index()].clone();
-        let exit_offset = decl.exit.then(|| {
+        let exit_offset = if decl.exit {
             let hirsel_core_layout::Body::Variant(cases) = &module.types[dest.index()].body else {
-                unreachable!("checked Result has variant shape")
+                return Err("entry Result needs a variant");
             };
-            let hirsel_core_layout::FieldTy::Inline(exit) = cases[1].fields[0].ty else {
-                unreachable!("checked Exit is an inline result payload")
+            let Some(hirsel_core_layout::FieldTy::Inline(exit)) = cases
+                .get(1)
+                .and_then(|case| case.fields.first())
+                .map(|field| &field.ty)
+            else {
+                return Err("entry Exit needs an inline result payload");
             };
             let Layout::Fixed(result) = &recipe.layout else {
-                unreachable!("entry result is fixed")
+                return Err("entry Result is not fixed");
             };
             let Layout::Fixed(exit) = &recipes[exit.index()].layout else {
-                unreachable!("Exit is fixed")
+                return Err("entry Exit is not fixed");
             };
-            result.offsets[1][0] + exit.offsets[0][0]
-        });
+            let offset = result
+                .offsets
+                .get(1)
+                .and_then(|fields| fields.first())
+                .zip(exit.offsets.first().and_then(|fields| fields.first()))
+                .ok_or("entry Exit has no status field")?;
+            Some(offset.0 + offset.1)
+        } else {
+            None
+        };
         let cleanup = (!recipe.plain).then(|| result_cleanup(module, dest, entry));
         Ok((
             EntryAbi {
@@ -1308,13 +1338,7 @@ fn entry_abi(
 
 /// Runtime CAP-4 kind numbers. Args is always supplied by the process constructor.
 pub fn grant_kind(name: &str) -> Option<u8> {
-    [
-        "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-        "Args", "Secret",
-    ]
-    .iter()
-    .position(|kind| *kind == name)
-    .map(|kind| kind as u8)
+    recipe_build::kind(name)
 }
 
 pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
@@ -1509,6 +1533,7 @@ fn link_objects(
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
     address: ContentHash,
     revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
+    assembly: Option<(ContentHash, ContentHash)>,
 ) -> Result<Linked, NativeStop> {
     let revision = hirsel_core_ir::code_revision(address);
     // The executable key includes the mode-specific lld options.
@@ -1521,23 +1546,26 @@ fn link_objects(
     // v5: the image objects are linked as their image unit. The source map
     // enters by its digest, and the runtime headers by the compiler identity,
     // which embeds them.
-    let link_key = key(
-        "hirsel.core-executable.v5",
-        &(
-            compiler_identity()?,
-            toolchain,
-            recipe.identity,
-            DIRECT_LINK_SUPPORT_LIBS,
-            entry_plan,
-            &identities,
-            sources_digest,
-            &options.target,
-            options.backend,
-            options.optimize,
-            options.debug_lines,
-            link_mode,
-        ),
-    )?;
+    let link_key = match assembly {
+        Some(assembly) => key("hirsel.recipe-final-link.v1", &assembly)?,
+        None => key(
+            "hirsel.core-executable.v5",
+            &(
+                compiler_identity()?,
+                toolchain,
+                recipe.identity,
+                DIRECT_LINK_SUPPORT_LIBS,
+                entry_plan,
+                &identities,
+                sources_digest,
+                &options.target,
+                options.backend,
+                options.optimize,
+                options.debug_lines,
+                link_mode,
+            ),
+        )?,
+    };
     let store = Store::new(&options.store)?;
     let (bytes, linked) = if let Some(bytes) = cached(&store, link_key)? {
         (bytes, false)
@@ -1586,9 +1614,15 @@ fn link_objects(
         } else {
             None
         };
+        let expected_link = recipe.identity;
         let recapture = || {
             let recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
                 .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            if assembly.is_some() && recipe.identity != expected_link {
+                return Err(NativeStop::Link(
+                    "link inputs changed during recipe assembly".into(),
+                ));
+            }
             if closed_image && !recipe.uses_hirsel_launcher() {
                 return Err(NativeStop::Link(
                     "direct link refused: process entry inputs changed".into(),
@@ -1721,6 +1755,9 @@ fn link_objects(
         executable: options.output.clone(),
         identity: link_key,
         address,
+        recipe: assembly.map(|(root, _)| root),
+        assembly: assembly
+            .map(|(root, toolchain)| recipe_build::AssemblyRecord::new(root, toolchain, &bytes)),
         revision,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
@@ -1796,6 +1833,7 @@ mod tests {
     include!("tape_build_native.rs");
     include!("request_sequences.rs");
     include!("revision_native.rs");
+    include!("build_identity.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

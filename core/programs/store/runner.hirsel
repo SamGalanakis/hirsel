@@ -625,6 +625,50 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity] {
 
 pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
 
+pub type Preview: codec + send { describe: Describe, release: Bytes, answers: List[Entry] }
+
+pub type Release: codec + send {
+    describe: Describe,
+    release: Bytes,
+    grants: List[String],
+    root_limit: u64,
+    recipe: Bytes
+}
+
+fn preview_old_entries() -> Result[List[Exported], RegisterError] {
+    let count = launch_word(7u64, 0u64)
+    let allocated: Result[Bytes, Capacity] = list.with_capacity(count)
+    let mut payload = match take allocated {
+        Ok(take buffer) => take buffer,
+        Error(c) => return Error(Full(c)),
+    }
+    for i in 0u64 .. count {
+        result.unwrap(list.push(mut payload, int.narrow(launch_word(8u64, i))))
+    }
+    let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
+    match std.codec.decode(codec, payload) {
+        Ok(Ok(take entries)) => Ok(take entries),
+        Ok(Error(_)) => Error(Bounds),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+fn encode_preview(take description: Describe) -> Result[Bytes, RegisterError] {
+    let old = preview_old_entries()?
+    if list.len(old) != 0u64 { return Error(Bounds) }
+    let release = match release_digest(description.exported) {
+        Ok(take digest) => take digest,
+        Error(c) => return Error(Full(c)),
+    }
+    let preview = Preview(describe: take description, release: take release, answers: list.new())
+    let codec: std.codec.Codec[Preview] = std.codec.of()
+    let mut out: Bytes = list.new()
+    match std.codec.encode(codec, preview, mut out) {
+        Ok(()) => Ok(take out),
+        Error(c) => Error(Full(c)),
+    }
+}
+
 pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | Bounds
 
 fn launch_emit(data: Bytes) -> bool { false }
@@ -636,9 +680,22 @@ fn encode_describe(description: Describe) -> Result[Bytes, Capacity] {
     Ok(take out)
 }
 
-fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Result[Bytes, Capacity] {
+fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
     let Registry(exported: take exported, ..) = take r
-    encode_describe(Describe(digest: launch_digest()?, target: launch_target(a)?, n_place: launch_word(0u64, 0u64), exported: take exported))
+    let digest = match launch_digest() {
+        Ok(take digest) => take digest,
+        Error(c) => return Error(Full(c)),
+    }
+    let target = match launch_target(a) {
+        Ok(take target) => take target,
+        Error(c) => return Error(Full(c)),
+    }
+    let description = Describe(digest: take digest, target: take target, n_place: launch_word(0u64, 0u64), exported: take exported)
+    if launch_word(6u64, 0u64) != 0u64 { return encode_preview(take description) }
+    match encode_describe(description) {
+        Ok(take payload) => Ok(take payload),
+        Error(c) => Error(Full(c)),
+    }
 }
 
 pub type ReleaseRecord: codec + send { release: Bytes, digest: Bytes }
@@ -694,10 +751,7 @@ fn describe_response[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[
     let ran = bound bytes launch_word(0u64, 0u64) {
         let mut r: Registry[G, H] = registry()
         let response: Result[Bytes, RegisterError] = match run(mut r) {
-            Ok(()) => match describe_registered(a, take r) {
-                Ok(take payload) => Ok(take payload),
-                Error(c) => Error(Full(c)),
-            },
+            Ok(()) => describe_registered(a, take r),
             Error(take e) => Error(take e),
         }
         take response

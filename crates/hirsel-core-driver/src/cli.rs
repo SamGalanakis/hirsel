@@ -4,6 +4,9 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptionId {
     Json,
+    Recipe,
+    CodeStore,
+    ReleaseManifest,
     Record,
     Tape,
     IncludeCredentials,
@@ -67,7 +70,9 @@ macro_rules! commands {
 commands! {
     "help", "help [command]", "Show commands or help for one command.";
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
-    "build", "build [package-dir] [options]", "Build a native executable from its reachable definitions.";
+    "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
+    "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
+    "manifest", "manifest show PATH", "Print a release manifest.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
@@ -89,6 +94,27 @@ macro_rules! option {
 }
 static OPTIONS: &[OptionSpec] = &[
     option!(
+        Recipe,
+        ["--recipe"],
+        Some("HASH"),
+        ["build"],
+        "Assemble an existing recipe in --code-store."
+    ),
+    option!(
+        CodeStore,
+        ["--code-store"],
+        Some("DIR"),
+        ["build", "publish"],
+        "Select the immutable code store."
+    ),
+    option!(
+        ReleaseManifest,
+        ["--manifest"],
+        Some("PATH"),
+        ["build"],
+        "Write a release manifest from an empty-list preview."
+    ),
+    option!(
         SdkOut,
         ["--out"],
         Some("DIR"),
@@ -99,14 +125,14 @@ static OPTIONS: &[OptionSpec] = &[
         PlaceTimeout,
         ["--place-timeout"],
         Some("SECONDS"),
-        ["sdk", "call"],
-        "Describe wall-clock deadline; default 10 seconds."
+        ["sdk", "call", "build"],
+        "Describe and preview wall-clock deadline; default 10 seconds."
     ),
     option!(
         NPlace,
         ["--n-place"],
         Some("BYTES"),
-        ["sdk", "call"],
+        ["sdk", "call", "build", "publish"],
         "Place registration allowance; default 16777216 bytes."
     ),
     option!(
@@ -202,14 +228,14 @@ static OPTIONS: &[OptionSpec] = &[
         SourceCore,
         ["--source-core"],
         None,
-        ["check", "build", "run", "replay", "test", "sdk"],
+        ["check", "build", "publish", "run", "replay", "test", "sdk"],
         "Check supplied core and std sources."
     ),
     option!(
         SourceStd,
         ["--source-std"],
         None,
-        ["check", "build", "run", "replay", "test", "sdk"],
+        ["check", "build", "publish", "run", "replay", "test", "sdk"],
         "Check std from source instead of its product."
     ),
     option!(
@@ -230,14 +256,14 @@ static OPTIONS: &[OptionSpec] = &[
         Dir,
         ["--dir"],
         Some("PATH"),
-        ["build", "run", "replay", "test"],
+        ["build", "publish", "run", "replay", "test"],
         "Grant a confined directory. Repeat for more directories."
     ),
     option!(
         Grant,
         ["--grant"],
         Some("KIND"),
-        ["build", "run", "replay", "test"],
+        ["build", "publish", "run", "replay", "test"],
         "Grant a capability kind; Net requires Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>]. Repeat for more kinds."
     ),
     option!(
@@ -258,7 +284,7 @@ static OPTIONS: &[OptionSpec] = &[
         Release,
         ["--release"],
         None,
-        ["build", "run", "replay", "test", "sdk"],
+        ["build", "publish", "run", "replay", "test", "sdk"],
         "Optimize native code; defaults to LLVM."
     ),
     option!(
@@ -272,7 +298,7 @@ static OPTIONS: &[OptionSpec] = &[
         Backend,
         ["--backend"],
         Some("cranelift|llvm"),
-        ["build", "run", "replay", "test", "sdk"],
+        ["build", "publish", "run", "replay", "test", "sdk"],
         "Select the native engine; dev defaults to Cranelift."
     ),
     option!(
@@ -321,6 +347,7 @@ static OPTIONS: &[OptionSpec] = &[
         Some("TRIPLE"),
         [
             "build",
+            "publish",
             "run",
             "replay",
             "test",
@@ -349,7 +376,7 @@ static OPTIONS: &[OptionSpec] = &[
         Limit,
         ["--limit"],
         Some("BYTES"),
-        ["build", "run", "replay", "test", "sdk"],
+        ["build", "publish", "run", "replay", "test", "sdk"],
         "Set the root limit; mandatory for test."
     ),
     option!(
@@ -363,14 +390,16 @@ static OPTIONS: &[OptionSpec] = &[
         Entry,
         ["--entry"],
         Some("DEFINITION"),
-        ["check", "build", "run", "sdk"],
+        ["check", "build", "publish", "run", "sdk"],
         "Select an entry by its full definition path."
     ),
     option!(
         Libraries,
         ["--libraries"],
         Some("ROOT"),
-        ["check", "image", "build", "run", "replay", "test", "sdk"],
+        [
+            "check", "image", "build", "publish", "run", "replay", "test", "sdk"
+        ],
         "Select a root containing core/ and std/."
     ),
     option!(
@@ -381,6 +410,7 @@ static OPTIONS: &[OptionSpec] = &[
             "check",
             "image",
             "build",
+            "publish",
             "run",
             "replay",
             "test",
@@ -394,7 +424,9 @@ static OPTIONS: &[OptionSpec] = &[
         Inputs,
         ["--inputs"],
         Some("MANIFEST"),
-        ["check", "image", "build", "run", "replay", "test", "sdk"],
+        [
+            "check", "image", "build", "publish", "run", "replay", "test", "sdk"
+        ],
         "Read an explicit CorpusManifest JSON file."
     ),
     option!(
@@ -405,6 +437,7 @@ static OPTIONS: &[OptionSpec] = &[
             "check",
             "image",
             "build",
+            "publish",
             "run",
             "replay",
             "test",
@@ -417,7 +450,7 @@ static OPTIONS: &[OptionSpec] = &[
         ProfileFront,
         ["--profile-front"],
         None,
-        ["check", "build", "run"],
+        ["check", "build", "publish", "run"],
         "Include nested published-image work in --metrics (adds profiling overhead)."
     ),
     option!(
@@ -427,6 +460,7 @@ static OPTIONS: &[OptionSpec] = &[
         [
             "check",
             "build",
+            "publish",
             "run",
             "replay",
             "test",
@@ -524,11 +558,11 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         }
         return Ok(Action::Help(help(target)));
     }
-    if name == "tape" {
+    if matches!(name.as_str(), "tape" | "manifest") {
         match arguments.next().as_deref() {
             Some("show") => {}
             Some("--help" | "-h") => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err("expected: tape show TAPE --include-credentials".into()),
+            _ => return Err(format!("expected: hirsel {}", command.usage)),
         }
     }
     let mut invocation = Invocation {

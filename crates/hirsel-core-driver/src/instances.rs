@@ -2,7 +2,7 @@
 //! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
 //! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::{CodeRow, Identity, code_addresses, code_revision};
+use hirsel_core_ir::{CodeRow, Identity, address::code_groups, code_revision};
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
@@ -294,55 +294,68 @@ impl InstanceSet {
         prior: Option<&crate::reach::Reach>,
     ) -> Option<&BTreeMap<Identity, ContentHash>> {
         self.addresses
-            .get_or_init(|| {
-                let mut rows = BTreeMap::new();
-                let mut generated = BTreeMap::new();
-                for identity in instances {
-                    let (body, slots, signatures, adapters) =
-                        if let Some(&row) = self.rows.get(identity) {
-                            let body = &self.bodies[row];
-                            (body.body, &body.slots, &body.signatures, &body.adapters)
-                        } else if let Some(record) = self.hits.get(identity) {
-                            (
-                                record.body,
-                                &record.slots,
-                                &record.signatures,
-                                &record.adapters,
-                            )
-                        } else {
-                            let prior = prior?;
-                            let entry = prior.entry(prior.instance(identity)?);
-                            (entry.body, &entry.slots, &entry.signatures, &entry.adapters)
-                        };
-                    rows.insert(identity, (body, slots, signatures));
-                    for adapter in adapters {
-                        use std::collections::btree_map::Entry;
-                        match generated.entry(&adapter.identity) {
-                            Entry::Vacant(entry) => {
-                                entry.insert(adapter);
-                            }
-                            Entry::Occupied(entry) if *entry.get() == adapter => {}
-                            Entry::Occupied(_) => return None,
-                        }
-                    }
-                }
-                for (_, _, signatures) in rows.values() {
-                    for (identity, expected) in &signatures.slots {
-                        let (_, _, actual) = rows.get(identity)?;
-                        if *expected != actual.own {
-                            return None;
-                        }
-                    }
-                }
-                code_addresses(instances.iter().cloned(), |identity| {
-                    let (body, slots, _) = rows.get(identity)?;
-                    Some(CodeRow {
-                        body: *body,
-                        slots: (*slots).clone(),
-                    })
-                })
-            })
+            .get_or_init(|| self.groups(instances, prior, instances.iter().cloned(), |_, _| {}))
             .as_ref()
+    }
+
+    /// Bind the canonical slots once, including the existing ABI and shared
+    /// adapter agreement checks, and pass each group frame to the caller.
+    pub(crate) fn groups(
+        &self,
+        instances: &[Identity],
+        prior: Option<&crate::reach::Reach>,
+        roots: impl IntoIterator<Item = Identity>,
+        group: impl FnMut(ContentHash, Vec<u8>),
+    ) -> Option<BTreeMap<Identity, ContentHash>> {
+        let mut rows = BTreeMap::new();
+        let mut generated = BTreeMap::new();
+        for identity in instances {
+            let (body, slots, signatures, adapters) = if let Some(&row) = self.rows.get(identity) {
+                let body = &self.bodies[row];
+                (body.body, &body.slots, &body.signatures, &body.adapters)
+            } else if let Some(record) = self.hits.get(identity) {
+                (
+                    record.body,
+                    &record.slots,
+                    &record.signatures,
+                    &record.adapters,
+                )
+            } else {
+                let prior = prior?;
+                let entry = prior.entry(prior.instance(identity)?);
+                (entry.body, &entry.slots, &entry.signatures, &entry.adapters)
+            };
+            rows.insert(identity, (body, slots, signatures));
+            for adapter in adapters {
+                use std::collections::btree_map::Entry;
+                match generated.entry(&adapter.identity) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(adapter);
+                    }
+                    Entry::Occupied(entry) if *entry.get() == adapter => {}
+                    Entry::Occupied(_) => return None,
+                }
+            }
+        }
+        for (_, _, signatures) in rows.values() {
+            for (identity, expected) in &signatures.slots {
+                let (_, _, actual) = rows.get(identity)?;
+                if *expected != actual.own {
+                    return None;
+                }
+            }
+        }
+        code_groups(
+            roots,
+            |identity| {
+                let (body, slots, _) = rows.get(identity)?;
+                Some(CodeRow {
+                    body: *body,
+                    slots: (*slots).clone(),
+                })
+            },
+            group,
+        )
     }
 
     /// Each instance that one of `instances` describes, with its code

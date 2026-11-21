@@ -598,6 +598,7 @@ fn link_weak_adapter_order(
         |_| Ok(0),
         reached.address(entry).unwrap(),
         || reached.revisions(),
+        None,
     )
     .unwrap();
     let Linked::Built(built) = linked else {

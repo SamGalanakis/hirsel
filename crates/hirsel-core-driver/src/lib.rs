@@ -30,6 +30,7 @@ mod native_facts;
 mod native_object;
 mod native_sources;
 mod prebuild;
+mod release_manifest;
 pub use prebuild::Prebuilt;
 mod core_inventory;
 mod layers;
@@ -41,6 +42,7 @@ mod request_record;
 mod test_run;
 mod tool_inputs;
 pub use core_inventory::{allowlist, core_declarations, core_inventory};
+pub use native::recipe_build::{AssemblyRecord, Publication};
 pub use native::{
     Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, RunTape, RunTapeMode,
     grant_kind,

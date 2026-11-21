@@ -7,9 +7,9 @@ type Error = Box<dyn std::error::Error>;
 pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
+pub(crate) struct Reader<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) at: usize,
 }
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
@@ -21,20 +21,20 @@ impl<'a> Reader<'a> {
     fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
     }
-    fn count(&mut self) -> Result<usize, Error> {
+    pub(crate) fn count(&mut self) -> Result<usize, Error> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into()?) as usize)
     }
-    fn word(&mut self) -> Result<u64, Error> {
+    pub(crate) fn word(&mut self) -> Result<u64, Error> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into()?))
     }
-    fn bytes(&mut self) -> Result<Vec<u8>, Error> {
+    pub(crate) fn bytes(&mut self) -> Result<Vec<u8>, Error> {
         let n = self.count()?;
         Ok(self.take(n)?.to_vec())
     }
-    fn name(&mut self) -> Result<String, Error> {
+    pub(crate) fn name(&mut self) -> Result<String, Error> {
         Ok(String::from_utf8(self.bytes()?)?)
     }
-    fn done(&self) -> Result<(), Error> {
+    pub(crate) fn done(&self) -> Result<(), Error> {
         if self.at == self.bytes.len() {
             Ok(())
         } else {
@@ -241,6 +241,12 @@ pub struct Describe {
 impl Describe {
     pub fn read(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader { bytes, at: 0 };
+        let description = Self::read_from(&mut r)?;
+        r.done()?;
+        Ok(description)
+    }
+
+    pub(crate) fn read_from(r: &mut Reader<'_>) -> Result<Self, Error> {
         let digest = r.bytes()?;
         let target = r.name()?;
         let n_place = r.word()?;
@@ -261,7 +267,6 @@ impl Describe {
                 revision: r.bytes()?,
             });
         }
-        r.done()?;
         Ok(Self {
             digest,
             target,

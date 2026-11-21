@@ -750,6 +750,18 @@ pub fn encode_with_annex(
     (body, Annex(annex, None))
 }
 
+/// Prepare the canonical module and its diagnostic data for assembly.
+pub fn prepare_assembly(
+    module: &Module,
+    root: FuncId,
+    sources: &crate::source::SourceMap,
+) -> (EncodedBody, Annex, Module) {
+    let (body, annex) = encode_with_annex(module, root, sources);
+    let (module, _) = decode_payload(&body.bytes, &mut DecodeBudget::unlimited())
+        .expect("the producer's normal form is readable");
+    (body, annex, module)
+}
+
 /// Materialize the retained module for existing native and evaluator consumers.
 /// Source anchors and hints keep their original facts in the canonical numbering.
 pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
@@ -1867,6 +1879,7 @@ fn f0 = n0 g0 {
         };
         module.functions[0].body.as_mut().unwrap().inst_anchors[1] = anchor(0, 0);
         let sources = SourceMap {
+            points: Default::default(),
             files: vec![crate::source::SourceFile {
                 path: "main.hirsel".into(),
                 text: "a\nb".into(),

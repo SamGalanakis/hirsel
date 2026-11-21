@@ -2,6 +2,8 @@
 //! the `hirsel` executable's whole behaviour after process setup. It lives in
 //! the library so that a test process can run a request exactly as the
 //! executable does (request_sequences.rs compares their outputs).
+use crate::code_store::CodeStore;
+use crate::native::recipe_build::Publication;
 use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions,
@@ -9,6 +11,7 @@ use crate::{
 use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Serialize)]
 struct Output<'a> {
@@ -34,6 +37,21 @@ struct ReachableOutput<'a> {
 }
 fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+/// Local loading still parses disk input under CA4's decoder. Size limits
+/// follow the process allowance. Bound recursive decoder stack use explicitly.
+pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits {
+    crate::code_admission::AdmissionLimits {
+        recipe_bytes: usize::MAX,
+        closure_objects: usize::MAX,
+        object_bytes: u64::MAX,
+        decoded_bytes: usize::MAX,
+        members: usize::MAX,
+        edges: usize::MAX,
+        nesting: 512,
+        outstanding: 0,
+        timeout: Duration::from_secs(24 * 60 * 60),
+    }
 }
 fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let invocation = match crate::cli::parse(args.into_iter())? {
@@ -64,6 +82,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             return Err("tape show requires --include-credentials".into());
         }
         crate::tape_cli::show(Path::new(path))?;
+        std::process::exit(0);
+    }
+    if command == "manifest" {
+        crate::release_manifest::show(Path::new(
+            invocation
+                .positional
+                .as_deref()
+                .ok_or("manifest show requires a path")?,
+        ))?;
         std::process::exit(0);
     }
     let replay_command = command == "replay";
@@ -124,7 +151,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut product_name = None;
     let mut entry = None;
     let test_command = command == "test";
-    let native_command = command == "build" || command == "run" || replay_command || test_command;
+    let recipe_command = matches!(command, "build" | "publish");
+    let native_command = recipe_command || command == "run" || replay_command || test_command;
+    let mut recipe_root = None;
+    let mut code_store = None;
+    let mut release_manifest = None;
+    let mut n_place = None;
+    let mut place_timeout = Duration::from_secs(10);
     let mut test_filter = None;
     let mut test_timeout = None;
     let mut explicit_limit = false;
@@ -159,6 +192,16 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         let value = value.unwrap_or_default();
         match option {
             Opt::Json => json = true,
+            Opt::Recipe => recipe_root = Some(crate::native::recipe_build::parse_root(&value)?),
+            Opt::CodeStore => code_store = Some(PathBuf::from(value)),
+            Opt::ReleaseManifest => release_manifest = Some(PathBuf::from(value)),
+            Opt::NPlace => n_place = Some(value.parse::<u64>()?),
+            Opt::PlaceTimeout => {
+                place_timeout = Duration::from_secs(value.parse::<u64>()?);
+                if place_timeout.is_zero() {
+                    return Err("--place-timeout must be positive".into());
+                }
+            }
             Opt::Record => {
                 run_tape = Some(crate::RunTape {
                     path: value,
@@ -268,8 +311,6 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::Signatures
             | Opt::ListRules
             | Opt::SdkOut
-            | Opt::PlaceTimeout
-            | Opt::NPlace
             | Opt::Url
             | Opt::CallTimeout => {
                 unreachable!("CLI early command option")
@@ -301,6 +342,34 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .to_owned();
         }
     }
+    let stored_recipe = if let Some(root) = recipe_root {
+        if dir.is_some()
+            || manifest.is_some()
+            || entry.is_some()
+            || image_path.is_some()
+            || libraries_explicit
+            || source_core
+            || source_std
+            || core_product.is_some()
+            || explicit_target
+            || explicit_limit
+            || n_place.is_some()
+            || !directories.is_empty()
+            || grant_mask != 0
+            || !secret_grants.is_empty()
+        {
+            return Err("--recipe supplies source, target, limits and grants".into());
+        }
+        let path = code_store
+            .clone()
+            .ok_or("--recipe requires --code-store DIR")?;
+        let publication =
+            Publication::open(&CodeStore::new(path), root, &local_admission_limits())?;
+        target.clone_from(&publication.recipe().launch.target);
+        Some(publication)
+    } else {
+        None
+    };
     let runner = match (emulator, sysroot) {
         (None, None) => crate::Runner::Native,
         (Some(emulator), Some(sysroot)) => crate::Runner::qemu(&emulator, &sysroot, &target)?,
@@ -405,6 +474,61 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .unwrap_or(Path::new("."))
                 .join(".hirsel-core")
         });
+    let code_store = CodeStore::new(code_store.unwrap_or_else(|| store.join("code-store")));
+    let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
+        match (cc, &installed) {
+            (Some(cc), _) => Ok(Link::Driver(crate::link_driver(&cc)?)),
+            (None, Some(installed)) => Ok(Link::Installed(installed.link(&target).ok_or_else(
+                || format!("this installation links its host target only, not {target}; pass --cc"),
+            )?)),
+            (None, None) => Ok(Link::Driver(crate::link_driver(&pinned().ok_or(
+                "no link driver: this compiler is not installed and LLVM_SYS_231_PREFIX is unset; pass --cc",
+            )?)?)),
+        }
+    };
+    if let Some(publication) = stored_recipe {
+        use hirsel_core_ir::release_recipe::Backend as RecipeBackend;
+        let root = publication.root();
+        let recipe = publication.recipe();
+        let mut options = NativeOptions::development(
+            target.clone(),
+            runtime.ok_or("build requires --runtime <core runtime archive>")?,
+            select_link(cc)?,
+            store.join("native"),
+            output_path.unwrap_or_else(|| PathBuf::from("program")),
+        );
+        options.backend = match recipe.launch.backend {
+            RecipeBackend::Cranelift => Backend::Cranelift,
+            RecipeBackend::Llvm => Backend::Llvm,
+        };
+        if backend.is_some_and(|backend| backend != options.backend) {
+            return Err("--backend differs from the recipe".into());
+        }
+        options.optimize =
+            release || (matches!(options.backend, Backend::Llvm) && backend.is_none());
+        options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
+        options.logical_charge_report = logical_charge_report;
+        let recipe = release_manifest.as_ref().map(|_| recipe.clone());
+        let product = publication.assemble(&options, Default::default())?;
+        if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
+            crate::release_manifest::write(
+                &path,
+                &product.executable,
+                root,
+                &recipe,
+                place_timeout,
+            )?;
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "accepted": true, "native": product })
+            );
+        } else {
+            println!("built {}", product.executable.display());
+        }
+        std::process::exit(0);
+    }
     if command == "core-product" || command == "std-product" {
         meter.finish("startup/discovery");
         let (image, rebuilt) = if let Some(path) = image_path {
@@ -454,7 +578,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
         std::process::exit(0);
     }
-    if native_command && (matches!(backend, Some(Backend::Llvm)) || (backend.is_none() && release))
+    if command != "publish"
+        && native_command
+        && (matches!(backend, Some(Backend::Llvm)) || (backend.is_none() && release))
     {
         hirsel_llvm_lazy::llvm_library()?;
     }
@@ -509,18 +635,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             } else {
                 PathBuf::from("program")
             };
-            let link = match (cc, &installed) {
-                (Some(cc), _) => Link::Driver(crate::link_driver(&cc)?),
-                (None, Some(installed)) => Link::Installed(installed.link(&target).ok_or_else(
-                    || format!("this installation links its host target only, not {target}; pass --cc"),
-                )?),
-                (None, None) => Link::Driver(crate::link_driver(&pinned().ok_or(
-                    "no link driver: this compiler is not installed and LLVM_SYS_231_PREFIX is unset; pass --cc",
-                )?)?),
+            let publishing = command == "publish";
+            let link = if publishing {
+                Link::Driver(PathBuf::new())
+            } else {
+                select_link(cc)?
+            };
+            let archive = if publishing {
+                PathBuf::new()
+            } else {
+                runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?
             };
             let mut options = NativeOptions::development(
                 target.clone(),
-                runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
+                archive,
                 link,
                 native_store,
                 output_path.unwrap_or(default_output),
@@ -549,7 +677,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // options or toolchain cannot be read goes on without one and meets
     // that error where it always has.
     let record = match &mut prepared {
-        _ if command == "image" || test_command => None,
+        _ if command == "image" || test_command || recipe_command => None,
         Some(Ok(options)) if options.logical_charge_report.is_none() => {
             crate::request_record::Request::new(
                 command,
@@ -609,6 +737,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .as_ref()
                 .ok_or("build/run requires an entry")?;
             match &prepared {
+                Some(Ok(options)) if recipe_command => {
+                    product.reachable(entry, options.instance_limit)?
+                }
                 Some(Ok(options)) => product.reachable_for(entry, options)?,
                 _ => product.reachable(entry, 65_536)?,
             }
@@ -705,13 +836,54 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut undelivered = None;
     let native = if native_command && accepted {
         let options = native_options.as_ref().unwrap();
-        match product.build_reachable(
-            selected_entry
-                .as_ref()
-                .ok_or("build/run requires an entry")?,
-            reach.as_ref().unwrap(),
-            options,
-        ) {
+        let entry = selected_entry
+            .as_ref()
+            .ok_or("build/run requires an entry")?;
+        let reached = reach.as_ref().unwrap();
+        let assembled = if recipe_command {
+            match product.publish_release(
+                entry,
+                reached,
+                options,
+                &code_store,
+                n_place.unwrap_or(hirsel_core_ids::launch::DEFAULT_N_PLACE),
+            ) {
+                Ok(publication) => {
+                    let root = publication.root;
+                    if command == "publish" {
+                        if let Some(path) = metrics {
+                            meter.write_metrics(path)?;
+                        }
+                        if json {
+                            println!("{}", serde_json::json!({ "recipe": hex(root) }));
+                        } else {
+                            println!("{}", hex(root));
+                        }
+                        std::process::exit(0);
+                    }
+                    let recipe = release_manifest
+                        .as_ref()
+                        .map(|_| publication.recipe.clone());
+                    let built = publication.assemble(options, reached.counters);
+                    if let (Ok(built), Some(path), Some(recipe)) =
+                        (&built, &release_manifest, recipe)
+                    {
+                        crate::release_manifest::write(
+                            path,
+                            &built.executable,
+                            root,
+                            &recipe,
+                            place_timeout,
+                        )?;
+                    }
+                    built
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            product.build_reachable(entry, reached, options)
+        };
+        match assembled {
             Ok(native) => Some(native),
             Err(crate::NativeStop::Output { product, error }) => {
                 stopped = Some(crate::native::output_stop(&error));

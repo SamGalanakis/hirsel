@@ -8,7 +8,7 @@
 ```
 pub opaque type Hmac  // inner and outer SHA-256 states
 pub fn hmac.start(key: Bytes) -> Hmac
-pub fn hmac.add(mut h: Hmac, bytes: Bytes, lo: u64, hi: u64)
+pub fn hmac.add(mut h: Hmac, input: Bytes, lo: u64, hi: u64)
 pub fn hmac.add_byte(mut h: Hmac, x: u8)
 pub fn hmac.finish(h: Hmac) -> Inline[u8, 32]
 pub fn hmac.sha256(key: Bytes, data: Bytes) -> Inline[u8, 32]

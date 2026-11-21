@@ -244,6 +244,40 @@ fn std_seed_check() -> String {
     check_corpus(seed_corpus())
 }
 
+#[test]
+fn hmac_rfc_4231_vectors() {
+    let mut inputs = manifest();
+    for package in &mut inputs.packages {
+        if is_seed(&package.package) {
+            package.sources.retain(|source| {
+                source.modules == ["sha256"]
+                    || source.modules == ["hmac"]
+                    || source.modules == ["tests", "hmac"]
+            });
+        }
+    }
+    let checked = Checked::corpus(&inputs.load().unwrap());
+    for case in 1..=7 {
+        let name = format!("rfc_4231_case_{case}");
+        let path =
+            hirsel_core_ids::DefPath::from_full(&format!("std@1/tests/hmac/{name}")).unwrap();
+        let root = Identity::plain(path);
+        let units = checked.product.units([root.clone()], 65_536).unwrap();
+        let (module, function) =
+            hirsel_core_materialize::join(&units.modules().unwrap(), &root).unwrap();
+        hirsel_core_ir::wf::module(&module).unwrap();
+        let call = format!("{name}()");
+        let error = run_expect(
+            &module,
+            &[(name, function)].into(),
+            &call,
+            &["true"],
+            &|a| format!("{a:?}"),
+        );
+        assert!(error.is_none(), "{call}: {error:?}");
+    }
+}
+
 fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);

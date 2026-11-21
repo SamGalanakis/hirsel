@@ -34,3 +34,41 @@ fn bare_clock_shared_state(c: Clock) -> bool waits {
     host.sleep_until(c, deadline)
     result.unwrap(read_shared(monotonic_read, c)) >= deadline
 }
+
+// Dropping a pending alarm leaves the inbox empty. Joining a second pending
+// alarm after cancelling it returns its Cancelled cause. The last alarm wakes
+// to a closed receiver and finishes before cancel_join consumes its handle.
+// expect: run alarm_lifecycle(tasks) = true
+fn alarm_lifecycle(tasks: Tasks) -> bool waits {
+    let (c, h) = provide.clock(0, 0)
+    let mut hand = take h
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let first = clock.alarm(tasks, c, 10, to, 1)
+    let pending = clock.idle(mut hand) == Some(10)
+    let _ = take first
+    clock.advance_to(mut hand, 10)
+    let empty = match channel.try_receive(from) {
+        Error(Empty) => true,
+        _ => false,
+    }
+    let second = clock.alarm(tasks, c, 20, to, 2)
+    let blocked = clock.idle(mut hand) == Some(20)
+    let mut causes_seen = 0u64
+    if let Error(Cancelled(causes)) = task.cancel_join(take second) {
+        for cause in causes {
+            if let Cancelled = cause.kind {
+                causes_seen += 1
+            }
+        }
+    }
+    let third = clock.alarm(tasks, c, 30, to, 3)
+    let waiting = clock.idle(mut hand) == Some(30)
+    let _ = take from
+    clock.advance_to(mut hand, 30)
+    let settled = clock.idle(mut hand) == None
+    let closed = match task.cancel_join(take third) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+    pending && empty && blocked && causes_seen == 1 && waiting && settled && closed
+}

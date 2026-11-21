@@ -1,0 +1,6 @@
+/// Requests cancellation and joins the child. Returns the child's result if it
+/// finished successfully, or its full Failed or Cancelled cause chain.
+pub fn cancel_join[R: send](take h: Task[R]) -> Result[R, JoinError] waits {
+    task.cancel(mut h)
+    task.join(take h)
+}

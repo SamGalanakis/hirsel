@@ -9,12 +9,6 @@ type Reading: send {
     config: std.wsock.Config
 }
 
-type Closing: send {
-    tx: Sender[Notice],
-    clock: Clock,
-    deadline: u64
-}
-
 fn reader(take job: Reading) -> std.wsock.Reader waits {
     let Reading(reader: initial, tx: output_tx, clock: c, config: limits) = take job
     let mut input = take initial
@@ -54,11 +48,6 @@ fn reader(take job: Reading) -> std.wsock.Reader waits {
             }
         }
     }
-}
-
-fn close_timer(take job: Closing) waits {
-    host.sleep_until(job.clock, job.deadline)
-    let _ = channel.send(job.tx, Timer(Expired, job.deadline))
 }
 
 fn close_code(code: u16) -> std.websocket.Control {
@@ -184,8 +173,7 @@ fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: s
                 At(_, deadline) => deadline,
                 Never => host.mono_ns(clock)
             }
-            let job = Closing(tx: channel.sender(tx), clock: clock, deadline: end)
-            let handle = task.spawn(tasks, bytes 4096, take job, close_timer)
+            let handle = std.clock.alarm(tasks, clock, end, tx, Timer(Expired, end))
             alarm = Some(take handle)
         }
         if std.wsock.due(mut time, host.mono_ns(clock)) == Expired {
@@ -260,9 +248,7 @@ fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: s
         }
     }
     if let Some(take handle) = take alarm {
-        let mut timer = take handle
-        task.cancel(mut timer)
-        let _ = task.join(take timer)
+        let _ = task.cancel_join(take handle)
     }
     Ok(())
 }

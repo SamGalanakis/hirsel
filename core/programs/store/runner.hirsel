@@ -2451,13 +2451,6 @@ type WritePause {
     work: Option[CutoverWork],
 }
 
-type PauseWake: send { clock: Clock, deadline: u64, to: Sender[HeadInput] }
-
-fn pause_wake(take wake: PauseWake) -> () waits {
-    host.sleep_until(wake.clock, wake.deadline)
-    let _ = channel.send(wake.to, PauseDeadline(wake.deadline))
-}
-
 pub type HeadRequests = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
 type HeadDrain {
     finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]],
@@ -2821,8 +2814,7 @@ fn start_write_pause(mut pause: Option[WritePause], take work: CutoverWork, cont
     }
     let deadline = work.request.deadline
     if host.mono_ns(control.clock) >= deadline { return Error(Expired) }
-    let wake = PauseWake(clock: control.clock, deadline: deadline, to: channel.sender(control.head_to))
-    let timer = task.spawn(control.tasks, bytes 4096u64, take wake, pause_wake)
+    let timer = std.clock.alarm(control.tasks, control.clock, deadline, control.head_to, PauseDeadline(deadline))
     pause = Some(WritePause(deadline: deadline, attempt: take attempt, deadline_task: take timer, work: Some(take work)))
     let _ = channel.send(control.events, WritesPaused)
     Ok(())
@@ -3407,8 +3399,6 @@ fn attempt_grants[G: send](to: Sender[GrantRequest[G]], take ctx: TriggerContext
     }
 }
 
-type TriggerTimer: send { clock: Clock, deadline: u64, at: u64, to: Sender[HeadInput] }
-
 type ArmedTimer { at: u64, task_handle: Task[()] }
 
 type TriggerDrive[G: send] {
@@ -3438,32 +3428,22 @@ fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks
     Ok(box.new(take drive))
 }
 
-fn fire_trigger_timer(take timer: TriggerTimer) -> () waits {
-    host.sleep_until(timer.clock, timer.deadline)
-    let _ = channel.send(timer.to, TriggerWake(timer.at))
-}
-
-fn stop_timer(take armed: ArmedTimer) -> () waits {
-    let ArmedTimer(at: _, task_handle: take timer) = take armed
-    let mut waiting = take timer
-    task.cancel(mut waiting)
-    let _ = task.join(take waiting)
-}
-
 fn arm_trigger_timer[G: send](mut drive: Box[TriggerDrive[G]], at: u64) -> Result[(), store.Error] waits {
     if let Some(armed) = drive.timer {
         if armed.at == at { return Ok(()) }
     }
-    if let Some(take prior) = replace(mut drive.timer, None) { stop_timer(take prior) }
+    if let Some(ArmedTimer(at: _, task_handle: take prior)) = replace(mut drive.timer, None) {
+        let _ = task.cancel_join(take prior)
+    }
     // The clock's wait runs on monotonic time. Sample wall time again after
     // waking so a wall-clock correction cannot start a trigger early.
     let remaining = int.saturating_sub(at, host.wall_ms(drive.clock))
     // Recheck long waits so a wall-clock step forward is visible on an idle head.
     let delay = if remaining < 1000u64 { remaining } else { 1000u64 }
     let deadline = int.saturating_add(host.mono_ns(drive.clock), delay * 1000000u64)
-    let timer = TriggerTimer(clock: drive.clock, deadline: deadline, at: at, to: channel.sender(drive.to))
-    let waiting = task.spawn(drive.tasks, bytes 4096u64, take timer, fire_trigger_timer)
- drive.timer = Some(ArmedTimer(at: at, task_handle: take waiting)); Ok(())
+    let waiting = std.clock.alarm(drive.tasks, drive.clock, deadline, drive.to, TriggerWake(at))
+    drive.timer = Some(ArmedTimer(at: at, task_handle: take waiting))
+    Ok(())
 }
 
 fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () waits {
@@ -3471,22 +3451,22 @@ fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () wait
     let mut owned = take drive
     let clear = match owned.timer { Some(armed) => armed.at == at, None => false }
     if clear {
-        if let Some(take elapsed) = replace(mut owned.timer, None) { stop_timer(take elapsed) }
+        if let Some(ArmedTimer(at: _, task_handle: take elapsed)) = replace(mut owned.timer, None) {
+            let _ = task.cancel_join(take elapsed)
+        }
     }
     hd.trigger_drive = Some(take owned)
 }
 
 fn stop_triggers[G: send](take drive: Box[TriggerDrive[G]]) -> () waits {
     let TriggerDrive(active: take active, timer: take timer, granting: take granting, ..) = box.unbox(take drive)
-    if let Some(take armed) = take timer { stop_timer(take armed) }
-    for take (_, take watcher) in take active {
-        let mut stopping = take watcher
-        task.cancel(mut stopping)
-        let _ = task.join(take stopping)
+    if let Some(ArmedTimer(at: _, task_handle: take armed)) = take timer {
+        let _ = task.cancel_join(take armed)
     }
-    let mut supply = take granting
-    task.cancel(mut supply)
-    let _ = task.join(take supply)
+    for take (_, take watcher) in take active {
+        let _ = task.cancel_join(take watcher)
+    }
+    let _ = task.cancel_join(take granting)
 }
 
 fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[Bytes], store.Error] {
@@ -6418,13 +6398,6 @@ pub fn wire_publish(to: Sender[WireEvent], take frame: Frame) -> Result[(), Send
     channel.try_send(to, wire_event(Published(take frame)))
 }
 
-type WireAlarm: send { clock: Clock, at: u64, to: Sender[WireEvent] }
-
-fn wire_alarm(take a: WireAlarm) -> () waits {
-    host.sleep_until(a.clock, a.at)
-    let _ = channel.send(a.to, wire_event(Ended(1001u16)))
-}
-
 fn wire_close_control(code: u16) -> std.websocket.Control {
     let mut data: Inline[u8, 125] = [0u8; 125]
     data[0u64] = int.narrow(code >> 8u16)
@@ -6532,9 +6505,8 @@ fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C
     let hello_at = std.wsock.hello_deadline(timers)
     let mut hello_alarm: Option[Task[()]] = None
     if let Some(at) = hello_at {
-        let timing = WireAlarm(clock: clock, at: at, to: channel.sender(to))
-        let h = task.spawn(tasks, bytes 4096u64, take timing, wire_hello_alarm)
- hello_alarm = Some(take h)
+        let h = std.clock.alarm(tasks, clock, at, to, wire_event(HelloExpired))
+        hello_alarm = Some(take h)
     }
     let st = WireLoop(apply_input: apply_input, work: take work, c: c, clock: clock, tasks: tasks, managed: take managed, pub_to: take pub_to,
         to: take to, inbox: take inbox, credit: take credit, write: take write,
@@ -6925,9 +6897,8 @@ fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], p
         }
         let deadline = match st.work.deadline { Some(cut) => if cut < own_close { cut } else { own_close }, None => own_close }
         st.close_at = Some(deadline)
-        let close_wait = WireAlarm(clock: st.clock, at: deadline, to: channel.sender(st.to))
-        let h = task.spawn(st.tasks, bytes 4096u64, take close_wait, wire_alarm)
- st.alarm = Some(take h)
+        let h = std.clock.alarm(st.tasks, st.clock, deadline, st.to, wire_event(Ended(1001u16)))
+        st.alarm = Some(take h)
     }
     if wire_ready(st.busy) && !st.write_closed {
         if let Some(take b) = replace(mut st.control, None) {
@@ -7373,12 +7344,8 @@ fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
     let _ = channel.send(to, wire_event(HelloBound(take identity_result)))
 }
 
-type WireDeadline: send { clock: Clock, at: u64, to: Sender[WireEvent], stream: Bytes, p: u64, generation: u64 }
-
-fn wire_deadline(take t: WireDeadline) -> () waits {
-    host.sleep_until(t.clock, t.at)
-    let WireDeadline(clock: _, at: _, to: take to, stream: take stream, p: p, generation: g) = take t
-    let _ = channel.send(to, wire_event(FromRunner(Notice(e: Expired(Tick(stream: take stream, p: p, generation: g))))))
+fn deadline_notice(take stream: Bytes, p: u64, generation: u64) -> WireEvent {
+    wire_event(FromRunner(Notice(e: Expired(Tick(stream: take stream, p, generation)))))
 }
 
 type WireHead: send = LegacyHead(Sender[Req]) | LifecycleHead(Sender[HeadInput])
@@ -7990,10 +7957,11 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
         None
     }
     s.generation += 1u64
-    let to = match s.me { Some(to) => channel.sender(to), None => return Error(1008u16) }
     let until = match work.deadline { Some(cut) => if cut < sent.deadline { cut } else { sent.deadline }, None => sent.deadline }
-    let timing = WireDeadline(clock: s.clock, at: until, to: take to, stream: clone(sent.stream), p: p, generation: s.generation)
-    let h = task.spawn(s.tasks, bytes 4096u64, take timing, wire_deadline)
+    let h = match s.me {
+        Some(to) => std.clock.alarm(s.tasks, s.clock, until, to, deadline_notice(clone(sent.stream), p, s.generation)),
+        None => return Error(1008u16),
+    }
     map.reserve(mut work.timers, 1u64)
     map.reserve(mut s.held, 1u64)
     let owed = WireOwed(generation: s.generation, reply: take reply)
@@ -8052,8 +8020,7 @@ fn wire_start_granted[G: send, H: send](mut s: WireSession[G, H], mut work: Wire
     let generation = s.generation
     let until = match work.deadline { Some(cut) => if cut < deadline { cut } else { deadline }, None => deadline }
     let to = wire_me(s)
-    let timing = WireDeadline(clock: s.clock, at: until, to: channel.sender(to), stream: clone(named), p: p, generation: generation)
-    let timer = task.spawn(s.tasks, bytes 4096u64, take timing, wire_deadline)
+    let timer = std.clock.alarm(s.tasks, s.clock, until, to, deadline_notice(clone(named), p, generation))
     let report = WireGrantReport(tick: Tick(stream: take named, p: p, generation: generation), to: take to, clock: s.clock, deadline: until)
     let launched: Result[Task[Outcome], Refusal] = match map.get(s.registry.slots, entry) {
         Some(Granted(go)) => match go(s.tasks, Direct(take seed), take caller, take argument, Some(WireGrant(take report))) {
@@ -8563,11 +8530,6 @@ fn wire_publisher[G: send, H: send](s: WireSession[G, H]) -> Sender[PubIn] {
     match s.publisher { Some(to) => channel.sender(to), _ => fail("runner: detached wire service") }
 }
 
-
-fn wire_hello_alarm(take a: WireAlarm) -> () waits {
-    host.sleep_until(a.clock, a.at)
-    let _ = channel.send(a.to, wire_event(HelloExpired))
-}
 
 fn wire_finish[G: send, H: send](mut s: WireSession[G, H]) -> Option[PubIn] {
     s.mark = None

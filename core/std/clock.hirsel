@@ -20,3 +20,24 @@ pub fn sleep_ns(c: Clock, ns: u64) waits {
 pub fn deadline_after_ms(at: u64, ms: u64) -> u64 {
     int.saturating_add(at, int.saturating_mul(ms, 1000000u64))
 }
+
+type Alarm[M: send]: send {
+    c: Clock,
+    at: u64,
+    to: Sender[M],
+    m: M
+}
+
+fn fire_alarm[M: send](take job: Alarm[M]) waits {
+    let Alarm(c, at, to: take to, m: take m) = take job
+    host.sleep_until(c, at)
+    let _ = channel.send(to, take m)
+}
+
+/// Sends m once at or after the absolute monotonic deadline at. Waits for room
+/// in the channel and ends cleanly if the receiver is closed. Dropping the task
+/// before at cancels the alarm without sending.
+/// Alloc: a task with a 4096-byte child limit and a copy of the sender handle.
+pub fn alarm[M: send](tasks: Tasks, c: Clock, at: u64, to: Sender[M], take m: M) -> Task[()] {
+    task.spawn(tasks, bytes 4096, Alarm(c, at, to: channel.sender(to), m: take m), fire_alarm)
+}

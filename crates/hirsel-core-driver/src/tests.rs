@@ -47,35 +47,39 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
 }
 
 fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Arc<CheckProduct> {
+    #[derive(serde::Deserialize)]
+    struct StoreManifest {
+        packages: Vec<PackageManifest>,
+    }
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request =
         CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
-    request.inputs.packages.push(PackageManifest {
-        package: package("store"),
-        dependencies: vec![package("core"), package("std")],
-        sources: [
-            ("core/programs/store/store.hirsel", "store"),
-            ("core/programs/store/ingress.hirsel", "ingress"),
-            ("core/programs/store/runner.hirsel", "runner"),
-            (
-                "crates/hirsel-core-driver/src/testdata/runner_launch.hirsel",
-                "runner_launch",
-            ),
-        ]
-        .into_iter()
-        .map(|(file, module)| hirsel_core_resolve::ModuleSource {
-            file: if module == "runner" {
-                runner_override
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| root.join(file))
-            } else {
-                root.join(file)
-            },
-            modules: vec![module.into()],
-            signatures: false,
-        })
-        .collect(),
+    let StoreManifest { mut packages } = serde_json::from_slice(
+        &std::fs::read(root.join("core/programs/store/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    for source in packages.iter_mut().flat_map(|package| &mut package.sources) {
+        source.file = root.join(&source.file);
+    }
+    let store = packages
+        .iter_mut()
+        .find(|p| p.package == package("store"))
+        .unwrap();
+    if let Some(path) = runner_override {
+        store
+            .sources
+            .iter_mut()
+            .find(|source| source.modules == ["runner"])
+            .unwrap()
+            .file = path.to_owned();
+    }
+    store.sources.push(hirsel_core_resolve::ModuleSource {
+        file: root.join("crates/hirsel-core-driver/src/testdata/runner_launch.hirsel"),
+        modules: vec!["runner_launch".into()],
+        signatures: false,
     });
+    request.inputs.packages.extend(packages);
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();

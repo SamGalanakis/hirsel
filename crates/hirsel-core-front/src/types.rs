@@ -116,10 +116,12 @@ pub struct TypeFlags(u8);
 impl TypeFlags {
     const PARAM: u8 = 1;
     const HOLE: u8 = 2;
+    const ERROR: u8 = 4;
     fn of(t: &impl TyRead, kind: &TyKind) -> Self {
         let flags = match kind {
             TyKind::Param(_) | TyKind::Region(Root::Generic(_)) => Self::PARAM,
             TyKind::Hole => Self::HOLE,
+            TyKind::Error => Self::ERROR,
             TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().fold(0, |f, &x| f | t.flags(x).0),
             TyKind::Anchored(x, r) => t.flags(*x).0 | t.flags(*r).0,
             TyKind::View(x) | TyKind::Array(x, _) => t.flags(*x).0,
@@ -764,6 +766,11 @@ pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
 pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
     crate::cost_scope!("query", "has parameter");
     t.flags(ty).0 & TypeFlags::PARAM != 0
+}
+
+/// Whether a part of the type has already been refused or hit a gap.
+pub(crate) fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
+    t.flags(ty).0 & TypeFlags::ERROR != 0
 }
 
 #[cfg(test)]

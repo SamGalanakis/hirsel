@@ -1484,6 +1484,88 @@ fn corpus() {
 }
 
 #[test]
+fn unresolved_signature_types_are_refused_at_their_names() {
+    let source = "fn qualified(generator: rand.Pcg) -> u64 { 0u64 }
+fn bad_parameter(mut generator: Pcg) -> u64 { 0u64 }
+fn bad_result() -> MissingResult { () }
+fn bad_callback(callback: fn(MissingInput) -> u64) {}
+fn direct() -> u64 { let mut generator = rand.new(1, 2); bad_parameter(mut generator) }
+fn result_call() { let _ = bad_result() }
+fn callable_value() { let _ = bad_callback }
+";
+    let files = tempfile::tempdir().unwrap();
+    let file = files.path().join("signatures.hirsel");
+    std::fs::write(&file, source).unwrap();
+    let mut std = crate::std_manifest();
+    std.sources.push(ModuleSource {
+        foreign: false,
+        captured: None,
+        file,
+        modules: vec!["signatures".into()],
+        signatures: false,
+    });
+    let checked = Checked::check(
+        CorpusManifest {
+            core: package("core"),
+            packages: vec![
+                PackageManifest::directory(&core_dir(), package("core"), true).unwrap(),
+                std,
+            ],
+        },
+        files,
+        None,
+    );
+    let product = &checked.product;
+    let mut diagnostics = product.machine_diagnostics().unwrap();
+    diagnostics.sort_by_key(|d| d.primary.span.start);
+    let expected = [
+        ("Pcg", "mut generator: "),
+        ("MissingResult", "fn bad_result() -> "),
+        ("MissingInput", "callback: fn("),
+    ];
+    assert_eq!(
+        diagnostics.len(),
+        expected.len(),
+        "{:?}",
+        product.diagnostics
+    );
+    for (diagnostic, (name, prefix)) in diagnostics.iter().zip(expected) {
+        assert_eq!(diagnostic.rule, "LANG-7");
+        assert_eq!(diagnostic.primary.module, "std@1/signatures");
+        let span = diagnostic.primary.span;
+        let start = source.find(prefix).unwrap() + prefix.len();
+        assert_eq!(span.start as usize, start);
+        assert_eq!(span.end as usize, start + name.len());
+        assert_eq!(diagnostic.message, format!("name `{name}` was not found"));
+    }
+    assert!(product.incomplete.is_empty(), "{:?}", product.incomplete);
+    let path = |name| DefPath::from_full(&format!("std@1/signatures/{name}")).unwrap();
+    assert!(
+        product.definitions[&path("qualified")]
+            .check
+            .function
+            .is_some()
+    );
+    for (caller, name) in [
+        ("direct", "Pcg"),
+        ("result_call", "MissingResult"),
+        ("callable_value", "MissingInput"),
+    ] {
+        let caller = path(caller);
+        assert!(product.definitions[&caller].check.function.is_none());
+        let reached = product.reachable(&caller, 8).unwrap();
+        let [diagnostic] = reached.diagnostics.as_slice() else {
+            panic!(
+                "expected one signature refusal for {caller}: {:?}",
+                reached.diagnostics
+            );
+        };
+        assert_eq!(diagnostic.rule, "LANG-7");
+        assert_eq!(diagnostic.message, format!("name `{name}` was not found"));
+    }
+}
+
+#[test]
 fn foreign_frontend_cases() {
     for name in ["headers", "types"] {
         foreign_case(name);

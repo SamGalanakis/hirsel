@@ -20,7 +20,8 @@ fn ready_tag(i: u64) -> Bytes {
 fn recv_exact(mut r: ReadHalf, mut buf: Bytes, size: u64) -> bool waits {
     list.clear(mut buf)
     while list.len(buf) < size {
-        match host.recv_bounded(mut r, mut buf, size - list.len(buf), Never) {
+        let want = size - list.len(buf)
+        match host.recv_bounded(mut r, mut buf, want, Never) {
             Ok(0) => return false,
             Ok(_) => {},
             Error(_) => return false,
@@ -40,9 +41,18 @@ fn through(mut r: ReadHalf, mut buf: Bytes, read: scoped fn(mut ReadHalf, mut By
     read(mut r, mut buf)
 }
 
+// The network may take part of a send, so this loops until all of `b` is out.
 fn send_all(mut w: WriteHalf, b: Bytes) waits {
-    if result.unwrap(host.send_pair(mut w, b, string.as_bytes(""), Never)) != list.len(b) {
-        fail("short send")
+    let mut sent: u64 = 0
+    let end = list.len(b)
+    while sent < end {
+        match host.send_pair(mut w, list.slice(b, sent, end), string.as_bytes(""), Never) {
+            Ok(0) => fail("send closed"),
+            Ok(n) => {
+                sent += n
+            },
+            Error(_) => fail("send failed"),
+        }
     }
 }
 
@@ -58,7 +68,7 @@ fn serve(take job: Served) -> u64 waits {
     let mut log: Bytes = list.with_capacity(32)
     let mut buf: Bytes = list.with_capacity(8)
     let mut rounds: u64 = 0
-    for i in 0 .. 4 {
+    for i in 0u64 .. 4 {
         if i % 2 == 0 {
             list.append(mut log, ready_tag(i))
         } else {
@@ -95,7 +105,7 @@ fn waits_through_wrappers_and_closures(n: Net, clock: Clock, tasks: Tasks) -> bo
     let mut w = take write
     let mut ack: Bytes = list.with_capacity(1)
     let sends = ["a", "aa", "xb", "bb", "c", "cc", "yd", "dd"]
-    for i in 0 .. 4 {
+    for i in 0u64 .. 4 {
         send_all(mut w, string.as_bytes(sends[2 * i]))
         send_all(mut w, string.as_bytes(sends[2 * i + 1]))
         if !recv_exact(mut r, mut ack, 1) || ack != string.as_bytes("k") {

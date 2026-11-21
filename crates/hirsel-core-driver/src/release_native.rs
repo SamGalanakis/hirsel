@@ -317,9 +317,13 @@ pub(super) fn emit_release_image(
     if contained {
         hirsel_core_ir::step_contexts::specialize_over(&mut joined, entry_function, summaries);
     }
-    // A self-contained program's owned network waits give their task's stack
-    // back where every frame down to them is represented (returnable.rs).
-    if contained && std::env::var_os(hirsel_core_ir::returnable::DISABLE).is_none() {
+    // Owned network waits give their task's stack back where every frame
+    // down to them, from a spawned task's entry, is represented
+    // (returnable.rs). The rule reads only the unit's bodies: the variants are
+    // called only from represented frames and the rewritten spawn entries,
+    // and every other caller, foreign or not, keeps the stackful bodies, so it
+    // holds however the image is linked or launched.
+    if std::env::var_os(hirsel_core_ir::returnable::DISABLE).is_none() {
         let applied = hirsel_core_ir::returnable::apply(&mut joined);
         if std::env::var_os("HIRSEL_RETURNABLE_REPORT").is_some() {
             eprint!("{}", hirsel_core_ir::returnable::report(&joined, &applied));

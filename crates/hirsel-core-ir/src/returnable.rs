@@ -991,6 +991,13 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     .get(&old.pools.values)
                     .unwrap_or_default()
                     .to_vec();
+                // A fresh call starts with a clear word: the callee reads a
+                // nonzero word as its own resume, and the child area may still
+                // hold what an earlier sibling call kept there.
+                b.emit(Inst::Store {
+                    address: child_word,
+                    value: zero,
+                });
                 let c = site_call(&mut b, old_call, site, results.clone(), &HashMap::new());
                 b.cur.push((Inst::Call { call: c }, anchor));
                 for &r in &results {

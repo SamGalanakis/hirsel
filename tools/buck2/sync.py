@@ -608,7 +608,11 @@ def first_party(meta: dict) -> str:
                     out.append("\n" + call("hirsel_test", name=f"{name}-bin-{target['name']}-unittest", deps=own + test_deps,
                                              **test_attrs(f"{name}-bin-{target['name']}-unittest", src), **attrs))
             elif kind == "example":
-                out.append("\n" + call("hirsel_binary", name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=own + test_deps, **attrs))
+                example_lib = own
+                if name == "hirsel-core-rt" and target["name"] == "tape_cost":
+                    example_lib = ["//:hirsel-core-rt-record"]
+                    attrs["features"] = sorted(set(features) | {"record"})
+                out.append("\n" + call("hirsel_binary", name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=example_lib + test_deps, **attrs))
             else:
                 binaries = {
                     t["name"]: f"//:{name}-bin-{t['name']}"

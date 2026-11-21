@@ -8,6 +8,10 @@ rust-version.workspace = true
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[[example]]
+name = "tape_cost"
+required-features = ["record"]
+
 [features]
 # Only a standalone program owns the process allocator. Rust embeddings keep theirs.
 standalone = []

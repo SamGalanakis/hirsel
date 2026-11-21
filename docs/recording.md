@@ -83,6 +83,11 @@ both offered buffers and the absolute deadline, and its delivery how many bytes 
 committed. A final readiness attempt at a deadline can deliver a successful receive,
 including its bytes.
 
+**Name resolution.** Each `RESOLVE` issue holds the Net ordinal, the name, the spare
+capacity and the deadline. Its delivery holds the addresses in the order delivered, or the
+error. The header's grant snapshot records a `Resolve` rule with direction byte 3 and a
+`u16` count of patterns, each a length byte followed by its bytes, as a `Tls` rule's.
+
 **Standard input and environment.** Each `stdin.read` issue holds the spare capacity of
 its buffer and its deadline. Its delivery holds the bytes in their original fragment
 sizes, or `Aborted`, `TimedOut` or the host error. An Env grant is recorded in the grant

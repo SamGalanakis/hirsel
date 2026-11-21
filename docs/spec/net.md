@@ -45,7 +45,8 @@ listener closes it once. No finalizer waits or enables positive linger.
 rule with `r`, dropping empty intersections. Address rules have `dir: NetDirection`,
 `prefix: Ip`, `bits: u8`, `ports: (u16, u16)`, where
 `NetDirection = Connect | Listen`. A `Tls` rule has name patterns, ports and a pinned trust
-instead ([TLS-3](tls.md#tls-3-authority)). In Hirsel, use
+instead ([TLS-3](tls.md#tls-3-authority)), and a `Resolve` rule has name patterns alone
+(NET-11). In Hirsel, use
 `Tls(names: String, ports: (u16, u16), trust: TlsPin)` with `SystemPin` or
 `Sha256(Bytes)`. The latter holds the 32 raw digest bytes. It permits only a client handshake on a socket
 that a `Connect` rule already allowed. An invalid prefix length, nonzero prefix host
@@ -62,7 +63,8 @@ hirsel run app --grant 'Net=Connect 127.0.0.0/8 1-65535;Listen 127.0.0.1/32 8000
 
 The syntax is `--grant 'Net=<dir> <prefix>/<len> <lo>-<hi>[;<rule>]'`, where
 `dir` is `Connect` or `Listen` and the prefix is an IPv4 or IPv6 literal. A `Tls` rule is
-written `Tls <pattern>[,<pattern>] <lo>-<hi> <trust>`. Its trust is `System` or
+written `Tls <pattern>[,<pattern>] <lo>-<hi> <trust>`, and a `Resolve` rule
+`Resolve <pattern>[,<pattern>]`. Its trust is `System` or
 `Roots=sha256:<hex>`. An example:
 `--grant 'Net=Connect 203.0.113.7/32 443-443;Tls api.example.com 443-443 System'`. Bare
 `--grant Net` is refused with the required syntax. Full authority is explicit,
@@ -88,3 +90,43 @@ this process's descriptor, leaving the host's socket and accept queue live.
 
 Graceful finish, prefix I/O, try-first waiting, reset propagation and the scheduler's
 poll registration are specified by NET-1 through NET-10 and implemented after W1a.
+
+### NET-11: Name resolution
+
+`host.resolve(n: Net, name: String, mut out: List[Ip], until: Until) -> Result[u64, NetError] waits`
+is the one way a program turns a DNS name into addresses, and it needs a `Resolve` rule
+of `n` that covers `name`. A query name is itself a message to the resolver and to every
+nameserver it reaches, so resolution is gated by name as a handshake is
+([TLS-3](tls.md#tls-3-authority)), not by address. The rule is
+`Resolve(names: String)` in `Rule`, written `Resolve <pattern>[,<pattern>]` in a grant,
+with TLS-3's pattern syntax and normalisation:
+
+```sh
+hirsel run app --grant 'Net=Resolve api.example.com,*.internal;Connect 10.0.0.0/8 443-443'
+```
+
+`net.narrow` intersects `Resolve` patterns as TLS-3 intersects `Tls` names, and drops an
+empty intersection. A resolved address grants nothing. Connecting to it still needs a
+`Connect` rule, so `Resolve` alone reaches no host but the resolver.
+
+The host provider resolves through the system resolver (`getaddrinfo` with a stream
+socket type, so `/etc/hosts` and the configured nameservers apply), as Go's
+`net.LookupIP` with the cgo resolver and Rust's `ToSocketAddrs` do. It runs the lookup on a
+helper, so the operation waits after issue and is a cancellation point at issue and while
+it waits ([CONC-7](tasks.md#conc-7-cancellation-points)). Cancellation there gives
+`Aborted`, and a passed `until` gives `TimedOut`. A lookup still running when it is aborted
+is discarded. An IP literal `name` is covered by a pattern for that literal, and it
+resolves to itself without a query.
+
+`resolve` appends to `out`, at most its spare capacity, the distinct addresses in the
+resolver's order (RFC 6724 when the host sorts), and returns how many it appended.
+Addresses past the spare capacity are not delivered, so a caller that needs every address
+reserves for them. A name with no address (`EAI_NONAME`, `EAI_NODATA`) is `Ok(0)`. An
+uncovered or malformed name is `Denied` before issue, with no query. A temporary resolver
+failure (`EAI_AGAIN`) is `Unreachable`, and any other failure is `Other(code)`. The
+operation admits nothing.
+
+Its issue passes the replay point with `n`'s ordinal, `name`, the spare capacity and
+`until`, and its delivery with the addresses or the error
+([CAP-8](capabilities.md#cap-8-the-replay-point)). A replay supplies the recorded addresses
+and makes no query ([recording](../recording.md#what-a-recording-holds)).

@@ -1,6 +1,8 @@
 //! The common native boundary for the C thunks emitted by the linker.
 use crate::tasks;
 
+pub(crate) mod helpers;
+
 /// A C thunk takes an initialized array of argument words and returns the
 /// result bits. Its caller retains custody of the words and every loan.
 pub type Thunk = unsafe extern "C" fn(*mut u64) -> u64;
@@ -27,6 +29,36 @@ pub unsafe extern "C" fn hirsel_core_foreign_stack(
 ) -> u64 {
     // SAFETY: the thunk is synchronous and the caller pins its arguments.
     unsafe { tasks::on_host_stack(true, || invoke(thunk, args, result)) }
+}
+
+/// Enter a C call that may wait on this run's helper pool.
+///
+/// # Safety
+/// The context is the running task in a run with helpers. The result word is
+/// writable on success. For the thunk and arguments, see hirsel_core_foreign_stack.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_foreign_wait(
+    context: *mut crate::Context,
+    thunk: Thunk,
+    args: *mut u64,
+    result_tag: u8,
+    result: *mut u64,
+    site: u64,
+) -> u8 {
+    // SAFETY: the caller pins the task and its run configuration through delivery.
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let _commit = tasks::before_provider_entry();
+        if tasks::check_cancel(context, site) != 0 {
+            return 1;
+        }
+        let helpers = &*(*context).foreign_helpers;
+        let outcome = helpers.call(context, thunk, args, result_tag, site);
+        if outcome.status == 0 {
+            result.write(outcome.value);
+        }
+        outcome.status
+    }
 }
 
 /// The caller is already on a host or helper stack.

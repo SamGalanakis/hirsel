@@ -220,9 +220,26 @@ pub unsafe extern "C" fn hirsel_core_test_run_last(config: *const Config, entry:
 /// The generated entry thunk returns only after cleanup on every exit edge.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) -> u8 {
+    // SAFETY: caller pins the configuration and entry through the run.
+    unsafe { run_config(&*config, entry, false) }
+}
+
+/// Run a program whose checked reach requires the foreign helper pool.
+///
+/// # Safety
+/// As hirsel_core_run. The entry may use the pool until its last task ends.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_run_with_foreign_helpers(
+    config: *const Config,
+    entry: Entry,
+) -> u8 {
+    // SAFETY: caller pins the configuration and entry through the run.
+    unsafe { run_config(&*config, entry, true) }
+}
+
+unsafe fn run_config(config: &Config, entry: Entry, foreign_helpers: bool) -> u8 {
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
-        let config = &*config;
         let key = match map_hash_key() {
             Ok(key) => key,
             Err(error) => {
@@ -236,7 +253,7 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
                 return NOT_STARTED;
             }
         };
-        run_with_map_hash_key(config, entry, key)
+        run_with_map_hash_key(config, entry, key, foreign_helpers)
     }
 }
 
@@ -262,7 +279,12 @@ fn map_hash_key() -> std::io::Result<[u8; 16]> {
 }
 
 /// Enter with the key restored from a checked Run header.
-pub(crate) unsafe fn run_with_map_hash_key(config: &Config, entry: Entry, key: [u8; 16]) -> u8 {
+pub(crate) unsafe fn run_with_map_hash_key(
+    config: &Config,
+    entry: Entry,
+    key: [u8; 16],
+    foreign_helpers: bool,
+) -> u8 {
     // SAFETY: the caller pins the same operands as hirsel_core_run.
     unsafe {
         let _pipe_policy = PipePolicy::enter();
@@ -287,6 +309,26 @@ pub(crate) unsafe fn run_with_map_hash_key(config: &Config, entry: Entry, key: [
             }
             return NOT_STARTED;
         }
+        let helpers = if foreign_helpers {
+            match crate::foreign::helpers::Helpers::start() {
+                Ok(helpers) => Some(helpers),
+                Err(error) => {
+                    diagnostic(
+                        config,
+                        format!("not started: foreign helpers: {error}\n").as_bytes(),
+                    );
+                    if let Some(close) = config.close_grants {
+                        close(config.state);
+                    }
+                    return NOT_STARTED;
+                }
+            }
+        } else {
+            None
+        };
+        context.foreign_helpers = helpers
+            .as_ref()
+            .map_or(std::ptr::null(), std::ptr::from_ref);
         #[cfg(feature = "charge-observation")]
         crate::peak::checkpoint("startup");
         let mut result = MainResult::default();
@@ -327,6 +369,7 @@ pub(crate) unsafe fn run_with_map_hash_key(config: &Config, entry: Entry, key: [
             size_of::<MainResult>(),
             config.scheduler,
         );
+        drop(helpers);
         #[cfg(feature = "charge-observation")]
         crate::peak::checkpoint("main");
         crate::fiber::set_stop_fd(previous_fd);

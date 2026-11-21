@@ -108,6 +108,7 @@ pub struct Context {
     pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
     pub(crate) frame_lists: frame_list::FrameLists,
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
+    pub(crate) foreign_helpers: *const foreign::helpers::Helpers,
 }
 
 const _: () =
@@ -144,6 +145,7 @@ impl Context {
             isolates: Vec::new(),
             frame_lists: frame_list::FrameLists::default(),
             spare_isolate_cell: None,
+            foreign_helpers: std::ptr::null(),
         }
     }
 

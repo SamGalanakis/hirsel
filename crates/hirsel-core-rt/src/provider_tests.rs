@@ -1064,6 +1064,102 @@ fn foreign_host_call_canonicalizes_nan_and_restores_floats() {
 }
 
 #[test]
+fn foreign_helper_parks_the_issuer_and_delivers_its_writes() {
+    use crate::{foreign::hirsel_core_foreign_wait, tasks::*};
+    use std::sync::{Condvar, Mutex};
+
+    type Gate = (Mutex<bool>, Condvar);
+
+    unsafe extern "C" fn open(_: *mut crate::Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the input holds the parent-owned gate pointer. Its only
+        // mutation is under the mutex, and the parent joins before dropping it.
+        let gate = unsafe { &**input.cast::<*const Gate>() };
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_one();
+        0
+    }
+
+    unsafe extern "C" fn mark(args: *mut u64) -> u64 {
+        // SAFETY: the call lends three initialized argument words. The
+        // borrowed gate remains pinned and only its mutex-protected bit changes.
+        unsafe {
+            assert_ne!(args.read(), libc::pthread_self());
+            let gate = &*std::ptr::with_exposed_provenance::<Gate>(args.add(1).read() as usize);
+            drop(
+                gate.1
+                    .wait_while(gate.0.lock().unwrap(), |open| !*open)
+                    .unwrap(),
+            );
+            args.add(2).write(0xabab_abab);
+        }
+        4
+    }
+
+    unsafe extern "C" fn main(
+        context: *mut crate::Context,
+        _: *const Config,
+        result: *mut MainResult,
+    ) -> u8 {
+        let gate = Gate::default();
+        let mut gate_pointer = &raw const gate;
+        let mut count = 0;
+        let mut unit = 0u8;
+        let input = ValueLayout {
+            bytes: 8,
+            align: 8,
+            logical: 8,
+            clean: None,
+        };
+        let output = ValueLayout {
+            bytes: 0,
+            align: 1,
+            logical: 0,
+            clean: None,
+        };
+        // SAFETY: both borrowed slots and the gate outlive the helper and the
+        // child. The task exclusively owns its result slot and child handle.
+        unsafe {
+            *result = MainResult::default();
+            let child = hirsel_core_spawn(
+                context,
+                0,
+                0,
+                (&raw mut gate_pointer).cast(),
+                open,
+                TaskLayout {
+                    input,
+                    result: output,
+                },
+                1,
+            );
+            assert!(!child.task.is_null());
+            let mut words = [
+                libc::pthread_self(),
+                gate_pointer.expose_provenance() as u64,
+                0,
+            ];
+            assert_eq!(
+                hirsel_core_foreign_wait(context, mark, words.as_mut_ptr(), 0, &mut count, 2),
+                0
+            );
+            assert_eq!((count, words[2]), (4, 0xabab_abab));
+            let joined = hirsel_core_join(context, child.task, &mut unit, 3);
+            assert_eq!((joined.kind, joined.status), (0, 0));
+        }
+        0
+    }
+
+    let mut stderr = Vec::new();
+    let config = config(std::ptr::null(), 0, &mut stderr);
+    // SAFETY: config and stderr stay live through the run and helper shutdown.
+    assert_eq!(
+        unsafe { hirsel_core_run_with_foreign_helpers(&config, main) },
+        0
+    );
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_site() {
     unsafe extern "C" fn main(
         context: *mut crate::Context,

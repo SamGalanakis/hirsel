@@ -1899,6 +1899,9 @@ impl Scheduler {
                     // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
                     // Cancellation wins even if the callback returns Ready.
                     if wake == Wake::Cancel {
+                        if (*request).operation == crate::foreign::helpers::WAIT_OP {
+                            (p.abort)(p.state, request, token, ABORT_CANCEL);
+                        }
                         #[cfg(feature = "record")]
                         if let Some(group) = (*task).group {
                             group.cancel_wait(request);
@@ -2523,10 +2526,13 @@ unsafe fn parked(
             match step.kind {
                 STEP_DONE => break Some(step.outcome),
                 STEP_PENDING => {
-                    // An issued sync is not cancellable: its task waits for the
-                    // real result, and a cancel takes effect at the next
-                    // cancellation point.
-                    if matches!((*request).operation, SYNC | SYNC_DIR) {
+                    // Sync disables cancellation after issue. A submitted
+                    // foreign call decides the race with cancellation when
+                    // its helper takes custody of the pinned frame.
+                    if matches!(
+                        (*request).operation,
+                        SYNC | SYNC_DIR | crate::foreign::helpers::WAIT_OP
+                    ) {
                         op.observes_cancel = false;
                     }
                     op.state = OperationState::Issued {
@@ -3510,6 +3516,20 @@ pub(crate) unsafe fn cancel_pending(context: *mut Context) -> bool {
         unsafe { cancel_flag(task) }
     };
     cancel_takes_effect(current, requested)
+}
+
+/// # Safety
+/// The caller is the current task and pins its cancellation flag through
+/// delivery. Other threads may only load the flag atomically.
+pub(crate) unsafe fn foreign_cancel_flag(context: *const Context) -> *const AtomicBool {
+    // SAFETY: the current task pins this context and its request flag.
+    unsafe {
+        if (*context).cancel_shield != 0 || (*context).finalizing != 0 {
+            ptr::null()
+        } else {
+            cancel_flag(CURRENT.get())
+        }
+    }
 }
 
 /// # Safety

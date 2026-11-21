@@ -235,8 +235,8 @@ resource type Lease: codec { n: u64 }                 // refused: OWN-4, a resou
 fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, integer outside core
 ```
 ```hirsel unbuilt
-fn equals[T: inert + key](take x: T) -> Result[own fn(T) -> bool, (Capacity, T)] { fn(y: T) -> bool { y == x } }
-fn same[T: codec + key](take x: T) -> Result[own fn(T) -> bool, (Capacity, T)] { fn(y: T) -> bool { y == x } }
+fn equals[T: inert + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
+fn same[T: codec + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 ```
 ```hirsel unbuilt
 type Tagged: inert { n: u64 }                             // refused: OWN-4, inert is computed
@@ -306,9 +306,9 @@ refused here, at the `mut p` or at the move.
 
 ```hirsel
 fn len(xs: List[u64]) -> u64 { list.len(xs) }
-fn add(mut xs: List[u64], x: u64) -> Result[(), (Capacity, u64)] { list.push(mut xs, x) }
+fn add(mut xs: List[u64], x: u64) { list.push(mut xs, x) }
 fn eat(take xs: List[u64]) {}
-fn use_all(take xs: List[u64]) { let n = len(xs); let _ = add(mut xs, n); eat(take xs) }
+fn use_all(take xs: List[u64]) { let n = len(xs); add(mut xs, n); eat(take xs) }
 ```
 ```hirsel
 fn eat(take xs: List[u64]) {}
@@ -384,10 +384,10 @@ fn f(mut m: Inbox) {
 ```hirsel
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
-fn f() -> i64 { let b = result.unwrap(box.new(Lit(6i64))); ev(b) }
+fn f() -> i64 { let b = box.new(Lit(6i64)); ev(b) }
 fn g(b: Box[Option[u64]]) -> u64 { match b { Some(x) => x, None => 0 } }   // Some reads the payload
 fn h(b: Box[u64]) -> u64 { match b { x => x } }                            // x is the Box, read as u64
-fn grow(mut b: Box[List[u64]]) -> Result[(), (Capacity, u64)] { list.push(mut b, 1) }
+fn grow(mut b: Box[List[u64]]) { list.push(mut b, 1) }
 fn deep(b: Box[Box[N]]) -> i64 { ev(b) }                    // reads through both holders
 fn mixed(b: Box[Rc[N]]) -> i64 { match b { Lit(x) => x } }  // Lit reads the N
 ```
@@ -549,7 +549,7 @@ Compound assignment (`+=`) is plain-only: it resolves `q` once, reads its old va
 evaluates the right side, computes, and installs.
 
 ```hirsel
-fn f(mut s: String) -> Result[(), Capacity] { s = string.from("new")?; Ok(()) }  // old s dropped at install
+fn f(mut s: String) { s = string.from("new") }  // old s dropped at install
 ```
 ```hirsel
 fn f(mut xs: List[u64]) { xs[0] = { xs = list.new(); 7 } }  // refused: OWN-12, xs is reserved
@@ -799,14 +799,13 @@ fn show(mut xs: List[String]) {
 fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }  // refused: OWN-20
 ```
 ```hirsel
-fn grow(mut s: String) -> Result[View[String], Capacity] in s {
-  string.push(mut s, "x")?
-  Ok(string.slice(s, 0, 1))
+fn grow(mut s: String) -> View[String] in s {
+  string.push(mut s, "x")
+  string.slice(s, 0, 1)
 }
-fn use_it(mut s: String) -> Result[u64, Capacity] {
-  let v = grow(mut s)?
-  let n = string.byte_len(v) + string.byte_len(s)     // reading s while v lives is accepted
-  Ok(n)
+fn use_it(mut s: String) -> u64 {
+  let v = grow(mut s)
+  string.byte_len(v) + string.byte_len(s)             // reading s while v lives is accepted
 }
 ```
 ```hirsel
@@ -817,11 +816,11 @@ fn last(mut xs: List[String]) -> Option[View[String]] in xs {
 }
 ```
 ```hirsel
-fn grow(mut s: String) -> Result[View[String], Capacity] in s { Ok(string.slice(s, 0, 0)) }
-fn twice(mut s: String) -> Result[u64, Capacity] {
-  let a = grow(mut s)?
-  let b = grow(mut s)?                                // refused: OWN-10, a freezes s
-  Ok(string.byte_len(a) + string.byte_len(b))
+fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
+fn twice(mut s: String) -> u64 {
+  let a = grow(mut s)
+  let b = grow(mut s)                                 // refused: OWN-10, a freezes s
+  string.byte_len(a) + string.byte_len(b)
 }
 ```
 
@@ -1002,15 +1001,16 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T1.1 | `T(a: take a, b: e)` | fields evaluated left to right into temporaries; value L, stored inline; nothing admitted | `e` fails | earlier temporaries dropped in reverse by statement cleanup; prop |
-| T1.2 | a resource literal, an owning closure | as T1.1, then `chg` (commit) | `e` fails; `Capacity` at `chg` | `e`: as T1.1. `Capacity`: nothing admitted, cleaned or run. A resource literal's error is `(Capacity, F)`, owning `F`: its one field, or the tuple of all its fields in declaration order; with no fields, bare `Capacity`. An owning closure's is `(Capacity, F)`, `F` its one capture or the tuple of its captures in environment order |
-| T1.3 | `box.new(take x)`, `rc.new(take x)` | as T1.2, then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `Capacity` | the error owns `x` |
-| T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
-| T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `Capacity` at block k | own blocks copied so far dropped and shares released in reverse, each `ref`; region bytes stay charged until close; `x` untouched |
-| T1.6 | `span.push(mut b, x)` | value moved into the builder | `Capacity` | the error owns the value; the builder unchanged; region bytes stay charged |
+| T1.2 | a resource literal | as T1.1, then `chg` (commit) | `e` fails; `chg` refused | `e`: as T1.1. Refused: nothing admitted, cleaned or run; the value `Error((c, F))` owns `F`: its one field, or the tuple of all its fields in declaration order; with no fields, `Error(c)` |
+| T1.2a | an owning closure | as T1.1, then `chg` (commit), then captures moved into the environment | `e` fails; `chg` refused | `e`: as T1.1. Refused: failure `Capacity` before any capture moves; the captures stay in their slots for the cleanup; prop |
+| T1.3 | `box.new(take x)`, `rc.new(take x)` | `chg` (commit), then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `chg` refused: failure `Capacity` | `x` a statement temporary, dropped by the cleanup; prop |
+| T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | as T1.3, recorded | as T1.3 |
+| T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `chg` refused at block k: failure `Capacity` | own blocks copied so far dropped and shares released in reverse, each `ref`, before the failure is raised; region bytes stay charged until close; `x` untouched; prop |
+| T1.6 | `span.push(mut b, x)` | value moved into the builder | `chg` refused: failure `Capacity` | the value a statement temporary, dropped by the cleanup; the builder unchanged; region bytes stay charged; prop |
 | T1.7 | `finish(take b)` | region value L | cannot fail | |
-| T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Overflow` or `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
+| T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Error(Overflow())` or failure `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
 | T1.9 | `finish_trim(take b)` | region value L; `ref(round8(n) − round8(used))` at the allocation's record | cannot fail | |
-| T1.10 | `seq.index_in(r, s)` | `chg` (commit), then the table | `Capacity` | nothing allocated; the source unchanged |
+| T1.10 | `seq.index_in(r, s)` | `chg` (commit), then the table | failure `Capacity` | nothing allocated; the source unchanged; prop |
 
 **T2 Bindings and views**
 
@@ -1050,11 +1050,11 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T5.1 | `region r { .. }` enter | `r` open | cannot fail | |
-| T5.2 | region allocation of n bytes | `chg(n)` | `Capacity` before any write | nothing allocated; earlier bytes stay charged |
+| T5.2 | region allocation of n bytes | `chg(n)` | failure `Capacity` before any write | nothing allocated; earlier bytes stay charged; prop |
 | T5.3 | region close, any exit edge | views end; owners drop; all bytes `ref` | cannot fail | |
-| T5.4 | `bound bytes n { .. }` enter | `chg(n)` to the current limit; a new limit of n is current | `Capacity`: the body does not run | `Error(c)` |
+| T5.4 | `bound bytes n { .. }` enter | `chg(n)` to the current limit; a new limit of n is current | `chg` refused: the body does not run | the value `Error(c)`; nothing moved |
 | T5.5 | bound exit, any edge | views end; owners drop; the unused part `ref`; surviving blocks handed to the parent ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)) | cannot fail | |
-| T5.6 | admission of n | used + n ≤ size: used += n | `Capacity` | per the operation's row |
+| T5.6 | admission of n | used + n ≤ size: used += n | refused, with `Capacity(requested: n, available: size − used)`; an event ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)) | per the operation's row: the failure `Capacity`, or the value `Error` of T1.2, T5.4, T7.1a and the `try_` operations |
 | T5.7 | refund of n | used −= n at the block's limit | cannot fail | |
 | T5.8 | `bound steps n { .. }` enter | n reserved from the current step bound, if any; a new step bound of n is current ([MEM-30](budgets.md#mem-30-step-bounds)) | n exceeds what is left: the body does not run | `Error(OutOfTime)`; nothing moved |
 | T5.9 | a step | one step of the current step bound used | past the bound: failure `OutOfTime` at the step | per FAIL-7 |
@@ -1073,7 +1073,8 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
-| T7.1 | `task.spawn(.., take x, f)` | `chg` (commit); the child owns `x` | `Capacity` | the error owns `x` |
+| T7.1 | `task.spawn(.., take x, f)` | `chg` (commit); the child owns `x` | `chg` refused: failure `Capacity` | `x` a statement temporary, dropped by the cleanup; prop |
+| T7.1a | `task.try_spawn(.., take x, f)` | as T7.1 | `chg` refused | the value `Error((c, x))` owns `x` |
 | T7.2 | `send(tx, take x)` | recorded publication (commit); the queue owns `x` | `Closed` | the error owns `x` |
 | T7.3 | cancelled before publication | | `Cancelled` | the sender's cleanup drops `x` |
 | T7.4 | `receive(rx)` | the receiver owns the item | `Closed` | |

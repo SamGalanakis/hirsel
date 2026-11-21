@@ -48,7 +48,7 @@ fn load(d: Dir, p: String, f: fn(Dir, String) -> Result[u64, IoError] waits) -> 
 }
 ```
 ```hirsel
-fn opener(d: Dir) -> Result[own fn(String) -> Result[HostFile, IoError] waits, (Capacity, Dir)] {
+fn opener(d: Dir) -> own fn(String) -> Result[HostFile, IoError] waits {
   fn(p: String) -> Result[HostFile, IoError] waits { host.open(d, p, Read) }   // refused: LANG-14, captures Dir
 }
 ```
@@ -131,10 +131,10 @@ Random bytes land in capacity the caller already holds, so a draw admits nothing
 pass the replay point like every provider result (CAP-8):
 
 ```hirsel
-fn store_id(r: Random) -> Result[Bytes, Capacity] {
-  let mut b: Bytes = list.with_capacity(16)?
+fn store_id(r: Random) -> Bytes {
+  let mut b: Bytes = list.with_capacity(16)
   host.random(r, mut b)
-  Ok(b)
+  b
 }
 ```
 

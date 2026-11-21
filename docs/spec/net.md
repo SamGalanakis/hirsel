@@ -51,8 +51,8 @@ instead ([TLS-3](tls.md#tls-3-authority)), and a `Resolve` rule has name pattern
 `Sha256(Bytes)`. The latter holds the 32 raw digest bytes. It permits only a client handshake on a socket
 that a `Connect` rule already allowed. An invalid prefix length, nonzero prefix host
 bits, reversed ports or IPv4-mapped IPv6 prefix returns `Invalid` without changing
-anything. Rule storage is admitted, so `RuleError` also includes
-`Capacity(Capacity)`. The immutable result storage remains charged to its payer
+anything; `RuleError` is `Invalid()`. Rule storage is admitted, and a refused admission
+raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)). The immutable result storage remains charged to its payer
 until the run ends; plain copies of `Net` add no charge or refund.
 
 A run grants Net with an explicit rule list:

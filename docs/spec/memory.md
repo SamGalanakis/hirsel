@@ -21,8 +21,8 @@ spare existing code. In five lines:
 5. **Speed is the engine's, not the language's** ([MEM-32](#mem-32-engine-obligations)): a
    per-task size-class allocator, a demand-sized first region chunk, per-type pools inside a
    region, and no teardown walk for plain data. Charges stay logical and deterministic
-   ([MEM-24](budgets.md#mem-24-logical-charges)); `Capacity` fails at the same point on every
-   engine.
+   ([MEM-24](budgets.md#mem-24-logical-charges)); an admission is refused at the same point
+   on every engine.
 
 Rejected, each for a reason that still holds:
 
@@ -63,8 +63,8 @@ reads only that region, its one anchor ([OWN-11](ownership.md#own-11-call-argume
 no callee stores another region in its caller's slot.
 
 ```hirsel
-fn width(s: String) -> Result[u64, Capacity] {
-  region r { let t = text.copy_in(r, s)?; Ok(text.len(t)) }
+fn width(s: String) -> u64 {
+  region r { let t = text.copy_in(r, s); text.len(t) }
 }
 ```
 ```hirsel
@@ -107,8 +107,8 @@ Two builder types exist, each naming its element or result type and its region.
 `span.builder(r)` makes a `SpanBuilder[T, in r]`, which builds a `FixedSpan[T] in r` (MEM-12)
 of a plain `T`; `span.with_capacity(r, n)` makes one with room for `n` elements, admitted at
 once ([core](core.md)):
-`span.push(mut b, x: T)` appends one element and may fail with `Capacity`, returning its
-argument and leaving the builder unchanged ([T1.6](ownership.md#own-26-the-transition-table));
+`span.push(mut b, x: T)` appends one element; a refused growth raises `Capacity`, leaving the
+builder unchanged ([T1.6](ownership.md#own-26-the-transition-table));
 `span.finish(take b)` publishes it. A `Builder[T, in r]`, made by `build_in`
 (MEM-4), holds one finished compact blob; `finish(take b)` publishes it as a `T in r`. Both
 builders are own, affine and not `send`, expose no view of their contents, and cannot leave
@@ -119,18 +119,18 @@ abandons stay charged until the region closes ([FAIL-6](failure.md#fail-6-region
 empty span, which allocates nothing. Dropping an unfinished builder publishes nothing.
 
 ```hirsel
-fn digits(n: u64, r: Region) -> Result[FixedSpan[u8] in r, (Capacity, u8)] {
+fn digits(n: u64, r: Region) -> FixedSpan[u8] in r {
   let mut b: SpanBuilder[u8, in r] = span.builder(r)
   let mut k = n
-  loop { span.push(mut b, int.narrow(k % 10))?; k = k / 10; if k == 0 { break } }
-  Ok(span.finish(take b))
+  loop { span.push(mut b, int.narrow(k % 10)); k = k / 10; if k == 0 { break } }
+  span.finish(take b)
 }
 ```
 ```hirsel
-fn names(r: Region, s: String) -> Result[FixedSpan[String] in r, (Capacity, String)] {
+fn names(r: Region, s: String) -> FixedSpan[String] in r {
   let mut b = span.builder(r)                                // refused: MEM-3, String is not plain
-  span.push(mut b, s)?
-  Ok(span.finish(take b))
+  span.push(mut b, s)
+  span.finish(take b)
 }
 ```
 
@@ -140,11 +140,12 @@ fn names(r: Region, s: String) -> Result[FixedSpan[String] in r, (Capacity, Stri
 fn build_in[T](r: Region, bytes n: u64,
                w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError])
     -> Result[Builder[T, in r], BuildError]
-type BuildError = Capacity(Capacity) | Overflow
+type BuildError = Overflow()
 ```
 
 `build_in` requires a compact `T` and fixes the destination's `W` to `T`'s. It admits one
-allocation of `n` bytes in `r`, then calls the writer `w` once with a new destination
+allocation of `n` bytes in `r`, whose refusal raises `Capacity`
+([MEM-21](budgets.md#mem-21-admission)) before `w` runs, then calls the writer `w` once with a new destination
 `d`. Every destination has an identity, a number no other destination of
 the run has. `dest.put(mut d, L)`, where `L` is a construction literal of a compact type
 `U`, is a built-in form of type `Result[Child[U], BuildError]`: it writes `L` completely at
@@ -158,7 +159,7 @@ depth-first field order, then the size and width, and only then writes. A child 
 another destination's identity, and a writer that returns such a root, fail with `Bounds`;
 this check is one comparison per link and comes before the size check. A put that does not
 fit in what is left of `n`, or one in which a count, a link distance or the used prefix
-would exceed `2^b − 1` for that `W` (MEM-9), writes nothing, returns `Error(Overflow)` and
+would exceed `2^b − 1` for that `W` (MEM-9), writes nothing, returns `Error(Overflow())` and
 leaves the destination usable for a smaller put. The `Child[T]` that `w` returns is the root: the builder holds the
 destination's whole used prefix as the blob, and the reference that `finish` publishes
 records the root's offset in it. A published compact value is copied into another region by
@@ -192,7 +193,7 @@ says so and a generic body uses only its bounds
 ([OWN-23](ownership.md#own-23-generic-bodies)), while a sequence of a parameter is a root,
 `SeqSpan[T]` when `T: streamable`. So a generic function cannot build or stream a document
 whose root is its own parameter; its caller calls `build_in` or `build_stream_in` at its
-own type. It returns `Error(Overflow)` when `n` exceeds the
+own type. It returns `Error(Overflow())` when `n` exceeds the
 blob cap of that `W`, then admits `n` bytes as `build_in` does, and only then calls `w`
 once. A `Writer[U, in r]` is the right to
 write one complete `U` at the allocation's next byte. It is scoped and moves (OWN-3), has
@@ -222,7 +223,7 @@ constant time, return views anchored to `r` of complete elements; nothing views 
 value. Each header, scalar or field is checked before its bytes are written, and an
 `IndexedSpan`'s whole table before its first entry is stored: a write that does not fit in
 `n`, or that would make a count, byte length, offset or the used prefix exceed `2^b − 1`,
-returns `Error(Overflow)` and writes none of the bytes it guards, while bytes written before
+returns `Error(Overflow())` and writes none of the bytes it guards, while bytes written before
 it stay. A `Child` that a callback returns is checked when it is received, before the
 element counts or its parent completes: its identity and offset must be those of the frame
 handed out, or the operation fails with `Bounds`. This guards against a program mixing
@@ -328,12 +329,11 @@ type Hidden { text: Text }                                   // refused: MEM-6, 
 ```
 ```hirsel
 type Token[in src] { text: Text in src, line: u32 }
-fn tok(t: String) -> Result[(), Capacity] {
+fn tok(t: String) {
   region outer {
     let mut k: Option[Token[in outer]] = None
-    region inner { let x = text.copy_in(inner, t)?; k = Some(Token(text: x, line: 1)) }
+    region inner { let x = text.copy_in(inner, t); k = Some(Token(text: x, line: 1)) }
                                                // refused: MEM-6, inner does not outlive outer
-    Ok(())
   }
 }
 ```
@@ -346,10 +346,10 @@ or a spawn. A function's result may mention only its region parameters. These ar
 on types; nothing is traversed.
 
 ```hirsel
-fn width(s: String) -> Result[u64, Capacity] { region r { let t = text.copy_in(r, s)?; Ok(text.len(t)) } }
+fn width(s: String) -> u64 { region r { let t = text.copy_in(r, s); text.len(t) } }
 ```
 ```hirsel
-fn leak(s: String) -> Result[Text, Capacity] {
+fn leak(s: String) -> Text {
   region r { text.copy_in(r, s) }                           // refused: MEM-7
 }
 ```
@@ -531,7 +531,7 @@ only the instructions and the bytes copied differ.
 
 ### MEM-14: Rc
 
-`rc.new(take x) -> Result[Rc[T], (Capacity, T)]` requires `T: shareable` and moves the
+`rc.new(take x) -> Rc[T]` requires `T: shareable` and moves the
 complete owner `x` into a new counted node with count 1
 ([T1.3](ownership.md#own-26-the-transition-table)). An `Rc[T]`'s payload is immutable except through `rc.with_unique`, and an `Rc` is task-local:
 it is never `send`. A counted value is read where a view of its payload is expected.
@@ -541,7 +541,7 @@ owned.
 
 ```hirsel
 type Node: shareable { label: String, next: Option[Rc[Node]] }
-fn cons(take l: String, take tail: Option[Rc[Node]]) -> Result[Rc[Node], (Capacity, Node)] {
+fn cons(take l: String, take tail: Option[Rc[Node]]) -> Rc[Node] {
   rc.new(Node(label: take l, next: take tail))
 }
 ```
@@ -555,7 +555,7 @@ test and no CONC event because `Rc` is not `send`.
 
 ### MEM-15: Arc
 
-`arc.new(take x) -> Result[Arc[T], (Capacity, T)]` requires `T: shareable + send`. An
+`arc.new(take x) -> Arc[T]` requires `T: shareable + send`. An
 `Arc[T]`'s payload is immutable except through `arc.with_unique`, and an `Arc` is `send`.
 Its creation, every share, every release, every `try_unwrap` and every `with_unique` test
 is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)), so the
@@ -611,13 +611,13 @@ reaches the payload (CONC-10's rule), and every earlier read by another task is 
 before the release that dropped the count to 1.
 
 Copy-on-write is std, not core: `arc.update[T: shareable + send, R](mut h: Arc[T], f:
-scoped fn(mut T) -> R) -> Result[R, Capacity]` runs `f` through `with_unique`, and when
+scoped fn(mut T) -> R) -> R` runs `f` through `with_unique`, and when
 `h` is shared first replaces `h` with a new `Arc` holding `clone(h)`
 ([MEM-17](#mem-17-clone)), releasing the old share. `T: shareable` is the whole clone bound:
 a shareable type holds no resource, scoped value or opaque owner
-([OWN-4](ownership.md#own-4-bounds)), so `clone` accepts every payload. On `Capacity`, from
-the copy or the new node, `h` is unchanged and `f` has not run. `f` runs exactly once on
-`Ok`.
+([OWN-4](ownership.md#own-4-bounds)), so `clone` accepts every payload. When the copy or
+the new node is refused, `h` is unchanged and `f` has not run. Otherwise `f` runs exactly
+once.
 
 ```hirsel
 type Hits: shareable + send { n: u64 }
@@ -651,8 +651,8 @@ unchanged.
 
 ```hirsel
 type Node: shareable { label: String }
-fn own_copy(take h: Rc[Node]) -> Result[Node, Capacity] {
-  match rc.try_unwrap(take h) { Ok(take n) => Ok(take n), Error(take g) => clone(g) }
+fn own_copy(take h: Rc[Node]) -> Node {
+  match rc.try_unwrap(take h) { Ok(take n) => take n, Error(take g) => clone(g) }
 }
 ```
 
@@ -663,14 +663,14 @@ their result `U` and what is copied: first `x`'s own type, if it is `U`; otherwi
 payloads through `Box`, `Rc` and `Arc`, outermost first, the first that is `U`. No match is
 refused; a conversion between two types is an explicit operation, such as `text.copy_in`,
 never a clone. With no expected type `U` is open, and the
-call is refused ([LANG-12](language.md#lang-12-generics)): `let k = clone(key)?` is,
-`let k: Bytes = clone(key)?` is not. `clone(x) -> Result[U, Capacity]` makes a
+call is refused ([LANG-12](language.md#lang-12-generics)): `let k = clone(key)` is,
+`let k: Bytes = clone(key)` is not. `clone(x) -> U` makes a
 plain, own or counted `U`: it deep-copies the own parts of the selected value into new
 blocks charged to the current limit and shares its counted edges, a counted root selected
 as `U` included, and keeps the regions of its region fields. A region reference (`S in r`),
 at the root or as a part, is copied as the reference: the copy shares its block, and
-nothing is allocated for it. `clone_in(r, x) -> Result[U
-in r, Capacity]` copies a region value `x` into `r`. A compact value or sequence is never
+nothing is allocated for it. `clone_in(r, x) -> U
+in r` copies a region value `x` into `r`. A compact value or sequence is never
 re-encoded at `U`'s own `W`; which bytes are copied follows its type, with no check at run
 time. A value of a streamable type (MEM-12) is copied as exactly its own bytes at its `W`,
 as the root of a new blob, admitting its length rounded up to 8. Any other compact value,
@@ -688,24 +688,24 @@ form; plain callables and capabilities copy as plain values. A core type may ins
 **clone body**, a core item `clone[P..](x: T[P..]) { .. }` in any core module and refused
 anywhere else: one per type, taking one view of the type, generic in exactly the type's
 parameters with no stronger bounds, and writing no result type; it makes the copy that
-`clone` returns, `Result[T[P..], Capacity]`. It is checked assuming its parameters hold no
+`clone` returns, `T[P..]`. It is checked assuming its parameters hold no
 resource, scoped value or opaque owner, which is sound because a clone reaches it only
 after this rule's check has passed at the form. Failure is
 [T1.5](ownership.md#own-26-the-transition-table).
 
 ```hirsel
-fn keep(r: Region, t: Text) -> Result[Text in r, Capacity] { clone_in(r, t) }
+fn keep(r: Region, t: Text) -> Text in r { clone_in(r, t) }
 ```
 ```hirsel
-fn freeze(r: Region, s: String) -> Result[Text in r, Capacity] { clone_in(r, s) }
+fn freeze(r: Region, s: String) -> Text in r { clone_in(r, s) }
                                                             // refused: MEM-17, String is not Text
 ```
 ```hirsel
-fn dup(r: Region, b: SpanBuilder[u8, in r]) -> Result[SpanBuilder[u8, in r], Capacity] { clone(b) }
+fn dup(r: Region, b: SpanBuilder[u8, in r]) -> SpanBuilder[u8, in r] { clone(b) }
                                                             // refused: MEM-17, an opaque owner
 ```
 ```hirsel
-fn size(key: Bytes) -> Result[u64, Capacity] { let k = clone(key)?; Ok(list.len(k)) }
+fn size(key: Bytes) -> u64 { let k = clone(key); list.len(k) }
                                                             // refused: LANG-12, U is open
 ```
 
@@ -750,13 +750,13 @@ A `Log[E]` is an own, task-local, opaque handle of 8 bytes to a separately admit
 `ordered`. Its entries are state that no view exposes
 ([OWN-8](ownership.md#own-8-views)): no operation reads, counts, clears or iterates them.
 
-- `log.new() -> Result[Log[E], Capacity]` admits the node.
-- `log.append(l: Log[E], take e: E) -> Result[(), (Capacity, E)]` takes a view of the log.
+- `log.new() -> Log[E]` admits the node.
+- `log.append(l: Log[E], take e: E)` takes a view of the log.
   It admits the growth of the entries' storage, as `list.push` grows a `List[E]`
-  ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; on `Capacity` it
-  returns `e` and leaves the log unchanged. An append writes only the node and the entries'
+  ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; a refused growth
+  raises `Capacity`, has not taken `e` and leaves the log unchanged. An append writes only the node and the entries'
   storage, never the handle's 8 bytes, so no byte a view of the log exposes changes.
-- A successful append stays: a later `Error` or failure undoes nothing
+- An append stays: a later `Error` or failure undoes nothing
   ([FAIL-16](failure.md#fail-16-isolation)).
 - `log.finish(take l: Log[E]) -> List[E]` returns the entries in append order, moving their
   storage into the `List` without admitting, and frees and refunds the node. Dropping a
@@ -771,9 +771,9 @@ captures ([LANG-14](language.md#lang-14-captures)). Any other `Log[T]` is refuse
 
 ```hirsel
 type Row { name: String }
-fn read(m: Map[u64, Row], seen: Log[u64], k: u64) -> Result[Option[View[Row]], (Capacity, u64)] in m {
-  log.append(seen, k)?
-  Ok(map.get(m, k))
+fn read(m: Map[u64, Row], seen: Log[u64], k: u64) -> Option[View[Row]] in m {
+  log.append(seen, k)
+  map.get(m, k)
 }
 ```
 ```hirsel
@@ -783,7 +783,7 @@ fn names(l: Log[View[String]]) {}                 // refused: MEM-29, at View[St
 fn seen(take l: Log[u64]) -> List[u64] {
   let v = view l
   let xs = log.finish(take l)                     // refused: OWN-10, l is frozen
-  let _ = log.append(v, 1)
+  log.append(v, 1)
   xs
 }
 ```
@@ -796,7 +796,7 @@ Charged bytes are semantic and identical on every engine, including the referenc
 ([MEM-24](budgets.md#mem-24-logical-charges)). The physical layout and work count obligations
 below bind native engines only. Everything [SEM-8](semantics.md#sem-8-determinism) makes
 observable agrees across engines, refunds as admissions see them, refusal points, finalizer
-order and output included. `Capacity` fails at the same operation on every engine. Each physical
+order and output included. An admission is refused at the same operation on every engine. Each physical
 obligation is checked by counting the native engine's work, never by a program:
 
 - **A size-class allocator per task.** Own blocks (`Box` nodes, collection storage, counted

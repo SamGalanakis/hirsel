@@ -167,9 +167,9 @@ this encoding and nothing else, followed by the UTF-8 text `D S`:
   keyword, an identifier, a number, a definition identity or a root name `^i` or `#i`, and
   no list has a trailing comma.
 
-So `fn double(b: Bytes) -> Result[Bytes, Capacity]` in module `main` of package `app`
+So `fn double(b: Bytes) -> Bytes` in module `main` of package `app`
 version 1 has the identity bytes `0x01` followed by
-`app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]`.
+`app@1/main/double(core@1/core/List[u8])->core@1/core/List[u8]`.
 And `fn edges[in b, in a](s: Region, r: Region, t: Text in a, u: Text in b) -> u64 where
 a: r, r: s` there, or the same header with `[in a, in b]`, has `0x01` followed by
 `app@1/main/edges(core@1/core/Region,core@1/core/Region,core@1/core/Text in ^0,core@1/core/Text in ^1)->u64 where ^0:#0,^0:#1,#1:#0`.
@@ -215,11 +215,11 @@ under `hirsel.code-revision.v2`. Every revision value, and so every release dige
 it do not. No migration is provided before 1.0.
 
 ```hirsel
-type Handler = fn(Bytes) -> Result[Bytes, Capacity]
+type Handler = fn(Bytes) -> Bytes
 type Entry { code: StaticFn[Handler] }
-fn double(b: Bytes) -> Result[Bytes, Capacity] { let mut out: Bytes = list.new(); list.append(mut out, b)?; list.append(mut out, b)?; Ok(out) }
+fn double(b: Bytes) -> Bytes { let mut out: Bytes = list.new(); list.append(mut out, b); list.append(mut out, b); out }
 fn register() -> Entry { Entry(code: code.describe(double)) }
-fn serve(reg: List[Entry], wire: Bytes, arg: Bytes) -> Option[Result[Bytes, Capacity]] {
+fn serve(reg: List[Entry], wire: Bytes, arg: Bytes) -> Option[Bytes] {
   for e in reg { if code.identity(e.code) == wire { return Some((code.callable(e.code))(arg)) } }
   None
 }

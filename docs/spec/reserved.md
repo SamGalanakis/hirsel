@@ -94,8 +94,8 @@ branded identities. Codec version/schema/order are explicit; decoding validates 
 bytes into fresh ownership and grants no authority or brands. Stable decoding uses a
 separate result signature naming its destination root." *v1:* SEM-10: a codec is the one
 dictionary, `Codec[T]` from `codec.of()` for a type with the `codec` bound (OWN-4), and a
-decode returns `Result[Result[T, DecodeError], Capacity]` into fresh ownership holding no
-authority; its schema and the writer's are explicit, resolved by field name. No region type
+decode returns `Result[T, DecodeError]`, raising a refused admission as `Capacity`
+(MEM-21), into fresh ownership holding no authority; its schema and the writer's are explicit, resolved by field name. No region type
 is `codec`, so there is no region decoding. Eq, Hash and Format dictionaries are not in v1,
 and SEM-5 fixes one equality and hash per key type. An owner replaces a generated codec
 only by `via` a codec type, and no owner writes bytes.
@@ -117,9 +117,8 @@ semantic code and runtime-contract identity; a generic identity includes its typ
 dictionary and generator dependencies, never backend addresses or clone numbers. An entry
 is made by library code at registration, never declared: module `runner` of package
 `store` registers a top-level non-generic function `f` by its `StaticFn` with `compute`
-(`fn(take A) -> Result[R, Capacity]`), `transact` (`fn(mut Tx, H, take A) -> Result[R,
-E]`), `query` (`fn(Tx, H, take A) -> Result[Cover, Capacity]`) or `granted` (`fn(G, take
-A) -> Result[R, Capacity] waits`), each with `A`, `R` and `E` bounded `codec`, where `H:
+(`fn(take A) -> R`), `transact` (`fn(mut Tx, H, take A) -> Result[R, E]`), `query`
+(`fn(Tx, H, take A) -> Cover`) or `granted` (`fn(G, take A) -> R waits`), each with `A`, `R` and `E` bounded `codec`, where `H:
 send` is the place's handles (its Tables and Indexes), passed by view and built at open by
 the place's `handles(mut db: Db) -> Result[H, store.Error] waits`. The key is `f`'s
 identity bytes with the schema fingerprints of `A` and `R`, so a changed codec schema

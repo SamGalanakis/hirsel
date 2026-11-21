@@ -122,9 +122,11 @@ No semicolons are inserted. These rules use syntax only:
 3. At a complete statement or item a newline ends it, unless the next token after it,
    past comments and blank lines, is a continuation token that continues the expression,
    assignment or variant list being parsed. The continuation tokens are a closed set: `&&` `||` `==`
-   `!=` `<` `<=` `>` `>=` `+` `*` `/` `%` `&` `|` `^` `<<` `>>` `..` `..=`, `.` and `?`,
+   `!=` `<` `<=` `>` `>=` `+` `*` `/` `%` `&` `|` `^` `<<` `>>` `..` `..=`, `.`, `?` and `?=>`,
    and, at an assignment position, `=` and every compound assignment operator. A token is
-   classified whole, so `!=` and `-=` are continuation tokens though `!` and `-` are not.
+   classified whole, so `!=` and `-=` are continuation tokens though `!` and `-` are not,
+   and `?=>` written without spaces is always the one token: a guard ending in `?` is
+   written `c? =>`.
    `-`, `!`, `~`, `(`, `[` and `{` never continue a line: each starts the next statement.
    A continued statement is exactly the statement its tokens make on one line, with the
    same precedence and the same refusals, so `a < b\n < c` is refused as a chained
@@ -264,7 +266,8 @@ additive    = product, { ( "+" | "-" ), product } ;
 product     = prefix, { ( "*" | "/" | "%" ), prefix } ;
 prefix      = ( "-" | "!" | "~" | "take" | "mut" | "copy" | "view" ), prefix | postfix ;
 postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
-                       | ".", ( name | digits(digit) ) | "?" } ;
+                       | ".", ( name | digits(digit) ) | "?" }, [ "?=>", mapper ] ;
+mapper      = type-path | "|", pattern, "|", prefix ;
 argument    = [ name, ":" ], expression | "bytes", expression ;
 primary     = literal | type-path | "(", ")" | "(", expression, ")"
             | "(", expression, ":", type, ")"
@@ -300,7 +303,7 @@ Precedence, strongest first:
 
 | operators | associativity |
 |---|---|
-| call, index, `.`, `?` | left, postfix |
+| call, index, `.`, `?`, then `?=>` and its mapper | left, postfix; `?=>` ends the chain |
 | `in` (placement) | postfix, once |
 | `- ! ~ take mut copy view` | prefix |
 | `* / %` | left |
@@ -315,7 +318,8 @@ Precedence, strongest first:
 
 The grammar is context-free. Parsing needs no names or types: types appear only after
 `:` and `->`, an **ascription** `(e : T)` included, inside `[ ]` after a type path and on the right of a type definition; expressions never carry type
-arguments, so postfix `[ ]` always indexes; constructors, variants and calls share call
+arguments, so postfix `[ ]` always indexes; a `?=>` ends its postfix chain, so a call, index, field
+or `?` after its mapper is refused, at that token, and is written `(e ?=> m).f`; constructors, variants and calls share call
 syntax and are told apart by name resolution; braces after a condition begin a block,
 because records are built with parentheses. On the right of a type definition, two or more
 `|`-separated variants or one name followed by `(` declare variants; anything else is an

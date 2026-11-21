@@ -280,8 +280,8 @@ type parameters and regions are found in one forward visit of that call, in this
    transfer)` types the tuple from `transfer`. A tuple or array with any other component is
    checked at step 2.
 
-So `let xs: List[u64] = result.unwrap(list.with_capacity(5))` fixes `unwrap`'s `T`, then
-`with_capacity`'s `T`, then `unwrap`'s `E` as `Capacity`. A parameter determined twice
+So `let n: u16 = result.unwrap(int.parse(s))` fixes `unwrap`'s `T`, then
+`parse`'s `T`, then `unwrap`'s `E` as `ParseError`. A parameter determined twice
 differently is refused at the argument or result that determined it second; a hole still
 open when its call has been visited is refused by
 [LANG-12](#lang-12-generics) at that call. Nothing is inferred across statements, from a
@@ -486,10 +486,10 @@ active ([OWN-21](ownership.md#own-21-scoped-callbacks)), and it never moves a ca
 closure with captures is an **owning closure**: creating it admits one environment block
 ([MEM-24](budgets.md#mem-24-logical-charges)) and then copies its plain captures into it and
 moves the others, whose slots become moved ([OWN-5](ownership.md#own-5-availability)); its
-literal has type `Result[own fn(..) -> R, (Capacity, F)]`, `own[send]` when every capture is
-`send`, where `F` is its one capture, or the tuple of its captures in environment order. On
-`Capacity` nothing is admitted and the error hands every capture back to the caller
-([T1.2](ownership.md#own-26-the-transition-table)), as `box.new` hands back its value. Its body reads captures as views and
+literal has type `own fn(..) -> R`, `own[send]` when every capture is `send`. A refused
+environment admission raises the failure `Capacity` ([MEM-21](budgets.md#mem-21-admission))
+before any capture is moved, and the captures stay in their slots for the failure's cleanup
+([T1.2](ownership.md#own-26-the-transition-table)). Its body reads captures as views and
 cannot move, assign or lend them `mut`. An owning closure may capture only a value whose
 type holds no resource, no capability, no view, no scoped value and no region reference at
 any depth, as its type
@@ -502,12 +502,12 @@ holds the captures in the order the body first names them, and cleaning it clean
 reverse.
 
 ```hirsel
-fn counter(take base: List[u64]) -> Result[own fn(u64) -> u64, (Capacity, List[u64])] {
+fn counter(take base: List[u64]) -> own fn(u64) -> u64 {
   fn(x: u64) -> u64 { x + list.len(base) }
 }
 ```
 ```hirsel
-fn counter(base: List[u64]) -> Result[own fn(u64) -> u64, (Capacity, List[u64])] {
+fn counter(base: List[u64]) -> own fn(u64) -> u64 {
   fn(x: u64) -> u64 { x + list.len(base) }                // refused: LANG-14, base is a view
 }
 ```
@@ -596,16 +596,36 @@ fn zero(x: f64) -> u64 { match x { 0.0 => 1, _ => 2 } }   // refused: LANG-17, f
 
 Expected failures are `Result[T, E]` values. `e?` on `Result[T, E]` consumes `e` and
 evaluates to the `Ok` payload, or exits the function with `Error` of the same payload; the
-function's error type must be exactly `E`. A different error type is converted explicitly,
-with `match`. `e?` on `Option[T]` in a function returning `Option` exits with `None`. Inside
-a bound scope of the same function, `?` on an error of type exactly `Capacity` exits the
-scope instead ([MEM-25](budgets.md#mem-25-the-bound-scope)). Which exit `?` takes is chosen
-from its operand's type, so nothing gives the operand an expected error type: an expected
+function's error type must be exactly `E`. `e?` on `Option[T]` in a function returning
+`Option` exits with `None`. `?` always exits the innermost enclosing function or closure
+body; no bound or region scope stops it.
+
+A different error type is converted at the exit with a **mapping propagate**, `e ?=> m`,
+or with `match`. `e` is a `Result[T, E]` and the function returns `Result[_, F]`; `e ?=> m`
+consumes `e` and evaluates to the `Ok` payload, or, on `Error(x)`, evaluates `m` applied
+to `x` and exits the function with `Error` of that value. The **mapper** `m` is one of:
+
+- a path naming a variant of `F` whose one payload has type `E`, as `?=> Io`;
+- a path naming a callable, a function or a local, that applied as `m(take x)` has result
+  type `F`, as `?=> json.wrap`;
+- an inline arm `|p| v`: `p` an irrefutable pattern over `E`, binding `x` as `let p =
+  take x` would, and `v` an expression of type `F`, as `?=> |(c, _)| Full(c)` or
+  `?=> |_| Invalid`. The arm is code of the enclosing function, not a closure: it captures
+  nothing, may name the function's locals, and its own `?` exits that function.
+
+`m` is checked against the expected type `fn(take E) -> F`, which a variant, callable or arm
+must fit; nothing global converts errors, and there is no conversion trait. The mapper runs
+on the error edge before it leaves any scope, so an arm sees the locals `e` could see; the
+exit then stages `Error(m(x))` as its pending result and cleans the exited scopes
+([FAIL-9](failure.md#fail-9-pending-results)). `?=>` applies to a `Result` only, in a
+function whose result is a `Result`; on an `Option` it is refused.
+
+Which exit `?` or `?=>` takes is chosen from its operand's type, so nothing gives the operand an expected error type: an expected
 type `T` of `e?` reaches `e` only as its payload; whether `e` is a `Result` or an `Option`,
-and its error type, are found from `e` alone, and neither the function's result type nor an enclosing bound is an expected type of `e`.
+and its error type, are found from `e` alone, and neither the function's result type nor a mapper is an expected type of `e`.
 A type argument that only the error would fix is refused by
 [LANG-12](#lang-12-generics) at its call; the error type is written on a binding or an
-ascription, `(receipt() : Result[u64, Capacity])?`. An expression statement whose
+ascription, `(receipt() : Result[u64, ParseError])?`. An expression statement whose
 value is a `Result` is refused; `let _ = e` discards it explicitly.
 
 ```hirsel
@@ -618,11 +638,11 @@ fn quarter(n: u64) -> Result[u64, ParseError] { half(n); Ok(0) }   // refused: L
 ```
 ```hirsel
 fn receipt[E]() -> Result[u64, E] { loop {} }
-fn f() -> Result[u64, Capacity] { bound bytes 0 { let r: Result[u64, Capacity] = receipt(); let n = r?; n } }
+fn f() -> Result[u64, ParseError] { let r: Result[u64, ParseError] = receipt(); let n = r?; Ok(n) }
 ```
 ```hirsel
 fn receipt[E]() -> Result[u64, E] { loop {} }
-fn f() -> Result[u64, Capacity] { bound bytes 0 { let n: u64 = receipt()?; n } }   // refused: LANG-12, at receipt(): E is open
+fn f() -> Result[u64, ParseError] { let n: u64 = receipt()?; Ok(n) }   // refused: LANG-12, at receipt(): E is open
 ```
 
 ### LANG-19: Recursion

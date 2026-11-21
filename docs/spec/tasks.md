@@ -31,31 +31,34 @@ type Job: send { id: u64, cache: Rc[Node] }            // refused: CONC-2, Rc is
 
 ### CONC-3: Spawn
 
-`task.spawn(tasks, bytes n, take x, f) -> Result[Task[R], (Capacity, X)]` starts a task
+`task.spawn(tasks, bytes n, take x, f) -> Task[R]` starts a task
 that runs `f(take x)`, where `x: X`, `X` and `R` are `send`, and `f: fn(take X) -> R waits`
 is a plain callable, which captures nothing ([LANG-13](language.md#lang-13-callables)).
 Everything the child owns arrives as `x`. Spawn admits the task charge
 ([MEM-24](budgets.md#mem-24-logical-charges)), which includes `n`, against the spawner's
 current limit, and the child's root limit is `n` ([MEM-19](budgets.md#mem-19-limits)). A child spawned while a step bound is current draws its
 steps from that bound ([MEM-30](budgets.md#mem-30-step-bounds)). Admission is the
-commit point; on `Capacity` the error owns `x`
-([T7.1](ownership.md#own-26-the-transition-table)).
+commit point; a refused one raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)) and
+has not taken `x` ([T7.1](ownership.md#own-26-the-transition-table)).
+`task.try_spawn(tasks, bytes n, take x, f) -> Result[Task[R], (Capacity, X)]` is the same
+except that a refusal is the value `Error((c, x))`, for a caller that answers it in place,
+as a server refuses a connection it cannot run.
 
 ```hirsel
-fn count(tasks: Tasks, take words: List[String]) -> Result[Task[u64], (Capacity, List[String])] {
+fn count(tasks: Tasks, take words: List[String]) -> Task[u64] {
   task.spawn(tasks, bytes 4096, take words, fn(take w: List[String]) -> u64 { list.len(w) })
 }
 ```
 ```hirsel
 type Node: shareable { label: String }
-fn count(tasks: Tasks, take words: List[Rc[Node]]) -> Result[Task[u64], (Capacity, List[Rc[Node]])] {
+fn count(tasks: Tasks, take words: List[Rc[Node]]) -> Task[u64] {
   task.spawn(tasks, bytes 4096, take words, fn(take w: List[Rc[Node]]) -> u64 { list.len(w) })
 }                                                          // refused: CONC-2, Rc is not send
 ```
 
 ### CONC-4: Channels
 
-`channel.new[T: send](cap: u64) -> Result[(Sender[T], Receiver[T]), Capacity]` admits the
+`channel.new[T: send](cap: u64) -> (Sender[T], Receiver[T])` admits the
 channel's whole charge, including `cap` items, at creation; sending never allocates. A
 `cap` of 0 is a failure with cause `Bounds`. `Sender[T]` is a `send` resource;
 `channel.sender(tx)` adds a sender, admits nothing and cannot fail; a sender count past
@@ -165,11 +168,11 @@ observation, every `task.check_cancel()`, publication by `send`, every `try_send
 change of a channel's sender count, `join`, channel close, every `latest.publish` and
 `latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every refund or hand-over that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
-creation, share, release, `try_unwrap` and `with_unique` test, and every admission that returns `Capacity`
+creation, share, release, `try_unwrap` and `with_unique` test, and every refused admission
 ([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.
 That list follows one rule: an operation whose result can depend on the order of tasks is
 an event, and one whose result cannot, such as a change to a value only its own task
-reaches, is not. Stage steps are private. The only owner flow operations in the event order are wiring refusals that return `Capacity` ([CONC-14](#conc-14-flows)). So only events need sequencing when tasks run in parallel, and no
+reaches, is not. Stage steps are private. The only owner flow operations in the event order are refused wiring admissions ([CONC-14](#conc-14-flows)). So only events need sequencing when tasks run in parallel, and no
 operation observes a state that no prefix of the order gives: no weaker ordering is
 visible.
 The order is chosen by the scheduler provider at the replay point
@@ -183,7 +186,7 @@ is ended by its provider (CONC-7).
 
 A **poll** is a non-waiting operation that returns without effect because of another
 task's state: a `try_send` that returns `Full`, a `try_receive` that returns `Empty`, a `task.check_cancel()` that finds no
-request, a `try_unwrap` that returns the `Arc`, a `with_unique` that returns `None`, and an admission that returns `Capacity`;
+request, a `try_unwrap` that returns the `Arc`, a `with_unique` that returns `None`, and a refused admission;
 any later operation of that kind is a poll too. Every event is a point where the scheduler
 may run another task, and every scheduler provider is fair: no task performs unboundedly
 many polls while another task that is not waiting performs no event, unless that other
@@ -237,10 +240,10 @@ fn bump(mut a: Arc[Hits]) { a.n += 1 }                   // refused: OWN-12, not
 ### CONC-13: Latest
 
 `Latest[T]`, for `T: shareable + send`, is a handle to a root that holds one `Arc[T]`.
-`latest.new(take a: Arc[T]) -> Result[Latest[T], (Capacity, Arc[T])]` admits the root, 32
+`latest.new(take a: Arc[T]) -> Latest[T]` admits the root, 32
 bytes, from the current limit, to which it stays charged
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and returns its first handle;
-on `Capacity` the error owns `a`. A handle is a `send` resource, mechanical
+a refusal raises `Capacity` and has not taken `a`. A handle is a `send` resource, mechanical
 ([MEM-24](budgets.md#mem-24-logical-charges)) and neither `shareable` nor region data, so no
 `Arc` holds one. `latest.handle(h)` adds a handle, admits nothing and cannot fail; a handle
 count past `2^64 − 1` is the run stop `LatestHandles`
@@ -261,8 +264,8 @@ task's cleanup cleans the handles it owns, as it cleans every resource.
 
 ```hirsel
 type Config: shareable + send { routes: List[String] }
-fn reload(h: Latest[Config], take c: Config) -> Result[(), Capacity] {
-  match arc.new(take c) { Ok(take a) => { latest.publish(h, take a); Ok(()) }, Error((e, _)) => Error(e) }
+fn reload(h: Latest[Config], take c: Config) {
+  latest.publish(h, arc.new(take c))
 }
 fn routes(h: Latest[Config]) -> u64 { let c = latest.read(h); list.len(c.routes) }
 ```
@@ -281,8 +284,8 @@ owner reads, and returns it with an `Into[T]` naming that merge. `flow.stage(mut
 steps k, x, body)` adds a stage whose one output is a new port of `cap` slots into `to`, and returns the
 stage's input merge as an `Into[A]`. `flow.port(mut f, to, cap)` adds a port into `to` that the owner
 writes. A port's index in its merge is its creation order there, and stages are numbered from 0 in
-creation order. Wiring returns `Err(Foreign)` for a handle of another flow, `Err(Zero)` for `cap = 0`
-and `Err(Refused(Capacity))` when the charge is refused. The owner's first `push`, `advance`, `end` or
+creation order. Wiring returns `Err(Foreign)` for a handle of another flow and `Err(Zero)` for `cap = 0`;
+a refused charge raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)). The owner's first `push`, `advance`, `end` or
 `next` **seals** the flow, and wiring after it returns `Err(Started)`. A handle of another flow in any
 other flow operation fails the owner with `Bounds`.
 
@@ -325,8 +328,8 @@ the key of the last entry it completed. When its merge gives `End`, the stage en
 fails, its merge gives `Dropped`, or its own push gives `Closed`, the stage stops. A failing item at key
 `k` ends its port with `Dropped(i, k)`, where `i` is the port's index, and a delivered `Dropped(from, at)`
 ends it with `Dropped(i, at)`. Every position below `at` is complete. Only the first
-counts as the stage failing, with `halt` `OutOfTime` (`k` or the copy ran out) or `Failed`. A refused
-admission is a value the body handles. Leaving it unhandled fails in the ordinary way.
+counts as the stage failing, with `halt` `OutOfTime` (`k` or the copy ran out) or `Failed`. An
+admission the stage's limit refuses fails the item with `Capacity`, so its `halt` is `Failed`.
 
 **The fixed point.** Steps of different stages commute, except that a mark may replace an unread mark,
 which no answer reads. So taking steps until none is possible reaches, up to marks,
@@ -338,7 +341,7 @@ charge, and returns `Ok(())` or `Err(Failure { stage, key, halt })` for the lowe
 failed, with the failing item's key. Cleaning a flow without `finish` may skip remaining steps. It refunds every charge and has no result.
 
 Every answer depends only on the owner's operations and is identical at every degree of parallelism.
-A wiring refusal that returns `Capacity` is the flow's only event ([CONC-10](#conc-10-event-order)).
+A refused wiring admission is the flow's only event ([CONC-10](#conc-10-event-order)).
 Flow operations end within bounded steps and observe no cancellation ([CONC-7](#conc-7-cancellation-points)).
 An owner that loops over flow operations checks for cancellation at an explicit cancellation point.
 

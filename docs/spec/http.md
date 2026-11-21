@@ -184,7 +184,7 @@ A socket being handed over is briefly in two populations: its connection task li
 - **The bound.** A live `serve` holds at most `fixed + http_max × C + streams_max × (S + W_s) + upgrades_max × (U_max + W_u)`, all admitted at spawn, where U_max is the largest `bytes n` any `Upgrade` route declares. No admission happens after a response head is committed.
 - **Sockets not yet received.** An accepted socket in the inbox, or held by a blocked acceptor, costs one inbox item (inside `fixed`) and a kernel descriptor, which is outside logical charges (MEM-19). Refused sockets are at most `refuse_max` (their tasks) and are paid by `refuse_max` × R inside `fixed`; a refused socket with no free slot is closed at once. So the process holds at most `sockets_max + refuse_max + inbox_cap + listeners` server sockets.
 
-**Accepting.** On `Accepted`, the supervisor takes the source key (W-D5): the TCP peer at accept. For a peer in the trusted `ingress` prefixes, the sanitized `X-Forwarded-For` source is known only when the first head completes, so the connection reports it to the supervisor, which re-checks `ip_sockets_max` against it and moves the count. The supervisor refuses when `sockets_max`, `http_max`, `conns_max` or `ip_sockets_max` would be passed, or when spawning C returns `Capacity`.
+**Accepting.** On `Accepted`, the supervisor takes the source key (W-D5): the TCP peer at accept. For a peer in the trusted `ingress` prefixes, the sanitized `X-Forwarded-For` source is known only when the first head completes, so the connection reports it to the supervisor, which re-checks `ip_sockets_max` against it and moves the count. The supervisor refuses when `sockets_max`, `http_max`, `conns_max` or `ip_sockets_max` would be passed, or when spawning C with `task.try_spawn` returns `Capacity`.
 
 **Refusing.** A refused socket goes to a refusal task if one of the `refuse_max` slots is free. It writes a static `503` with `Connection: close` and `Retry-After: 1`, then calls `net.finish`, all under one absolute deadline, accept + `refuse_ms`. With no free slot, the supervisor drops both halves at once: a mechanical close, with no response. Neither path waits on the client inside the supervisor.
 
@@ -375,7 +375,7 @@ A handler returns `Outcome = Response(Response) | Stream(StreamSpec) | Upgrade(U
 - std encodes the head (status and fields) and P into the one hand-over block W_s (HTTP-1), inside the handler's scope; the group's writer copies the head from it into its own `out_cap` buffer.
 - A raw source's state P is `codec + send`. The handler builds the spec, and std encodes P into at most `state_max` bytes, inside the handler's scope; a P that does not fit is a handler error before anything is committed. The producer child decodes it into its own limit (§2), so every block P ever has is born and grows there.
 - The connection sends `Promote(Stream(spec), halves)` to the supervisor and waits on its 1-slot reply.
-- The supervisor admits S by spawning the stream group (§2) **before any byte of the response head is written**. On `Capacity`, CONC-3 returns the halves inside the error. The supervisor passes them back, and the connection answers 503 and closes.
+- The supervisor admits S by spawning the stream group (§2) **before any byte of the response head is written**. The spawn is `task.try_spawn`, so on a refusal CONC-3 returns the halves inside the error. The supervisor passes them back, and the connection answers 503 and closes.
 - On success the stream group owns the socket. The connection task ends, and its read buffer, with any pipelined bytes, is dropped. A stream always ends its connection, so its head carries `Connection: close`.
 
 **`Upgrade`, an ownership transfer**
@@ -386,7 +386,7 @@ A handler returns `Outcome = Response(Response) | Stream(StreamSpec) | Upgrade(U
   - the `ReadHalf` and `WriteHalf`;
   - the read buffer, moved and not copied, with the **exact tail**: the bytes after `head.end`, including any already pipelined;
   - the encoded 101 head and the encoded argument (HTTP-1's W_u); the protocol task decodes the argument into its own `bytes n`, so nothing the handler allocated outlives the hand-over except these blocks.
-- The supervisor spawns the protocol task under `bytes n` before the 101 is written. On `Capacity`, the connection gets `Taken` back and answers 503.
+- The supervisor spawns the protocol task with `task.try_spawn` under `bytes n` before the 101 is written. On a refusal, the connection gets `Taken` back and answers 503.
 - The protocol task's first act is std's `upgrade.start(taken)`. It writes the full 101 under one output-unit deadline, then gives the protocol the halves and the tail. A failure before the 101 is complete closes the socket.
 - The socket keeps its `sockets_max` slot until the protocol task ends. Its `conns_max` slot is released when the protocol sends `Established`; the runner's WebSocket sends it at Hello accepted.
 - After the handoff, HTTP does nothing more with the socket: no drain and no `net.finish`.
@@ -413,9 +413,8 @@ A handler returns `Outcome = Response(Response) | Stream(StreamSpec) | Upgrade(U
 
 - Before the final response's first byte is committed:
   - a handler's `Error(e)` writes 500, with no body detail;
-  - `Capacity` inside the handler's scope writes 503;
   - a passed handler deadline (HTTP-5) writes 503.
-- After that commit, every failure closes the connection without writing a new status.
+- A failure in the handler, a refused admission's `Capacity` ([MEM-21](budgets.md#mem-21-admission)) included, closes the connection without writing a new status, before that commit or after it. A handler that answers a refusal with 503 runs its allocating work under `isolate` ([FAIL-16](failure.md#fail-16-isolation)) and returns an error.
 - A cancellation (server shutdown) closes.
 - None of these is a run stop: the connection's cleanup ends it (CONC-8).
 
@@ -1238,7 +1237,7 @@ A check read is taken only between operations, never inside one, so a phase make
 - each clock read named above, with its point and kind;
 - each `host.random` delivery (an anonymous Caller's subject).
 
-**The scheduler's choices** are inputs too (CONC-10). These include the 16-request batch point (HTTP-9), every admission that returns `Capacity`, and each `try_send` and `try_receive` outcome (Ingress, the relay, the stream timer, an ending session's `Drained`, and the publisher's sweep of retirement marks). Part B adds the recovery queue's starts (K-8).
+**The scheduler's choices** are inputs too (CONC-10). These include the 16-request batch point (HTTP-9), every refused admission, and each `try_send` and `try_receive` outcome (Ingress, the relay, the stream timer, an ending session's `Drained`, and the publisher's sweep of retirement marks). Part B adds the recovery queue's starts (K-8).
 
 **Computed by the run, never an input:**
 - parsing, framing and routing;

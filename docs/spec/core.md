@@ -100,7 +100,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `StaticFn[F]` | plain | `shareable`, `send`, `key` | 8 | nothing |
 
 Flow endpoints are usable with the flow that created them. `Wire` has cases
-`Foreign`, `Started`, `Zero` and `Refused(Capacity)`. `Push[T]` has cases `Ok`,
+`Foreign`, `Started` and `Zero`. `Push[T]` has cases `Ok`,
 `Ended(T)`, `Order(T)`, `Closed(T)` and `Stalled(T)`. `Pull[T]` has cases
 `Item(key, from, x)`, `Dropped(from, at)`, `End` and `Stalled`. `Halt` has cases
 `OutOfTime` and `Failed`. These types are plain enums. `Failure` is a plain struct
@@ -124,16 +124,20 @@ identity bytes, a revision and a function ([PROG-9](programs.md#prog-9-code-desc
 Each item gives the domain, result, length and capacity, custody and partial effects of the
 operations it names; nothing else about them may be inferred from an implementation.
 
-- **Errors.** An operation that fails with `Capacity` returns in its error every argument it
-  would have taken and leaves its other arguments unchanged. Its error is `(Capacity, X)`,
-  `X` the one such argument or the tuple of them in parameter order, as an owning closure's
-  or a resource literal's error holds its captures or fields, and bare `Capacity` when it
-  takes none. Only the failures named here or
-  by a rule occur: `Bounds`, `Overflow`, `Division` and `Unwrap` are failures
-  ([FAIL-2](failure.md#fail-2-causes)), every other error is a `Result`. `fail(take msg)`
-  takes custody of a message the program already holds and admits nothing, so raising `Fail`
-  cannot be refused ([FAIL-10](failure.md#fail-10-cause-chain)); a built message's
-  `Capacity` is an ordinary error at its own allocation, before `fail`.
+- **Errors.** An allocating operation whose admission is refused raises the failure
+  `Capacity(c)` ([MEM-21](budgets.md#mem-21-admission)) at its commit point: it has taken
+  none of its arguments, which the failure's cleanup drops with the rest of the statement,
+  and it leaves its other arguments unchanged. An operation named `try_` returns the
+  refusal instead: its error is `(Capacity, X)`, `X` the one argument it would have taken
+  or the tuple of them in parameter order, as a resource literal's error holds its fields,
+  and bare `Capacity` when it takes none; it changes nothing else. The `try_` operations
+  that admit are `list.try_reserve`, `map.try_reserve` and `task.try_spawn`. Only the
+  failures named here or by a rule occur: `Bounds`, `Overflow`, `Division`, `Unwrap` and
+  `Capacity` are failures ([FAIL-2](failure.md#fail-2-causes)), every other error is a
+  `Result`. `fail(take msg)` takes custody of a message the program already holds and
+  admits nothing, so raising `Fail` cannot be refused
+  ([FAIL-10](failure.md#fail-10-cause-chain)); a built message's allocation is refused, if
+  at all, at its own admission, before `fail`.
 - **Drop and copied.** `drop[T](take x: T)` ends `x` where it is called, by the implicit drop
   the end of its scope would perform ([T6.2](ownership.md#own-26-the-transition-table)), a
   resource's finalizer included ([FAIL-11](failure.md#fail-11-resources)), and returns `()`;
@@ -150,8 +154,9 @@ operations it names; nothing else about them may be inferred from an implementat
   even when `n` is 0; `text.copy_in` admits its count header even for empty text.
   `build_stream_in` admits `n` bytes once, and `finish_trim` refunds all of them past the
   used bytes, rounded up to 8; `finish` admits nothing and refunds nothing.
-  `list.reserve(mut xs, n)` leaves capacity at least `len + n`; every other allocating
-  operation grows by
+  `list.reserve(mut xs, n)` and `list.try_reserve(mut xs, n)` leave capacity at least
+  `len + n`, `try_reserve` returning `Error(c)` and leaving `xs` unchanged where `reserve`
+  raises; every other allocating operation grows by
   [MEM-24](budgets.md#mem-24-logical-charges). `string.from` copies a literal or a view.
 - **Literals.** A string literal has type `String`, is static, allocates nothing and is never
   charged; it has capacity 0, so the first push onto it grows it into new storage. This is
@@ -159,9 +164,9 @@ operations it names; nothing else about them may be inferred from an implementat
   storage, `truncate` and `clear` only shorten it, and the ASCII case changes copy it first. A `List` has in-place element writes
   (`list.set`, `xs[i] = x`), so an own `List` that has elements always owns its storage:
   capacity 0 means length 0, and no `List` is static. A byte-string literal (`b".."`,
-  `br#".."#`) therefore has type `Result[Bytes, Capacity]`: it admits its length as
-  `List[u8]` storage and copies its bytes. When the expected type is
-  `Result[FrozenBytes, Capacity]`, the literal uses read-only static storage.
+  `br#".."#`) therefore has type `Bytes`: it admits its length as `List[u8]` storage and
+  copies its bytes, and a refusal raises `Capacity`. When the expected type is
+  `FrozenBytes`, the literal uses read-only static storage.
   It admits the same charge, in the same limit, and refunds it when the owner
   drops. `bytebuf.freeze(take b)` transfers the existing charge, length and
   capacity of an owned `Bytes`. `bytebuf.as_bytes(b)` borrows the bytes with
@@ -172,16 +177,15 @@ operations it names; nothing else about them may be inferred from an implementat
   without writing if either check fails. It never grows the destination.
 - **Strings.** `string.into_bytes(take s)` transfers `s`'s owned storage unchanged, with its
   length, capacity and charge; a static `s` is copied into newly admitted storage of capacity
-  equal to its length, and on `Capacity` the error returns `s`. `string.from_utf8` returns its
+  equal to its length; a refused copy has not taken `s`. `string.from_utf8` returns its
   argument when it is not UTF-8. `string.push_u64` appends `n` in ASCII decimal, with no sign
   and no leading zeros (`0` for zero). `string.make_ascii_upper(mut s)` and
   `string.make_ascii_lower(mut s)` change `a`–`z` to `A`–`Z`, or the reverse, in place, and
   leave every other byte as it is, so `s` keeps its length and stays UTF-8 with no second
   check. For an owned `s` they admit nothing and cannot fail. A static `s` is first copied
-  as `into_bytes` copies it, and on that copy's `Capacity` they return the error with `s`
-  unchanged. `string.encode_base64(b)` constructs a new `String` with the standard
+  as `into_bytes` copies it, and a refused copy leaves `s` unchanged. `string.encode_base64(b)` constructs a new `String` with the standard
   RFC 4648 alphabet and `=` padding. `string.append_base64_bytes(b, mut out)` appends
-  the same encoding to a byte list and leaves `out` unchanged on `Capacity`.
+  the same encoding to a byte list and leaves `out` unchanged when its growth is refused.
   `string.next_scalar(s, at)` returns `None` when `at`
   is `byte_len(s)`, and fails with `Bounds` when `at` is greater or falls inside a scalar.
 - **Slices.** `list.slice(xs, lo, hi)` and `string.slice(s, lo, hi)` view the elements or
@@ -201,7 +205,7 @@ operations it names; nothing else about them may be inferred from an implementat
   Without an expected type the result is `u64`. An invalid range, including an overflowing
   end, fails with `Bounds`. `list.put_word_le(mut b, x)` and `list.put_word_be(mut b, x)`
   append the two, four or eight bytes of `x` in the specified order. Growth follows
-  [MEM-24](budgets.md#mem-24-logical-charges). On `Capacity` the list is unchanged.
+  [MEM-24](budgets.md#mem-24-logical-charges). A refused growth leaves the list unchanged.
   `inline.word_le` and `inline.word_be` read the same widths from an Inline byte
   array. Its expected integer type fixes the width and an invalid range fails with `Bounds`.
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
@@ -247,12 +251,12 @@ operations it names; nothing else about them may be inferred from an implementat
   `Equal`; when `before` is not a total preorder the result is still a permutation of `xs`.
   For two or more elements it admits one scratch block of `len` elements as a `List[T]`
   ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any, and refunds it before it
-  returns; on `Capacity` `xs` is unchanged. A failure inside `before` leaves `xs` holding
+  returns; a refused scratch leaves `xs` unchanged. A failure inside `before` leaves `xs` holding
   every element it had, in an unspecified order, refunds the scratch and propagates. The
   number and order of calls to `before` is unspecified.
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
-  `Deque[T]`, and `heap.push` adds to a `Heap[T]`; on `Capacity` each returns `x` and leaves
-  the collection unchanged. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
+  `Deque[T]`, and `heap.push` adds to a `Heap[T]`; a refused growth leaves the collection
+  unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
   return an element, `None` when empty, and admit nothing; `heap.pop` returns a least element
   by `<` ([SEM-7](semantics.md#sem-7-equality-and-order)), and `heap.peek` views the
   element the next `pop` would return. `new` admits nothing and `len` counts elements. Both
@@ -260,21 +264,21 @@ operations it names; nothing else about them may be inferred from an implementat
   unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
   only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private
   bodiless functions, as `Map` is; no library module provides a deque or a heap.
-- **Maps.** `map.insert` inserts an absent key or replaces a present key's value.
-  It returns its key and value with `Capacity`, as
-  `(Capacity, (K, V))`, and a present key admits nothing. `map.update(mut m, k, f)`, where
+- **Maps.** `map.insert` inserts an absent key or replaces a present key's value; a
+  present key admits nothing, and a refused growth takes neither the key nor the value. `map.update(mut m, k, f)`, where
   `f: scoped fn(mut V) -> R`, runs `f` once on the value of `k` in place and returns
   `Some(r)`, or returns `None` without calling `f` when `k` is absent; it makes one lookup,
   never inserts and admits nothing. `map.update_or_insert(mut m, take k, take initial, f)`
   makes one lookup. It inserts `initial` only if `k` is absent, then calls `f` once on
-  the entry and returns `Ok(r)`. On `Capacity` it returns `(k, initial)` untouched,
-  leaves `m` unchanged and does not call `f`. Both operations lend `m` for the call,
+  the entry and returns `r`. A refused growth takes neither `k` nor `initial`, leaves `m`
+  unchanged and does not call `f`. Both operations lend `m` for the call,
   so `f` cannot name `m` ([OWN-9](ownership.md#own-9-overlap)). `map.remove` drops the stored key
   and returns the value. `map.reserve(mut m, n)` makes room for `n` absent keys: after it
-  returns `Ok`, the next `n` insertions admit nothing, whatever removals, replacements and updates
+  returns, the next `n` insertions admit nothing, whatever removals, replacements and updates
   come between. It grows by [MEM-24](budgets.md#mem-24-logical-charges) from a need of
   `len + n`, admits nothing when the capacity already holds `len + n` (it drops removed
-  entries in place), and on `Capacity` leaves `m` unchanged. A `Map` is cleaned entry by entry in insertion order, each key
+  entries in place), and a refusal leaves `m` unchanged. `map.try_reserve(mut m, n)` does
+  the same and returns a refusal as `Error(c)`. A `Map` is cleaned entry by entry in insertion order, each key
   before its value, and `for take (k, v) in m` consumes one entry by entry
   ([SEM-6](semantics.md#sem-6-iteration)).
 - **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say

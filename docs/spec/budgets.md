@@ -36,7 +36,7 @@ task's result. So the lexical end of a limit and the death of what it funded are
 and the limit a block's record leads to is always live. Transferring or refunding across
 tasks is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)). An
 admission sees exactly the refunds from other tasks that the order puts before the
-admitting task's latest event; an admission that returns `Capacity` is itself an event.
+admitting task's latest event; a refused admission is itself an event.
 
 Records form a union-find forest, joined by rank with path compression; each tree's
 representative points to the live limit it leads to, so a refund costs amortised
@@ -46,7 +46,7 @@ not charged.
 
 ```hirsel
 fn make(n: u64) -> Result[List[u64], Capacity] {
-  let xs = bound bytes 1024 { list.with_capacity(n)? }?  // after the scope, xs is the caller's
+  let xs = bound bytes 1024 { list.with_capacity(n) }?   // after the scope, xs is the caller's
   Ok(xs)
 }
 ```
@@ -54,27 +54,39 @@ fn make(n: u64) -> Result[List[u64], Capacity] {
 ### MEM-21: Admission
 
 Every operation that allocates admits its charge before any write: `used + n ≤ limit`
-gives `used += n`; otherwise the operation fails with `Capacity` and nothing has been
-allocated ([T5.6](ownership.md#own-26-the-transition-table)). For an allocating operation,
-admission is its commit point ([FAIL-3](failure.md#fail-3-commit-points)). Every core
-operation that may allocate says so in its result type, `Result[_, Capacity]` or an error
-type that holds `Capacity` ([core](core.md)), with two exceptions: a call through a callable
-value may allocate whatever the callee does, and an owning closure's environment is
-admitted by its literal ([LANG-14](language.md#lang-14-captures)). A user function may
-allocate and handle the `Capacity` itself, so a result type without `Capacity` does not
-show that a function allocates nothing.
+gives `used += n`; otherwise the admission is **refused**, nothing has been allocated
+([T5.6](ownership.md#own-26-the-transition-table)), and the operation raises a failure
+whose primary cause is `Capacity(c)`, `c` the refused charge
+([FAIL-2](failure.md#fail-2-causes)). For an allocating operation, admission is its commit
+point ([FAIL-3](failure.md#fail-3-commit-points)), so a refused one has consumed nothing:
+the inputs it would have taken are dropped by the failure's cleanup with the rest of the
+statement ([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). The failure is observed as every
+failure is: by an enclosing `isolate` ([FAIL-16](failure.md#fail-16-isolation)) or by the
+task's joiner ([CONC-6](tasks.md#conc-6-join)). An allocating operation's result type does
+not mention `Capacity`.
+
+Four admissions return their refusal as the value `Error(c)` instead, because the caller
+recovers at the point of refusal: entering a bound scope (MEM-25), entering an `isolate`
+([FAIL-16](failure.md#fail-16-isolation)), a resource literal
+([FAIL-11](failure.md#fail-11-resources)), whose fields need an owner that is not a
+temporary, and the core operations named `try_` that admit
+([core](core.md)), such as `list.try_reserve` and `task.try_spawn`. Each says so in its
+result type, and nothing else does.
 
 ```hirsel
-fn grow(mut xs: List[u64]) -> Result[(), (Capacity, u64)] { list.push(mut xs, 1) }
+fn grow(mut xs: List[u64]) { list.push(mut xs, 1) }        // a refusal fails here; xs unchanged
 ```
-```hirsel
-fn grow(mut xs: List[u64]) { list.push(mut xs, 1); }        // refused: LANG-18, unused Result
+```hirsel unbuilt
+fn room(mut xs: List[u64], n: u64) -> bool {
+  match list.try_reserve(mut xs, n) { Ok(()) => true, Error(_) => false }
+}
 ```
 
 ### MEM-22: The Capacity value
 
 `Capacity` is a plain record `{ requested: u64, available: u64 }`: the charge that was
-refused, and the room left in the limit the admission was tried against. Charges are
+refused, and the room left in the limit the admission was tried against. A refused
+admission carries it, in its failure's cause `Capacity(c)` (MEM-21) or in its `Error(c)`. Charges are
 computed in exact arithmetic; one that exceeds `2^64 − 1` is refused with `requested`
 `2^64 − 1`. Constructing, copying and returning a `Capacity` admits nothing. Two runs of the
 same program with the same inputs and limits produce the same `Capacity` values at the
@@ -128,7 +140,7 @@ allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an emp
 charges each copy at capacity equal to its length, and a compact `clone_in` charges the
 selected value's bytes when its type is streamable and the whole copied blob otherwise ([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
 
-Creating a resource admits its cause cell, and can therefore fail with `Capacity`; then
+Creating a resource admits its cause cell, and can therefore be refused; then
 nothing was admitted, so nothing is refunded, and the literal's fields come back in its
 error ([T1.2](ownership.md#own-26-the-transition-table)). This holds unless
 it is **mechanical**: its cleanup can never add a cause. These mechanical resources have no cause cell: `Sender`, `Receiver`, `Task`,
@@ -161,20 +173,31 @@ name; a package states the policy it was written for
 
 ### MEM-25: The bound scope
 
-`bound bytes n { body }` evaluates to `Result[T, Capacity]` where `T` is the body's type.
-Entering it admits `n` against the current limit and makes a new limit of `n` current for
-the body; if the admission fails the body does not run and the result is `Error(c)`
-([T5.4](ownership.md#own-26-the-transition-table)). It covers every allocation kind made in
-the body: own, counted, region and task storage. In the body, `?` applied to an `Error(c)`
-whose type is exactly `Capacity` exits the bound scope with `Error(c)`; `?` on any other
-error type exits the function as usual. No exit crosses a closure body. On exit by any
-edge, the body's views end and its owners are cleaned, the unused part of `n` is refunded
-to the parent, and the record is handed over (MEM-20). `bound bytes` is the only form that
-bounds bytes; a region is not one, and `bound steps` (MEM-30) bounds steps.
+`bound bytes n { body }` sets a byte limit for its body and evaluates to
+`Result[T, Capacity]` where `T` is the body's type. Entering it admits `n` against the
+current limit and makes a new limit of `n` current for the body; if that admission is
+refused the body does not run and the result is `Error(c)`
+([T5.4](ownership.md#own-26-the-transition-table)). That entry refusal is the only `Error`
+the scope makes: when the body runs, the result is `Ok` of its value. The limit covers every
+allocation kind made in the body: own, counted, region and task storage. An admission the
+body's limit refuses raises the failure `Capacity(c)` (MEM-21), which the scope does not
+catch: it propagates past the scope, cleaning it as every exit edge does, to an enclosing
+`isolate` or the task's joiner. So a refused entry (nothing ran) and a body that ran out
+(its effects stand) stay distinct. `?` in the body exits the function as it does anywhere
+([LANG-18](language.md#lang-18-errors)). On exit by any edge, the body's views end and its
+owners are cleaned, the unused part of `n` is refunded to the parent, and the record is
+handed over (MEM-20). `bound bytes` is the only form that bounds bytes; a region is not
+one, and `bound steps` (MEM-30) bounds steps. Because the scope catches nothing, its body
+may assign and lend `mut` places declared outside it.
 
 ```hirsel
-fn copy_bounded(src: String) -> Result[Result[String, Capacity], Capacity] {
-  bound bytes 65536 { string.from(src) }
+fn copy_bounded(src: String) -> Result[String, Capacity] {
+  bound bytes 65536 { string.from(src) }   // Error only when the 65536 is refused
+}
+```
+```hirsel
+fn fill(mut xs: List[u64], n: u64) -> Result[(), Capacity] {
+  bound bytes 4096 { list.fill(mut xs, n, 0) }   // past 4096 bytes: the failure Capacity
 }
 ```
 ```hirsel
@@ -193,12 +216,11 @@ A resource type whose finalizer allocates, creates resources or spawns declares
 `grant bytes n`; one without a declaration has a grant of 0. Creating a value of the type
 reserves the grant as part of its charge (MEM-24). The grant is a limit of `n` bytes, and it
 is the current limit while the finalizer runs: its allocations, and the storage, cause cell
-and grant of every resource or task it creates, are admitted from it. Exceeding it is a
-finalizer failure with cause `Capacity` ([FAIL-12](failure.md#fail-12-finalizer-failure)),
-recorded in the resource's own cause cell ([FAIL-10](failure.md#fail-10-cause-chain)), and
-abandons the finalizer body. The one exception is the cell an `isolate` reserves at its
-entry: refused, it is the value `Error(Capacity)` and never this failure
-([FAIL-16](failure.md#fail-16-isolation)). When the finalizer ends, the unused part of the grant is
+and grant of every resource or task it creates, are admitted from it. An admission it
+refuses raises `Capacity(c)` as everywhere (MEM-21); in a finalizer that is a finalizer
+failure ([FAIL-12](failure.md#fail-12-finalizer-failure)), recorded in the resource's own
+cause cell ([FAIL-10](failure.md#fail-10-cause-chain)), and abandons the finalizer body. The
+four value refusals of MEM-21 stay values under a grant too. When the finalizer ends, the unused part of the grant is
 refunded, and what survives it (cause cells, sent values) is handed over to the limit that
 funded the resource (MEM-20). So cleanup, failure cleanup included, never admits from any
 limit but a grant.
@@ -214,7 +236,7 @@ resource type Log grant bytes 256 { sink: Sender[String] }
 ### MEM-28: Optimisation keeps charges
 
 No optimisation changes which operations admit, how much they charge, which refunds an
-admission sees or which of them fail with `Capacity`
+admission sees or which of them are refused
 ([SEM-8](semantics.md#sem-8-determinism)). An engine that allocates less still charges the
 logical amount; an engine that elides a copy still charges for it.
 

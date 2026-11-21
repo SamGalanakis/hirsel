@@ -246,7 +246,7 @@ pub fn seal(take b: Bytes, to: String) -> Result[Secret, SecretError]
 pub fn narrow(s: Secret, to: String) -> Result[Secret, SecretError]
 pub fn render(s: Secret) -> View[String] in s
 pub fn send_secret(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits
-pub type SecretError = Invalid | Capacity(Capacity)
+pub type SecretError = Invalid()
 ```
 
 **Ingestion.** A secret's bytes enter the run in one of two ways:

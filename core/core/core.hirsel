@@ -185,6 +185,16 @@ pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, p
 
 pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64)
 
+// A socket's part a dropped handle releases: the whole socket, or one half
+// of a split one (core.md, Provide).
+pub type Part = Whole | Read | Write
+
+// A served Net's operations and answers: a name or data field is its byte
+// length; ids name the server's sockets and listeners.
+pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part)
+
+pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake)
+
 pub type Kind = File | Directory | Symlink | Other
 
 pub type Stat {

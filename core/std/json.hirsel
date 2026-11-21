@@ -1004,9 +1004,7 @@ fn write_value[in r](s: String, mut i: u64, take w: core.Writer[Json, in r]) -> 
     } else {
         // A number: its spelling, copied in one write.
         let start = i
-        while is_number_byte(at(s, i)) {
-            i += 1
-        }
+        i = number_end(s, start)
         emit(take w, Num(string.slice(s, start, i)))
     }
 }

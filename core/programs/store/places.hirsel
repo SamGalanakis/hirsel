@@ -191,9 +191,7 @@ pub fn stop(take d: Directory) -> List[Unloaded] waits {
     let Directory(to: take to, actor: take actor, ticker: take ticker) = take d
     let _ = channel.send(to, Shutdown)
     let ended = match task.join(take actor) { Ok(take done) => take done, Error(_) => no_unloaded() }
-    let mut ticking = take ticker
-    task.cancel(mut ticking)
-    let _ = task.join(take ticking)
+    let _ = task.cancel_join(take ticker)
     take ended
 }
 

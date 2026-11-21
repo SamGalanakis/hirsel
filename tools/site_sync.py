@@ -19,8 +19,7 @@ ALTERNATE = '  <link rel="alternate" type="text/markdown" href="/primer.md">\n'
 ANCHOR = '  <link rel="canonical" href="https://hirsel.ai/">\n'
 LLMS = """# Hirsel
 
-> Hirsel is a native systems language for coding agents: value semantics, declared
-> representation, explicit capabilities and logical byte budgets.
+> Hirsel is a native systems language for coding agents, with explicit capabilities and byte budgets.
 
 The primer is the whole language in one page; with the installed `hirsel` binary it is
 enough to write, check and test working programs.

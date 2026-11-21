@@ -24,21 +24,20 @@ write every top-level signature in full, and repeat each `mut` and `take` mode a
    Fix to the rule, not to the message's wording.
 5. Repeat from step 2 until it prints `accepted`.
 6. Run `hirsel test`. It runs every `@test` in its own process under the `[tests]`
-   limit in `hirsel.toml`, and prints `pass` or `fail` for each.
+   limit in `hirsel.toml`, and prints one row per test.
 7. Run `hirsel run --grant Stdout` (one `--grant KIND` or `--dir PATH` per
    capability parameter of `main`). A missing grant exits 103 before the program starts.
 
 ## Finding an operation
 
 Never guess a function name. `hirsel inspect --std --interface` lists every public std
-declaration with its full signature, and the core modules are in the primer. Read the
-signature's modes: an unmarked parameter is a view, `mut` is lent and `take` is moved.
+declaration with its full signature. Read the signature's modes: an unmarked parameter is a view, `mut` is lent and `take` is moved.
 
 ## Habits that avoid refusals
 
 - Give every `let` of a literal or a generic call a type: `let n: u64 = 0`.
 - Never reuse a name: no shadowing, and no local named like a function.
 - Bind or `?` every `Result`; discard one only with `let _ = e`.
-- Pass capabilities (`Stdout`, `Dir`, `Clock`) as parameters; mark a function `waits`
-  exactly when it calls a `waits` function.
+- Pass capabilities (`Stdout`, `Dir`, `Clock`) as parameters; mark a function other
+  than `main` `waits` exactly when it calls a `waits` function.
 - `hirsel primer` prints the same primer as `references/PRIMER.md`.

@@ -927,6 +927,22 @@ static void lowerX86IndexStrides(Function &F) {
   }
 }
 
+static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
+  using namespace llvm::PatternMatch;
+  // An indirect-result Hirsel call returns a status byte. Recognize its
+  // status check after instcombine and require the failure to exit the loop.
+  if (!Call.getType()->isIntegerTy(8)) return nullptr;
+  auto *Branch = dyn_cast<CondBrInst>(Call.getParent()->getTerminator());
+  auto *Check = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
+  if (!Check || !Check->isEquality() ||
+      !match(Check->getOperand(0), m_Specific(&Call)) ||
+      !match(Check->getOperand(1), m_Zero())) return nullptr;
+  unsigned Failure = Check->getPredicate() == ICmpInst::ICMP_EQ ? 1 : 0;
+  auto *Unwind = Branch->getSuccessor(Failure);
+  return !L.contains(Unwind) && L.contains(Branch->getSuccessor(1 - Failure))
+             ? Unwind : nullptr;
+}
+
 // Metering expands tiny helpers with checked slow paths before the ordinary
 // inliner prices them. Revisit direct loop calls after O3 has simplified those
 // paths, sharing one finite expansion budget across introduced helper calls.
@@ -949,7 +965,13 @@ static void inlineLoopHelpers(Module &M) {
         Copies += History[Entry].first == Target;
       return Copies >= 8;
     };
-    SmallVector<std::pair<CallBase *, int>, 16> Pending;
+    struct Candidate {
+      CallBase *Call;
+      int Entry;
+      size_t UnwindGroup;
+    };
+    SmallVector<Candidate, 16> Pending;
+    DenseMap<BasicBlock *, SmallVector<size_t, 4>> UnwindGroups;
     // Only calls on a loop's hot path: a block that runs less than once per
     // eight header visits (failure arms, growth slow paths) keeps its call,
     // whose inlined body would carry every cold path of its own.
@@ -959,24 +981,50 @@ static void inlineLoopHelpers(Module &M) {
     for (BasicBlock &BB : F) if (Loop *L = LI.getLoopFor(&BB)) {
       if (BFI.getBlockFreq(&BB).getFrequency() <
           BFI.getBlockFreq(L->getHeader()).getFrequency() / 8) continue;
-      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
-        if (C->getCalledFunction()) Pending.push_back({C, -1});
+      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I)) {
+        if (!C->getCalledFunction()) continue;
+        size_t Group = 0;
+        if (auto *Unwind = loopCallUnwind(*C, *L)) {
+          auto &Representatives = UnwindGroups[Unwind];
+          auto Same = find_if(Representatives, [&](size_t Index) {
+            auto *Other = Pending[Index].Call;
+            return Other->getCalledFunction() == C->getCalledFunction() &&
+                   equal(Other->args(), C->args());
+          });
+          if (Same == Representatives.end()) {
+            Group = Pending.size() + 1;
+            Representatives.push_back(Pending.size());
+          } else {
+            Group = *Same + 1;
+          }
+        }
+        Pending.push_back({C, -1, Group});
+      }
     }
+    DenseSet<size_t> ExpandedUnwinds;
     unsigned Budget = 2048;
     while (!Pending.empty()) {
-      auto [Call, Entry] = Pending.pop_back_val();
+      auto [Call, Entry, Group] = Pending.pop_back_val();
       Function *Target = Call->getCalledFunction();
       if (!Target || Target->isDeclaration() || Target == &F || Deep(Target, Entry) ||
           Target->hasFnAttribute(Attribute::NoInline) ||
-          Call->hasFnAttr(Attribute::NoInline) ||
-          expansionCost(*Target) > Budget) continue;
+          Call->hasFnAttr(Attribute::NoInline)) continue;
       unsigned Cost = expansionCost(*Target);
+      if (Cost > Budget) continue;
+      // A looping helper amortizes its call. Repeating the same expansion
+      // into a shared unwind join extends the cleanup state's live ranges.
+      // Calls with different operands can specialize independently.
+      if (Group && ExpandedUnwinds.contains(Group)) {
+        DominatorTree TargetDT(*Target);
+        if (!LoopInfo(TargetDT).empty()) continue;
+      }
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) {
         Budget -= Cost;
+        if (Group) ExpandedUnwinds.insert(Group);
         History.push_back({Target, Entry});
         for (CallBase *Site : Info.InlinedCallSites)
-          Pending.push_back({Site, int(History.size()) - 1});
+          Pending.push_back({Site, int(History.size()) - 1, 0});
       }
     }
   }

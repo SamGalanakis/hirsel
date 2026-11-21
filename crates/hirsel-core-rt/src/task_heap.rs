@@ -1,5 +1,4 @@
-//! Initial small blocks occupy payer-owned regions on worker-local pages.
-//! Other blocks use fixed-slot pages with one payer and one owner per page. Like mimalloc's
+//! Fixed-slot pages with one payer and one owner per page. Like mimalloc's
 //! page queues, a class keeps only pages that can supply a block. The task
 //! owns the queue even if it resumes on a different worker. As mimalloc
 //! retires a queue's last page lazily, a queue keeps at most one empty page,
@@ -23,7 +22,6 @@
 //! heap reuses the closest suitable resident dedicated extent, even when
 //! the new block has a different stride. Reusing reserved space allows a
 //! bounded margin over peak live backing for other extents in the same burst.
-mod shared;
 mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
@@ -56,7 +54,6 @@ static RETAINING_HEAPS: AtomicUsize = AtomicUsize::new(0);
 /// wait finds nothing.
 pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
     let retaining = slabs::retaining()
-        || shared::retaining()
         || RETAINING_HEAPS.load(Ordering::Relaxed) != 0
         || crate::fiber::surplus();
     if !retaining || (0..=RELEASE_DELAY_MS).contains(&timeout) {
@@ -70,7 +67,6 @@ pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
 /// host. A worker calls this after an `idle_wait` that found nothing, or
 /// before it parks without a poller.
 pub(crate) fn purge() {
-    shared::purge();
     slabs::purge();
     if RETAINING_HEAPS.load(Ordering::Relaxed) == 0 {
         return;
@@ -188,11 +184,6 @@ impl Class {
         // Small growable slots share a slab until they exceed a native page.
         (self.bin as usize) < SLAB_BINS && (!self.growable || self.stride <= page_bytes())
     }
-
-    #[inline(always)]
-    fn tracks_small(self) -> bool {
-        self.align == 8 && self.stride != 0 && self.stride <= shared::MAX_STRIDE
-    }
 }
 
 #[inline(always)]
@@ -235,16 +226,7 @@ fn dedicated_page(payload: NonNull<u8>) -> PagePointer {
         .0
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy)]
-enum PageHeader {
-    Private,
-    Shared,
-}
-
-#[repr(C)]
 pub(crate) struct Page {
-    header: PageHeader,
     heap: Arc<Heap>,
     backing: Backing,
     payer: std::cell::UnsafeCell<Payer>,
@@ -352,7 +334,6 @@ impl Page {
             (Backing::Dedicated(mapping), start)
         };
         let data = Self {
-            header: PageHeader::Private,
             heap: Arc::clone(heap),
             backing,
             payer: payer.into(),
@@ -397,7 +378,6 @@ impl Page {
         // blocks start after it.
         unsafe {
             page.as_ptr().write(Self {
-                header: PageHeader::Private,
                 heap: Arc::clone(heap),
                 backing: Backing::Slab {
                     _allocation: allocation,
@@ -497,82 +477,15 @@ pub(crate) struct Heap {
     /// `State::listed` is not empty, a nursery emptied, or detached empty
     /// slabs exceed `EMPTY_SLAB_LIMIT`.
     pending: AtomicBool,
-    small: std::cell::UnsafeCell<SmallState>,
-    state: std::cell::UnsafeCell<Option<Box<State>>>,
+    state: std::cell::UnsafeCell<State>,
 }
 
-// SAFETY: State and SmallState are reached only through Locked, which holds the flag.
+// SAFETY: State is reached only through Locked, which holds the flag.
 unsafe impl Sync for Heap {}
 
 struct Locked<'a>(&'a Heap);
 
-#[derive(Default)]
-struct SmallState {
-    live: usize,
-    private: bool,
-    regions: [Option<shared::Region>; 3],
-}
-
-// SAFETY: only the locked heap can access its assigned regions. The regions
-// can move between threads with the heap and keep their page's owner shard.
-unsafe impl Send for SmallState {}
-
-const PROMOTE_AT: usize = 2048;
-const DEMOTE_AT: usize = 1024;
-
 impl Locked<'_> {
-    #[inline(always)]
-    fn small(&mut self) -> &mut SmallState {
-        // SAFETY: this guard holds the heap lock.
-        unsafe { &mut *self.0.small.get() }
-    }
-
-    #[inline(always)]
-    fn use_shared(&mut self, class: Class) -> bool {
-        if !class.tracks_small() {
-            return false;
-        }
-        let demand = self.small();
-        let shared = !class.growable && !demand.private;
-        demand.live += class.stride;
-        demand.private |= demand.live >= PROMOTE_AT;
-        shared
-    }
-
-    #[inline(always)]
-    fn release_small(&mut self, stride: usize) {
-        let demand = self.small();
-        demand.live -= stride;
-        demand.private &= demand.live > DEMOTE_AT;
-    }
-
-    fn retire_regions(&mut self, close: bool) {
-        for current in &mut self.small().regions {
-            if let Some(region) = *current {
-                // SAFETY: the heap lock owns the region's block slots.
-                let empty = unsafe { region.is_empty() };
-                if empty || close {
-                    *current = None;
-                }
-                if empty {
-                    // SAFETY: the heap detached the empty region from its cache.
-                    unsafe { region.give_back() };
-                }
-            }
-        }
-    }
-
-    fn has_pages(&self) -> bool {
-        // SAFETY: this guard holds the heap lock.
-        unsafe { (*self.0.state.get()).is_some() }
-    }
-
-    #[inline(always)]
-    fn ensure_pages(&mut self) {
-        // SAFETY: this guard holds the heap lock.
-        unsafe { &mut *self.0.state.get() }.get_or_insert_with(State::boxed);
-    }
-
     #[inline(always)]
     fn finish_allocation(self, pointer: NonNull<u8>, class: Class) -> NonNull<u8> {
         // Sampling may take the sequencer. The slot is still private to the caller.
@@ -589,13 +502,13 @@ impl std::ops::Deref for Locked<'_> {
     type Target = State;
     fn deref(&self) -> &State {
         // SAFETY: this guard holds the heap's flag.
-        unsafe { &*self.0.state.get() }.as_deref().unwrap()
+        unsafe { &*self.0.state.get() }
     }
 }
 impl std::ops::DerefMut for Locked<'_> {
     fn deref_mut(&mut self) -> &mut State {
         // SAFETY: this guard holds the heap's flag.
-        unsafe { &mut *self.0.state.get() }.as_deref_mut().unwrap()
+        unsafe { &mut *self.0.state.get() }
     }
 }
 impl Drop for Locked<'_> {
@@ -665,13 +578,6 @@ impl Default for State {
             nurseries: HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0)),
             idle_nurseries: false,
         }
-    }
-}
-
-impl State {
-    #[cold]
-    fn boxed() -> Box<Self> {
-        Box::default()
     }
 }
 
@@ -1070,10 +976,6 @@ impl Heap {
         let Some(mut state) = heap.try_lock() else {
             return Self::allocate_locking(heap, payer, bytes, align, kind, growable);
         };
-        if state.use_shared(class) {
-            return Self::allocate_shared(heap, state, payer, class, bytes);
-        }
-        state.ensure_pages();
         // SAFETY: this heap owns its queues. The head page of a matching payer
         // and alignment with a free slot gives it out; a head it fills stays
         // linked until the class's list next moves.
@@ -1090,7 +992,7 @@ impl Heap {
                 let pointer = Self::take(page, class, bytes);
                 return state.finish_allocation(pointer, class);
             }
-            Self::allocate_slow(heap, state, payer, bytes, class)
+            Self::allocate_slow(heap, state, payer, bytes, align, kind, growable)
         }
     }
 
@@ -1104,27 +1006,9 @@ impl Heap {
         kind: u8,
         growable: bool,
     ) -> NonNull<u8> {
-        let class = Class::for_block(bytes, align, kind, growable);
-        let mut state = heap.lock();
-        if state.use_shared(class) {
-            return Self::allocate_shared(heap, state, payer, class, bytes);
-        }
-        state.ensure_pages();
+        let state = heap.lock();
         // SAFETY: the lock is held.
-        unsafe { Self::allocate_slow(heap, state, payer, bytes, class) }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn allocate_shared(
-        heap: &Arc<Self>,
-        mut state: Locked<'_>,
-        payer: Payer,
-        class: Class,
-        bytes: usize,
-    ) -> NonNull<u8> {
-        let pointer = shared::allocate(heap, &mut state, payer, class, bytes);
-        state.finish_allocation(pointer, class)
+        unsafe { Self::allocate_slow(heap, state, payer, bytes, align, kind, growable) }
     }
 
     /// Extend `page`'s empty free list, then take its head. A miss of the
@@ -1177,8 +1061,11 @@ impl Heap {
         mut state: Locked<'_>,
         payer: Payer,
         bytes: usize,
-        class: Class,
+        align: usize,
+        kind: u8,
+        growable: bool,
     ) -> NonNull<u8> {
+        let class = Class::for_block(bytes, align, kind, growable);
         let key = Key {
             payer: payer.record_pointer().addr(),
             class,
@@ -1193,8 +1080,7 @@ impl Heap {
             };
             if ready.is_none()
                 && class.stride <= NURSERY_STRIDE
-                && !class.growable
-                && !class.tracks_small()
+                && !growable
                 && let Some(pointer) = Self::nurse(heap, &mut state, payer, class, bytes)
             {
                 return state.finish_allocation(pointer, class);
@@ -1298,10 +1184,6 @@ impl Heap {
     pub(crate) fn trim(&self) {
         let mut state = self.lock();
         self.pending.store(false, Ordering::Relaxed);
-        state.retire_regions(false);
-        if !state.has_pages() {
-            return;
-        }
         let mut listed = std::mem::take(&mut state.listed);
         for page in listed.drain(..) {
             // SAFETY: listed pages are live slab pages owned by this heap;
@@ -1336,13 +1218,9 @@ impl Heap {
     /// alive and are released by the last free on whichever task owns that block.
     pub(crate) fn close(&self) {
         let mut state = self.lock();
-        state.retire_regions(true);
-        self.pending.store(false, Ordering::Relaxed);
-        if !state.has_pages() {
-            return;
-        }
         state.closed = true;
         state.listed = Vec::new();
+        self.pending.store(false, Ordering::Relaxed);
         let nurseries = std::mem::take(&mut state.nurseries)
             .into_values()
             .filter_map(|nursery| nursery.page)
@@ -1382,71 +1260,31 @@ impl Heap {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum AllocationPage {
-    Private(PagePointer),
-    Shared(shared::Region),
-}
-
-impl AllocationPage {
-    /// # Safety
-    /// A live slot pins its metadata and original payer across the borrow.
-    #[inline(always)]
-    pub(crate) unsafe fn funding<'a>(self) -> &'a Payer {
-        // SAFETY: the caller keeps the slot live for the borrow.
-        unsafe {
-            match self {
-                Self::Private(page) => Page::funding(page),
-                Self::Shared(slot) => slot.funding(),
-            }
-        }
-    }
-
-    /// # Safety
-    /// The slot is live.
-    #[inline]
-    pub(crate) unsafe fn kind(self) -> u8 {
-        // SAFETY: the caller keeps the slot live during the lookup.
-        unsafe {
-            match self {
-                Self::Private(page) => Page::kind(page),
-                Self::Shared(slot) => slot.kind(),
-            }
-        }
-    }
-}
-
 /// # Safety
 /// A live own or resource block allocated by this heap.
 #[inline]
-pub(crate) unsafe fn page_of(payload: NonNull<u8>) -> AllocationPage {
+pub(crate) unsafe fn page_of(payload: NonNull<u8>) -> PagePointer {
     let address = payload.as_ptr().addr();
     let base = address & !(SLAB - 1);
     if base == address {
-        return AllocationPage::Private(dedicated_page(payload));
+        return dedicated_page(payload);
     }
-    // SAFETY: both slab and shared slots pin their aligned page header.
-    unsafe {
-        let header = NonNull::new_unchecked(payload.as_ptr().with_addr(base).cast());
-        match header.read() {
-            PageHeader::Private => AllocationPage::Private(header.cast()),
-            PageHeader::Shared => AllocationPage::Shared(shared::Region::at(header, payload)),
-        }
-    }
+    // SAFETY: slab slots share their mapping with its aligned descriptor.
+    unsafe { NonNull::new_unchecked(payload.as_ptr().with_addr(base).cast()) }
 }
 
 /// # Safety
 /// A live block pins its page's original payer until its logical refund.
 pub(crate) unsafe fn payer<'a>(payload: NonNull<u8>) -> &'a Payer {
     // SAFETY: the page's payer remains immutable throughout this block's lifetime.
-    unsafe { page_of(payload).funding() }
+    unsafe { Page::funding(page_of(payload)) }
 }
 
 /// # Safety
 /// A live block whose kind was assigned by the allocator.
 pub(crate) unsafe fn kind(payload: NonNull<u8>) -> u8 {
     // SAFETY: exclusively owned slots pin the page metadata.
-    unsafe { page_of(payload).kind() }
+    unsafe { Page::kind(page_of(payload)) }
 }
 
 /// # Safety
@@ -1467,7 +1305,7 @@ pub(crate) unsafe fn try_grow_in_place(
     }
     // SAFETY: the unique live slot pins the header, mapping and payer.
     unsafe {
-        let page = dedicated_page(payload);
+        let page = page_of(payload);
         let header = page.as_ref();
         if !Arc::ptr_eq(heap, &header.heap) || *header.payer.get() != payer {
             return false;
@@ -1509,29 +1347,17 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
 /// The caller transfers the unique cleaned slot after its logical refund, and
 /// `page` is the owning page returned by `page_of(payload)` for that slot.
 #[inline(always)]
-pub(crate) unsafe fn release_page(page: AllocationPage, payload: NonNull<u8>) {
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::deallocated(payload.as_ptr());
-    let page = match page {
-        AllocationPage::Private(page) => page,
-        AllocationPage::Shared(slot) => {
-            // SAFETY: the caller transfers this live slot after its refund.
-            unsafe { slot.release(payload) };
-            return;
-        }
-    };
+pub(crate) unsafe fn release_page(page: PagePointer, payload: NonNull<u8>) {
     // SAFETY: slot pins this immutable heap handle through the lock and state update.
     let heap = unsafe { &page.as_ref().heap };
-    let mut state = heap.lock();
+    #[cfg(any(test, feature = "charge-observation"))]
+    crate::peak::deallocated(payload.as_ptr());
+    let state = heap.lock();
     // SAFETY: the heap lock owns the free list and page lifecycle. This slot is
     // writable and never shared after its caller publishes the refund.
     unsafe {
-        let class = Page::key(page).class;
-        if class.tracks_small() {
-            state.release_small(class.stride);
-        }
         #[cfg(feature = "memcheck")]
-        allocation_check::freed(payload, class.kind);
+        allocation_check::freed(payload, (*page.as_ref().key.get()).class.kind);
         let slots = &mut *page.as_ref().slots.get();
         // A partial page or the head keeps its queue position, and an emptied head stays
         // as the spare unless it is spread. A closed heap destroys the page at
@@ -2074,9 +1900,7 @@ mod tests {
             // SAFETY: the block is live, so its page is; this thread is the
             // heap's only user and holds no borrow of the slots.
             unsafe {
-                let AllocationPage::Private(page) = page_of(pointer) else {
-                    return None;
-                };
+                let page = page_of(pointer);
                 let slots = &*page.as_ref().slots.get();
                 (Page::key(page).class.stride != 0)
                     .then_some((slots.live == slots.limit, slots.head))
@@ -2166,7 +1990,7 @@ mod tests {
     fn mapping(payload: NonNull<u8>) -> (NonNull<u8>, usize) {
         // SAFETY: the owned buffer pins its backing until free, and the cache
         // retains the reservation during the observations below.
-        let backing = unsafe { dedicated_page(payload).as_ref().backing.dedicated() };
+        let backing = unsafe { page_of(payload).as_ref().backing.dedicated() };
         (backing.base, backing.len)
     }
 
@@ -2185,7 +2009,7 @@ mod tests {
             .iter()
             .flat_map(|context| {
                 let payer = context.payer();
-                [520, 656, 784, 912].map(|bytes| {
+                [8, 32, 40, 128].map(|bytes| {
                     block::admit_storage(payer, Some(bytes as u64)).unwrap();
                     let pointer = Heap::allocate(heap, payer, bytes, 8, block::PLAIN, false);
                     (pointer, bytes)
@@ -2395,10 +2219,6 @@ mod allocation_check {
     }
 
     pub(super) fn link_access(pointer: NonNull<u8>, readable: bool) {
-        storage_access(pointer, size_of::<usize>(), readable);
-    }
-
-    pub(super) fn storage_access(pointer: NonNull<u8>, bytes: usize, readable: bool) {
         const MAKE_MEM_NOACCESS: u64 = 0x4d43_0000;
         const MAKE_MEM_DEFINED: u64 = 0x4d43_0002;
         let request = if readable {
@@ -2406,6 +2226,6 @@ mod allocation_check {
         } else {
             MAKE_MEM_NOACCESS
         };
-        valgrind_request(0, request, [pointer.addr().get(), bytes, 0, 0]);
+        valgrind_request(0, request, [pointer.addr().get(), size_of::<usize>(), 0, 0]);
     }
 }

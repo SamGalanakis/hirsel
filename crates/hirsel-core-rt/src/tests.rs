@@ -560,145 +560,6 @@ fn reexecute_heap_test(name: &str, child_flag: &str) -> bool {
 }
 
 #[test]
-fn shared_page_uses_each_blocks_original_payer() {
-    if reexecute_heap_test(
-        "tests::shared_page_uses_each_blocks_original_payer",
-        "SHARED_PAYERS_TEST_CHILD",
-    ) {
-        return;
-    }
-    use crate::{Capacity, task_heap::page_bytes};
-    let native_page = |block: &Block| block.pointer().addr().get() / page_bytes();
-    let exact = Context::new(17);
-    let above = Context::new(18);
-    let below = Context::new(16);
-    let first = Block::new(&exact, Some(17), 24, 8).unwrap();
-    let second = Block::new(&above, Some(17), 24, 8).unwrap();
-    assert_eq!(native_page(&first), native_page(&second));
-    assert_eq!(first.payer().record_pointer(), exact.limit_record());
-    assert_eq!(second.payer().record_pointer(), above.limit_record());
-    assert_eq!(
-        Block::new(&below, Some(17), 24, 8).err(),
-        Some(Capacity {
-            requested: 17,
-            available: 16
-        })
-    );
-    assert_eq!(
-        (exact.available(), above.available(), below.available()),
-        (0, 1, 16)
-    );
-    drop(second);
-    assert_eq!((exact.available(), above.available()), (0, 18));
-    drop(first);
-    assert_eq!(exact.available(), 17);
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "memcheck")))]
-#[test]
-fn shared_pages_reuse_remote_holes_around_pinned_survivors() {
-    if reexecute_heap_test(
-        "tests::shared_pages_reuse_remote_holes_around_pinned_survivors",
-        "SHARED_CHURN_TEST_CHILD",
-    ) {
-        return;
-    }
-    use crate::task_heap::{page_bytes, purge};
-    use std::collections::HashSet;
-    use std::ptr::NonNull;
-
-    const BYTES: usize = 256;
-    const CHARGE: u64 = 23;
-    let contexts: Vec<_> = (0..128).map(|_| Context::new(CHARGE)).collect();
-    let native_page = |block: &Block| block.pointer().addr().get() / page_bytes();
-    let mut pages = HashSet::new();
-    let mut survivors = Vec::new();
-    let mut returns = Vec::new();
-    let mut charged = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
-        let block = Block::new(&context, Some(CHARGE), BYTES, 8).unwrap();
-        // SAFETY: this block has BYTES exclusive writable bytes.
-        unsafe { block.pointer().write_bytes(i as u8 + 1, BYTES) };
-        if pages.insert(native_page(&block)) {
-            survivors.push((block, i as u8 + 1));
-            drop(context);
-        } else {
-            returns.push(block.pointer().as_ptr().expose_provenance());
-            std::mem::forget(block);
-            charged.push(context);
-        }
-    }
-    assert!(pages.len() > 1);
-    let holes = returns.len();
-    let return_on_other_thread = |returns: Vec<usize>| {
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                for address in returns {
-                    let pointer =
-                        NonNull::new(std::ptr::with_exposed_provenance_mut(address)).unwrap();
-                    // SAFETY: each address transfers its block and exact charge once.
-                    drop(unsafe { Block::from_raw(pointer, CHARGE) });
-                }
-            });
-        });
-    };
-    return_on_other_thread(returns);
-    for context in &charged {
-        assert_eq!(context.available(), 0);
-        context.current.drain();
-        assert_eq!(context.available(), CHARGE);
-    }
-    purge();
-    let refill: Vec<_> = (0..holes)
-        .map(|_| {
-            let context = Context::new(CHARGE);
-            let block = Block::new(&context, Some(CHARGE), BYTES, 8).unwrap();
-            assert!(pages.contains(&native_page(&block)), "a free slot was lost");
-            // SAFETY: the shared allocator initializes the full slot before reuse.
-            assert_eq!(
-                unsafe { block.pointer().cast::<[u8; BYTES]>().read() },
-                [0; BYTES]
-            );
-            block
-        })
-        .collect();
-    let mut live = HashSet::new();
-    for (block, fill) in &survivors {
-        assert!(live.insert(block.pointer()));
-        // SAFETY: the original owner retained its initialized block throughout churn.
-        assert_eq!(
-            unsafe { block.pointer().cast::<[u8; BYTES]>().read() },
-            [*fill; BYTES]
-        );
-    }
-    for block in &refill {
-        assert!(live.insert(block.pointer()), "a slot had two live owners");
-    }
-    drop(refill);
-    return_on_other_thread(
-        survivors
-            .into_iter()
-            .map(|(block, _)| {
-                let address = block.pointer().as_ptr().expose_provenance();
-                std::mem::forget(block);
-                address
-            })
-            .collect(),
-    );
-    purge();
-    for page in pages {
-        let mut flag = 0;
-        // SAFETY: mincore looks up the old page address without reading its contents.
-        let mapped =
-            unsafe { libc::mincore((page * page_bytes()) as *mut _, page_bytes(), &mut flag) } == 0;
-        assert!(
-            !mapped || flag & 1 == 0,
-            "an empty shared page stayed resident"
-        );
-    }
-}
-
-#[test]
 fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
     // This law observes a cold mapping before measuring reuse. Run it apart
     // from other tests whose heaps can share a mapped slab range.
@@ -730,16 +591,16 @@ fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
         }
     }
 
-    // Two payers have partial nursery pages of the same class.
+    // Two payers have partial pages of the same class above 256 bytes.
     // The newest page belongs to the inner payer, even after forwarding.
-    let outer = Block::new(&context, Some(24), 640, 8).unwrap();
+    let outer = Block::new(&context, Some(24), 320, 8).unwrap();
     context.limit_enter(64).unwrap();
-    let inner = Block::new(&context, Some(24), 640, 8).unwrap();
+    let inner = Block::new(&context, Some(24), 320, 8).unwrap();
     context.limit_exit();
-    let sibling = Block::new(&context, Some(24), 640, 8).unwrap();
+    let sibling = Block::new(&context, Some(24), 320, 8).unwrap();
     assert_eq!(
         sibling.pointer().addr().get() - outer.pointer().addr().get(),
-        640
+        320
     );
     assert_eq!(context.available(), 1_000_000 - 72);
     drop((outer, inner, sibling));

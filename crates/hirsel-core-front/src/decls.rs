@@ -25,14 +25,19 @@ pub const ENCODED: u16 = PACKED | STREAMABLE;
 const FIXED_ENCODING: u16 = 512;
 /// A declared conditional codec promise (OWN-4, SEM-10).
 pub const CODEC: u16 = 1024;
+/// May move to another unit (CONC-2); every `cross` type is `send`.
+pub const CROSS: u16 = 2048;
 /// A declared bound set closed under implication (OWN-4): `integer` and `float` imply
 /// every bound all their admitted types have, and `streamable` implies `packed`.
 pub fn implied(mut b: u16) -> u16 {
     if b & INTEGER != 0 {
-        b |= PLAIN | SHAREABLE | SEND | KEY | ORDERED | ENCODED | CODEC;
+        b |= PLAIN | SHAREABLE | SEND | CROSS | KEY | ORDERED | ENCODED | CODEC;
     }
     if b & FLOAT != 0 {
-        b |= PLAIN | SHAREABLE | SEND | ENCODED | CODEC;
+        b |= PLAIN | SHAREABLE | SEND | CROSS | ENCODED | CODEC;
+    }
+    if b & CROSS != 0 {
+        b |= SEND;
     }
     if b & STREAMABLE != 0 {
         b |= PACKED;
@@ -44,6 +49,7 @@ pub fn bound_bit(name: &str) -> u16 {
         "plain" => PLAIN,
         "shareable" => SHAREABLE,
         "send" => SEND,
+        "cross" => CROSS,
         "key" => KEY,
         "integer" => INTEGER,
         "float" => FLOAT,
@@ -63,6 +69,7 @@ pub fn bound_names(b: u16) -> String {
         (PLAIN, "plain"),
         (SHAREABLE, "shareable"),
         (SEND, "send"),
+        (CROSS, "cross"),
         (KEY, "key"),
         (ORDERED, "ordered"),
         (INTEGER, "integer"),
@@ -153,6 +160,8 @@ pub enum Role {
     Rc,
     Arc,
     Latest,
+    Client,
+    Inbox,
     List,
     String,
     Text,
@@ -195,6 +204,8 @@ impl Role {
             "Rc" => Role::Rc,
             "Arc" => Role::Arc,
             "Latest" => Role::Latest,
+            "Client" => Role::Client,
+            "Inbox" => Role::Inbox,
             "List" => Role::List,
             "String" => Role::String,
             "FrozenBytes" => Role::FrozenBytes,
@@ -260,6 +271,8 @@ impl Role {
             | Role::Socket
             | Role::HostFile
             | Role::Latest
+            | Role::Client
+            | Role::Inbox
             | Role::Flow => Kind::Resource,
         }
     }
@@ -561,7 +574,7 @@ impl Program<'_> {
                                     self.refusals.push(refusal("OWN-4", self.site(at, b),
                                         "a resource, region or scoped definition cannot declare codec"));
                                 }
-                                declared |= bit;
+                                declared |= implied(bit);
                             }
                         }
                         NodeKind::Drop => drop = Some(c),
@@ -2197,6 +2210,8 @@ impl Program<'_> {
                     | Role::Socket
                     | Role::HostFile
                     | Role::Latest
+                    | Role::Client
+                    | Role::Inbox
                     | Role::Flow,
                 ) => H_RESOURCE,
                 Some(Role::View | Role::Region | Role::Dest | Role::Writer) => H_SCOPED,
@@ -2284,7 +2299,7 @@ impl Program<'_> {
             let mut out = vec![];
             let forbidden = if decl.repr != Repr::Own { SHAREABLE } else { 0 }
                 | if matches!(decl.repr, Repr::Region | Repr::Scoped) {
-                    SEND
+                    SEND | CROSS
                 } else {
                     0
                 }
@@ -2373,7 +2388,7 @@ impl Program<'_> {
                 if missing != 0 {
                     let b = bound_names(missing);
                     let mut r = refusal(
-                        if missing & SEND != 0 {
+                        if missing & (SEND | CROSS) != 0 {
                             "CONC-2"
                         } else {
                             "OWN-4"
@@ -2861,9 +2876,9 @@ fn bounds_inner<const ENCODING: bool>(
     params: &[u16],
 ) -> u16 {
     let row = t.kind(ty);
-    let all = PLAIN | SHAREABLE | SEND | KEY | ORDERED;
+    let all = PLAIN | SHAREABLE | SEND | CROSS | KEY | ORDERED;
     let plain_extra = if kind_row(decls, t, row, params) == Kind::Plain {
-        PLAIN | SHAREABLE | SEND
+        PLAIN | SHAREABLE | SEND | CROSS
     } else {
         0
     };
@@ -2884,7 +2899,7 @@ fn bounds_inner<const ENCODING: bool>(
             TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED | CODEC,
             TyKind::Never | TyKind::Unit => all | CODEC,
             TyKind::Scalar(Scalar::F32 | Scalar::F64) => {
-                PLAIN | SHAREABLE | SEND | FLOAT | ENCODED | CODEC
+                PLAIN | SHAREABLE | SEND | CROSS | FLOAT | ENCODED | CODEC
             }
             TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => {
                 all | INTEGER | ENCODED | CODEC
@@ -2892,7 +2907,7 @@ fn bounds_inner<const ENCODING: bool>(
             TyKind::Scalar(Scalar::Bool | Scalar::Char) => all | ENCODED | CODEC,
             TyKind::Scalar(_) => all | ENCODED,
             TyKind::Fn(_, _, _, callable) => match callable {
-                Callable::Plain => PLAIN | SHAREABLE | SEND,
+                Callable::Plain => PLAIN | SHAREABLE | SEND | CROSS,
                 Callable::OwnSend => SEND,
                 Callable::Own | Callable::Scoped | Callable::ScopedView => 0,
             },
@@ -2900,7 +2915,7 @@ fn bounds_inner<const ENCODING: bool>(
             TyKind::Region(_) => 0,
             TyKind::Anchored(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params),
             TyKind::Array(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params) & all,
-            TyKind::Vector(_) => PLAIN | SHAREABLE | SEND,
+            TyKind::Vector(_) => PLAIN | SHAREABLE | SEND | CROSS,
             TyKind::View(x) => bounds_inner::<ENCODING>(decls, t, *x, params) & (KEY | ORDERED),
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
@@ -2924,25 +2939,43 @@ fn bounds_inner<const ENCODING: bool>(
 
 fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) -> u16) -> u16 {
     let declared = match decl.role {
-        Some(Role::List) => meet() & (KEY | ORDERED | SHAREABLE | SEND | CODEC),
-        Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CODEC,
+        // L2 (mc-units-lang): an owner crosses as a flat copy of its content,
+        // so only a list of plain elements and a string are `cross`.
+        Some(Role::List) => {
+            let elems = meet();
+            elems & (KEY | ORDERED | SHAREABLE | SEND | CODEC)
+                | if elems & PLAIN != 0 { CROSS } else { 0 }
+        }
+        Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CROSS | CODEC,
         Some(Role::FrozenBytes) => SHAREABLE | SEND,
         Some(Role::Text) => KEY | ORDERED,
         Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => meet() & (KEY | ORDERED),
-        Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | KEY,
-        Some(Role::Args) => PLAIN | SHAREABLE | SEND,
+        Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
+        Some(Role::Args) => PLAIN | SHAREABLE | SEND | CROSS,
         Some(Role::Causes) => SEND,
-        Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | KEY,
+        Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
         Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
-        Some(Role::Sender | Role::Receiver | Role::Socket | Role::HostFile | Role::Latest) => SEND,
+        Some(
+            Role::Sender
+            | Role::Receiver
+            | Role::Socket
+            | Role::HostFile
+            | Role::Latest
+            | Role::Inbox,
+        ) => SEND,
+        Some(Role::Client) => SEND | CROSS,
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
-        Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
+        Some(Role::Capability) => PLAIN | SHAREABLE | SEND | CROSS,
         Some(_) => 0,
         None if decl.structural => meet(),
         None => {
             let mut bounds = decl.declared & !PLAIN;
+            // L2: a variant crosses only when plain, which `plain_extra` gives.
+            if matches!(decl.body, DeclBody::Variant(_)) {
+                bounds &= !CROSS;
+            }
             for &i in &decl.summary.bound_params {
                 bounds &= at(i as usize);
             }
@@ -2957,8 +2990,8 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         }
     };
     match decl.repr {
-        Repr::Region => declared & !(SEND | SHAREABLE | CODEC),
-        Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED | CODEC),
+        Repr::Region => declared & !(SEND | CROSS | SHAREABLE | CODEC),
+        Repr::Scoped => declared & !(SEND | CROSS | SHAREABLE | KEY | ORDERED | CODEC),
         // SEM-7: a resource is never compared, whatever it declares.
         Repr::Resource => declared & !(KEY | ORDERED | CODEC),
         Repr::Own => declared,

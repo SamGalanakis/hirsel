@@ -37,6 +37,52 @@ impl FunctionEmitter<'_> {
         }
         buffer
     }
+    /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
+    /// of `shift + size(ty)`: the buffer's bytes, then each owner row.
+    fn cross(&mut self, ty: TypeId, shift: u64) -> Value {
+        let (bytes, _) = self.place_layout(PlaceTy::Declared(ty));
+        let owners = hirsel_core_layout::cross::owners(
+            &self.module.types,
+            self.recipes,
+            hirsel_core_layout::TypeRef(ty.0),
+        );
+        let buffer = self.temp(Type::bytes(24 + 32 * owners.len() as u64));
+        let rows = self.offset(&buffer, 24);
+        self.store(&Type::I64, &int(bytes + shift), &buffer, 8);
+        let at = self.offset(&buffer, 8);
+        self.store(&Type::Ptr, &rows, &at, 8);
+        let at = self.offset(&buffer, 16);
+        self.store(&Type::I64, &int(owners.len() as u64), &at, 8);
+        for (i, row) in owners.iter().enumerate() {
+            for (j, &n) in row.iter().enumerate() {
+                let n = if j == 0 { n + shift } else { n };
+                let at = self.offset(&buffer, (24 + i * 32 + j * 8) as u64);
+                self.store(&Type::I64, &int(n), &at, 8);
+            }
+        }
+        buffer
+    }
+    /// A task's entry buffer: the adapter code word, then the wrapped input at
+    /// its offset.
+    fn task_input(&mut self, x: TypeId, code: &Value, value: &Value) -> (Value, u64) {
+        let (bytes, _) = self.place_layout(PlaceTy::Declared(x));
+        let offset = task_entry::input_offset(self.module, self.recipes, x);
+        let packed = self.temp(Type::bytes(bytes + offset));
+        self.store(&Type::Ptr, code, &packed, 8);
+        if bytes != 0 {
+            let data = self.offset(&packed, offset);
+            self.runtime_void(
+                "llvm.memcpy.p0.p0.i64",
+                &[
+                    ptr(data),
+                    ptr(value.clone()),
+                    word(int(bytes)),
+                    arg(Type::I1, FALSE),
+                ],
+            );
+        }
+        (packed, offset)
+    }
     pub(super) fn native_call(&mut self, name: &str, results: &[Ty], args: &[CArg]) -> Vec<Value> {
         let abi = abi::Return::on_target(self.abi.target, results);
         let args: Vec<CArg> = args
@@ -166,6 +212,12 @@ impl FunctionEmitter<'_> {
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
                 | RtOp::Spawn { .. }
+                | RtOp::SpawnUnit { .. }
+                | RtOp::ConnNew { .. }
+                | RtOp::ConnSend { .. }
+                | RtOp::ConnTrySend { .. }
+                | RtOp::ConnReceive { .. }
+                | RtOp::ConnTryReceive { .. }
                 | RtOp::Flow(_)
         ) {
             self.site_word()
@@ -253,22 +305,7 @@ impl FunctionEmitter<'_> {
                 vec![self.compare_bytes(&args[..4])]
             }
             RtOp::Spawn { x, r } => {
-                let (bytes, _) = self.place_layout(PlaceTy::Declared(x));
-                let offset = task_entry::input_offset(self.module, self.recipes, x);
-                let packed = self.temp(Type::bytes(bytes + offset));
-                self.store(&Type::Ptr, &args[2], &packed, 8);
-                if bytes != 0 {
-                    let data = self.offset(&packed, offset);
-                    self.runtime_void(
-                        "llvm.memcpy.p0.p0.i64",
-                        &[
-                            ptr(data),
-                            ptr(args[1].clone()),
-                            word(int(bytes)),
-                            arg(Type::I1, FALSE),
-                        ],
-                    );
-                }
+                let (packed, _) = self.task_input(x, &args[2], &args[1]);
                 let descriptor = self.value_descriptors(&[x, r], true);
                 self.native_call(
                     "hirsel_core_spawn",
@@ -281,6 +318,81 @@ impl FunctionEmitter<'_> {
                         ptr(Value::global(format!("core_task_entry_{}_{}", x.0, r.0))),
                         (abi::composite_argument(self.abi.target, 64), descriptor),
                         u(&at),
+                    ],
+                )
+            }
+            RtOp::SpawnUnit { x, r } => {
+                let (packed, offset) = self.task_input(x, &args[2], &args[1]);
+                let layout = self.value_descriptors(&[x, r], true);
+                let xc = self.cross(x, offset);
+                let rc = self.cross(r, 0);
+                self.native_call(
+                    "hirsel_core_spawn_unit",
+                    &[P, U, U, K],
+                    &[
+                        ptr(CONTEXT),
+                        u(&args[3]),
+                        u(&args[0]),
+                        p(&packed),
+                        ptr(Value::global(format!("core_task_entry_{}_{}", x.0, r.0))),
+                        p(&layout),
+                        p(&xc),
+                        p(&rc),
+                        u(&at),
+                    ],
+                )
+            }
+            RtOp::ConnNew { item } => {
+                let cross = self.cross(item, 0);
+                let logical = hirsel_core_layout::field_size(
+                    &self.module.types,
+                    self.recipes,
+                    &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(item.0)),
+                )
+                .2;
+                self.native_call(
+                    "hirsel_core_conn_new",
+                    &[P, P, U, K],
+                    &[
+                        ptr(CONTEXT),
+                        u(&args[0]),
+                        u(&args[1]),
+                        p(&cross),
+                        word(int(logical)),
+                        u(&at),
+                    ],
+                )
+            }
+            RtOp::ConnClient => self.native_call("hirsel_core_conn_client", &[P], &[p(&args[0])]),
+            RtOp::ConnSend { item } | RtOp::ConnTrySend { item } => {
+                let cross = self.cross(item, 0);
+                let wait = u64::from(matches!(op, RtOp::ConnSend { .. }));
+                self.native_call(
+                    "hirsel_core_conn_send",
+                    &[K, K],
+                    &[
+                        ptr(CONTEXT),
+                        p(&args[0]),
+                        p(&args[1]),
+                        p(&cross),
+                        u(&at),
+                        zeroext(Type::I8, int(wait)),
+                    ],
+                )
+            }
+            RtOp::ConnReceive { item } | RtOp::ConnTryReceive { item } => {
+                let cross = self.cross(item, 0);
+                let wait = u64::from(matches!(op, RtOp::ConnReceive { .. }));
+                self.native_call(
+                    "hirsel_core_conn_receive",
+                    &[K, U, U, K],
+                    &[
+                        ptr(CONTEXT),
+                        p(&args[0]),
+                        p(&args[1]),
+                        p(&cross),
+                        u(&at),
+                        zeroext(Type::I8, int(wait)),
                     ],
                 )
             }

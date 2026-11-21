@@ -398,3 +398,13 @@ core@1/host/accept
 # DECISIONS.md 2026-11-17: W3d's loopback wire client and fixture listeners.
 core@1/host/connect
 core@1/host/listen
+# mc-units-lang, units and connections in the language (CONC-15, CONC-17).
+core@1/core/Client
+core@1/core/Inbox
+core@1/conn/new
+core@1/conn/client
+core@1/conn/send
+core@1/conn/try_send
+core@1/conn/receive
+core@1/conn/try_receive
+core@1/task/spawn_unit

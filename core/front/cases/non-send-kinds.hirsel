@@ -1,7 +1,7 @@
 // expect: refuse OWN-4 at 6:20
 // expect: refuse OWN-4 at 7:13
-// expect: compared OWN-4 at 6:20 | send | region type without shareable + send
-// expect: compared OWN-4 at 7:13 | send | scoped type without shareable + send + key + ordered
+// expect: compared OWN-4 at 6:20 | send | region type without shareable + send + cross
+// expect: compared OWN-4 at 7:13 | send | scoped type without shareable + send + cross + key + ordered
 // OWN-4/CONC-2: region and scoped values cannot promise send, even with plain fields.
 @compact(u32) type Stable: send { n: u64 }
 scoped type Scoped: send { n: u64 }

@@ -833,6 +833,25 @@ impl Substitution<'_> {
                 x: self.ty(x),
                 r: self.ty(r),
             },
+            RtOp::SpawnUnit { x, r } => RtOp::SpawnUnit {
+                x: self.ty(x),
+                r: self.ty(r),
+            },
+            RtOp::ConnNew { item } => RtOp::ConnNew {
+                item: self.ty(item),
+            },
+            RtOp::ConnSend { item } => RtOp::ConnSend {
+                item: self.ty(item),
+            },
+            RtOp::ConnTrySend { item } => RtOp::ConnTrySend {
+                item: self.ty(item),
+            },
+            RtOp::ConnReceive { item } => RtOp::ConnReceive {
+                item: self.ty(item),
+            },
+            RtOp::ConnTryReceive { item } => RtOp::ConnTryReceive {
+                item: self.ty(item),
+            },
             RtOp::Join { r } => RtOp::Join { r: self.ty(r) },
             RtOp::ChannelNew { item } => RtOp::ChannelNew {
                 item: self.ty(item),

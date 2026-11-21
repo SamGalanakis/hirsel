@@ -10,6 +10,7 @@
 //! Sequence storage is cleaned by its carrier; list and map operations are the
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
+mod conn;
 mod simd;
 
 use crate::*;
@@ -433,6 +434,11 @@ impl Limit {
     fn subtract(&self, n: u64) {
         self.0.state.lock().unwrap().used -= n;
     }
+
+    /// Charge what a crossing brings in, already checked against the cap.
+    fn add(&self, n: u64) {
+        self.0.state.lock().unwrap().used += n;
+    }
 }
 
 impl Drop for LimitRecord {
@@ -565,6 +571,7 @@ struct Machine<'m> {
     regions: Vec<Vec<usize>>,
     children: Vec<Child>,
     chans: Vec<Chan>,
+    conns: Vec<Conn>,
     latests: Vec<Latest>,
     /// Each live delivered `Causes`, by its head cell: the charged cells it owns.
     causes: HashMap<u64, Vec<(Limit, u64)>>,
@@ -623,6 +630,7 @@ struct Footprint {
 // blocked task newest first, and a poll queue that runs only when nothing else
 // is ready. So the event order is the native order by construction.
 
+use conn::{CONN_BASE, Conn};
 use event::*;
 /// The CONC-10 event kinds: the one table native and the evaluator share.
 pub use hirsel_core_layout::event;
@@ -682,6 +690,8 @@ enum Condition {
     Join(usize),
     Send(usize),
     Receive(usize),
+    ConnSend(usize),
+    ConnReceive(usize),
 }
 /// A task wait or a provider deadline.
 #[derive(Clone, Copy, Debug)]
@@ -1472,6 +1482,7 @@ impl<'m> Machine<'m> {
             regions: Vec::new(),
             children: Vec::new(),
             chans: Vec::new(),
+            conns: Vec::new(),
             latests: Vec::new(),
             causes: HashMap::new(),
             arrays: Vec::new(),
@@ -1533,6 +1544,7 @@ impl<'m> Machine<'m> {
             regions: Vec::new(),
             children: Vec::new(),
             chans: Vec::new(),
+            conns: Vec::new(),
             latests: Vec::new(),
             causes: HashMap::new(),
             arrays: Vec::new(),
@@ -3033,6 +3045,16 @@ impl Machine<'_> {
                 self.chan_freed(i);
                 false
             }
+            FieldTy::Handle(Handle::Client) => {
+                self.client_drop(self.load(at, 8));
+                false
+            }
+            FieldTy::Handle(Handle::Inbox) => {
+                t.shield += 1;
+                self.inbox_drop(self.load(at, 8));
+                t.shield -= 1;
+                false
+            }
             FieldTy::Handle(Handle::Latest) => {
                 let i = (self.load(at, 8) - LATEST_BASE) as usize;
                 self.latests[i].handles -= 1;
@@ -3316,20 +3338,43 @@ impl Machine<'_> {
                 }
                 vec![u64::from(caught)]
             }
-            RtOp::Spawn { x, r } => {
+            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } => {
                 self.deny_describe_capability();
+                let unit = matches!(op, RtOp::SpawnUnit { .. });
                 let x = TypeRef(x.0);
                 let r = TypeRef(r.0);
                 let n = a[0];
                 let charge = charge::task(self.logical(r), n).unwrap_or(u64::MAX);
                 if let Err(room) = self.admit(cur, charge) {
-                    return Ok(vec![0, room]); // x stays the caller's
+                    // x stays the caller's
+                    return Ok(if unit {
+                        vec![0, charge, room]
+                    } else {
+                        vec![0, room]
+                    });
+                }
+                // CONC-15: then x's movable charge against n.
+                let owners = if unit {
+                    self.cross_owners(x)
+                } else {
+                    Vec::new()
+                };
+                let moved = self.cross_charge(a[1], &owners);
+                if unit && moved > n {
+                    self.refund(cur.clone(), charge);
+                    return Ok(vec![0, moved, n]);
                 }
                 // The child's limit serves the child, the next scheduler record.
                 let lim = Limit::new(n, Some(cur.clone()), false, self.sched.tasks.len());
                 let xb = self.block(self.held(x), None, 0, None);
-                let bytes = self.get(a[1], self.held(x) as usize).to_vec();
-                self.put(xb, &bytes);
+                if unit {
+                    let item = self.cross_take(a[1], x, &owners);
+                    lim.add(moved);
+                    self.cross_put(xb, &item, &owners, &lim);
+                } else {
+                    let bytes = self.get(a[1], self.held(x) as usize).to_vec();
+                    self.put(xb, &bytes);
+                }
                 let rb = self.block(self.held(r), None, 0, None);
                 // The child's primary cell is part of the spawn's charge to `cur`.
                 let inherited = t
@@ -3394,7 +3439,11 @@ impl Machine<'_> {
                 self.links.push(None);
                 self.sched.ready.push_back(i + 1);
                 self.event(SPAWN, id, n);
-                vec![TASK_BASE + i as u64, 0]
+                if unit {
+                    vec![TASK_BASE + i as u64, 0, 0]
+                } else {
+                    vec![TASK_BASE + i as u64, 0]
+                }
             }
             RtOp::Join { r } => {
                 let i = self.child(a[0]);
@@ -3630,6 +3679,17 @@ impl Machine<'_> {
                         vec![s, s + 1, 0]
                     }
                 }
+            }
+            RtOp::ConnNew { item } => self.conn_new(&cur.clone(), item, a[0], a[1])?,
+            RtOp::ConnClient => self.conn_client(a[0]),
+            RtOp::ConnSend { .. } | RtOp::ConnTrySend { .. } => {
+                let wait = matches!(op, RtOp::ConnSend { .. });
+                self.conn_send(t, wait, a[0], a[1])?
+            }
+            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
+                let wait = matches!(op, RtOp::ConnReceive { .. });
+                let cur = cur.clone();
+                self.conn_receive(t, &cur, wait, a[0], a[1])?
             }
             RtOp::ChannelSender => {
                 let c = &mut self.chans[((a[0] - CHAN_BASE) / 2) as usize];

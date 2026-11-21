@@ -17,6 +17,7 @@ hirsel_guard::install!();
 
 pub mod charge;
 mod continuation;
+pub mod cross;
 pub mod event;
 pub mod flow;
 pub mod isa;

@@ -1389,6 +1389,8 @@ fn measure<'r>(
             | Handle::Socket
             | Handle::HostFile
             | Handle::Latest
+            | Handle::Client
+            | Handle::Inbox
             | Handle::Flow,
         ) => (POINTER, POINTER, 8),
         FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
@@ -1414,6 +1416,8 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
             | Handle::Sender
             | Handle::Receiver
             | Handle::Latest
+            | Handle::Client
+            | Handle::Inbox
             | Handle::Socket
             | Handle::HostFile
             | Handle::Flow,
@@ -1577,6 +1581,8 @@ fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool
             | Handle::Sender
             | Handle::Receiver
             | Handle::Latest
+            | Handle::Client
+            | Handle::Inbox
             | Handle::Causes
             | Handle::Socket
             | Handle::HostFile

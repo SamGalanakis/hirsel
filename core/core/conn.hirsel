@@ -1,0 +1,12 @@
+// Module `conn` (CONC-17): connections between units.
+pub fn new[T: cross](cap: u64, bytes b: u64) -> Result[(Client[T], Inbox[T]), Capacity]
+
+pub fn client[T: cross](c: Client[T]) -> Client[T]
+
+pub fn send[T: cross](c: Client[T], take x: T) -> Result[(), Closed[T]] waits
+
+pub fn try_send[T: cross](c: Client[T], take x: T) -> Result[(), SendError[T]]
+
+pub fn receive[T: cross](i: Inbox[T]) -> Result[T, InboxError] waits
+
+pub fn try_receive[T: cross](i: Inbox[T]) -> Result[T, InboxPoll]

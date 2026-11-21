@@ -61,6 +61,8 @@ tags!(Handle {
     6 => HostFile,
     8 => Socket,
     9 => Flow,
+    10 => Client,
+    11 => Inbox,
 });
 
 tags!(Repr {
@@ -348,6 +350,13 @@ tags!(RtOp {
     37 => Sha1Blocks,
     38 => Xxh3Short,
     39 => Xxh3Stripes,
+    40 => ConnNew { item },
+    41 => ConnClient,
+    42 => ConnSend { item },
+    43 => ConnTrySend { item },
+    44 => ConnReceive { item },
+    45 => ConnTryReceive { item },
+    46 => SpawnUnit { x, r },
 });
 
 tags!(HostOp {

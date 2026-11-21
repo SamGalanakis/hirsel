@@ -3281,7 +3281,10 @@ pub(crate) fn attach_model(model: Arc<dyn ModelClock>) {
         CURRENT.get()
     };
     if task.is_null() {
-        *alone_waiter().model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model);
+        *alone_waiter()
+            .model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(model);
     } else {
         // SAFETY: the provider callback's task pins its run on this worker.
         unsafe {
@@ -3489,6 +3492,7 @@ pub(crate) unsafe fn park_unit_alone() -> bool {
             return false;
         }
         if run.model.is_some()
+            || run.pool.is_some()
             || !run.net.is_null()
             || !run.head.is_null()
             || !run.deferred.is_null()

@@ -1,0 +1,265 @@
+// Units and connections (CONC-15, CONC-17). Charges come from the spec: a
+// connection admits 64 + cap × size(T) + b; an item is charged to b at its
+// content, round8(len × size(elem)) per buffer; a unit admits 256 + size(R) + 32 + n
+// from its spawner, then x's content against n. Loops repeat a law under a bound
+// with no slack, so a refund that never comes fails a later iteration.
+// test-env: HIRSEL_UNTIED=4
+fn owned(s: String) -> String {
+    result.unwrap(string.from(s))
+}
+
+type Ask: cross {
+    n: u64,
+    back: Client[u64]
+}
+
+// An item's buffer crosses by content, and a client inside an item still reaches
+// its connection: the receiver answers through the client it was sent.
+// expect: run items_cross_with_their_clients() = true
+fn items_cross_with_their_clients() -> bool waits {
+    let (words, words_in): (Client[String], Inbox[String]) = result.unwrap(conn.new(2, bytes 64))
+    let (asks, asks_in): (Client[Ask], Inbox[Ask]) = result.unwrap(conn.new(1, bytes 0))
+    let (answers, answers_in): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(words, owned("hello")))
+    result.unwrap(conn.send(words, owned("units")))
+    result.unwrap(conn.send(asks, Ask(n: 41, back: conn.client(answers))))
+    let a = result.unwrap(conn.receive(words_in))
+    let b = result.unwrap(conn.receive(words_in))
+    let Ask(n: n, back: back) = result.unwrap(conn.receive(asks_in))
+    result.unwrap(conn.send(back, n + 1))
+    a == "hello" && b == "units" && result.unwrap(conn.receive(answers_in)) == 42
+}
+
+// conn.new[u64](2, bytes 8) asks 64 + 16 + 8 = 88: refused at 87 with exactly
+// that, and made at 88 with nothing left. (The refund at the last release is
+// taken at a later take position, CONC-16, so no law here relies on its moment.)
+// expect: run new_charges_header_slots_and_room() = true
+fn new_charges_header_slots_and_room() -> bool {
+    let refused = bound bytes 87 {
+        let r: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(2, bytes 8)
+        match r {
+            Error(c) => c.requested == 88 && c.available == 87,
+            Ok(_) => false,
+        }
+    }
+    let made = bound bytes 88 {
+        let pair: (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 8))
+        match arc.new(0u64) {
+            Error((c, _)) => c.requested == 16 && c.available == 0,
+            Ok(_) => false,
+        }
+    }
+    match (refused, made) {
+        (Ok(a), Ok(b)) => a && b,
+        _ => false,
+    }
+}
+
+// A connection with no slots is a program error.
+// expect: run zero_slots() = fail Bounds
+fn zero_slots() -> bool {
+    let r: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(0, bytes 64)
+    true
+}
+
+// "abcdefghi" is charged round8(9) = 16 against a room of 8: no send can ever
+// take it, so the send fails with Bounds.
+// expect: run item_beyond_room() = fail Bounds
+fn item_beyond_room() -> bool waits {
+    let (c, i): (Client[String], Inbox[String]) = result.unwrap(conn.new(1, bytes 8))
+    let _ = conn.send(c, owned("abcdefghi"))
+    true
+}
+
+// One slot: the second try_send is Full and hands its item back; after a
+// receive frees the slot the next one is accepted, in order.
+// expect: run try_send_full_hands_back() = true
+fn try_send_full_hands_back() -> bool {
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let first = match conn.try_send(c, 1) {
+        Ok(()) => true,
+        _ => false,
+    }
+    let full = match conn.try_send(c, 2) {
+        Error(Full(x)) => x == 2,
+        _ => false,
+    }
+    let one = result.unwrap(conn.try_receive(i))
+    let third = match conn.try_send(c, 3) {
+        Ok(()) => true,
+        _ => false,
+    }
+    let empty_after = match conn.try_receive(i) {
+        Ok(x) => x == 3,
+        _ => false,
+    }
+    let empty = match conn.try_receive(i) {
+        Error(Empty) => true,
+        _ => false,
+    }
+    first && full && one == 1 && third && empty_after && empty
+}
+
+// A dropped inbox closes the connection: a send hands its item back. A
+// receive drains what was accepted, then sees Closed once no client is left.
+// expect: run closed_both_ways() = true
+fn closed_both_ways() -> bool waits {
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    {
+        let gone = take i
+    }
+    let sealed = match conn.send(c, 7) {
+        Error(Closed(x)) => x == 7,
+        _ => false,
+    }
+    let (d, j): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(d, 5))
+    {
+        let gone = take d
+    }
+    let last = result.unwrap(conn.receive(j))
+    let ended = match conn.receive(j) {
+        Error(Closed) => true,
+        _ => false,
+    }
+    sealed && last == 5 && ended
+}
+
+// A receive whose limit cannot admit the front item's 16 bytes answers
+// Capacity with the figures and leaves the item queued for the next receive.
+// expect: run receive_refused_keeps_item() = true
+fn receive_refused_keeps_item() -> bool waits {
+    let (c, i): (Client[String], Inbox[String]) = result.unwrap(conn.new(1, bytes 64))
+    result.unwrap(conn.send(c, owned("abcdefghijkl")))
+    let refused = bound bytes 8 {
+        match conn.receive(i) {
+            Error(Capacity(k)) => k.requested == 16 && k.available == 8,
+            _ => false,
+        }
+    }
+    let kept = result.unwrap(conn.receive(i))
+    match refused {
+        Ok(r) => r && kept == "abcdefghijkl",
+        _ => false,
+    }
+}
+
+type Blocked: send {
+    c: Client[u64],
+    ready: Sender[()]
+}
+
+// Tells the owner it runs, then waits on a full connection: the tasks of a unit
+// run one at a time, so the owner's next turn finds it parked in the send.
+fn blocked_send(take b: Blocked) waits {
+    let Blocked(c: c, ready: ready) = take b
+    result.unwrap(channel.send(ready, ()))
+    let _ = conn.send(c, 2)
+}
+
+// A send waiting on a full connection is a cancellation point: the cancelled
+// task ends Cancelled and its item never arrives.
+// expect: run cancel_waiting_send(tasks) = true
+fn cancel_waiting_send(tasks: Tasks) -> bool waits {
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let (ready, started): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    result.unwrap(conn.send(c, 1))
+    let b = Blocked(c: conn.client(c), ready: take ready)
+    let mut t = result.unwrap(task.spawn(tasks, bytes 65536, take b, blocked_send))
+    result.unwrap(channel.receive(started))
+    task.cancel(mut t)
+    let cancelled = match task.join(take t) {
+        Error(Cancelled(_)) => true,
+        _ => false,
+    }
+    let one = result.unwrap(conn.receive(i))
+    let none = match conn.try_receive(i) {
+        Error(Empty) => true,
+        _ => false,
+    }
+    cancelled && one == 1 && none
+}
+
+type Waiting: send {
+    i: Inbox[u64],
+    ready: Sender[()]
+}
+
+fn blocked_receive(take w: Waiting) waits {
+    let Waiting(i: i, ready: ready) = take w
+    result.unwrap(channel.send(ready, ()))
+    let _ = conn.receive(i)
+}
+
+// A receive waiting on an empty inbox is a cancellation point; the cancelled
+// task's cleanup drops the inbox, so the connection is closed after the join.
+// expect: run cancel_waiting_receive(tasks) = true
+fn cancel_waiting_receive(tasks: Tasks) -> bool waits {
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let (ready, started): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let w = Waiting(i: take i, ready: take ready)
+    let mut t = result.unwrap(task.spawn(tasks, bytes 65536, take w, blocked_receive))
+    result.unwrap(channel.receive(started))
+    task.cancel(mut t)
+    let cancelled = match task.join(take t) {
+        Error(Cancelled(_)) => true,
+        _ => false,
+    }
+    let closed = match conn.send(c, 9) {
+        Error(Closed(x)) => x == 9,
+        _ => false,
+    }
+    cancelled && closed
+}
+
+type Job: cross {
+    word: String,
+    back: Client[String]
+}
+
+fn echo(take j: Job) -> u64 waits {
+    let Job(word: word, back: back) = take j
+    let n = string.byte_len(word)
+    result.unwrap(conn.send(back, take word))
+    n
+}
+
+// A helper unit gets its entry by content, answers through the client it was
+// given, and its result comes back at the join.
+// expect: run helper_echoes(tasks) = true
+fn helper_echoes(tasks: Tasks) -> bool waits {
+    let (back, answers): (Client[String], Inbox[String]) = result.unwrap(conn.new(1, bytes 64))
+    let mut ok = true
+    for _ in 0u64 .. 8 {
+        let j = Job(word: owned("ping"), back: conn.client(back))
+        let t = result.unwrap(task.spawn_unit(tasks, bytes 4096, take j, echo))
+        let word = result.unwrap(conn.receive(answers))
+        ok = ok && word == "ping" && result.unwrap(task.join(take t)) == 4
+    }
+    ok
+}
+
+fn length(take s: String) -> u64 {
+    string.byte_len(s)
+}
+
+// The task charge is admitted first: 256 + size(u64) + 32 + 16 = 312 against 311.
+// Then x's content, round8(17) = 24, against n = 16. Each refusal hands x back.
+// expect: run helper_refusals(tasks) = true
+fn helper_refusals(tasks: Tasks) -> bool {
+    // A literal's bytes are not the bound's, so all 311 are available.
+    let first = bound bytes 311 {
+        match task.spawn_unit(tasks, bytes 16, "abcdefghijklmnopq", length) {
+            Error((c, take x)) => c.requested == 312 && c.available == 311 && x == "abcdefghijklmnopq",
+            Ok(_) => false,
+        }
+    }
+    let second = match task.spawn_unit(tasks, bytes 16, owned("abcdefghijklmnopq"), length) {
+        Error((c, take x)) => c.requested == 24 && c.available == 16 && x == "abcdefghijklmnopq",
+        Ok(_) => false,
+    }
+    match first {
+        Ok(a) => a && second,
+        _ => false,
+    }
+}

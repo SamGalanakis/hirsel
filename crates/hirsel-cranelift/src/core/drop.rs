@@ -70,7 +70,7 @@ impl Glues {
                         roots.insert(ty.index());
                     }
                     Inst::Call { call } => match body.calls[call.index()].callee {
-                        Callee::Runtime(RtOp::Spawn { x, r }) => {
+                        Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => {
                             descriptors.extend([x.index(), r.index()]);
                             values.insert(r.index());
                             needed.extend([x.index(), r.index()]);
@@ -918,6 +918,21 @@ impl Glue<'_, '_, '_> {
             FieldTy::Handle(hirsel_core_layout::Handle::Latest) => {
                 let handle = self.load(at, 0);
                 self.call("hirsel_core_latest_drop", &[P, P], &[], &[self.ctx, handle])?;
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Client) => {
+                let handle = self.load(at, 0);
+                self.call("hirsel_core_client_drop", &[P, P], &[], &[self.ctx, handle])?;
+            }
+            // CONC-17: the drop seals and waits shielded in place, so it
+            // cannot fail.
+            FieldTy::Handle(hirsel_core_layout::Handle::Inbox) => {
+                let handle = self.load(at, 0);
+                self.call(
+                    "hirsel_core_inbox_drop",
+                    &[P, P],
+                    &[Ty::Scalar(Scalar::U8)],
+                    &[self.ctx, handle],
+                )?;
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Receiver) => {
                 let handle = self.load(at, 0);

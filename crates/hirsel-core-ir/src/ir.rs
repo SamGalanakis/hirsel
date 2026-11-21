@@ -914,6 +914,36 @@ pub enum RtOp {
         item: TypeId,
     },
     LatestHandle,
+    /// `conn.new` (CONC-17): `(cap, b) -> (client, inbox, available)`; a null
+    /// client is `Capacity`, and `cap` 0 fails with `Bounds`.
+    ConnNew {
+        item: TypeId,
+    },
+    /// `conn.client`: one more client of the same connection.
+    ConnClient,
+    /// `conn.send`: 0 accepted, 1 closed (the item stays in its place).
+    ConnSend {
+        item: TypeId,
+    },
+    /// `conn.try_send`: 0 accepted, 1 closed, 2 full (the item stays in its place).
+    ConnTrySend {
+        item: TypeId,
+    },
+    /// `conn.receive`: `(outcome, requested, available)`, outcome 0 an item,
+    /// 1 closed, 2 `Capacity` (the item stays queued).
+    ConnReceive {
+        item: TypeId,
+    },
+    /// `conn.try_receive`: as `ConnReceive`, and outcome 3 empty.
+    ConnTryReceive {
+        item: TypeId,
+    },
+    /// `task.spawn_unit` (CONC-15): `Spawn`'s operands, and
+    /// `(task, requested, available)`; a null task is `Capacity`.
+    SpawnUnit {
+        x: TypeId,
+        r: TypeId,
+    },
     /// Installs a node and returns the old root's node, which the caller releases.
     LatestPublish,
     /// The root's node, which the caller shares before any other event.
@@ -1235,6 +1265,17 @@ impl RtOp {
             RtOp::Receive { item } => (vec![V(p), out(item)], vec![bool_]),
             RtOp::TryReceive { item } => (vec![V(p), out(item)], vec![u8_]),
             RtOp::LatestNew { .. } => (vec![V(p)], vec![p, u64_]),
+            RtOp::ConnNew { .. } => (vec![V(u64_), V(u64_)], vec![p, p, u64_]),
+            RtOp::ConnClient => (vec![V(p)], vec![p]),
+            RtOp::ConnSend { item } | RtOp::ConnTrySend { item } => {
+                (vec![V(p), take(item)], vec![u8_])
+            }
+            RtOp::ConnReceive { item } | RtOp::ConnTryReceive { item } => {
+                (vec![V(p), out(item)], vec![u8_, u64_, u64_])
+            }
+            RtOp::SpawnUnit { x, .. } => {
+                (vec![V(u64_), take(x), V(p), V(u64_)], vec![p, u64_, u64_])
+            }
             RtOp::LatestHandle | RtOp::LatestRead => (vec![V(p)], vec![p]),
             RtOp::LatestPublish => (vec![V(p), V(p)], vec![]),
             RtOp::DestId => (vec![], vec![u64_]),
@@ -1408,6 +1449,11 @@ impl RtOp {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::ConnNew { .. }
+                | RtOp::ConnSend { .. }
+                | RtOp::ConnTrySend { .. }
+                | RtOp::ConnReceive { .. }
+                | RtOp::SpawnUnit { .. }
                 | RtOp::IsolateCatch
                 | RtOp::Flow(_)
         ) || matches!(self, RtOp::Host(_))
@@ -1415,9 +1461,14 @@ impl RtOp {
 
     pub fn types(self) -> Vec<TypeId> {
         match self {
-            RtOp::Spawn { x, r } => vec![x, r],
+            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } => vec![x, r],
             RtOp::Join { r } => vec![r],
-            RtOp::ChannelNew { item }
+            RtOp::ConnNew { item }
+            | RtOp::ConnSend { item }
+            | RtOp::ConnTrySend { item }
+            | RtOp::ConnReceive { item }
+            | RtOp::ConnTryReceive { item }
+            | RtOp::ChannelNew { item }
             | RtOp::Send { item }
             | RtOp::TrySend { item }
             | RtOp::Receive { item }
@@ -1427,6 +1478,7 @@ impl RtOp {
             RtOp::Cancel
             | RtOp::CheckCancel
             | RtOp::ChannelSender
+            | RtOp::ConnClient
             | RtOp::LatestHandle
             | RtOp::LatestPublish
             | RtOp::LatestRead

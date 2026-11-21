@@ -1,0 +1,31 @@
+// CONC-2, CONC-15, CONC-17: an Inbox is send but not cross, so a cross record may not hold
+// one; a Client of a cross item is cross. A unit's entry must be cross (CONC-15: Arc is not
+// cross), and a connection of a non-cross item cannot be named (Client[T: cross]).
+type Hello: cross {
+    back: Inbox[u64]
+}
+
+type Reply: cross {
+    back: Client[u64],
+    n: u64
+}
+
+fn serve(take a: Arc[u64]) -> u64 {
+    1
+}
+
+fn start(tasks: Tasks, take a: Arc[u64]) waits {
+    let _ = task.spawn_unit(tasks, bytes 64, take a, serve)
+}
+
+fn open() {
+    let r: Result[(Client[Arc[u64]], Inbox[Arc[u64]]), Capacity] = conn.new(1, bytes 0)
+}
+// expect: refuse CONC-2 at 5:5
+// expect: refuse CONC-15 at 18:46
+// expect: compared CONC-2 at 5:5 | core@1/core/Inbox[u64] | cross
+// expect: compared CONC-15 at 18:46 | core@1/core/Arc[u64] | cross
+// expect: refuse LANG-12 at 22:27
+// expect: refuse LANG-12 at 22:44
+// expect: compared LANG-12 at 22:27 | core@1/core/Arc[u64] | cross
+// expect: compared LANG-12 at 22:44 | core@1/core/Arc[u64] | cross

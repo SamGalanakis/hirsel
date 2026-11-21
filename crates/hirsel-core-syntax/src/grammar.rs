@@ -22,6 +22,7 @@ pub const BOUNDS: &[Symbol] = &[
     sym::PLAIN,
     sym::SHAREABLE,
     sym::SEND,
+    sym::CROSS,
     sym::KEY,
     sym::ORDERED,
     sym::INTEGER,

@@ -1242,12 +1242,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
             if missing != 0 {
                 let (a, b) = (self.shown(t), crate::decls::bound_names(missing));
-                let transfer = p.fns[f].path.package_is("core", "1")
-                    && matches!(p.fns[f].path.0.modules.as_slice(), [module] if module == "task" || module == "channel");
-                let rule = if transfer && missing & crate::decls::SEND != 0 {
-                    "CONC-2"
-                } else {
-                    "LANG-12"
+                let path = &p.fns[f].path;
+                let module = match path.0.modules.as_slice() {
+                    [module] if path.package_is("core", "1") => module.as_str(),
+                    _ => "",
+                };
+                let transfer = crate::decls::SEND | crate::decls::CROSS;
+                let rule = match module {
+                    // A unit's entry and result (CONC-15).
+                    "task" if path.0.name == "spawn_unit" && missing & transfer != 0 => "CONC-15",
+                    "task" | "channel" | "conn" if missing & transfer != 0 => "CONC-2",
+                    _ => "LANG-12",
                 };
                 let message = format!("`{a}` is not {b}");
                 self.refuse_compared(rule, n, a, b, message);

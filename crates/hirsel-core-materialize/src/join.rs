@@ -98,13 +98,18 @@ impl Remap {
             match &mut call.callee {
                 Callee::Direct(f) => *f = self.functions[f.index()],
                 Callee::Runtime(op) => match op {
-                    RtOp::Spawn { x, r } => {
+                    RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } => {
                         *x = self.types[x.index()];
                         *r = self.types[r.index()];
                     }
                     RtOp::Join { r } => *r = self.types[r.index()],
                     RtOp::LaunchTarget { view } => *view = self.types[view.index()],
                     RtOp::ChannelNew { item }
+                    | RtOp::ConnNew { item }
+                    | RtOp::ConnSend { item }
+                    | RtOp::ConnTrySend { item }
+                    | RtOp::ConnReceive { item }
+                    | RtOp::ConnTryReceive { item }
                     | RtOp::Send { item }
                     | RtOp::TrySend { item }
                     | RtOp::Receive { item }

@@ -244,6 +244,10 @@ pub enum Handle {
     Sender,
     Receiver,
     Latest,
+    /// A connection's client (CONC-17): cross, cloned by `conn.client`.
+    Client,
+    /// A connection's inbox (CONC-17): dropping it seals the connection.
+    Inbox,
     /// A capability (`Dir`, `Tasks`, ...).
     Capability,
     /// A delivered cause chain (`Causes`, CONC-6): cleaning it refunds its used cells.

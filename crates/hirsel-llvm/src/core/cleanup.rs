@@ -146,7 +146,7 @@ pub(super) fn drop_glue(
                 Inst::Drop { ty, .. } => pending.push((ty.index(), false)),
                 Inst::Release { ty, .. } => pending.push((ty.index(), true)),
                 Inst::Call { call } => match body.calls[call.index()].callee {
-                    Callee::Runtime(RtOp::Spawn { x, r }) => {
+                    Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => {
                         values.insert(r.index());
                         pending.push((x.index(), false));
                         pending.push((r.index(), false));
@@ -448,6 +448,22 @@ impl FunctionEmitter<'_> {
             FieldTy::Handle(hirsel_core_layout::Handle::Latest) => {
                 let handle = self.load(&Type::Ptr, p, 1);
                 self.runtime_void("hirsel_core_latest_drop", &[ptr(CONTEXT), ptr(handle)]);
+                None
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Client) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                self.runtime_void("hirsel_core_client_drop", &[ptr(CONTEXT), ptr(handle)]);
+                None
+            }
+            // CONC-17: the drop seals and waits shielded in place, so it
+            // cannot fail.
+            FieldTy::Handle(hirsel_core_layout::Handle::Inbox) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                self.native_call(
+                    "hirsel_core_inbox_drop",
+                    &[Ty::Scalar(Scalar::U8)],
+                    &[ptr(CONTEXT), ptr(handle)],
+                );
                 None
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Capability) => None,

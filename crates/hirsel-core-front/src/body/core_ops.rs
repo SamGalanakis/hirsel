@@ -4,6 +4,7 @@
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
+mod conn;
 mod flow;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +31,13 @@ pub(crate) enum Kernel {
     Cancel,
     Join,
     ChannelNew,
+    SpawnUnit,
+    ConnNew,
+    ConnClient,
+    ConnSend,
+    ConnTrySend,
+    ConnReceive,
+    ConnTryReceive,
     LatestNew,
     LatestHandle,
     LatestPublish,
@@ -120,6 +128,12 @@ operations! {
     ("channel", "try_send", Lane::Runtime(Kernel::TrySend), "B", "core-ops-914", false),
     ("channel", "receive", Lane::Runtime(Kernel::Receive), "B", "core-ops-914", false),
     ("channel", "try_receive", Lane::Runtime(Kernel::TryReceive), "B", "core-ops-914", false),
+    ("conn", "new", Lane::Runtime(Kernel::ConnNew), "B", "mc-units-lang", false),
+    ("conn", "client", Lane::Runtime(Kernel::ConnClient), "B", "mc-units-lang", false),
+    ("conn", "send", Lane::Runtime(Kernel::ConnSend), "B", "mc-units-lang", false),
+    ("conn", "try_send", Lane::Runtime(Kernel::ConnTrySend), "B", "mc-units-lang", false),
+    ("conn", "receive", Lane::Runtime(Kernel::ConnReceive), "B", "mc-units-lang", false),
+    ("conn", "try_receive", Lane::Runtime(Kernel::ConnTryReceive), "B", "mc-units-lang", false),
     ("char", "from_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("core", "fail", Lane::Language, "A", "core-check-895", false),
@@ -327,6 +341,7 @@ operations! {
     ("string", "view_string", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", true),
     ("string", "shorten", Lane::Runtime(Kernel::StringShorten), "A", "core-ops-914", true),
     ("task", "spawn", Lane::Runtime(Kernel::Spawn), "B", "core-ops-914", false),
+    ("task", "spawn_unit", Lane::Runtime(Kernel::SpawnUnit), "B", "mc-units-lang", false),
     ("task", "join", Lane::Runtime(Kernel::Join), "B", "core-ops-914", false),
     ("task", "cancel", Lane::Runtime(Kernel::Cancel), "B", "core-ops-914", false),
     ("task", "check_cancel", Lane::Runtime(Kernel::CheckCancel), "B", "core-ops-914", false),
@@ -716,6 +731,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
             Kernel::Spawn => self.runtime_spawn(
                 types[0], types[1], vals[0]?, vals[1]?, vals[2], vals[3]?, result, n,
+            ),
+            Kernel::SpawnUnit => self.runtime_spawn_unit(
+                types[0], types[1], vals[0]?, vals[1]?, vals[2], vals[3]?, result, n,
+            ),
+            Kernel::ConnNew => self.runtime_conn_new(types[0], vals[0]?, vals[1]?, result, n),
+            Kernel::ConnClient => {
+                let handle = self.runtime_handle(vals[0]?, n);
+                let [handle, ..] = self.runtime_row(RtOp::ConnClient, &[Arg::Value(handle)], n)?;
+                self.runtime_carrier(result, handle, n)
+            }
+            Kernel::ConnSend | Kernel::ConnTrySend => self.runtime_conn_send(
+                kernel == Kernel::ConnSend,
+                types[0],
+                vals[0]?,
+                vals[1],
+                result,
+                n,
+            ),
+            Kernel::ConnReceive | Kernel::ConnTryReceive => self.runtime_conn_receive(
+                kernel == Kernel::ConnReceive,
+                types[0],
+                vals[0]?,
+                result,
+                n,
             ),
             Kernel::CheckCancel => {
                 self.runtime_row(RtOp::CheckCancel, &[], n)?;
@@ -1491,6 +1530,13 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Cancel
             | Kernel::Join
             | Kernel::ChannelNew
+            | Kernel::SpawnUnit
+            | Kernel::ConnNew
+            | Kernel::ConnClient
+            | Kernel::ConnSend
+            | Kernel::ConnTrySend
+            | Kernel::ConnReceive
+            | Kernel::ConnTryReceive
             | Kernel::LatestNew
             | Kernel::LatestHandle
             | Kernel::LatestPublish

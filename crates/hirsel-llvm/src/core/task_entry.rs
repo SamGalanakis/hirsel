@@ -33,7 +33,7 @@ pub(super) fn emit(
         .filter_map(|f| f.body.as_ref())
         .flat_map(|b| b.calls.iter())
         .filter_map(|c| match c.callee {
-            Callee::Runtime(RtOp::Spawn { x, r }) => Some((x, r)),
+            Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => Some((x, r)),
             _ => None,
         })
         .collect::<BTreeSet<_>>();

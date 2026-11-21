@@ -11,6 +11,77 @@ const B: Ty = Ty::Scalar(Scalar::Bool);
 impl Function<'_, '_, '_> {
     fn descriptor(&mut self, types: &[TypeId], task_input: bool) -> Result<Value> {
         let storage = self.calls.storage(&mut self.b, (types.len() * 32) as u32);
+        self.describe(storage, types, task_input)
+    }
+    /// An explicit stack slot of its own, for a descriptor passed by pointer
+    /// beside an indirect result that shares the call scratch.
+    fn own_slot(&mut self, size: u32) -> Value {
+        let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            size.max(8).next_multiple_of(8),
+            3,
+        ));
+        self.b.ins().stack_addr(types::I64, slot, 0)
+    }
+    /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
+    /// of `shift + size(ty)`: the buffer's bytes, then each owner row.
+    fn cross(&mut self, ty: TypeId, shift: u64) -> Result<Value> {
+        let (bytes, _) = place::storage(self.input, self.layouts, PlaceTy::Declared(ty))?;
+        let owners = hirsel_core_layout::cross::owners(
+            &self.input.types,
+            self.layouts,
+            hirsel_core_layout::TypeRef(ty.0),
+        );
+        let at = self.own_slot((24 + owners.len() * 32) as u32);
+        let rows = self.b.ins().iadd_imm_s(at, 24);
+        let words = [bytes + shift, 0, owners.len() as u64];
+        for (j, &n) in words.iter().enumerate() {
+            let value = if j == 1 {
+                rows
+            } else {
+                self.b.ins().iconst(types::I64, n as i64)
+            };
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), value, at, (j * 8) as i32);
+        }
+        for (i, row) in owners.iter().enumerate() {
+            for (j, &n) in row.iter().enumerate() {
+                let n = if j == 0 { n + shift } else { n };
+                let value = self.b.ins().iconst(types::I64, n as i64);
+                self.b.ins().store(
+                    MemFlagsData::trusted(),
+                    value,
+                    at,
+                    (24 + i * 32 + j * 8) as i32,
+                );
+            }
+        }
+        Ok(at)
+    }
+    /// A task's entry buffer: the adapter code word, then the wrapped input at
+    /// its offset. Returns the buffer and the input's offset.
+    fn task_input(&mut self, x: TypeId, code: Value, value: Value) -> Result<(Value, u64)> {
+        let (bytes, align) = place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
+        let offset = task_entry::input_offset(self.input, self.layouts, x)?;
+        let size = (bytes + offset)
+            .try_into()
+            .map_err(|_| unsupported("native task input exceeds the stack-slot limit"))?;
+        let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            size,
+            align.max(8).trailing_zeros() as u8,
+        ));
+        let packed = self.b.ins().stack_addr(types::I64, slot, 0);
+        self.b.ins().store(MemFlagsData::trusted(), code, packed, 0);
+        if bytes != 0 {
+            let data = self.b.ins().iadd_imm_s(packed, offset as i64);
+            let bytes = self.b.ins().iconst(types::I64, bytes as i64);
+            self.c_call("memcpy", &[P, P, U], &[P], &[data, value, bytes])?;
+        }
+        Ok((packed, offset))
+    }
+    fn describe(&mut self, storage: Value, types: &[TypeId], task_input: bool) -> Result<Value> {
         for (i, &t) in types.iter().enumerate() {
             let (mut bytes, mut alignment) =
                 place::storage(self.input, self.layouts, PlaceTy::Declared(t))?;
@@ -77,6 +148,12 @@ impl Function<'_, '_, '_> {
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
             | RtOp::Spawn { .. }
+            | RtOp::SpawnUnit { .. }
+            | RtOp::ConnNew { .. }
+            | RtOp::ConnSend { .. }
+            | RtOp::ConnTrySend { .. }
+            | RtOp::ConnReceive { .. }
+            | RtOp::ConnTryReceive { .. }
             | RtOp::Flow(_) => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
@@ -338,26 +415,7 @@ impl Function<'_, '_, '_> {
                 0
             }
             RtOp::Spawn { x, r } => {
-                let (bytes, align) =
-                    place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
-                let offset = task_entry::input_offset(self.input, self.layouts, x)?;
-                let size = (bytes + offset)
-                    .try_into()
-                    .map_err(|_| unsupported("native task input exceeds the stack-slot limit"))?;
-                let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    size,
-                    align.max(8).trailing_zeros() as u8,
-                ));
-                let packed = self.b.ins().stack_addr(types::I64, slot, 0);
-                self.b
-                    .ins()
-                    .store(MemFlagsData::trusted(), args[2], packed, 0);
-                if bytes != 0 {
-                    let data = self.b.ins().iadd_imm(packed, offset as i64);
-                    let bytes = self.b.ins().iconst(types::I64, bytes as i64);
-                    self.c_call("memcpy", &[P, P, U], &[P], &[data, args[1], bytes])?;
-                }
+                let (packed, _) = self.task_input(x, args[2], args[1])?;
                 let bridge = self.calls.reference(
                     self.object,
                     &mut self.b,
@@ -383,6 +441,95 @@ impl Function<'_, '_, '_> {
                 outputs[0] = values[0];
                 outputs[1] = values[1];
                 2
+            }
+            RtOp::SpawnUnit { x, r } => {
+                let (packed, offset) = self.task_input(x, args[2], args[1])?;
+                let bridge = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.task_entries.entries[&(x, r)],
+                );
+                let bridge = self.b.ins().func_addr(types::I64, bridge);
+                let layout = self.own_slot(64);
+                let layout = self.describe(layout, &[x, r], true)?;
+                let xc = self.cross(x, offset)?;
+                let rc = self.cross(r, 0)?;
+                let values = self.c_call(
+                    "hirsel_core_spawn_unit",
+                    &[P, U, U, P, P, P, P, P, U],
+                    &[P, U, U, K],
+                    &[
+                        self.context,
+                        args[3],
+                        args[0],
+                        packed,
+                        bridge,
+                        layout,
+                        xc,
+                        rc,
+                        site,
+                    ],
+                )?;
+                self.call_failure(values[3], call.fail)?;
+                for i in 0..3 {
+                    outputs[i] = values[i];
+                }
+                3
+            }
+            RtOp::ConnNew { item } => {
+                let cross = self.cross(item, 0)?;
+                let logical = hirsel_core_layout::field_size(
+                    &self.input.types,
+                    self.layouts,
+                    &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(item.0)),
+                )
+                .2;
+                let logical = self.b.ins().iconst(types::I64, logical as i64);
+                let values = self.c_call(
+                    "hirsel_core_conn_new",
+                    &[P, U, U, P, U, U],
+                    &[P, P, U, K],
+                    &[self.context, args[0], args[1], cross, logical, site],
+                )?;
+                self.call_failure(values[3], call.fail)?;
+                for i in 0..3 {
+                    outputs[i] = values[i];
+                }
+                3
+            }
+            RtOp::ConnClient => {
+                outputs[0] = self.c_call("hirsel_core_conn_client", &[P], &[P], &[args[0]])?[0];
+                1
+            }
+            RtOp::ConnSend { item } | RtOp::ConnTrySend { item } => {
+                let cross = self.cross(item, 0)?;
+                let wait = matches!(op, RtOp::ConnSend { .. });
+                let wait = self.b.ins().iconst(types::I8, i64::from(wait));
+                let values = self.c_call(
+                    "hirsel_core_conn_send",
+                    &[P, P, P, P, U, B],
+                    &[K, K],
+                    &[self.context, args[0], args[1], cross, site, wait],
+                )?;
+                self.call_failure(values[1], call.fail)?;
+                outputs[0] = values[0];
+                1
+            }
+            RtOp::ConnReceive { item } | RtOp::ConnTryReceive { item } => {
+                let cross = self.cross(item, 0)?;
+                let wait = matches!(op, RtOp::ConnReceive { .. });
+                let wait = self.b.ins().iconst(types::I8, i64::from(wait));
+                let values = self.c_call(
+                    "hirsel_core_conn_receive",
+                    &[P, P, P, P, U, B],
+                    &[K, U, U, K],
+                    &[self.context, args[0], args[1], cross, site, wait],
+                )?;
+                self.call_failure(values[3], call.fail)?;
+                for i in 0..3 {
+                    outputs[i] = values[i];
+                }
+                3
             }
             RtOp::Join { .. } => {
                 let values = self.c_call(

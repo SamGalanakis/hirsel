@@ -802,7 +802,7 @@
 //! **Runtime rows** (`Callee::Runtime`) are the runtime's own declared C entry
 //! points, with the row's parameters and results. Only the rows that can fail
 //! ([`RtOp::fails`]: `join`, `check_cancel`, `channel_new`, `send`, `receive`,
-//! `isolate_catch`, and the host rows that wait) append the `u8` status, and only those may name a failure successor. The
+//! the `conn` rows but `conn_client`, `spawn_unit`, `isolate_catch`, and the host rows that wait) append the `u8` status, and only those may name a failure successor. The
 //! runtime entries behind instructions (`alloc`, `free`, `limit_enter`, region
 //! operations, `trim`) are not calls in FORM and report refusals as values.
 //! `rt.dest_id` is a runtime row with no parameters and one `u64`, no status;

@@ -16,6 +16,8 @@ pub const TASK_RECORD: u64 = 256;
 pub const CAUSE_CELL: u64 = 32;
 /// Charge of a channel's bookkeeping, besides its items.
 pub const CHANNEL_BASE: u64 = 64;
+/// Charge of a connection's bookkeeping, besides its slots and room (CONC-17).
+pub const CONNECTION_BASE: u64 = 64;
 /// A `Latest` root's bookkeeping: its `Arc` holder, handle count, identity and
 /// the holder's drop (CONC-13), exactly the record the engine keeps.
 pub const LATEST_ROOT: u64 = 32;

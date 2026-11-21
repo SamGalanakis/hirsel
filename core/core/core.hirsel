@@ -36,6 +36,10 @@ pub opaque type Arc[T: shareable + send]
 
 pub opaque resource type Latest[T: shareable + send]
 
+pub opaque resource type Client[T: cross]
+
+pub opaque resource type Inbox[T: cross]
+
 pub opaque resource type Flow
 
 pub opaque type Into[T]
@@ -174,6 +178,10 @@ pub type Closed[T] = Closed(T)
 pub type SendError[T] = Full(T) | Closed(T)
 
 pub type ReceiveError = Empty | Closed
+
+pub type InboxError = Closed | Capacity(Capacity)
+
+pub type InboxPoll = Empty | Closed | Capacity(Capacity)
 
 pub type JoinError = Failed(Causes) | Cancelled(Causes)
 

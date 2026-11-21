@@ -964,10 +964,25 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     let seen = log.finish(take reads)
     match take caught {
         Error(c) => Over(Refused(c)),
-        Ok(Error(take cs)) => Over(Failed(take cs)),
+        Ok(Error(take cs)) => match raised_capacity(cs) {
+            Some(c) => Over(Refused(c)),
+            None => Over(Failed(take cs)),
+        },
         Ok(Ok(Error(e))) => Over(Stopped(e)),
         Ok(Ok(Ok(take f))) => finish_stage(ci, take f, take seen),
     }
+}
+
+// R1: a refused admission inside a body raises Capacity. The store reports it
+// as the refusal it is (`Refused`), not as a fault, so it is never recorded.
+fn raised_capacity(causes: Causes) -> Option[Capacity] {
+    for cause in causes {
+        return match cause.kind {
+            Capacity(c) => Some(c),
+            _ => None,
+        }
+    }
+    None
 }
 
 fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64],
@@ -1072,7 +1087,10 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
     let mut next_id = db.next_node
     let staged: Stage[Bytes, ServeReply] = match take caught {
         Error(problem) => Over(Refused(problem)),
-        Ok(Error(take causes)) => Over(Failed(take causes)),
+        Ok(Error(take causes)) => match raised_capacity(causes) {
+            Some(problem) => Over(Refused(problem)),
+            None => Over(Failed(take causes)),
+        },
         Ok(Ok(Error(limit))) => Over(Stopped(limit)),
         Ok(Ok(Ok(Error(problem)))) => Over(Refused(problem)),
         Ok(Ok(Ok(Ok(take draft)))) => {
@@ -4946,7 +4964,10 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     let seen = log.finish(take reads)
     match take caught {
         Error(c) => Ok(Refused(c)),
-        Ok(Error(take cs)) => Ok(Failed(take cs)),
+        Ok(Error(take cs)) => match raised_capacity(cs) {
+            Some(c) => Ok(Refused(c)),
+            None => Ok(Failed(take cs)),
+        },
         Ok(Ok(Error(e))) => Ok(Stopped(e)),
         Ok(Ok(Ok(take value))) => Ok(Seen(Seen(value: take value, version: s.head, reads: take seen)))
     }
@@ -5338,11 +5359,18 @@ pub fn law_changes(c: Clock) -> bool {
     if !is_foreign(changes(a, other_store)) {
         return false
     }
-    let no_room = result.unwrap(bound bytes 0 {
-        changes(a, b)
+    // R1: the diff's own allocation is refused under a zero bound and raises
+    // Capacity; changes has no refusal value of its own.
+    let no_room = isolate(fn() -> Result[Result[List[Change], Error], Capacity] {
+        bound bytes 0 {
+            changes(a, b)
+        }
     })
     match take no_room {
-        Error(Full(_)) => true,
+        Ok(Error(causes)) => match raised_capacity(causes) {
+            Some(_) => true,
+            None => false
+        },
         _ => false
     }
 }

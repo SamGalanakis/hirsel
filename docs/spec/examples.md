@@ -75,8 +75,8 @@ Outcome: success.
 
 Refused edits:
 
-- Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 29:7, a value
-  whose type mentions `r` leaves its block.
+- Make the region block's value `w` instead of `w.len`: refused, LANG-11 at 29:7, the bound's
+  body must be the `u64` that `measure` returns.
 - Drop the region parameter from `Word` (`type Word { text: Text, len: u64 }`): refused,
   MEM-6 at 2:13, a region field of an own type names its region.
 
@@ -145,8 +145,9 @@ Outcome: success.
 Refused edits:
 
 - Bind a link as a value: replace `eval(a)` with `{ let k: Link[Expr] = a; eval(k) }`:
-  refused, MEM-10 at 17:48, a link is never a value.
-- Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:79, a compact type has no own
+  refused, LANG-11 at 17:61, `a` is a view of the target, since a link is never a value
+  (MEM-10).
+- Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:72, a compact type has no own
   field.
 
 ## 3. Tallying words, and a refused push
@@ -294,8 +295,8 @@ Outcome: success.
 
 Refused edits:
 
-- Insert `type Doc: send { pieces: List[Rc[Piece]] }` as line 3: refused, CONC-2 at 3:31,
-  `Rc` is not `send`.
+- Insert `type Doc: send { pieces: List[Rc[Piece]] }` as line 3: refused, CONC-2 at 3:18,
+  `pieces` holds an `Rc`, which is not `send`.
 - Use `first` after `try_unwrap`: insert `let again = rc.share(first)` before the last
   `Ok(())`: refused, OWN-5 at 39:24, `first` was moved.
 
@@ -356,7 +357,7 @@ lines, the second dropped `b` then `a` before the failure ended the run.
 
 Refused edits:
 
-- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 26:14, `c` was
+- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 26:9, `c` was
   moved.
 - Use `?` in the finalizer: `drop(s) { stdout.write(s.out, s.name)? }`: refused, FAIL-11 at
   4:40, no `?` in a finalizer.
@@ -432,7 +433,8 @@ Refused edits:
 
 - Receive from `rx1` after it moved into `ends`: insert `let _ = channel.receive(rx1)`
   before `let mut total`: refused, OWN-5 at 42:27, `rx1` was moved.
-- Give `Ends` a field `seen: Rc[u64]`: refused, CONC-2 at 2:68, `Rc` is not `send`.
+- Give `Ends` a field `seen: Rc[u64]`: refused, CONC-2 at 2:62, `seen` holds an `Rc`, which
+  is not `send`.
 
 ## 7. A child's failure is a value at join
 

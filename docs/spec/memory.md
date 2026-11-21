@@ -416,7 +416,7 @@ fn eval(e: Expr) -> i64 { match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) 
 ```hirsel
 @compact(u32) type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
 fn keep(e: Expr) -> Link[Expr] { match e { Add(a, _) => a, _ => fail("leaf") } }
-                                              // refused: MEM-10, a link is not a value
+                                              // refused: LANG-11, a link is not a value: a is a view
 ```
 
 ### MEM-11: Active-size variants

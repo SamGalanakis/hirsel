@@ -46,7 +46,7 @@ not charged.
 
 ```hirsel
 fn make(n: u64) -> Result[List[u64], Capacity] {
-  let xs = bound bytes 1024 { list.with_capacity(n) }?   // after the scope, xs is the caller's
+  let xs: List[u64] = bound bytes 1024 { list.with_capacity(n) }?   // after the scope, xs is the caller's
   Ok(xs)
 }
 ```

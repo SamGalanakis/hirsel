@@ -32,7 +32,7 @@ fn f(take a: T) -> bool { a.name == "x" && keep(take a) }   // a.name's view end
 ```
 ```hirsel
 fn copy_len(s: String) -> u64 {
-  if let Ok(t) = string.from(s) { string.byte_len(t) } else { 0 }   // the copy lives in the branch
+  if let Ok(t) = string.from_utf8(string.into_bytes(string.from(s))) { string.byte_len(t) } else { 0 }   // the copy lives in the branch
 }
 ```
 

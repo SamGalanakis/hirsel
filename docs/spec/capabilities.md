@@ -105,8 +105,8 @@ gives `Denied` and creates nothing:
 ```hirsel
 fn scratch(d: Dir) -> Result[(Dir, String), IoError] waits {
   let mut name = string.new()
-  match string.reserve(mut name, 34) { Ok(()) => {}, Error(_) => return Error(Other(0)) }
-  match string.push(mut name, "t-") { Ok(()) => {}, Error(_) => return Error(Other(0)) }
+  string.reserve(mut name, 34)
+  string.push(mut name, "t-")
   let dir = host.mkdtemp(d, mut name)?
   Ok((dir, take name))
 }

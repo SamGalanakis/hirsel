@@ -112,7 +112,7 @@ the joiner's cleanup (CONC-8).
 
 ```hirsel
 fn total(tasks: Tasks, take a: List[String]) -> Result[u64, JoinError] waits {
-  let h = match task.spawn(tasks, bytes 4096, take a, fn(take w: List[String]) -> u64 { list.len(w) }) {
+  let h = match task.try_spawn(tasks, bytes 4096, take a, fn(take w: List[String]) -> u64 { list.len(w) }) {
     Ok(take h) => h, Error((_, take back)) => return Ok(list.len(back)),
   }
   task.join(take h)

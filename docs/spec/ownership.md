@@ -266,7 +266,7 @@ fn f(take s: String) -> String { let t = s; t }
 fn f(take s: String) -> String { let t = s; s }        // refused: OWN-5, s moved at 1:39
 ```
 ```hirsel
-type P { a: u64, b: u64 }
+type P { a: u64, b: String }
 fn f(take p: P) { let q = p; p.a = 1 }                    // refused: OWN-5, at p.a: p moved
 ```
 

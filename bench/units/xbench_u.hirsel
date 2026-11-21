@@ -4,7 +4,8 @@
 // shapes on local channels inside one unit.
 //
 // Arguments: mode n size, then
-//   x_pingpong, x_pipe, c_pingpong: nothing more
+//   x_pingpong: [warm], round trips before the timed n
+//   x_pipe, c_pingpong: nothing more
 //   c_pipe: depth
 //   x_fanin, c_fanin: grain producers (c_fanin: producers grain)
 //   x_svc: nothing more (size is ignored)
@@ -92,14 +93,18 @@ fn start_echo(tasks: Tasks, back: Client[Bytes], n: u64, depth: u64, size: u64) 
     (take t, take peer)
 }
 
-// One buffer circulates: each crossing copies it into the receiver.
-fn x_pingpong(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64) waits {
+// One buffer circulates: each crossing copies it into the receiver. The
+// first `warm` round trips are not timed; the check covers all of them.
+fn x_pingpong(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, warm: u64) waits {
     let (back, answers): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes room(1, size)))
-    let (take t, take peer) = start_echo(tasks, back, n, 1, size)
+    let (take t, take peer) = start_echo(tasks, back, warm + n, 1, size)
     let mut buf = payload(size, 7)
     let mut check = 0u64
-    let started = host.mono_ns(clock)
-    for i in 0 .. n {
+    let mut started = host.mono_ns(clock)
+    for i in 0 .. warm + n {
+        if i == warm {
+            started = host.mono_ns(clock)
+        }
         let _ = list.set(mut buf, 0, int.truncate(i))
         result.unwrap(conn.send(peer, take buf))
         buf = result.unwrap(conn.receive(answers))
@@ -401,7 +406,11 @@ pub fn main(tasks: Tasks, clock: Clock, err: Stderr, argv: Args) -> Result[(), E
     } else if mode == "c_fanin" {
         c_fanin(tasks, clock, err, n, size, arg(argv, 3), arg(argv, 4))
     } else if mode == "x_pingpong" {
-        x_pingpong(tasks, clock, err, n, size)
+        x_pingpong(tasks, clock, err, n, size, if args.len(argv) > 3 {
+            arg(argv, 3)
+        } else {
+            0
+        })
     } else if mode == "x_pipe" {
         x_pipe(tasks, clock, err, n, size)
     } else if mode == "x_fanin" {

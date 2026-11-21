@@ -269,6 +269,48 @@ impl Value {
     pub(crate) fn set_item(&mut self, item: Vec<u8>) {
         self.extra_mut().item = item;
     }
+
+    /// Give this value a language item held in `buf`, whose box is reused.
+    pub(crate) fn set_item_buf(&mut self, mut buf: ItemBuf) {
+        let old = std::mem::replace(&mut self.data, ValueData::Empty).into_parts();
+        debug_assert!(old.shared.is_empty() && old.res.is_none());
+        buf.0.charges = old.charges;
+        self.data = ValueData::Extra(buf.0);
+    }
+
+    /// Take a language item's box and bytes out for reuse; the value keeps
+    /// its charges.
+    pub(crate) fn take_item_buf(&mut self) -> Option<ItemBuf> {
+        let ValueData::Extra(extra) = &mut self.data else {
+            return None;
+        };
+        if !extra.shared.is_empty() || extra.res.is_some() {
+            return None;
+        }
+        let charges = std::mem::take(&mut extra.charges);
+        let ValueData::Extra(extra) = std::mem::replace(&mut self.data, Value::plain(charges).data)
+        else {
+            unreachable!();
+        };
+        Some(ItemBuf(extra))
+    }
+}
+
+/// A language item's bytes in a reusable box (units_lang).
+pub(crate) struct ItemBuf(Box<ValueExtra>);
+
+impl ItemBuf {
+    pub(crate) fn new() -> ItemBuf {
+        ItemBuf(Box::default())
+    }
+
+    pub(crate) fn bytes_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.0.item
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.item.capacity()
+    }
 }
 
 impl ValueData {

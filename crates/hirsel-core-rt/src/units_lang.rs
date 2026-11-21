@@ -22,7 +22,7 @@ use crate::{
     causes::{self, Cause, Causes, Cell},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Received, Sent},
-    units::ledger::{Took, UnitCtx, Value},
+    units::ledger::{ItemBuf, Took, UnitCtx, Value},
 };
 use std::{collections::HashMap, ptr, sync::Arc};
 
@@ -95,24 +95,38 @@ unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
 
 /// Copy `value` and its owners' content into one buffer.
 unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
+    let mut data = Vec::new();
+    // SAFETY: as `pack_into`.
+    unsafe { pack_into(&mut data, value, bytes, owners) };
+    data
+}
+
+/// `pack` into `data`, reusing its buffer.
+unsafe fn pack_into(data: &mut Vec<u8>, value: *const u8, bytes: u64, owners: &[[u64; 4]]) {
     // SAFETY: `value` is an initialized item of `bytes` bytes.
     unsafe {
-        let mut data = Vec::with_capacity(bytes as usize);
+        let content = |o: &[u64; 4]| {
+            let at = value.add(o[0] as usize);
+            (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
+        };
+        let seqs = owners.iter().filter(|o| o[1] == SEQ);
+        data.clear();
+        data.reserve(bytes as usize + seqs.clone().map(|o| content(o).1).sum::<usize>());
         data.extend_from_slice(std::slice::from_raw_parts(value, bytes as usize));
-        for o in owners {
-            if o[1] == SEQ {
-                let at = value.add(o[0] as usize);
-                let p = word(at) as *const u8;
-                let len = word(at.add(8));
-                let n = (len * o[2]) as usize;
-                if n > 0 {
-                    data.extend_from_slice(std::slice::from_raw_parts(p, n));
-                }
+        for o in seqs {
+            let (p, n) = content(o);
+            if n > 0 {
+                data.extend_from_slice(std::slice::from_raw_parts(p, n));
             }
         }
-        data
     }
 }
+
+/// Item buffers a unit keeps for its next sends: a received item's buffer
+/// goes back here, so a steady exchange allocates none. Only small buffers
+/// are kept, so the spares stay under 64 × 4 KiB of runtime memory.
+const SPARE_ITEMS: usize = 64;
+const SPARE_BYTES: usize = 4096;
 
 /// Free the seq buffers of a value whose content has been copied out; its
 /// clients have moved and are not touched.
@@ -211,6 +225,7 @@ pub(crate) struct LangUnit {
     /// The run's root task, cancelled by a cancel arrival (helpers).
     pub(crate) root: *mut tasks::Task,
     helper: Option<Arc<HelperShared>>,
+    spare: Vec<ItemBuf>,
 }
 
 impl LangUnit {
@@ -229,6 +244,7 @@ impl LangUnit {
             helpers: map(),
             retained: map(),
             waits: 0,
+            spare: Vec::new(),
             root: ptr::null_mut(),
             helper,
         })
@@ -501,7 +517,9 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             .ctx
             .alloc_block(charge)
             .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
-        v.set_item(pack(value, item.bytes, owners));
+        let mut data = u.spare.pop().unwrap_or_else(ItemBuf::new);
+        pack_into(data.bytes_mut(), value, item.bytes, owners);
+        v.set_item_buf(data);
         let id = match u.ctx.send(&(*client).client, v, wait) {
             Sent::Accepted => {
                 free_owners(value, owners);
@@ -630,7 +648,14 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 let Received::Ok(v) = u.ctx.receive(&h.inbox) else {
                     crate::process::stop(b"UnitLedger");
                 };
+                let mut v = v;
                 unpack(context, payer, v.item(), dest, item.bytes, owners);
+                if u.spare.len() < SPARE_ITEMS
+                    && let Some(data) = v.take_item_buf()
+                    && data.capacity() <= SPARE_BYTES
+                {
+                    u.spare.push(data);
+                }
                 u.ctx.drop_value(v);
                 if waited {
                     u.waits -= 1;
@@ -1070,11 +1095,9 @@ pub(crate) unsafe fn cancel(task: *mut tasks::Task) {
     // SAFETY: the owner's handle pins the helper's port.
     unsafe {
         if !(*h).ended {
-            (*h)
-                .port
-                .publish(crate::units::ledger::ArrivalRef::boxed(
-                    crate::units::ledger::Body::Cancel,
-                ));
+            (*h).port.publish(crate::units::ledger::ArrivalRef::boxed(
+                crate::units::ledger::Body::Cancel,
+            ));
         }
     }
 }

@@ -538,6 +538,11 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     {
         return step;
     }
+    // Standard output, standard error and file operations may block this
+    // worker in the kernel; a sleep or a random read does not.
+    if unsafe { !matches!((*request).operation, SLEEP_UNTIL | RANDOM) } {
+        crate::units::before_blocking();
+    }
     let outcome = unsafe { crate::tasks::host_operation(state, request, issue_on_stack) };
     #[cfg(test)]
     probe::note(probe::ISSUE, request, probe::answer(&outcome));

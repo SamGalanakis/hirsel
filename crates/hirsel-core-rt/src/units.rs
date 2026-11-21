@@ -1453,6 +1453,25 @@ fn enqueue(p: &Pool, u: &Unit) {
     publish(p, if ix < p.w { &p.locals[ix] } else { &p.injector }, UP(u));
 }
 
+/// The running unit is about to make a host call that may block its worker
+/// (a write to a full pipe, a file operation). A unit in this worker's private
+/// slot would wait that long, since only this worker takes it: queue it where
+/// any worker can take it, and tell the pool.
+pub(crate) fn before_blocking() {
+    if !untied() {
+        return;
+    }
+    let p = pool();
+    let ix = worker_ix();
+    if ix >= p.w || p.lifo[ix].load(Ordering::Relaxed).is_null() {
+        return;
+    }
+    let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
+    if !l.is_null() {
+        publish(p, &p.locals[ix], UP(l));
+    }
+}
+
 /// Put `up` on queue `q`, count it and tell the pool. Every unit that becomes
 /// counted work comes through here, so a sleeping worker or a poller blocked
 /// with no deadline always hears of it.

@@ -3462,6 +3462,66 @@ pub(crate) unsafe fn lang_unit() -> *mut crate::units_lang::LangUnit {
     }
 }
 
+/// units_lang: when the running task is the only thing its run could run
+/// next (no ready task, timer, socket, sync, cancellation or tape), park its
+/// unit right here instead of switching to the scheduler, whose next turn
+/// would only park the unit too. Returns false, doing nothing, otherwise.
+/// The caller pumps the unit's port and rechecks its condition either way;
+/// a pump that readies another task sends the next wait the long way.
+/// # Safety
+/// The caller holds no commit and pins its condition across the park.
+pub(crate) unsafe fn park_unit_alone() -> bool {
+    if !crate::units::untied() || !WORKER.get().is_null() || !CALLBACK_TASK.get().is_null() {
+        return false;
+    }
+    let task = CURRENT.get();
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: the running task pins its run; only this thread uses it.
+    unsafe {
+        let run = &mut *(*task).run;
+        #[cfg(feature = "record")]
+        if !run.tapes.live.is_empty()
+            || run.tapes.take_inputs.is_some()
+            || !run.outside_cancels.is_empty()
+        {
+            return false;
+        }
+        if run.model.is_some()
+            || !run.net.is_null()
+            || !run.head.is_null()
+            || !run.deferred.is_null()
+            || !run.cancels.is_empty()
+            || !run.timers.root.is_null()
+            || !run.parked.live.is_empty()
+            || run.readies.outside()
+            || run.readies.pending.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        CURRENT.set(ptr::null_mut());
+        crate::fiber::guard((0, 0));
+        crate::limit::Funding::unbind();
+        crate::units::park(None);
+        // Only the port's own token can be pending: nothing else of this
+        // run is armed. Taking it here stands for the scheduler's turn.
+        let run = &mut *(*task).run;
+        if run.readies.pending.swap(false, Ordering::Acquire) {
+            let mut tokens = run.readies.lock();
+            if tokens.iter().any(|&t| t != u64::MAX) {
+                run.readies.pending.store(true, Ordering::Release);
+            } else {
+                tokens.clear();
+            }
+        }
+        CURRENT.set(task);
+        abi::task_resume((*task).context);
+        crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
+    }
+    true
+}
+
 /// The returned guard keeps the resumed commit through the caller's retry,
 /// so a woken waiter rechecks its condition without a second acquisition.
 /// # Safety

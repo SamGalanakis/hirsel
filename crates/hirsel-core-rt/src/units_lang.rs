@@ -26,6 +26,12 @@ use crate::{
 };
 use std::{collections::HashMap, ptr, sync::Arc};
 
+/// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
+type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
+fn map<K, V>() -> Map<K, V> {
+    HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0))
+}
+
 /// The ledger roots never refuse: the program's limits decide every admission.
 const UNREFUSED: u64 = 1 << 62;
 /// A seq owner: pointer, length, capacity.
@@ -194,11 +200,11 @@ struct SendWait {
 
 pub(crate) struct LangUnit {
     pub(crate) ctx: Box<UnitCtx>,
-    inboxes: HashMap<usize, *mut InboxH>,
-    sends: HashMap<u32, *mut SendWait>,
-    helpers: HashMap<usize, *mut HelperH>,
+    inboxes: Map<usize, *mut InboxH>,
+    sends: Map<u32, *mut SendWait>,
+    helpers: Map<usize, *mut HelperH>,
     /// Header and unused room of cleaned connections, until the last release.
-    retained: HashMap<usize, Block>,
+    retained: Map<usize, Block>,
     /// Tasks waiting on something another unit settles: the scheduler does
     /// not call such a wait a deadlock.
     pub(crate) waits: usize,
@@ -218,10 +224,10 @@ impl LangUnit {
         ctx.port.arm();
         Box::new(LangUnit {
             ctx,
-            inboxes: HashMap::new(),
-            sends: HashMap::new(),
-            helpers: HashMap::new(),
-            retained: HashMap::new(),
+            inboxes: map(),
+            sends: map(),
+            helpers: map(),
+            retained: map(),
             waits: 0,
             root: ptr::null_mut(),
             helper,
@@ -552,6 +558,10 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 continue;
             }
             drop(commit);
+            if tasks::park_unit_alone() {
+                commit = tasks::before_commit();
+                continue;
+            }
             commit = tasks::park(&raw mut frame.waiters);
         }
     }
@@ -641,6 +651,10 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 u.waits += 1;
             }
             drop(commit);
+            if tasks::park_unit_alone() {
+                commit = tasks::before_commit();
+                continue;
+            }
             commit = tasks::park(&raw mut h.waiters);
         }
     }
@@ -666,6 +680,10 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
                 break;
             }
             drop(commit);
+            if tasks::park_unit_alone() {
+                commit = tasks::before_commit();
+                continue;
+            }
             commit = tasks::park(&raw mut h.waiters);
         }
         u.waits -= 1;

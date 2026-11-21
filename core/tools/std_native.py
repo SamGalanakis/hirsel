@@ -249,6 +249,8 @@ def host_parameter(case):
         return 'native_net:Net,native_clock:Clock,token:Secret,native_out:Stdout,native_err:Stderr', ''
     if model_network(case):
         return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
+    if '(dir, tasks)' in case.call:  # A host Dir as the oracle beside served ports.
+        return 'native_dir:Dir,native_tasks:Tasks', ''
     for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks'), ('env', 'Env')]:
         if '(' + argument + ')' in case.call:
             name = 'native_' + argument
@@ -395,7 +397,7 @@ class Evaluator:
 def wrapper(case, port=None):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
-    call = call.replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
+    call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
     if port is not None:
@@ -753,7 +755,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Stderr'])
                 if '(clock)' in case.call:
                     command.extend(['--grant', 'Clock'])
-                if '(tasks)' in case.call:
+                if '(tasks)' in case.call or '(dir, tasks)' in case.call:
                     command.extend(['--grant', 'Tasks'])
                 if '(env)' in case.call:
                     command.extend(['--grant', 'Env=' + ','.join(name for name, _ in case.env_fixture)])

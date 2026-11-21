@@ -1,0 +1,169 @@
+// Charge parity (MEM-24, CAP-5) of served ports. These laws live outside core
+// because a call inside core takes no step of its own (MEM-30): from here each
+// host operation is one step, as in any program. The granted host Dir is the
+// oracle: the same client against it and against a provide.dir must stop at
+// the same admission and the same step, whatever the bound.
+
+fn answer(mut s: Served[DirOp], take c: Call[DirOp], r: DirReply) -> bool {
+    match provide.reply(mut s, take c, provide.dir_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+type Attempt: send {
+    d: Dir,
+    steps: u64
+}
+
+// Create "p", write "hello", close; reopen it, read into 8 bytes, close.
+// The value counts each step that worked and the bytes read back; a step
+// bound that runs out gives 1000000 and the bound.
+fn parity_client(take a: Attempt) -> u64 waits {
+    let Attempt(d, steps: limit) = take a
+    let run = bound steps limit {
+        let made: u64 = match host.open(d, "p", CreateNew) {
+            Ok(take f) => {
+                let mut file = take f
+                let wrote: u64 = match host.write(mut file, string.as_bytes("hello")) {
+                    Ok(_) => 1,
+                    Error(_) => 0
+                }
+                let closed: u64 = match host.close(take file) {
+                    Ok(_) => 10,
+                    Error(_) => 0
+                }
+                wrote + closed
+            },
+            Error(_) => 0
+        }
+        let mut b: Bytes = list.with_capacity(8)
+        let got: u64 = match host.open(d, "p", Read) {
+            Ok(take f) => {
+                let mut file = take f
+                let read: u64 = match host.read(mut file, mut b) {
+                    Ok(n) => n * 100,
+                    Error(_) => 0
+                }
+                let closed: u64 = match host.close(take file) {
+                    Ok(_) => 10000,
+                    Error(_) => 0
+                }
+                read + closed
+            },
+            Error(_) => 0
+        }
+        let same = list.len(b) == 5 && b[0] == 0x68 && b[4] == 0x6f
+        made + got + if same { 100000u64 } else { 0u64 }
+    }
+    match run {
+        Ok(v) => v,
+        Error(o) => 1000000 + o.steps
+    }
+}
+
+// A file store behind a port: Open issues a fresh id, Write appends the
+// payload, Read fills what was written, Remove empties it; it serves until
+// quiescence and counts the calls it answered.
+fn store(take s: Served[DirOp]) -> u64 waits {
+    let mut served = take s
+    let mut data: Bytes = list.with_capacity(64)
+    let mut id: u64 = 5
+    let mut calls: u64 = 0
+    let mut going = true
+    while going {
+        match provide.next(mut served) {
+            Some(take call) => {
+                let mut c = take call
+                let op = provide.dir_op(c)
+                let reply: Option[DirReply] = match op {
+                    Open(dir, path, mode) => {
+                        id = id + 1
+                        Some(File(id))
+                    },
+                    Write(file, len) => {
+                        provide.payload(c, 1, mut data)
+                        Some(Done)
+                    },
+                    Read(file, room) => Some(Count(provide.fill(mut served, mut c, data))),
+                    Remove(dir, path) => {
+                        list.clear(mut data)
+                        Some(Done)
+                    },
+                    Released(id: _) => None,
+                    _ => Some(Done)
+                }
+                match reply {
+                    Some(r) => {
+                        if answer(mut served, take c, r) {
+                            calls = calls + 1
+                        }
+                    },
+                    None => {
+                        let _ = take c
+                    }
+                }
+            },
+            None => {
+                going = false
+            }
+        }
+    }
+    calls
+}
+
+// The client in a task of `b` bytes under a bound of `n` steps: its value,
+// or the requested and available bytes of the admission that stopped it.
+fn attempt(tasks: Tasks, d: Dir, b: u64, n: u64) -> (u64, u64, u64) waits {
+    let _ = host.remove(d, "p")
+    let child = task.spawn(tasks, bytes b, Attempt(d: d, steps: n), parity_client)
+    match task.join(take child) {
+        Ok(v) => (v, 0, 0),
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => (1, k.requested, k.available),
+                    _ => (2, 0, 0),
+                }
+            }
+            (3, 0, 0)
+        },
+        Error(_) => (4, 0, 0)
+    }
+}
+
+// The client in a task of `b` bytes under a step bound of `n`, against the
+// granted Dir and against the served one, for every `b` up to 160 and every
+// `n` up to 24: each pair agrees on the value, or on the requested and
+// available bytes of the admission that stopped it. Both sweeps cross over:
+// no bytes refuses (value 1), no steps runs out (1000000 and the bound), and
+// the whole client gives 110511 (wrote 1, closed 10, read 5 x 100, closed
+// 10000, the bytes back 100000).
+// expect: run dir_parity(dir, tasks) = true
+fn dir_parity(dir: Dir, tasks: Tasks) -> bool waits {
+    let (v, s) = provide.dir(bytes 4096)
+    let server = task.spawn(tasks, bytes 65536, take s, store)
+    let mut same = true
+    let mut refused = false
+    let mut whole = false
+    let mut b: u64 = 0
+    while b <= 160 {
+        let host = attempt(tasks, dir, b, 1000)
+        same = same && host == attempt(tasks, v, b, 1000)
+        let (value, _, _) = host
+        refused = refused || value == 1
+        whole = whole || value == 110511
+        b = b + 1
+    }
+    let mut short = false
+    let mut n: u64 = 0
+    while n <= 24 {
+        let host = attempt(tasks, dir, 65536, n)
+        same = same && host == attempt(tasks, v, 65536, n)
+        let (value, _, _) = host
+        short = short || value == 1000000 + n
+        n = n + 1
+    }
+    let served = result.unwrap(task.join(take server)) > 0
+    same && refused && whole && short && served
+}

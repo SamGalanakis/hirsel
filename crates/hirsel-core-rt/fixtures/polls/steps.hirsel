@@ -10,11 +10,11 @@ fn spin(take p: Pair) {
     loop { let _ = channel.try_send(p.tx, 0u64); let _ = channel.try_receive(p.rx) }
 }
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
-    let (peer_tx, peer_rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let (peer_tx, peer_rx): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let peer = Pair(tx: take peer_tx, rx: take peer_rx)
     let stopped = bound steps 131072 {
-        let child = result.unwrap(task.spawn(tasks, bytes 4096, take peer, spin))
+        let child = task.spawn(tasks, bytes 4096, take peer, spin)
         loop { let _ = channel.try_send(tx, 0u64); let _ = channel.try_receive(rx) }
     }
     match stopped {

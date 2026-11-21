@@ -747,7 +747,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             self.builtin_use(f, n);
             let direct = vals[1].and_then(|v| self.pointer_address(v)) == Some(to);
-            self.list_push(tys[0], header, vals[1], result, n, Some((full, direct)))
+            self.list_push(tys[0], header, vals[1], n, Some((full, direct)))
         } else if builtin {
             self.intrinsic(f, tys, vals, n)
         } else {

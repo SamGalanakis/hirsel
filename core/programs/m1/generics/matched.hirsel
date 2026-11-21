@@ -25,8 +25,8 @@ fn tally(mut c: Counts, s: String) -> Result[(), m1.support.Error] {
         } else {
             list.len(c.buckets) * 2
         }
-        let mut buckets: List[u64] = m1.support.mem(list.with_capacity(next))?
-        m1.support.mem(list.fill(mut buckets, next, 0))?
+        let mut buckets: List[u64] = list.with_capacity(next)
+        list.fill(mut buckets, next, 0)
         let mut i: u64 = 0
         for e in c.entries {
             let mut slot = hash(string.slice(c.storage, int.widen(e.lo), int.widen(e.hi))) % next
@@ -61,7 +61,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     let mut xs: List[String] = list.new()
     let mut at: u64 = 0
     while at < string.byte_len(input) {
-        let w = m1.support.mem(string.from(m1.support.line(input, mut at)))?
+        let w = string.from(m1.support.line(input, mut at))
         m1.support.push(mut xs, take w)?
     }
     let mapped_owner = m1.support.marker(tx, "mapped")?
@@ -73,7 +73,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
         if s == "!error" {
             return Error(m1.support.error(m1.support.name("Callback@", position, "")?))
         }
-        let mut t = m1.support.mem(string.from(s))?
+        let mut t = string.from(s)
         m1.support.add(mut t, "!")?
         Ok(take t)
     })?
@@ -109,7 +109,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
 
 fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(6))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(6)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

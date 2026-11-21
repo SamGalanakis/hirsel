@@ -85,9 +85,7 @@ pub fn read(d: Dir, p: String) -> Result[Bytes, Error] waits {
             } else {
                 list.capacity(buf)
             }
-            if let Error(c) = list.reserve(mut buf, want) {
-                return Error(Capacity(c))
-            }
+            list.reserve(mut buf, want)
         }
         match host.read(mut f, mut buf) {
             Ok(0) => break,

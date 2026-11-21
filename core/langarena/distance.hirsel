@@ -1,11 +1,11 @@
 // kostya/LangArena 3c9f84d benchmarks/distance.rs:31-243.
 // Byte matching is upstream's representation; generated strings are ASCII.
 fn random_string(mut g: helper.Lcg, n: i32) -> Result[String, helper.Error] {
-    let mut s = helper.mem(string.with_capacity(int.narrow(n)))?
+    let mut s = string.with_capacity(int.narrow(n))
     for _ in 0 .. n {
         let digit: u32 = int.narrow(helper.next_int(mut g, 10))
         let code: u32 = 97 + digit
-        helper.mem(string.push_char(mut s, option.unwrap(char.from_u32(code))))?
+        string.push_char(mut s, option.unwrap(char.from_u32(code)))
     }
     Ok(take s)
 }
@@ -30,8 +30,8 @@ fn jaro(a: String, b: String) -> Result[f64, helper.Error] {
     }
     let mut xm: List[bool] = list.new()
     let mut ym: List[bool] = list.new()
-    helper.mem(list.fill(mut xm, n, false))?
-    helper.mem(list.fill(mut ym, m, false))?
+    list.fill(mut xm, n, false)
+    list.fill(mut ym, m, false)
     let mut matches: u64 = 0
     for i in 0 .. n {
         let start = if i > distance {
@@ -96,20 +96,20 @@ fn ngram(a: String, b: String) -> Result[f64, helper.Error] {
         return Ok(0.0)
     }
     let mut first: Map[u32, u64] = map.new()
-    helper.mem(map.reserve(mut first, n))?
+    map.reserve(mut first, n)
     let increment = fn(mut count: u64) -> u64 {
         count += 1
         count
     }
     for i in 0 .. n - 3 {
-        let _ = helper.mem(result.capacity_only(map.update_or_insert(mut first, gram(x, i), 0u64, increment)))?
+        let _ = map.update_or_insert(mut first, gram(x, i), 0u64, increment)
     }
     let mut second: Map[u32, u64] = map.new()
-    helper.mem(map.reserve(mut second, m))?
+    map.reserve(mut second, m)
     let mut intersection: u64 = 0
     for i in 0 .. m - 3 {
         let key = gram(y, i)
-        let count = helper.mem(result.capacity_only(map.update_or_insert(mut second, key, 0u64, increment)))?
+        let count = map.update_or_insert(mut second, key, 0u64, increment)
         if let Some(first_count) = map.get(first, key) {
             if count <= first_count {
                 intersection += 1
@@ -136,16 +136,13 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
         return Error(Config)
     }
     let mut g = helper.lcg()
-    let mut pairs: List[(String, String)] = helper.mem(list.with_capacity(int.narrow(count)))?
+    let mut pairs: List[(String, String)] = list.with_capacity(int.narrow(count))
     for _ in 0 .. count {
         let n = helper.next_int(mut g, int.narrow(size)) + 4
         let m = helper.next_int(mut g, int.narrow(size)) + 4
         let a = random_string(mut g, n)?
         let b = random_string(mut g, m)?
-        match list.push(mut pairs, (take a, take b)) {
-            Ok(()) => {},
-            Error((c, _)) => return Error(Capacity(c))
-        }
+        list.push(mut pairs, (take a, take b))
     }
     let mut checksum: u32 = 0
     for _ in 0 .. warmup + iterations {

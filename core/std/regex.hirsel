@@ -7,7 +7,7 @@ pub type SyntaxError: key {
     kind: SyntaxKind
 }
 
-pub type Error = Syntax(SyntaxError) | TooBig(u64) | Capacity(Capacity)
+pub type Error = Syntax(SyntaxError) | TooBig(u64)
 
 const ROOT: u64 = 0
 
@@ -105,10 +105,8 @@ fn write(mut xs: List[Node], i: u64, n: Node) {
 
 fn insert(mut xs: List[Node], n: Node) -> Result[u64, Error] {
     let i = list.len(xs)
-    match list.push(mut xs, n) {
-        Ok(()) => Ok(i),
-        Error((e, _)) => Error(Capacity(e)),
-    }
+    list.push(mut xs, n)
+    Ok(i)
 }
 
 fn append(mut p: Parser, n: Node) -> Result[u64, Error] {
@@ -178,11 +176,7 @@ fn skip(s: String, mut p: Parser) {
 
 fn ast(s: String) -> Result[Parser, Error] {
     let width = string.byte_len(s)
-    let alloc: Result[List[Node], Capacity] = list.with_capacity(width + 1)
-    let arena = match take alloc {
-        Ok(take xs) => take xs,
-        Error(e) => return Error(Capacity(e)),
-    }
+    let arena: List[Node] = list.with_capacity(width + 1)
     let mut p = Parser(ast: take arena, names: list.new(), at: 0, width, captures: 0, free_space: false, scope: 0, arm: 0, tail: 0)
     let _ = insert(mut p.ast, node(ROOT, 0, 0, 0, 0))?
     loop {
@@ -1347,15 +1341,8 @@ const ENTER_ARM: u64 = 0
 fn compile_hir(s: String) -> Result[Hir, Error] {
     let parsed = ast(s)?
     check_depth(parsed.ast)?
-    let alloc: Result[List[Node], Capacity] = list.with_capacity(parsed.width + 1)
-    let mut nodes = match take alloc {
-        Ok(take xs) => take xs,
-        Error(e) => return Error(Capacity(e)),
-    }
-    match list.append(mut nodes, parsed.ast) {
-        Ok(()) => {},
-        Error(e) => return Error(Capacity(e)),
-    }
+    let mut nodes: List[Node] = list.with_capacity(parsed.width + 1)
+    list.append(mut nodes, parsed.ast)
     let mut ranges: List[u32] = list.new()
     translate(s, parsed.ast, mut nodes, mut ranges)?
     let Parser(names: take names, ..) = take parsed
@@ -1486,10 +1473,8 @@ fn translate_atom(s: String, tree: List[Node], i: u64, n: Node, active: u64, mut
 }
 
 fn push_u32(mut pool: List[u32], x: u32) -> Result[(), Error] {
-    match list.push(mut pool, x) {
-        Ok(()) => Ok(()),
-        Error((e, _)) => Error(Capacity(e)),
-    }
+    list.push(mut pool, x)
+    Ok(())
 }
 
 fn add_range(mut pool: List[u32], lo: u32, hi: u32) -> Result[(), Error] {
@@ -2069,22 +2054,20 @@ pub fn cache_bytes(re: Regex, budget: u64) -> u64 {
     round8(4 * layout(re, budget).words)
 }
 
-pub fn cache(re: Regex, budget: u64) -> Result[Cache, Capacity] {
+pub fn cache(re: Regex, budget: u64) -> Cache {
     let slices = layout(re, budget)
     let n = slices.words
-    let admitted: Result[List[u32], Capacity] = list.with_capacity(n)
-    let mut work = admitted?
-    list.fill(mut work, n, 0)?
-    Ok(Cache(owner: re.owner, work: take work, slices))
+    let mut work: List[u32] = list.with_capacity(n)
+    list.fill(mut work, n, 0)
+    Cache(owner: re.owner, work: take work, slices)
 }
 
-pub fn groups(re: Regex) -> Result[Groups, Capacity] {
+pub fn groups(re: Regex) -> Groups {
     let n = 2 * re.group_count
-    let admitted: Result[List[u64], Capacity] = list.with_capacity(n)
-    let mut spans = admitted?
-    list.fill(mut spans, n, 0)?
+    let mut spans: List[u64] = list.with_capacity(n)
+    list.fill(mut spans, n, 0)
     init_group_spans(mut spans)
-    Ok(Groups(owner: re.owner, spans: take spans))
+    Groups(owner: re.owner, spans: take spans)
 }
 
 fn init_group_spans(mut spans: List[u64]) {
@@ -2473,51 +2456,27 @@ type Assembler {
 }
 
 fn admit_states(n: u64) -> Result[List[NfaState], Error] {
-    let admitted: Result[List[NfaState], Capacity] = list.with_capacity(n)
-    let mut xs = match take admitted {
-        Ok(take x) => take x,
-        Error(e) => return Error(Capacity(e)),
-    }
-    match list.fill(mut xs, n, NfaState(op: 0, a: 0, b: 0, c: 0)) {
-        Ok(()) => Ok(take xs),
-        Error(e) => Error(Capacity(e)),
-    }
+    let mut xs: List[NfaState] = list.with_capacity(n)
+    list.fill(mut xs, n, NfaState(op: 0, a: 0, b: 0, c: 0))
+    Ok(take xs)
 }
 
 fn admit_edges(n: u64) -> Result[List[NfaEdge], Error] {
-    let admitted: Result[List[NfaEdge], Capacity] = list.with_capacity(n)
-    let mut xs = match take admitted {
-        Ok(take x) => take x,
-        Error(e) => return Error(Capacity(e)),
-    }
-    match list.fill(mut xs, n, NfaEdge(lo: 0, hi: 0, target: 0)) {
-        Ok(()) => Ok(take xs),
-        Error(e) => Error(Capacity(e)),
-    }
+    let mut xs: List[NfaEdge] = list.with_capacity(n)
+    list.fill(mut xs, n, NfaEdge(lo: 0, hi: 0, target: 0))
+    Ok(take xs)
 }
 
 fn admit_u32(n: u64) -> Result[List[u32], Error] {
-    let result: Result[List[u32], Capacity] = list.with_capacity(n)
-    let mut xs = match take result {
-        Ok(take x) => take x,
-        Error(e) => return Error(Capacity(e)),
-    }
-    match list.fill(mut xs, n, 0) {
-        Ok(()) => Ok(take xs),
-        Error(e) => Error(Capacity(e)),
-    }
+    let mut xs: List[u32] = list.with_capacity(n)
+    list.fill(mut xs, n, 0)
+    Ok(take xs)
 }
 
 fn admit_u8(n: u64) -> Result[Bytes, Error] {
-    let result: Result[Bytes, Capacity] = list.with_capacity(n)
-    let mut xs = match take result {
-        Ok(take x) => take x,
-        Error(e) => return Error(Capacity(e)),
-    }
-    match list.fill(mut xs, n, 0) {
-        Ok(()) => Ok(take xs),
-        Error(e) => Error(Capacity(e)),
-    }
+    let mut xs: Bytes = list.with_capacity(n)
+    list.fill(mut xs, n, 0)
+    Ok(take xs)
 }
 
 fn put_op(mut a: Assembler, i: u64, tag: u32, x: u32, y: u32, z: u32) {

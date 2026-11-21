@@ -21,20 +21,20 @@ fn ev(n: N) -> i64 {
 }
 
 fn calculator() -> i64 {
-    let a = result.unwrap(box.new(Lit(3i64)))
-    let b = result.unwrap(box.new(Lit(7i64)))
-    let tree = result.unwrap(box.new(Add(take a, take b)))
+    let a = box.new(Lit(3i64))
+    let b = box.new(Lit(7i64))
+    let tree = box.new(Add(take a, take b))
     ev(tree)
 }
 
 fn counted() -> i64 {
-    let a = result.unwrap(rc.new(Lit(5i64)))
-    let b = result.unwrap(arc.new(Lit(7i64)))
+    let a = rc.new(Lit(5i64))
+    let b = arc.new(Lit(7i64))
     ev(a) + ev(b) + ev(a) + ev(b)
 }
 
 fn nested() -> i64 {
-    let a = result.unwrap(box.new(result.unwrap(box.new(Lit(9i64)))))
+    let a = box.new(box.new(Lit(9i64)))
     ev(a)
 }
 
@@ -43,9 +43,9 @@ type P: shareable + send {
 }
 
 fn fields() -> u64 {
-    let a = result.unwrap(box.new(P(n: 4u64)))
-    let b = result.unwrap(rc.new(P(n: 5u64)))
-    let c = result.unwrap(arc.new(P(n: 6u64)))
+    let a = box.new(P(n: 4u64))
+    let b = rc.new(P(n: 5u64))
+    let c = arc.new(P(n: 6u64))
     a.n * 100u64 + b.n * 10u64 + c.n
 }
 
@@ -54,7 +54,7 @@ fn len(x: View[String]) -> u64 {
 }
 
 fn explicit() -> u64 {
-    let b = result.unwrap(box.new("abc"));
+    let b = box.new("abc");
     len(b)
 }
 
@@ -63,14 +63,14 @@ fn borrow(b: Box[P]) -> View[P] in b {
 }
 
 fn borrowed() -> u64 {
-    let b = result.unwrap(box.new(P(n: 4u64)))
+    let b = box.new(P(n: 4u64))
     let p: View[P] = b
     let q = borrow(b)
     p.n + q.n
 }
 
 fn make() -> Box[N] {
-    result.unwrap(box.new(Lit(6i64)))
+    box.new(Lit(6i64))
 }
 
 fn temporary() -> i64 {
@@ -78,9 +78,9 @@ fn temporary() -> i64 {
 }
 
 fn matched() -> u64 {
-    let a = result.unwrap(box.new(Some(1u64)))
-    let b = result.unwrap(rc.new(Some(2u64)))
-    let c = result.unwrap(arc.new(Some(3u64)))
+    let a = box.new(Some(1u64))
+    let b = rc.new(Some(2u64))
+    let c = arc.new(Some(3u64))
     let xa = match a {
         Some(ax) => ax,
         None => 0u64
@@ -97,7 +97,7 @@ fn matched() -> u64 {
 }
 
 fn tupled() -> u64 {
-    let b = result.unwrap(box.new((4u64, 2u64)));
+    let b = box.new((4u64, 2u64));
     match b {
         (a, c) => a * 10u64 + c
     }
@@ -117,7 +117,7 @@ fn mark(m: Mark) -> u64 {
 
 fn resource_read() -> u64 {
     let m = result.unwrap(Mark(n: 9u64))
-    let b = result.unwrap(box.new(take m))
+    let b = box.new(take m)
     mark(b) + mark(b)
 }
 
@@ -126,7 +126,7 @@ fn positive() -> bool {
 }
 
 fn go() -> i64 {
-    let b = result.unwrap(box.new(Lit(3i64)));
+    let b = box.new(Lit(3i64));
     ev(b)
 }
 
@@ -136,7 +136,7 @@ fn go() -> i64 {
 // expect: run h_run() = 11
 // expect: run grow_run() = 19
 fn f() -> i64 {
-    let b = result.unwrap(box.new(Lit(6i64)));
+    let b = box.new(Lit(6i64));
     ev(b)
 }
 
@@ -153,24 +153,24 @@ fn h(b: Box[u64]) -> u64 {
     }
 }
 
-fn grow(mut b: Box[List[u64]]) -> Result[(), (Capacity, u64)] {
+fn grow(mut b: Box[List[u64]]) {
     list.push(mut b, 1)
 }
 
 fn g_run() -> u64 {
-    let b = result.unwrap(box.new(Some(7u64)));
+    let b = box.new(Some(7u64));
     g(b)
 }
 
 fn h_run() -> u64 {
-    let b = result.unwrap(box.new(11u64));
+    let b = box.new(11u64);
     h(b)
 }
 
 fn grow_run() -> u64 {
     let xs: List[u64] = list.new()
-    let mut b = result.unwrap(box.new(take xs))
-    result.unwrap(grow(mut b))
+    let mut b = box.new(take xs)
+    grow(mut b)
     b[0] = 9u64
     b[0] + list.len(b) * 10u64
 }
@@ -192,20 +192,20 @@ fn set(mut b: Box[Box[P]]) {
 }
 
 fn deep_run() -> i64 {
-    let p = result.unwrap(box.new(Lit(5i64)));
-    let b = result.unwrap(box.new(take p));
+    let p = box.new(Lit(5i64));
+    let b = box.new(take p);
     deep(b)
 }
 
 fn mixed_run() -> i64 {
-    let p = result.unwrap(rc.new(Lit(7i64)));
-    let b = result.unwrap(box.new(take p));
+    let p = rc.new(Lit(7i64));
+    let b = box.new(take p);
     mixed(b)
 }
 
 fn set_run() -> u64 {
-    let p = result.unwrap(box.new(P(n: 2u64)));
-    let mut b = result.unwrap(box.new(take p));
+    let p = box.new(P(n: 2u64));
+    let mut b = box.new(take p);
     set(mut b);
     b.n
 }
@@ -219,13 +219,13 @@ type TextP: shareable {
 
 fn counted_field() -> u64 {
     let p = TextP(s: "abc")
-    let r = result.unwrap(rc.new(take p))
+    let r = rc.new(take p)
     let v = r.s
     string.byte_len(v) + string.byte_len(r.s)
 }
 
 fn make_p() -> Box[P] {
-    result.unwrap(box.new(P(n: 8u64)))
+    box.new(P(n: 8u64))
 }
 
 fn temporary_field() -> u64 {
@@ -234,9 +234,9 @@ fn temporary_field() -> u64 {
 
 fn make_list() -> Box[Box[List[u64]]] {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 2u64))
-    let b = result.unwrap(box.new(take xs))
-    result.unwrap(box.new(take b))
+    list.push(mut xs, 2u64)
+    let b = box.new(take xs)
+    box.new(take b)
 }
 
 fn temporary_index() -> u64 {
@@ -247,6 +247,6 @@ fn temporary_index() -> u64 {
 // expect: run deep_grow() = 12
 fn deep_grow() -> u64 {
     let mut b = make_list()
-    result.unwrap(list.push(mut b, 12u64))
+    list.push(mut b, 12u64)
     b[1]
 }

@@ -2,24 +2,24 @@
 // expect: run checked() = 72
 fn copied(s: String) -> String {
     let mut out = string.new()
-    result.unwrap(string.push(mut out, s))
+    string.push(mut out, s)
     take out
 }
 
 fn checked() -> u64 {
     let mut keys: List[String] = list.new()
-    result.unwrap(list.push(mut keys, ""))
-    result.unwrap(list.push(mut keys, "abcdefg"))
-    result.unwrap(list.push(mut keys, "abcdefgh"))
-    result.unwrap(list.push(mut keys, "abcdefghi"))
-    result.unwrap(list.push(mut keys, "abcdefghijklmnopqrstuvwxyzABCDE"))
-    result.unwrap(list.push(mut keys, "abcdefghijklmnopqrstuvwxyzABCDEF"))
-    result.unwrap(list.push(mut keys, "abcdefghijklmnopqrstuvwxyzABCDEFG"))
-    result.unwrap(list.push(mut keys, "abcdefghabcdefgh"))
+    list.push(mut keys, "")
+    list.push(mut keys, "abcdefg")
+    list.push(mut keys, "abcdefgh")
+    list.push(mut keys, "abcdefghi")
+    list.push(mut keys, "abcdefghijklmnopqrstuvwxyzABCDE")
+    list.push(mut keys, "abcdefghijklmnopqrstuvwxyzABCDEF")
+    list.push(mut keys, "abcdefghijklmnopqrstuvwxyzABCDEFG")
+    list.push(mut keys, "abcdefghabcdefgh")
     let mut m: Map[String, u64] = map.new()
     let mut value: u64 = 1
     for key in keys {
-        result.unwrap(map.insert(mut m, copied(key), value))
+        map.insert(mut m, copied(key), value)
         value += 1
     }
     let mut sum: u64 = 0

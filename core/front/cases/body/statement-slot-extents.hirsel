@@ -20,7 +20,7 @@ type P {
 
 fn mk(x: u64) -> P {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, x))
+    list.push(mut xs, x)
     P(xs: take xs, n: 1)
 }
 

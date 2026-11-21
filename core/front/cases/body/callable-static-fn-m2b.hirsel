@@ -121,7 +121,7 @@ type HandlerEntry {
 
 fn echo_bytes(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
-    list.append(mut out, b)?
+    list.append(mut out, b)
     Ok(out)
 }
 

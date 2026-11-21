@@ -16,7 +16,7 @@ fn found(o: Option[u64]) -> u64 {
 
 // expect: run with_capacity_is_empty() = true
 fn with_capacity_is_empty() -> bool {
-    let s = result.unwrap(string.with_capacity(10))
+    let s = string.with_capacity(10)
     string.byte_len(s) == 0 && list.capacity(string.as_bytes(s)) >= 10
 }
 
@@ -44,10 +44,10 @@ fn boundary_before_scalar() -> bool {
 // expect: run push_i64_signs() = true
 fn push_i64_signs() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_i64(mut s, -3))
-    result.unwrap(string.push_i64(mut s, 0))
-    result.unwrap(string.push_i64(mut s, -9223372036854775808))
-    result.unwrap(string.push_i64(mut s, 9223372036854775807))
+    string.push_i64(mut s, -3)
+    string.push_i64(mut s, 0)
+    string.push_i64(mut s, -9223372036854775808)
+    string.push_i64(mut s, 9223372036854775807)
     same(s, "-30-92233720368547758089223372036854775807")
 }
 
@@ -55,14 +55,14 @@ fn push_i64_signs() -> bool {
 // expect: run push_uint_padded_hex() = true
 fn push_uint_padded_hex() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 31, 16, 4, '0'))
+    string.push_uint(mut s, 31, 16, 4, '0')
     same(s, "001f")
 }
 
 // expect: run push_uint_binary() = true
 fn push_uint_binary() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 255, 2, 0, ' '))
+    string.push_uint(mut s, 255, 2, 0, ' ')
     same(s, "11111111")
 }
 
@@ -70,7 +70,7 @@ fn push_uint_binary() -> bool {
 // expect: run push_uint_zero_padded() = true
 fn push_uint_zero_padded() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 0, 10, 3, '*'))
+    string.push_uint(mut s, 0, 10, 3, '*')
     same(s, "**0")
 }
 
@@ -78,34 +78,34 @@ fn push_uint_zero_padded() -> bool {
 // expect: run push_uint_narrow_width() = true
 fn push_uint_narrow_width() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 12345, 10, 2, '0'))
+    string.push_uint(mut s, 12345, 10, 2, '0')
     same(s, "12345")
 }
 
 // expect: run push_uint_base_36() = true
 fn push_uint_base_36() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 35, 36, 1, '0'))
+    string.push_uint(mut s, 35, 36, 1, '0')
     same(s, "z")
 }
 
 // expect: run push_uint_base_37() = fail Fail
 fn push_uint_base_37() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 1, 37, 0, '0'))
+    string.push_uint(mut s, 1, 37, 0, '0')
     true
 }
 
 // expect: run push_uint_base_1() = fail Fail
 fn push_uint_base_1() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_uint(mut s, 1, 1, 0, '0'))
+    string.push_uint(mut s, 1, 1, 0, '0')
     true
 }
 
 // expect: run clear_keeps_storage() = true
 fn clear_keeps_storage() -> bool {
-    let mut s = result.unwrap(string.from("abc"))
+    let mut s = string.from("abc")
     string.clear(mut s)
     string.byte_len(s) == 0 && list.capacity(string.as_bytes(s)) >= 3
 }
@@ -121,24 +121,23 @@ fn clear_static() -> u64 {
 // fits afterwards. A clear that copied the literal first (charge 8) would hold the whole bound.
 // expect: run clear_static_admits_nothing() = true
 fn clear_static_admits_nothing() -> bool {
-    let r: Result[bool, Capacity] = bound bytes 8 {
-        let mut s = "xyz"
-        string.clear(mut s)
-        let fits = match string.from("abcdefgh") {
-            Ok(_) => true,
-            Error(_) => false,
+    let r = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 8 {
+            let mut s = "xyz"
+            string.clear(mut s)
+            let _ = string.from("abcdefgh")
+            string.byte_len(s) == 0
         }
-        fits && string.byte_len(s) == 0
-    }
+    })
     match r {
-        Ok(b) => b,
-        Error(_) => false,
+        Ok(Ok(Ok(b))) => b,
+        _ => false,
     }
 }
 
 // expect: run repeat_three() = true
 fn repeat_three() -> bool {
-    let r = result.unwrap(string.repeat("aé", 3))
+    let r = string.repeat("aé", 3)
     r == "aéaéaé" && string.byte_len(r) == 9 && list.capacity(string.as_bytes(r)) >= 9
 }
 
@@ -146,7 +145,7 @@ fn repeat_three() -> bool {
 // window is "aé", and the length is 600.
 // expect: run repeat_blocks() = 200
 fn repeat_blocks() -> u64 {
-    let r = result.unwrap(string.repeat("aé", 200))
+    let r = string.repeat("aé", 200)
     let mut windows: u64 = 0
     for i in 0u64 .. 200 {
         if string.slice(r, i * 3, i * 3 + 3) == "aé" {
@@ -163,13 +162,13 @@ fn repeat_blocks() -> u64 {
 // Zero copies and the empty string both give "".
 // expect: run repeat_empty() = 0
 fn repeat_empty() -> u64 {
-    string.byte_len(result.unwrap(string.repeat("abc", 0))) + string.byte_len(result.unwrap(string.repeat("", 1000)))
+    string.byte_len(string.repeat("abc", 0)) + string.byte_len(string.repeat("", 1000))
 }
 
 // 2 x 2^63 = 2^64 does not fit in u64.
 // expect: run repeat_overflow() = fail Fail
 fn repeat_overflow() -> u64 {
-    string.byte_len(result.unwrap(string.repeat("ab", 9223372036854775808)))
+    string.byte_len(string.repeat("ab", 9223372036854775808))
 }
 
 // expect: run find_first() = 2
@@ -218,10 +217,10 @@ fn find_every_offset() -> u64 {
         let mut s = string.new()
         for i in 0u64 .. 16 {
             if i == k {
-                result.unwrap(string.push(mut s, "éy"))
+                string.push(mut s, "éy")
             }
             if i < 15 {
-                result.unwrap(string.push(mut s, "x"))
+                string.push(mut s, "x")
             }
         }
         match string.find(s, 0, "éz") {
@@ -239,7 +238,7 @@ fn find_every_offset() -> u64 {
 // after r when b_after; an offset of 37 or more places nothing.
 fn newlines(q: u64, r: u64, b_after: bool) -> String {
     let mut out: Bytes = list.new()
-    result.unwrap(list.fill(mut out, 37, 0x61))
+    list.fill(mut out, 37, 0x61)
     if q < 37 {
         let _ = list.set(mut out, q, 0x0A)
     }
@@ -323,15 +322,15 @@ fn find_oracle(s: String, start: u64, pat: String) -> Option[u64] {
 }
 
 fn find_binary_text(n: u64, seed: u64) -> String {
-    let mut out = result.unwrap(string.with_capacity(n))
+    let mut out = string.with_capacity(n)
     let mut x = seed
     for _ in 0u64 .. n {
         x = int.wrapping_add(int.wrapping_mul(x, 6364136223846793005), 1)
-        result.unwrap(string.push(mut out, if (x >> 63) == 0 {
+        string.push(mut out, if (x >> 63) == 0 {
             "a"
         } else {
             "b"
-        }))
+        })
     }
     take out
 }
@@ -344,10 +343,10 @@ fn find_binary_differential() -> bool {
     for m in 0u64 .. 41 {
         let pat = find_binary_text(m, m + 1)
         let s = find_binary_text(67, 2 * m + 3)
-        let mut prefix = result.unwrap(string.from(pat))
-        result.unwrap(string.push(mut prefix, s))
-        let mut suffix = result.unwrap(string.from(s))
-        result.unwrap(string.push(mut suffix, pat))
+        let mut prefix = string.from(pat)
+        string.push(mut prefix, s)
+        let mut suffix = string.from(s)
+        string.push(mut suffix, pat)
         if string.find(prefix, 0, pat) != Some(0) || string.find(suffix, 67, pat) != Some(67) {
             return false
         }
@@ -361,24 +360,24 @@ fn find_binary_differential() -> bool {
         }
         if m >= 3 {
             for shape in 0u64 .. 2 {
-                let mut needle = result.unwrap(string.with_capacity(m))
+                let mut needle = string.with_capacity(m)
                 for i in 0u64 .. m {
                     let is_b = if shape == 0 {
                         i % 3 == 1 && i + 1 < m
                     } else {
                         i == m - 2
                     }
-                    result.unwrap(string.push(mut needle, if is_b {
+                    string.push(mut needle, if is_b {
                         "b"
                     } else {
                         "a"
-                    }))
+                    })
                 }
-                let mut hay = result.unwrap(string.repeat("a", 67))
+                let mut hay = string.repeat("a", 67)
                 if string.find(hay, 0, needle) != None {
                     return false
                 }
-                result.unwrap(string.push(mut hay, needle))
+                string.push(mut hay, needle)
                 if string.find(hay, 0, needle) != find_oracle(hay, 0, needle) {
                     return false
                 }
@@ -387,9 +386,9 @@ fn find_binary_differential() -> bool {
     }
     // The right half matches at 60, while its left half first matches at 63.
     let periodic = "abaabaabaabaaba"
-    let mut hay = result.unwrap(string.repeat("a", 62))
-    result.unwrap(string.push(mut hay, string.slice(periodic, 2, 15)))
-    result.unwrap(string.push(mut hay, "aba"))
+    let mut hay = string.repeat("a", 62)
+    string.push(mut hay, string.slice(periodic, 2, 15))
+    string.push(mut hay, "aba")
     string.find(hay, 0, periodic) == find_oracle(hay, 0, periodic)
 }
 
@@ -428,16 +427,16 @@ fn pieces(s: String, sep: String) -> String {
     let mut at: u64 = 0
     if string.byte_len(sep) == 0 {
         while let Some((line, next)) = string.next_line(s, at) {
-            result.unwrap(string.push(mut out, "["))
-            result.unwrap(string.push(mut out, line))
-            result.unwrap(string.push(mut out, "]"))
+            string.push(mut out, "[")
+            string.push(mut out, line)
+            string.push(mut out, "]")
             at = next
         }
     } else {
         while let Some((piece, next)) = string.next_split(s, at, sep) {
-            result.unwrap(string.push(mut out, "["))
-            result.unwrap(string.push(mut out, piece))
-            result.unwrap(string.push(mut out, "]"))
+            string.push(mut out, "[")
+            string.push(mut out, piece)
+            string.push(mut out, "]")
             at = next
         }
     }
@@ -580,16 +579,15 @@ fn trim_keeps_other_scalars() -> bool {
 }
 
 // Core operations with bodies (core/core/string.hirsel), against core.md and RFC 3629.
-fn utf8(take b: Result[Bytes, Capacity]) -> u64 {
-    match string.from_utf8(result.unwrap(take b)) {
+fn utf8(take b: Bytes) -> u64 {
+    match string.from_utf8(take b) {
         Ok(_) => 1,
         Error(_) => 0,
     }
 }
 
-fn utf8_error_is(take input: Result[Bytes, Capacity], at: u64, n: Option[u64]) -> bool {
-    let b = result.unwrap(take input)
-    utf8_error_at(b, at, n)
+fn utf8_error_is(take input: Bytes, at: u64, n: Option[u64]) -> bool {
+    utf8_error_at(input, at, n)
 }
 
 fn utf8_error_at(b: Bytes, at: u64, n: Option[u64]) -> bool {
@@ -647,10 +645,10 @@ fn valid(take b: Bytes) -> u64 {
 }
 
 // n bytes of 'a', then the bytes of tail.
-fn a_run(n: u64, take tail: Result[Bytes, Capacity]) -> Bytes {
+fn a_run(n: u64, take tail: Bytes) -> Bytes {
     let mut out: Bytes = list.new()
-    result.unwrap(list.fill(mut out, n, 0x61))
-    result.unwrap(list.append(mut out, result.unwrap(take tail)))
+    list.fill(mut out, n, 0x61)
+    list.append(mut out, take tail)
     out
 }
 
@@ -712,9 +710,9 @@ fn from_utf8_rows_after_a_block() -> u64 {
 // Repeat the boundary scalars around adjacent vectors and where the
 // final vector hands off to the tail. Invalid second bytes are checked even
 // when the lead is the last lane. Truncated scalars still fail at EOF.
-fn utf8_vector_case(pad: u64, take tail: Result[Bytes, Capacity], rest: u64) -> bool {
+fn utf8_vector_case(pad: u64, take tail: Bytes, rest: u64) -> bool {
     let mut b = a_run(pad, take tail)
-    result.unwrap(list.fill(mut b, rest, b'a'))
+    list.fill(mut b, rest, b'a')
     string.is_utf8(b)
 }
 
@@ -728,33 +726,33 @@ fn from_utf8_vector_edges() -> bool {
     // The lead in lane 31 starts in the previous block. Rust's Utf8Error
     // counts the lead and two valid continuations before the bad fourth byte.
     let mut split = a_run(31, b"\xF0\x90\x80A")
-    result.unwrap(list.fill(mut split, 256, b'a'))
+    list.fill(mut split, 256, b'a')
     if !utf8_error_at(split, 31, Some(3)) || !utf8_error_at(a_run(255, b"\xF0\x90\x80"), 255, None) {
         return false
     }
     utf8_vector_case(255, b"\xF0\x90\x80\x80", 0) && !utf8_vector_case(255, b"\xF0\x90\x80", 0) && !utf8_vector_case(255, b"\xF4\x90\x80\x80", 0)
 }
 
-fn utf8_prefix_buf(pad: u64, multibyte: bool, take bad: Result[Bytes, Capacity], tail_len: u64) -> Bytes {
+fn utf8_prefix_buf(pad: u64, multibyte: bool, take bad: Bytes, tail_len: u64) -> Bytes {
     let mut b: Bytes = list.new()
     if multibyte {
         let mut cur: u64 = 0
         // Fill with 3-byte '✓' (E2 9C 93) and pad remainder with 'a' to exact length `pad`.
         while cur + 3 <= pad {
-            result.unwrap(list.push(mut b, 0xE2))
-            result.unwrap(list.push(mut b, 0x9C))
-            result.unwrap(list.push(mut b, 0x93))
+            list.push(mut b, 0xE2)
+            list.push(mut b, 0x9C)
+            list.push(mut b, 0x93)
             cur += 3
         }
         if cur < pad {
-            result.unwrap(list.fill(mut b, pad - cur, b'a'))
+            list.fill(mut b, pad - cur, b'a')
         }
     } else {
-        result.unwrap(list.fill(mut b, pad, b'a'))
+        list.fill(mut b, pad, b'a')
     }
-    result.unwrap(list.append(mut b, result.unwrap(take bad)))
+    list.append(mut b, take bad)
     if tail_len > 0 {
-        result.unwrap(list.fill(mut b, tail_len, b'a'))
+        list.fill(mut b, tail_len, b'a')
     }
     take b
 }
@@ -860,7 +858,7 @@ fn pairs_accepted(lo: u64, hi: u64, pad: u64, rest: u64) -> u64 {
                 b = match checked {
                     Ok(take s) => {
                         accepted += 1
-                        result.unwrap(string.into_bytes(take s))
+                        string.into_bytes(take s)
                     },
                     Error(take back) => back,
                 }
@@ -967,7 +965,7 @@ fn from_utf8_every_continuation() -> u64 {
 // The argument comes back unchanged.
 // expect: run from_utf8_returns_argument() = 3
 fn from_utf8_returns_argument() -> u64 {
-    match string.from_utf8(result.unwrap(b"ab\xFF")) {
+    match string.from_utf8(b"ab\xFF") {
         Ok(_) => 99,
         Error(b) => list.len(b),
     }
@@ -976,16 +974,16 @@ fn from_utf8_returns_argument() -> u64 {
 // A literal has capacity 0; its copy has capacity equal to its length, 6 bytes.
 // expect: run from_literal() = 60
 fn from_literal() -> u64 {
-    let t = result.unwrap(string.from("héllo"))
+    let t = string.from("héllo")
     list.capacity(string.as_bytes(t)) * 10 + list.capacity(string.as_bytes("héllo"))
 }
 
 // An owned source with spare capacity: the copy's capacity is its length, 4.
 // expect: run from_owned() = 4
 fn from_owned() -> u64 {
-    let mut s = result.unwrap(string.from("abc"))
-    result.unwrap(string.push_char(mut s, 'd'))
-    let t = result.unwrap(string.from(s))
+    let mut s = string.from("abc")
+    string.push_char(mut s, 'd')
+    let t = string.from(s)
     if t == "abcd" {
         list.capacity(string.as_bytes(t))
     } else {
@@ -993,21 +991,25 @@ fn from_owned() -> u64 {
     }
 }
 
-// Under `bound bytes 0` the copy of "abc" (charge 8) returns Capacity; under 8 it fits.
+// Under `bound bytes 0` the copy of "abc" (charge 8) raises Capacity; under 8 it fits.
 // expect: run from_under_bound() = 12
 fn from_under_bound() -> u64 {
-    let small = bound bytes 0 {
-        string.from("abc")
+    let small = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            string.byte_len(string.from("abc"))
+        }
+    })
+    let refused: u64 = match caught(take small) {
+        Some(_) => 1,
+        None => 0,
     }
-    let refused: u64 = match small {
-        Ok(Error(_)) => 1,
-        _ => 0,
-    }
-    let enough = bound bytes 8 {
-        string.from("abc")
-    }
+    let enough = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 8 {
+            string.byte_len(string.from("abc"))
+        }
+    })
     let admitted: u64 = match enough {
-        Ok(Ok(_)) => 2,
+        Ok(Ok(Ok(3))) => 2,
         _ => 0,
     }
     refused * 10 + admitted
@@ -1015,7 +1017,7 @@ fn from_under_bound() -> u64 {
 
 fn decimal(n: u64) -> String {
     let mut s = string.new()
-    result.unwrap(string.push_u64(mut s, n))
+    string.push_u64(mut s, n)
     s
 }
 
@@ -1025,16 +1027,18 @@ fn push_u64_digits() -> bool {
 }
 
 // Appending the 20 digits of u64::MAX to a one-byte literal needs 21
-// bytes of storage, charged as 24. Refusal leaves the literal intact.
+// bytes of storage, charged as 24.
 // expect: run push_u64_refusal_keeps_literal() = true
 fn push_u64_refusal_keeps_literal() -> bool {
-    let mut s = "x"
-    let outcome = bound bytes 7 {
-        string.push_u64(mut s, 18446744073709551615)?
-    }
-    match outcome {
-        Error(c) => c.requested == 24 && c.available == 7 && s == "x",
-        Ok(()) => false,
+    let out = isolate(fn() -> Result[(), Capacity] {
+        let mut s = "x"
+        bound bytes 7 {
+            string.push_u64(mut s, 18446744073709551615)
+        }
+    })
+    match caught(take out) {
+        Some(c) => c.requested == 24 && c.available == 7,
+        None => false,
     }
 }
 
@@ -1042,7 +1046,7 @@ fn push_u64_refusal_keeps_literal() -> bool {
 // expect: run push_u64_onto_literal() = true
 fn push_u64_onto_literal() -> bool {
     let mut s = "x"
-    result.unwrap(string.push_u64(mut s, 42))
+    string.push_u64(mut s, 42)
     s == "x42"
 }
 
@@ -1054,9 +1058,9 @@ fn push_u64_powers_of_ten() -> u64 {
     let mut p: u64 = 1
     for k in 1u64 .. 20 {
         p = p * 10
-        let nines = result.unwrap(string.repeat("9", k))
-        let mut ten = result.unwrap(string.from("1"))
-        result.unwrap(string.push(mut ten, result.unwrap(string.repeat("0", k))))
+        let nines = string.repeat("9", k)
+        let mut ten = string.from("1")
+        string.push(mut ten, string.repeat("0", k))
         if decimal(p - 1) == nines && decimal(p) == ten {
             right += 1
         }
@@ -1073,7 +1077,7 @@ fn push_u64_repdigits() -> u64 {
         let mut n: u64 = 0
         for w in 1u64 .. 20 {
             n = n * 10 + d
-            if decimal(n) == result.unwrap(string.repeat(string.slice("123456789", d - 1, d), w)) {
+            if decimal(n) == string.repeat(string.slice("123456789", d - 1, d), w) {
                 right += 1
             }
         }
@@ -1094,9 +1098,9 @@ fn push_u64_digit_order() -> bool {
 // Onto owned bytes, twice: the digits land after what is there, zeros inside n included.
 // expect: run push_u64_appends() = true
 fn push_u64_appends() -> bool {
-    let mut s = result.unwrap(string.from("ab"))
-    result.unwrap(string.push_u64(mut s, 100))
-    result.unwrap(string.push_u64(mut s, 7))
+    let mut s = string.from("ab")
+    string.push_u64(mut s, 100)
+    string.push_u64(mut s, 7)
     s == "ab1007"
 }
 
@@ -1105,11 +1109,11 @@ fn push_u64_appends() -> bool {
 // expect: run push_char_into_room() = true
 fn push_char_into_room() -> bool {
     let mut s = string.new()
-    result.unwrap(string.reserve(mut s, 8))
+    string.reserve(mut s, 8)
     let room = list.capacity(string.as_bytes(s))
-    result.unwrap(string.push_char(mut s, 'a'))
-    result.unwrap(string.push_char(mut s, 'é'))
-    result.unwrap(string.push_char(mut s, 'b'))
+    string.push_char(mut s, 'a')
+    string.push_char(mut s, 'é')
+    string.push_char(mut s, 'b')
     s == "aéb" && list.capacity(string.as_bytes(s)) == room
 }
 
@@ -1117,10 +1121,10 @@ fn push_char_into_room() -> bool {
 // expect: run push_char_widths() = true
 fn push_char_widths() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_char(mut s, 'a'))
-    result.unwrap(string.push_char(mut s, 'é'))
-    result.unwrap(string.push_char(mut s, '€'))
-    result.unwrap(string.push_char(mut s, '\u{1F600}'))
+    string.push_char(mut s, 'a')
+    string.push_char(mut s, 'é')
+    string.push_char(mut s, '€')
+    string.push_char(mut s, '\u{1F600}')
     s == "aé€\u{1F600}" && string.byte_len(s) == 10
 }
 
@@ -1130,15 +1134,15 @@ fn push_char_widths() -> bool {
 // expect: run push_char_width_edges() = true
 fn push_char_width_edges() -> bool {
     let mut s = string.new()
-    result.unwrap(string.push_char(mut s, '\u{7F}'))
-    result.unwrap(string.push_char(mut s, '\u{80}'))
-    result.unwrap(string.push_char(mut s, '\u{7FF}'))
-    result.unwrap(string.push_char(mut s, '\u{800}'))
-    result.unwrap(string.push_char(mut s, '\u{D7FF}'))
-    result.unwrap(string.push_char(mut s, '\u{E000}'))
-    result.unwrap(string.push_char(mut s, '\u{FFFF}'))
-    result.unwrap(string.push_char(mut s, '\u{10000}'))
-    result.unwrap(string.push_char(mut s, '\u{10FFFF}'))
+    string.push_char(mut s, '\u{7F}')
+    string.push_char(mut s, '\u{80}')
+    string.push_char(mut s, '\u{7FF}')
+    string.push_char(mut s, '\u{800}')
+    string.push_char(mut s, '\u{D7FF}')
+    string.push_char(mut s, '\u{E000}')
+    string.push_char(mut s, '\u{FFFF}')
+    string.push_char(mut s, '\u{10000}')
+    string.push_char(mut s, '\u{10FFFF}')
     s == "\u{7F}\u{80}\u{7FF}\u{800}\u{D7FF}\u{E000}\u{FFFF}\u{10000}\u{10FFFF}" && string.byte_len(s) == 25
 }
 
@@ -1192,36 +1196,35 @@ fn slice_reversed() -> u64 {
 // An owned String keeps its storage: length 3, capacity 3.
 // expect: run into_bytes_owned() = 33
 fn into_bytes_owned() -> u64 {
-    let b = result.unwrap(string.into_bytes(result.unwrap(string.from("abc"))))
+    let b = string.into_bytes(string.from("abc"))
     list.len(b) * 10 + list.capacity(b)
 }
 
 // A literal is copied into capacity equal to its length.
 // expect: run into_bytes_literal() = 44
 fn into_bytes_literal() -> u64 {
-    let b = result.unwrap(string.into_bytes("abcd"))
+    let b = string.into_bytes("abcd")
     list.len(b) * 10 + list.capacity(b)
 }
 
-// Under `bound bytes 0` the copy is refused and the error returns the String.
-// expect: run into_bytes_under_bound() = 3
-fn into_bytes_under_bound() -> u64 {
-    let r: Result[u64, Capacity] = bound bytes 0 {
-        match string.into_bytes("abc") {
-            Ok(_) => 99,
-            Error((_, s)) => string.byte_len(s),
+// Under `bound bytes 0` the copy of the literal is refused and raises Capacity.
+// expect: run into_bytes_under_bound() = true
+fn into_bytes_under_bound() -> bool {
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            list.len(string.into_bytes("abc"))
         }
-    }
-    match r {
-        Ok(n) => n,
-        Error(_) => 98,
+    })
+    match caught(take r) {
+        Some(c) => c.requested > 0,
+        None => false,
     }
 }
 
 // "aé€" truncated to 3 bytes is "aé"; the capacity stays 6.
 // expect: run truncate_keeps_capacity() = 36
 fn truncate_keeps_capacity() -> u64 {
-    let mut s = result.unwrap(string.from("aé€"))
+    let mut s = string.from("aé€")
     string.truncate(mut s, 3)
     if s == "aé" {
         string.byte_len(s) * 10 + list.capacity(string.as_bytes(s))
@@ -1232,7 +1235,7 @@ fn truncate_keeps_capacity() -> u64 {
 
 // expect: run truncate_inside_scalar() = fail Bounds
 fn truncate_inside_scalar() -> u64 {
-    let mut s = result.unwrap(string.from("aé"))
+    let mut s = string.from("aé")
     string.truncate(mut s, 2)
     string.byte_len(s)
 }
@@ -1247,7 +1250,7 @@ fn truncate_past_end() -> u64 {
 // To 0: the owned "aé" keeps capacity 3 (len*10 + cap = 3); the literal keeps capacity 0 (0).
 // expect: run truncate_to_zero() = 30
 fn truncate_to_zero() -> u64 {
-    let mut owned = result.unwrap(string.from("aé"))
+    let mut owned = string.from("aé")
     string.truncate(mut owned, 0)
     let mut lit = "aé"
     string.truncate(mut lit, 0)
@@ -1304,18 +1307,34 @@ fn truncate_literal() -> u64 {
 // give independent single-, double- and triple-byte malformed prefixes.
 // expect: run rust_utf8_admission() = true
 fn rust_utf8_admission() -> bool {
-    let invalid: Inline[Bytes, 19] =[result.unwrap(b"A\xC3\xA9 \xFF "), result.unwrap(b"A\xC3\xA9 \x80 "), result.unwrap(b"A\xC3\xA9 \xC1 "), result.unwrap(b"A\xC3\xA9 \xC1"), result.unwrap(b"A\xC3\xA9 \xC2"), result.unwrap(b"A\xC3\xA9 \xC2 "), result.unwrap(b"A\xC3\xA9 \xC2\xC0"), result.unwrap(b"A\xC3\xA9 \xE0"), result.unwrap(b"A\xC3\xA9 \xE0\x9F"), result.unwrap(b"A\xC3\xA9 \xE0\xA0"), result.unwrap(b"A\xC3\xA9 \xE0\xA0\xC0"), result.unwrap(b"A\xC3\xA9 \xE0\xA0 "), result.unwrap(b"A\xC3\xA9 \xED\xA0\x80 "), result.unwrap(b"A\xC3\xA9 \xF1"), result.unwrap(b"A\xC3\xA9 \xF1\x80"), result.unwrap(b"A\xC3\xA9 \xF1\x80\x80"), result.unwrap(b"A\xC3\xA9 \xF1 "), result.unwrap(b"A\xC3\xA9 \xF1\x80 "), result.unwrap(b"A\xC3\xA9 \xF1\x80\x80 "),]
+    let invalid: Inline[Bytes, 19] =[b"A\xC3\xA9 \xFF ", b"A\xC3\xA9 \x80 ", b"A\xC3\xA9 \xC1 ", b"A\xC3\xA9 \xC1", b"A\xC3\xA9 \xC2", b"A\xC3\xA9 \xC2 ", b"A\xC3\xA9 \xC2\xC0", b"A\xC3\xA9 \xE0", b"A\xC3\xA9 \xE0\x9F", b"A\xC3\xA9 \xE0\xA0", b"A\xC3\xA9 \xE0\xA0\xC0", b"A\xC3\xA9 \xE0\xA0 ", b"A\xC3\xA9 \xED\xA0\x80 ", b"A\xC3\xA9 \xF1", b"A\xC3\xA9 \xF1\x80", b"A\xC3\xA9 \xF1\x80\x80", b"A\xC3\xA9 \xF1 ", b"A\xC3\xA9 \xF1\x80 ", b"A\xC3\xA9 \xF1\x80\x80 ",]
     for input in invalid {
-        match string.from_utf8(result.unwrap(clone(input))) {
+        match string.from_utf8(clone(input)) {
             Error(original) => if original != input {
                 return false
             },
             Ok(_) => return false,
         }
     }
-    let utf8_input = result.unwrap(b"\xE0\xB8\xA8\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2\xE4\xB8\xAD\xE5\x8D\x8EVi\xE1\xBB\x87t Nam")
+    let utf8_input = b"\xE0\xB8\xA8\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2\xE4\xB8\xAD\xE5\x8D\x8EVi\xE1\xBB\x87t Nam"
     match string.from_utf8(take utf8_input) {
         Ok(s) => s == "ศไทย中华Việt Nam",
         Error(_) => false,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

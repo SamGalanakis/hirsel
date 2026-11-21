@@ -1,7 +1,7 @@
 fn read_sequence(d:Dir)->bool waits {
     let mut f=result.unwrap(host.open(d,"f",Read))
-    let mut b:Bytes=result.unwrap(list.with_capacity(8))
-    result.unwrap(list.push(mut b,b'P'))
+    let mut b:Bytes=list.with_capacity(8)
+    list.push(mut b,b'P')
     match host.read(mut f,mut b) {Error(Other(5))=>{},_=>return false}
     if list.len(b)!=1 || b[0]!=b'P' {return false}
     if result.unwrap(host.read(mut f,mut b))!=2 || list.len(b)!=3 || b[1]!=b'a' || b[2]!=b'b' {return false}
@@ -29,7 +29,7 @@ fn append_sequence(d:Dir,n:u64)->bool waits {
     result.unwrap(host.write(mut f,string.as_bytes("!")))
     result.unwrap(host.close(take f))
     let mut reader=result.unwrap(host.open(d,"f",Read))
-    let mut got:Bytes=result.unwrap(list.with_capacity(8))
+    let mut got:Bytes=list.with_capacity(8)
     if result.unwrap(host.read(mut reader,mut got))!=7 {return false}
     got[0]==b'o' && got[1]==b'l' && got[2]==b'd' && got[3]==b'x' && got[4]==b'y' && got[5]==b'z' && got[6]==b'!'
 }
@@ -43,7 +43,7 @@ fn sync_sequence(d:Dir)->bool waits {
             result.unwrap(host.rename(d,"sync-a","sync-b"))
             result.unwrap(host.sync_dir(d))
             let mut r=result.unwrap(host.open(d,"sync-b",Read))
-            let mut b:Bytes=result.unwrap(list.with_capacity(16))
+            let mut b:Bytes=list.with_capacity(16)
             result.unwrap(host.read(mut r,mut b))==7 && list.len(b)==7
         }
         _ => false
@@ -54,7 +54,7 @@ fn crash_read(d:Dir)->bool waits {
         Error(NotFound) => true,
         Ok(take h) => {
             let mut f=take h
-            let mut b:Bytes=result.unwrap(list.with_capacity(2))
+            let mut b:Bytes=list.with_capacity(2)
             let ok=result.unwrap(host.read(mut f,mut b))==1 && b[0]==b'x'
             result.unwrap(host.close(take f))
             ok
@@ -73,8 +73,7 @@ fn crash_write(d:Dir)->bool waits {
 }
 fn close_sender(take tx:Sender[u64])->bool { true }
 fn try_receive_sequence()->bool waits {
-    let c:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(2)
-    let (tx,rx)=result.unwrap(take c)
+    let (tx,rx):(Sender[u64],Receiver[u64])=channel.new(2)
     match channel.try_receive(rx) { Error(Empty)=>{}, _=>return false }
     result.unwrap(channel.send(tx,7))
     match channel.try_receive(rx) { Ok(v)=>if v!=7{return false}, _=>return false }
@@ -85,7 +84,7 @@ fn try_receive_sequence()->bool waits {
     match channel.try_receive(rx) { Error(Closed)=>true, _=>false }
 }
 fn random_sequence(r:Random)->bool {
-    let mut b:Bytes=result.unwrap(list.with_capacity(4))
+    let mut b:Bytes=list.with_capacity(4)
     host.random(r,mut b)
     list.len(b)==4 && b[0]==b'\xa0' && b[1]==b'\xa1' && b[2]==b'\xa2' && b[3]==b'\xa3'
 }
@@ -95,7 +94,7 @@ fn issued(take input:IssueInput)->u64 waits {
     let value=if x.write {
         match host.write(mut x.f,string.as_bytes("xyz")) {Error(e)=>{match e.error {Other(5)=>{},_=>return 0};e.written},_=>return 0}
     } else {
-        let mut b:Bytes=result.unwrap(list.with_capacity(1))
+        let mut b:Bytes=list.with_capacity(1)
         let n=result.unwrap(host.read(mut x.f,mut b))
         if list.len(b)!=1 || b[0]!=b'A' {return 0}
         n
@@ -107,9 +106,8 @@ fn issued(take input:IssueInput)->u64 waits {
 fn cancelled_at_provider(d:Dir,tasks:Tasks,before:bool,writing:bool)->bool waits {
     let mode=if writing {Append} else {Read}
     let f=result.unwrap(host.open(d,"f",mode))
-    let c:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(1)
-    let (tx,rx)=result.unwrap(take c)
-    let mut h=result.unwrap(task.spawn(tasks,bytes 1024,IssueInput(f:take f,tx:take tx,write:writing),issued))
+    let (tx,rx):(Sender[u64],Receiver[u64])=channel.new(1)
+    let mut h=task.spawn(tasks,bytes 1024,IssueInput(f:take f,tx:take tx,write:writing),issued)
     if before {task.cancel(mut h)}
     match task.join(take h) {Error(Cancelled(take causes))=>{let _=take causes},_=>return false}
     if before {match channel.receive(rx) {Error(Closed(()))=>true,_=>false}}
@@ -124,13 +122,11 @@ fn blocked(take input:WaitInput)->u64 waits {
     99
 }
 fn cancel_blocked(tasks:Tasks,sending:bool)->bool waits {
-    let ready:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(1)
-    let (ready_tx,ready_rx)=result.unwrap(take ready)
-    let data:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(1)
-    let (data_tx,data_rx)=result.unwrap(take data)
+    let (ready_tx,ready_rx):(Sender[u64],Receiver[u64])=channel.new(1)
+    let (data_tx,data_rx):(Sender[u64],Receiver[u64])=channel.new(1)
     if sending {result.unwrap(channel.try_send(data_tx,11))}
     let parent_tx=channel.sender(data_tx)
-    let mut h=result.unwrap(task.spawn(tasks,bytes 0,WaitInput(ready:take ready_tx,data_tx:take data_tx,data_rx:take data_rx,sending:sending),blocked))
+    let mut h=task.spawn(tasks,bytes 0,WaitInput(ready:take ready_tx,data_tx:take data_tx,data_rx:take data_rx,sending:sending),blocked)
     if result.unwrap(channel.receive(ready_rx))!=1 {return false}
     task.cancel(mut h)
     match task.join(take h) {Error(Cancelled(take causes))=>{let _=take causes;true},_=>false}

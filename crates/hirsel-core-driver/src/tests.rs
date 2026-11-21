@@ -3543,7 +3543,7 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n\
          let mut d: Deque[u64] = deque.new()\n\
          let _ = deque.push_back(mut d, 1)\n\
-         let mut w = result.unwrap(std.io.out(out, 16))\n\
+         let mut w = std.io.out(out, 16)\n\
          result.unwrap(std.io.write(mut w, \"x\"))\n\
          let xs: List[(u64, u8)] = list.new()\n\
          let b: Bytes = list.new()\n\

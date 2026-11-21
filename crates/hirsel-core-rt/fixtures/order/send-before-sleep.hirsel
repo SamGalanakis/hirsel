@@ -8,8 +8,8 @@ fn child(take s: In) waits {
     result.unwrap(stdout.write(out, "s"))
 }
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, tx: take tx, out: out), child))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, In(clock: clock, tx: take tx, out: out), child)
     let v = result.unwrap(channel.receive(rx))
     result.unwrap(stdout.write(out, "R"))
     result.unwrap(task.join(take h))

@@ -53,8 +53,8 @@ fn words() -> bool {
 }
 
 fn octets() -> bool {
-    let a = result.unwrap(b"abc");
-    let b = result.unwrap(b"abc");
+    let a = b"abc";
+    let b = b"abc";
     same(a, b)
 }
 

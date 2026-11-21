@@ -750,7 +750,7 @@ fn recording_cli_replays() {
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.
-    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = result.unwrap(list.with_capacity(70000)); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
+    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = list.with_capacity(70000); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
     std::fs::write(app.join("main.hirsel"), random).unwrap();
     let random_tape = dir.path().join("random.tape");
     let (code, _, err) = invoke(

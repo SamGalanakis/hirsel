@@ -63,9 +63,7 @@ pub(super) struct SlotReplacement {
 enum ScopeKind {
     Region(Option<ValueId>),
     Restore(SlotReplacement),
-    Bound {
-        failed: usize,
-    },
+    Bound,
     StepBound {
         failed: usize,
         steps: Option<ValueId>,
@@ -1951,9 +1949,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             }
         };
-        let bound = error.filter(|_| mapped.is_none()).filter(|&e| matches!(self.t.kind(e), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"])))
-            .and_then(|_| self.patterns.scopes.iter().rposition(|s| matches!(s.kind, ScopeKind::Bound { .. })));
-        if bound.is_none() && mapped.is_none() {
+        if mapped.is_none() {
             let Some((od, _, oe)) = outer else {
                 self.refuse(
                     "LANG-18",
@@ -1974,7 +1970,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             })
                     });
                 let message = if capacity_only {
-                    "`?` propagates only the identical error type, or Option to Option; use `result.capacity_only(...)?` to discard the returned value and propagate Capacity"
+                    "`?` propagates only the identical error type, or Option to Option; use `?=> |(c, _)| c` to propagate the Capacity"
                 } else {
                     "`?` propagates only the identical error type, or Option to Option"
                 };
@@ -2032,15 +2028,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.halt();
             }
             self.dead = was_dead;
-        } else if let Some(scope) = bound {
-            let context = self.patterns.scopes[scope];
-            let ScopeKind::Bound { failed } = context.kind else {
-                unreachable!()
-            };
-            let fi = context.frame.unwrap();
-            self.unwind(self.frames[fi].owners, scope, n);
-            self.exit_edge(fi);
-            self.goto(failed, error.unwrap(), error_value, n);
         } else {
             let value = self.wrap_case(
                 self.fd.result,
@@ -2131,7 +2118,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn pattern_scope_exits_one(&mut self, i: usize, n: NodeId) {
         match self.patterns.scopes[i].kind {
             ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
-            ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
+            ScopeKind::Bound => self.inst(Inst::LimitExit, n),
             ScopeKind::Restore(old) => {
                 let restore = self.new_block(&[]);
                 let done = self.new_block(&[]);
@@ -2177,7 +2164,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             matches!(
                 s.kind,
                 ScopeKind::Region(Some(_))
-                    | ScopeKind::Bound { .. }
+                    | ScopeKind::Bound
                     | ScopeKind::StepBound { .. }
                     | ScopeKind::Restore(_)
             )
@@ -2350,7 +2337,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let owners = self.owner_mark();
         self.patterns.scopes.push(Scope {
-            kind: ScopeKind::Bound { failed },
+            kind: ScopeKind::Bound,
             frame: Some(fi),
             owners: self.owners.len(),
         });

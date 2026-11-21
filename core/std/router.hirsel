@@ -31,7 +31,7 @@ pub opaque type Router[S: shareable + send]: shareable + send {
     entries: List[Entry[S]]
 }
 
-pub type AddError: send = InvalidMethod | InvalidPattern | Allocation(Capacity)
+pub type AddError: send = InvalidMethod | InvalidPattern
 
 pub type RouteConflict: key {}
 
@@ -51,13 +51,6 @@ fn name_valid(name: String) -> bool {
         }
     }
     true
-}
-
-fn owned(s: String) -> Result[String, AddError] {
-    match string.from(s) {
-        Ok(take text) => Ok(take text),
-        Error(e) => Error(Allocation(e)),
-    }
 }
 
 fn parse(pattern: String) -> Result[Pattern, AddError] {
@@ -98,10 +91,10 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
                 if end != n {
                     return Error(InvalidPattern)
                 }
-                tail = Some(owned(name)?)
+                tail = Some(string.from(name))
                 break
             }
-            Capture(owned(name)?)
+            Capture(string.from(name))
         } else {
             for c in list.slice(raw_bytes, start, end) {
                 if c == b'{' || c == b'}' {
@@ -111,7 +104,6 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
             let mut literal = string.new()
             match uri.decode_text(pattern, http1.Span(start, end), mut literal) {
                 Ok(()) => {},
-                Error(Capacity(e)) => return Error(Allocation(e)),
                 Error(_) => return Error(InvalidPattern),
             }
             if literal == "." || literal == ".." {
@@ -119,9 +111,7 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
             }
             Literal(take literal)
         }
-        if let Error((e, _)) = list.push(mut pieces, take item) {
-            return Error(Allocation(e))
-        }
+        list.push(mut pieces, take item)
         if end == n {
             break
         }
@@ -140,11 +130,9 @@ pub fn add[S: shareable + send](mut b: Builder[S], method: String, pattern: Stri
             return Error(InvalidMethod)
         }
     }
-    let entry = Entry(method: owned(method)?, pattern: parse(pattern)?, route: take route)
-    match list.push(mut b.entries, take entry) {
-        Ok(()) => Ok(()),
-        Error((e, _)) => Error(Allocation(e)),
-    }
+    let entry = Entry(method: string.from(method), pattern: parse(pattern)?, route: take route)
+    list.push(mut b.entries, take entry)
+    Ok(())
 }
 
 fn capture_index_in(pieces: List[Segment], name: String) -> Option[u64] {
@@ -297,25 +285,25 @@ fn has_method(methods: String, method: String) -> bool {
     false
 }
 
-fn add_method(mut methods: String, method: String) -> Result[(), Capacity] {
+fn add_method(mut methods: String, method: String) {
     if has_method(methods, method) {
-        return Ok(())
+        return
     }
     if string.byte_len(methods) != 0 {
-        string.push(mut methods, ", ")?
+        string.push(mut methods, ", ")
     }
     string.push(mut methods, method)
 }
 
-pub fn allow[S: shareable + send](r: Router[S], path: List[String], all: bool) -> Result[String, Capacity] {
+pub fn allow[S: shareable + send](r: Router[S], path: List[String], all: bool) -> String {
     let mut methods = string.new()
     for entry in r.entries {
         if all || matches(entry.pattern, path) {
-            add_method(mut methods, entry.method)?
+            add_method(mut methods, entry.method)
             if entry.method == "GET" {
-                add_method(mut methods, "HEAD")?
+                add_method(mut methods, "HEAD")
             }
         }
     }
-    Ok(take methods)
+    take methods
 }

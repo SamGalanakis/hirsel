@@ -1,14 +1,14 @@
 // A core-declared clone owns the live-set walk, including a containing List.
 // expect: accept
 // Private Slots and hooks for clone_in/twin remain guarded in derivation tests.
-fn direct(d: Deque[u64]) -> Result[Deque[u64], Capacity] {
+fn direct(d: Deque[u64]) -> Deque[u64] {
     clone(d)
 }
 
-fn containing(ds: List[Deque[u64]]) -> Result[List[Deque[u64]], Capacity] {
+fn containing(ds: List[Deque[u64]]) -> List[Deque[u64]] {
     clone(ds)
 }
 
-fn counted(d: Rc[Deque[u64]]) -> Result[Rc[Deque[u64]], Capacity] {
+fn counted(d: Rc[Deque[u64]]) -> Rc[Deque[u64]] {
     clone(d)
 }

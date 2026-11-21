@@ -33,8 +33,8 @@ fn nist_bytewise() -> bool {
 // NIST million-a vector, streamed as 1,000 chunks with only one 1,000-byte input.
 // expect: run nist_million() = true
 fn nist_million() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(1000))
-    result.unwrap(list.fill(mut b, 1000, b'a'))
+    let mut b: Bytes = list.with_capacity(1000)
+    list.fill(mut b, 1000, b'a')
     let mut s = sha256.start()
     for _ in 0u64 .. 1000u64 {
         sha256.add(mut s, b, 0, 1000)
@@ -77,12 +77,12 @@ fn reference(d: Inline[u8, 32], n: u64) -> bool {
 }
 
 fn differential(lo: u64, hi: u64) -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(202))
-    result.unwrap(list.push(mut b, 99u8))
+    let mut b: Bytes = list.with_capacity(202)
+    list.push(mut b, 99u8)
     for i in 0u64 .. 200u64 {
-        result.unwrap(list.push(mut b, int.truncate(i * 17 + 3)))
+        list.push(mut b, int.truncate(i * 17 + 3))
     }
-    result.unwrap(list.push(mut b, 77u8))
+    list.push(mut b, 77u8)
     for n in lo .. hi {
         if !reference(sha256.hash(list.slice(b, 1, n + 1)), n) {
             return false

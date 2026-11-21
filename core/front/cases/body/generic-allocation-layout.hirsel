@@ -40,10 +40,10 @@ fn big() -> Big {
 }
 
 fn available() -> u64 {
-    let p: Result[List[u8], Capacity] = list.with_capacity(1000)
-    match p {
+    let mut p: List[u8] = list.new()
+    match list.try_reserve(mut p, 1000) {
         Error(c) => c.available,
-        Ok(_) => 0
+        Ok(()) => 0
     }
 }
 
@@ -141,7 +141,7 @@ fn variant32() -> bool {
 }
 
 fn boxed[T](take v: T) -> u64 {
-    let p = result.unwrap(box.new(take v));
+    let p = box.new(take v);
     let left = available();
     let _ = take p;
     left

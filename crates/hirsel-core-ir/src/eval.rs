@@ -488,7 +488,6 @@ struct Limit(Arc<LimitRecord>);
 #[derive(Debug)]
 struct LimitRecord {
     cap: u64,
-    grant: bool,
     /// Scheduler index of the task whose admissions this limit serves.
     owner: usize,
     state: Mutex<LimitState>,
@@ -502,10 +501,9 @@ struct LimitState {
 }
 
 impl Limit {
-    fn new(cap: u64, parent: Option<Self>, grant: bool, owner: usize) -> Self {
+    fn new(cap: u64, parent: Option<Self>, owner: usize) -> Self {
         Self(Arc::new(LimitRecord {
             cap,
-            grant,
             owner,
             state: Mutex::new(LimitState {
                 used: 0,
@@ -1593,6 +1591,7 @@ fn cause(r: RaiseCause) -> &'static str {
         RaiseCause::Unwrap => "Unwrap",
         RaiseCause::Bounds => "Bounds",
         RaiseCause::Fail(_) => "Fail",
+        RaiseCause::Capacity { .. } => "Capacity",
     }
 }
 
@@ -1604,7 +1603,7 @@ impl<'m> Machine<'m> {
             recipes,
             mem: Blocks::default(),
             peak_reserved: 0,
-            root: Some(Limit::new(limit, None, false, 0)),
+            root: Some(Limit::new(limit, None, 0)),
             regions: Vec::new(),
             children: Vec::new(),
             chans: Vec::new(),
@@ -2990,7 +2989,7 @@ impl Machine<'_> {
         if let Some(r) = &blk.res {
             if !r.settled {
                 let payer = blk.limit.as_ref().expect("a resource payer");
-                let grant = Limit::new(r.grant, Some(payer.clone()), true, self.sched.current);
+                let grant = Limit::new(r.grant, Some(payer.clone()), self.sched.current);
                 self.end_limit(grant, None);
             }
             n -= r.grant;
@@ -3480,7 +3479,7 @@ impl Machine<'_> {
             let resource = self.mem[b].res.as_ref().expect("a resource block");
             let (grant, creator) = (resource.grant, resource.creator);
             let payer = self.mem[b].limit.clone().expect("charged");
-            let g = Limit::new(grant, Some(payer.clone()), true, self.sched.current);
+            let g = Limit::new(grant, Some(payer.clone()), self.sched.current);
             t.limits.push(g);
             t.obligations.push(Some(Cell {
                 limit: payer,
@@ -3551,6 +3550,11 @@ impl Machine<'_> {
                     self.store(cell + 8 * j as u64, 8, w);
                 }
             } else {
+                if c.kind == "Capacity" {
+                    // `Capacity(c)`: requested at 0, available at 8.
+                    self.store(cell, 8, c.message[0]);
+                    self.store(cell + 8, 8, c.message[1]);
+                }
                 self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
             }
             let site = self.site_word(c.site);
@@ -3723,7 +3727,7 @@ impl Machine<'_> {
                     return Ok(vec![0, room]); // x stays the caller's
                 }
                 // The child's limit serves the child, the next scheduler record.
-                let lim = Limit::new(n, Some(cur.clone()), false, self.sched.tasks.len());
+                let lim = Limit::new(n, Some(cur.clone()), self.sched.tasks.len());
                 let xb = self.block(self.held(x), None, 0, None);
                 let bytes = self.get(a[1], self.held(x) as usize).to_vec();
                 self.put(xb, &bytes);
@@ -4413,9 +4417,17 @@ impl Machine<'_> {
                 }
                 Terminator::Raise { cause: c, cleanup } => {
                     let mut message = [0; 3];
-                    if let RaiseCause::Fail(a) = c {
-                        let (p, _) = self.address(b, slots, &vals, &places, *a)?;
-                        message = [0, 8, 16].map(|o| self.load(p + o, 8));
+                    match c {
+                        RaiseCause::Fail(a) => {
+                            let (p, _) = self.address(b, slots, &vals, &places, *a)?;
+                            message = [0, 8, 16].map(|o| self.load(p + o, 8));
+                        }
+                        // `Capacity(c)`'s payload sits where `Fail`'s carrier does.
+                        RaiseCause::Capacity {
+                            requested,
+                            available,
+                        } => message = [vals[requested.index()], vals[available.index()], 0],
+                        RaiseCause::Unwrap | RaiseCause::Bounds => {}
                     }
                     t.at.last_mut().unwrap().0 = blk.anchor;
                     let site = self.site(t);
@@ -4929,7 +4941,6 @@ impl Machine<'_> {
                 }
                 let n = vals[charge.index()];
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
-                    Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) if let AllocPlace::Frame(at) = place => {
                         (vals[result.index()], vals[available.index()]) = (vals[at.index()], 0);
@@ -5097,7 +5108,7 @@ impl Machine<'_> {
                     Err(room) => (0, room),
                 };
                 if ok == 1 {
-                    let l = Limit::new(n, Some(cur.clone()), false, self.sched.current);
+                    let l = Limit::new(n, Some(cur.clone()), self.sched.current);
                     t.limits.push(l);
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
@@ -5174,7 +5185,6 @@ impl Machine<'_> {
                 let l = t.limits.last().unwrap().clone();
                 let n = vals[charge.index()];
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
-                    Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     // Refused: the carrier, its block and the block's elements stay.
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) => {
@@ -5518,7 +5528,7 @@ fn ended_byte_limits_release_their_records() {
     let root = machine.root().clone();
     for _ in 0..4096 {
         machine.admit(&root, 0).unwrap();
-        let scope = Limit::new(0, Some(root.clone()), false, 0);
+        let scope = Limit::new(0, Some(root.clone()), 0);
         peak = peak.max(meter.bytes());
         machine.end_limit(scope, None);
     }
@@ -5531,9 +5541,9 @@ fn ended_byte_limits_release_their_records() {
     // block refunds exactly its surviving charge to the root.
     drop(measure);
     machine.admit(&root, 64).unwrap();
-    let outer = Limit::new(64, Some(root.clone()), false, 0);
+    let outer = Limit::new(64, Some(root.clone()), 0);
     machine.admit(&outer, 48).unwrap();
-    let inner = Limit::new(48, Some(outer.clone()), false, 0);
+    let inner = Limit::new(48, Some(outer.clone()), 0);
     machine.admit(&inner, 8).unwrap();
     let block = machine.block(8, Some(inner.clone()), 8, None);
     machine.end_limit(inner, None);

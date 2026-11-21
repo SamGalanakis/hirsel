@@ -10,9 +10,9 @@ fn framing(id: u8) -> flate.Format {
 }
 
 fn stream_matches(format: flate.Format, input: Bytes, expected: Bytes, single: bool) -> bool {
-    let mut d = result.unwrap(flate.decoder(format))
+    let mut d = flate.decoder(format)
     let mut out: Bytes = list.new()
-    let mut piece: Bytes = result.unwrap(list.with_capacity(1))
+    let mut piece: Bytes = list.with_capacity(1)
     let n = list.len(input)
     let mut at: u64 = 0
     let mut seed: u64 = 0x1951
@@ -31,14 +31,14 @@ fn stream_matches(format: flate.Format, input: Bytes, expected: Bytes, single: b
         if single {
             list.clear(mut piece)
         } else {
-            piece = result.unwrap(list.with_capacity((seed / 19) % 23 + 1))
+            piece = list.with_capacity((seed / 19) % 23 + 1)
         }
         let step = result.unwrap(flate.decode_step(mut d, input, at, hi, mut piece))
         at += step.consumed
         if step.produced != list.len(piece) || step.produced > list.capacity(piece) {
             return false
         }
-        result.unwrap(list.append(mut out, piece))
+        list.append(mut out, piece)
         if step.ended {
             return at == n && out == expected
         }
@@ -101,7 +101,7 @@ fn malformed(data: Bytes) -> bool {
 // be borrowed again. The failed whole-buffer call also refunds its output.
 fn refunds(bad_sum: Bytes, too_large: Bytes) -> bool {
     result.unwrap(bound bytes 65536 {
-        let mut d = result.unwrap(flate.decoder(Zlib()))
+        let mut d = flate.decoder(Zlib())
         let mut output: Bytes = list.new()
         let occupied = match (bound bytes 65536 {
             true
@@ -133,9 +133,9 @@ fn refunds(bad_sum: Bytes, too_large: Bytes) -> bool {
 
 fn gzip_boundary(member: Bytes) -> bool {
     let mut two: Bytes = list.new()
-    result.unwrap(list.append(mut two, member))
-    result.unwrap(list.append(mut two, member))
-    let mut d = result.unwrap(flate.decoder(Gzip()))
+    list.append(mut two, member)
+    list.append(mut two, member)
+    let mut d = flate.decoder(Gzip())
     let mut out: Bytes = list.new()
     let n = list.len(member)
     let first = result.unwrap(flate.decode_step(mut d, two, 0, n * 2, mut out))
@@ -150,14 +150,14 @@ fn gzip_boundary(member: Bytes) -> bool {
 // RFC 1950 section 2.2 checksum, header and stream boundary from zlib.
 // expect: run hostile_decode() = true
 fn hostile_decode() -> bool {
-    let raw = result.unwrap(b"\x03\x00")
-    let zlib = result.unwrap(b"\x78\x9c\x63\xa8\x00\x00\x00\x7a\x00\x79")
-    let gzip = result.unwrap(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00")
-    let old_gzip = result.unwrap(b"\x1f\x8b\x08\x04\x00\x09\x6e\x88\x00\xff\x07\x00foo bar\xcb\x48\xcd\xc9\xc9\xd7\x51\x28\xcf\x2f\xca\x49\x01\x04\x3a\x72\xab\xff\x0c\x00\x00\x00")
-    let bad_header = result.unwrap(b"\x78\x00")
-    let bad_sum = result.unwrap(b"\x78\x9c\x03\x00\x00\x00\x00\x00")
-    let too_large = result.unwrap(b"\x78\xda\x63\x60\xa0\x3d\x00\x00\x00\x64\x00\x01")
-    let trailing = result.unwrap(b"\x03\x00\xff")
+    let raw = b"\x03\x00"
+    let zlib = b"\x78\x9c\x63\xa8\x00\x00\x00\x7a\x00\x79"
+    let gzip = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    let old_gzip = b"\x1f\x8b\x08\x04\x00\x09\x6e\x88\x00\xff\x07\x00foo bar\xcb\x48\xcd\xc9\xc9\xd7\x51\x28\xcf\x2f\xca\x49\x01\x04\x3a\x72\xab\xff\x0c\x00\x00\x00"
+    let bad_header = b"\x78\x00"
+    let bad_sum = b"\x78\x9c\x03\x00\x00\x00\x00\x00"
+    let too_large = b"\x78\xda\x63\x60\xa0\x3d\x00\x00\x00\x64\x00\x01"
+    let trailing = b"\x03\x00\xff"
     let limited = match flate.decode(Zlib(), too_large, 99) {
         Error(Data(TooLarge())) => true,
         _ => false,
@@ -170,7 +170,7 @@ fn hostile_decode() -> bool {
         Error(Data(TrailingData(2))) => true,
         _ => false,
     }
-    let mut d = result.unwrap(flate.decoder(Zlib()))
+    let mut d = flate.decoder(Zlib())
     let mut out: Bytes = list.new()
     let first = flate.decode_step(mut d, bad_sum, 0, 8, mut out)
     let sticky = flate.decode_step(mut d, bad_sum, 0, 0, mut out)
@@ -184,12 +184,12 @@ fn hostile_decode() -> bool {
     limited && header && tail && checksums && gzip_boundary(gzip) && refunds(bad_sum, too_large) && (match budget_result {
         Error(Checksum()) => true,
         _ => false
-    }) && malformed(result.unwrap(b"\x07")) && malformed(result.unwrap(b"\xfc\xfe\x36")) && malformed(result.unwrap(b"\x01\x00\x00\x00\x00")) && truncated(Raw(), raw, 0) && truncated(Zlib(), zlib, 2) && truncated(Gzip(), gzip, 0) && truncated(Gzip(), old_gzip, 12)
+    }) && malformed(b"\x07") && malformed(b"\xfc\xfe\x36") && malformed(b"\x01\x00\x00\x00\x00") && truncated(Raw(), raw, 0) && truncated(Zlib(), zlib, 2) && truncated(Gzip(), gzip, 0) && truncated(Gzip(), old_gzip, 12)
 }
 
 fn split_encode(format: flate.Format, data: Bytes, level: u8) -> Bytes {
-    let mut e = result.unwrap(flate.encoder(format, level))
-    let mut piece: Bytes = result.unwrap(list.with_capacity(1))
+    let mut e = flate.encoder(format, level)
+    let mut piece: Bytes = list.with_capacity(1)
     let mut out: Bytes = list.new()
     let end = list.len(data)
     let mut at: u64 = 0
@@ -197,12 +197,12 @@ fn split_encode(format: flate.Format, data: Bytes, level: u8) -> Bytes {
         list.clear(mut piece)
         let step = flate.encode_step(mut e, data, at, at + 1, mut piece)
         at += step.consumed
-        result.unwrap(list.append(mut out, piece))
+        list.append(mut out, piece)
     }
     while true {
         list.clear(mut piece)
         let step = flate.finish_step(mut e, mut piece)
-        result.unwrap(list.append(mut out, piece))
+        list.append(mut out, piece)
         if step.ended {
             return take out
         }
@@ -220,7 +220,7 @@ fn encode_roundtrip() -> bool {
         for id in 0u8 .. 3 {
             let format = framing(id)
             for level in 0u8 .. 10 {
-                let output = result.unwrap(flate.encode(format, input, level))
+                let output = flate.encode(format, input, level)
                 if output != split_encode(format, input, level) || result.unwrap(flate.decode(format, output, list.len(input))) != input {
                     return false
                 }

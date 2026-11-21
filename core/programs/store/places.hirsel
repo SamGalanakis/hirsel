@@ -78,7 +78,7 @@ fn room(cap: Capacity) -> runner.Room { runner.Room(requested: cap.requested, av
 
 pub fn place_factory[G: send, H: send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Factory, Capacity] {
     let made = fn(take request: Launch) -> Result[Started, Refused] { start_place(take request, make) }
-    match take made { Ok(take start) => Ok(Factory(start: take start)), Error((cap, _)) => Error(cap) }
+    Ok(Factory(start: take made))
 }
 
 fn start_place[G: send, H: send, S: send](take request: Launch, make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Started, Refused] {
@@ -92,10 +92,8 @@ fn start_place[G: send, H: send, S: send](take request: Launch, make: fn(take Su
     if charge > available { return Error(Full(Reserve(runner.Room(requested: charge, available: available)))) }
     let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, slot: slot, need: need)
     let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
-    match task.spawn(tasks, bytes charge, take job, run) {
-        Ok(take handle) => Ok(Started(task: take handle, charge: charge)),
-        Error((cap, _)) => Error(Full(Reserve(room(cap)))),
-    }
+    let handle = task.spawn(tasks, bytes charge, take job, run)
+    Ok(Started(task: take handle, charge: charge))
 }
 
 // The place task: operate runs in a child so this task can read its phases. Its last
@@ -111,11 +109,10 @@ fn run_place[G: send, H: send, S: send](take job: PlaceJob[G, H, S]) -> () waits
 fn operated[G: send, H: send, S: send](take job: PlaceJob[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, slot: slot, need: need) = take job
     let tasks = config.tasks
-    let made: Result[(Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]), Capacity] = channel.new(1u64)
-    let (handoff, phases_from) = match take made { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
+    let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let request = Operated(config: take config, stop: take halt, status: take root, watch: take handoff)
     let run: fn(take Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits = run_operate
-    let running = match task.spawn(tasks, bytes need, take request, run) { Ok(take handle) => take handle, Error((cap, _)) => return Error(Full(cap)) }
+    let running = task.spawn(tasks, bytes need, take request, run)
     if let Ok(take phases) = channel.receive(phases_from) {
         while let Ok(phase) = channel.receive(phases) {
             if let Ready = phase { let _ = channel.send(to, Up(slot)) }
@@ -146,25 +143,21 @@ pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Res
     for i in 0u64 .. count {
         for j in 0u64 .. i {
             if places[i].name == places[j].name {
-                return match string.from(places[i].name) { Ok(take name) => Error(Duplicate(take name)), Error(cap) => Error(Full(cap)) }
+                let name = string.from(places[i].name)
+                return Error(Duplicate(take name))
             }
         }
     }
     let DirectoryConfig(idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net,
         watch: take watch) = take config
-    let made: Result[(Sender[DirIn], Receiver[DirIn]), Capacity] = channel.new(64u64)
-    let (to, inbox) = match take made { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
+    let (to, inbox): (Sender[DirIn], Receiver[DirIn]) = channel.new(64u64)
     let seed = Seed(listed: take places, inbox: take inbox, to: channel.sender(to), idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
         tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
     let own = int.saturating_add(DIRECTORY_BYTES, int.saturating_mul(count, DIRECTORY_SLOT_BYTES))
-    let running = match task.spawn(tasks, bytes int.saturating_add(place_bytes, own), take seed, run_directory) {
-        Ok(take handle) => take handle, Error((cap, _)) => return Error(Full(cap)),
-    }
+    let running = task.spawn(tasks, bytes int.saturating_add(place_bytes, own), take seed, run_directory)
     let every = if idle_ms < 2u64 { 1u64 } else { idle_ms / 2u64 }
     let ticking = Ticker(to: channel.sender(to), clock: clock, every_ms: every)
-    let ticker = match task.spawn(tasks, bytes 4096u64, take ticking, tick) {
-        Ok(take handle) => take handle, Error((cap, _)) => return Error(Full(cap)),
-    }
+    let ticker = task.spawn(tasks, bytes 4096u64, take ticking, tick)
     Ok(Directory(to: take to, actor: take running, ticker: take ticker))
 }
 
@@ -180,17 +173,15 @@ pub fn opener(d: Directory) -> Opener { Opener(to: channel.sender(d.to)) }
 pub fn status(l: Lease) -> Latest[runner.Status] { latest.handle(l.status) }
 
 pub fn open(o: Opener, name: String) -> Result[Lease, Refused] waits {
-    let owned = match string.from(name) { Ok(take copied) => take copied, Error(cap) => return Error(Full(Reserve(room(cap)))) }
-    let made: Result[(Sender[Result[Lease, Refused]], Receiver[Result[Lease, Refused]]), Capacity] = channel.new(1u64)
-    let (reply, answer) = match take made { Ok(take pair) => take pair, Error(cap) => return Error(Full(Reserve(room(cap)))) }
+    let owned = string.from(name)
+    let (reply, answer): (Sender[Result[Lease, Refused]], Receiver[Result[Lease, Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(o.to, Open(take owned, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 
 pub fn close(o: Opener, name: String) -> Result[Unloaded, CloseRefused] waits {
-    let owned = match string.from(name) { Ok(take copied) => take copied, Error(_) => return Error(Stopping) }
-    let made: Result[(Sender[Result[Unloaded, CloseRefused]], Receiver[Result[Unloaded, CloseRefused]]), Capacity] = channel.new(1u64)
-    let (reply, answer) = match take made { Ok(take pair) => take pair, Error(_) => return Error(Stopping) }
+    let owned = string.from(name)
+    let (reply, answer): (Sender[Result[Unloaded, CloseRefused]], Receiver[Result[Unloaded, CloseRefused]]) = channel.new(1u64)
     if let Error(_) = channel.send(o.to, Close(take owned, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
@@ -222,8 +213,8 @@ fn lease(live: Live) -> Lease { Lease(status: latest.handle(live.status), pin: a
 fn answer_all(take waiters: Waiters, refused: Refused) {
     let mut left = take waiters
     while let Some(take waiter) = list.pop(mut left) {
-        let copied: Result[Refused, Capacity] = clone(refused)
-        let sent = match take copied { Ok(take value) => take value, Error(cap) => Full(Reserve(room(cap))) }
+        let copied: Refused = clone(refused)
+        let sent = take copied
         let _ = channel.try_send(waiter, Error(take sent))
     }
 }
@@ -237,15 +228,14 @@ fn lease_all(take waiters: Waiters, live: Live) {
 
 fn one_waiter(take waiter: Sender[Result[Lease, Refused]]) -> Option[Waiters] {
     let mut waiters: Waiters = list.new()
-    match list.push(mut waiters, take waiter) {
-        Ok(()) => Some(take waiters),
-        Error((cap, take back)) => { let _ = channel.try_send(back, Error(Full(Reserve(room(cap))))); None },
-    }
+    list.push(mut waiters, take waiter)
+    Some(take waiters)
 }
 
 fn watch_up(a: Actor, index: u64) {
     if let Some(to) = a.watch {
-        if let Ok(take name) = string.from(a.slots[index].name) { let _ = channel.try_send(to, Up(take name)) }
+        let name = string.from(a.slots[index].name)
+        let _ = channel.try_send(to, Up(take name))
     }
 }
 
@@ -256,10 +246,9 @@ fn pin_activation(mut a: Actor, index: u64, live: Live) {
 }
 
 // Starts a fresh instance for these waiters, or answers each of them why not.
-fn launch(mut a: Actor, index: u64, take waiters: Waiters) waits {
+fn launch(mut a: Actor, index: u64, take waiters: Waiters) {
     if a.live >= a.max_places { answer_all(take waiters, Full(Count(a.max_places))); return }
-    let made: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
-    let (stop_to, stop_from) = match take made { Ok(take pair) => take pair, Error(cap) => { answer_all(take waiters, Full(Reserve(room(cap)))); return } }
+    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let root = match runner.status_root() { Ok(take made_root) => take made_root, Error(cap) => { answer_all(take waiters, Full(Reserve(room(cap)))); return } }
     let supplied = Supplied(tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
     let launched = Launch(supplied: take supplied, backing: copy_backing(a.slots[index].backing), selection: a.slots[index].selection,
@@ -268,16 +257,7 @@ fn launch(mut a: Actor, index: u64, take waiters: Waiters) waits {
     match take started {
         Ok(take begun) => {
             let Started(task: take running, charge: charged) = take begun
-            let pin = match arc.new(Pin(slot: index)) {
-                Ok(take shared) => take shared,
-                Error((cap, _)) => {
-                    // The place started, so it is stopped like any other; its waiters are told.
-                    let _ = channel.try_send(stop_to, ())
-                    let _ = task.join(take running)
-                    answer_all(take waiters, Full(Reserve(room(cap))))
-                    return
-                },
-            }
+            let pin = arc.new(Pin(slot: index))
             a.used += charged
             a.live += 1u64
             a.slots[index].state = Starting(Live(stop: take stop_to, status: take root, pin: take pin, task: take running, charge: charged), take waiters)
@@ -298,14 +278,13 @@ fn begin_close(take live: Live) -> Live {
 fn run_directory(take seed: Seed) -> List[Unloaded] waits {
     let Seed(listed: take listed, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
         tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take seed
-    let reserved: Result[List[Slot], Capacity] = list.with_capacity(list.len(listed))
-    let mut slots = match take reserved { Ok(take made) => take made, Error(_) => return no_unloaded() }
+    let mut slots: List[Slot] = list.with_capacity(list.len(listed))
     let mut left = take listed
     while let Some(take entry) = list.pop(mut left) {
         let Listed(name: take name, factory: take factory, backing: take backing, selection: selection) = take entry
         let changes = volatile(backing)
         let slot = Slot(name: take name, factory: take factory, backing: take backing, selection: selection, volatile: changes, state: Absent)
-        if let Error(_) = list.push(mut slots, take slot) { return no_unloaded() }
+        list.push(mut slots, take slot)
     }
     list.reverse(mut slots)
     let mut a = Actor(slots: take slots, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
@@ -325,14 +304,14 @@ fn run_directory(take seed: Seed) -> List[Unloaded] waits {
     }
 }
 
-fn on_open(mut a: Actor, name: String, take reply: Sender[Result[Lease, Refused]]) waits {
+fn on_open(mut a: Actor, name: String, take reply: Sender[Result[Lease, Refused]]) {
     if a.stopping { let _ = channel.try_send(reply, Error(Stopping)); return }
     let Some(index) = find(a.slots, name) else { let _ = channel.try_send(reply, Error(Unknown)); return }
     match replace(mut a.slots[index].state, Absent) {
         Absent => if let Some(take waiters) = one_waiter(take reply) { launch(mut a, index, take waiters) },
         Starting(take live, take waiters) => {
             let mut more = take waiters
-            if let Error((cap, take back)) = list.push(mut more, take reply) { let _ = channel.try_send(back, Error(Full(Reserve(room(cap))))) }
+            list.push(mut more, take reply)
             a.slots[index].state = Starting(take live, take more)
         },
         Running(take live, _) => {
@@ -341,7 +320,7 @@ fn on_open(mut a: Actor, name: String, take reply: Sender[Result[Lease, Refused]
         },
         Closing(take live, take reopen, take closers) => {
             let mut more = take reopen
-            if let Error((cap, take back)) = list.push(mut more, take reply) { let _ = channel.try_send(back, Error(Full(Reserve(room(cap))))) }
+            list.push(mut more, take reply)
             a.slots[index].state = Closing(take live, take more, take closers)
         },
     }
@@ -360,7 +339,7 @@ fn on_close(mut a: Actor, name: String, take reply: Sender[Result[Unloaded, Clos
             let mut held = take live
             if unique(mut held.pin) {
                 let mut closers = no_closers()
-                if let Error((_, take back)) = list.push(mut closers, take reply) { let _ = channel.try_send(back, Error(Stopping)) }
+                list.push(mut closers, take reply)
                 a.slots[index].state = Closing(begin_close(take held), no_waiters(), take closers)
             } else {
                 let _ = channel.try_send(reply, Error(Leased))
@@ -369,7 +348,7 @@ fn on_close(mut a: Actor, name: String, take reply: Sender[Result[Unloaded, Clos
         },
         Closing(take live, take reopen, take closers) => {
             let mut more = take closers
-            if let Error((_, take back)) = list.push(mut more, take reply) { let _ = channel.try_send(back, Error(Stopping)) }
+            list.push(mut more, take reply)
             a.slots[index].state = Closing(take live, take reopen, take more)
         },
     }
@@ -451,16 +430,16 @@ fn ended_place(mut a: Actor, index: u64, take ended: Result[runner.Ended, runner
     let _ = task.join(take running)
     a.used -= charged
     a.live -= 1u64
-    let name = match string.from(a.slots[index].name) { Ok(take copied) => take copied, Error(_) => string.new() }
+    let name = string.from(a.slots[index].name)
     let unloaded = Unloaded(name: take name, ended: take ended)
     let mut answering = take closers
     while let Some(take closer) = list.pop(mut answering) {
-        let copied: Result[Unloaded, Capacity] = clone(unloaded)
-        if let Ok(take value) = take copied { let _ = channel.try_send(closer, Ok(take value)) } else { let _ = channel.try_send(closer, Error(Stopping)) }
+        let copied: Unloaded = clone(unloaded)
+        let _ = channel.try_send(closer, Ok(take copied))
     }
     if let Some(to) = a.watch {
-        let copied: Result[Unloaded, Capacity] = clone(unloaded)
-        if let Ok(take value) = take copied { let _ = channel.try_send(to, Down(take value)) }
+        let copied: Unloaded = clone(unloaded)
+        let _ = channel.try_send(to, Down(take copied))
     }
     if list.len(waiters) != 0u64 {
         // Opens that waited on a close start a fresh instance (§13.2); opens that waited on a
@@ -472,11 +451,8 @@ fn ended_place(mut a: Actor, index: u64, take ended: Result[runner.Ended, runner
         } else {
             match unloaded.ended {
                 Error(problem) => {
-                    let copied: Result[runner.StartError, Capacity] = clone(problem)
-                    match take copied {
-                        Ok(take reason) => answer_all(take waiters, Start(take reason)),
-                        Error(cap) => answer_all(take waiters, Full(Reserve(room(cap)))),
-                    }
+                    let copied: runner.StartError = clone(problem)
+                    answer_all(take waiters, Start(take copied))
                 },
                 Ok(_) => answer_all(take waiters, Stopping),
             }

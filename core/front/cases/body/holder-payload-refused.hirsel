@@ -6,7 +6,7 @@ type P:shareable { n:u64 }
 fn borrow(b:Box[P])->View[P] in b { b }
 fn write(mut r:Rc[P]) { r.n=1u64 }
 fn held() {
- let b=result.unwrap(box.new(P(n:4u64)))
+ let b=box.new(P(n:4u64))
  let v=borrow(b)
  let _=v.n
  let _=box.unbox(take b)

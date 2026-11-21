@@ -6,8 +6,8 @@
 // rpc_changed.hirsel is this file with `repeat`'s count narrowed to u32.
 pub fn double(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
-    list.append(mut out, b)?
-    list.append(mut out, b)?
+    list.append(mut out, b)
+    list.append(mut out, b)
     Ok(out)
 }
 
@@ -15,7 +15,7 @@ pub fn repeat(b: Bytes, k: u64) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
     let mut i: u64 = 0
     while i < k {
-        list.append(mut out, b)?
+        list.append(mut out, b)
         i += 1
     }
     Ok(out)

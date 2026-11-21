@@ -5,7 +5,7 @@ fn lend(mut s: String) -> View[String] in s {
 }
 
 fn step(mut s: String) -> Result[Option[View[String]], Capacity] in s {
-    string.push(mut s, "x")?
+    string.push(mut s, "x")
     Ok(Some(lend(mut s)))
 }
 

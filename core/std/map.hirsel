@@ -40,6 +40,6 @@ pub fn get_or_insert[K: key, V: plain](mut m: Map[K, V], take k: K, x: V) -> Res
     if let Some(v) = found {
         return Ok(v)
     }
-    map.insert(mut m, take k, x)?
+    map.insert(mut m, take k, x)
     Ok(x)
 }

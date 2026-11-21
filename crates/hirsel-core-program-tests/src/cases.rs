@@ -1507,7 +1507,7 @@ fn literal_aggregate_call_inference() {
 #[test]
 fn list_set_transfers_the_indexed_element() {
     let checked = Checked::source(
-        "fn set_one(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }\nfn probe() -> u64 { let mut xs: List[u64] = result.unwrap(list.with_capacity(2)); result.unwrap(list.push(mut xs, 5u64)); result.unwrap(list.push(mut xs, 7u64)); let old = set_one(mut xs); xs[0] * 10000 + old * 100 + xs[1] }",
+        "fn set_one(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }\nfn probe() -> u64 { let mut xs: List[u64] = list.with_capacity(2); list.push(mut xs, 5u64); list.push(mut xs, 7u64); let old = set_one(mut xs); xs[0] * 10000 + old * 100 + xs[1] }",
         None,
     );
     assert!(

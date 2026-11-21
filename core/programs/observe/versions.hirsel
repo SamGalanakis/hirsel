@@ -10,16 +10,16 @@ fn version(mut s: State, conn: u64, value: u64) {
     if let Some(previous) = map.get(s.last, conn) {
         if value < previous { observe.failed(mut s.v, observe.key(conn, list.new(), 0u64), s.index, s.index) }
     }
-    result.unwrap(map.insert(mut s.last, conn, value))
+    map.insert(mut s.last, conn, value)
 }
 
 pub fn step(mut s: State, e: observe.Obs) {
     match e {
         Got(a) => {
             version(mut s, a.conn, a.version)
-            result.unwrap(list.push(mut s.frames, observe.own(a)))
+            list.push(mut s.frames, observe.own(a))
         },
-        Ran(r) => result.unwrap(map.insert(mut s.ran, observe.key(0u64, r.stream, r.p), r.version)),
+        Ran(r) => map.insert(mut s.ran, observe.key(0u64, r.stream, r.p), r.version),
         Rx(w) => {
             // WIRE v2 tags 6 and 8 have their version immediately after the tag.
             if list.len(w.frame) >= 12u64 {
@@ -51,6 +51,6 @@ pub fn finish(s: State, h: observe.Header) -> List[observe.Verdict] {
         }
     }
     let mut vs: List[observe.Verdict] = list.new()
-    result.unwrap(list.push(mut vs, take v))
+    list.push(mut vs, take v)
     vs
 }

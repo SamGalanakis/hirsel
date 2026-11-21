@@ -1,6 +1,6 @@
 // Bound-entry refusal skips its body. Return, break and continue restore the
 // enclosing limit, as the one-byte probes after the zero-byte bounds demonstrate.
-// Capacity ? chooses the innermost bound; other errors still leave the function.
+// `?` inside a bound leaves the enclosing function, as from any block.
 // expect: accept
 // expect: run denied() = 1
 // expect: run returned() = 7
@@ -8,7 +8,6 @@
 // expect: run continued() = 3
 // expect: run capacity(false) = 3
 // expect: run capacity(true) = 5
-// expect: run nested() = 6
 // expect: run other_error() = 4
 // expect: run region_value(9) = 10
 fn denied() -> u64 {
@@ -77,7 +76,7 @@ fn operation(bad: bool) -> Result[u64, Capacity] {
     }
 }
 
-fn capacity(bad: bool) -> u64 {
+fn through(bad: bool) -> Result[u64, Capacity] {
     let r: Result[u64, Capacity] = bound bytes 0 {
         let n = operation(bad)?
         let divisor: u64 = if bad {
@@ -87,26 +86,13 @@ fn capacity(bad: bool) -> u64 {
         }
         n / divisor
     }
-    match r {
-        Ok(n) => n,
-        Error(c) => c.requested
-    }
+    Ok(result.unwrap(r))
 }
 
-fn nested() -> u64 {
-    let r: Result[u64, Capacity] = bound bytes 0 {
-        let inner: Result[u64, Capacity] = bound bytes 0 {
-            let n = operation(true)?;
-            n
-        }
-        match inner {
-            Ok(n) => n,
-            Error(c) => c.requested + 1
-        }
-    }
-    match r {
+fn capacity(bad: bool) -> u64 {
+    match through(bad) {
         Ok(n) => n,
-        Error(_) => 99
+        Error(c) => c.requested
     }
 }
 
@@ -136,25 +122,5 @@ fn other_error() -> u8 {
 fn region_value(n: u64) -> u64 {
     region scratch {
         n + 1
-    }
-}
-
-// The typed success context must not turn Capacity into the function's u8 error.
-// expect: run different_error_context() = 5
-fn different_error() -> Result[u64, u8] {
-    let r: Result[u64, Capacity] = bound bytes 0 {
-        let n: u64 = operation(true)?;
-        n
-    }
-    Ok(match r {
-        Ok(n) => n,
-        Error(c) => c.requested
-    })
-}
-
-fn different_error_context() -> u64 {
-    match different_error() {
-        Ok(n) => n,
-        Error(_) => 99
     }
 }

@@ -24,7 +24,7 @@ fn make(r: Region, s: String) -> Doc in r {
 
 fn exercise(a: Doc, b: Doc, other: Doc) -> u64 {
     let mut m: Map[Doc, u64] = map.new()
-    let _ = result.unwrap(map.insert(mut m, a, 7u64))
+    let _ = map.insert(mut m, a, 7u64)
     let hit: u64 = match map.get(m, b) {
         Some(v) => v,
         None => 1000u64

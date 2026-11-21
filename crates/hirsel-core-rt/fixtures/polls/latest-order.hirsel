@@ -3,10 +3,10 @@
 // r2 before h, and h last, so its cleanup releases the root's last share.
 fn number(x:u64)->u64 { x }
 pub fn main(tasks:Tasks)->Result[(),Exit] waits {
- let h=result.unwrap(latest.new(result.unwrap(arc.new(1u64))))
+ let h=latest.new(arc.new(1u64))
  let first={
   let r1=latest.read(h)
-  latest.publish(h,result.unwrap(arc.new(2u64)))
+  latest.publish(h,arc.new(2u64))
   number(r1)
  }
  let second={

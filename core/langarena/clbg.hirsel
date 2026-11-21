@@ -70,12 +70,12 @@ fn mandelbrot(config: helper.Settings, name: String, warmup: u64, iterations: u6
     let hf: f64 = float.from_int(h)
     let mut result: Bytes = list.new()
     for _ in 0 .. warmup + iterations {
-        let mut header = helper.mem(string.from("P4\n"))?
-        helper.mem(string.push_u64(mut header, w))?
-        helper.mem(string.push(mut header, " "))?
-        helper.mem(string.push_u64(mut header, h))?
-        helper.mem(string.push(mut header, "\n"))?
-        helper.mem(list.append(mut result, string.as_bytes(header)))?
+        let mut header = string.from("P4\n")
+        string.push_u64(mut header, w)
+        string.push(mut header, " ")
+        string.push_u64(mut header, h)
+        string.push(mut header, "\n")
+        list.append(mut result, string.as_bytes(header))
         let mut bit: u8 = 0
         let mut byte: u8 = 0
         for y in 0 .. h {
@@ -106,10 +106,7 @@ fn mandelbrot(config: helper.Settings, name: String, warmup: u64, iterations: u6
                         let shift: u8 = int.narrow(8 - w % 8);
                         byte = byte << shift
                     }
-                    match list.push(mut result, byte) {
-                        Ok(()) => {},
-                        Error((c, _)) => return Error(Capacity(c))
-                    }
+                    list.push(mut result, byte)
                     byte = 0
                     bit = 0
                 }
@@ -203,7 +200,7 @@ fn eval_a(i: u64, j: u64) -> f64 {
 fn times(u: List[f64], transpose: bool) -> Result[List[f64], helper.Error] {
     let n = list.len(u)
     let mut result: List[f64] = list.new()
-    helper.mem(list.fill(mut result, n, 0.0))?
+    list.fill(mut result, n, 0.0)
     for i in 0 .. n {
         let mut sum: f64 = 0.0
         for j in 0 .. n {
@@ -231,8 +228,8 @@ fn spectral(config: helper.Settings, name: String, warmup: u64, iterations: u64)
     let n: u64 = int.narrow(ni)
     let mut u: List[f64] = list.new()
     let mut v: List[f64] = list.new()
-    helper.mem(list.fill(mut u, n, 1.0))?
-    helper.mem(list.fill(mut v, n, 1.0))?
+    list.fill(mut u, n, 1.0)
+    list.fill(mut v, n, 1.0)
     for _ in 0 .. warmup + iterations {
         v = ata(u)?;
         u = ata(v)?

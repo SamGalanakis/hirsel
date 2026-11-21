@@ -28,9 +28,9 @@ fn soa(n: u64, seed: u64) -> Result[u64, helper.Error] {
     let mut values: List[u64] = list.new()
     let mut indices: List[u64] = list.new()
     let mut stencil: List[u64] = list.new()
-    helper.mem(list.fill(mut values, n, 0))?
-    helper.mem(list.fill(mut indices, n, 0))?
-    helper.mem(list.fill(mut stencil, n, 0))?
+    list.fill(mut values, n, 0)
+    list.fill(mut indices, n, 0)
+    list.fill(mut stencil, n, 0)
     for i in 0 .. n {
         values[i] = (i * 37 + seed) % 1000;
         indices[i] = (i * 17 + 3) % n
@@ -46,12 +46,12 @@ fn soa(n: u64, seed: u64) -> Result[u64, helper.Error] {
 }
 
 fn aos(n: u64, seed: u64) -> Result[u64, helper.Error] {
-    let mut values: List[Cell] = helper.mem(list.with_capacity(n))?
+    let mut values: List[Cell] = list.with_capacity(n)
     for i in 0 .. n {
         let _ = list.push(mut values, Cell(value: (i * 37 + seed) % 1000, index: (i * 17 + 3) % n))
     }
     let mut stencil: List[u64] = list.new()
-    helper.mem(list.fill(mut stencil, n, 0))?
+    list.fill(mut stencil, n, 0)
     for i in 0 .. n {
         stencil[i] = values[(i + n - 1) % n].value + values[i].value + values[(i + 1) % n].value
     }
@@ -97,10 +97,10 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
 
 fn capacity_prefix() -> u64 {
     let result = bound bytes 16 {
-        let mut values: List[u64] = list.with_capacity(2)?
+        let mut values: List[u64] = list.with_capacity(2)
         let _ = list.push(mut values, 1u64)
         let _ = list.push(mut values, 2u64)
-        match list.reserve(mut values, 1) {
+        match list.try_reserve(mut values, 1) {
             Error(c) => if c.available == 0 {
                 list.len(values) * 10000 + (values[0] + values[1]) * 100 + c.requested
             } else {
@@ -117,7 +117,7 @@ fn capacity_prefix() -> u64 {
 
 pub fn helper_laws() -> bool {
     let refused = bound bytes 0 {
-        let data: List[u64] = list.with_capacity(1)?;
+        let data: List[u64] = list.with_capacity(1);
         list.len(data)
     }
     let charge = match refused {

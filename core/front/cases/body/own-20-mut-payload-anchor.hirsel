@@ -9,7 +9,10 @@ fn grow(mut s: String) -> View[String] in s {
 }
 
 fn escape() -> u64 {
-    let mut src = Text(result.unwrap(string.from("a")))
-    let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+    let mut src = Text(string.from("a"))
+    let v = match src {
+        Text(mut s) => grow(mut s),
+        Count(_) => return 0
+    }
     string.byte_len(v)
 }

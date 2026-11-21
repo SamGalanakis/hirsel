@@ -8,6 +8,6 @@ clone(x: U) {
 
 pub fn clone_u() -> u64 {
     let x = U(n: 1u64)
-    let y: U = result.unwrap(clone(x))
+    let y: U = clone(x)
     y.n
 }

@@ -25,7 +25,7 @@ fn nested_of(k: u64) -> Option[Option[Box[u64]]] {
     } else if k == 1 {
         Some(None)
     } else {
-        Some(Some(result.unwrap(box.new(7u64))))
+        Some(Some(box.new(7u64)))
     }
 }
 
@@ -112,7 +112,7 @@ fn second(empty: bool) -> u64 {
     let o: Option[Pair] = if empty {
         None
     } else {
-        Some(Pair(n: 4u64, b: result.unwrap(box.new(6u64))))
+        Some(Pair(n: 4u64, b: box.new(6u64)))
     }
     match o {
         None => 0,

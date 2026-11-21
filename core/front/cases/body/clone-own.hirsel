@@ -2,17 +2,17 @@
 // to its length; a refusal at block k drops the blocks already copied, refunds them, and
 // leaves x untouched. Hand-derived charges: a List[String] of two is 2 x 24 = 48, "ab"
 // and "cde" 8 each; a Box[Cell] node is 24 + 8 = 32. So under 60 bytes the list copy
-// takes 48 + 8 and is refused at "cde" (requested 8, available 4), and once refunded 56
-// bytes fit again; Two under 12 is refused at b with 4 left and 8 fits after the refund;
-// Box[Cell] under 36 is refused at "hello" with 4 left and 32 fits again. generic()
-// is apart() through a generic instance, derived once T is closed.
+// takes 48 + 8 and raises at "cde" (requested 8, available 4); Two under 12 raises at b
+// with 4 left; Box[Cell] under 36 raises at "hello" with 4 left. Each refund shows as
+// nothing but the caught 32-byte cause cell still admitted. generic() is apart()
+// through a generic instance, derived once T is closed.
 // expect: run apart() = 2005
 // expect: run tree() = 10
 // expect: run boxed() = 7
 // expect: run selected() = 5
-// expect: run refused() = 80407
-// expect: run two_refused() = 80401
-// expect: run box_refused() = 80404
+// expect: run refused() = 804 used 32
+// expect: run two_refused() = 804 used 32
+// expect: run box_refused() = 804 used 32
 // expect: run generic() = 2005
 type Cell {
     s: String,
@@ -44,10 +44,8 @@ fn strings() -> List[String] {
 
 fn apart() -> u64 {
     let mut xs = strings()
-    let c: Result[List[String], Capacity] = clone(xs)
-    let Ok(ys) = c else {
-        return 999
-    }
+    let c: List[String] = clone(xs)
+    let ys = take c
     list.clear(mut xs)
     let mut n = list.len(ys) * 1000
     for y in ys {
@@ -75,101 +73,97 @@ fn tree() -> u64 {
     let _ = list.push(mut kids, leaf(2))
     let _ = list.push(mut kids, Tree(v: 3, kids: take deep))
     let mut t = Tree(v: 1, kids: take kids)
-    let c: Result[Tree, Capacity] = clone(t)
-    let Ok(u) = c else {
-        return 999
-    }
+    let c: Tree = clone(t)
+    let u = take c
     list.clear(mut t.kids)
     sum(u)
 }
 
 fn boxed() -> u64 {
-    let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else {
-        return 999
-    }
-    let c: Result[Box[Cell], Capacity] = clone(b)
-    let Ok(d) = c else {
-        return 998
-    }
+    let b = box.new(Cell(s: own("hello"), n: 2))
+    let c: Box[Cell] = clone(b)
+    let d = take c
     let _ = box.unbox(take b)
     string.byte_len(d.s) + d.n
 }
 
 fn selected() -> u64 {
-    let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else {
-        return 999
-    }
-    let c: Result[Cell, Capacity] = clone(b)
-    let Ok(d) = c else {
-        return 998
-    }
+    let b = box.new(Cell(s: own("hello"), n: 2))
+    let c: Cell = clone(b)
+    let d = take c
     let _ = box.unbox(take b)
     string.byte_len(d.s)
 }
 
 fn refused() -> u64 {
-    let xs = strings()
-    let r = bound bytes 60 {
-        let c: Result[List[String], Capacity] = clone(xs)
-        let Error(e) = c else {
-            return 1
+    let x = strings()
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 60 {
+            let c: List[String] = clone(x)
+            0
         }
-        let after: List[u64] = list.with_capacity(7)?
-        e.requested * 10000 + e.available * 100 + list.capacity(after)
-    }
-    match r {
-        Ok(n) => n + list.len(xs) - 2,
-        Error(_) => 2
+    })
+    match caught(take outer) {
+        Some(e) => e.requested * 100 + e.available + list.len(x) - 2,
+        None => 1
     }
 }
 
 fn two_refused() -> u64 {
     let x = Two(a: own("ab"), b: own("cde"))
-    let r = bound bytes 12 {
-        let c: Result[Two, Capacity] = clone(x)
-        let Error(e) = c else {
-            return 1
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 12 {
+            let c: Two = clone(x)
+            0
         }
-        let after: List[u64] = list.with_capacity(1)?
-        e.requested * 10000 + e.available * 100 + list.capacity(after)
-    }
-    match r {
-        Ok(n) => n,
-        Error(_) => 2
+    })
+    match caught(take outer) {
+        Some(e) => e.requested * 100 + e.available,
+        None => 1
     }
 }
 
 fn box_refused() -> u64 {
-    let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else {
-        return 999
-    }
-    let r = bound bytes 36 {
-        let c: Result[Box[Cell], Capacity] = clone(b)
-        let Error(e) = c else {
-            return 1
+    let x = box.new(Cell(s: own("hello"), n: 2))
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 36 {
+            let c: Box[Cell] = clone(x)
+            0
         }
-        let after: List[u64] = list.with_capacity(4)?
-        e.requested * 10000 + e.available * 100 + list.capacity(after)
-    }
-    match r {
-        Ok(n) => n,
-        Error(_) => 2
+    })
+    match caught(take outer) {
+        Some(e) => e.requested * 100 + e.available,
+        None => 1
     }
 }
 
-fn dup[T: shareable](x: T) -> Result[T, Capacity] {
+fn dup[T: shareable](x: T) -> T {
     clone(x)
 }
 
 fn generic() -> u64 {
     let mut xs = strings()
-    let Ok(ys) = dup(xs) else {
-        return 999
-    }
+    let ys = dup(xs)
     list.clear(mut xs)
     let mut n = list.len(ys) * 1000
     for y in ys {
         n = n + string.byte_len(y)
     }
     n
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

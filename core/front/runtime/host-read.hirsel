@@ -5,7 +5,7 @@ pub fn main(d: Dir) -> Result[(), Exit] {
     let mut f = result.unwrap(host.open(d, "input", Read))
     let mut buf: Bytes = list.new()
     if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 3)) }
-    buf = result.unwrap(list.with_capacity(5))
+    buf = list.with_capacity(5)
     if result.unwrap(host.read(mut f, mut buf)) != 5u64 || list.len(buf) != 5u64 { return Error(Exit(status: 4)) }
     if buf[0] != b'h' || buf[1] != b'e' || buf[2] != b'l' || buf[3] != b'l' || buf[4] != b'o' { return Error(Exit(status: 5)) }
     if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 6)) }
@@ -13,7 +13,7 @@ pub fn main(d: Dir) -> Result[(), Exit] {
     result.unwrap(host.close(take f))
     // A file opened only for writing produces Closed(EBADF) on read.
     let mut writer = result.unwrap(host.open(d, "output", Write))
-    let mut other: Bytes = result.unwrap(list.with_capacity(1))
+    let mut other: Bytes = list.with_capacity(1)
     match host.read(mut writer, mut other) { Error(Closed) => {}, _ => return Error(Exit(status: 7)) }
     result.unwrap(host.close(take writer))
     Ok(())

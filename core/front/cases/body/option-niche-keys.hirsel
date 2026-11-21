@@ -12,8 +12,8 @@ fn found(m: Map[Option[String], u64], k: Option[String]) -> u64 {
 
 fn keys() -> u64 {
     let mut m: Map[Option[String], u64] = map.new()
-    result.unwrap(map.insert(mut m, None, 1u64))
-    result.unwrap(map.insert(mut m, Some(""), 2u64))
-    result.unwrap(map.insert(mut m, Some("a"), 3u64))
+    map.insert(mut m, None, 1u64)
+    map.insert(mut m, Some(""), 2u64)
+    map.insert(mut m, Some("a"), 3u64)
     found(m, Some("a")) * 100u64 + found(m, Some("")) * 10u64 + found(m, None)
 }

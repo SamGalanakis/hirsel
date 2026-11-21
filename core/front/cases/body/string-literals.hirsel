@@ -65,7 +65,7 @@ fn rec_gt(x: u64) -> bool {
 }
 
 fn bytes_lt(x: u64) -> bool {
-    result.unwrap(b"ab") < result.unwrap(b"abc") && result.unwrap(b"\xff") > result.unwrap(b"\x7f\xff")
+    b"ab" < b"abc" && b"\xff" > b"\x7f\xff"
 }
 
 fn viewed(x: u64) -> bool {

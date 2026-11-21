@@ -4,15 +4,15 @@
 // expect: run check() = 2
 fn later() -> u64 {
     let mut rows: List[Bytes] = list.new()
-    result.unwrap(list.push(mut rows, list.new()))
+    list.push(mut rows, list.new())
     list.len(rows)
 }
 
 fn route[T](take value: T) -> u64 {
     let mut inner: List[T] = list.new()
-    result.unwrap(list.push(mut inner, take value))
+    list.push(mut inner, take value)
     let mut outer: List[List[T]] = list.new()
-    result.unwrap(list.push(mut outer, take inner))
+    list.push(mut outer, take inner)
     list.len(outer) + later()
 }
 

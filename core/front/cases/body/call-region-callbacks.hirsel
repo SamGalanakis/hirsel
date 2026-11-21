@@ -4,7 +4,7 @@
 // expect: accept
 // Native oracle: checked() = 10, and main succeeds.
 fn invoke(r: Region, f: scoped fn(Text in r) -> u64) -> u64 {
-    let t = result.unwrap(text.copy_in(r, "hi"));
+    let t = text.copy_in(r, "hi");
     f(t)
 }
 

@@ -22,7 +22,7 @@ fn own_error() -> Result[(), Bad] { Error(result.unwrap(Bad(divisor: 0u64))) }
 @test
 fn own_success() -> Result[(), Bad] { Ok(()) }
 @test
-fn allocation() -> Result[(), (Capacity, u64)] { let b = box.new(7u64)?; Ok(()) }
+fn allocation() -> Result[(), (Capacity, u64)] { let b = box.new(7u64); Ok(()) }
 @test
 fn granted(out: Stdout) -> Result[(), ()] waits { result.unwrap(stdout.write(out, "test ran\n")); Ok(()) }
 "#;

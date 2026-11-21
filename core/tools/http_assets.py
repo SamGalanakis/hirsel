@@ -43,17 +43,17 @@ def fingerprint(path, digest):
 
 
 def emit_entry(index, path, alias, media_type, formats):
-    yield f'fn asset_{index}() -> Result[assets.Entry, Capacity] {{'
-    yield f'    let mut path: List[String] = list.with_capacity({len(path.parts)})?'
+    yield f'fn asset_{index}() -> assets.Entry {{'
+    yield f'    let mut path: List[String] = list.with_capacity({len(path.parts)})'
     for part in path.parts:
-        yield f'    result.capacity_only(list.push(mut path, string.from({literal(part)})?))?'
-    yield f'    let mut formats: List[assets.Representation] = list.with_capacity({len(formats)})?'
+        yield f'    list.push(mut path, string.from({literal(part)}))'
+    yield f'    let mut formats: List[assets.Representation] = list.with_capacity({len(formats)})'
     for coding, data in formats:
         etag = '"' + hashlib.sha256(data).hexdigest() + '"'
         body = f'{coding.lower()}_body'
-        yield f'    let {body} = {byte_literal(data)}?'
-        yield f'    result.capacity_only(list.push(mut formats, assets.representation({coding}, take {body}, string.from({literal(etag)})?)?))?'
-    yield f'    Ok(assets.Entry(path: take path, fingerprint: string.from({literal(alias.name)})?, media_type: string.from({literal(media_type)})?, formats: take formats))'
+        yield f'    let {body} = {byte_literal(data)}'
+        yield f'    list.push(mut formats, assets.representation({coding}, take {body}, string.from({literal(etag)})))'
+    yield f'    assets.Entry(path: take path, fingerprint: string.from({literal(alias.name)}), media_type: string.from({literal(media_type)}), formats: take formats)'
     yield '}'
 
 
@@ -91,11 +91,11 @@ def emit(root, brotli):
     for index, entry in enumerate(entries):
         yield from emit_entry(index, *entry)
         yield ''
-    yield 'pub fn manifest() -> Result[assets.Manifest, Capacity] {'
-    yield f'    let mut entries: List[assets.Entry] = list.with_capacity({len(entries)})?'
+    yield 'pub fn manifest() -> assets.Manifest {'
+    yield f'    let mut entries: List[assets.Entry] = list.with_capacity({len(entries)})'
     for index in range(len(entries)):
-        yield f'    result.capacity_only(list.push(mut entries, asset_{index}()?))?'
-    yield '    Ok(assets.manifest(take entries))'
+        yield f'    list.push(mut entries, asset_{index}())'
+    yield '    assets.manifest(take entries)'
     yield '}'
 
 

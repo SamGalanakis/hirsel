@@ -328,24 +328,21 @@ pub fn remove[T](mut xs: List[T], i: u64) -> T {
 }
 
 /// Inserts x at i, shifting i.. up by one.
-/// Fails: Bounds (failure) when i > len, checked before growth; Error((c, x)) when GROWTH
-/// is refused, xs unchanged. Alloc: GROWTH. Cost: O(len - i) moves.
-/// Ex: `list.insert(mut xs, 0, take s)?`
-pub fn insert[T](mut xs: List[T], i: u64, take x: T) -> Result[(), (Capacity, T)] {
+/// Fails: Bounds (failure) when i > len, checked before growth; a refused GROWTH raises
+/// Capacity before xs changes. Alloc: GROWTH. Cost: O(len - i) moves.
+/// Ex: `list.insert(mut xs, 0, take s)`
+pub fn insert[T](mut xs: List[T], i: u64, take x: T) {
     let n = list.len(xs)
     if i != n {
         check_index(xs, i)
     }
-    if let Error(c) = list.reserve(mut xs, 1) {
-        return Error((c, take x))
-    }
+    list.reserve(mut xs, 1)
     let mut cur = x
     for j in i .. n {
         let y = list.set(mut xs, j, take cur)
         cur = y
     }
-    push_reserved(mut xs, take cur)
-    Ok(())
+    list.push(mut xs, take cur)
 }
 
 /// Removes and returns element i, moving the last element into its place; order not kept.
@@ -453,15 +450,6 @@ pub fn sum_bytes(b: Bytes) -> u64 {
 /// Fails with Bounds when i >= len, at the index.
 fn check_index[T](xs: List[T], i: u64) {
     let _ = view xs[i]
-}
-
-/// Pushes into capacity a `list.reserve` or a `list.pop` already made spare, so the push
-/// admits nothing and cannot be refused.
-fn push_reserved[T](mut xs: List[T], take x: T) {
-    match list.push(mut xs, take x) {
-        Ok(()) => {},
-        Error(_) => fail("list: a push into reserved capacity was refused"),
-    }
 }
 
 fn less[T](xs: List[T], i: u64, j: u64, before: scoped fn(T, T) -> Order) -> bool {
@@ -646,7 +634,7 @@ pub fn dedup[T: key](mut xs: List[T]) {
 
 /// Appends copies of ys. Fails: Capacity leaves xs unchanged.
 /// Alloc: one list GROWTH. Cost: O(len ys), plus growth copies.
-pub fn extend[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {
+pub fn extend[T: plain](mut xs: List[T], ys: List[T]) {
     list.append(mut xs, ys)
 }
 

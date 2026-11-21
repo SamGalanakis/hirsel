@@ -14,7 +14,7 @@ pub type Tree[K: plain, V: plain] {
 
 pub fn new[K: plain, V: plain]() -> Result[Tree[K, V], Capacity] {
     let mut links: List[Links] = list.new()
-    result.capacity_only(list.push(mut links, Links(children:[0, 0], parent: 0, red: false)))?
+    list.push(mut links, Links(children:[0, 0], parent: 0, red: false))
     Ok(Tree(root: 0, links: take links, entries: list.new()))
 }
 
@@ -146,10 +146,10 @@ pub fn put[K: plain, V: plain](mut tree: Tree[K, V], key: K, value: V, compare: 
         node = tree.links[node].children[side]
     }
     let index = list.len(tree.links)
-    list.reserve(mut tree.entries, 1)?
-    list.reserve(mut tree.links, 1)?
-    result.capacity_only(list.push(mut tree.entries, (key, copy value)))?
-    result.capacity_only(list.push(mut tree.links, Links(children:[0, 0], parent: parent, red: true)))?
+    list.reserve(mut tree.entries, 1)
+    list.reserve(mut tree.links, 1)
+    list.push(mut tree.entries, (key, copy value))
+    list.push(mut tree.links, Links(children:[0, 0], parent: parent, red: true))
     if parent == 0 {
         tree.root = index
     } else {

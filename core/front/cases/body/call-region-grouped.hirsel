@@ -29,7 +29,7 @@ fn indirect(r: Region) -> u64 {
 }
 
 fn invoke(r: Region, f: scoped fn(Text in r) -> u64) -> u64 {
-    let t = result.unwrap(text.copy_in(r, "x"));
+    let t = text.copy_in(r, "x");
     f(t)
 }
 

@@ -8,10 +8,7 @@ fn dispatch(tasks: Tasks, config: helper.Settings, name: String, warmup: u64, it
         return Error(UnknownTask)
     }
     let input: u32 = int.narrow(warmup + iterations)
-    let handle = match task.spawn(tasks, bytes 4096, input, child) {
-        Ok(take h) => take h,
-        Error(_) => return Error(Config),
-    }
+    let handle = task.spawn(tasks, bytes 4096, input, child)
     match task.join(take handle) {
         Ok(n) => Ok(n),
         Error(_) => Error(Config)

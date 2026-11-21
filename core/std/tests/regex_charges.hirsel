@@ -48,26 +48,26 @@ fn regex_cache_refusal() -> bool {
 // expect: run regex_clone_exact_and_search() = true
 fn regex_clone_exact_and_search() -> bool {
     let re = result.unwrap(new("(?<g>a)"))
-    let c = result.unwrap(cache(re, 0))
-    let g = result.unwrap(groups(re))
+    let c = cache(re, 0)
+    let g = groups(re)
     let cache_charge = cache_bytes(re, 0)
     let groups_charge = 16 * group_len(re)
     let copied_cache: Result[Cache, Capacity] = result.unwrap(bound bytes cache_charge {
-        let copied: Result[Cache, Capacity] = clone(c)
+        let copied: Cache = clone(c)
         take copied
     })
     let copied_groups: Result[Groups, Capacity] = result.unwrap(bound bytes groups_charge {
-        let copied: Result[Groups, Capacity] = clone(g)
+        let copied: Groups = clone(g)
         take copied
     })
     let mut duplicate: Cache = result.unwrap(take copied_cache)
     let mut slots: Groups = result.unwrap(take copied_groups)
     let misses: Result[Cache, Capacity] = result.unwrap(bound bytes cache_charge - 1 {
-        let copied: Result[Cache, Capacity] = clone(c)
+        let copied: Cache = clone(c)
         take copied
     })
     let groups_miss: Result[Groups, Capacity] = result.unwrap(bound bytes groups_charge - 1 {
-        let copied: Result[Groups, Capacity] = clone(g)
+        let copied: Groups = clone(g)
         take copied
     })
     let got = result.unwrap(bound bytes 0 {
@@ -86,7 +86,7 @@ fn regex_clone_exact_and_search() -> bool {
 fn regex_wrong_cache_first() -> bool {
     let re = result.unwrap(new("a"))
     let other = result.unwrap(new("a"))
-    let mut c = result.unwrap(cache(other, 0))
+    let mut c = cache(other, 0)
     find(re, mut c, "a", 2) != None
 }
 
@@ -94,7 +94,7 @@ fn regex_wrong_cache_first() -> bool {
 fn regex_wrong_cache_finished() -> bool {
     let re = result.unwrap(new("a"))
     let other = result.unwrap(new("a"))
-    let mut c = result.unwrap(cache(other, 0))
+    let mut c = cache(other, 0)
     let mut k = cursor(0)
     let _ = next(other, mut c, "", mut k)
     next(re, mut c, "a", mut k) != None
@@ -103,7 +103,7 @@ fn regex_wrong_cache_finished() -> bool {
 // expect: run regex_inside_scalar() = fail Bounds
 fn regex_inside_scalar() -> bool {
     let re = result.unwrap(new(""))
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     is_match(re, mut c, "é", 1)
 }
 
@@ -149,7 +149,7 @@ fn regex_scratch_is_capacity() -> bool {
 
 // expect: run regex_literal_ninety_thousand() = true
 fn regex_literal_ninety_thousand() -> bool {
-    let p = result.unwrap(string.repeat("a", 90000))
+    let p = string.repeat("a", 90000)
     // The two automata use (2 * 90000 + 8) * 16 bytes. The byte map uses
     // 256 bytes and the 100-byte prefix rounds up to 104.
     match new(p) {
@@ -173,7 +173,7 @@ fn move_cache(take c: Cache) -> Cache {
 }
 
 fn threshold_trial(re: Regex, input: String, first: Match, probe: String, next_span: Match, history: u64, budget: u64) -> Option[bool] {
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     if history != 0 {
         if find(re, mut c, input, 0) != Some(first) {
             return None
@@ -250,8 +250,8 @@ fn regex_dfa_steps() -> bool {
 }
 
 fn fixed_capture_trial(re: Regex, budget: u64) -> Option[bool] {
-    let c = result.unwrap(cache(re, 0))
-    let g = result.unwrap(groups(re))
+    let c = cache(re, 0)
+    let g = groups(re)
     let start = cursor(0)
     let subject = "xé界éaaa界"
     let observed = bound steps budget {
@@ -314,7 +314,7 @@ fn regex_fixed_capture_steps() -> bool {
 }
 
 fn regex_worker(take input: Arc[Regex]) -> Option[Match] {
-    let mut local = result.unwrap(cache(input, 0))
+    let mut local = cache(input, 0)
     find(input, mut local, "xa", 0)
 }
 
@@ -326,13 +326,13 @@ fn regex_moved_worker(take input: (Regex, Cache)) -> Option[Match] {
 
 // expect: run regex_shared_and_moved(tasks) = true
 fn regex_shared_and_moved(tasks: Tasks) -> bool waits {
-    let shared = result.unwrap(arc.new(result.unwrap(new("a"))))
-    let a = result.unwrap(task.spawn(tasks, bytes 65536, arc.share(shared), regex_worker))
-    let b = result.unwrap(task.spawn(tasks, bytes 65536, arc.share(shared), regex_worker))
+    let shared = arc.new(result.unwrap(new("a")))
+    let a = task.spawn(tasks, bytes 65536, arc.share(shared), regex_worker)
+    let b = task.spawn(tasks, bytes 65536, arc.share(shared), regex_worker)
     let re = result.unwrap(new("a"))
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     let _ = find(re, mut c, "xa", 0)
-    let moved = result.unwrap(task.spawn(tasks, bytes 65536, (take re, take c), regex_moved_worker))
+    let moved = task.spawn(tasks, bytes 65536, (take re, take c), regex_moved_worker)
     let expected = Some(Match(start: 1, end: 2))
     result.unwrap(task.join(take a)) == expected && result.unwrap(task.join(take b)) == expected && result.unwrap(task.join(take moved)) == expected
 }

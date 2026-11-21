@@ -38,7 +38,7 @@ fn read(x: u64) -> u64 {
 }
 
 fn single_index() -> u64 {
-    let element = result.unwrap(box.new(7u64))
+    let element = box.new(7u64)
     let xs =[take element]
     let mut calls = 0u64
     let result = read((xs[index(mut calls)] : u64))

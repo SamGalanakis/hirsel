@@ -257,11 +257,11 @@ tags!(Inst {
     16 => UpdateMask { result, mask, field @ index, initialized },
     17 => Call { call },
     18 => Pointer { result, address },
-    19 => Alloc { result, available, region_entry, kind, place, charge, overflow, size, align, fail },
+    19 => Alloc { result, available, region_entry, kind, place, charge, overflow, size, align },
     20 => Free { block, charge },
     21 => FrameRefund { charge },
     22 => Copy { to, from, bytes },
-    23 => Grow { result, available, carrier, charge, overflow, size, align, capacity, moved, refund, fail },
+    23 => Grow { result, available, carrier, charge, overflow, size, align, capacity, moved, refund },
     24 => Case { result, address },
     25 => SetCase { address, case @ index },
     26 => RegionOpen { result },
@@ -406,6 +406,7 @@ tags!(RaiseCause {
     0 => Unwrap,
     1 => Bounds,
     2 => Fail(part0),
+    3 => Capacity { requested, available },
 });
 
 tags!(Callee {

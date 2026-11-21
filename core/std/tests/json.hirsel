@@ -50,17 +50,17 @@ fn size_of_escapes() -> u64 {
 // expect: run sizing_words_stop_at_special_bytes() = true
 fn sizing_words_stop_at_special_bytes() -> bool {
     for n in 0u64 .. 80 {
-        let mut plain = result.unwrap(string.from("\""))
-        let mut escaped = result.unwrap(string.from("\""))
-        let mut bad = result.unwrap(string.from("\""))
+        let mut plain = string.from("\"")
+        let mut escaped = string.from("\"")
+        let mut bad = string.from("\"")
         for _ in 0u64 .. n {
-            result.unwrap(string.push(mut plain, " "))
-            result.unwrap(string.push(mut escaped, "x"))
-            result.unwrap(string.push(mut bad, "x"))
+            string.push(mut plain, " ")
+            string.push(mut escaped, "x")
+            string.push(mut bad, "x")
         }
-        result.unwrap(string.push(mut plain, "\"                                "))
-        result.unwrap(string.push(mut escaped, "🙂\\n\\\"\"                                "))
-        result.unwrap(string.push(mut bad, "\u{1f}\"                                "))
+        string.push(mut plain, "\"                                ")
+        string.push(mut escaped, "🙂\\n\\\"\"                                ")
+        string.push(mut bad, "\u{1f}\"                                ")
         if size_of(plain) != n + 5 || size_of(escaped) != n + 11 || syntax_at(bad) != n + 1 {
             return false
         }
@@ -113,20 +113,20 @@ fn leading_zero() -> u64 {
 // expect: run number_words_keep_grammar_and_range() = true
 fn number_words_keep_grammar_and_range() -> bool {
     for n in 0u64 .. 24 {
-        let mut s = result.unwrap(string.from("0."))
+        let mut s = string.from("0.")
         for _ in 0u64 .. n {
-            result.unwrap(string.push(mut s, "0"))
+            string.push(mut s, "0")
         }
-        result.unwrap(string.push(mut s, "125"))
+        string.push(mut s, "125")
         if size_of(s) != n + 10 {
             return false
         }
-        let mut bad = result.unwrap(string.from(s))
-        result.unwrap(string.push(mut bad, "x"))
+        let mut bad = string.from(s)
+        string.push(mut bad, "x")
         if syntax_at(bad) != n + 5 {
             return false
         }
-        result.unwrap(string.push(mut s, "e999"))
+        string.push(mut s, "e999")
         if not_finite_at(s) != 0 {
             return false
         }
@@ -226,7 +226,7 @@ fn lookup_takes_last() -> bool {
     region r {
         match result.unwrap(json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
             Obj(ms) => {
-                let x = result.unwrap(json.index(ms))
+                let x = json.index(ms)
                 let b = match json.get(x, "b") {
                     Some(v) => spelled(v, "3"),
                     None => false,
@@ -257,7 +257,7 @@ fn render_keeps_first_position() -> bool {
     region r {
         match result.unwrap(json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
             Obj(ms) => {
-                let x = result.unwrap(json.index(ms))
+                let x = json.index(ms)
                 let first = match json.shown(x, 0) {
                     Some((k, v)) => k == "b" && spelled(v, "3"),
                     None => false,
@@ -287,7 +287,7 @@ fn equal_keys_order_by_ordinal() -> bool {
     region r {
         match result.unwrap(json.parse(r, "{\"k\":1,\"k\":2,\"k\":3}")) {
             Obj(ms) => {
-                let x = result.unwrap(json.index(ms))
+                let x = json.index(ms)
                 let last = match json.get(x, "k") {
                     Some(v) => spelled(v, "3"),
                     None => false,
@@ -309,12 +309,12 @@ fn equal_keys_order_by_ordinal() -> bool {
 fn print_nested_round_trip() -> bool {
     region r {
         let doc = result.unwrap(json.parse(r, " {\"b\": [null, false, true, -0.50e+2], \"b\":{}, \"a\": []} "))
-        let mut out = result.unwrap(string.from("prefix:"))
-        let _ = result.unwrap(json.push_json(mut out, doc))
+        let mut out = string.from("prefix:")
+        let _ = json.push_json(mut out, doc)
         let expected = "{\"b\":[null,false,true,-0.50e+2],\"b\":{},\"a\":[]}"
         let again = result.unwrap(json.parse(r, string.slice(out, 7, string.byte_len(out))))
         let mut second = string.new()
-        let _ = result.unwrap(json.push_json(mut second, again))
+        let _ = json.push_json(mut second, again)
         string.slice(out, 7, string.byte_len(out)) == expected && second == expected
     }
 }
@@ -326,98 +326,96 @@ fn print_escapes_round_trip() -> bool {
     region r {
         let doc = result.unwrap(json.parse(r, "{\"\\u0000\\u001f\":\"é\\b\\t\\n\\f\\r\\\"\\\\/😀\"}"))
         let mut out = string.new()
-        let _ = result.unwrap(json.push_json(mut out, doc))
+        let _ = json.push_json(mut out, doc)
         let expected = "{\"\\u0000\\u001f\":\"é\\b\\t\\n\\f\\r\\\"\\\\/😀\"}"
         let again = result.unwrap(json.parse(r, out))
         let mut second = string.new()
-        let _ = result.unwrap(json.push_json(mut second, again))
+        let _ = json.push_json(mut second, again)
         out == expected && second == expected
     }
 }
 
-// Syntax is checked before admission. Invalid input under zero capacity stays Syntax;
-// valid null needs exactly one rounded8 block, with no parser staging allocation.
 // expect: run parse_admission_order() = true
 fn parse_admission_order() -> bool {
-    result.unwrap(bound bytes 0 {
-        region r {
-            let bad = match json.parse(r, "[1,]") {
-                Error(Syntax(3)) => true,
-                _ => false
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 0 {
+            region r {
+                let bad = match json.parse(r, "[1,]") {
+                    Error(Syntax(3)) => true,
+                    _ => false
+                }
+                let bad_key = match json.parse_tree("{\"abcdef\\q\":0}", fn() -> Result[(), json.Error] {
+                    Ok(())
+                }, fn(take node: json.TreeValue[()]) {
+                    drop(take node)
+                }, fn(take e: json.Error) -> json.Error {
+                    take e
+                }) {
+                    Error(Syntax(9)) => true,
+                    _ => false
+                }
+                if bad && bad_key {
+                    let _ = json.parse(r, "null")
+                }
+                false
             }
-            let good = match json.parse(r, "null") {
-                Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0,
-                _ => false
-            }
-            let bad_key = match json.parse_tree("{\"abcdef\\q\":0}", fn() -> Result[(), json.Error] {
-                Ok(())
-            }, fn(take node: json.TreeValue[()]) {
-                drop(take node)
-            }, fn(take e: json.Error) -> json.Error {
-                take e
-            }) {
-                Error(Syntax(9)) => true,
-                _ => false
-            }
-            bad && good && bad_key
         }
     })
+    match caught(take out) {
+        Some(c) => c.requested == 8 && c.available == 0,
+        None => false,
+    }
 }
 
-// Two exact one-tag blobs remain charged; the third refusal leaves both readable.
+// Two exact one-tag blobs remain charged and readable; the third raises Capacity.
 // expect: run parse_retains_admitted_prefix() = true
 fn parse_retains_admitted_prefix() -> bool {
-    result.unwrap(bound bytes 16 {
-        region r {
-            let a = result.unwrap(json.parse(r, "null"))
-            let b = result.unwrap(json.parse(r, "true"))
-            let refused = match json.parse(r, "false") {
-                Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0,
-                _ => false
-            }
-            refused && match (a, b) {
-                (Null, True) => true,
-                _ => false
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 16 {
+            region r {
+                let a = result.unwrap(json.parse(r, "null"))
+                let b = result.unwrap(json.parse(r, "true"))
+                let readable = match (a, b) {
+                    (Null, True) => true,
+                    _ => false
+                }
+                if readable {
+                    let _ = json.parse(r, "false")
+                }
+                false
             }
         }
     })
+    match caught(take out) {
+        Some(c) => c.requested == 8 && c.available == 0,
+        None => false,
+    }
 }
 
 // Output GROWTH starts at capacity4, rounded charge8. At limit8, quote+a+\n
-// fills it and the next run is refused, keeping exactly those four bytes. At limit16,
-// quote+abc fills it; reserving the whole six-byte hex escape requests16 with8 left.
-// A printer that appends a hex escape piecemeal leaves a partial \u00 and fails this law.
+// fills it and the next run is refused. At limit16, quote+abc fills it; reserving the
+// whole six-byte hex escape requests16 with8 left. A printer that appends a hex escape
+// piecemeal requests 8 first and fails this law.
 // expect: run print_capacity_prefixes() = true
-fn print_capacity_prefixes() -> bool {
-    region r {
-        let line = result.unwrap(json.parse(r, "\"a\\nb\""))
-        let hex = result.unwrap(json.parse(r, "\"abc\\u0000\""))
-        let zero = result.unwrap(bound bytes 0 {
-            let mut s = string.new()
-            let refused = match json.push_json(mut s, line) {
-                Error(c) => c.requested == 8 && c.available == 0,
-                _ => false
+fn printed(src: String, limit: u64, requested: u64, available: u64) -> bool {
+    let out = isolate(fn() -> Result[u64, Capacity] {
+        region r {
+            let x = result.unwrap(json.parse(r, src))
+            bound bytes limit {
+                let mut s = string.new()
+                json.push_json(mut s, x)
+                string.byte_len(s)
             }
-            refused && s == ""
-        })
-        let run = result.unwrap(bound bytes 8 {
-            let mut s = string.new()
-            let refused = match json.push_json(mut s, line) {
-                Error(c) => c.requested == 8 && c.available == 0,
-                _ => false
-            }
-            refused && s == "\"a\\n"
-        })
-        let atomic_hex = result.unwrap(bound bytes 16 {
-            let mut s = string.new()
-            let refused = match json.push_json(mut s, hex) {
-                Error(c) => c.requested == 16 && c.available == 8,
-                _ => false
-            }
-            refused && s == "\"abc"
-        })
-        zero && run && atomic_hex
+        }
+    })
+    match caught(take out) {
+        Some(c) => c.requested == requested && c.available == available,
+        None => false,
     }
+}
+
+fn print_capacity_prefixes() -> bool {
+    printed("\"a\\nb\"", 0, 8, 0) && printed("\"a\\nb\"", 8, 8, 0) && printed("\"abc\\u0000\"", 16, 16, 8)
 }
 
 fn read_named_values(s: String, mut cursor: json.Cursor) -> Result[List[f64], json.Error] {
@@ -464,10 +462,10 @@ fn json_test_case(s: String, expected: JsonTestExpectation) -> bool {
 
 fn decode_json_fixture(hex: String) -> Bytes {
     let n = string.byte_len(hex)
-    let mut input: Bytes = result.unwrap(list.with_capacity(n / 2))
+    let mut input: Bytes = list.with_capacity(n / 2)
     for i in 0u64 .. n / 2 {
         let byte: u8 = int.narrow(result.unwrap(int.parse_uint(string.slice(hex, 2 * i, 2 * i + 2), 16)))
-        result.unwrap(list.push(mut input, byte))
+        list.push(mut input, byte)
     }
     take input
 }
@@ -494,7 +492,7 @@ fn json_test_suite() -> bool {
             Error(_) => tag == b'U',
         }
         if !passed {
-            fail(result.unwrap(string.from(name)))
+            fail(string.from(name))
         }
         at = end + 1
     }
@@ -509,24 +507,24 @@ fn serde_json_numbers() -> bool {
         let (input, bits) = row
         match json.decode(input, json.read_f64) {
             Ok(n) => if float.to_bits64(n) != bits {
-                fail(result.unwrap(string.from(input)))
+                fail(string.from(input))
             },
-            Error(_) => fail(result.unwrap(string.from(input))),
+            Error(_) => fail(string.from(input)),
         }
     }
     let invalid: Inline[(String, JsonTestExpectation), 9] =[("00", RefuseJsonSyntax), ("0x80", RefuseJsonSyntax), (".0", RefuseJsonSyntax), ("1.e1", RefuseJsonSyntax), ("1e", RefuseJsonSyntax), ("1e+", RefuseJsonSyntax), ("1a", RefuseJsonSyntax), ("100e777777777777777777777777777", RefuseJsonNumber), ("-100e777777777777777777777777777", RefuseJsonNumber),]
     for row in invalid {
         let (input, expected) = row
         if !json_test_case(input, expected) {
-            fail(result.unwrap(string.from(input)))
+            fail(string.from(input))
         }
     }
     true
 }
 
 fn nested_json_input(unit: String, count: u64, tail: String) -> String {
-    let mut input = result.unwrap(string.repeat(unit, count))
-    result.unwrap(string.push(mut input, tail))
+    let mut input = string.repeat(unit, count)
+    string.push(mut input, tail)
     take input
 }
 
@@ -546,7 +544,7 @@ fn json_test_suite_nesting() -> bool {
     for row in json_test_suite_deep_data() {
         let (name, unit, count, tail) = row
         if !refuses_depth_before_admission(nested_json_input(unit, count, tail)) {
-            fail(result.unwrap(string.from(name)))
+            fail(string.from(name))
         }
     }
     true
@@ -554,7 +552,7 @@ fn json_test_suite_nesting() -> bool {
 
 // expect: run json_nesting_128() = true
 fn json_nesting_128() -> bool {
-    let input = nested_json_input("[", 128, result.unwrap(string.repeat("]", 128)))
+    let input = nested_json_input("[", 128, string.repeat("]", 128))
     // The innermost empty array takes 9 bytes. Each of the other arrays
     // adds a 9-byte header and one 4-byte offset.
     let Ok(1660u64) = json.size(input) else {
@@ -570,7 +568,7 @@ fn json_nesting_128() -> bool {
 
 // expect: run json_nesting_129() = true
 fn json_nesting_129() -> bool {
-    let closing = result.unwrap(string.repeat("]", 129))
+    let closing = string.repeat("]", 129)
     refuses_depth_before_admission(nested_json_input("[", 129, closing))
 }
 
@@ -600,18 +598,17 @@ type ProfileRow: codec {
 }
 
 fn typed_input(s: String) -> Bytes {
-    result.unwrap(string.into_bytes(result.unwrap(string.from(s))))
+    string.into_bytes(string.from(s))
 }
 
 fn profile_encode[T](f: json.Format[T], v: T) -> String {
     let mut scratch: Bytes = list.new()
     let mut output: Bytes = list.new()
     let mut declared: u64 = 0
-    let measured = result.unwrap(json.encode_typed(f, v, mut scratch, scoped fn(n: u64) -> Result[(), Capacity] {
+    let measured = result.unwrap(json.encode_typed(f, v, mut scratch, scoped fn(n: u64) {
         declared = n
-        Ok(())
-    }, scoped fn(byte: u8) -> Result[(), Capacity] {
-        codec.put_u8(byte, mut output)
+    }, scoped fn(byte: u8) {
+        list.push(mut output, byte)
     }))
     if measured != declared || measured != list.len(output) {
         fail("typed JSON length differs from bytes written")
@@ -639,14 +636,14 @@ fn profile_law[T: codec](f: json.Format[T], v: T, alternative: String, canonical
 // expect: run typed_json_profile_round_trips() = true
 fn typed_json_profile_round_trips() -> bool {
     let mut lookup: Map[u64, String] = map.new()
-    result.unwrap(map.insert(mut lookup, 10u64, result.unwrap(string.from("ten"))))
-    result.unwrap(map.insert(mut lookup, 2u64, result.unwrap(string.from("two"))))
+    map.insert(mut lookup, 10u64, string.from("ten"))
+    map.insert(mut lookup, 2u64, string.from("two"))
     let mut payload: Bytes = list.new()
     result.unwrap(codec.put_u8(77, mut payload))
     let mut series: List[u16] = list.new()
-    result.unwrap(list.push(mut series, 2u16))
-    result.unwrap(list.push(mut series, 0u16))
-    let value = ProfileRow(unit: (), flag: true, scalar: '😀', a8: 255, a16: 65535, a32: 4294967295, a64: 18446744073709551615, b8: -128, b16: -32768, b32: -2147483648, b64: -9223372036854775808, narrow: 1.0000001, wide: float.from_bits64(0x8000000000000000), label: result.unwrap(string.from("é\n/\"\\\u{001f}")), payload: take payload, series: take series, lookup: take lookup, maybe: None, outcome: Ok(()), choice: Multiple(7, false))
+    list.push(mut series, 2u16)
+    list.push(mut series, 0u16)
+    let value = ProfileRow(unit: (), flag: true, scalar: '😀', a8: 255, a16: 65535, a32: 4294967295, a64: 18446744073709551615, b8: -128, b16: -32768, b32: -2147483648, b64: -9223372036854775808, narrow: 1.0000001, wide: float.from_bits64(0x8000000000000000), label: string.from("é\n/\"\\\u{001f}"), payload: take payload, series: take series, lookup: take lookup, maybe: None, outcome: Ok(()), choice: Multiple(7, false))
     let alternative = " { \"choice\": {\"Multiple\": [7,false]}, \"outcome\": {\"ok\":null}, \"lookup\":[[\"10\",\"ten\"],[\"2\",\"two\"]], \"series\":[2,0], \"payload\":\"TQ==\", \"label\":\"é\\n\\/\\\"\\\\\\u001f\", \"wide\":-0.0e4, \"narrow\":1.0000000596046448, \"b64\":\"-9223372036854775808\", \"b32\":-2147483648, \"b16\":-32768, \"b8\":-128, \"a64\":\"18446744073709551615\", \"a32\":4294967295, \"a16\":65535, \"a8\":255, \"scalar\":\"\\uD83D\\uDE00\", \"flag\":true, \"unit\":null } "
     let canonical = "{\"unit\":null,\"flag\":true,\"scalar\":\"😀\",\"a8\":255,\"a16\":65535,\"a32\":4294967295,\"a64\":\"18446744073709551615\",\"b8\":-128,\"b16\":-32768,\"b32\":-2147483648,\"b64\":\"-9223372036854775808\",\"narrow\":1.0000001,\"wide\":-0,\"label\":\"é\\u000A/\\\"\\\\\\u001F\",\"payload\":\"TQ==\",\"series\":[2,0],\"lookup\":[[\"10\",\"ten\"],[\"2\",\"two\"]],\"maybe\":null,\"outcome\":{\"ok\":null},\"choice\":{\"Multiple\":[7,false]}}"
     let f: json.Format[ProfileRow] = result.unwrap(json.typed())
@@ -715,9 +712,9 @@ fn typed_json_profile_refusals() -> bool {
         _ => false,
     }
     let f_deep: json.Format[ProfileDepth] = result.unwrap(json.typed())
-    let mut deep = result.unwrap(string.repeat("{\"Next\":[", 33))
-    result.unwrap(string.push(mut deep, "\"Stop\""))
-    result.unwrap(string.push(mut deep, result.unwrap(string.repeat("]}", 33))))
+    let mut deep = string.repeat("{\"Next\":[", 33)
+    string.push(mut deep, "\"Stop\"")
+    string.push(mut deep, string.repeat("]}", 33))
     let depth = match json.decode_typed(f_deep, typed_input(deep), 1048576) {
         Error(Input(288, _, DepthLimit)) => true,
         _ => false,
@@ -726,26 +723,40 @@ fn typed_json_profile_refusals() -> bool {
     let mut nested: ProfileDepth = Stop
     for _ in 0u64 .. 32 {
         let mut items: List[ProfileDepth] = list.new()
-        result.unwrap(list.push(mut items, take nested))
+        list.push(mut items, take nested)
         nested = Next(take items)
     }
     let mut wire_value: Bytes = list.new()
     result.unwrap(codec.encode(c, nested, mut wire_value))
     let good_depth = result.unwrap(json.typed_length(f_deep, wire_value)) == 358
     let mut items: List[ProfileDepth] = list.new()
-    result.unwrap(list.push(mut items, take nested))
+    list.push(mut items, take nested)
     let mut starts: u64 = 0
-    let bad_depth = match json.encode_typed(f_deep, Next(take items), mut wire_value, scoped fn(n: u64) -> Result[(), Capacity] {
+    let bad_depth = match json.encode_typed(f_deep, Next(take items), mut wire_value, scoped fn(n: u64) {
         starts = n
-        Ok(())
-    }, scoped fn(byte: u8) -> Result[(), Capacity] {
+    }, scoped fn(byte: u8) {
         if byte != 0 {
             fail("over-depth JSON sent a byte")
         }
-        Ok(())
     }) {
         Error(DepthLimit) => starts == 0,
         _ => false,
     }
     duplicate && unknown && bare && padding && surrogate && overflow && depth && good_depth && bad_depth
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

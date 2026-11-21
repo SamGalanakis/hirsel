@@ -948,14 +948,13 @@ impl<'a> Machine<'a> {
         }
     }
     /// Push a frame of resume point `r` holding `values`, and start its member.
-    fn push(&self, w: &Gen<'a>, r: usize, values: Vec<String>, jump: &str) -> String {
-        let c = w.c;
+    fn push(&self, r: usize, values: Vec<String>, jump: &str) -> String {
         let mut s = String::new();
         if !self.frame(r).is_empty() {
-            let _ = writeln!(s, "{c}full(list.push(mut r{r}$, {}))?", tuple(&values));
+            let _ = writeln!(s, "list.push(mut r{r}$, {})", tuple(&values));
         }
         if self.tagged() {
-            let _ = writeln!(s, "{c}full(list.push(mut ts$, {r}u64))?");
+            let _ = writeln!(s, "list.push(mut ts$, {r}u64)");
         }
         if self.multi() {
             let _ = writeln!(s, "next$ = {}", self.step(r).edge.unwrap().1);
@@ -1003,12 +1002,12 @@ impl<'a> Machine<'a> {
             let r = self.resume_at(m, v, k);
             match edge {
                 Edge::Direct => {
-                    s += &self.push(w, r, saved(k), jump);
+                    s += &self.push(r, saved(k), jump);
                     return (s, None);
                 }
                 Edge::Option => {
                     let inner = w.empty_codec_at(&self.g.members[child].1, step.source);
-                    let push = self.push(w, r, saved(k), jump);
+                    let push = self.push(r, saved(k), jump);
                     let start = format!("{pre}start{k}$");
                     let check = reject_empty(Some(&inner), &start);
                     let _ = write!(
@@ -1018,7 +1017,7 @@ impl<'a> Machine<'a> {
                     );
                 }
                 Edge::Ok(other) | Edge::Error(other) => {
-                    let push = self.push(w, r, saved(k), jump);
+                    let push = self.push(r, saved(k), jump);
                     let (at, side) = match edge {
                         Edge::Ok(_) => ("== 0", "Error"),
                         _ => ("!= 0", "Ok"),
@@ -1041,7 +1040,7 @@ impl<'a> Machine<'a> {
                     values.extend([format!("take {pre}k{k}$"), format!("{pre}n{k}$")]);
                     let push = format!(
                         "let {pre}k{k}$: {text} = {c}room({pre}n{k}$)?\n{}",
-                        self.push(w, r, values, jump)
+                        self.push(r, values, jump)
                     );
                     let _ = write!(
                         s,
@@ -1060,13 +1059,13 @@ impl<'a> Machine<'a> {
                     ]);
                     let push = format!(
                         "let {pre}q{k}$ = {c}take_with(b$, mut at$, {ck})?\n{}",
-                        self.push(w, r, values, jump)
+                        self.push(r, values, jump)
                     );
                     let _ = write!(
                         s,
                         "let {pre}n{k}$ = {c}take_count(b$, mut at$, {c}least({ck}) + {least})?\n\
                          let mut {pre}m{k}$: {text} = map.new()\n\
-                         if let Error(f$) = map.reserve(mut {pre}m{k}$, {pre}n{k}$) {{\n    return Error(Full(f$))\n}}\n\
+                         map.reserve(mut {pre}m{k}$, {pre}n{k}$)\n\
                          if {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$ = take {pre}m{k}$\n",
                         indent(&push)
                     );
@@ -1140,10 +1139,10 @@ impl<'a> Machine<'a> {
             Edge::List => {
                 let mut values = saved();
                 values.extend(["take bx$".to_owned(), "bl$ - 1".to_owned()]);
-                let push = self.push(w, r, values, "break");
+                let push = self.push(r, values, "break");
                 let _ = write!(
                     s,
-                    "let mut bx$ = take bk$\n{c}full(list.push(mut bx$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    "let mut bx$ = take bk$\nlist.push(mut bx$, take x$)\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
                     indent(&push)
                 );
             }
@@ -1154,11 +1153,11 @@ impl<'a> Machine<'a> {
                 let push = format!(
                     "let key_at$ = at$\nlet bn$ = {c}take_with(b$, mut at$, {ck})?\n\
                      if map.contains(bx$, bn$) {{\n    return Error(Bad(Duplicate(key_at$)))\n}}\n{}",
-                    self.push(w, r, values, "break")
+                    self.push(r, values, "break")
                 );
                 let _ = write!(
                     s,
-                    "let mut bx$ = take bm$\n{c}full(map.insert(mut bx$, take bq$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    "let mut bx$ = take bm$\nmap.insert(mut bx$, take bq$, take x$)\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
                     indent(&push)
                 );
             }

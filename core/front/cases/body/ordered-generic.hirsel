@@ -99,8 +99,8 @@ fn lists() -> u64 {
 }
 
 fn octets() -> u64 {
-    let a = result.unwrap(b"a")
-    let b = result.unwrap(b"aa")
+    let a = b"a"
+    let b = b"aa"
     code(a, b) * 10000 + code(b, a) * 100 + code(a, a)
 }
 
@@ -109,12 +109,12 @@ type Owned: shareable + send + ordered {
 }
 
 fn pointers() -> u64 {
-    let a = result.unwrap(box.new(Owned(key: -2)))
-    let b = result.unwrap(box.new(Owned(key: 1)))
-    let c = result.unwrap(rc.new(Owned(key: -2)))
-    let d = result.unwrap(rc.new(Owned(key: 1)))
-    let e = result.unwrap(arc.new(Owned(key: -2)))
-    let f = result.unwrap(arc.new(Owned(key: 1)))
+    let a = box.new(Owned(key: -2))
+    let b = box.new(Owned(key: 1))
+    let c = rc.new(Owned(key: -2))
+    let d = rc.new(Owned(key: 1))
+    let e = arc.new(Owned(key: -2))
+    let f = arc.new(Owned(key: 1))
     code(a, b) * 10000 + code(c, d) * 100 + code(e, f)
 }
 
@@ -124,8 +124,8 @@ type Node: shareable + send + ordered {
 }
 
 fn nested() -> u64 {
-    let a = result.unwrap(arc.new(Node(value: -1, next: None)))
-    let b = result.unwrap(arc.new(Node(value: 1, next: None)))
+    let a = arc.new(Node(value: -1, next: None))
+    let b = arc.new(Node(value: 1, next: None))
     let l = Node(value: 0, next: Some(take a))
     let r = Node(value: 0, next: Some(take b))
     code(l, r) * 10000 + code(r, l) * 100 + code(l, l)

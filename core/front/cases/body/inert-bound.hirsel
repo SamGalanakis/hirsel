@@ -6,11 +6,11 @@ type Tagged: inert { n: u64 }
 
 type Wrap[T: plain] { item: T }
 
-fn equals[T: inert + key](take x: T) -> Result[own fn(T) -> bool, (Capacity, T)] {
+fn equals[T: inert + key](take x: T) -> own fn(T) -> bool {
     fn(y: T) -> bool { y == x }
 }
 
-fn wrapped[T: plain + inert](take w: Wrap[T]) -> Result[own fn() -> u64, (Capacity, Wrap[T])] {
+fn wrapped[T: plain + inert](take w: Wrap[T]) -> own fn() -> u64 {
     fn() -> u64 { let _ = w; 1 }
 }
 

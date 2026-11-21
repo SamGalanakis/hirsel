@@ -45,8 +45,8 @@ fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -
     let made: Result[triggers.Entry[Signup], Capacity] = triggers.granted(code.describe(run))
     let target = match take made { Ok(take value) => take value, Error(_) => return Error(Rejected) }
     let entries = match trigger_entries(target) { Ok(take value) => take value, Error(_) => return Error(Rejected) }
-    let copied: Result[String, Capacity] = clone(arg.email)
-    let email = match take copied { Ok(take value) => take value, Error(_) => return Error(Rejected) }
+    let copied: String = clone(arg.email)
+    let email = take copied
     stored(store.put(mut tx, h.accounts, arg.id, Account(email: take email, active: false)))?
     match steps.schedule(mut tx, entries, target, arg, 3u64, AfterCommit) {
         Ok(id) => Ok(id),
@@ -104,7 +104,7 @@ fn payment_service(take inbox: Receiver[Payment]) -> () waits {
             Charge(take key, _, take reply) => {
                 // This service charges for every request, even a repeated key.
                 charged += 1u64
-                let _ = result.unwrap(map.insert(mut charges, take key, charged))
+                let _ = map.insert(mut charges, take key, charged)
                 let _ = channel.send(reply, charged)
             },
             Lookup(key, reply) => {
@@ -116,10 +116,10 @@ fn payment_service(take inbox: Receiver[Payment]) -> () waits {
 }
 
 pub fn scripted_services(tasks: Tasks) -> (Services, Task[()], Task[()]) {
-    let (mail, mail_in): (Sender[Mail], Receiver[Mail]) = result.unwrap(channel.new(1u64))
-    let (payment, payment_in): (Sender[Payment], Receiver[Payment]) = result.unwrap(channel.new(1u64))
-    let mailing = result.unwrap(task.spawn(tasks, bytes 65536u64, take mail_in, mail_service))
-    let payments = result.unwrap(task.spawn(tasks, bytes 65536u64, take payment_in, payment_service))
+    let (mail, mail_in): (Sender[Mail], Receiver[Mail]) = channel.new(1u64)
+    let (payment, payment_in): (Sender[Payment], Receiver[Payment]) = channel.new(1u64)
+    let mailing = task.spawn(tasks, bytes 65536u64, take mail_in, mail_service)
+    let payments = task.spawn(tasks, bytes 65536u64, take payment_in, payment_service)
     (Services(mail: take mail, payment: take payment), take mailing, take payments)
 }
 
@@ -134,8 +134,8 @@ fn entry_key[A: codec, R: codec](f: StaticFn[fn(mut store.Tx, Tables, store.Call
     let input: std.codec.Codec[A] = std.codec.of()
     let reply: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
     let identity = code.identity(f)
-    let mut raw: Bytes = list.with_capacity(list.len(identity) + 16u64)?
-    list.append(mut raw, identity)?
+    let mut raw: Bytes = list.with_capacity(list.len(identity) + 16u64)
+    list.append(mut raw, identity)
     std.codec.put_u64(std.codec.fingerprint(input)?, mut raw)?
     std.codec.put_u64(std.codec.fingerprint(reply)?, mut raw)?
     Ok(take raw)
@@ -155,16 +155,14 @@ pub type ChargeRequest: codec + send { id: steps.StepId, card: String }
 
 pub fn send_welcome(port: Port, take email: String) -> Result[u64, WriteError] waits {
     let Welcome(mail) = view port else { fail("sign-up: expected mail grant") }
-    let pair: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
-    let (to, from) = result.unwrap(take pair)
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     result.unwrap(channel.send(mail, Mail(email: take email, reply: take to)))
     Ok(result.unwrap(channel.receive(from)))
 }
 
 pub fn send_charge(port: Port, take request: ChargeRequest) -> Result[u64, WriteError] waits {
     let Billing(payment) = view port else { fail("sign-up: expected payment grant") }
-    let pair: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
-    let (to, from) = result.unwrap(take pair)
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let ChargeRequest(id: id, card: take card) = take request
     result.unwrap(channel.send(payment, Charge(result.unwrap(steps.outside_key(id)), take card, take to)))
     Ok(result.unwrap(channel.receive(from)))
@@ -172,8 +170,7 @@ pub fn send_charge(port: Port, take request: ChargeRequest) -> Result[u64, Write
 
 pub fn find_charge(port: Port, take request: ChargeRequest) -> Result[u64, WriteError] waits {
     let Billing(payment) = view port else { fail("sign-up: expected payment grant") }
-    let pair: Result[(Sender[Option[u64]], Receiver[Option[u64]]), Capacity] = channel.new(1u64)
-    let (to, from) = result.unwrap(take pair)
+    let (to, from): (Sender[Option[u64]], Receiver[Option[u64]]) = channel.new(1u64)
     result.unwrap(channel.send(payment, Lookup(result.unwrap(steps.outside_key(request.id)), take to)))
     match channel.receive(from) {
         Ok(Some(receipt)) => Ok(receipt),
@@ -185,8 +182,8 @@ fn process(mut ctx: steps.Ctx[Port], take arg: Signup) -> Result[RunResult, step
     let Signup(id: id, email: take email, card: take card) = take arg
     let _ = steps.step(mut ctx, take email, send_welcome)?
     let charge = ChargeRequest(id: steps.next_id(ctx), card: take card)
-    let copied: Result[ChargeRequest, Capacity] = clone(charge)
-    let attempted = steps.step(mut ctx, result.unwrap(take copied), send_charge)
+    let copied: ChargeRequest = clone(charge)
+    let attempted = steps.step(mut ctx, take copied, send_charge)
     let _ = match take attempted {
         Error(InDoubt(step)) => steps.resolve(mut ctx, step, take charge, find_charge)?,
         other => (take other)?,
@@ -197,8 +194,8 @@ fn process(mut ctx: steps.Ctx[Port], take arg: Signup) -> Result[RunResult, step
 
 fn run(g: Grants, caller: runner.Caller, take arg: Signup) -> Result[RunResult, Capacity] waits {
     let mut allowed: Map[u64, Port] = map.new()
-    result.capacity_only(map.insert(mut allowed, 0u64, Welcome(channel.sender(g.services.mail))))?
-    result.capacity_only(map.insert(mut allowed, 1u64, Billing(channel.sender(g.services.payment))))?
+    map.insert(mut allowed, 0u64, Welcome(channel.sender(g.services.mail)))
+    map.insert(mut allowed, 1u64, Billing(channel.sender(g.services.payment)))
     match steps.run(g.context, take allowed, take arg, process) {
         Ok(value) => Ok(value),
         Error(StaleAttempt) => Ok(Held),
@@ -241,8 +238,8 @@ fn client_call[R: codec](conn: wire_client.Conn, slot: u32, take arg: Bytes, pos
 
 // Run with a scratch Dir, then inspect the account and its stored step rows.
 pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout) -> Result[(), Exit] waits {
-    let mut name = result.unwrap(string.with_capacity(64u64))
-    result.unwrap(string.push(mut name, "signup-"))
+    let mut name = string.with_capacity(64u64)
+    string.push(mut name, "signup-")
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let (take services, take mailing, take payments) = scripted_services(tasks)
     let target: triggers.Entry[Signup] = result.unwrap(triggers.granted(code.describe(run)))
@@ -256,11 +253,11 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: Some(take trigger_config))
-    let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let demo = Demo(config: take settings, stop: take stopping, status: latest.handle(status), watch: take watch)
-    let mut running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take demo, operate))
+    let mut running = task.spawn(tasks, bytes 50331648u64, take demo, operate)
     let phases = result.unwrap(channel.receive(watching))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("sign-up: place did not start") }
@@ -269,8 +266,8 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     let mut keys: List[Bytes] = list.new()
     let signup_key = result.unwrap(entry_key(code.describe(signup)))
     let status_key = result.unwrap(entry_key(code.describe(signup_status)))
-    result.unwrap(list.push(mut keys, result.unwrap(clone(signup_key))))
-    result.unwrap(list.push(mut keys, result.unwrap(clone(status_key))))
+    list.push(mut keys, clone(signup_key))
+    list.push(mut keys, clone(status_key))
     let conn = result.unwrap(wire_client.connect(tasks, net, address, clock, random, keys, None, wire.socket))
     let arg = Signup(id: 1u64, email: "ada@example.test", card: "scripted-card")
     let created = result.unwrap(encode(arg))

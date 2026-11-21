@@ -47,7 +47,7 @@ fn sum(xs: List[u64]) -> u64 {
 fn counted(n: u64) -> List[u64] {
     let mut xs: List[u64] = list.new()
     for i in 0u64 .. n {
-        result.unwrap(list.push(mut xs, i))
+        list.push(mut xs, i)
     }
     take xs
 }
@@ -57,12 +57,9 @@ fn counted(n: u64) -> List[u64] {
 // length 100, sum 0 + ... + 99 = 4950: 1 * 100000000 + 100 * 100000 + 4950.
 fn fill_then_refuse(mut xs: List[u64], n: u64) -> Result[u64, Capacity] {
     for i in 0u64 .. n {
-        match list.push(mut xs, i) {
-            Ok(_) => {},
-            Error((e, _)) => return Error(e)
-        }
+        list.push(mut xs, i)
     }
-    list.reserve(mut xs, 100000)?
+    list.try_reserve(mut xs, 100000)?
     Ok(0)
 }
 
@@ -91,10 +88,10 @@ fn grown_refused() -> u64 {
 // 4950 + 1: 1 * 1000000 + 101 * 1000 + 4951 = 1105951.
 fn fill_then_index(mut xs: List[u64], i: u64) -> u64 {
     for k in 0u64 .. 100 {
-        result.unwrap(list.push(mut xs, k))
+        list.push(mut xs, k)
     }
     let a =[1u64, 2u64];
-    result.unwrap(list.push(mut xs, a[i]))
+    list.push(mut xs, a[i])
     a[i]
 }
 
@@ -113,8 +110,8 @@ fn grown_trap(i: u64) -> u64 {
 // length 2, sum 42.
 fn swap_in(mut xs: List[u64]) -> u64 {
     let mut ys: List[u64] = list.new()
-    result.unwrap(list.push(mut ys, 40))
-    result.unwrap(list.push(mut ys, 2))
+    list.push(mut ys, 40)
+    list.push(mut ys, 2)
     xs = take ys
     list.len(xs)
 }
@@ -138,7 +135,7 @@ fn replace_then_index(mut xs: List[u64], i: u64) -> u64 {
         swap_in(mut xs);
     }
     let a =[1u64, 2u64];
-    result.unwrap(list.push(mut xs, a[i]))
+    list.push(mut xs, a[i])
     list.len(xs)
 }
 
@@ -150,9 +147,9 @@ fn replaced_trap(i: u64) -> u64 {
 // 01afc9d2: a caught Fail whose callee grew a `mut` list first, caught twice. Each
 // catch returns 1; the earlier cause cell is refunded and the last is kept (FAIL-16).
 fn push_then_fail(mut xs: List[u64]) -> u64 {
-    result.unwrap(list.push(mut xs, 1))
+    list.push(mut xs, 1)
     if list.len(xs) > 0 {
-        fail(result.unwrap(string.from("busy")))
+        fail(string.from("busy"))
     }
     0
 }
@@ -183,14 +180,14 @@ fn caught_twice() -> u64 {
 // `mut` loan cannot leave an `if` arm (OWN-10), so those calls stay direct. [1, 2] then 5: length 3
 // and element 2 is 5; [1, 2, 3] from 1: length 2 and element 0 is 2.
 fn grown_view(mut xs: List[u64]) -> View[List[u64]] in xs {
-    result.unwrap(list.push(mut xs, 5))
+    list.push(mut xs, 5)
     list.slice(xs, 0, list.len(xs))
 }
 
 fn anchored_mut() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 1))
-    result.unwrap(list.push(mut xs, 2))
+    list.push(mut xs, 1)
+    list.push(mut xs, 2)
     let v = grown_view(mut xs)
     list.len(v) * 100 + v[2]
 }
@@ -202,7 +199,7 @@ fn tail_view(xs: List[u64]) -> View[List[u64]] in xs {
 fn anchored_view() -> u64 {
     let mut xs: List[u64] = list.new()
     for i in 1u64 .. 4 {
-        result.unwrap(list.push(mut xs, i))
+        list.push(mut xs, i)
     }
     let e: List[u64] = list.new()
     let v = if list.len(e) == list.capacity(e) {
@@ -231,7 +228,7 @@ fn anchored_whole() -> u64 {
 }
 
 fn itself_mut(mut xs: List[u64]) -> View[List[u64]] in xs {
-    result.unwrap(list.push(mut xs, 7))
+    list.push(mut xs, 7)
     view xs
 }
 
@@ -246,7 +243,7 @@ fn anchored_whole_mut() -> u64 {
 // 1 + .. + 20 = 210.
 fn deep(mut xs: List[u64], n: u64) -> View[List[u64]] in xs {
     if n == 0 {
-        result.unwrap(list.push(mut xs, 7))
+        list.push(mut xs, 7)
         return view xs
     }
     deep(mut xs, n - 1)
@@ -320,7 +317,7 @@ type Span2 {
 }
 
 fn mix(s: Span2, mut xs: List[u64]) -> u64 {
-    result.unwrap(list.push(mut xs, s.start))
+    list.push(mut xs, s.start)
     s.end + list.len(xs)
 }
 
@@ -329,7 +326,7 @@ fn stable_holder() -> u64 {
         match make_span2(r, 5, 10) {
             Ok(s) => {
                 let mut xs: List[u64] = list.new()
-                result.unwrap(list.push(mut xs, 1))
+                list.push(mut xs, 1)
                 let e: List[u64] = list.new()
                 let n = if list.len(e) == list.capacity(e) {
                     mix(s, mut xs)
@@ -369,7 +366,7 @@ fn padded() -> u64 {
 
 fn put(mut o: Option[List[u64]]) {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 9))
+    list.push(mut xs, 9)
     o = Some(take xs)
 }
 
@@ -410,7 +407,7 @@ fn floats() -> u64 {
 
 // Called directly and through its address: 1, then 2, and the list is [1, 1].
 fn add_one(mut xs: List[u64]) -> u64 {
-    result.unwrap(list.push(mut xs, 1))
+    list.push(mut xs, 1)
     list.len(xs)
 }
 
@@ -450,7 +447,7 @@ fn count_down(mut xs: List[u64], n: u64) -> u64 {
     if n == 0 {
         return list.len(xs)
     }
-    result.unwrap(list.push(mut xs, n))
+    list.push(mut xs, n)
     let e: List[u64] = list.new()
     if list.len(e) == list.capacity(e) {
         count_down(mut xs, n - 1)
@@ -476,7 +473,7 @@ fn ping(mut a: List[u64], mut b: List[u64], n: u64) -> u64 {
     if n == 0 {
         return list.len(a) * 100 + list.len(b)
     }
-    result.unwrap(list.push(mut a, n))
+    list.push(mut a, n)
     let e: List[u64] = list.new()
     if list.len(e) == list.capacity(e) {
         pong(mut a, mut b, n - 1)
@@ -489,7 +486,7 @@ fn pong(mut a: List[u64], mut b: List[u64], n: u64) -> u64 {
     if n == 0 {
         return list.len(a) * 100 + list.len(b)
     }
-    result.unwrap(list.push(mut b, n))
+    list.push(mut b, n)
     let e: List[u64] = list.new()
     if list.len(e) == list.capacity(e) {
         ping(mut a, mut b, n - 1)
@@ -513,7 +510,7 @@ fn mutual_recursion() -> u64 {
 // A direct call in tail position with copy-back: [0 .. 9], then 3, then 1: length 12
 // and sum 45 + 3 + 1 = 49.
 fn tail(mut xs: List[u64], n: u64) -> u64 {
-    result.unwrap(list.push(mut xs, n))
+    list.push(mut xs, n)
     let e: List[u64] = list.new()
     if list.len(e) == list.capacity(e) {
         add_one(mut xs)
@@ -540,7 +537,7 @@ fn tail_call() -> u64 {
 // pushes from empty, then an index past a one-element array.
 fn fill_unit_then_trap(mut xs: List[u64], i: u64) {
     for n in 0u64 .. 100 {
-        result.unwrap(list.push(mut xs, n))
+        list.push(mut xs, n)
     }
     let a =[1u64];
     let _ = a[i]
@@ -557,7 +554,7 @@ fn grown_unit_trap() -> u64 {
 // [0 .. 3] fills its four slots, then is replaced by [37] before the trap.
 fn replace_unit_then_trap(mut xs: List[u64], i: u64) {
     let mut ys: List[u64] = list.new()
-    result.unwrap(list.push(mut ys, 37))
+    list.push(mut ys, 37)
     xs = take ys
     let a =[1u64];
     let _ = a[i]
@@ -574,8 +571,8 @@ fn replaced_unit_trap() -> u64 {
 // As caught_twice, with a unit callee: each catch returns 1 and the last cause cell
 // is kept.
 fn push_unit_then_fail(mut xs: List[u64]) {
-    result.unwrap(list.push(mut xs, 7))
-    fail(result.unwrap(string.from("busy")))
+    list.push(mut xs, 7)
+    fail(string.from("busy"))
 }
 
 fn unit_caught() -> u64 {
@@ -600,7 +597,7 @@ fn unit_caught_twice() -> u64 {
 // A result anchored to a `mut` loan, used inside the cold arm: [27] has length 1 and
 // element 0 is 27, and churn(10) is 1 + ... + 10 = 55.
 fn mut_identity(mut xs: List[u64]) -> View[List[u64]] in xs {
-    result.unwrap(list.push(mut xs, 27))
+    list.push(mut xs, 27)
     view xs
 }
 
@@ -620,7 +617,6 @@ fn make_span2(r: Region, start: u64, end: u64) -> Result[Span2 in r, Capacity] {
         dest.put(mut d, Span2(start: start, end: end))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
     }
 }

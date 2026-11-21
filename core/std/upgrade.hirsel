@@ -9,19 +9,19 @@ pub type Spec: send {
 pub fn spec[A: codec + send](req: http.Request, protocol: String, reserve: u64, arg: A, run: fn(take Taken) waits) -> Result[Spec, http.HandlerError] {
     let limit = http.upgrade_offer(req, protocol)?
     let coding: codec.Codec[A] = codec.of()
-    let encoded = bound bytes ((limit + 7) / 8 * 8) {
-        let mut out: Bytes = list.with_capacity(limit)?
-        codec.encode(coding, arg, mut out)?
-        take out
+    let encoded: Result[Result[Bytes, Capacity], Capacity] = bound bytes ((limit + 7) / 8 * 8) {
+        let mut out: Bytes = list.with_capacity(limit)
+        match codec.encode(coding, arg, mut out) {
+            Ok(()) => Ok(take out),
+            Error(e) => Error(e),
+        }
     }
     let argument = match take encoded {
-        Ok(take argument) => take argument,
+        Ok(Ok(take argument)) => take argument,
+        Ok(Error(e)) => return Error(Allocation(e)),
         Error(e) => return Error(Allocation(e)),
     }
-    match string.from(protocol) {
-        Ok(take name) => Ok(Spec(protocol: take name, fields: list.new(), argument: take argument, reservation: reserve, run)),
-        Error(e) => Error(Allocation(e)),
-    }
+    Ok(Spec(protocol: string.from(protocol), fields: list.new(), argument: take argument, reservation: reserve, run))
 }
 
 pub type Transfer: send {

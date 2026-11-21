@@ -10,11 +10,8 @@ fn again() -> u64 {
     region r {
         match make_span2(r, 5, 10) {
             Ok(s) => region q {
-                let c: Result[Span2 in q, Capacity] = clone_in(q, s)
-                match c {
-                    Ok(t) => t.start + t.end,
-                    Error(_) => 999
-                }
+                let t: Span2 in q = clone_in(q, s)
+                t.start + t.end
             },
             Error(_) => 998,
         }
@@ -26,7 +23,6 @@ fn make_span2(r: Region, start: u64, end: u64) -> Result[Span2 in r, Capacity] {
         dest.put(mut d, Span2(start: start, end: end))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
     }
 }
@@ -52,11 +48,8 @@ fn copy_nested() -> bool {
         let holder = result.unwrap(label(source))
         match (bound bytes 8 {
             region out {
-                let copied: Result[Text in out, Capacity] = clone_in(out, holder.text)
-                match copied {
-                    Ok(t) => text.as_string(t) == "sheep",
-                    Error(_) => false,
-                }
+                let t: Text in out = clone_in(out, holder.text)
+                text.as_string(t) == "sheep"
             }
         }) {
             Ok(equal) => equal,
@@ -87,21 +80,40 @@ fn sum(e: Expr) -> u64 {
 // The three encodings are 9 bytes each. The clone copies the used 27-byte
 // prefix, admits 32, and keeps the Add root's offset within that prefix.
 // expect: run copy_linked(32) = 7
-// expect: run copy_linked(31) = 3231
+// expect: run copy_linked(31) = 3231 used 32
 fn copy_linked(limit: u64) -> u64 {
-    region source {
-        let root = result.unwrap(tree(source))
-        match (bound bytes limit {
-            region out {
-                let copied: Result[Expr in out, Capacity] = clone_in(out, root)
-                match copied {
-                    Ok(e) => sum(e),
-                    Error(c) => c.requested * 100 + c.available,
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        region source {
+            let root = result.unwrap(tree(source))
+            bound bytes limit {
+                region out {
+                    let copied: Expr in out = clone_in(out, root)
+                    sum(copied)
                 }
             }
-        }) {
-            Ok(n) => n,
-            Error(_) => 0,
         }
+    })
+    if let Ok(Ok(Ok(n))) = outer {
+        return n
+    }
+    match caught(take outer) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 0,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

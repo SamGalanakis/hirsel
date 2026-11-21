@@ -556,23 +556,23 @@ fn native_flow_corpus_agrees_with_the_owner_laws() {
 fn viewed_carrier_headers_thaw_after_success_error_and_failure() {
     let source = r#"
 fn inspect(xs: List[u64], mode: u64) -> Result[u64, Capacity] {
-    let mut scratch: List[u64] = result.unwrap(list.with_capacity(2))
-    let _ = result.unwrap(list.push(mut scratch, 7u64))
-    let _ = result.unwrap(list.push(mut scratch, 8u64))
+    let mut scratch: List[u64] = list.with_capacity(2)
+    let _ = list.push(mut scratch, 7u64)
+    let _ = list.push(mut scratch, 8u64)
     let before = list.len(xs)
     if mode == 1 { return Error(Capacity(requested: 1, available: 0)) }
     if mode == 2 { let _ = 1u64 / (mode - 2) }
     Ok(before + list.len(xs) + list.len(scratch))
 }
 fn probe(mode: u64) -> u64 {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(2))
-    let _ = result.unwrap(list.push(mut xs, 1u64))
-    let _ = result.unwrap(list.push(mut xs, 2u64))
+    let mut xs: List[u64] = list.with_capacity(2)
+    let _ = list.push(mut xs, 1u64)
+    let _ = list.push(mut xs, 2u64)
     let first = result.unwrap(isolate(scoped fn() -> u64 {
         match inspect(xs, mode) { Ok(n) => n, Error(_) => 900u64 }
     }))
     let before: u64 = match take first { Ok(n) => n, Error(take causes) => 901u64 }
-    let _ = result.unwrap(list.push(mut xs, 3u64))
+    let _ = list.push(mut xs, 3u64)
     let after = result.unwrap(inspect(xs, 0))
     before * 100u64 + after
 }
@@ -900,7 +900,7 @@ fn cancelled_cold_word_call(target: Target, with_isolate: bool) {
     let source = r#"
 fn grow_then_check(mut xs: List[u64]) {
     for n in 0u64 .. 100 {
-        result.unwrap(list.push(mut xs, n))
+        list.push(mut xs, n)
     }
     task.check_cancel()
 }
@@ -918,7 +918,7 @@ fn child(take x: u64) -> u64 {
 }
 
 fn cancelled(tasks: Tasks) -> u64 waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
+    let mut h = task.spawn(tasks, bytes 65536, 41u64, child)
     task.cancel(mut h)
     match task.join(take h) {
         Ok(n) => n,
@@ -1368,11 +1368,11 @@ fn step_counter_survives_inlined_mutations_and_exact_exhaustion() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let source = r#"
 fn append(mut xs: List[u64], n: u64) {
-    result.unwrap(list.push(mut xs, n))
+    list.push(mut xs, n)
 }
 fn probe(s: u64) -> u64 {
     match (bound steps s {
-        let mut xs: List[u64] = result.unwrap(list.with_capacity(8))
+        let mut xs: List[u64] = list.with_capacity(8)
         for i in 0u64 .. 8u64 { append(mut xs, i) }
         list.len(xs)
     }) {
@@ -1462,9 +1462,9 @@ fn purebits(s: u64, n: u64) -> u64 {
 fn probe(s: u64) -> u64 {
     match (bound steps s {
         let first = result.unwrap(isolate(fn() -> u64 {
-            let mut xs: List[u64] = result.unwrap(list.with_capacity(8))
+            let mut xs: List[u64] = list.with_capacity(8)
             for i in 0u64 .. 8u64 {
-                result.unwrap(list.push(mut xs, i))
+                list.push(mut xs, i)
                 let _ = 100u64 / (5u64 - i)
             }
             list.len(xs)
@@ -1505,10 +1505,10 @@ fn resetting(s: u64) -> u64 {
 }
 fn strided(s: u64, stride: u64) -> u64 {
     match (bound steps s {
-        let mut xs: List[u64] = result.unwrap(list.with_capacity(16))
+        let mut xs: List[u64] = list.with_capacity(16)
         let mut k = 1u64
         while k <= 10u64 {
-            result.unwrap(list.push(mut xs, k))
+            list.push(mut xs, k)
             k += stride
         }
         list.len(xs)
@@ -1749,7 +1749,7 @@ fn capacity_only(take r: Result[(), (Capacity, Arc[Cell])]) -> Result[(), Capaci
 fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Result[(), Capacity] {
     for i in 0u64 .. n {
         let held = arc.share(value)
-        capacity_only(list.push(mut xs, take held))?
+        list.push(mut xs, take held)
         if i == at { return Error(Capacity(requested: 1, available: 0)) }
     }
     Ok(())
@@ -1757,7 +1757,7 @@ fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Res
 fn probe(s: u64, n: u64, at: u64) -> u64 {
     let ran = bound steps s {
         let mut xs: List[Arc[Cell]] = list.new()
-        let value = result.unwrap(arc.new(Cell(value: 9u64)))
+        let value = arc.new(Cell(value: 9u64))
         let caught = share_loop(mut xs, value, n, at)
         for _ in 0u64 .. 3u64 {}
         let prefix = list.len(xs)
@@ -1997,8 +1997,8 @@ fn probe(n: u64, extra: u64, k: u64) -> u64 {
     let mut xs: List[List[u64]] = list.new()
     for _ in 0u64 .. 2u64 {
         let mut b: List[u64] = list.new()
-        result.unwrap(list.fill(mut b, n + extra, 3u64))
-        result.unwrap(list.push(mut xs, take b))
+        list.fill(mut b, n + extra, 3u64)
+        list.push(mut xs, take b)
     }
     walk(mut xs, 0u64, k, n) + list.len(xs[0]) * 100u64
 }

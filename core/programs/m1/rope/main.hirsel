@@ -10,8 +10,8 @@ type Piece {
 }
 
 fn piece(s: String, id: u64) -> Result[Piece, m1.support.Error] {
-    let c = Chunk(id, value: m1.support.mem(string.from(s))?)
-    let h = m1.support.mem(result.capacity_only(rc.new(take c)))?
+    let c = Chunk(id, value: string.from(s))
+    let h = rc.new(take c)
     Ok(Piece(chunk: take h, lo: 0, hi: string.byte_len(s)))
 }
 
@@ -63,7 +63,7 @@ fn edit(ps: List[Piece], pos: u64, len: u64, replacement: String, id: u64, varia
         return Error(m1.support.error("InvalidPosition"))
     }
     m1.support.admission(variant, m1.support.name("edit", id, ".piece")?, 24 * (list.len(ps) + 2))?
-    let mut staged: List[Piece] = m1.support.mem(list.with_capacity(list.len(ps) + 2))?
+    let mut staged: List[Piece] = list.with_capacity(list.len(ps) + 2)
     range(mut staged, ps, 0, pos)?
     if string.byte_len(replacement) > 0 {
         m1.support.push(mut staged, piece(replacement, id)?)?
@@ -74,7 +74,7 @@ fn edit(ps: List[Piece], pos: u64, len: u64, replacement: String, id: u64, varia
 
 fn mark(ps: List[Piece], mut seen: std.set.Set[u64]) -> Result[(), m1.support.Error] {
     for p in ps {
-        let _ = m1.support.mem(result.capacity_only(std.set.insert(mut seen, p.chunk.id)))?
+        let _ = std.set.insert(mut seen, p.chunk.id)
     }
     Ok(())
 }
@@ -107,7 +107,7 @@ fn operations(input: String, at_start: u64, variant: String, mut current: List[P
             let next = edit(current, m1.support.number(a)?, m1.support.number(b)?, replacement, edits + 1, variant)?
             // Reserve history before publication. Moving the previous descriptor list copies no text.
             let needed = list.len(history) + 1
-            m1.support.mem(list.reserve(mut history, needed))?
+            list.reserve(mut history, needed)
             let old = replace(mut current, take next)
             m1.support.push(mut history, take old)?
             edits += 1
@@ -149,7 +149,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     m1.support.num(mut rendered, live(current, history)?)?
     m1.support.add(mut rendered, "\n")?
     m1.support.put(out, rendered)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {
         let closed = tx
     }

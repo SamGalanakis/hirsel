@@ -16,20 +16,20 @@ fn positive() -> bool {
     let absent: Option[u8] = numbers.maybe(-1i64)
     let signed: Option[i8] = numbers.maybe(-128i64)
     let mut xs: List[u8] = list.new()
-    result.unwrap(list.push(mut xs,250u8))
-    result.unwrap(list.push(mut xs,5u8))
+    list.push(mut xs,250u8)
+    list.push(mut xs,5u8)
     let sum = list.sum(xs)
     let mut ys: List[i8] = list.new()
-    result.unwrap(list.push(mut ys,-128i8))
-    result.unwrap(list.push(mut ys,127i8))
-    result.unwrap(list.push(mut ys,-1i8))
+    list.push(mut ys,-128i8)
+    list.push(mut ys,127i8)
+    list.push(mut ys,-1i8)
     let signed_sum = list.sum(ys)
     a==255u8 && b== -128i8 && c==18446744073709551615u64 && d== -9223372036854775808i64 && good_range && good_grammar && cast==65535u16 && absent==None && option.unwrap(signed)== -128i8 && sum==255u8 && signed_sum== -2i8
 }
 fn overflow_sum() -> u8 {
     let mut xs: List[u8] = list.new()
-    result.unwrap(list.push(mut xs,250u8))
-    result.unwrap(list.push(mut xs,6u8))
+    list.push(mut xs,250u8)
+    list.push(mut xs,6u8)
     list.sum(xs)
 }
 fn overflow_cast() -> u8 { numbers.cast(256u64) }

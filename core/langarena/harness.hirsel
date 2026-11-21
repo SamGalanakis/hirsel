@@ -44,16 +44,16 @@ fn execute(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(helper.Settings,
     let actual_word: u64 = int.widen(actual)
     let expected_word: u64 = int.narrow(expected)
     let expected_code: u32 = int.narrow(expected)
-    let mut line = helper.mem(string.from(name))?
-    helper.mem(string.push(mut line, " checksum="))?
-    helper.mem(string.push_u64(mut line, actual_word))?
-    helper.mem(string.push(mut line, " expected="))?
-    helper.mem(string.push_u64(mut line, expected_word))?
-    helper.mem(string.push(mut line, if observed == expected {
+    let mut line = string.from(name)
+    string.push(mut line, " checksum=")
+    string.push_u64(mut line, actual_word)
+    string.push(mut line, " expected=")
+    string.push_u64(mut line, expected_word)
+    string.push(mut line, if observed == expected {
         " status=OK\n"
     } else {
         " status=ERR\n"
-    }))?
+    })
     match stdout.write(out, line) {
         Ok(()) => {},
         Error(e) => return Error(Io(e.error))

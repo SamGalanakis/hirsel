@@ -14,11 +14,11 @@ fn slots_move_law() -> u64 {
 // expect: run slots_owned_law() = true
 fn slots_owned_law() -> bool {
     let mut s: Slots[String] = result.unwrap(slots_new(4))
-    slots_put(mut s, 0, result.unwrap(string.from("abc")))
+    slots_put(mut s, 0, string.from("abc"))
     slots_shift(mut s, 0, 2)
     let text = slots_take(mut s, 2)
     slots_free(take s)
-    let another = result.unwrap(string.from("xyz"))
+    let another = string.from("xyz")
     text == "abc" && another == "xyz"
 }
 
@@ -74,7 +74,7 @@ fn slots_empty_view() -> u64 {
 // expect: slot-fault free of a block whose slot
 fn slots_free_live() {
     let mut s: Slots[String] = result.unwrap(slots_new(4))
-    slots_put(mut s, 3, result.unwrap(string.from("abc")))
+    slots_put(mut s, 3, string.from("abc"))
     slots_free(take s)
 }
 

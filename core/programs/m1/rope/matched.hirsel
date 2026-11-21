@@ -60,7 +60,7 @@ fn release(mut s: Store, take root: List[Piece]) {
 
 fn piece(mut s: Store, value: String) -> Result[Piece, m1.support.Error] {
     let hi: u32 = int.narrow(string.byte_len(value))
-    let c = Chunk(value: m1.support.mem(string.from(value))?, refs: 1)
+    let c = Chunk(value: string.from(value), refs: 1)
     let id: u32 = if let Some(i) = s.free {
         let next = match s.slots[int.widen(i)] {
             Free(n) => n,
@@ -115,7 +115,7 @@ fn range(mut s: Store, mut out: List[Piece], root: List[Piece], lo: u64, hi: u64
                 end - offset
             })
             let kept = retain(mut s, Piece(id: p.id, lo: a, hi: b))
-            result.unwrap(list.push(mut out, kept))
+            list.push(mut out, kept)
         }
         offset = end
     }
@@ -128,7 +128,7 @@ fn edit(mut s: Store, root: List[Piece], pos: u64, len: u64, replacement: String
     }
     let cap = list.len(root) + 2
     m1.support.admission(variant, m1.support.name("edit", number, ".piece")?, ((cap * 12 + 7) / 8) * 8)?
-    let mut out: List[Piece] = m1.support.mem(list.with_capacity(cap))?
+    let mut out: List[Piece] = list.with_capacity(cap)
     // Stage every fallible allocation before adding any borrowed edge to the new root.
     let inserted = if string.byte_len(replacement) > 0 {
         Some(piece(mut s, replacement)?)
@@ -137,7 +137,7 @@ fn edit(mut s: Store, root: List[Piece], pos: u64, len: u64, replacement: String
     }
     range(mut s, mut out, root, 0, pos)
     if let Some(p) = inserted {
-        result.unwrap(list.push(mut out, p))
+        list.push(mut out, p)
     }
     range(mut s, mut out, root, pos + len, n)
     Ok(take out)
@@ -161,10 +161,10 @@ fn operations(input: String, start: u64, variant: String, mut s: Store, mut curr
                 return Error(m1.support.error("InvalidPosition"))
             }
             let needed = list.len(history) + 1
-            m1.support.mem(list.reserve(mut history, needed))?
+            list.reserve(mut history, needed)
             let next = edit(mut s, current, m1.support.number(a)?, m1.support.number(b)?, replacement, variant, edits + 1)?
             let old = replace(mut current, take next)
-            result.unwrap(list.push(mut history, take old))
+            list.push(mut history, take old)
             edits += 1
             if list.len(history) > 64 {
                 release(mut s, list.remove(mut history, 0))
@@ -179,7 +179,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     let mut at: u64 = 0
     let initial = m1.support.line(input, mut at)
     let mut s = Store(slots: list.new(), free: None, live: 0)
-    let mut current: List[Piece] = m1.support.mem(list.with_capacity(1))?
+    let mut current: List[Piece] = list.with_capacity(1)
     m1.support.push(mut current, piece(mut s, initial)?)?
     let mut history: List[List[Piece]] = list.new()
     let mut edits: u64 = 0
@@ -206,7 +206,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     m1.support.num(mut rendered, s.live)?
     m1.support.add(mut rendered, "\n")?
     m1.support.put(out, rendered)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {
         let closed = tx
     }

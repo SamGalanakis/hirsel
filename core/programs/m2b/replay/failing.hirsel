@@ -63,12 +63,8 @@ pub fn cause_changed() -> Result[u64, m2b.journal.Diverged] {
         None => return Ok(1),
     }
     let mut older: Bytes = list.new()
-    if let Error((cap, _)) = list.push(mut older, 2u8) {
-        return Error(Full(cap))
-    }
-    if let Error((cap, _)) = list.push(mut older, 1u8) {
-        return Error(Full(cap))
-    }
+    list.push(mut older, 2u8)
+    list.push(mut older, 1u8)
     let _ = list.set(mut j.entries, 0, m2b.journal.Entry(code: code0, arg: list.new(), outcome: take older))
     m2b.journal.rewind(mut j)
     let _ = m2b.journal.call_isolated(mut j, code.describe(divide), empty)?
@@ -101,12 +97,8 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

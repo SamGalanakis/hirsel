@@ -35,7 +35,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
         }
         m1.support.push(mut edges, (source, target))?
     }
-    let mut graph = Graph(neighbors: m1.support.mem(list.with_capacity(n))?)
+    let mut graph = Graph(neighbors: list.with_capacity(n))
     let mut v: u64 = 0
     while v < n {
         m1.support.push(mut graph.neighbors, list.new())?;
@@ -46,11 +46,11 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     }
     m1.support.admission(variant, "search.parent", 8 * n)?
     let parent_owner = m1.support.marker(tx, "parent")?
-    let mut parent: List[u64] = m1.support.mem(list.with_capacity(n))?
-    m1.support.mem(list.fill(mut parent, n, n))?
+    let mut parent: List[u64] = list.with_capacity(n)
+    list.fill(mut parent, n, n)
     m1.support.admission(variant, "search.queue", 8 * n)?
     let queue_owner = m1.support.marker(tx, "queue")?
-    let mut queue: List[u64] = m1.support.mem(list.with_capacity(n))?
+    let mut queue: List[u64] = list.with_capacity(n)
     m1.support.push(mut queue, from)?
     let _ = list.set(mut parent, from, from)
     let mut head: u64 = 0
@@ -74,7 +74,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
         path_len += 1
     }
     m1.support.admission(variant, "result.path", path_len * 8)?
-    let mut path: List[u64] = m1.support.mem(list.with_capacity(path_len))?
+    let mut path: List[u64] = list.with_capacity(path_len)
     cursor = to
     m1.support.push(mut path, cursor)?
     while cursor != from {
@@ -100,7 +100,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
 
 fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(6))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(6)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

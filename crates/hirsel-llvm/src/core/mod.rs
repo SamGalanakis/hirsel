@@ -2382,6 +2382,19 @@ impl FunctionEmitter<'_> {
                             ],
                         );
                     }
+                    RaiseCause::Capacity {
+                        requested,
+                        available,
+                    } => {
+                        let (requested, available) =
+                            (self.numeric(requested), self.numeric(available));
+                        let site = self.site_word();
+                        self.intrinsic(
+                            "hirsel_core_raise_capacity",
+                            Type::Void,
+                            &[ptr(CONTEXT), word(site), word(requested), word(available)],
+                        );
+                    }
                 }
                 self.propagate_to(cleanup);
             }

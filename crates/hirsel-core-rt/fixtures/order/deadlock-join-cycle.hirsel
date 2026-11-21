@@ -2,8 +2,8 @@
 // Root joins a child that needs root to send a value before it can finish.
 fn child(take rx: Receiver[u64]) waits { let _ = channel.receive(rx) }
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, take rx, child))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, take rx, child)
     result.unwrap(task.join(take h))
     Ok(())
 }

@@ -1,7 +1,7 @@
 // The parent sleeps while a child is runnable.
 fn child(take out: Stdout) waits { result.unwrap(stdout.write(out, "c")) }
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, out, child))
+    let h = task.spawn(tasks, bytes 4096, out, child)
     result.unwrap(stdout.write(out, "P"))
     let now = host.mono_ns(clock)
     host.sleep_until(clock, now + 20_000_000u64)

@@ -5,7 +5,7 @@ type Node {
 }
 
 fn sum(n: u64) -> u64 {
-    let node = result.unwrap(box.new(Node(a: n, b: n + 1, c: n + 2)));
+    let node = box.new(Node(a: n, b: n + 1, c: n + 2));
     node.a + node.b + node.c
 }
 

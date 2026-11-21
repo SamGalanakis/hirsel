@@ -68,14 +68,11 @@ fn put(mut c: Cache, take key: String, take value: String) -> Result[(), helper.
             if c.head == Some(old) {
                 c.head = None
             }
-            match list.push(mut c.free, old) {
-                Ok(()) => {},
-                Error((e, _)) => return Error(Capacity(e))
-            }
+            list.push(mut c.free, old)
             c.size -= 1
         }
     }
-    let node_key = helper.mem(string.from(key))?
+    let node_key = string.from(key)
     let entry = Node(key: take node_key, value: take value, prev: None, next: None)
     let node = match list.pop(mut c.free) {
         Some(slot) => {
@@ -84,14 +81,11 @@ fn put(mut c: Cache, take key: String, take value: String) -> Result[(), helper.
         },
         None => {
             let slot = list.len(c.nodes)
-            match list.push(mut c.nodes, take entry) {
-                Ok(()) => {},
-                Error((e, _)) => return Error(Capacity(e))
-            }
+            list.push(mut c.nodes, take entry)
             slot
         },
     }
-    helper.mem(result.capacity_only(map.insert(mut c.entries, take key, node)))?
+    map.insert(mut c.entries, take key, node)
     front(mut c, node)
     c.size += 1
     Ok(())
@@ -99,8 +93,8 @@ fn put(mut c: Cache, take key: String, take value: String) -> Result[(), helper.
 
 fn step(mut c: Cache, mut g: helper.Lcg, iteration: u64, values: i32, mut hits: u32, mut misses: u32) -> Result[(), helper.Error] {
     for _ in 0u64 .. 1000u64 {
-        let mut key = helper.mem(string.from("item_"))?
-        helper.mem(string.push_i64(mut key, int.widen(helper.next_int(mut g, values))))?
+        let mut key = string.from("item_")
+        string.push_i64(mut key, int.widen(helper.next_int(mut g, values)))
         let found: Option[u64] = match map.get(c.entries, key) {
             Some(n) => Some(n),
             None => None
@@ -109,12 +103,12 @@ fn step(mut c: Cache, mut g: helper.Lcg, iteration: u64, values: i32, mut hits: 
         if let Some(node) = found {
             touch(mut c, node)
             hits += 1
-            helper.mem(string.push(mut value, "updated_"))?
+            string.push(mut value, "updated_")
         } else {
             misses += 1
-            helper.mem(string.push(mut value, "new_"))?
+            string.push(mut value, "new_")
         }
-        helper.mem(string.push_u64(mut value, iteration))?
+        string.push_u64(mut value, iteration)
         put(mut c, take key, take value)?
     }
     Ok(())

@@ -8,7 +8,7 @@
 resource type Marker grant bytes 256 {
     id: u64
 } drop(m) {
-    let s = result.unwrap(b"release")
+    let s = b"release"
     let _ = m.id
 }
 
@@ -16,7 +16,7 @@ resource type Held[T] grant bytes 64 {
     id: u64,
     value: T
 } drop(h) {
-    let s = result.unwrap(b"x")
+    let s = b"x"
     let _ = h.id
 }
 

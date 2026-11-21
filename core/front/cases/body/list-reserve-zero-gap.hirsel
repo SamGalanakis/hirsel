@@ -13,15 +13,15 @@ fn new[T]() -> List[T] {
     list.new()
 }
 
-fn make[T](n: u64) -> Result[List[T], Capacity] {
+fn make[T](n: u64) -> List[T] {
     list.with_capacity(n)
 }
 
 fn reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity] {
-    list.reserve(mut xs, n)
+    list.try_reserve(mut xs, n)
 }
 
-fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)] {
+fn push[T](mut xs: List[T], take x: T) {
     list.push(mut xs, take x)
 }
 
@@ -39,10 +39,10 @@ fn generic_fresh() -> u64 {
 
 fn exact() -> bool {
     let outcome = bound bytes 0 {
-        let a: List[()] = make(0)?
-        let b: List[()] = make(18446744073709551615u64)?
+        let a: List[()] = make(0)
+        let b: List[()] = make(18446744073709551615u64)
         let mut c: List[()] = new()
-        reserve(mut c, 18446744073709551615u64)?
+        result.unwrap(reserve(mut c, 18446744073709551615u64))
         list.capacity(a) == 18446744073709551615u64 && list.capacity(b) == 18446744073709551615u64 && list.capacity(c) == 18446744073709551615u64
     }
     match outcome {
@@ -54,7 +54,7 @@ fn exact() -> bool {
 fn reserve_overflow() -> bool {
     let outcome = bound bytes 0 {
         let mut xs: List[()] = new()
-        result.unwrap(push(mut xs, ()))
+        push(mut xs, ())
         match reserve(mut xs, 18446744073709551615u64) {
             Ok(()) => false,
             Error(e) => e.requested == 18446744073709551615u64 && e.available == 0 && list.len(xs) == 1 && list.capacity(xs) == 18446744073709551615u64,
@@ -70,18 +70,18 @@ fn max_count() -> bool {
     let outcome = bound bytes 0 {
         let mut a: List[()] = new()
         let mut b: List[()] = new()
-        result.unwrap(push(mut a, ()))
+        push(mut a, ())
         // After iteration k, len(a)=2^(k+2)-1. No element bytes are copied.
         for _ in 0u64 .. 63u64 {
             list.clear(mut b)
-            list.append(mut b, a)?
-            list.append(mut a, b)?
-            result.unwrap(push(mut a, ()))
+            list.append(mut b, a)
+            list.append(mut a, b)
+            push(mut a, ())
         }
         let good = list.len(a) == 18446744073709551615u64
-        let declined = match push(mut a, ()) {
+        let declined = match reserve(mut a, 1) {
             Ok(()) => false,
-            Error((e, _)) => e.requested == 18446744073709551615u64 && e.available == 0,
+            Error(e) => e.requested == 18446744073709551615u64 && e.available == 0,
         }
         good && declined && list.len(a) == 18446744073709551615u64
     }
@@ -93,8 +93,8 @@ fn max_count() -> bool {
 
 fn generic_ops() -> bool {
     let outcome = bound bytes 0 {
-        let mut xs: List[Empty] = make(18446744073709551615u64)?
-        result.unwrap(push(mut xs, Empty()))
+        let mut xs: List[Empty] = make(18446744073709551615u64)
+        push(mut xs, Empty())
         list.set(mut xs, 0, Empty())
         let present = match list.get(xs, 0) {
             Some(_) => true,
@@ -114,7 +114,7 @@ fn generic_ops() -> bool {
 
 fn concrete_get() -> u64 {
     let mut xs: List[()] = list.new()
-    result.unwrap(list.push(mut xs, ()))
+    list.push(mut xs, ())
     let first: u64 = match list.get(xs, 0) {
         Some(_) => 1,
         None => 0

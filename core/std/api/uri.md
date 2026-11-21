@@ -26,7 +26,7 @@ pub type Uri: key {
     fragment: Option[http1.Span],
 }
 pub type Set: key = Segment | Path | Query | QueryPart | UserInfo
-pub type Error = Invalid(u64) | NotUtf8(u64) | Relative | Capacity(Capacity)
+pub type Error = Invalid(u64) | NotUtf8(u64) | Relative
 ```
 
 - Spans exclude the delimiters: `scheme` stops before `:`, `query` starts after `?`, and

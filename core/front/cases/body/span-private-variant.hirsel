@@ -28,18 +28,9 @@ fn each(xs: FixedSpan[Choice]) -> u64 {
 fn values() -> u64 {
     region r {
         let mut b: SpanBuilder[Choice, in r] = span.builder(r)
-        match span.push(mut b, Small(7u8)) {
-            Ok(()) => {},
-            Error(_) => return 999
-        }
-        match span.push(mut b, Large(11u64)) {
-            Ok(()) => {},
-            Error(_) => return 999
-        }
-        match span.push(mut b, Empty) {
-            Ok(()) => {},
-            Error(_) => return 999
-        }
+        span.push(mut b, Small(7u8))
+        span.push(mut b, Large(11u64))
+        span.push(mut b, Empty)
         let xs = span.finish(take b)
         let first = match span.get(xs, 0) {
             Some(x) => score(x),
@@ -52,10 +43,7 @@ fn values() -> u64 {
 fn nested() -> u64 {
     region r {
         let mut b: SpanBuilder[Inline[Choice, 2], in r] = span.builder(r)
-        match span.push(mut b,[Small(2u8), Large(3u64)]) {
-            Ok(()) => {},
-            Error(_) => return 999
-        }
+        span.push(mut b,[Small(2u8), Large(3u64)])
         let xs = span.finish(take b)
         let mut s: u64 = 0
         for row in xs {

@@ -556,8 +556,9 @@ pub enum Inst {
     /// sized destination's `n` and a text's length are known only at run time)
     /// aligned to `align`
     /// (MEM-21). On refusal `result` is null and `available` is the room left in the
-    /// limit tried (MEM-22), and nothing is allocated; on success `available` is 0. Under a finalizer's grant a
-    /// refusal is a failure with cause `Capacity` instead (MEM-27).
+    /// limit tried (MEM-22), and nothing is allocated; on success `available` is 0. It
+    /// never fails: the producer raises `Capacity` on a null result where the source
+    /// operation raises (MEM-21).
     Alloc {
         result: ValueId,
         available: ValueId,
@@ -571,7 +572,6 @@ pub enum Inst {
         overflow: Option<ValueId>,
         size: ValueId,
         align: u64,
-        fail: Option<BlockId>,
     },
     /// Free an own, counted or resource block and refund `charge` to the limit its
     /// record leads to (MEM-20, MEM-23). Never fails. A resource's refund leaves out
@@ -598,8 +598,7 @@ pub enum Inst {
     /// `capacity` elements, consuming the old one. It admits `charge` as `alloc ..
     /// like` the old block does, the whole charge before any refund. On refusal
     /// `result` is null, `available` the room left, and the carrier, its block and
-    /// its elements are unchanged; under a finalizer's grant a refusal is the failure
-    /// `Capacity` (MEM-27). On success the first `moved` bytes (the carrier's
+    /// its elements are unchanged; it never fails, as `alloc`. On success the first `moved` bytes (the carrier's
     /// length times its element's stride) are the new block's, the carrier holds the
     /// new data and `capacity`, and then the old block is dead, even at an unchanged
     /// address, and `refund` (its charge) goes back to the limit its record leads to.
@@ -614,7 +613,6 @@ pub enum Inst {
         capacity: ValueId,
         moved: ValueId,
         refund: ValueId,
-        fail: Option<BlockId>,
     },
     // ---- FORM v1b (frozen) ----
     /// The case number (`u32`, declaration order from 0) of the variant value at
@@ -1195,13 +1193,19 @@ impl HostOp {
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
 /// recorded by the instructions that raise them; Cancelled by the engine operations
-/// that observe it; Capacity by an allocation over a grant.
+/// that observe it.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RaiseCause {
     Unwrap,
     Bounds,
     /// `fail(msg)`: takes the `String` at the address.
     Fail(AddressId),
+    /// A refused admission (MEM-21): `Capacity(c)` with `c`'s two `u64` words, the
+    /// refused charge and the room left in the limit tried (MEM-22).
+    Capacity {
+        requested: ValueId,
+        available: ValueId,
+    },
 }
 
 impl RtOp {
@@ -1560,7 +1564,7 @@ impl Inst {
                 Callee::Runtime(op) => op.fails(),
                 Callee::Direct(_) | Callee::Indirect(_) => true,
             }),
-            Inst::Step { .. } | Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } => true,
+            Inst::Step { .. } | Inst::Drop { .. } => true,
             _ => false,
         }
     }
@@ -1573,8 +1577,6 @@ impl Inst {
             | Inst::Binary { fail, .. }
             | Inst::Simd { fail, .. }
             | Inst::Address { fail, .. }
-            | Inst::Alloc { fail, .. }
-            | Inst::Grow { fail, .. }
             | Inst::Drop { fail, .. } => fail,
             Inst::Call { call } => b.calls.get(call.index()).and_then(|c| c.fail),
             _ => None,

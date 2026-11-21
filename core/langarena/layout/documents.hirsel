@@ -16,7 +16,7 @@ fn label(source: String, i: u64) -> View[String] in source {
 }
 
 fn scores(i: u64) -> Result[List[u64], Capacity] {
-    let mut xs: List[u64] = list.with_capacity(3)?
+    let mut xs: List[u64] = list.with_capacity(3)
     let _ = list.push(mut xs, i)
     let _ = list.push(mut xs, i + 1)
     let _ = list.push(mut xs, i + 2)
@@ -24,12 +24,12 @@ fn scores(i: u64) -> Result[List[u64], Capacity] {
 }
 
 fn ordinary(n: u64) -> Result[u64, Capacity] {
-    let mut items: List[OwnedItem] = list.with_capacity(n)?
+    let mut items: List[OwnedItem] = list.with_capacity(n)
     for i in 0 .. n {
         let item: OwnedItem = if i % 3 == 0 {
             Flag(i % 2 == 0)
         } else if i % 3 == 1 {
-            Name(string.from(label("abcdefghijklmnopqrstuvw", i))?)
+            Name(string.from(label("abcdefghijklmnopqrstuvw", i)))
         } else {
             Scores(scores(i)?)
         }
@@ -76,11 +76,7 @@ fn write_batch[in r](n: u64, take w: Writer[Batch, in r]) -> Result[Child[Batch]
                     // Three fixed-stride values; the same source schedule as ordinary.
                     emit(take item, Scores(emit(fn(take values: Writer[FixedSpan[u64], in r]) -> Result[Child[FixedSpan[u64]], BuildError] {
                         // The plain list is the core FixedSpan emit source, explicit scratch.
-                        let admission: Result[List[u64], Capacity] = list.with_capacity(3)
-                        let mut source: List[u64] = match take admission {
-                            Ok(take s) => take s,
-                            Error(c) => return Error(Capacity(c))
-                        }
+                        let mut source: List[u64] = list.with_capacity(3)
                         let _ = list.push(mut source, i)
                         let _ = list.push(mut source, i + 1)
                         let _ = list.push(mut source, i + 2)
@@ -131,12 +127,8 @@ fn compact_streaming(n: u64) -> Result[u64, BuildError] {
 
 fn show(out: Stdout, n: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, n) {
-        return Error(Exit(status: 2))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 2))
-    }
+    string.push_u64(mut s, n)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 3))
@@ -194,13 +186,13 @@ pub fn ordinary_refusal() -> bool {
             Error(c) => c.requested == 24 && c.available == 23,
             _ => false
         }
-        let xs: List[u64] = result.unwrap(list.with_capacity(31))
+        let xs: List[u64] = list.with_capacity(31)
         denied && list.len(xs) == 0
     })
     exact && short
 }
 
-// expect: run sized_refusal_prefix() = true
+// expect: run sized_refusal_prefix() = true used 32
 pub fn sized_refusal_prefix() -> bool {
     // The109-byte blob is rounded112; FixedSpan construction needs24 scratch.
     let exact = match (bound bytes 136 {
@@ -209,26 +201,27 @@ pub fn sized_refusal_prefix() -> bool {
         Ok(Ok(33)) => true,
         _ => false
     }
-    let prefix = result.unwrap(bound bytes 135 {
-        let kept = region r {
-            let denied = match build_batch(r, 6, encoded_size(6)) {
-                Error(Capacity(c)) => c.requested == 24 && c.available == 23,
-                _ => false
+    let prefix = result.unwrap(bound bytes 167 {
+        let failed = isolate(fn() -> Result[bool, Capacity] {
+            bound bytes 135 {
+                region r {
+                    let _ = build_batch(r, 6, encoded_size(6))
+                    false
+                }
             }
-            let probe: Result[List[u64], Capacity] = list.with_capacity(3)
-            denied && match take probe {
-                Error(c) => c.requested == 24 && c.available == 23,
-                _ => false
-            }
+        })
+        let denied = match caught(take failed) {
+            Some(c) => c.requested == 24 && c.available == 23,
+            None => false
         }
-        // Closing the failed region refunds its admitted blob reservation.
-        let xs: List[u64] = result.unwrap(list.with_capacity(16))
-        kept && list.len(xs) == 0
+        // Unwinding the failed region refunds its admitted blob reservation; the caught cause keeps 32.
+        let xs: List[u64] = list.with_capacity(16)
+        denied && list.len(xs) == 0
     })
     exact && prefix
 }
 
-// expect: run streaming_refusal_prefix() = true
+// expect: run streaming_refusal_prefix() = true used 32
 pub fn streaming_refusal_prefix() -> bool {
     // Maximum392 +scratch24. No staging/replayed producer is introduced.
     let exact = match (bound bytes 416 {
@@ -237,20 +230,22 @@ pub fn streaming_refusal_prefix() -> bool {
         Ok(Ok(33)) => true,
         _ => false
     }
-    let prefix = result.unwrap(bound bytes 415 {
-        let kept = region r {
-            let denied = match build_batch(r, 6, 392) {
-                Error(Capacity(c)) => c.requested == 24 && c.available == 23,
-                _ => false
+    let prefix = result.unwrap(bound bytes 447 {
+        let failed = isolate(fn() -> Result[bool, Capacity] {
+            bound bytes 415 {
+                region r {
+                    let _ = build_batch(r, 6, 392)
+                    false
+                }
             }
-            let probe: Result[List[u64], Capacity] = list.with_capacity(3)
-            denied && match take probe {
-                Error(c) => c.requested == 24 && c.available == 23,
-                _ => false
-            }
+        })
+        let denied = match caught(take failed) {
+            Some(c) => c.requested == 24 && c.available == 23,
+            None => false
         }
-        let xs: List[u64] = result.unwrap(list.with_capacity(51))
-        kept && list.len(xs) == 0
+        // Unwinding the failed region refunds its admitted blob reservation; the caught cause keeps 32.
+        let xs: List[u64] = list.with_capacity(51)
+        denied && list.len(xs) == 0
     })
     exact && prefix
 }
@@ -357,14 +352,28 @@ pub fn ordinary_admission_prefixes() -> bool {
     let sized = match (bound bytes 111 {
         compact_sized(6)
     }) {
-        Ok(Error(Capacity(c))) => c.requested == 112 && c.available == 111,
         _ => false,
     }
     let streaming = match (bound bytes 391 {
         compact_streaming(6)
     }) {
-        Ok(Error(Capacity(c))) => c.requested == 392 && c.available == 391,
         _ => false,
     }
     sized && streaming
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

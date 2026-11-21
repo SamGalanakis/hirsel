@@ -6,8 +6,8 @@ fn same(a: String, b: String) -> bool {
 // Only a-z change; É (two bytes) and '-' are kept.
 // expect: run upper_owned() = true
 fn upper_owned() -> bool {
-    let mut s = result.unwrap(string.from("abc-Éz"))
-    result.unwrap(string.make_ascii_upper(mut s))
+    let mut s = string.from("abc-Éz")
+    string.make_ascii_upper(mut s)
     same(s, "ABC-ÉZ")
 }
 
@@ -15,8 +15,8 @@ fn upper_owned() -> bool {
 // bytes of é are not shifted by the one-comparison test.
 // expect: run upper_range_edges() = true
 fn upper_range_edges() -> bool {
-    let mut s = result.unwrap(string.from("`az{@AZ[é"))
-    result.unwrap(string.make_ascii_upper(mut s))
+    let mut s = string.from("`az{@AZ[é")
+    string.make_ascii_upper(mut s)
     same(s, "`AZ{@AZ[é")
 }
 
@@ -24,7 +24,7 @@ fn upper_range_edges() -> bool {
 // expect: run upper_static() = true
 fn upper_static() -> bool {
     let mut s = "hello"
-    result.unwrap(string.make_ascii_upper(mut s))
+    string.make_ascii_upper(mut s)
     same(s, "HELLO")
 }
 
@@ -32,8 +32,8 @@ fn upper_static() -> bool {
 // C3 89 are not shifted.
 // expect: run lower_range_edges() = true
 fn lower_range_edges() -> bool {
-    let mut s = result.unwrap(string.from("@AZ[`az{É"))
-    result.unwrap(string.make_ascii_lower(mut s))
+    let mut s = string.from("@AZ[`az{É")
+    string.make_ascii_lower(mut s)
     s == "@az[`az{É"
 }
 
@@ -41,26 +41,43 @@ fn lower_range_edges() -> bool {
 // each neighbour of a-z and A-Z falls in several lanes of a 16-byte vector and in the tail.
 // expect: run case_edges_across_vectors() = true
 fn case_edges_across_vectors() -> bool {
-    let mut up = result.unwrap(string.from("`az{@AZ[é`az{@AZ[é`az{@AZ[é`az{@AZ[é"))
-    result.unwrap(string.make_ascii_upper(mut up))
-    let mut low = result.unwrap(string.from("@AZ[`az{É@AZ[`az{É@AZ[`az{É@AZ[`az{É"))
-    result.unwrap(string.make_ascii_lower(mut low))
-    same(up, result.unwrap(string.from("`AZ{@AZ[é`AZ{@AZ[é`AZ{@AZ[é`AZ{@AZ[é"))) && same(low, result.unwrap(string.from("@az[`az{É@az[`az{É@az[`az{É@az[`az{É")))
+    let mut up = string.from("`az{@AZ[é`az{@AZ[é`az{@AZ[é`az{@AZ[é")
+    string.make_ascii_upper(mut up)
+    let mut low = string.from("@AZ[`az{É@AZ[`az{É@AZ[`az{É@AZ[`az{É")
+    string.make_ascii_lower(mut low)
+    same(up, string.from("`AZ{@AZ[é`AZ{@AZ[é`AZ{@AZ[é`AZ{@AZ[é")) && same(low, string.from("@az[`az{É@az[`az{É@az[`az{É@az[`az{É"))
 }
 
-// Under `bound bytes 0` the copy of the literal is refused: Error, and s is still "Abc".
-// expect: run upper_static_refused() = true
-fn upper_static_refused() -> bool {
-    let r: Result[bool, Capacity] = bound bytes 0 {
-        let mut s = "Abc"
-        let refused = match string.make_ascii_upper(mut s) {
-            Ok(()) => false,
-            Error(_) => true,
+// Under `bound bytes 0` the copy of the literal is refused: 8 bytes for "Abc".
+// expect: run upper_static_refused() = 8
+fn upper_static_refused() -> u64 {
+    refused_request(isolate(fn() -> Result[(), Capacity] {
+        bound bytes 0 {
+            let mut s = "Abc"
+            string.make_ascii_upper(mut s)
         }
-        refused && same(s, "Abc")
-    }
+    }))
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {
-        Ok(b) => b,
-        Error(_) => false,
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
     }
 }

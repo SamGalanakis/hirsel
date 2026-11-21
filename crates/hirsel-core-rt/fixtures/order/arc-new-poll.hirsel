@@ -11,10 +11,10 @@ fn child(take x: Out) -> u64 waits {
     0u64
 }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, Out(tx: take tx, out: out), child))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, Out(tx: take tx, out: out), child)
     let mut i = 0u64
-    while i < 64u64 { let a = result.unwrap(arc.new(i)); i += 1 }
+    while i < 64u64 { let a = arc.new(i); i += 1 }
     let early = match channel.try_receive(rx) { Ok(_) => true, _ => false }
     result.unwrap(stdout.write(out, "r"))
     let _ = task.join(take h)

@@ -10,7 +10,7 @@ fn make_list(size: u64) -> Result[Option[Box[Element]], Capacity] {
     }
     let rest = make_list(size - 1)?
     let element = Element(value: size, next: take rest)
-    Ok(Some(result.capacity_only(box.new(take element))?))
+    Ok(Some(box.new(take element)))
 }
 
 fn next[in a](element: View[Element] in a) -> Option[View[Element]] in a {

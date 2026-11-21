@@ -2,7 +2,7 @@
 fn child(take out: Stdout) waits { result.unwrap(stdout.write(out, "c")) }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     {
-        let h = result.unwrap(task.spawn(tasks, bytes 4096, out, child))
+        let h = task.spawn(tasks, bytes 4096, out, child)
         result.unwrap(stdout.write(out, "P"))
     }
     result.unwrap(stdout.write(out, "E"))

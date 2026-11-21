@@ -311,8 +311,8 @@
 //! never `alloc .. like`.
 //! A dynamic ordinary/counted or region allocation may carry `overflow vN`, a
 //! bool saying its exact logical charge exceeds u64. It refuses admission even
-//! with u64::MAX available, reports that limit's actual room, and follows the
-//! same finalizer-grant failure path as any refusal. Omission means false.
+//! with u64::MAX available and reports that limit's actual room, as any refusal.
+//! Omission means false.
 //! - **Only a `String` is ever static** (core.md "Literals"). An own `List`,
 //!   `Bytes` or `Map` with elements always owns its storage: capacity 0 means
 //!   length 0, because a `List` has in-place element writes. So a carrier of
@@ -325,10 +325,10 @@
 //!   Passed to a view parameter it is that carrier in a frame slot, with nothing
 //!   to clean: a capacity-0 `String` has no storage and plain elements, so a
 //!   producer may omit its `drop`.
-//! - **A byte-string literal** (`b".."`) is `Result[Bytes, Capacity]`: it admits
-//!   `round8(length)` as `List[u8]` storage (`alloc for seq u8` against the current
-//!   limit) and copies its bytes out of `static dN` into `{data, length,
-//!   length}`; a refusal is the `Capacity` value. `b""` is `Ok({0, 0, 0})`.
+//! - **A byte-string literal** (`b".."`) is `Bytes`: it admits `round8(length)` as
+//!   `List[u8]` storage (`alloc for seq u8` against the current limit) and copies
+//!   its bytes out of `static dN` into `{data, length, length}`; a refusal raises
+//!   `Capacity` ("Failure"). `b""` is `{0, 0, 0}`.
 //! - A static `String`'s length exceeds its capacity, so every room test is
 //!   `length + n > capacity` (after the overflow check), never `capacity - length`.
 //!   Growth copies `length` bytes out of the static data and frees nothing. Static
@@ -349,7 +349,7 @@
 //!   Creating, reserving, growing and cloning it emit no `alloc` and no charge
 //!   (its logical charge is 0); clone copies the carrier. Only the length is
 //!   bounded: a `reserve` past `2^64 - 1` elements or a push at that length is
-//!   `Capacity` with `requested` `2^64 - 1`, made by an `alloc for` of that
+//!   refused with `requested` `2^64 - 1`, made by an `alloc for` of that
 //!   charge with `overflow` true against the current limit, which always refuses
 //!   and reports that limit's room as `available` (MEM-22). Its cleanup is none,
 //!   decided from the layout (its drop glue never reads the carrier), so the null
@@ -524,10 +524,14 @@
 //! a failure path drops the live owners in the order the normal exit would. A
 //! failing finalizer appends its cause, its resource's fields are still cleaned and
 //! its block freed (FAIL-12); a pending result is discarded. Mechanical cleanup
-//! (fields, boxes, counted releases, handles) never fails (FAIL-13). `Capacity` is
-//! a failure only inside a finalizer, against its grant (MEM-27); everywhere else a
-//! refused admission is a value: `alloc` yields null and the room left in the
-//! limit it tried (MEM-22 `available`). [`failure::Failures`] says which functions
+//! (fields, boxes, counted releases, handles) never fails (FAIL-13). A refused
+//! admission is a value in the IR: `alloc` and `grow` yield null and the room left
+//! in the limit they tried (MEM-22 `available`) and never fail. Where the source
+//! operation raises (MEM-21), the producer tests the result and ends that path in
+//! `raise capacity vR, vA`, the cause `Capacity(c)` with `c`'s two words at the
+//! cause's offsets 0 and 8; the value refusals (a bound scope's or an isolate's
+//! entry, a resource literal, a `try_` operation) build `Error(c)` instead, under a
+//! finalizer's grant too. [`failure::Failures`] says which functions
 //! of a module may fail; wf and the LLVM emitter share it.
 //!
 //! A cause's `Site` is its failure point's anchor (a `raise` takes its block's).
@@ -610,7 +614,7 @@
 //! the inner catch makes N_inner the obligation, the outer body may fail into it,
 //! and the outer catch replaces it with N_outer. In a finalizer, O is the
 //! resource's cell and the current limit is the grant: a refused `enter` there is
-//! still the value `Error(Capacity)`, never the grant's `Capacity` failure, and a
+//! the value `Error(Capacity)`, as everywhere, and a
 //! failure path being cleaned (the finalizer of a failure-path drop) is S, set
 //! aside whole and restored by `leave` or the catch. Run stops are not failures
 //! and pass every isolate (FAIL-16).
@@ -663,10 +667,9 @@
 //! parent, so blocks made inside stay charged (MEM-25). `alloc .. like v` and
 //! ordinary `alloc` both admit from the current limit (MEM-26). In a finalizer
 //! the current limit is its grant or an enclosing bound scope entered within it
-//! (MEM-19, MEM-27). A refusal is the failure
-//! `Capacity` only when the refusing limit is the grant itself; a bound scope's
-//! refusal, inside a finalizer too, is a value (MEM-25), and `limit_enter`'s always
-//! is. A resource value is a pointer to its block, charged
+//! (MEM-19, MEM-27). Which limit refused does not decide what a refusal is: the
+//! source operation does (MEM-21), and `limit_enter`'s is always a value. A
+//! resource value is a pointer to its block, charged
 //! storage + cause cell + grant; its finalizer runs under a limit of its grant,
 //! whose used part is handed over at the end. A whole destructure moves the fields
 //! out with `copy` and `free`s the block, refunding that complete charge (MEM-23). A counted node is a u64 count at
@@ -684,7 +687,7 @@
 //! # Growth (FORM v1d, #93)
 //!
 //! `vR: ptr, vA: u64 = grow aC vS align A charge vK capacity vN moved vM refund vO
-//! [overflow vF] [fail bN]` replaces the storage of the sequence carrier at `aC`: a
+//! [overflow vF]` replaces the storage of the sequence carrier at `aC`: a
 //! place whose type is a row with exactly one field, a `seq E` edge (`List` items,
 //! `String` bytes; [`sequence_edge`]), with the data, length and capacity words at
 //! +0, +8 and +16. The carrier is written, so it is never a `view` or `take`
@@ -697,8 +700,7 @@
 //!   refunding the old storage to the limit its record leads to (MEM-26).
 //!   `overflow` refuses as on `alloc`.
 //! - **Refusal**: `vR` is null, `vA` the room the refusing limit had, and the
-//!   carrier, its old block and its elements are untouched. Under a finalizer's
-//!   grant a refusal is the failure `Capacity` (`fail bN`).
+//!   carrier, its old block and its elements are untouched. `grow` never fails.
 //! - **Success**: a block of `size` bytes, of the class
 //!   `cleanup_class(seq E)` (Terminal or Dynamic; never Fixed, Resource or region
 //!   storage). The first `moved` bytes move into it with their liveness shadow

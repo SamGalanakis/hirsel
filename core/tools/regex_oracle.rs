@@ -361,12 +361,12 @@ const MATCH_HELPERS: &str = r#"
 fn show_span(mut out: String, found: Option[Match]) -> Result[(), Capacity] {
     match found {
         Some(m) => {
-            string.push_u64(mut out, m.start)?
-            string.push(mut out, ",")?
-            string.push_u64(mut out, m.end)?
-            string.push(mut out, ";")?
+            string.push_u64(mut out, m.start)
+            string.push(mut out, ",")
+            string.push_u64(mut out, m.end)
+            string.push(mut out, ";")
         },
-        None => { string.push(mut out, "-;")? },
+        None => { string.push(mut out, "-;") },
     }
     Ok(())
 }
@@ -383,15 +383,15 @@ fn show_groups(mut out: String, g: Groups, n: u64) -> Result[(), Capacity] {
 fn observe_match(re: Regex, s: String, at: u64, budget: u64, mut out: String) -> Result[(), Capacity] {
     let mut c = cache(re, budget)?
     let mut g = groups(re)?
-    string.push(mut out, if is_match(re, mut c, s, at) { "y" } else { "n" })?
+    string.push(mut out, if is_match(re, mut c, s, at) { "y" } else { "n" })
     let m = find(re, mut c, s, at)
     show_span(mut out, m)?
     let matched = captures(re, mut c, s, at, mut g)
     if matched != (m != None) || group(g, 0) != m {
-        string.push(mut out, "capture disagreement")?
+        string.push(mut out, "capture disagreement")
     }
     show_groups(mut out, g, group_len(re))?
-    string.push(mut out, "|")?
+    string.push(mut out, "|")
     let mut k = cursor(0)
     loop {
         match next(re, mut c, s, mut k) {
@@ -400,24 +400,24 @@ fn observe_match(re: Regex, s: String, at: u64, budget: u64, mut out: String) ->
         }
     }
     if next(re, mut c, s, mut k) != None || next_captures(re, mut c, s, mut k, mut g) {
-        string.push(mut out, "finished cursor continued")?
+        string.push(mut out, "finished cursor continued")
     }
     k = cursor(0)
-    string.push(mut out, "|")?
+    string.push(mut out, "|")
     while next_captures(re, mut c, s, mut k, mut g) {
         show_groups(mut out, g, group_len(re))?
     }
     if next_captures(re, mut c, s, mut k, mut g) || next(re, mut c, s, mut k) != None {
-        string.push(mut out, "finished cursor continued")?
+        string.push(mut out, "finished cursor continued")
     }
     let mut i: u64 = 0
     while i < group_len(re) {
         if group(g, i) != None {
-            string.push(mut out, "capture survived a miss")?
+            string.push(mut out, "capture survived a miss")
         }
         i += 1
     }
-    string.push(mut out, "|")?
+    string.push(mut out, "|")
     string.push_u64(mut out, count(re, mut c, s))
 }
 

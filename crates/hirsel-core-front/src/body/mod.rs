@@ -841,11 +841,11 @@ impl Emitter {
     }
 }
 
-/// A clone body's: `(ptr from, ptr to) -> (u64 requested, u64 available)` (MEM-17).
+/// A clone body's: `(ptr from, ptr to)`, failing with `Capacity` (MEM-17).
 fn clone_body_signature() -> Signature {
     Signature {
         params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-        results: vec![Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
+        results: vec![],
         dest: None,
         never: false,
     }
@@ -2025,76 +2025,17 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let r = PoolRange::push(&mut self.b.pools.values, v);
         self.end(Terminator::Return(r), Some(n));
     }
-    /// A clone body's return (MEM-17): `Ok(copy)` moves the copy to `to` and returns
-    /// `(0, 0)`; `Error(Capacity)` leaves `to` alone and returns its request.
+    /// A clone body's return (MEM-17): the copy moves to `to`. A refusal in the body
+    /// raised `Capacity` and never reaches here.
     fn clone_return(&mut self, to: ValueId, n: NodeId) {
         let Some((dest, rid)) = self.dest else {
             return self.gap(n, "this clone body's result is not built");
         };
-        let Some((_, this, Some(cap))) = self.result_parts(self.fd.result) else {
-            return self.gap(n, "this clone body's result is not built");
-        };
-        let (Ok(Rep::Place(this)), Ok(Rep::Place(cap))) = (self.rep(this), self.rep(cap)) else {
-            return self.gap(n, "this clone body's result is not built");
-        };
-        let whole = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(rid), n);
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: whole,
-            },
-            n,
-        );
-        let error = self.new_block(&[]);
-        self.pattern_compare(
-            Some(tag),
-            Ty::Scalar(Scalar::U32),
-            0,
-            CompareOp::Eq,
-            Some(error),
-            n,
-        );
-        let copy = self.address(
-            AddressBase::Address(whole),
-            &[Step::CaseField { case: 0, field: 0 }],
-            PlaceTy::Declared(this),
-            n,
-        );
+        let copy = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(rid), n);
         let copy = self.pointer(copy, n);
-        let target = self.address(AddressBase::Value(to), &[], PlaceTy::Declared(this), n);
-        self.copy_to(target, copy, this, n);
-        let Some(zero) = self.konst(Ty::Scalar(Scalar::U64), 0, n) else {
-            return;
-        };
-        let r = PoolRange::push(&mut self.b.pools.values, [zero, zero]);
-        self.end(Terminator::Return(r), Some(n));
-        self.start(error);
-        let refused = self.address(
-            AddressBase::Address(whole),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(cap),
-            n,
-        );
-        let mut pair = [zero; 2];
-        for (i, v) in pair.iter_mut().enumerate() {
-            let at = self.address(
-                AddressBase::Address(refused),
-                &[Step::Field(i as u32)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            *v = self.value(Ty::Scalar(Scalar::U64));
-            self.inst(
-                Inst::Read {
-                    result: *v,
-                    address: at,
-                    mode: ReadMode::Bits,
-                },
-                n,
-            );
-        }
-        let r = PoolRange::push(&mut self.b.pools.values, pair);
+        let target = self.address(AddressBase::Value(to), &[], PlaceTy::Declared(rid), n);
+        self.copy_to(target, copy, rid, n);
+        let r = PoolRange::push(&mut self.b.pools.values, []);
         self.end(Terminator::Return(r), Some(n));
     }
 

@@ -1,8 +1,0 @@
-// LANG-18 keeps the returned value in the error until explicitly discarded.
-fn append(mut xs: List[u64], x: u64) -> Result[(), Capacity] {
-    list.push(mut xs, x)?
-    Ok(())
-}
-// expect: refuse LANG-18 at 3:5
-// expect: compared LANG-18 at 3:5 | core@1/core/Result[(), (core@1/core/Capacity, u64)] | core@1/core/Result[(), core@1/core/Capacity]
-// expect: message LANG-18 at 3:5 | result.capacity_only(...)?

@@ -9,11 +9,11 @@ resource type Mark {
 fn compacted() -> u64 {
     let mut m: Map[u64, Mark] = map.new()
     for i in 0u64 .. 4u64 {
-        result.unwrap(map.insert(mut m, i, result.unwrap(Mark(id: i))))
+        map.insert(mut m, i, result.unwrap(Mark(id: i)))
     }
     let _ = map.remove(mut m, 0)
     let _ = map.remove(mut m, 2)
-    result.unwrap(map.insert(mut m, 4, result.unwrap(Mark(id: 4))))
+    map.insert(mut m, 4, result.unwrap(Mark(id: 4)))
     map.len(m)
 }
 

@@ -38,7 +38,7 @@ fn regex_uncaught_steps(steps: u64, history: u64, divisor: u64) {
     } else {
         "baab"
     }
-    let mut c = result.unwrap(regex.cache(re, 0))
+    let mut c = regex.cache(re, 0)
     if history > 0 {
         let _ = regex.find(re, mut c, haystack, 0)
     }

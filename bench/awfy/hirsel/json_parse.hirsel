@@ -86,12 +86,12 @@ fn digit(input: String, mut c: Cursor) -> bool {
 
 fn capture_piece(input: String, mut c: Cursor) -> Result[(), Error] {
     let part = string.slice(input, c.capture_start, c.index)
-    result.map_err(string.push(mut c.capture, part), memory)
+    Ok(string.push(mut c.capture, part))
 }
 
 fn finish_capture(input: String, mut c: Cursor) -> Result[String, Error] {
     if string.byte_len(c.capture) == 0 {
-        result.map_err(string.from(string.slice(input, c.capture_start, c.index)), memory)
+        Ok(string.from(string.slice(input, c.capture_start, c.index)))
     } else {
         capture_piece(input, mut c)?
         Ok(replace(mut c.capture, string.new()))
@@ -144,7 +144,7 @@ fn read_string(input: String, mut c: Cursor) -> Result[String, Error] {
                 116 => 9u32,
                 _ => return Error(Syntax),
             }
-            result.map_err(string.push_char(mut c.capture, option.unwrap(char.from_u32(scalar))), memory)?
+            string.push_char(mut c.capture, option.unwrap(char.from_u32(scalar)))
             advance(input, mut c)
             c.capture_start = c.index
         } else {
@@ -168,7 +168,7 @@ fn array(input: String, mut c: Cursor) -> Result[Value, Error] {
         while more {
             skip_whitespace(input, mut c)
             let element = value(input, mut c)?
-            result.map_err(result.capacity_only(list.push(mut elements, take element)), memory)?
+            list.push(mut elements, take element)
             skip_whitespace(input, mut c)
             more = consume(input, mut c, 44)
         }
@@ -196,8 +196,8 @@ fn object(input: String, mut c: Cursor) -> Result[Value, Error] {
             } else {
                 0
             }
-            result.map_err(result.capacity_only(list.push(mut members.names, take name)), memory)?
-            result.map_err(result.capacity_only(list.push(mut members.values, take child)), memory)?
+            list.push(mut members.names, take name)
+            list.push(mut members.values, take child)
             skip_whitespace(input, mut c)
             more = consume(input, mut c, 44)
         }

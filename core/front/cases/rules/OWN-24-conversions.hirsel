@@ -9,7 +9,7 @@
 // expect: compared LANG-12 at 20:18 | core@1/core/HostFile | shareable
 type P: shareable { n: u64 }
 fn round(n: u64) -> u64 {
-  let h = result.unwrap(rc.new(P(n: n)))
+  let h = rc.new(P(n: n))
   {
     let s = rc.share(h)
     let _ = s.n

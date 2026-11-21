@@ -118,42 +118,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     fn byte_string(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let p = self.p;
-        let (Some(bytes), Some(result), Some(list), Some(cap)) = (
-            quoted_bytes(self.token_text(n), true),
-            p.core_decl("Result"),
-            p.core_decl("List"),
-            p.core_decl("Capacity"),
-        ) else {
+        let (Some(bytes), Some(list)) =
+            (quoted_bytes(self.token_text(n), true), p.core_decl("List"))
+        else {
             return self.gap_ty(n, "byte string literal form is not built");
         };
-        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
         let frozen = want
             .filter(|w| w.payload == 0)
             .and_then(|w| match self.t.kind(w.ty) {
-                TyKind::Adt(r, args)
-                    if *r == result
-                        && args[1] == cap
-                        && matches!(self.t.kind(args[0]), TyKind::Adt(d, _)
-                            if self.p.decls[d.index()].role == Some(Role::FrozenBytes)) =>
-                {
-                    Some(args[0])
+                TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::FrozenBytes) => {
+                    Some(w.ty)
                 }
                 _ => None,
             });
-        let list = frozen.unwrap_or_else(|| self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)])));
+        let ty = frozen.unwrap_or_else(|| self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)])));
         let frozen = frozen.is_some();
-        let ty = self.t.mk(TyKind::Adt(result, vec![list, cap]));
-        let (id, list_id, cap_id) = match (self.rep(ty), self.rep(list), self.rep(cap)) {
-            (Ok(Rep::Place(a)), Ok(Rep::Place(b)), Ok(Rep::Place(c))) => (a, b, c),
-            (Err(what), _, _) | (_, Err(what), _) | (_, _, Err(what)) => {
-                return self.gap_ty(n, what);
-            }
+        let list_id = match self.rep(ty) {
+            Ok(Rep::Place(a)) => a,
+            Err(what) => return self.gap_ty(n, what),
             _ => return (ty, None),
         };
         if !self.live() {
             return (ty, None);
         }
-        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let to = self.new_slot(PlaceTy::Declared(list_id), n);
         let u64t = Ty::Scalar(Scalar::U64);
         let len = bytes.len() as u64;
         let (Some(length), Some(null)) = (self.konst(u64t, len, n), self.konst(Ty::Ptr, 0, n))
@@ -162,19 +150,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         // Both carriers have the same capacity and occupy three words.
         let ok = |cx: &mut Self, data: ValueId, payer: Option<ValueId>| {
-            cx.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: 0,
-                },
-                n,
-            );
-            let carrier = cx.address(
-                AddressBase::Address(to),
-                &[Step::CaseField { case: 0, field: 0 }],
-                PlaceTy::Declared(list_id),
-                n,
-            );
+            let carrier = to;
             let fields = [
                 (data, Ty::Ptr),
                 payer.map_or((length, u64t), |payer| (payer, Ty::Ptr)),
@@ -227,7 +203,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     overflow: None,
                     size,
                     align: 8,
-                    fail: None,
                 },
                 n,
             );
@@ -241,21 +216,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
-            let (yes, no, join) = (
-                self.new_block(&[]),
-                self.new_block(&[]),
-                self.new_block(&[]),
-            );
-            let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
-            self.end(
-                Terminator::Branch {
-                    condition: admitted,
-                    yes: ye,
-                    no: ne,
-                },
-                Some(n),
-            );
-            self.start(yes);
+            self.raise_unless(admitted, charge, available, n);
             if frozen {
                 let data = self.e.static_bytes(&bytes);
                 let value = self.value(Ty::Ptr);
@@ -289,33 +250,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 ok(self, block, None);
             }
-            self.jump(join, &[], n);
-            // Error: `Capacity { requested, available }`.
-            self.start(no);
-            self.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: 1,
-                },
-                n,
-            );
-            let err = self.address(
-                AddressBase::Address(to),
-                &[Step::CaseField { case: 1, field: 0 }],
-                PlaceTy::Declared(cap_id),
-                n,
-            );
-            for (k, value) in [charge, available].into_iter().enumerate() {
-                let at = self.address(
-                    AddressBase::Address(err),
-                    &[Step::Field(k as u32)],
-                    PlaceTy::Value(u64t),
-                    n,
-                );
-                self.inst(Inst::Store { address: at, value }, n);
-            }
-            self.jump(join, &[], n);
-            self.start(join);
         }
         let v = self.pointer(to, n);
         self.temp(ty, Some(v));

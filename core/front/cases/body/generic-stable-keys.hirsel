@@ -52,13 +52,13 @@ fn map_charge() -> u64 {
         let mut m: Map[u64, Span3 in r] = map.new()
         let mut q: Map[u64, P16] = map.new()
         let x = match (bound bytes 0 {
-            map.reserve(mut m, 3)
+            map.try_reserve(mut m, 3)
         }) {
             Ok(Error(c)) => c.requested,
             _ => 0
         }
         let y = match (bound bytes 0 {
-            map.reserve(mut q, 3)
+            map.try_reserve(mut q, 3)
         }) {
             Ok(Error(c)) => c.requested,
             _ => 0
@@ -196,7 +196,6 @@ fn make_span3(r: Region, a: u64, b: u64, c: u64) -> Result[Span3 in r, Capacity]
         dest.put(mut d, Span3(a: a, b: b, c: c))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
     }
 }

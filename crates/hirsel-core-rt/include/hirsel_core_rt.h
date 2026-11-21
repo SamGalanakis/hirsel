@@ -65,8 +65,8 @@ typedef struct { void *pointer; HirselCoreCapacity capacity; } HirselCoreAllocat
 typedef struct { void *pointer; uint64_t available; } HirselCoreGrowth;
 /* Consuming sequence growth; stride is the element's native size and the
  * shared reuse threshold is tested here. Success installs data/capacity before
- * refund and returns pointer/0. Capacity returns NULL/room without mutation;
- * use allocation_status for a grant refusal. HostMemory is stop102, no
+ * refund and returns pointer/0. Capacity returns NULL/room without mutation.
+ * HostMemory is stop102, no
  * cleanup. kind is PLAIN/GRAPH, capacity was nonzero. */
 HirselCoreGrowth hirsel_core_grow_cold(const HirselCoreContext *, void *carrier,
     size_t bytes, size_t align, uint64_t stride, uint64_t charge, uint64_t capacity,
@@ -169,6 +169,9 @@ void hirsel_core_raise(HirselCoreContext *, HirselCoreCause);
 void hirsel_core_raise_builtin(HirselCoreContext *, uint8_t kind, uint64_t site);
 void hirsel_core_raise_string(HirselCoreContext *, uint64_t site,
     uint8_t *data, uint64_t len, uint64_t capacity);
+/* Capacity(c) for a refused admission: requested and available at 0 and 8. */
+void hirsel_core_raise_capacity(HirselCoreContext *, uint64_t site,
+    uint64_t requested, uint64_t available);
 HirselCoreCauseCell *hirsel_core_causes_take(HirselCoreContext *);
 void hirsel_core_causes_drop(HirselCoreCauseCell *);
 const HirselCoreCauseCell *hirsel_core_cause_next(const HirselCoreCauseCell *);
@@ -190,7 +193,6 @@ uint8_t *hirsel_core_promote_frame_list(const HirselCoreContext *, uint8_t *data
 void *hirsel_core_alloc_admitted(const HirselCoreContext *, HirselCoreLimitRecord *, size_t bytes,
     size_t alignment, uint8_t kind);
 HirselCoreLimitRecord *hirsel_core_block_payer(void *);
-uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);
 void hirsel_core_free_value(const HirselCoreContext *, void *, uint64_t);
 /* Recipe borrows its descriptor from the still-live parent frame. */
 bool hirsel_core_release_buffer(HirselCoreContext *, void *buffer, uint64_t charge, void *carrier, HirselCoreDropRecipe, uint64_t site);

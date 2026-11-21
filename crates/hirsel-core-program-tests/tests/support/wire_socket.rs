@@ -10,11 +10,11 @@ fn wire(n: Net, c: Clock) -> u64 waits {
     let mut cw = cw0
     let mut sr = sr0
     let sent = result.unwrap(host.send_pair(mut cw, string.as_bytes("a"), string.as_bytes("bc"), Never))
-    let mut input: Bytes = result.unwrap(list.with_capacity(3))
+    let mut input: Bytes = list.with_capacity(3)
     let first = result.unwrap(host.recv_bounded(mut sr, mut input, 2, At(c, 0)))
     let tail = result.unwrap(host.recv_bounded(mut sr, mut input, 1, At(c, 0)))
     let address_ok = match peer.ip { V4(2130706433u32) => 1u64, _ => 0u64 }
-    let mut empty: Bytes = result.unwrap(list.with_capacity(1))
+    let mut empty: Bytes = list.with_capacity(1)
     let timed_out = match host.recv_bounded(mut sr, mut empty, 1, At(c, 0)) { Error(TimedOut) => 1u64, _ => 0u64 }
     release_write(take cw)
     let ended = result.unwrap(host.recv_bounded(mut sr, mut empty, 1, Never))

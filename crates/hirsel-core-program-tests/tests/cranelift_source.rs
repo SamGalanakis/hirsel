@@ -101,7 +101,7 @@ int main(void) {{
 fn blocked_channel_is_a_named_run_stop() {
     let source = r#"
 fn waiting() -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     result.unwrap(channel.receive(rx))
 }
 "#;

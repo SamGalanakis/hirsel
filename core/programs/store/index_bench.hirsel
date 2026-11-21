@@ -43,7 +43,7 @@ fn bucket(a: Account) -> Result[u64, Capacity] {
 
 fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        let a = Account(id: k, owner: result.unwrap(string.from("owner000")), balance: int.narrow(balance))
+        let a = Account(id: k, owner: string.from("owner000"), balance: int.narrow(balance))
         store.put(mut tx, t, k, a)?
         Ok(balance)
     }))
@@ -80,7 +80,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
         let _ = save(mut db, t, i, i)
     }
     let mut gate = result.unwrap(host.open(dir, "gate", Read))
-    let mut byte: Bytes = result.unwrap(list.with_capacity(1))
+    let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))
     if result.unwrap(host.read(mut gate, mut byte)) != 1 {
         return Error(Exit(status: 7))
@@ -92,11 +92,11 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
     }
     let elapsed = host.mono_ns(clock) - start
     let mut rendered = string.new()
-    result.unwrap(string.push(mut rendered, "DONE "))
-    result.unwrap(string.push_u64(mut rendered, sum))
-    result.unwrap(string.push(mut rendered, " "))
-    result.unwrap(string.push_u64(mut rendered, elapsed))
-    result.unwrap(string.push(mut rendered, "\n"))
+    string.push(mut rendered, "DONE ")
+    string.push_u64(mut rendered, sum)
+    string.push(mut rendered, " ")
+    string.push_u64(mut rendered, elapsed)
+    string.push(mut rendered, "\n")
     result.unwrap(stdout.write(out, rendered))
     list.clear(mut byte)
     if result.unwrap(host.read(mut gate, mut byte)) != 1 {

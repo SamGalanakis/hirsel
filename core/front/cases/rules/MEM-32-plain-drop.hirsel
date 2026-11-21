@@ -1,8 +1,8 @@
 fn checksum(n: u64) -> u64 {
-    let mut items: List[u64] = result.unwrap(list.with_capacity(n));
+    let mut items: List[u64] = list.with_capacity(n);
     let mut i = 0u64;
     while i < n {
-        result.unwrap(list.push(mut items, i));
+        list.push(mut items, i);
         i = i + 1;
     };
     list.len(items)

@@ -33,7 +33,7 @@ fn request(block: String, variant: String, number: u64, take config: Arc[Config]
             let _ = m1.support.line(block, mut at);
             count += 1
         }
-        let mut headers: SpanBuilder[Header, in scratch] = m1.support.mem(span.with_capacity(scratch, count))?
+        let mut headers: SpanBuilder[Header, in scratch] = span.with_capacity(scratch, count)
         at = header_start
         let mut h: u64 = 0
         while at < string.byte_len(block) {
@@ -47,7 +47,7 @@ fn request(block: String, variant: String, number: u64, take config: Arc[Config]
                 return Error(m1.support.error("Parse@header"))
             }
             let value = Header(name_lo: lo, name_hi: lo + colon, value_lo: lo + colon + 2, value_hi: lo + string.byte_len(row))
-            m1.support.mem(result.capacity_only(span.push(mut headers, value)))?
+            span.push(mut headers, value)
         }
         let hs = span.finish(take headers)
         let Some(banner) = map.get(config.routes, route) else {
@@ -61,7 +61,7 @@ fn request(block: String, variant: String, number: u64, take config: Arc[Config]
         }
         let size = string.byte_len(banner) + string.byte_len(id) + string.byte_len(content) + 2
         m1.support.admission(variant, m1.support.name("request", number, ".reply")?, size)?
-        let mut reply = m1.support.mem(string.with_capacity(size))?
+        let mut reply = string.with_capacity(size)
         m1.support.add(mut reply, banner)?
         m1.support.add(mut reply, ":")?
         m1.support.add(mut reply, id)?
@@ -101,7 +101,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     let mut routes: Map[String, String] = map.new()
     m1.support.insert(mut routes, "/alpha", "welcome")?
     m1.support.insert(mut routes, "/beta", "ready")?
-    let config = m1.support.mem(result.capacity_only(arc.new(Config(routes: take routes))))?
+    let config = arc.new(Config(routes: take routes))
     let mut requests: u64 = 0
     let mut total: u64 = 0
     let mut checksum: u64 = 0
@@ -128,7 +128,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
             events += 4
         }
     }
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(events)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

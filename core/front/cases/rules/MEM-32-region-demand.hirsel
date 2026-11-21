@@ -1,9 +1,6 @@
 fn demand() -> u64 {
     region r {
-        match text.copy_in(r, "abcdefghijklmnopqrstuvwxyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl") {
-            Ok(t) => text.len(t),
-            Error(_) => 0
-        }
+        text.len(text.copy_in(r, "abcdefghijklmnopqrstuvwxyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"))
     }
 }
 // expect: run demand() = 73

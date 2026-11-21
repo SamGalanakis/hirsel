@@ -324,7 +324,7 @@ fn a_body_record_with_another_module_part_misses_its_object() {
 fn a_new_caller_of_shared_glue_leaves_every_existing_object_a_hit() {
     let b = r#"fn b() -> u64 {
   let mut m: Map[String, u64] = map.new()
-  let _ = map.insert(mut m, result.unwrap(string.from("k")), 2u64)
+  let _ = map.insert(mut m, string.from("k"), 2u64)
   map.len(m)
 }
 "#;

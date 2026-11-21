@@ -5,7 +5,7 @@ fn encode(s: String) -> Result[String, helper.Error] {
     let alphabet = string.as_bytes(table)
     let input_bytes = string.as_bytes(s)
     let n = list.len(input_bytes)
-    let mut result = helper.mem(string.with_capacity(((n + 2) / 3) * 4))?
+    let mut result = string.with_capacity(((n + 2) / 3) * 4)
     let mut i: u64 = 0
     while i < n {
         let a: u32 = int.widen(input_bytes[i])
@@ -27,7 +27,7 @@ fn encode(s: String) -> Result[String, helper.Error] {
             } else {
                 int.widen(alphabet[int.widen(digit)])
             }
-            helper.mem(string.push_char(mut result, option.unwrap(char.from_u32(code))))?
+            string.push_char(mut result, option.unwrap(char.from_u32(code)))
         }
         i += 3
     }
@@ -42,9 +42,9 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     if size < 0 {
         return Error(Config)
     }
-    let mut data = helper.mem(string.with_capacity(int.narrow(size)))?
+    let mut data = string.with_capacity(int.narrow(size))
     for _ in 0 .. size {
-        helper.mem(string.push(mut data, "a"))?
+        string.push(mut data, "a")
     }
     let mut encoded = encode(data)?
     let mut total: u32 = 0
@@ -52,22 +52,22 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
         encoded = encode(data)?
         total = int.wrapping_add(total, int.narrow(string.byte_len(encoded)))
     }
-    let mut message = helper.mem(string.from("encode "))?
+    let mut message = string.from("encode ")
     if string.byte_len(data) > 4 {
-        helper.mem(string.push(mut message, string.slice(data, 0, 4)))?
-        helper.mem(string.push(mut message, "..."))?
+        string.push(mut message, string.slice(data, 0, 4))
+        string.push(mut message, "...")
     } else {
-        helper.mem(string.push(mut message, data))?
+        string.push(mut message, data)
     }
-    helper.mem(string.push(mut message, " to "))?
+    string.push(mut message, " to ")
     if string.byte_len(encoded) > 4 {
-        helper.mem(string.push(mut message, string.slice(encoded, 0, 4)))?
-        helper.mem(string.push(mut message, "..."))?
+        string.push(mut message, string.slice(encoded, 0, 4))
+        string.push(mut message, "...")
     } else {
-        helper.mem(string.push(mut message, encoded))?
+        string.push(mut message, encoded)
     }
-    helper.mem(string.push(mut message, ": "))?
-    helper.mem(string.push_u64(mut message, int.widen(total)))?
+    string.push(mut message, ": ")
+    string.push_u64(mut message, int.widen(total))
     Ok(helper.checksum_str(message))
 }
 

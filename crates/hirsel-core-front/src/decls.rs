@@ -435,8 +435,8 @@ pub struct FnDecl {
     pub drop_of: Option<DeclId>,
     /// A core own row's clone body: the `clone(x)` block of this type's item, under
     /// the path `Type.$clone`. Its one parameter is the value, viewed; its result is
-    /// `Result[Self, Capacity]`, lowered to `(from, to) -> (requested, available)`
-    /// (MEM-17, `Shape::clone`).
+    /// `Self`, lowered to `(from, to)`; a refusal raises `Capacity` (MEM-17,
+    /// `Shape::clone`).
     #[serde(default)]
     pub clone_of: Option<DeclId>,
 }
@@ -851,7 +851,7 @@ impl Program<'_> {
 
     /// MEM-17: the clone body takes one view of a core own type `T[P..]`, generic in
     /// exactly `T`'s parameters with no stronger bounds (it runs for every instance that
-    /// may be cloned), and returns `Result[T[P..], Capacity]`. A type has one.
+    /// may be cloned), and returns `T[P..]`. A type has one.
     fn clone_hook(&mut self, f: usize) {
         let fd = &self.fns[f];
         let n = fd.generics.len();
@@ -897,13 +897,7 @@ impl Program<'_> {
             return;
         }
         let ty = self.fns[f].params[0].ty;
-        let result = match (self.core_decl("Result"), self.core_decl("Capacity")) {
-            (Some(r), Some(c)) => {
-                let cap = self.types.intern(TyKind::Adt(c, vec![]));
-                self.types.intern(TyKind::Adt(r, vec![ty, cap]))
-            }
-            _ => ERROR,
-        };
+        let result = ty;
         let callable = self.types.intern(TyKind::Fn(
             vec![(Mode::View, ty)],
             result,

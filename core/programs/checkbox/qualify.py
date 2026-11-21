@@ -68,7 +68,7 @@ def scratch_sources(work, case, mutant):
         marker = """        Some(Query(_, _, go)) => {
             let answer = go(s, h, arg, prior, old, sub, rows)
             if let Covered(_) = answer {
-                result.unwrap(log.append(rows, Row(sub: sub, key: list.new(), value: None)))
+                log.append(rows, Row(sub: sub, key: list.new(), value: None))
             }
             take answer
         },"""

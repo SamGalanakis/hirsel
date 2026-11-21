@@ -18,8 +18,8 @@ pub fn ts_codec_vectors() -> bool {
     let unit: codec.Codec[Option[()]] = codec.of()
     let keyed: codec.Codec[Map[TsKey, u8]] = codec.of()
     let mut keys: Map[TsKey, u8] = map.new()
-    result.unwrap(map.insert(mut keys, TsKey(id: 1), 7u8))
-    result.unwrap(map.insert(mut keys, TsKey(id: 2), 8u8))
+    map.insert(mut keys, TsKey(id: 1), 7u8)
+    map.insert(mut keys, TsKey(id: 2), 8u8)
     enc(codec.of_u64(), 9007199254740993u64) == unhex("0100000000002000") && enc(codec.of_u64(), 18446744073709551615u64) == unhex("ffffffffffffffff") && enc(codec.of_i64(), -9223372036854775808i64) == unhex("0000000000000080") && enc(nested, None) == unhex("00000000") && enc(nested, Some(None)) == unhex("0100000000000000") && enc(nested, Some(Some(7u32))) == unhex("010000000100000007000000") && enc(unit, Some(())) == unhex("01000000") && enc(keyed, keys) == unhex("0200000001000000070200000008") && outcome(keyed, unhex("0200000001000000070100000008")) == 4009
 }
 
@@ -62,7 +62,7 @@ pub fn ts_hirsel_differential() -> bool {
         } else {
             "x"
         }
-        let ts_sample = TsRow(n: (state << 32) | i, label: result.unwrap(string.from(label)), nested)
+        let ts_sample = TsRow(n: (state << 32) | i, label: string.from(label), nested)
         let encoded = enc(c, ts_sample)
         let start = at
         match codec.take_with(supplied, mut at, c) {
@@ -95,7 +95,7 @@ fn unhex(s: String) -> Bytes {
         if raw[i] == 32 {
             i += 1
         } else {
-            result.unwrap(list.push(mut b, nibble(raw[i]) * 16 + nibble(raw[i + 1])))
+            list.push(mut b, nibble(raw[i]) * 16 + nibble(raw[i + 1]))
             i += 2
         }
     }
@@ -147,7 +147,7 @@ fn prefixes[T](c: codec.Codec[T], b: Bytes) -> bool {
     let mut k: u64 = 0
     while k < list.len(b) {
         let mut cut: Bytes = list.new()
-        result.unwrap(list.append(mut cut, list.slice(b, 0, k)))
+        list.append(mut cut, list.slice(b, 0, k))
         let o = outcome(c, cut)
         if o < 1000 || o > 1000 + k {
             return false
@@ -197,10 +197,10 @@ fn of_builtins() -> bool {
 
 // Bytes through `of` (the bulk of_bytes) against of_list at u8, pushing byte by byte:
 // into an out already holding `pre` bytes, under a bound of `limit`, both succeed or both
-// fail, and leave the same bytes and the same capacity, so the same charges. Both decode
-// what either wrote to the same value, and every prefix is Truncated. A bulk put that
-// grows out other than by MEM-24 at the bytes a push grows at, writes a partial chunk
-// another way on Capacity, or a take that reads past the count, fails it.
+// fail, and on success leave the same bytes and the same capacity, so the same charges.
+// Both decode what either wrote to the same value, and every prefix is Truncated. A bulk
+// put that grows out other than by MEM-24 at the bytes a push grows at, or a take that
+// reads past the count, fails it.
 // expect: run bytes_as_list() = 0
 fn bytes_as_list() -> u64 {
     let mut bad: u64 = 0
@@ -217,7 +217,7 @@ fn bytes_as_list() -> u64 {
         let mut xs: Bytes = list.new()
         let mut i: u64 = 0
         while i < n {
-            result.unwrap(result.capacity_only(list.push(mut xs, int.truncate((i * 37 + 1) & 255))))
+            list.push(mut xs, int.truncate((i * 37 + 1) & 255))
             i += 1
         }
         let slow: codec.Codec[Bytes] = codec.of_list()
@@ -253,22 +253,26 @@ fn bytes_as_list() -> u64 {
 }
 
 // Encodes xs with c into an out holding pre bytes, under a bound of limit: whether it
-// failed, then out's length, capacity and bytes.
+// failed, then on success out's length, capacity and bytes.
 fn put_under(c: codec.Codec[Bytes], xs: Bytes, pre: u64, limit: u64) -> (bool, u64, u64, Bytes) {
-    let mut out: Bytes = list.new()
-    let mut i: u64 = 0
-    while i < pre {
-        result.unwrap(result.capacity_only(list.push(mut out, 0xee)))
-        i += 1
+    let r = isolate(fn() -> Result[Result[(u64, u64, Bytes), Capacity], Capacity] {
+        let mut out: Bytes = list.new()
+        let mut i: u64 = 0
+        while i < pre {
+            list.push(mut out, 0xee)
+            i += 1
+        }
+        bound bytes limit {
+            match codec.encode(c, xs, mut out) {
+                Ok(()) => Ok((list.len(out), list.capacity(out), take out)),
+                Error(e) => Error(e),
+            }
+        }
+    })
+    match take r {
+        Ok(Ok(Ok(Ok((len, cap, take written))))) => (false, len, cap, take written),
+        _ => (true, 0, 0, list.new()),
     }
-    let r = bound bytes limit {
-        codec.encode(c, xs, mut out)
-    }
-    let failed = match r {
-        Ok(Ok(())) => false,
-        _ => true
-    }
-    (failed, list.len(out), list.capacity(out), take out)
 }
 
 // The extremes of each width come back, and every prefix of them is Truncated.
@@ -366,10 +370,10 @@ fn mix_bytes() -> Bytes {
 // expect: run mix_format() = true
 fn mix_format() -> bool {
     let mut m: Map[String, u8] = map.new()
-    result.unwrap(map.insert(mut m, result.unwrap(string.from("k")), 5))
+    map.insert(mut m, string.from("k"), 5)
     let mut xs: List[i32] = list.new()
-    result.unwrap(list.push(mut xs, -1))
-    let x = Mix(tag: Some(result.unwrap(string.from("a"))), res: Error(result.unwrap(string.from("b"))), m: take m, xs: take xs, pair: (9, true))
+    list.push(mut xs, -1)
+    let x = Mix(tag: Some(string.from("a")), res: Error(string.from("b")), m: take m, xs: take xs, pair: (9, true))
     enc(mixes(), x) == mix_bytes() && prefixes(mixes(), mix_bytes())
 }
 
@@ -392,7 +396,7 @@ fn flips_are_refused_or_exact() -> bool {
                 255
             }
             let mut bad: Bytes = list.new()
-            result.unwrap(list.append(mut bad, b))
+            list.append(mut bad, b)
             let _ = list.set(mut bad, i, b[i] ^ mask)
             match codec.decode(mixes(), bad) {
                 Ok(Ok(x)) => {
@@ -643,7 +647,7 @@ fn schema_bytes(w: fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), Capacity
 }
 
 fn row(id: u64, name: String) -> Row {
-    Row(id, name: result.unwrap(string.from(name)), score: 3)
+    Row(id, name: string.from(name), score: 3)
 }
 
 // Reads b, written under the schema `writer`, as c's type; the value or the error code.
@@ -719,9 +723,9 @@ fn fingerprint_avro_vectors() -> bool {
 // of byte i = (17*i+3) mod 256.
 // expect: run fingerprint_span_boundaries() = true
 fn fingerprint_span_boundaries() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(4097))
+    let mut b: Bytes = list.with_capacity(4097)
     for i in 0u64 .. 4097 {
-        result.unwrap(list.push(mut b, int.truncate(i * 17 + 3)))
+        list.push(mut b, int.truncate(i * 17 + 3))
     }
     let vectors: Inline[(u64, u64), 14] =[(0, 0xc15d213aa4d7a795), (1, 0x636ab938825c5af3), (7, 0x2332dd08478ed62a), (8, 0xe902ff8e513f3454), (9, 0x0b7483a78473573e), (63, 0xb40e1cdba1c0c77f), (64, 0xdb4545c7b4366271), (65, 0x804e5715595fc6f1), (255, 0x94522820065f273f), (256, 0x1a3838c9eb465a04), (257, 0xc6cf4a49cd53f3bc), (4095, 0x92849bde69880f9c), (4096, 0x3fd56a423782450d), (4097, 0x0f2f73fd02e9a6a2)]
     for (size, expected) in vectors {
@@ -1083,7 +1087,7 @@ fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
         let n = codec.take_count(b, mut at, 12)?
         if n > 0 {
             let kids: List[Tree] = codec.room(n)?
-            codec.full(list.push(mut stack, TreeFrame(label, kids: take kids, left: n)))?
+            list.push(mut stack, TreeFrame(label, kids: take kids, left: n))
             continue
         }
         let mut done = Tree(label, kids: list.new())
@@ -1092,10 +1096,10 @@ fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
                 Some(top) => take top,
                 None => return Ok(take done)
             }
-            codec.full(list.push(mut f.kids, take done))?
+            list.push(mut f.kids, take done)
             f.left -= 1
             if f.left > 0 {
-                codec.full(list.push(mut stack, take f))?
+                list.push(mut stack, take f)
                 break
             }
             done = Tree(label: f.label, kids: replace(mut f.kids, list.new()))
@@ -1147,12 +1151,12 @@ fn swapped_trees() -> codec.Codec[Tree] {
 fn preorder(take t: Tree) -> u64 {
     let mut digits: u64 = 0
     let mut todo: List[Tree] = list.new()
-    result.unwrap(list.push(mut todo, take t))
+    list.push(mut todo, take t)
     while let Some(top) = list.pop(mut todo) {
         let mut x = take top
         digits = digits * 10 + x.label
         while let Some(k) = list.pop(mut x.kids) {
-            result.unwrap(list.push(mut todo, take k))
+            list.push(mut todo, take k)
         }
     }
     digits
@@ -1191,17 +1195,17 @@ fn recursive_tree() -> (bool, bool, u64, u64) {
 // chain taken apart the same way) or a decode error's code, 9999 for Capacity.
 fn deep(depth: u64) -> (u64, u64) {
     let a = deep_decode(depth)
-    let mut w: Bytes = result.unwrap(list.with_capacity(12 * depth + 12))
+    let mut w: Bytes = list.with_capacity(12 * depth + 12)
     let mut i: u64 = 0
     while i < depth {
         result.unwrap(codec.put_u32(1, mut w))
         i += 1
     }
     result.unwrap(codec.put_u32(0, mut w))
-    result.unwrap(list.put_word_le(mut w, depth))
+    list.put_word_le(mut w, depth)
     while i > 0 {
         i -= 1
-        result.unwrap(list.put_word_le(mut w, i))
+        list.put_word_le(mut w, i)
     }
     let c = match through(trees(), result.unwrap(codec.schema(swapped_trees())), w) {
         Ok(t) => chain(take t),
@@ -1211,14 +1215,14 @@ fn deep(depth: u64) -> (u64, u64) {
 }
 
 fn deep_decode(depth: u64) -> u64 {
-    let mut b: Bytes = result.unwrap(list.with_capacity(12 * depth + 12))
+    let mut b: Bytes = list.with_capacity(12 * depth + 12)
     let mut i: u64 = 0
     while i < depth {
-        result.unwrap(list.put_word_le(mut b, i))
+        list.put_word_le(mut b, i)
         result.unwrap(codec.put_u32(1, mut b))
         i += 1
     }
-    result.unwrap(list.put_word_le(mut b, depth))
+    list.put_word_le(mut b, depth)
     result.unwrap(codec.put_u32(0, mut b))
     match codec.decode(trees(), b) {
         Ok(Ok(t)) => chain(take t),
@@ -1394,7 +1398,7 @@ fn via_range() -> (bool, u64, u64, u64, bool) {
     let ok = unhex("0200000000000000 0500000000000000")
     let bad = unhex("0500000000000000 0200000000000000")
     let mut late = unhex("61626364")
-    result.unwrap(list.append(mut late, bad))
+    list.append(mut late, bad)
     let mine = result.unwrap(codec.schema(ranges()))
     let theirs = result.unwrap(codec.schema(range_wires()))
     let read = match through(ranges(), mine, ok) {
@@ -1417,9 +1421,9 @@ fn key_format() -> bool {
     let big: i64 = -2
     let zero: i32 = 0
     let mut nul: Bytes = list.new()
-    result.unwrap(list.push(mut nul, 0x61))
-    result.unwrap(list.push(mut nul, 0))
-    result.unwrap(list.push(mut nul, 0x62))
+    list.push(mut nul, 0x61)
+    list.push(mut nul, 0)
+    list.push(mut nul, 0x62)
     key_enc(codec.key_u16(), u) == unhex("1234") && key_enc(codec.key_i8(), small) == unhex("7f") && key_enc(codec.key_i64(), big) == unhex("7ffffffffffffffe") && key_enc(codec.key_i32(), zero) == unhex("80000000") && key_enc(codec.key_bytes(), nul) == unhex("61 00ff 62 0000") && key_enc(codec.key_string(), "") == unhex("0000") && result.unwrap(codec.key_schema(codec.key_u64())) == unhex("04 00000000 06")
 }
 
@@ -1494,7 +1498,7 @@ fn random_bytes(mut seed: u64) -> Bytes {
         } else {
             0xff
         }
-        result.unwrap(list.push(mut b, byte))
+        list.push(mut b, byte)
         i += 1
     }
     take b
@@ -1567,9 +1571,9 @@ fn key_order_is_value_order() -> u64 {
             sign(int.widen(n), int.widen(m))
         }
         let mut ta: Bytes = list.new()
-        result.unwrap(list.append(mut ta, a))
+        list.append(mut ta, a)
         let mut tb: Bytes = list.new()
-        result.unwrap(list.append(mut tb, b))
+        list.append(mut tb, b)
         if compare(key_enc(tuple_keys(), (take ta, n)), key_enc(tuple_keys(), (take tb, m))) != by_parts {
             wrong += 1
         }
@@ -1588,7 +1592,7 @@ fn key_near_misses() -> (bool, u64, u64, u64, u64) {
     let mut i: u64 = 0
     while i < list.len(whole) {
         let mut cut: Bytes = list.new()
-        result.unwrap(list.append(mut cut, list.slice(whole, 0, i)))
+        list.append(mut cut, list.slice(whole, 0, i))
         let o = key_outcome(tuple_keys(), cut)
         if o < 1000 || o > 1000 + i {
             ok = false
@@ -1616,7 +1620,7 @@ fn again_key[T](k: codec.Key[T], b: Bytes) -> bool {
 fn errors_return_their_bytes() -> (u64, u64, u64, u64) {
     let whole = chain_bytes(20)
     let mut cut: Bytes = list.new()
-    result.unwrap(list.append(mut cut, list.slice(whole, 0, list.len(whole) - 1)))
+    list.append(mut cut, list.slice(whole, 0, list.len(whole) - 1))
     let swapped = result.unwrap(codec.schema(swapped_trees()))
     let mut written: Bytes = list.new()
     match codec.decode(trees(), whole) {
@@ -1626,7 +1630,7 @@ fn errors_return_their_bytes() -> (u64, u64, u64, u64) {
         _ => {}
     }
     let mut short: Bytes = list.new()
-    result.unwrap(list.append(mut short, list.slice(written, 0, list.len(written) - 1)))
+    list.append(mut short, list.slice(written, 0, list.len(written) - 1))
     let direct_refusal = outcome(trees(), cut)
     let resolved_refusal = refusal(trees(), swapped, short)
     if direct_refusal != 1000 + 236 || resolved_refusal != 1000 + 244 {
@@ -1658,14 +1662,14 @@ fn errors_return_their_bytes() -> (u64, u64, u64, u64) {
 }
 
 fn chain_bytes(depth: u64) -> Bytes {
-    let mut b: Bytes = result.unwrap(list.with_capacity(12 * depth + 12))
+    let mut b: Bytes = list.with_capacity(12 * depth + 12)
     let mut i: u64 = 0
     while i < depth {
-        result.unwrap(list.put_word_le(mut b, i))
+        list.put_word_le(mut b, i)
         result.unwrap(codec.put_u32(1, mut b))
         i += 1
     }
-    result.unwrap(list.put_word_le(mut b, depth))
+    list.put_word_le(mut b, depth)
     result.unwrap(codec.put_u32(0, mut b))
     take b
 }
@@ -1679,9 +1683,9 @@ fn chain_bytes(depth: u64) -> Bytes {
 // that ignores start, or reports offsets from it, fails.
 // expect: run shared_reader_reads_in_place() = ((5, 2, 7), (9, 2, 3), (1010, 5016, 3014), (1010, 1001))
 fn shared_reader_reads_in_place() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, u64), (u64, u64)) {
-    let old = result.unwrap(arc.new(sendable(resolved_rows(rows(), schema_bytes(v1_schema)))))
+    let old = arc.new(sendable(resolved_rows(rows(), schema_bytes(v1_schema))))
     let held = arc.share(old)
-    let same = result.unwrap(arc.new(sendable(resolved_rows(rows(), schema_bytes(row_schema)))))
+    let same = arc.new(sendable(resolved_rows(rows(), schema_bytes(row_schema))))
     let tomb = resolved_rows(rows_tomb(), schema_bytes(noted_schema))
     let a = row_at(old, behind(enc(rows_v1(), row(5, "ab"))))
     let b = row_at(same, behind(enc(rows(), row(9, "yz"))))
@@ -1706,7 +1710,7 @@ fn resolved_rows(c: codec.Codec[Row], writer: Bytes) -> codec.Reader[Row] {
 
 fn behind(b: Bytes) -> Bytes {
     let mut stored = unhex("abcd")
-    result.unwrap(list.append(mut stored, b))
+    list.append(mut stored, b)
     take stored
 }
 
@@ -1751,9 +1755,9 @@ fn at_path(b: Bytes, path: String) -> Bytes {
         Error(_) => 0
     })
     let mut out: Bytes = list.new()
-    result.unwrap(list.append(mut out, list.slice(b, 0, 5)))
+    list.append(mut out, list.slice(b, 0, 5))
     result.unwrap(codec.put_string(path, mut out))
-    result.unwrap(list.append(mut out, list.slice(b, 9 + n, list.len(b))))
+    list.append(mut out, list.slice(b, 9 + n, list.len(b)))
     take out
 }
 
@@ -1926,12 +1930,12 @@ type DTree: codec {
 fn dpreorder(take t: DTree) -> u64 {
     let mut digits: u64 = 0
     let mut todo: List[DTree] = list.new()
-    result.unwrap(list.push(mut todo, take t))
+    list.push(mut todo, take t)
     while let Some(top) = list.pop(mut todo) {
         let mut x = take top
         digits = digits * 10 + x.label
         while let Some(k) = list.pop(mut x.kids) {
-            result.unwrap(list.push(mut todo, take k))
+            list.push(mut todo, take k)
         }
     }
     digits
@@ -1940,14 +1944,14 @@ fn dpreorder(take t: DTree) -> u64 {
 // A DTree chain of depth d (label i, one kid) decoded: its depth counted iteratively, a
 // decode error's code, or 9999 for Capacity.
 fn dchain(depth: u64) -> u64 {
-    let mut b: Bytes = result.unwrap(list.with_capacity(12 * depth + 12))
+    let mut b: Bytes = list.with_capacity(12 * depth + 12)
     let mut i: u64 = 0
     while i < depth {
-        result.unwrap(list.put_word_le(mut b, i))
+        list.put_word_le(mut b, i)
         result.unwrap(codec.put_u32(1, mut b))
         i += 1
     }
-    result.unwrap(list.put_word_le(mut b, depth))
+    list.put_word_le(mut b, depth)
     result.unwrap(codec.put_u32(0, mut b))
     let c: codec.Codec[DTree] = codec.of()
     match codec.decode(c, b) {
@@ -2095,10 +2099,10 @@ fn repath(b: Bytes, from: String, to: String) -> Bytes {
             k += 1
         }
         if k == n {
-            result.unwrap(list.append(mut out, with))
+            list.append(mut out, with)
             i += n
         } else {
-            result.unwrap(result.capacity_only(list.push(mut out, b[i])))
+            list.push(mut out, b[i])
             i += 1
         }
     }
@@ -2182,7 +2186,7 @@ fn derived_via() -> (bool, bool, u64, (u64, u64), u64, bool, (bool, u64, u64, bo
     let ok = unhex("0200000000000000 0500000000000000")
     let bad = unhex("0500000000000000 0200000000000000")
     let mut late = unhex("61626364")
-    result.unwrap(list.append(mut late, bad))
+    list.append(mut late, bad)
     let written = enc(c, result.unwrap(dcheck(DRangeWire(lo: 2, hi: 5)))) == ok && prefixes(c, ok)
     let twin = result.unwrap(codec.schema(ranges()))
     let want = repath(repath(twin, "t.Range", "std.tests.codec.DRange"), "t.RangeWire", "std.tests.codec.DRangeWire")
@@ -2219,24 +2223,24 @@ type SHold: codec {
 // root's, least is `least`, and `of` through a generic body (generic_of) agrees.
 fn structural[T: codec](c: codec.Codec[T], x: T, hex: String, root: String, least: u64) -> bool {
     let mut want = unhex("03 00000000")
-    result.unwrap(list.append(mut want, unhex(root)))
+    list.append(mut want, unhex(root))
     enc(c, x) == unhex(hex) && prefixes(c, unhex(hex)) && result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want) && codec.least(c) == least && same_codec(c, generic_of(), x)
 }
 
 fn sample() -> SHold {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 1))
-    result.unwrap(list.push(mut xs, 2))
+    list.push(mut xs, 1)
+    list.push(mut xs, 2)
     let mut m: Map[String, u64] = map.new()
-    result.unwrap(map.insert(mut m, result.unwrap(string.from("a")), 1))
-    result.unwrap(map.insert(mut m, result.unwrap(string.from("b")), 2))
+    map.insert(mut m, string.from("a"), 1)
+    map.insert(mut m, string.from("b"), 2)
     let mut b: Bytes = list.new()
-    result.unwrap(list.push(mut b, 0xab))
-    result.unwrap(list.push(mut b, 0xcd))
+    list.push(mut b, 0xab)
+    list.push(mut b, 0xcd)
     let mut n: List[Option[String]] = list.new()
-    result.unwrap(list.push(mut n, Some(result.unwrap(string.from("a")))))
-    result.unwrap(list.push(mut n, None))
-    SHold(xs, o: Some(result.unwrap(string.from("hé"))), m, r: Error(result.unwrap(string.from("x"))), b, n)
+    list.push(mut n, Some(string.from("a")))
+    list.push(mut n, None)
+    SHold(xs, o: Some(string.from("hé")), m, r: Error(string.from("x")), b, n)
 }
 
 // Each field of sample() through `of` at its type, by hand: List[u64] [1, 2]; Option[String]
@@ -2262,12 +2266,12 @@ fn structural_of() -> ((bool, bool, bool, bool, bool, bool, bool), (bool, bool, 
     let fields = (structural(xs, h.xs, "02000000 0100000000000000 0200000000000000", "0e06", 4), structural(o, h.o, "01000000 03000000 68c3a9", "100d", 4), structural(m, h.m, "02000000 01000000 61 0100000000000000 01000000 62 0200000000000000", "0f0d06", 4), structural(r, h.r, "01000000 01000000 78", "11060d", 4), structural(r, ok, "00000000 0700000000000000", "11060d", 4), structural(b, h.b, "02000000 abcd", "0e03", 4), structural(n, h.n, "02000000 01000000 01000000 61 00000000", "0e100d", 4))
     let c: codec.Codec[SHold] = codec.of()
     let mut whole: Bytes = list.new()
-    result.unwrap(list.append(mut whole, enc(xs, h.xs)))
-    result.unwrap(list.append(mut whole, enc(o, h.o)))
-    result.unwrap(list.append(mut whole, enc(m, h.m)))
-    result.unwrap(list.append(mut whole, enc(r, h.r)))
-    result.unwrap(list.append(mut whole, enc(b, h.b)))
-    result.unwrap(list.append(mut whole, enc(n, h.n)))
+    list.append(mut whole, enc(xs, h.xs))
+    list.append(mut whole, enc(o, h.o))
+    list.append(mut whole, enc(m, h.m))
+    list.append(mut whole, enc(r, h.r))
+    list.append(mut whole, enc(b, h.b))
+    list.append(mut whole, enc(n, h.n))
     let schema = unhex("03 01000000 15000000 7374642e74657374732e636f6465632e53486f6c64 00000000 00 06000000 00 02000000 7873 0e06 00 01000000 6f 100d 00 01000000 6d 0f0d06 00 01000000 72 11060d 00 01000000 62 0e03 00 01000000 6e 0e100d 13 00000000")
     let held = (enc(c, h) == whole, result.unwrap(codec.schema(c)) == schema, codec.least(c) == 24)
     let refused = (outcome(m, unhex("02000000 01000000 61 0100000000000000 01000000 61 0200000000000000")), outcome(o, unhex("02000000")), outcome(r, unhex("02000000 0700000000000000")))
@@ -2291,7 +2295,7 @@ fn dnonempty_at(b: Bytes) -> u64 {
 fn structural_via() -> (bool, bool, u64, u64, u64) {
     let c: codec.Codec[DNonEmpty[u64]] = codec.of()
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 3))
+    list.push(mut xs, 3)
     let one = unhex("01000000 0300000000000000")
     let written = enc(c, result.unwrap(dnonempty(take xs))) == one && prefixes(c, one)
     let schema = unhex("03 01000000 19000000 7374642e74657374732e636f6465632e444e6f6e456d707479 01000000 06 02 0e06 13 00000000")
@@ -2304,7 +2308,7 @@ fn two_deep[T: codec](take x: T, take y: T, take z: T, list_hex: String, pair_he
     let l: codec.Codec[List[T]] = generic_of()
     let p: codec.Codec[DPair[T]] = generic_of()
     let mut xs: List[T] = list.new()
-    result.unwrap(list.push(mut xs, take z))
+    list.push(mut xs, take z)
     enc(l, xs) == unhex(list_hex) && enc(p, DPair(left: take x, right: take y)) == unhex(pair_hex)
 }
 
@@ -2316,7 +2320,7 @@ fn structural_through() -> (bool, bool) {
 }
 
 fn owned(x: String) -> String {
-    result.unwrap(string.from(x))
+    string.from(x)
 }
 
 // Tuples (the front derives a tuple's codec per tuple row). (5, "a") is the u64, then the
@@ -2407,16 +2411,16 @@ fn derived_generic_group() -> (bool, bool, bool, (u64, u64), bool, bool) {
     let f: codec.Codec[DGForest[String]] = codec.of()
     let b = unhex("01000000 61 01000000 01000000 62 00000000")
     let mut ks: List[DGNode[String]] = list.new()
-    result.unwrap(list.push(mut ks, DGNode(v: "b", kids: DGForest(trees: list.new()))))
+    list.push(mut ks, DGNode(v: "b", kids: DGForest(trees: list.new())))
     let x = DGNode(v: "a", kids: DGForest(trees: take ks))
     let u: codec.Codec[DGNode[u64]] = codec.of()
     let ub = unhex("0100000000000000 01000000 0200000000000000 00000000")
     let node = "16000000 7374642e74657374732e636f6465632e 44474e6f6465 01000000 06 00 02000000 00 01000000 76 06 00 04000000 6b696473 13 01000000"
     let forest = "18000000 7374642e74657374732e636f6465632e 4447466f72657374 01000000 06 00 01000000 00 05000000 7472656573 0e 13 00000000"
     let mut want = unhex("03 02000000")
-    result.unwrap(list.append(mut want, unhex(node)))
-    result.unwrap(list.append(mut want, unhex(forest)))
-    result.unwrap(list.append(mut want, unhex("13 00000000")))
+    list.append(mut want, unhex(node))
+    list.append(mut want, unhex(forest))
+    list.append(mut want, unhex("13 00000000"))
     (enc(c, x) == b, again(c, b), prefixes(c, b), (codec.least(c), codec.least(f)), again(u, ub) && prefixes(u, ub), result.unwrap(codec.schema(u)) == want)
 }
 
@@ -2437,10 +2441,10 @@ fn derived_result_group() -> (bool, bool, bool, (u64, u64), u64) {
     let l: codec.Codec[DRLink] = codec.of()
     let b = unhex("0100000000000000 04000000 00000000 00000000 0200000000000000 00000000 00000000 01000000 01000000 65 01000000 00000000 07 01000000 01000000 0300000000000000 00000000")
     let mut ls: List[DRLink] = list.new()
-    result.unwrap(list.push(mut ls, Fwd(Ok(DRNode(v: 2, next: list.new())))))
-    result.unwrap(list.push(mut ls, Fwd(Error("e"))))
-    result.unwrap(list.push(mut ls, Back(Ok(7))))
-    result.unwrap(list.push(mut ls, Back(Error(DRNode(v: 3, next: list.new())))))
+    list.push(mut ls, Fwd(Ok(DRNode(v: 2, next: list.new()))))
+    list.push(mut ls, Fwd(Error("e")))
+    list.push(mut ls, Back(Ok(7)))
+    list.push(mut ls, Back(Error(DRNode(v: 3, next: list.new()))))
     let x = DRNode(v: 1, next: take ls)
     let bad = unhex("0100000000000000 01000000 00000000 02000000")
     (enc(c, x) == b, again(c, b), prefixes(c, b), (codec.least(c), codec.least(l)), outcome(c, bad))
@@ -2460,7 +2464,7 @@ fn structural_tuple() -> (bool, bool, bool, u64, bool) {
     let c: codec.Codec[List[(u64, String)]] = codec.of()
     let b = unhex("01000000 0500000000000000 01000000 61")
     let mut xs: List[(u64, String)] = list.new()
-    result.unwrap(list.push(mut xs, (5u64, "a")))
+    list.push(mut xs, (5u64, "a"))
     let schema = result.unwrap(codec.schema(c)) == unhex("03 00000000 0e 12 02000000 06 0d")
     (enc(c, xs) == b && again(c, b), prefixes(c, b), schema, codec.least(c), tuple_option("a", unhex("01000000 01000000 61 0700000000000000")))
 }
@@ -2471,7 +2475,7 @@ type JsonWireRow: codec {
 }
 
 fn json_bytes(s: String) -> Bytes {
-    result.unwrap(string.into_bytes(result.unwrap(string.from(s))))
+    string.into_bytes(string.from(s))
 }
 
 // HTTP B-4 and SEM-10. Missing members use declared defaults, and a codec's
@@ -2485,8 +2489,8 @@ fn typed_json_codec_admission() -> bool {
     result.unwrap(codec.encode(c, decoded_row, mut wire_value))
     let mut json_output: Bytes = list.new()
     let measured = result.unwrap(json.typed_length(f, wire_value))
-    let written = result.unwrap(json.write_typed(f, wire_value, scoped fn(byte: u8) -> Result[(), Capacity] {
-        codec.put_u8(byte, mut json_output)
+    let written = result.unwrap(json.write_typed(f, wire_value, scoped fn(byte: u8) {
+        list.push(mut json_output, byte)
     }))
     let canonical = json_bytes("{\"range\":{\"lo\":\"2\",\"hi\":\"9\"},\"score\":\"7\"}")
     let correct = json_output == canonical && list.len(canonical) == measured && measured == written
@@ -2509,9 +2513,14 @@ fn typed_json_codec_admission() -> bool {
         Error(Schema(14, EmptyListElement)) => true,
         _ => false,
     }
-    let exhausted = match json.decode_typed(f, json_bytes("{\"range\":{\"hi\":\"9\",\"lo\":\"2\"}}"), 0) {
-        Error(Capacity(_)) => true,
-        _ => false,
+    let starved = isolate(fn() -> Result[bool, Capacity] {
+        Ok(match json.decode_typed(f, json_bytes("{\"range\":{\"hi\":\"9\",\"lo\":\"2\"}}"), 0) {
+            _ => false,
+        })
+    })
+    let exhausted = match caught(take starved) {
+        Some(_) => true,
+        None => false,
     }
     correct && decoded_row.range.w.lo == 2 && decoded_row.range.w.hi == 9 && decoded_row.score == 7 && reversed && duplicate && refused_option && refused_list && exhausted
 }
@@ -2552,9 +2561,9 @@ fn tuple_never_codec() -> ((bool, bool, bool), (bool, bool, bool), (u64, u64, u6
     let current = result.unwrap(codec.schema(sum))
     let end = list.len(current) - 5
     let mut writer = unhex("03 02000000")
-    result.unwrap(list.append(mut writer, list.slice(current, 5, end)))
-    result.unwrap(list.append(mut writer, unhex("01000000 58 00000000 00 00000000")))
-    result.unwrap(list.append(mut writer, list.slice(current, end, list.len(current))))
+    list.append(mut writer, list.slice(current, 5, end))
+    list.append(mut writer, unhex("01000000 58 00000000 00 00000000"))
+    list.append(mut writer, list.slice(current, end, list.len(current)))
     let evolved = result.unwrap(result.unwrap(codec.resolve(sum, writer)))
     let via_plan = decode_outcome(codec.read_at(evolved, bad, 2))
     ((ordered, tuple_schemas, cross), (ok, schema, incompatible), (nbad, sbad, outcome(never, unhex("")), via_reader, via_plan))
@@ -2564,5 +2573,21 @@ fn wrong_writer[T](c: codec.Codec[T], writer: Bytes) -> bool {
     match result.unwrap(codec.resolve(c, writer)) {
         Error(Schema(_)) => true,
         _ => false,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

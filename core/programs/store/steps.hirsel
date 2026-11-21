@@ -66,7 +66,7 @@ fn fingerprint(kind: u8, raw: Bytes) -> Result[Bytes, Capacity] {
     std.sha256.add_byte(mut hash, kind)
     std.sha256.add(mut hash, raw, 0u64, list.len(raw))
     let digest = std.sha256.finish(hash)
-    let mut result: Bytes = list.with_capacity(32u64)?
+    let mut result: Bytes = list.with_capacity(32u64)
     for i in 0u64 .. 32u64 { let _ = list.push(mut result, digest[i]) }
     Ok(take result)
 }
@@ -132,7 +132,7 @@ fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Fini
         _ => if attempt != triggers.number(a) { return Ok(Doubt) },
     }
     let Finish(step: _, raw: take raw) = take f
-    let copied = stored_bytes(clone(raw))?
+    let copied: Bytes = clone(raw)
     store.put(mut tx, t.rows, key, Finished(take saved, take raw))?
     Ok(Replay(take copied))
 }
@@ -225,8 +225,8 @@ fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f:
     let raw = must(encode(a))
     let encoded = must(fingerprint(0u8, raw))
     let before = Begin(index: ctx.index, fingerprint: take encoded, mode: mode)
-    let copied: Result[Begin, Capacity] = clone(before)
-    let attempted: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(must(take copied)))
+    let copied: Begin = clone(before)
+    let attempted: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(take copied))
     match (take attempted)? {
         Ready => (),
         other => return reply_value(mut ctx, take other),
@@ -272,7 +272,7 @@ fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.
     let body = code.callable(f)
     let result = store.rollback_writes_on_error(mut tx, scoped fn(mut draft: store.Tx) -> Result[R, E] { body(mut draft, arg) })
     let raw = stored_bytes(encode(result))?
-    let data = stored_bytes(clone(raw))?
+    let data: Bytes = clone(raw)
     store.put(mut tx, t.rows, row, Finished(take encoded, take raw))?
     Ok(Replay(take data))
 }
@@ -281,7 +281,7 @@ pub fn register_transaction[G: send, H: send, A: codec, R: codec, E: codec](mut 
     let made = fn(mut tx: store.Tx, a: triggers.Attempt, take request: TxRequest) -> Result[Reply, store.Error] {
         transaction_body(mut tx, a, take request, f)
     }
-    let entry = match take made { Ok(take entry) => take entry, Error((cap, _)) => return Error(Full(cap)) }
+    let entry = take made
     runner.register_attempt(mut r, f, take entry, encoded, steps)
 }
 
@@ -482,7 +482,7 @@ pub fn journal_law_steps_reexecution(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let raw_mail: signup.Port = Welcome(channel.sender(unwrapped_services.mail))
     if let Ok(1u64) = signup.send_welcome(raw_mail, "ada@example.test") {} else { return false }
     let sent = law_begin(0u64, "ada@example.test", First)
-    if let Ready = law_control(mut law, first, Enter(result.unwrap(clone(sent)))) {} else { return false }
+    if let Ready = law_control(mut law, first, Enter(clone(sent))) {} else { return false }
     let receipt = signup.send_welcome(mail, "ada@example.test")
     let _ = law_control(mut law, first, law_receipt(take sent, receipt))
     let mut reopened = law_reopen(take law)
@@ -506,9 +506,9 @@ fn law_history_call(mut db: store.Db, stream: Bytes, position: u64) -> u64 waits
     let admitted = result.unwrap(store.admit(mut db, stream, position, store.request_digest(entry, request)))
     let Admitted(take token) = take admitted else { fail("step law: history setup") }
     let mut code_bytes: Bytes = list.new()
-    result.unwrap(list.fill(mut code_bytes, 16u64, 0u8))
-    let record = store.CallRecord(key: result.unwrap(clone(entry)), args: take request,
-        stream: result.unwrap(clone(stream)), revision: None, code: take code_bytes)
+    list.fill(mut code_bytes, 16u64, 0u8)
+    let record = store.CallRecord(key: clone(entry), args: take request,
+        stream: clone(stream), revision: None, code: take code_bytes)
     let plan = store.Plan(n_e: 65536u64, s_e: 65536u64, reply_max: 16u64)
     let served = store.serve(mut db, take token, plan, Some(take record),
         fn(mut tx: store.Tx) -> Result[Bytes, Bytes] { Ok(list.new()) })
@@ -570,9 +570,9 @@ pub fn journal_law_steps_typed_error(d: Dir, c: Clock, r: Random, tasks: Tasks) 
 
 fn law_release(mut law: LawDb, id: triggers.Id, revision: Bytes) -> () waits {
     let trigger_tables = view law.triggers
-    let selected: Bytes = result.unwrap(clone(revision))
+    let selected: Bytes = clone(revision)
     let released = store.run(mut law.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        let copied: Bytes = result.unwrap(clone(selected))
+        let copied: Bytes = clone(selected)
         triggers.release(mut tx, trigger_tables, id, Some(take copied))
     })
     law_commit(mut law.db, take released)
@@ -607,12 +607,12 @@ pub fn journal_law_steps_in_doubt(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let payment: signup.Port = Billing(channel.sender(services.payment))
     let charge = signup.ChargeRequest(id: StepId(run: id, index: 1u64), card: "scripted-card")
     if let Ready = law_control(mut law, first, Enter(law_begin(1u64, charge, First))) {} else { return false }
-    let original = signup.send_charge(payment, result.unwrap(clone(charge)))
+    let original = signup.send_charge(payment, clone(charge))
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
     if let Doubt = law_control(mut reopened, second, Enter(law_begin(1u64, charge, First))) {} else { return false }
     let lookup = law_begin(1u64, charge, Lookup)
-    if let Ready = law_control(mut reopened, second, Enter(result.unwrap(clone(lookup)))) {} else { return false }
+    if let Ready = law_control(mut reopened, second, Enter(clone(lookup))) {} else { return false }
     let found = signup.find_charge(payment, take charge)
     let answer = law_control(mut reopened, second, law_receipt(take lookup, found))
     let receipt: Result[u64, signup.WriteError] = law_replay(answer)
@@ -637,10 +637,9 @@ fn law_reply_after_cut(take waiting: WaitingReply) -> LateReply waits {
 }
 
 fn law_hold_reply(tasks: Tasks, a: triggers.Attempt, index: u64) -> (Sender[()], Task[LateReply]) {
-    let pipe: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
-    let (release, until) = result.unwrap(take pipe)
+    let (release, until): (Sender[()], Receiver[()]) = channel.new(1u64)
     let waiting = WaitingReply(attempt: a, index: index, until: take until)
-    let delayed = result.unwrap(task.spawn(tasks, bytes 65536u64, take waiting, law_reply_after_cut))
+    let delayed = task.spawn(tasks, bytes 65536u64, take waiting, law_reply_after_cut)
     (take release, take delayed)
 }
 
@@ -664,7 +663,7 @@ pub fn journal_law_steps_sealed(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let current = law_attempt(mut reopened, id, string.as_bytes("r1"))
     if let Doubt = law_control(mut reopened, current, Enter(law_begin(0u64, 6u64, First))) {} else { return false }
     let final_bytes = result.unwrap(encode(42u64))
-    law_finish(mut reopened, current, Returned(result.unwrap(clone(final_bytes))))
+    law_finish(mut reopened, current, Returned(clone(final_bytes)))
     if !law_late(mut reopened, release, take delayed) { return false }
     let saved = result.unwrap(triggers.outcome(store.snapshot(reopened.db), reopened.triggers, id))
     let effect: Result[Option[Result[u64, LawError]], store.Error] = recorded(reopened.db, StepId(run: id, index: 0u64))
@@ -684,7 +683,7 @@ pub fn journal_law_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let current = law_attempt(mut reopened, id, string.as_bytes("r1"))
     if let Doubt = law_control(mut reopened, current, Enter(law_begin(1u64, 6u64, First))) {} else { return false }
     let retry = law_begin(1u64, 6u64, Resend)
-    if let Ready = law_control(mut reopened, current, Enter(result.unwrap(clone(retry)))) {} else { return false }
+    if let Ready = law_control(mut reopened, current, Enter(clone(retry))) {} else { return false }
     if !law_late(mut reopened, release, take delayed) { return false }
     let answer: Result[u64, LawError] = Ok(22u64)
     let _ = law_control(mut reopened, current, law_receipt(take retry, answer))

@@ -10,17 +10,17 @@ fn hex_digit(b: u8) -> u8 {
 fn decode_hex(s: String) -> Bytes {
     let text = string.as_bytes(s)
     let n = list.len(text) / 2
-    let mut output: Bytes = result.unwrap(list.with_capacity(n))
+    let mut output: Bytes = list.with_capacity(n)
     for i in 0u64 .. n {
-        result.unwrap(list.push(mut output, (hex_digit(text[i * 2]) << 4) | hex_digit(text[i * 2 + 1])))
+        list.push(mut output, (hex_digit(text[i * 2]) << 4) | hex_digit(text[i * 2 + 1]))
     }
     output
 }
 
 fn tag_prefix(tag: Inline[u8, 32], n: u64) -> Bytes {
-    let mut out: Bytes = result.unwrap(list.with_capacity(n))
+    let mut out: Bytes = list.with_capacity(n)
     for i in 0u64 .. n {
-        result.unwrap(list.push(mut out, tag[i]))
+        list.push(mut out, tag[i])
     }
     out
 }

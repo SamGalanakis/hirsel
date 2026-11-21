@@ -127,6 +127,18 @@ impl Function<'_, '_, '_> {
         )?;
         Ok(())
     }
+    /// `Capacity(c)` for a refused admission (MEM-21).
+    pub fn record_capacity(&mut self, requested: Value, available: Value) -> Result<()> {
+        let site = self.site()?;
+        let u = Ty::Scalar(Scalar::U64);
+        self.c_call(
+            "hirsel_core_raise_capacity",
+            &[Ty::Ptr, u, u, u],
+            &[],
+            &[self.context, site, requested, available],
+        )?;
+        Ok(())
+    }
     pub fn guard(&mut self, condition: Value, kind: u8, target: Option<BlockId>) -> Result<()> {
         let key = (kind, target, self.anchor);
         let failed = if let Some(&block) = self.raise_lookup.get(&key) {

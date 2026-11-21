@@ -95,14 +95,6 @@ pub fn need(b: Bytes, at: u64, n: u64) -> Result[(), Stop] {
     Ok(())
 }
 
-/// An admission refusal as a Stop. Ex: `codec.full(list.push(mut xs, take x))?`
-pub fn full[E](r: Result[(), (Capacity, E)]) -> Result[(), Stop] {
-    match r {
-        Ok(()) => Ok(()),
-        Error((f, _)) => Error(Full(f))
-    }
-}
-
 fn admit(r: Result[(), Capacity]) -> Result[(), Stop] {
     match r {
         Ok(()) => Ok(()),
@@ -111,10 +103,8 @@ fn admit(r: Result[(), Capacity]) -> Result[(), Stop] {
 }
 
 fn put_byte(mut out: Bytes, x: u8) -> Result[(), Capacity] {
-    match list.push(mut out, x) {
-        Ok(()) => Ok(()),
-        Error((f, _)) => Error(f)
-    }
+    list.push(mut out, x)
+    Ok(())
 }
 
 pub fn put_unit(x: (), mut out: Bytes) -> Result[(), Capacity] {
@@ -156,6 +146,7 @@ pub fn take_u8(b: Bytes, mut at: u64) -> Result[u8, Stop] {
 
 pub fn put_u16(x: u16, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_le(mut out, x)
+    Ok(())
 }
 
 pub fn take_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
@@ -167,6 +158,7 @@ pub fn take_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
 
 pub fn put_u32(x: u32, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_le(mut out, x)
+    Ok(())
 }
 
 pub fn take_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
@@ -178,6 +170,7 @@ pub fn take_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
 
 pub fn put_u64(x: u64, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_le(mut out, x)
+    Ok(())
 }
 
 pub fn take_u64(b: Bytes, mut at: u64) -> Result[u64, Stop] {
@@ -219,6 +212,7 @@ pub fn take_i32(b: Bytes, mut at: u64) -> Result[i32, Stop] {
 pub fn put_i64(x: i64, mut out: Bytes) -> Result[(), Capacity] {
     let bits: u64 = int.truncate(x)
     list.put_word_le(mut out, bits)
+    Ok(())
 }
 
 pub fn take_i64(b: Bytes, mut at: u64) -> Result[i64, Stop] {
@@ -243,6 +237,7 @@ pub fn take_f32(b: Bytes, mut at: u64) -> Result[f32, Stop] {
 /// SEM-2's one NaN is 0x7ff8000000000000; any other NaN pattern is no f64's bytes.
 pub fn put_f64(x: f64, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_le(mut out, float.to_bits64(x))
+    Ok(())
 }
 
 pub fn take_f64(b: Bytes, mut at: u64) -> Result[f64, Stop] {
@@ -278,7 +273,7 @@ fn checked_count(n: u64) -> Result[u32, Capacity] {
 
 fn put_count(n: u64, mut out: Bytes) -> Result[(), Capacity] {
     let mut bits = checked_count(n)?
-    list.fill(mut out, 4, 0u8)?
+    list.fill(mut out, 4, 0u8)
     let end = list.len(out)
     for i in end - 4 .. end {
         out[i] = int.truncate(bits)
@@ -291,13 +286,14 @@ pub fn put_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
     let raw = string.as_bytes(x)
     let mut bits = checked_count(list.len(raw))?
     // Keep prefix and payload in one encoder; put_count's growth body prevents inlining.
-    list.fill(mut out, 4, 0u8)?
+    list.fill(mut out, 4, 0u8)
     let end = list.len(out)
     for i in end - 4 .. end {
         out[i] = int.truncate(bits)
         bits = bits >> 8
     }
     list.append(mut out, raw)
+    Ok(())
 }
 
 /// The count, then exactly that many bytes, copied into exact capacity and checked UTF-8.
@@ -307,11 +303,7 @@ pub fn take_string(b: Bytes, mut at: u64) -> Result[String, Stop] {
     if list.len(b) - at < n {
         return Error(Bad(Truncated(start)))
     }
-    let made: Result[Bytes, Capacity] = list.with_capacity(n)
-    let mut buf: Bytes = match take made {
-        Ok(buf) => take buf,
-        Error(f) => return Error(Full(f))
-    }
+    let mut buf: Bytes = list.with_capacity(n)
     let _ = list.append(mut buf, list.slice(b, at, at + n))
     match string.from_utf8(take buf) {
         Ok(s) => {
@@ -381,11 +373,8 @@ pub fn take_count(b: Bytes, mut at: u64, size: u64) -> Result[u64, Stop] {
 
 /// An empty list with room for exactly n elements.
 pub fn room[T](n: u64) -> Result[List[T], Stop] {
-    let made: Result[List[T], Capacity] = list.with_capacity(n)
-    match take made {
-        Ok(xs) => Ok(take xs),
-        Error(f) => Error(Full(f))
-    }
+    let made: List[T] = list.with_capacity(n)
+    Ok(take made)
 }
 
 /// The count, then the elements. A count no remaining bytes could hold is Truncated at
@@ -396,7 +385,7 @@ pub fn take_list[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[List[T], Stop]
     let mut i: u64 = 0
     while i < n {
         let x = take_with(b, mut at, c)?
-        full(list.push(mut xs, take x))?
+        list.push(mut xs, take x)
         i += 1
     }
     Ok(take xs)
@@ -416,7 +405,7 @@ pub fn put_map[K: key, V](m: Map[K, V], ck: Codec[K], cv: Codec[V], mut out: Byt
 pub fn take_map[K: key, V](b: Bytes, mut at: u64, ck: Codec[K], cv: Codec[V]) -> Result[Map[K, V], Stop] {
     let n = take_count(b, mut at, ck.smallest + cv.smallest)?
     let mut m: Map[K, V] = map.new()
-    admit(map.reserve(mut m, n))?
+    map.reserve(mut m, n)
     let mut i: u64 = 0
     while i < n {
         let key_at = at
@@ -425,7 +414,7 @@ pub fn take_map[K: key, V](b: Bytes, mut at: u64, ck: Codec[K], cv: Codec[V]) ->
             return Error(Bad(Duplicate(key_at)))
         }
         let v = take_with(b, mut at, cv)?
-        full(map.insert(mut m, take k, take v))?
+        map.insert(mut m, take k, take v)
         i += 1
     }
     Ok(take m)
@@ -585,7 +574,7 @@ fn put_bytes(xs: Bytes, mut out: Bytes) -> Result[(), Capacity] {
             } else {
                 n - i
             }
-            list.append(mut out, list.slice(xs, i, i + k))?
+            list.append(mut out, list.slice(xs, i, i + k))
             i += k
         }
     }
@@ -1006,7 +995,7 @@ fn body(mut s: Schema, kind: u8, n: u64) -> Result[bool, Capacity] {
         reference(mut s.cur, index)?
         return Ok(true)
     }
-    let mut key: Bytes = list.with_capacity(list.len(s.cur))?
+    let mut key: Bytes = list.with_capacity(list.len(s.cur))
     let _ = list.append(mut key, s.cur)
     push_own(mut s.keys, take key)?
     push_own(mut s.defs, list.new())?
@@ -1073,11 +1062,9 @@ pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Resul
     let def = s.open[list.len(s.open) - 1]
     let mut value: Bytes = list.new()
     (c.encoder)(v, mut value)?
-    let copied = string.from(path)?
-    match list.push(mut s.defaults, Default(def, field: take copied, value: take value)) {
-        Ok(()) => Ok(()),
-        Error((f, _)) => Error(f)
-    }
+    let copied = string.from(path)
+    list.push(mut s.defaults, Default(def, field: take copied, value: take value))
+    Ok(())
 }
 
 /// A removed field of the record being defined, where the field was; its type follows
@@ -1102,17 +1089,13 @@ pub fn variant(mut s: Schema, path: String, n: u64) -> Result[(), Capacity] {
 }
 
 fn push_own[T](mut xs: List[T], take x: T) -> Result[(), Capacity] {
-    match list.push(mut xs, take x) {
-        Ok(()) => Ok(()),
-        Error((f, _)) => Error(f)
-    }
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 fn push_plain(mut xs: List[u64], x: u64) -> Result[(), Capacity] {
-    match list.push(mut xs, x) {
-        Ok(()) => Ok(()),
-        Error((f, _)) => Error(f)
-    }
+    list.push(mut xs, x)
+    Ok(())
 }
 
 fn builder() -> Schema {
@@ -1130,13 +1113,13 @@ fn finish(s: Schema) -> Result[Bytes, Capacity] {
     for d in s.defs {
         size += list.len(d)
     }
-    let mut out: Bytes = list.with_capacity(size)?
+    let mut out: Bytes = list.with_capacity(size)
     put_byte(mut out, 3)?
     put_count(list.len(s.defs), mut out)?
     for d in s.defs {
-        list.append(mut out, d)?
+        list.append(mut out, d)
     }
-    list.append(mut out, s.cur)?
+    list.append(mut out, s.cur)
     Ok(take out)
 }
 
@@ -1377,7 +1360,7 @@ fn scan(all: Bytes, from: u64, end: u64, mut defs: List[u64]) -> Result[Result[u
     if n > end - from {
         return Ok(Error(from + 1))
     }
-    list.reserve(mut defs, n)?
+    list.reserve(mut defs, n)
     let mut i = from + 5
     let mut k: u64 = 0
     while k < n {
@@ -1433,10 +1416,7 @@ fn entries(b: Bytes, k: u64, mut out: List[(bool, u64, u64)]) -> Result[(), Capa
         let live = b[i] == 0
         let at_name = i + 1
         i = at_name + 4 + count_at(b, at_name)
-        match list.push(mut out, (live, at_name, i)) {
-            Ok(()) => {}
-            Error((f, _)) => return Error(f)
-        }
+        list.push(mut out, (live, at_name, i))
         if b[k] == 0 {
             i = skip(b, i)
         } else {
@@ -1469,10 +1449,8 @@ fn emit(mut p: Plan, x: u64) -> Result[(), Capacity] {
 }
 
 fn task(mut p: Plan, w: u64, r: u64, slot: u64) -> Result[(), Capacity] {
-    match list.push(mut p.tasks, (w, r, slot)) {
-        Ok(()) => Ok(()),
-        Error((f, _)) => Error(f)
-    }
+    list.push(mut p.tasks, (w, r, slot))
+    Ok(())
 }
 
 fn def_at(p: Plan, at: u64) -> u64 {
@@ -1560,7 +1538,7 @@ fn definition(mut p: Plan, wd: u64, rd: u64) -> Result[Result[u64, u64], Capacit
         return Ok(Error(wk))
     }
     let index = list.len(p.ops)
-    full_map(map.insert(mut p.memo, (wd, rd), index))?
+    map.insert(mut p.memo, (wd, rd), index)
     if kind == 2 {
         emit(mut p, 8)?
         emit(mut p, 0)?
@@ -1861,9 +1839,9 @@ pub fn resolve[T](c: Codec[T], writer: Bytes) -> Result[Result[Reader[T], Decode
         return Ok(Ok(Reader(c, same: true, ops: list.new(), defaults: list.new())))
     }
     let wlen = list.len(writer)
-    let mut all: Bytes = list.with_capacity(wlen + list.len(mine))?
-    list.append(mut all, writer)?
-    list.append(mut all, mine)?
+    let mut all: Bytes = list.with_capacity(wlen + list.len(mine))
+    list.append(mut all, writer)
+    list.append(mut all, mine)
     let mut wdefs: List[u64] = list.new()
     let wroot = match scan(all, 0, wlen, mut wdefs)? {
         Ok(root) => root,
@@ -1917,7 +1895,7 @@ fn grow(mut o: Out, lo: u64) -> Result[(), Stop] {
 fn chunk(mut o: Out, lo: u64) -> Result[u64, Stop] {
     let c = list.len(o.chunks)
     let hi = list.len(o.raw)
-    full(list.push(mut o.chunks, (lo, hi, SKIP)))?
+    list.push(mut o.chunks, (lo, hi, SKIP))
     let prev = o.last
     link(mut o, prev, c)
     o.last = c
@@ -1934,7 +1912,7 @@ fn run_bytes(o: Out, first: u64, last: u64, mut out: Bytes) -> Result[(), Stop] 
     let mut c = first
     loop {
         let (lo, hi, next) = o.chunks[c]
-        admit(list.append(mut out, list.slice(o.raw, lo, hi)))?
+        list.append(mut out, list.slice(o.raw, lo, hi))
         if c == last {
             return Ok(())
         }
@@ -1959,7 +1937,8 @@ fn frame(kind: u64, node: u64, n: u64, before: u64) -> Frame {
 }
 
 fn push_frame(mut stack: List[Frame], take f: Frame) -> Result[(), Stop] {
-    full(list.push(mut stack, take f))
+    list.push(mut stack, take f)
+    Ok(())
 }
 
 // One scalar or String at `at`, checked as its take does, copied to out.
@@ -1997,7 +1976,8 @@ fn leaf(code: u64, b: Bytes, mut at: u64, mut out: Bytes) -> Result[(), Stop] {
         need(b, at, width)?
         at += width
     }
-    admit(list.append(mut out, list.slice(b, start, at)))
+    list.append(mut out, list.slice(b, start, at))
+    Ok(())
 }
 
 fn word(mut o: Out, x: u64) -> Result[(), Stop] {
@@ -2078,7 +2058,7 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                     push_frame(mut stack, frame(5, v + 2, ops[v + 1], 0))?
                 }
             } else {
-                full(list.push(mut marks, (list.len(o.raw), at)))?
+                list.push(mut marks, (list.len(o.raw), at))
                 next = ops[next + 1]
                 starting = true
             }
@@ -2103,7 +2083,7 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                 if map.contains(f.keys, key) {
                     return Error(Bad(Duplicate(f.key_at)))
                 }
-                full(map.insert(mut f.keys, take key, ()))?
+                map.insert(mut f.keys, take key, ())
                 f.keyed = false
                 next = ops[f.node + 2]
                 starting = true
@@ -2135,12 +2115,12 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
         } else {
             // A reordered record: each writer field is a run of its own chunks.
             if f.i > 0 {
-                full(list.push(mut f.runs, o.last))?
+                list.push(mut f.runs, o.last)
             }
             if f.i < f.n {
                 let here = list.len(o.raw)
                 let first = chunk(mut o, here)?
-                full(list.push(mut f.runs, first))?
+                list.push(mut f.runs, first)
                 next = ops[f.node + 4 + 2 * f.i]
                 f.i += 1
                 starting = true
@@ -2163,7 +2143,7 @@ fn relink(ops: List[u64], node: u64, before: u64, runs: List[u64], defaults: Lis
         let source = ops[node + 4 + 2 * wn + q]
         if source >= DEFAULT {
             let lo = list.len(o.raw)
-            admit(list.append(mut o.raw, defaults[source - DEFAULT].value))?
+            list.append(mut o.raw, defaults[source - DEFAULT].value)
             let _ = chunk(mut o, lo)?
         } else {
             let prev = o.last
@@ -2210,16 +2190,14 @@ pub fn read_at[T](r: Reader[T], b: Bytes, start: u64) -> Result[Result[T, Decode
     let mut o = Out(raw: list.new(), chunks: list.new(), last: 0)
     let mut marks: List[(u64, u64)] = list.new()
     let mut out: Bytes = list.new()
-    let walked: Result[(), Stop] = match list.push(mut o.chunks, (0, 0, SKIP)) {
-        Ok(()) => match transcode(r.ops, r.defaults, b, start, mut o, mut marks) {
-            Ok(end) => if end != list.len(b) {
-                Error(Bad(Trailing(end)))
-            } else {
-                run_bytes(o, 0, o.last, mut out)
-            },
-            Error(e) => Error(e)
+    list.push(mut o.chunks, (0, 0, SKIP))
+    let walked: Result[(), Stop] = match transcode(r.ops, r.defaults, b, start, mut o, mut marks) {
+        Ok(end) => if end != list.len(b) {
+            Error(Bad(Trailing(end)))
+        } else {
+            run_bytes(o, 0, o.last, mut out)
         },
-        Error((f, _)) => Error(Full(f))
+        Error(e) => Error(e)
     }
     match walked {
         Ok(()) => {}
@@ -2313,6 +2291,7 @@ pub fn take_key_u8(b: Bytes, mut at: u64) -> Result[u8, Stop] {
 
 pub fn put_key_u16(x: u16, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_be(mut out, x)
+    Ok(())
 }
 
 pub fn take_key_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
@@ -2324,6 +2303,7 @@ pub fn take_key_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
 
 pub fn put_key_u32(x: u32, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_be(mut out, x)
+    Ok(())
 }
 
 pub fn take_key_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
@@ -2335,6 +2315,7 @@ pub fn take_key_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
 
 pub fn put_key_u64(x: u64, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_be(mut out, x)
+    Ok(())
 }
 
 pub fn take_key_u64(b: Bytes, mut at: u64) -> Result[u64, Stop] {
@@ -2393,7 +2374,7 @@ pub fn take_key_bool(b: Bytes, mut at: u64) -> Result[bool, Stop] {
 }
 
 pub fn put_key_bytes(x: Bytes, mut out: Bytes) -> Result[(), Capacity] {
-    list.reserve(mut out, list.len(x) + 2)?
+    list.reserve(mut out, list.len(x) + 2)
     for byte in x {
         put_byte(mut out, byte)?
         if byte == 0 {

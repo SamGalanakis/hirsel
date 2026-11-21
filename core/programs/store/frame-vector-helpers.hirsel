@@ -5,10 +5,10 @@ fn digit(x: u8) -> u8 {
 
 fn b(s: String) -> Bytes {
     let raw = string.as_bytes(s)
-    let mut out: Bytes = result.unwrap(list.with_capacity(list.len(raw) / 2u64))
+    let mut out: Bytes = list.with_capacity(list.len(raw) / 2u64)
     let mut i = 0u64
     while i < list.len(raw) {
-        result.unwrap(list.push(mut out, digit(raw[i]) * 16u8 + digit(raw[i + 1u64])))
+        list.push(mut out, digit(raw[i]) * 16u8 + digit(raw[i + 1u64]))
         i += 2u64
     }
     out
@@ -16,7 +16,7 @@ fn b(s: String) -> Bytes {
 
 fn one[T](take x: T) -> List[T] {
     let mut xs: List[T] = list.new()
-    result.unwrap(list.push(mut xs, take x))
+    list.push(mut xs, take x)
     xs
 }
 
@@ -28,7 +28,7 @@ fn row(chunk: u32) -> runner.Row {
     let mut payload: Bytes = list.new()
     for i in 0u64 .. 64u64 {
         let x: u8 = if chunk == 1953u32 && i >= 8u64 { 0u8 } else { int.narrow(i) }
-        result.unwrap(list.push(mut payload, x))
+        list.push(mut payload, x)
     }
     let c: std.codec.Codec[Bytes] = std.codec.of()
     result.unwrap(std.codec.encode(c, payload, mut value))
@@ -58,7 +58,7 @@ fn batch_caller() -> runner.Frame {
 fn batch_board() -> runner.Frame {
     let mut rows: List[runner.Row] = list.new()
     for i in 0u32 .. 1954u32 {
-        result.unwrap(list.push(mut rows, row(i)))
+        list.push(mut rows, row(i))
     }
     Batch(0x0102030405060708u64, one(7u32), take rows, list.new())
 }

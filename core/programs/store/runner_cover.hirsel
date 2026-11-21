@@ -42,7 +42,7 @@ fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
 // identity ++ fingerprint(A) ++ fingerprint(()), as a client builds a query's key.
 fn k_span() -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, code.identity(code.describe(span))))
+    list.append(mut key, code.identity(code.describe(span)))
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
     let unit: std.codec.Codec[()] = std.codec.of_unit()
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key))
@@ -72,7 +72,7 @@ fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
 
 fn drive(take d: D) -> () waits {
     let mut keys: List[Bytes] = list.new()
-    result.unwrap(list.push(mut keys, k_span()))
+    list.push(mut keys, k_span())
     let mut config = runner.wire_defaults(131072u64, 65536u64)
     config.q = 0u64
     config.budget = 262144u64
@@ -120,14 +120,10 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) ->
         fill(mut db, h.t, k, next)
         k = next
     }
-    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
-    let (head, inbox) = result.unwrap(take made)
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, covered: covered)
-    let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
-        Ok(take t) => take t,
-        Error(_) => return Error(Exit(status: 3)),
-    }
+    let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)
     match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),

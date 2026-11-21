@@ -1373,7 +1373,7 @@ fn code_identity_bytes_follow_prog9() {
     let cases: &[(&str, &str, &str)] = &[
         (
             "main",
-            "fn double(b: Bytes) -> Result[Bytes, Capacity] { let mut out: Bytes = list.new(); list.append(mut out, b)?; list.append(mut out, b)?; Ok(out) }",
+            "fn double(b: Bytes) -> Result[Bytes, Capacity] { let mut out: Bytes = list.new(); list.append(mut out, b); list.append(mut out, b); Ok(out) }",
             "app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]",
         ),
         // Modes: `view` is the default and is not written; `mut` and `take` are words.
@@ -1387,7 +1387,7 @@ fn code_identity_bytes_follow_prog9() {
         // `waits` stays, as a word after the result.
         (
             "main",
-            "fn add_one(take x: u64) -> u64 { x + 1 }\nfn double(tasks: Tasks) waits { let h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, add_one)); let _ = result.unwrap(task.join(take h)) }",
+            "fn add_one(take x: u64) -> u64 { x + 1 }\nfn double(tasks: Tasks) waits { let h = task.spawn(tasks, bytes 64, 41u64, add_one); let _ = result.unwrap(task.join(take h)) }",
             "app@1/main/double(core@1/core/Tasks)->()waits",
         ),
         // No generics list; a region generic is a root `in ^i`.

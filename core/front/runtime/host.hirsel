@@ -60,7 +60,7 @@ fn positioned_io(d: Dir) waits {
     let mut f = result.unwrap(host.open(d, "positioned", ReadWrite))
     result.unwrap(host.write_at(mut f, 4, string.as_bytes("Z")))
     result.unwrap(host.write(mut f, string.as_bytes("AB")))
-    let mut buf: Bytes = result.unwrap(list.with_capacity(8))
+    let mut buf: Bytes = list.with_capacity(8)
     if result.unwrap(host.read_at(mut f, 3, mut buf)) != 2 || buf[0] != 0 || buf[1] != b'Z' {
         fail("positioned read did not return the zero gap and written byte")
     }

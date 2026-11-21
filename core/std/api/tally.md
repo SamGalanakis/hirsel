@@ -18,7 +18,7 @@ with no event.
 in place, the `map.update` shape: f is given at the call site, so the engines inline
 it into the caller's loop, and the partial is a plain T that is never empty, so there
 is no tag test. A counter is `update(mut h, fn(mut n: u64) { n += 1 })`, a float sum
-`fn(mut s: f64) { s += x }`, a concatenation `fn(mut s: String) { result.unwrap(string.push(mut s, piece)) }`.
+`fn(mut s: f64) { s += x }`, a concatenation `fn(mut s: String) { string.push(mut s, piece) }`.
 `update` is the only way to change a partial. It is neither an event nor a
 cancellation point and touches nothing another task can see. A handle's cleanup sends
 `(index, partial)` once, so a handle dropped by a failing or cancelled task delivers

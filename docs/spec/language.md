@@ -319,7 +319,7 @@ fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwr
 ```hirsel
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
-fn f() -> i64 { ev(result.unwrap(box.new(Lit(6i64)))) }  // refused: LANG-11, at box.new: T is N
+fn f() -> i64 { ev(box.new(Lit(6i64))) }  // refused: LANG-11, at box.new: T is N
 ```
 ```hirsel unbuilt
 fn fits(s: String) -> bool { match (int.parse(s) : Result[u8, ParseError]) { Ok(_) => true, Error(_) => false } }

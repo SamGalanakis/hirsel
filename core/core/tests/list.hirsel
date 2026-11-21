@@ -1,11 +1,11 @@
-// list.fill laws (core.md): fill appends n copies of x after the existing elements; on
-// Capacity xs is unchanged. Elements are compared one by one against the spec, not with ==.
+// list.fill laws (core.md): fill appends n copies of x after the existing elements.
+// Elements are compared one by one against the spec, not with ==.
 // n = 0 appends nothing: one element too many would show as a second element.
 // expect: run fill_none() = true
 fn fill_none() -> bool {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 5))
-    result.unwrap(list.fill(mut xs, 0, 9))
+    list.push(mut xs, 5)
+    list.fill(mut xs, 0, 9)
     list.len(xs) == 1 && xs[0] == 5
 }
 
@@ -13,32 +13,10 @@ fn fill_none() -> bool {
 // expect: run fill_one() = true
 fn fill_one() -> bool {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 5))
-    result.unwrap(list.push(mut xs, 6))
-    result.unwrap(list.fill(mut xs, 1, 9))
+    list.push(mut xs, 5)
+    list.push(mut xs, 6)
+    list.fill(mut xs, 1, 9)
     list.len(xs) == 3 && xs[0] == 5 && xs[1] == 6 && xs[2] == 9
-}
-
-// A non-empty xs whose growth is refused keeps its length and elements. xs is made inside
-// the scope so its growth is charged there (MEM-26): 24 of 32 bytes are used, and 3 + 5
-// elements need 64. Made outside, the growth would go to the outer limit and succeed.
-// expect: run fill_refused_keeps_prefix() = true
-fn fill_refused_keeps_prefix() -> bool {
-    let r = bound bytes 32 {
-        let mut xs: List[u64] = result.unwrap(list.with_capacity(3))
-        result.unwrap(list.push(mut xs, 1))
-        result.unwrap(list.push(mut xs, 2))
-        result.unwrap(list.push(mut xs, 3))
-        let refused = match list.fill(mut xs, 5, 7) {
-            Error(_) => true,
-            Ok(()) => false,
-        }
-        refused && list.len(xs) == 3 && xs[0] == 1 && xs[1] == 2 && xs[2] == 3
-    }
-    match r {
-        Ok(b) => b,
-        Error(_) => false,
-    }
 }
 
 // Every element after a one-element prefix equals x, for u8 and i32 (u64 is above), with
@@ -48,10 +26,10 @@ fn fill_refused_keeps_prefix() -> bool {
 // expect: run fill_each_width() = true
 fn fill_each_width() -> bool {
     let mut b: Bytes = list.new()
-    result.unwrap(list.push(mut b, 3))
-    result.unwrap(list.fill(mut b, 37, 0xA5))
-    result.unwrap(list.fill(mut b, 37, 0))
-    result.unwrap(list.fill(mut b, 37, 0xFF))
+    list.push(mut b, 3)
+    list.fill(mut b, 37, 0xA5)
+    list.fill(mut b, 37, 0)
+    list.fill(mut b, 37, 0xFF)
     let mut ok = list.len(b) == 112 && b[0] == 3
     let mut i: u64 = 1
     while i < 112 {
@@ -66,9 +44,9 @@ fn fill_each_width() -> bool {
         i += 1
     }
     let mut w: List[i32] = list.new()
-    result.unwrap(list.push(mut w, 4))
-    result.unwrap(list.fill(mut w, 13, -7))
-    result.unwrap(list.fill(mut w, 13, -1))
+    list.push(mut w, 4)
+    list.fill(mut w, 13, -7)
+    list.fill(mut w, 13, -1)
     ok = ok && list.len(w) == 27 && w[0] == 4
     i = 1
     while i < 27 {
@@ -84,7 +62,7 @@ fn fill_each_width() -> bool {
 }
 
 fn fill_plain[T: plain](mut xs: List[T], n: u64, x: T) {
-    result.unwrap(list.fill(mut xs, n, x))
+    list.fill(mut xs, n, x)
 }
 
 // A tuple exercises the generic copy recipe, and a unit list needs no stores.
@@ -115,35 +93,41 @@ fn fill_generic_plain() -> bool {
 // engine-fact: List len and capacity ranges (core-form-883 FORM #113, LLVM !range)
 // expect: run length_bound_refused() = true
 fn length_bound_refused() -> bool {
-    let r = bound bytes 64 {
-        let words: Result[List[u64], Capacity] = list.with_capacity(2305843009213693952)
-        let below: Result[List[u64], Capacity] = list.with_capacity(2305843009213693951)
-        let pairs: Result[List[(u64, u64)], Capacity] = list.with_capacity(1152921504606846976)
-        let mut xs: List[u64] = list.new()
-        let grown = list.reserve(mut xs, 18446744073709551615)
-        let filled = list.fill(mut xs, 2305843009213693952, 0)
-        maximal(words) && match below {
-            Error(c) => c.requested == 18446744073709551608 && c.available == 64,
-            Ok(_) => false,
-        } && maximal(pairs) && refused_max(grown) && refused_max(filled) && list.len(xs) == 0
+    let mut xs: List[u64] = list.new()
+    let grown = bound bytes 64 {
+        list.try_reserve(mut xs, 18446744073709551615)
     }
-    match r {
-        Ok(b) => b,
-        Error(_) => false,
-    }
+    maximal(isolate(fn() -> Result[List[u64], Capacity] {
+        bound bytes 64 {
+            list.with_capacity(2305843009213693952)
+        }
+    })) && match refusal(isolate(fn() -> Result[List[u64], Capacity] {
+        bound bytes 64 {
+            list.with_capacity(2305843009213693951)
+        }
+    })) {
+        Some(c) => c.requested == 18446744073709551608 && c.available == 64,
+        None => false,
+    } && maximal(isolate(fn() -> Result[List[(u64, u64)], Capacity] {
+        bound bytes 64 {
+            list.with_capacity(1152921504606846976)
+        }
+    })) && maximal(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 64 {
+            let mut ys: List[u64] = list.new()
+            list.fill(mut ys, 2305843009213693952, 0)
+            list.len(ys)
+        }
+    })) && match grown {
+        Ok(Error(c)) => c.requested == 18446744073709551615 && c.available == 64,
+        _ => false,
+    } && list.len(xs) == 0 && list.capacity(xs) == 0
 }
 
-fn maximal[T](r: Result[List[T], Capacity]) -> bool {
-    match r {
-        Error(c) => c.requested == 18446744073709551615 && c.available == 64,
-        Ok(_) => false,
-    }
-}
-
-fn refused_max(r: Result[(), Capacity]) -> bool {
-    match r {
-        Error(c) => c.requested == 18446744073709551615 && c.available == 64,
-        Ok(()) => false,
+fn maximal[R](r: Result[Result[R, Causes], Capacity]) -> bool {
+    match refusal(r) {
+        Some(c) => c.requested == 18446744073709551615 && c.available == 64,
+        None => false,
     }
 }
 
@@ -151,11 +135,11 @@ fn refused_max(r: Result[(), Capacity]) -> bool {
 // expect: run copy_from_slice_list() = true
 fn copy_from_slice_list() -> bool {
     let mut src: List[(u8, u64)] = list.new()
-    result.unwrap(list.fill(mut src, 3, (4u8, 67u64)))
+    list.fill(mut src, 3, (4u8, 67u64))
     src[0] = (8u8, 3u64)
     src[2] = (6u8, 12u64)
     let mut dst: List[(u8, u64)] = list.new()
-    result.unwrap(list.fill(mut dst, 4, (10u8, 29u64)))
+    list.fill(mut dst, 4, (10u8, 29u64))
     let capacity = list.capacity(dst)
     list.copy_from_slice(mut dst, 1, list.slice(src, 1, 3))
     list.copy_from_slice(mut dst, 4, (list.new() : List[(u8, u64)]))
@@ -189,8 +173,8 @@ fn copy_from_slice_overflow() -> bool {
 fn copy_from_slice_unit_bounds() -> bool {
     let mut src: List[()] = list.new()
     let mut dst: List[()] = list.new()
-    result.unwrap(list.fill(mut src, 2, ()))
-    result.unwrap(list.fill(mut dst, 2, ()))
+    list.fill(mut src, 2, ())
+    list.fill(mut dst, 2, ())
     list.copy_from_slice(mut dst, 1, src)
     list.len(dst) == 2
 }
@@ -199,13 +183,13 @@ fn copy_from_slice_unit_bounds() -> bool {
 // numbers directly so matching read and write mistakes cannot cancel.
 // expect: run word_widths_unaligned() = true
 fn word_widths_unaligned() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(22))
-    result.unwrap(list.push(mut b, 0xff))
-    result.unwrap(list.put_word_le(mut b, 0x0201u16))
-    result.unwrap(list.put_word_be(mut b, 0x0304u16))
-    result.unwrap(list.put_word_le(mut b, 0x08070605u32))
-    result.unwrap(list.put_word_be(mut b, 0x090a0b0cu32))
-    result.unwrap(list.put_word_be(mut b, 0x0d0e0f1011121314u64))
+    let mut b: Bytes = list.with_capacity(22)
+    list.push(mut b, 0xff)
+    list.put_word_le(mut b, 0x0201u16)
+    list.put_word_be(mut b, 0x0304u16)
+    list.put_word_le(mut b, 0x08070605u32)
+    list.put_word_be(mut b, 0x090a0b0cu32)
+    list.put_word_be(mut b, 0x0d0e0f1011121314u64)
     let little16: u16 = list.word_le(b, 1)
     let big16: u16 = list.word_be(b, 3)
     let little32: u32 = list.word_le(b, 5)
@@ -232,17 +216,15 @@ fn word_widths_truncated() -> u16 {
 // four, also charged as eight, and there are zero bytes left to admit it.
 // expect: run word_widths_capacity() = true
 fn word_widths_capacity() -> bool {
-    let run = bound bytes 8 {
-        let mut b: Bytes = list.with_capacity(1)?
-        result.unwrap(list.push(mut b, 0xa5))
-        match list.put_word_be(mut b, 0x1234u16) {
-            Error(c) => c.requested == 8 && c.available == 0 && list.len(b) == 1 && list.capacity(b) == 1 && b[0] == 0xa5,
-            Ok(()) => false,
+    match refusal(isolate(fn() -> Result[(), Capacity] {
+        bound bytes 8 {
+            let mut b: Bytes = list.with_capacity(1)
+            list.push(mut b, 0xa5)
+            list.put_word_be(mut b, 0x1234u16)
         }
-    }
-    match run {
-        Ok(ok) => ok,
-        Error(_) => false,
+    })) {
+        Some(c) => c.requested == 8 && c.available == 0,
+        None => false,
     }
 }
 
@@ -260,4 +242,27 @@ fn inline_word_widths() -> bool {
 fn inline_word_widths_empty() -> u16 {
     let raw: Inline[u8, 0] =[0; 0]
     inline.word_le(raw, 0)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

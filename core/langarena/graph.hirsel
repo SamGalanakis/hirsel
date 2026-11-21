@@ -1,10 +1,8 @@
 // kostya/LangArena 3c9f84d benchmarks/graph_path.rs:11-316.
 // Adjacency lists, FIFO BFS, LIFO DFS, and lexicographic minimum (f,vertex) A*.
 fn append[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
-    match list.push(mut xs, take x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Capacity(c))
-    }
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 fn edge(mut adj: List[List[i32]], u: i32, v: i32) -> Result[(), helper.Error] {
@@ -19,13 +17,10 @@ fn bfs(adj: List[List[i32]]) -> Result[i32, helper.Error] {
     }
     let target: i32 = int.narrow(n - 1)
     let mut seen: List[bool] = list.new()
-    helper.mem(list.fill(mut seen, n, false))?
+    list.fill(mut seen, n, false)
     seen[0] = true
     let mut q: Deque[(i32, i32)] = deque.new()
-    match deque.push_back(mut q, (0, 0)) {
-        Ok(()) => {},
-        Error((c, _)) => return Error(Capacity(c))
-    }
+    deque.push_back(mut q, (0, 0))
     while let Some((v, d)) = deque.pop_front(mut q) {
         for neighbor in adj[int.narrow(v)] {
             if neighbor == target {
@@ -34,10 +29,7 @@ fn bfs(adj: List[List[i32]]) -> Result[i32, helper.Error] {
             let at: u64 = int.narrow(neighbor)
             if !seen[at] {
                 seen[at] = true
-                match deque.push_back(mut q, (neighbor, d + 1)) {
-                    Ok(()) => {},
-                    Error((c, _)) => return Error(Capacity(c))
-                }
+                deque.push_back(mut q, (neighbor, d + 1))
             }
         }
     }
@@ -51,7 +43,7 @@ fn dfs(adj: List[List[i32]]) -> Result[i32, helper.Error] {
     }
     let target: i32 = int.narrow(n - 1)
     let mut seen: List[bool] = list.new()
-    helper.mem(list.fill(mut seen, n, false))?
+    list.fill(mut seen, n, false)
     let mut stack: List[(i32, i32)] = list.new()
     append(mut stack, (0i32, 0i32))?
     let mut best: i32 = 2147483647
@@ -86,15 +78,12 @@ fn astar(adj: List[List[i32]]) -> Result[i32, helper.Error] {
     let target: i32 = int.narrow(n - 1)
     let mut scores: List[i32] = list.new()
     let mut best: List[i32] = list.new()
-    helper.mem(list.fill(mut scores, n, 2147483647))?
-    helper.mem(list.fill(mut best, n, 2147483647))?
+    list.fill(mut scores, n, 2147483647)
+    list.fill(mut best, n, 2147483647)
     scores[0] = 0
     best[0] = target
     let mut open: Heap[(i32, i32)] = heap.new()
-    match heap.push(mut open, (target, 0)) {
-        Ok(()) => {},
-        Error((c, _)) => return Error(Capacity(c))
-    }
+    heap.push(mut open, (target, 0))
     while let Some((_, v)) = heap.pop(mut open) {
         let vi: u64 = int.narrow(v)
         if v == target {
@@ -108,10 +97,7 @@ fn astar(adj: List[List[i32]]) -> Result[i32, helper.Error] {
                 let f = candidate + target - neighbor
                 if f < best[ni] {
                     best[ni] = f
-                    match heap.push(mut open, (f, neighbor)) {
-                        Ok(()) => {},
-                        Error((c, _)) => return Error(Capacity(c))
-                    }
+                    heap.push(mut open, (f, neighbor))
                 }
             }
         }
@@ -131,7 +117,7 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     }
     let count: i32 = int.narrow(vertices)
     let span: i32 = int.narrow(jump_len)
-    let mut adj: List[List[i32]] = helper.mem(list.with_capacity(int.narrow(vertices)))?
+    let mut adj: List[List[i32]] = list.with_capacity(int.narrow(vertices))
     for _ in 0 .. count {
         append(mut adj, list.new())?
     }

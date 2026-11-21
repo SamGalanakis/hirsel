@@ -17,10 +17,10 @@ fn release[T](take p: Pool[T]) -> u64 {
 }
 
 fn available() -> u64 {
-    let p: Result[List[u8], Capacity] = list.with_capacity(1000)
-    match p {
+    let mut p: List[u8] = list.new()
+    match list.try_reserve(mut p, 1000) {
         Error(c) => c.available,
-        Ok(_) => 0
+        Ok(()) => 0
     }
 }
 

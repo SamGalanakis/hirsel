@@ -131,23 +131,23 @@ fn far_out_of_range() -> u64 {
 // 65,536 fractional places make the net exponents 589,824 and 1, respectively.
 // expect: run exponent_after_long_fraction() = true
 fn exponent_after_long_fraction() -> bool {
-    let mut s = result.unwrap(string.with_capacity(65600))
-    result.unwrap(string.push(mut s, "0."))
+    let mut s = string.with_capacity(65600)
+    string.push(mut s, "0.")
     let block = "0000000000000000000000000000000000000000000000000000000000000000"
-    result.unwrap(string.push(mut s, result.unwrap(string.repeat(block, 1023))))
-    result.unwrap(string.push(mut s, string.slice(block, 0, 63)))
-    result.unwrap(string.push(mut s, "1e655360"))
+    string.push(mut s, string.repeat(block, 1023))
+    string.push(mut s, string.slice(block, 0, 63))
+    string.push(mut s, "1e655360")
     if error64(float.parse64(s)) != 3 || error32(float.parse32(s)) != 3 {
         return false
     }
     string.truncate(mut s, 65539)
-    result.unwrap(string.push(mut s, "65537"))
+    string.push(mut s, "65537")
     if bits64(float.parse64(s)) != 0x4024000000000000 {
         return false
     }
     // The interval of the first 19 digits straddles the binary64 midpoint.
     string.truncate(mut s, 65537)
-    result.unwrap(string.push(mut s, "100000000000000011102230246251565404236316680908203126e65536"))
+    string.push(mut s, "100000000000000011102230246251565404236316680908203126e65536")
     bits64(float.parse64(s)) == 0x3ff0000000000001
 }
 
@@ -313,13 +313,13 @@ fn nan_not_finite() -> bool {
 // agree with Rust's `{:.N}` and `{}` digits.
 fn fixed(x: f64, n: u64) -> String {
     let mut s = string.new()
-    result.unwrap(float.push_fixed64(mut s, x, n))
+    float.push_fixed64(mut s, x, n)
     s
 }
 
 fn shown(x: f64) -> String {
     let mut s = string.new()
-    result.unwrap(float.push_f64(mut s, x))
+    float.push_f64(mut s, x)
     s
 }
 
@@ -365,7 +365,7 @@ fn fixed_huge() -> bool {
 
 fn shown_json(x: f64) -> String {
     let mut out = string.new()
-    result.unwrap(float.push_json_f64(mut out, x))
+    float.push_json_f64(mut out, x)
     take out
 }
 
@@ -474,7 +474,7 @@ fn nigel_parse_numbers() -> bool {
             Error(_) => false,
         }
         if !pass32 || !pass64 {
-            fail(result.unwrap(string.from(input)))
+            fail(string.from(input))
         }
         at = end + 1
     }

@@ -1,12 +1,12 @@
 // Appended by the S2 driver. The reference uses the original read and admission order.
 fn original_prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
-    let mut out: Bytes = capacity(list.with_capacity(n))?
+    let mut out: Bytes = list.with_capacity(n)
     while list.len(out) < n {
-        let mut chunk: Bytes = capacity(list.with_capacity(n - list.len(out)))?
+        let mut chunk: Bytes = list.with_capacity(n - list.len(out))
         if disk_io(host.read(mut file, mut chunk))? == 0 {
             return Error(disk_fault("PREPARED", list.len(out), Truncated))
         }
-        capacity(list.append(mut out, chunk))?
+        list.append(mut out, chunk)
     }
     Ok(take out)
 }
@@ -54,7 +54,7 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
         return Error(ImportMalformed)
     }
     let ranges: List[ValidatedRange] = list.new()
-    let mut extra: Bytes = deploy_result(capacity(list.with_capacity(1)))?
+    let mut extra: Bytes = list.with_capacity(1)
     if scratch_result(disk_io(host.read(mut input.file, mut extra)))? != 0 {
         return Error(ImportMalformed)
     }
@@ -130,7 +130,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock) -> bool waits {
         },
         _ => return false,
     }
-    let mut fixture: Bytes = result.unwrap(list.with_capacity(217))
+    let mut fixture: Bytes = list.with_capacity(217)
     result.unwrap(list.fill(mut fixture, 217, 0u8))
     result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 1)))
     let short_export = result.unwrap(bound bytes 216 {

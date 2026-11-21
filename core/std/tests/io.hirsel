@@ -1,7 +1,7 @@
 fn input(d: Dir, s: String, cap: u64) -> io.Lines waits {
     result.unwrap(file.write(d, "input", string.as_bytes(s)))
     let f = result.unwrap(file.open(d, "input", Read))
-    result.unwrap(io.lines(File(take f), cap))
+    io.lines(File(take f), cap)
 }
 
 // cap4: first read abLFc, second defLF, final gh without terminator.
@@ -92,7 +92,7 @@ fn capacity_inside_utf8(d: Dir) -> bool waits {
 // expect: run reuse_without_allocation(dir) = true
 fn reuse_without_allocation(d: Dir) -> bool waits {
     let mut l = input(d, "ab\ncd\n", 4)
-    let mut line = result.unwrap(string.with_capacity(4))
+    let mut line = string.with_capacity(4)
     let r = bound bytes 0 {
         if !result.unwrap(io.read_line(mut l, mut line)) || line != "ab" {
             return false
@@ -118,29 +118,13 @@ fn zero_cap(d: Dir) -> bool waits {
     }
 }
 
-// Refused constructor hands the unchanged open file back, before reading.
-// expect: run lines_capacity_hands_back(dir) = true
-fn lines_capacity_hands_back(d: Dir) -> bool waits {
-    result.unwrap(file.write(d, "input", string.as_bytes("abc")))
-    let f = result.unwrap(file.open(d, "input", Read))
-    let r = bound bytes 0 {
-        io.lines(File(take f), 3)
-    }
-    let mut back = match take r {
-        Ok(Error((_, File(take returned)))) => take returned,
-        _ => return false
-    }
-    let mut b: Bytes = result.unwrap(list.with_capacity(3))
-    result.unwrap(file.read_into(mut back, mut b)) == 3 && b[0] == b'a'
-}
-
 // Each failure retains arbitrary bytes, including a UTF8 continuation. Host takes C3,
 // returns EIO, then accepts A9 78 exactly once. Final output is the original "éx".
 // host: first_write 1
 // expect: stdout "éx"
 // expect: run flush_keeps_utf8_suffix(out) = true
 fn flush_keeps_utf8_suffix(o: Stdout) -> bool waits {
-    let mut w = result.unwrap(io.out(o, 3))
+    let mut w = io.out(o, 3)
     result.unwrap(io.write(mut w, "éx"))
     match io.flush(mut w) {
         Error(e) => {
@@ -168,7 +152,7 @@ fn flush_keeps_utf8_suffix(o: Stdout) -> bool waits {
 // expect: stdout "abcdef"
 // expect: run out_spans_buffers(out) = true
 fn out_spans_buffers(o: Stdout) -> bool waits {
-    let mut w = result.unwrap(io.out(o, 3))
+    let mut w = io.out(o, 3)
     result.unwrap(io.write(mut w, "ab"))
     result.unwrap(io.write(mut w, "cdef"))
     result.unwrap(io.flush(mut w))
@@ -180,7 +164,7 @@ fn out_spans_buffers(o: Stdout) -> bool waits {
 // expect: stdout "abc"
 // expect: run flush_zero_progress(out) = true
 fn flush_zero_progress(o: Stdout) -> bool waits {
-    let mut w = result.unwrap(io.out(o, 3))
+    let mut w = io.out(o, 3)
     result.unwrap(io.write(mut w, "abc"))
     match io.flush(mut w) {
         Error(e) => if e.written != 0 {
@@ -214,36 +198,15 @@ fn stderr_bytes_prefix(e: Stderr) -> bool waits {
     true
 }
 
-// cap3 input admits8, pending admission refuses at8; original file returned without read.
-// expect: run lines_second_capacity_hands_back(dir) = true
-fn lines_second_capacity_hands_back(d: Dir) -> bool waits {
-    result.unwrap(file.write(d, "input", string.as_bytes("abc")))
-    let f = result.unwrap(file.open(d, "input", Read))
-    let r = bound bytes 8 {
-        io.lines(File(take f), 3)
-    }
-    let mut back = match take r {
-        Ok(Error((c, File(take returned)))) => {
-            if c.requested != 8 || c.available != 0 {
-                return false
-            }
-            take returned
-        },
-        _ => return false
-    }
-    let mut b: Bytes = result.unwrap(list.with_capacity(3))
-    result.unwrap(file.read_into(mut back, mut b)) == 3 && b[0] == b'a'
-}
-
 // Invalid UTF8 remains inspectable but consumes its line; the next valid line is readable.
 // expect: run invalid_utf8_then_next(dir) = true
 fn invalid_utf8_then_next(d: Dir) -> bool waits {
     let mut raw: Bytes = list.new()
-    result.unwrap(list.fill(mut raw, 1, 255u8))
-    result.unwrap(list.append(mut raw, string.as_bytes("\nok\n")))
+    list.fill(mut raw, 1, 255u8)
+    list.append(mut raw, string.as_bytes("\nok\n"))
     result.unwrap(file.write(d, "input", raw))
     let f = result.unwrap(file.open(d, "input", Read))
-    let mut l = result.unwrap(io.lines(File(take f), 4))
+    let mut l = io.lines(File(take f), 4)
     let mut line = string.new()
     match io.read_line(mut l, mut line) {
         Error(NotUtf8) => {},
@@ -258,15 +221,18 @@ fn invalid_utf8_then_next(d: Dir) -> bool waits {
     result.unwrap(io.read_line(mut l, mut line)) && line == "ok"
 }
 
-// Out allocation refuses before the host sees a write.
+// Out allocation raises Capacity before the host sees a write.
 // expect: run out_capacity_returns_before_issue(out) = true
 fn out_capacity_returns_before_issue(o: Stdout) -> bool {
-    let res = bound bytes 0 {
-        io.out(o, 3)
-    }
-    match take res {
-        Ok(Error(c)) => c.requested == 8 && c.available == 0,
-        _ => false
+    let res = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let _ = io.out(o, 3)
+            0
+        }
+    })
+    match caught(take res) {
+        Some(c) => c.requested == 8 && c.available == 0,
+        None => false,
     }
 }
 
@@ -277,16 +243,16 @@ fn newline_word_positions(d: Dir) -> bool waits {
     for n in 0u64 .. 34u64 {
         let mut text = string.new()
         for _ in 0u64 .. n {
-            result.unwrap(string.push(mut text, "x"))
+            string.push(mut text, "x")
         }
-        result.unwrap(string.push(mut text, "\n\u{b}q\nabcdefghijklmnop\n"))
+        string.push(mut text, "\n\u{b}q\nabcdefghijklmnop\n")
         let cap: u64 = if n < 16 {
             16
         } else {
             n
         }
         let mut l = input(d, text, cap)
-        let mut line = result.unwrap(string.with_capacity(40))
+        let mut line = string.with_capacity(40)
         if !result.unwrap(io.read_line(mut l, mut line)) || string.byte_len(line) != n {
             return false
         }
@@ -330,7 +296,7 @@ fn word_capacity_boundary(d: Dir) -> bool waits {
 // expect: run word_reuse_without_allocation(dir) = true
 fn word_reuse_without_allocation(d: Dir) -> bool waits {
     let mut l = input(d, "abcdefghijklmnop\nqrstuvwxyz012345\n", 32)
-    let mut line = result.unwrap(string.with_capacity(32))
+    let mut line = string.with_capacity(32)
     let r = bound bytes 0 {
         if !result.unwrap(io.read_line(mut l, mut line)) || line != "abcdefghijklmnop" {
             return false
@@ -363,7 +329,7 @@ fn static_caller_needs_only_output_capacity(d: Dir) -> bool waits {
 // expect: stdout "abcdef"
 // expect: run whole_input_and_empty_at_full(out) = true
 fn whole_input_and_empty_at_full(out: Stdout) -> bool waits {
-    let mut w = result.unwrap(io.out(out, 4))
+    let mut w = io.out(out, 4)
     result.unwrap(io.write(mut w, "ab"))
     result.unwrap(io.write(mut w, "cd"))
     result.unwrap(io.write(mut w, ""))
@@ -379,13 +345,13 @@ fn whole_input_and_empty_at_full(out: Stdout) -> bool waits {
 // expect: run buffered_raw_lines(dir) = true
 fn buffered_raw_lines(d: Dir) -> bool waits {
     let mut raw: Bytes = list.new()
-    result.unwrap(list.push(mut raw, 255u8))
-    result.unwrap(list.append(mut raw, string.as_bytes("ab\nz")))
+    list.push(mut raw, 255u8)
+    list.append(mut raw, string.as_bytes("ab\nz"))
     result.unwrap(file.write(d, "input", raw))
     let f = result.unwrap(file.open(d, "input", Read))
-    let mut reader = result.unwrap(io.buffered_input(File(take f), 3))
+    let mut reader = io.buffered_input(File(take f), 3)
     let mut output: Bytes = list.new()
-    result.unwrap(list.push(mut output, b'!'))
+    list.push(mut output, b'!')
     if !result.unwrap(io.read_until_lf(mut reader, mut output)) || list.len(output) != 5 || output[0] != b'!' || output[1] != 255u8 || output[2] != b'a' || output[3] != b'b' || output[4] != b'\n' {
         return false
     }
@@ -393,4 +359,20 @@ fn buffered_raw_lines(d: Dir) -> bool waits {
         return false
     }
     !result.unwrap(io.read_until_lf(mut reader, mut output)) && list.len(output) == 6
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

@@ -62,15 +62,15 @@ fn protocol(b: Bytes) -> bool {
 }
 
 /// RFC 6455 section 1.3 accept value. O(key bytes), Capacity on allocation.
-/// Ex: `websocket.accept(string.as_bytes("dGhlIHNhbXBsZSBub25jZQ=="))?`.
-pub fn accept(key: Bytes) -> Result[Bytes, Capacity] {
+/// Ex: `websocket.accept(string.as_bytes("dGhlIHNhbXBsZSBub25jZQ=="))`.
+pub fn accept(key: Bytes) -> Bytes {
     let mut input: Bytes = list.new()
-    list.append(mut input, key)?
-    list.append(mut input, string.as_bytes("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))?
-    let digest = sha1.hash(input)?
+    list.append(mut input, key)
+    list.append(mut input, string.as_bytes("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+    let digest = sha1.hash(input)
     let mut out: Bytes = list.new()
-    base64.encode(digest, mut out)?
-    Ok(take out)
+    base64.encode(digest, mut out)
+    take out
 }
 
 fn server_checks(b: Bytes, h: http1.Head) -> Result[http1.Span, u16] {
@@ -120,82 +120,82 @@ fn route_checks(b: Bytes, h: http1.Head) -> Result[bool, u16] {
 /// Server upgrade. Returns the consumed head offset and the 101 response;
 /// b[end..] is initial frame input. Refused(status) is terminal; 426 requires
 /// `Sec-WebSocket-Version: 13`. O(head), at most 8192 bytes and 64 fields.
-/// Ex: `websocket.server(input)?`.
-pub fn server(b: Bytes) -> Result[Upgrade, Capacity] {
+/// Ex: `websocket.server(input)`.
+pub fn server(b: Bytes) -> Upgrade {
     let mut h = http1.head()
     match http1.request(b, mut h) {
-        Partial => return Ok(Waiting),
-        Bad => return Ok(Refused(400)),
-        TooLarge => return Ok(Refused(431)),
+        Partial => return Waiting,
+        Bad => return Refused(400),
+        TooLarge => return Refused(431),
         Complete => {}
     }
     server_head(b, h)
 }
 
 /// Upgrade a request whose complete head has already been parsed.
-pub fn server_head(b: Bytes, h: http1.Head) -> Result[Upgrade, Capacity] {
+pub fn server_head(b: Bytes, h: http1.Head) -> Upgrade {
     let key = match server_checks(b, h) {
         Ok(x) => x,
-        Error(status) => return Ok(Refused(status))
+        Error(status) => return Refused(status)
     }
-    match base64.decode(part(b, key))? {
+    match base64.decode(part(b, key)) {
         Some(decoded) => if list.len(decoded) != 16 {
-            return Ok(Refused(400))
+            return Refused(400)
         },
-        None => return Ok(Refused(400))
+        None => return Refused(400)
     }
     let offered = match route_checks(b, h) {
         Ok(value) => value,
-        Error(code) => return Ok(Refused(code))
+        Error(code) => return Refused(code)
     }
-    let accepted = accept(part(b, key))?
+    let accepted = accept(part(b, key))
     let mut out: Bytes = list.new()
-    list.append(mut out, string.as_bytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "))?
-    list.append(mut out, accepted)?
-    list.append(mut out, string.as_bytes("\r\n"))?
+    list.append(mut out, string.as_bytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "))
+    list.append(mut out, accepted)
+    list.append(mut out, string.as_bytes("\r\n"))
     if offered {
-        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.2\r\n"))?
+        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.2\r\n"))
     }
-    list.append(mut out, string.as_bytes("\r\n"))?
-    Ok(Upgraded(h.end, take out))
+    list.append(mut out, string.as_bytes("\r\n"))
+    Upgraded(h.end, take out)
 }
 
 /// Validates the client's bounded 101 response against its sent key. The
 /// only supported offer is hirsel.2; no extensions are offered. Ready also
 /// reports selection, so the caller decides whether a protocol is required. O(head).
-/// Ex: `websocket.client(input, key, true)?`.
-pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Result[Checked, Capacity] {
+/// Ex: `websocket.client(input, key, true)`.
+pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Checked {
     let mut h = http1.head()
     match http1.response(b, mut h) {
-        Partial => return Ok(Pending),
-        Bad => return Ok(Failed(400)),
-        TooLarge => return Ok(Failed(431)),
+        Partial => return Pending,
+        Bad => return Failed(400),
+        TooLarge => return Failed(431),
         Complete => {}
     }
     if h.status != 101 || h.version != 1 || !connection(b, h) || !is_field(b, h, "upgrade", "websocket") {
-        return Ok(Failed(400))
+        return Failed(400)
     }
     let s = match field(b, h, "sec-websocket-accept") {
         Ok(Some(s)) => s,
-        _ => return Ok(Failed(400))
+        _ => return Failed(400)
     }
-    if part(b, s) != accept(key)? {
-        return Ok(Failed(400))
+    if part(b, s) != accept(key) {
+        return Failed(400)
     }
     if field(b, h, "sec-websocket-extensions") != Ok(None) {
-        return Ok(Failed(400))
+        return Failed(400)
     }
     let selected = match field(b, h, "sec-websocket-protocol") {
         Ok(None) => false,
         Ok(Some(p)) => {
             if !offered_protocol || part(b, p) != string.as_bytes("hirsel.2") {
-                return Ok(Failed(400))
+                return Failed(400)
             }
             true
         },
-        Error(_) => return Ok(Failed(400))
+        Error(_) => return Failed(400)
     }
-    Ok(Ready(h.end, selected))
+    Ready(h.end, selected)
 }
 
 /// Builds a client request from exactly sixteen caller-supplied random bytes.
@@ -211,15 +211,15 @@ pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Result
         }
     }
     let mut out: Bytes = list.new()
-    list.append(mut out, string.as_bytes("GET /hirsel HTTP/1.1\r\nHost: "))?
-    list.append(mut out, host)?
-    list.append(mut out, string.as_bytes("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "))?
-    base64.encode(nonce, mut out)?
-    list.append(mut out, string.as_bytes("\r\n"))?
+    list.append(mut out, string.as_bytes("GET /hirsel HTTP/1.1\r\nHost: "))
+    list.append(mut out, host)
+    list.append(mut out, string.as_bytes("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "))
+    base64.encode(nonce, mut out)
+    list.append(mut out, string.as_bytes("\r\n"))
     if offer_protocol {
-        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.2\r\n"))?
+        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.2\r\n"))
     }
-    list.append(mut out, string.as_bytes("\r\n"))?
+    list.append(mut out, string.as_bytes("\r\n"))
     if list.len(out) > 8192 {
         return Ok(Error(431))
     }
@@ -457,11 +457,11 @@ fn length_check(mut d: Decoder) -> u16 {
     0
 }
 
-fn room(mut d: Decoder, arriving: u64) -> Result[(), Capacity] {
+fn room(mut d: Decoder, arriving: u64) {
     let needed = list.len(d.message) + arriving
     let cap = list.capacity(d.message)
     if needed <= cap {
-        return Ok(())
+        return
     }
     // Doubling from four keeps growth independent of how reads are split.
     // Each old block is released after copying into the admitted new block.
@@ -481,15 +481,14 @@ fn room(mut d: Decoder, arriving: u64) -> Result[(), Capacity] {
             chosen * 2
         }
     }
-    let mut b: Bytes = list.with_capacity(chosen)?
-    list.append(mut b, d.message)?
+    let mut b: Bytes = list.with_capacity(chosen)
+    list.append(mut b, d.message)
     let old = replace(mut d.message, take b)
-    Ok(())
 }
 
 // ADAPTED from tungstenite frame/mask.rs:25-48: checked unaligned u64
 // operations replace its unsafe aligned u32 view. phase follows read splits.
-fn append_masked(mut out: Bytes, input: Bytes, mask: Inline[u8, 4], phase: u64) -> Result[(), Capacity] {
+fn append_masked(mut out: Bytes, input: Bytes, mask: Inline[u8, 4], phase: u64) {
     let mut word: u64 = 0
     for i in 0u64 .. 8u64 {
         let x: u64 = int.widen(mask[(phase + i) % 4])
@@ -498,14 +497,13 @@ fn append_masked(mut out: Bytes, input: Bytes, mask: Inline[u8, 4], phase: u64) 
     let n = list.len(input)
     let mut i: u64 = 0
     while n - i >= 8 {
-        list.put_word_le(mut out, list.word_le(input, i) ^ word)?
+        list.put_word_le(mut out, list.word_le(input, i) ^ word)
         i += 8
     }
     while i < n {
         let _ = list.push(mut out, input[i] ^ mask[(phase + i) % 4])
         i += 1
     }
-    Ok(())
 }
 
 fn finish_frame(mut d: Decoder) -> Event {
@@ -546,16 +544,16 @@ fn finish_frame(mut d: Decoder) -> Event {
 /// never disturb fragmentation. Close/Reject make later calls Ended. O(bytes),
 /// storage grows from arrival, never the declared length. Capacity preserves
 /// the current frame and cursor so the caller can close the connection.
-/// Ex: `websocket.next(mut decoder, input, mut cursor)?`.
-pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity] {
+/// Ex: `websocket.next(mut decoder, input, mut cursor)`.
+pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Event {
     if d.ended {
-        return Ok(Ended)
+        return Ended
     }
     loop {
         if !d.ready {
             while d.have < d.need {
                 if cursor == list.len(b) {
-                    return Ok(Need)
+                    return Need
                 }
                 d.header[d.have] = b[cursor]
                 d.have += 1
@@ -563,13 +561,13 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
                 if d.have == 2 {
                     let code = header_check(mut d)
                     if code != 0 {
-                        return Ok(reject(mut d, code))
+                        return reject(mut d, code)
                     }
                 }
                 if d.have == d.length_end && d.have >= 2 {
                     let code = length_check(mut d)
                     if code != 0 {
-                        return Ok(reject(mut d, code))
+                        return reject(mut d, code)
                     }
                 }
             }
@@ -592,7 +590,7 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
                 d.control.data[d.received + i] = b[cursor + i] ^ mask
             }
         } else {
-            room(mut d, count)?
+            room(mut d, count)
             let start = list.len(d.message)
             let input = list.slice(b, cursor, cursor + count)
             if d.masked {
@@ -600,14 +598,14 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
                 for i in 0u64 .. 4u64 {
                     mask[i] = d.header[d.length_end + i]
                 }
-                append_masked(mut d.message, input, mask, d.received % 4)?
+                append_masked(mut d.message, input, mask, d.received % 4)
             } else {
-                list.append(mut d.message, input)?
+                list.append(mut d.message, input)
             }
             if d.text {
                 let checked = validate_fragment(d.utf8, list.slice(d.message, start, list.len(d.message)))
                 let Some(validated) = checked else {
-                    return Ok(reject(mut d, 1007))
+                    return reject(mut d, 1007)
                 }
                 d.utf8 = validated
             }
@@ -615,7 +613,7 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
         d.received += count
         cursor += count
         if d.received != d.length {
-            return Ok(Need)
+            return Need
         }
         if d.opcode >= 8 {
             d.control.len = d.length
@@ -623,7 +621,7 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
         let e = finish_frame(mut d)
         match e {
             Need => {},
-            _ => return Ok(take e)
+            _ => return take e
         }
     }
 }
@@ -709,7 +707,7 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
         Some(x) => x,
         None => return Error(Capacity(requested: n, available: 0))
     }
-    list.reserve(mut out, needed)?
+    list.reserve(mut out, needed)
     let _ = list.push(mut out, opcode | if fin {
         128
     } else {
@@ -737,9 +735,9 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
         }
     }
     if masked {
-        append_masked(mut out, payload, mask, 0)?
+        append_masked(mut out, payload, mask, 0)
     } else {
-        list.append(mut out, payload)?
+        list.append(mut out, payload)
     }
     if opcode < 8 {
         e.fragmented = !fin
@@ -780,7 +778,7 @@ pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[Result[(), u16]
         Some(x) => x,
         None => return Error(Capacity(requested: n, available: 0))
     }
-    list.reserve(mut out, needed)?
+    list.reserve(mut out, needed)
     let _ = list.push(mut out, 130u8)
     let tag: u8 = if wide == 0 {
         int.narrow(n)
@@ -798,11 +796,10 @@ pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[Result[(), u16]
 }
 
 /// Appends the inline control payload, for the sole writer to encode as Pong
-/// or a Close echo. O(len), at most 125 bytes. Ex: `websocket.control(c, mut out)?`.
-pub fn control(c: Control, mut out: Bytes) -> Result[(), Capacity] {
-    list.reserve(mut out, c.len)?
+/// or a Close echo. O(len), at most 125 bytes. Ex: `websocket.control(c, mut out)`.
+pub fn control(c: Control, mut out: Bytes) {
+    list.reserve(mut out, c.len)
     for i in 0u64 .. c.len {
         let _ = list.push(mut out, c.data[i])
     }
-    Ok(())
 }

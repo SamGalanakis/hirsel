@@ -9,7 +9,7 @@ type Element {
 fn make_list(mut pool: List[Element], size: i64) -> Result[u64, Capacity] {
     if size == 0 { return Ok(NONE) }
     let node = list.len(pool)
-    result.capacity_only(list.push(mut pool, Element(value: size, next: NONE)))?
+    list.push(mut pool, Element(value: size, next: NONE))
     let rest = make_list(mut pool, size - 1)?
     pool[node].next = rest
     Ok(node)
@@ -84,7 +84,7 @@ pub fn towers_benchmark(count: u64) -> Result[u64, Capacity] {
     while size > 0 {
         size -= 1
         let disk = list.len(towers.disks)
-        result.capacity_only(list.push(mut towers.disks, Element(value: size, next: NONE)))?
+        list.push(mut towers.disks, Element(value: size, next: NONE))
         if !push(mut towers, disk, 0) { return Ok(0) }
     }
     Ok(if move_disks(mut towers, count, 0, 1) { towers.moves } else { 0 })

@@ -1,8 +1,8 @@
 // test-vectors
 // test-env: HIRSEL_SHA1=portable
 fn digest(b: Bytes, hex: Bytes) -> bool {
-    let d = result.unwrap(sha1.hash(b))
-    let alphabet = result.unwrap(b"0123456789abcdef")
+    let d = sha1.hash(b)
+    let alphabet = b"0123456789abcdef"
     for i in 0u64 .. 20u64 {
         if alphabet[int.widen(d[i] >> 4)] != hex[i * 2] || alphabet[int.widen(d[i] & 15)] != hex[i * 2 + 1] {
             return false
@@ -14,23 +14,23 @@ fn digest(b: Bytes, hex: Bytes) -> bool {
 // RFC 3174 section 7.3 TEST1/TEST2/TEST3/TEST4.
 // expect: run rfc3174_short() = true
 fn rfc3174_short() -> bool {
-    digest(result.unwrap(b"abc"), result.unwrap(b"a9993e364706816aba3e25717850c26c9cd0d89d")) && digest(result.unwrap(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), result.unwrap(b"84983e441c3bd26ebaae4aa1f95129e5e54670f1"))
+    digest(b"abc", b"a9993e364706816aba3e25717850c26c9cd0d89d") && digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", b"84983e441c3bd26ebaae4aa1f95129e5e54670f1")
 }
 
 // expect: run rfc3174_million() = true
 fn rfc3174_million() -> bool {
     let mut b: Bytes = list.new()
-    result.unwrap(list.fill(mut b, 1000000, b'a'))
-    digest(b, result.unwrap(b"34aa973cd4c4daa4f61eeb2bdbad27316534016f"))
+    list.fill(mut b, 1000000, b'a')
+    digest(b, b"34aa973cd4c4daa4f61eeb2bdbad27316534016f")
 }
 
 // expect: run rfc3174_repeat() = true
 fn rfc3174_repeat() -> bool {
     let mut b: Bytes = list.new()
     for i in 0u64 .. 10u64 {
-        result.unwrap(list.append(mut b, result.unwrap(b"0123456701234567012345670123456701234567012345670123456701234567")))
+        list.append(mut b, b"0123456701234567012345670123456701234567012345670123456701234567")
     }
-    digest(b, result.unwrap(b"dea356a2cddd90c7a7ecedc5ebb563934f460452"))
+    digest(b, b"dea356a2cddd90c7a7ecedc5ebb563934f460452")
 }
 
 // Source: NIST CAVP SHA1ShortMsg.rsp and SHA1LongMsg.rsp, CAVS 11.0, public domain.
@@ -49,10 +49,10 @@ fn cavp_sha1() -> bool {
 // unaligned input, and the lengths straddle both block and padding boundaries.
 // expect: run span_boundaries() = true
 fn span_boundaries() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(4102))
-    result.unwrap(list.fill(mut b, 5, 0))
+    let mut b: Bytes = list.with_capacity(4102)
+    list.fill(mut b, 5, 0)
     for i in 0u64 .. 4097 {
-        result.unwrap(list.push(mut b, int.truncate(i * 17 + 3)))
+        list.push(mut b, int.truncate(i * 17 + 3))
     }
     if !digest(list.slice(b, 5, 5), string.as_bytes("da39a3ee5e6b4b0d3255bfef95601890afd80709")) {
         return false

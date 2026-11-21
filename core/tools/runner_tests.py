@@ -279,7 +279,7 @@ def l12_module(path, variant, expect=None, revision=None):
               "// The fingerprint of ea's 32-byte code revision; 0 when it has none or another length.",
               'pub fn law_l12_revision() -> u64 {', '    match code.revision(code.describe(ea)) {',
               '        Some(r) => {', '            if list.len(r) != 32u64 {', '                return 0u64', '            }',
-              '            let mut b: Bytes = list.new()', '            result.unwrap(list.append(mut b, r))',
+              '            let mut b: Bytes = list.new()', '            list.append(mut b, r)',
               '            std.codec.fingerprint_of(b)', '        }', '        None => 0u64,', '    }', '}', '']
     if expect is not None:
         lines += ['@test', 'fn test_l12_describe() -> Result[(), ()] {',
@@ -593,7 +593,7 @@ fn probe_pre_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, fenced: bool) -> (
         Error(Unsupported(0x0070)) => want(fenced, "legacy rejected the unfenced generation"),
         Ok(take db) => {
             want(!fenced, "legacy recovered a fenced generation")
-            let (_sender, from): (Sender[legacy.runner.Req], Receiver[legacy.runner.Req]) = result.unwrap(channel.new(1u64))
+            let (_sender, from): (Sender[legacy.runner.Req], Receiver[legacy.runner.Req]) = channel.new(1u64)
             let mail = result.unwrap(legacy.runner.mailbox(1u64))
             let opened = legacy.runner.place_head(take db, code.describe(old_place), N_PLACE, code.describe(old_migrate),
                 code.describe(old_handles), take from, take mail, tasks, 1048576u64)

@@ -81,11 +81,8 @@ fn if_let_tail() -> u64 {
 }
 
 fn copy_len(s: String) -> u64 {
-    if let Ok(t) = string.from(s) {
-        string.byte_len(t)
-    } else {
-        0
-    }
+    let t = string.from(s)
+    string.byte_len(t)
 }
 
 fn copy_fence() -> u64 {

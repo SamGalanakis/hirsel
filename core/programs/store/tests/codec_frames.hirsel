@@ -3,7 +3,7 @@ fn raw(s: String) -> Bytes {
     let input = string.as_bytes(s)
     let mut out: Bytes = list.new()
     for i in 0u64 .. list.len(input) / 2 {
-        result.unwrap(list.push(mut out, digit(input[i * 2]) * 16 + digit(input[i * 2 + 1])))
+        list.push(mut out, digit(input[i * 2]) * 16 + digit(input[i * 2 + 1]))
     }
     take out
 }
@@ -18,7 +18,7 @@ fn digit(x: u8) -> u8 {
 
 fn singleton[T](take x: T) -> List[T] {
     let mut xs: List[T] = list.new()
-    result.unwrap(list.push(mut xs, take x))
+    list.push(mut xs, take x)
     take xs
 }
 

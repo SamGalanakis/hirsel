@@ -16,7 +16,7 @@ pub opaque type Timestamp: key { secs: i64, nanos: u32 }
 pub opaque type Date: key { year: u16, month: u8, day: u8 }
 pub opaque type Civil: key { date: Date, hour: u8, minute: u8, second: u8, nanos: u32 }
 pub type Weekday: key = Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday
-pub type Error = Invalid(u64) | Range | Capacity(Capacity)
+pub type Error = Invalid(u64) | Range
 ```
 
 - `Timestamp` is an instant: seconds since 1970-01-01T00:00:00Z, ignoring leap seconds as
@@ -36,8 +36,7 @@ pub type Error = Invalid(u64) | Range | Capacity(Capacity)
   either parsed (so already in range) or written by the program.
 - `Invalid(i)` gives the byte offset of the first byte the grammar refuses. `Range` means
   the text is well formed but names a value outside its type, such as 2023-02-29, hour 24,
-  or a duration past `i64`. The capacity case carries Core's `Capacity` record,
-  which has no `key` bound.
+  or a duration past `i64`. A refused allocation raises Capacity rather than returning it.
 
 ## Decisions
 

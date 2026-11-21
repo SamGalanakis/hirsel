@@ -7,8 +7,8 @@ pub fn caller(_seed: (), supplied: Bytes) -> Result[store.Caller, ()] {
     std.sha256.add(mut hash, tag, 0u64, list.len(tag))
     std.sha256.add(mut hash, supplied, 0u64, list.len(supplied))
     let digest = std.sha256.finish(hash)
-    let mut subject: Bytes = result.unwrap(list.with_capacity(16u64))
-    for i in 0u64 .. 16u64 { result.unwrap(list.push(mut subject, digest[i])) }
+    let mut subject: Bytes = list.with_capacity(16u64)
+    for i in 0u64 .. 16u64 { list.push(mut subject, digest[i]) }
     Ok(store.Caller(issuer: 2u8, subject: take subject))
 }
 
@@ -17,7 +17,7 @@ pub fn binding() -> runner.Wire[()] {
 }
 
 pub fn credential(random: Random) -> Bytes {
-    let mut bytes_out: Bytes = result.unwrap(list.with_capacity(16u64))
+    let mut bytes_out: Bytes = list.with_capacity(16u64)
     host.random(random, mut bytes_out)
     bytes_out
 }

@@ -43,7 +43,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
             if name in ('mkdtemp', 'host-wait-cancel'):
                 string = next(s for s in sources if s['modules'] == ['string'])
                 adapted = scratch / 'string.hirsel'
-                adapted.write_text(Path(string['file']).read_text() + '\npub fn proof_temp_name() -> String { let b:Bytes = result.unwrap(list.with_capacity(32)); of_bytes(take b) }\n')
+                adapted.write_text(Path(string['file']).read_text() + '\npub fn proof_temp_name() -> String { let b:Bytes = list.with_capacity(32); of_bytes(take b) }\n')
                 string['file'] = str(adapted)
             inputs = scratch / 'inputs.json'
             inputs.write_text(json.dumps({'core': core, 'packages': [

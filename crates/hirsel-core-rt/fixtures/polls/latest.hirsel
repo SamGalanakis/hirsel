@@ -14,19 +14,19 @@ fn reader(take s:Input)->u64 waits {
  ok
 }
 fn start(tasks:Tasks,h:Latest[u64],done:Sender[u64])->(Task[u64],Sender[u64]) {
- let (go,go_rx):(Sender[u64],Receiver[u64])=result.unwrap(channel.new(1))
+ let (go,go_rx):(Sender[u64],Receiver[u64])=channel.new(1)
  let input=Input(h:latest.handle(h),go:take go_rx,done:channel.sender(done))
- (result.unwrap(task.spawn(tasks,bytes 4096,take input,reader)),take go)
+ (task.spawn(tasks,bytes 4096,take input,reader),take go)
 }
 // Two readers race the publisher; the schedule decides which root each read sees.
 pub fn main(tasks:Tasks)->Result[(),Exit] waits {
- let h=result.unwrap(latest.new(result.unwrap(arc.new(1u64))))
- let (done,done_rx):(Sender[u64],Receiver[u64])=result.unwrap(channel.new(2))
+ let h=latest.new(arc.new(1u64))
+ let (done,done_rx):(Sender[u64],Receiver[u64])=channel.new(2)
  let (a,b)={
   let (a,go_a)=start(tasks,h,done)
   let (b,go_b)=start(tasks,h,done)
   for v in 2u64 .. 5 {
-   latest.publish(h,result.unwrap(arc.new(v)))
+   latest.publish(h,arc.new(v))
    result.unwrap(channel.send(go_a,v))
    result.unwrap(channel.send(go_b,v))
   }

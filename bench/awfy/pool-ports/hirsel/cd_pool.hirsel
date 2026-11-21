@@ -200,7 +200,7 @@ fn put_motion(mut map: BucketMap, voxel: V2, m: Motion) -> Result[(), Capacity] 
     let node = red_black.find(map.tree, voxel, compare_voxels)
     let bucket = if node == 0 {
         let index = list.len(map.buckets)
-        result.capacity_only(list.push(mut map.buckets, Bucket(head: NONE, tail: NONE, count: 0)))?
+        list.push(mut map.buckets, Bucket(head: NONE, tail: NONE, count: 0))
         let _ = red_black.put(mut map.tree, voxel, index, compare_voxels)?
         index
     } else {
@@ -208,7 +208,7 @@ fn put_motion(mut map: BucketMap, voxel: V2, m: Motion) -> Result[(), Capacity] 
         index
     }
     let entry = list.len(map.entries)
-    result.capacity_only(list.push(mut map.entries, Entry(motion: m, next: NONE)))?
+    list.push(mut map.entries, Entry(motion: m, next: NONE))
     let head = map.buckets[bucket].head
     let tail = map.buckets[bucket].tail
     if head == NONE {
@@ -251,7 +251,7 @@ fn reduce(motions: List[Motion]) -> Result[(BucketMap, List[u64]), Capacity] {
     while node != 0 {
         let (_, bucket) = red_black.entry(map.tree, node)
         if map.buckets[bucket].count > 1 {
-            result.capacity_only(list.push(mut reduced, bucket))?
+            list.push(mut reduced, bucket)
         }
         node = red_black.next(map.tree, node)
     }
@@ -270,14 +270,14 @@ fn handle_frame(mut state: red_black.Tree[u64, V3], frame: List[Aircraft]) -> Re
             Some(p) => p,
             None => current
         }
-        result.capacity_only(list.push(mut motions, Motion(callsign: aircraft.callsign, from: previous, to: current)))?
+        list.push(mut motions, Motion(callsign: aircraft.callsign, from: previous, to: current))
     }
     let mut remove: List[u64] = list.new()
     let mut node = red_black.first(state)
     while node != 0 {
         let (callsign, _) = red_black.entry(state, node)
         if red_black.find(seen, callsign, compare_callsigns) == 0 {
-            result.capacity_only(list.push(mut remove, callsign))?
+            list.push(mut remove, callsign)
         }
         node = red_black.next(state, node)
     }
@@ -294,7 +294,7 @@ fn handle_frame(mut state: red_black.Tree[u64, V3], frame: List[Aircraft]) -> Re
             while j != NONE {
                 let second = map.entries[j].motion
                 if let Some(point) = intersection(first, second) {
-                    result.capacity_only(list.push(mut collisions, Collision(first: first.callsign, second: second.callsign, position: point)))?
+                    list.push(mut collisions, Collision(first: first.callsign, second: second.callsign, position: point))
                 }
                 j = map.entries[j].next
             }
@@ -310,8 +310,8 @@ fn simulate(size: u64, time: f64) -> Result[List[Aircraft], Capacity] {
     while i < size {
         let (sine, cosine) = float.sin_cos(time)
         let lane: f64 = float.from_int(i * 3)
-        result.capacity_only(list.push(mut frame, Aircraft(callsign: i, position: V3(x: time, y: cosine * 2.0 + lane, z: 10.0))))?
-        result.capacity_only(list.push(mut frame, Aircraft(callsign: i + 1, position: V3(x: time, y: sine * 2.0 + lane, z: 10.0))))?
+        list.push(mut frame, Aircraft(callsign: i, position: V3(x: time, y: cosine * 2.0 + lane, z: 10.0)))
+        list.push(mut frame, Aircraft(callsign: i + 1, position: V3(x: time, y: sine * 2.0 + lane, z: 10.0)))
         i += 2
     }
     Ok(take frame)

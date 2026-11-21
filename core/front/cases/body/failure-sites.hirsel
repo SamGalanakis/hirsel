@@ -82,9 +82,9 @@ fn site_of(cs: Causes) -> Option[Site] {
 }
 
 fn sites(tasks: Tasks) -> u64 waits {
-    let a = result.unwrap(task.spawn(tasks, bytes 64, "data", child))
-    let b = result.unwrap(task.spawn(tasks, bytes 64, "tail-message", child))
-    let c = result.unwrap(task.spawn(tasks, bytes 64, "data", other))
+    let a = task.spawn(tasks, bytes 64, "data", child)
+    let b = task.spawn(tasks, bytes 64, "tail-message", child)
+    let c = task.spawn(tasks, bytes 64, "data", other)
     let sa: Option[Site] = match task.join(take a) {
         Error(Failed(take cs)) => site_of(cs),
         _ => None

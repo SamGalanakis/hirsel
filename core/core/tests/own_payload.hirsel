@@ -8,9 +8,9 @@ type LayoutPayload = LayoutAssignment(String, Box[LayoutValue]) | LayoutVariable
 
 // expect: run own_payload_projects_and_clones() = true
 fn own_payload_projects_and_clones() -> bool {
-    let original_box = result.unwrap(box.new(LayoutValue(flag: true, count: 42, code: 3)))
+    let original_box = box.new(LayoutValue(flag: true, count: 42, code: 3))
     let assignment = LayoutAssignment("alpha", take original_box)
-    let copied: LayoutPayload = result.unwrap(clone(assignment))
+    let copied: LayoutPayload = clone(assignment)
     let variable = LayoutVariable("beta")
     match copied {
         LayoutAssignment(name, copied_box) => {

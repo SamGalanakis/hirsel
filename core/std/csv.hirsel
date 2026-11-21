@@ -11,7 +11,7 @@ pub type Field: key {
 
 pub type Next: key = Record(u64) | End | Need
 
-pub type Error = Invalid(u64) | NotUtf8(u64) | Capacity(Capacity)
+pub type Error = Invalid(u64) | NotUtf8(u64)
 
 pub opaque type Writer {
     d: Dialect,
@@ -52,8 +52,8 @@ fn line_end(text: Bytes, at: u64, eof: bool) -> Result[Next, Error] {
 /// Clears fields and scans the record at at. Record(next) advances past its line end.
 /// End means EOF at at. Need means re-offer the same at after appending input,
 /// including when a final CR could still be followed by LF.
-/// Fails: Invalid(i) at a grammar error, Capacity(c) on growth, Fail for an
-/// invalid delimiter, or Bounds when at exceeds len(text). After failure fields
+/// Fails: Invalid(i) at a grammar error, Fail for an invalid delimiter, or Bounds
+/// when at exceeds len(text). Raises Capacity on growth. After failure fields
 /// holds an unspecified prefix. Field spans borrow their meaning from text.
 /// Alloc: GROWTH of fields only. Cost: O(record length) per call. Grow the
 /// input buffer geometrically when retrying a long record.
@@ -122,9 +122,7 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
         if next == Need {
             return Ok(Need)
         }
-        if let Error((c, _)) = list.push(mut fields, Field(span: http1.Span(start, end: stop), quoted)) {
-            return Error(Capacity(c))
-        }
+        list.push(mut fields, Field(span: http1.Span(start, end: stop), quoted))
         if !more {
             return Ok(next)
         }
@@ -169,8 +167,7 @@ fn doubled(b: Bytes, i: u64, quoted: bool) -> bool {
 /// Appends a field's value, undoubling quotes for a quoted field. For raw bytes,
 /// use `list.slice(text, f.span.start, f.span.end)`.
 /// Fails: Bounds for a bad span, NotUtf8(i) at the first invalid scalar start,
-/// or Capacity(c). Validates and reserves before writing, so out is unchanged
-/// on failure. Alloc: GROWTH of out. Cost: O(span).
+/// with out unchanged. Raises Capacity. Validates and reserves before writing. Alloc: GROWTH of out. Cost: O(span).
 /// Ex: `csv.field_text(buf, fields[i], mut value)?`.
 pub fn field_text(text: Bytes, f: Field, mut out: String) -> Result[(), Error] {
     let b = list.slice(text, f.span.start, f.span.end)
@@ -189,9 +186,7 @@ pub fn field_text(text: Bytes, f: Field, mut out: String) -> Result[(), Error] {
             i += width
         }
     }
-    if let Error(c) = string.reserve(mut out, size) {
-        return Error(Capacity(c))
-    }
+    string.reserve(mut out, size)
     i = 0
     while i < n {
         let width = scalar_width(b[i])
@@ -216,10 +211,9 @@ pub fn writer(d: Dialect) -> Writer {
 
 /// Appends a delimiter after the first field, then value. Quotes fields
 /// containing delimiter, quote, CR or LF, and doubles each embedded quote.
-/// A sole empty field is quoted by end. Fails: Capacity(c), leaving out and w
-/// unchanged. Alloc: GROWTH of out, reserved before writing. Cost: O(len value).
-/// Ex: `csv.field(mut w, mut out, "a,b")?`.
-pub fn field(mut w: Writer, mut out: String, value: String) -> Result[(), Capacity] {
+/// A sole empty field is quoted by end. Raises Capacity. Alloc: GROWTH of out, reserved before writing. Cost: O(len value).
+/// Ex: `csv.field(mut w, mut out, "a,b")`.
+pub fn field(mut w: Writer, mut out: String, value: String) {
     let b = string.as_bytes(value)
     let n = list.len(b)
     let mut quoted = false
@@ -242,7 +236,7 @@ pub fn field(mut w: Writer, mut out: String, value: String) -> Result[(), Capaci
     } else {
         0
     }
-    string.reserve(mut out, prefix + wrapper + n + quotes)?
+    string.reserve(mut out, prefix + wrapper + n + quotes)
     if prefix != 0 {
         let code: u32 = int.widen(w.d.delimiter)
         let _ = string.push_char(mut out, option.unwrap(char.from_u32(code)))
@@ -269,30 +263,28 @@ pub fn field(mut w: Writer, mut out: String, value: String) -> Result[(), Capaci
     if w.fields < 2 {
         w.fields += 1
     }
-    Ok(())
 }
 
 /// Appends the configured line end, inserting `""` first for a sole empty
 /// field, then resets the writer for the next record. A zero-field record is
-/// an empty line. Fails: Capacity(c), leaving out and w unchanged.
+/// an empty line. Raises Capacity.
 /// Alloc: GROWTH of out. Cost: O(1) excluding growth.
-/// Ex: `csv.end(mut w, mut out)?`.
-pub fn end(mut w: Writer, mut out: String) -> Result[(), Capacity] {
+/// Ex: `csv.end(mut w, mut out)`.
+pub fn end(mut w: Writer, mut out: String) {
     let single_empty = w.fields == 1 && w.empty_first
     if w.d.crlf {
         string.push(mut out, if single_empty {
             "\"\"\r\n"
         } else {
             "\r\n"
-        })?
+        })
     } else {
         string.push(mut out, if single_empty {
             "\"\"\n"
         } else {
             "\n"
-        })?
+        })
     }
     w.fields = 0
     w.empty_first = false
-    Ok(())
 }

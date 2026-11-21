@@ -13,7 +13,7 @@ An offer may be declined; the runner requires `selected` through its own
 configuration. Unoffered protocols and every extension are refused. Preserve
 `input[end..]` as the initial frame input. `request` constructs the fixed
 `/hirsel` request. Refused 426 requires a `Sec-WebSocket-Version: 13` response
-header. All paths expose Capacity separately from protocol refusal.
+header. A refusal raises Capacity.
 
 `decoder` and `next` consume arbitrarily split input, stop at one event, and
 advance a caller-owned cursor. A Ping is immediate even inside a fragmented

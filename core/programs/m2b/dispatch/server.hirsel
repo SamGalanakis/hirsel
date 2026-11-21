@@ -4,6 +4,7 @@
 // solo cases run the server role alone against a spool the case fills itself
 // (core/corpus/m2b/dispatch_server/SPEC.md).
 const PERIOD_NS: u64 = 1000000
+
 const BUDGET_MS: u64 = 10000
 
 fn handlers() -> Result[m2b.spool.Registry, m2b.spool.Failure] {
@@ -27,10 +28,8 @@ fn reply_value(take r: Result[m2b.spool.Reply, m2b.spool.Failure]) -> u64 {
 
 fn text(s: String) -> Result[Bytes, m2b.spool.Failure] {
     let mut b: Bytes = list.new()
-    match list.append(mut b, string.as_bytes(s)) {
-        Ok(()) => Ok(b),
-        Error(c) => Error(Full(c)),
-    }
+    list.append(mut b, string.as_bytes(s))
+    Ok(b)
 }
 
 // Publishes frame as request 0, serves it, and reads back reply 0.
@@ -68,10 +67,7 @@ fn bad(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
         } else {
             frame[i]
         }
-        match list.push(mut cut, byte) {
-            Ok(()) => {},
-            Error((cap, _)) => return Error(Full(cap)),
-        }
+        list.push(mut cut, byte)
         i += 1
     }
     solo(d, c, cut)
@@ -101,12 +97,8 @@ fn served(take r: Result[u64, m2b.spool.Failure]) -> u64 {
 
 fn line(out: Stdout, v: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

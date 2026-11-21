@@ -1,9 +1,7 @@
 fn run(mut l: Log[u64]) -> Result[Result[u64, Causes], Capacity] {
     isolate(fn() -> u64 { let _ = log.append(l, 7u64); fail("x") })
 }
-pub fn main() -> Result[(), ()] { let l: Log[u64] = log.new()?; let _ = run(mut l); Ok(()) }
+pub fn main() -> Result[(), ()] { let l: Log[u64] = log.new(); let _ = run(mut l); Ok(()) }
 
-// expect: refuse LANG-18 at 4:53
-// expect: refuse OWN-5 at 4:77
-// expect: compared LANG-18 at 4:53 | core@1/core/Result[core@1/core/Log[u64], core@1/core/Capacity] | core@1/core/Result[(), ()]
-// expect: cause OWN-5 at 4:77 from 4:39
+// expect: refuse OWN-5 at 4:76
+// expect: cause OWN-5 at 4:76 from 4:39

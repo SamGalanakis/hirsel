@@ -19,7 +19,7 @@ fn overflowing_deadline(c: Clock) -> bool waits {
 }
 
 fn read_shared[S: shareable + send](read: fn(S) -> u64, take state: S) -> Result[u64, Capacity] {
-    let shared = result.capacity_only(arc.new(take state))?
+    let shared = arc.new(take state)
     Ok(read(shared))
 }
 

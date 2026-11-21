@@ -24,12 +24,9 @@ fn stamp(c: Clock, caller: runner.Caller, take n: u32) -> Result[u64, Capacity] 
 
 // v2.3's L4 case: an R of k bytes, whose encoding is 8 + k bytes more.
 fn grow(take k: u64) -> Result[String, Capacity] {
-    let mut b: Bytes = list.with_capacity(k)?
+    let mut b: Bytes = list.with_capacity(k)
     for _ in 0u64 .. k {
-        match list.push(mut b, 97u8) {
-            Ok(()) => (),
-            Error((c, _)) => return Error(c),
-        }
+        list.push(mut b, 97u8)
     }
     match string.from_utf8(take b) {
         Ok(take s) => Ok(take s),
@@ -49,7 +46,7 @@ fn e1(take x: u64) -> Result[u64, Capacity] {
 // code.identity and the std codec, not from the runner.
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, id))
+    list.append(mut key, id)
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
     key
@@ -64,12 +61,12 @@ fn u32_arg(x: u32) -> Bytes {
 fn string_arg(n: u64, trailing: bool) -> Bytes {
     let mut s: Bytes = list.new()
     for _ in 0u64 .. n {
-        result.unwrap(list.push(mut s, 97u8))
+        list.push(mut s, 97u8)
     }
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.put_string(result.unwrap(string.from_utf8(take s)), mut b))
     if trailing {
-        result.unwrap(list.push(mut b, 0u8))
+        list.push(mut b, 0u8)
     }
     b
 }
@@ -121,7 +118,7 @@ pub fn law_p01_call() -> bool {
         _ => false,
     }
     let mut five = u32_arg(4u32)
-    result.unwrap(list.push(mut five, 9u8))
+    list.push(mut five, 9u8)
     let trailing = match runner.call(r, tk, five) {
         Refused(Malformed(m)) => m.kind == 4u32 && m.at == 4u64,
         _ => false,
@@ -240,8 +237,8 @@ fn trip(c: std.codec.Codec[runner.Outcome], take o: runner.Outcome) -> bool {
 pub fn law_p15_types_roundtrip() -> bool {
     let c: std.codec.Codec[runner.Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
-    result.unwrap(list.push(mut b, 5u8))
-    result.unwrap(list.push(mut b, 7u8))
+    list.push(mut b, 5u8)
+    list.push(mut b, 7u8)
     let mut ok = trip(c, Returned(take b)) && trip(c, Failed(Raised(9u32)))
     ok = ok && trip(c, Failed(OutOfBytes(runner.Room(requested: 2u64, available: 1u64)))) && trip(c, Failed(OutOfTime(77u64)))
     ok = ok && trip(c, Failed(Gone)) && trip(c, Refused(NoEntry)) && trip(c, Refused(Malformed(runner.Bad(kind: 3u32, at: 11u64))))
@@ -249,7 +246,7 @@ pub fn law_p15_types_roundtrip() -> bool {
     ok = ok && trip(c, Refused(NotAllowed)) && trip(c, Refused(RequestMismatch)) && trip(c, Refused(HistoryUnavailable)) && trip(c, Abandoned) && trip(c, InDoubt)
     let dc: std.codec.Codec[runner.Described] = std.codec.of()
     let mut id: Bytes = list.new()
-    result.unwrap(list.push(mut id, 1u8))
+    list.push(mut id, 1u8)
     let mut out: Bytes = list.new()
     let d = runner.Described(kind: Transact, identity: take id, args: u32_arg(1u32), result: u32_arg(2u32))
     result.unwrap(std.codec.encode(dc, d, mut out))
@@ -266,9 +263,9 @@ pub fn law_p15_types_roundtrip() -> bool {
 
 fn place_branching(mut r: Reg) -> Result[(), runner.RegisterError] {
     runner.compute(mut r, code.describe(e0), 65536u64, runner.DEFAULT_STEPS)?
-    let scratch: Result[List[u64], Capacity] = list.with_capacity(8192u64)
-    match scratch {
-        Ok(_) => runner.compute(mut r, code.describe(e1), 65536u64, runner.DEFAULT_STEPS),
+    let mut scratch: List[u64] = list.new()
+    match list.try_reserve(mut scratch, 8192u64) {
+        Ok(()) => runner.compute(mut r, code.describe(e1), 65536u64, runner.DEFAULT_STEPS),
         Error(_) => Ok(()),
     }
 }
@@ -473,10 +470,7 @@ fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 
 fn return_child(take n: u64) -> u64 { n }
 fn granted_spawn(tasks: Tasks, caller: runner.Caller, take n: u64) -> Result[u64, Capacity] waits {
-    let h = match task.spawn(tasks, bytes 0u64, n, return_child) {
-        Ok(take h) => take h,
-        Error((c, _)) => return Error(c),
-    }
+    let h = task.spawn(tasks, bytes 0u64, n, return_child)
     match task.join(take h) { Ok(v) => Ok(v), _ => fail("granted child failed") }
 }
 

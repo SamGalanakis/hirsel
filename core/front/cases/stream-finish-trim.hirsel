@@ -24,9 +24,9 @@ fn go(trim: u64) -> u64 {
         region r {
             match make(r, trim) {
                 Ok(t) => {
-                    let after: Result[List[u64], Capacity] = list.with_capacity(8)
-                    match after {
-                        Ok(xs) => text.len(t) * 100 + list.capacity(xs),
+                    let mut xs: List[u64] = list.new()
+                    match list.try_reserve(mut xs, 8) {
+                        Ok(()) => text.len(t) * 100 + list.capacity(xs),
                         Error(_) => text.len(t) * 100 + 90
                     }
                 },

@@ -84,7 +84,7 @@ resource type Park {
 }
 
 fn parking_body(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
-    let ends: (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let ends: (Sender[u64], Receiver[u64]) = channel.new(1)
     let (take tx, take rx) = take ends
     let _ = result.unwrap(Park(tx: take tx, rx: take rx))
     (state, Some(1u64))

@@ -42,7 +42,7 @@ type Forest {
 pub fn swap_round_trip() -> u64 {
     let leaf: Swap[bool, u64] = Swap(a: true, b: 7u64, kids: list.new())
     let mut kids: List[Swap[bool, u64]] = list.new()
-    result.unwrap(list.push(mut kids, take leaf))
+    list.push(mut kids, take leaf)
     let mut root: Swap[u64, bool] = Swap(a: 4u64, b: false, kids: take kids)
     let popped_leaf = option.unwrap(list.pop(mut root.kids))
     if popped_leaf.a {
@@ -55,10 +55,10 @@ pub fn swap_round_trip() -> u64 {
 pub fn rotate_round_trip() -> u64 {
     let last: Rotate[bool, u64, u8] = Rotate(a: true, b: 7u64, c: 3u8, kids: list.new())
     let mut xs: List[Rotate[bool, u64, u8]] = list.new()
-    result.unwrap(list.push(mut xs, take last))
+    list.push(mut xs, take last)
     let middle: Rotate[u8, bool, u64] = Rotate(a: 2u8, b: true, c: 5u64, kids: take xs)
     let mut ys: List[Rotate[u8, bool, u64]] = list.new()
-    result.unwrap(list.push(mut ys, take middle))
+    list.push(mut ys, take middle)
     let mut root: Rotate[u64, u8, bool] = Rotate(a: 4u64, b: 1u8, c: false, kids: take ys)
     let mut popped_middle = option.unwrap(list.pop(mut root.kids))
     let popped_last = option.unwrap(list.pop(mut popped_middle.kids))
@@ -72,7 +72,7 @@ pub fn rotate_round_trip() -> u64 {
 pub fn reset_round_trip() -> u64 {
     let bar: Bar[List[bool]] = Bar(child: list.new())
     let mut xs: List[Bar[List[bool]]] = list.new()
-    result.unwrap(list.push(mut xs, take bar))
+    list.push(mut xs, take bar)
     let root: Reset[bool] = Reset(child: take xs)
     list.len(root.child)
 }

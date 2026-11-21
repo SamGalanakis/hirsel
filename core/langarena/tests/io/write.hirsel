@@ -1,5 +1,5 @@
 pub fn main(out: Stdout) -> Result[(), Exit] waits {
-    let mut writer = result.unwrap(std.io.out(out, 4096))
+    let mut writer = std.io.out(out, 4096)
     for _ in 0u64 .. 65536u64 {
         result.unwrap(std.io.write(mut writer, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.\n"))
     }

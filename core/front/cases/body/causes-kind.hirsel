@@ -27,8 +27,8 @@ fn inspect(cs: Causes, expected: String) -> Option[Site] {
 }
 
 pub fn main(tasks: Tasks) -> Result[(), Exit] {
-    let a = result.unwrap(task.spawn(tasks, bytes 64, "data", child))
-    let b = result.unwrap(task.spawn(tasks, bytes 64, "tail-message", child))
+    let a = task.spawn(tasks, bytes 64, "data", child)
+    let b = task.spawn(tasks, bytes 64, "tail-message", child)
     let one: Option[Site] = match task.join(take a) {
         Error(Failed(take cs)) => inspect(cs, "data"),
         _ => None

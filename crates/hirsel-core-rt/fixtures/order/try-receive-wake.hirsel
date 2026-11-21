@@ -11,9 +11,9 @@ fn child(take x: Rx) -> u64 waits {
     a * 10u64 + b
 }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     result.unwrap(channel.try_send(tx, 7u64))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, Rx(rx: take rx, out: out), child))
+    let h = task.spawn(tasks, bytes 4096, Rx(rx: take rx, out: out), child)
     result.unwrap(channel.send(tx, 9u64))
     result.unwrap(stdout.write(out, "s"))
     if result.unwrap(task.join(take h)) == 79u64 { Ok(()) } else { Error(Exit(status: 3u8)) }

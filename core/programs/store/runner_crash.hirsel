@@ -83,7 +83,7 @@ const N_PLACE: u64 = 1048576u64
 
 fn key_of(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, id))
+    list.append(mut key, id)
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
     let carried: std.codec.Codec[Result[u64, u32]] = std.codec.of()
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key))
@@ -172,13 +172,13 @@ fn expected(x: Pos) -> runner.Outcome {
 fn positions(scenario: View[String]) -> List[Pos] {
     let mut xs: List[Pos] = list.new()
     if scenario == "runner-order" {
-        result.unwrap(list.push(mut xs, Pos(from: 1u64, stream: 0u64, p: 1u64, body: 0u64, k: 5u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 2u64, k: 0u64)))
+        list.push(mut xs, Pos(from: 1u64, stream: 0u64, p: 1u64, body: 0u64, k: 5u64))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 2u64, k: 0u64))
     } else {
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 1u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 1u64, stream: 1u64, p: 0u64, body: 1u64, k: 2u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 3u64)))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64))
+        list.push(mut xs, Pos(from: 1u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64))
+        list.push(mut xs, Pos(from: 1u64, stream: 1u64, p: 0u64, body: 1u64, k: 2u64))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 3u64))
     }
     xs
 }
@@ -187,13 +187,13 @@ fn positions(scenario: View[String]) -> List[Pos] {
 fn resends(scenario: View[String]) -> (List[Pos], u64) {
     let mut xs: List[Pos] = list.new()
     if scenario == "runner-order" {
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 2u64, k: 0u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 5u64)))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 2u64, k: 0u64))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 5u64))
         (take xs, 1u64)
     } else {
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 3u64)))
-        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 1u64, p: 0u64, body: 1u64, k: 2u64)))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64))
+        list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 3u64))
+        list.push(mut xs, Pos(from: 0u64, stream: 1u64, p: 0u64, body: 1u64, k: 2u64))
         (take xs, 2u64)
     }
 }
@@ -218,7 +218,7 @@ type SecretClient: send {
 fn secret_client(take d: SecretClient) -> String waits {
     let SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: take post, token: take token) = take d
     let mut keys: List[Bytes] = list.new()
-    result.unwrap(list.push(mut keys, body_key(0u64)))
+    list.push(mut keys, body_key(0u64))
     let pair = wire_client.pair(tasks, n, c, r, Some(ingress.binding()), head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
     let (take wire, take server) = match take pair {
         Ok(take connected) => take connected,
@@ -247,14 +247,14 @@ fn secret_client(take d: SecretClient) -> String waits {
 
 pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net) -> Result[(), Exit] waits {
     let encoded = option.unwrap(args.get(argv, 0u64))
-    let token = option.unwrap(result.unwrap(std.base64.decode(string.as_bytes(encoded))))
+    let token = option.unwrap(std.base64.decode(string.as_bytes(encoded)))
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
     let cv: std.codec.Codec[u64] = std.codec.of()
     result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), token: take token)
-    let driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, secret_client))
+    let driving = task.spawn(tasks, bytes 33554432u64, take seed, secret_client)
     result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64))
     clean(result.unwrap(task.join(take driving)))
     let mut o = options()
@@ -270,9 +270,9 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
 }
 
 fn ack(out: Stdout, v: u64) waits {
-    let mut line = result.unwrap(string.with_capacity(32u64))
-    result.unwrap(string.push(mut line, "ACK "))
-    result.unwrap(string.push_u64(mut line, v))
+    let mut line = string.with_capacity(32u64)
+    string.push(mut line, "ACK ")
+    string.push_u64(mut line, v)
     result.unwrap(stdout.write(out, line))
 }
 
@@ -409,7 +409,7 @@ fn keyed(take done: List[runner.Done]) -> List[runner.KeyedDone] {
     let mut out: List[runner.KeyedDone] = list.new()
     for take d in done {
         let runner.Done(stream: stream, p: p, outcome: take outcome) = take d
-        result.unwrap(list.push(mut out, runner.KeyedDone(stream: u64_bytes(int.widen(stream)), p: p, outcome: take outcome)))
+        list.push(mut out, runner.KeyedDone(stream: u64_bytes(int.widen(stream)), p: p, outcome: take outcome))
     }
     out
 }
@@ -432,20 +432,20 @@ fn accept(take seed: Accept) -> () waits {
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
         let service = runner.wire_place_target(code.describe(place), random, Some(ingress.binding()), head, c, tasks, config, "crash fixture")
         let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, post, config, c))
-        result.unwrap(list.push(mut owners, take owner))
+        list.push(mut owners, take owner)
     }
     for take owner in owners { let _ = task.join(take owner) }
 }
 
 fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
     let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
-    let mut port = result.unwrap(string.from("PORT "))
-    result.unwrap(string.push_u64(mut port, int.widen(address.port)))
+    let mut port = string.from("PORT ")
+    string.push_u64(mut port, int.widen(address.port))
     result.unwrap(stdout.write(out, port))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = Accept(listener: take listener, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
-    let mut driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, accept))
+    let mut driving = task.spawn(tasks, bytes 33554432u64, take seed, accept)
     let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), DirectRequests(take inbox), take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
@@ -458,20 +458,20 @@ fn decode_fixture_token(text: View[String]) -> Option[Bytes] {
     let raw = string.as_bytes(text)
     want(list.len(raw) == 32u64, "runner_crash: invalid saved credential")
     let mut out: Bytes = list.new()
-    for i in 0u64 .. 16u64 { result.unwrap(list.push(mut out, nibble(raw[i * 2u64]) * 16u8 + nibble(raw[i * 2u64 + 1u64]))) }
+    for i in 0u64 .. 16u64 { list.push(mut out, nibble(raw[i * 2u64]) * 16u8 + nibble(raw[i * 2u64 + 1u64])) }
     Some(take out)
 }
 
 fn remember(out: Stdout, principal: Bytes) waits {
     let mut digits: Inline[u8, 64] = [0; 64]
     let mut b: Bytes = list.new()
-    result.unwrap(list.append(mut b, string.as_bytes("TOKEN ")))
+    list.append(mut b, string.as_bytes("TOKEN "))
     for byte in principal {
         digits[62] = b'0'
         let value: u64 = int.widen(byte)
         let _ = int.radix_digits(value, 16, mut digits)
-        result.unwrap(list.push(mut b, digits[62]))
-        result.unwrap(list.push(mut b, digits[63]))
+        list.push(mut b, digits[62])
+        list.push(mut b, digits[63])
     }
     result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take b))))
 }
@@ -481,10 +481,10 @@ fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sess
     let credential = match take principal { Some(take given) => take given, None => ingress.credential(r) }
     for _ in 0u64 .. sessions {
         let mut keys: List[Bytes] = list.new()
-        for body in 0u64 .. 3u64 { result.unwrap(list.push(mut keys, body_key(body))) }
-        let cn = result.unwrap(wire_client.connect(tasks, n, Addr(ip: V4(0x7f000001u32), port: port), c, r, keys, Some(result.unwrap(clone(credential))), std.wsock.defaults()))
+        for body in 0u64 .. 3u64 { list.push(mut keys, body_key(body)) }
+        let cn = result.unwrap(wire_client.connect(tasks, n, Addr(ip: V4(0x7f000001u32), port: port), c, r, keys, Some(clone(credential)), std.wsock.defaults()))
         remember(out, credential)
-        result.unwrap(list.push(mut connections, take cn))
+        list.push(mut connections, take cn)
     }
     client(Client(connections: take connections, calls: take calls, out: out, armed: armed))
 }
@@ -526,8 +526,8 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let codec: std.codec.Codec[Bytes] = std.codec.of_list()
     let mut old_previous: Bytes = list.new()
     let mut old_current: Bytes = list.new()
-    result.unwrap(list.append(mut old_previous, string.as_bytes("previous release")))
-    result.unwrap(list.append(mut old_current, string.as_bytes("current release")))
+    list.append(mut old_previous, string.as_bytes("previous release"))
+    list.append(mut old_current, string.as_bytes("current release"))
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
         if genesis { result.unwrap(store.close(take db)); return }
@@ -600,8 +600,8 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
             refused_open(d, c, r, tasks, Current(base + 1u64), N_PLACE + 1u64, base + 1u64, false)
         }
     }
-    let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
     let settings: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d, existing), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
@@ -609,7 +609,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
-    let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take seed, deadline_place))
+    let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("activation: no Ready") }
@@ -631,7 +631,7 @@ fn unreachable_handles(_catalog: store.Schema) -> Result[Hd, store.Error] {
 
 fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Selection, allowance: u64, v: u64, legacy: bool) -> () waits {
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
-    let (_sender, from): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(1u64))
+    let (_sender, from): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(1u64)
     let mail = result.unwrap(runner.mailbox(1u64))
     let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, code.describe(migrate),
         code.describe(unreachable_handles), DirectRequests(take from), take mail, tasks, 1048576u64)
@@ -654,7 +654,7 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
     if phase == "write" {
         let chosen: runner.Selection = if grow { Install } else { Current(0u64) }
-        let (_sender, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(1u64))
+        let (_sender, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(1u64)
         let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, code.describe(migrate),
             code.describe(unreachable_handles), DirectRequests(take inbox), result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
         match take attempted {
@@ -668,7 +668,7 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
 }
 
 fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> () waits {
-    let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
@@ -678,15 +678,15 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(ingress.binding()), triggers: None)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
-    let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take seed, deadline_place))
+    let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("runner-deadline: no Ready") }
     }
     let mut keys: List[Bytes] = list.new()
-    result.unwrap(list.push(mut keys, body_key(0u64)))
+    list.push(mut keys, body_key(0u64))
     let credential = ingress.credential(r)
-    let connection = result.unwrap(wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, Some(result.unwrap(clone(credential))), wire.socket))
+    let connection = result.unwrap(wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, Some(clone(credential)), wire.socket))
     remember(out, credential)
     result.unwrap(stdout.write(out, "FREEZE"))
     wire_client.send_frame(connection, Call(0u32, 0u64, 0u32, 10000u32, u64_bytes(9u64)))
@@ -777,7 +777,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
     if scenario == "runner-activation" || scenario == "runner-activation-genesis" {
-        activation_pairs(d, c, r, tasks, n, out, result.unwrap(string.from(phase)), option.unwrap(args.get(argv, 2u64)) == "new", scenario == "runner-activation-genesis")
+        activation_pairs(d, c, r, tasks, n, out, string.from(phase), option.unwrap(args.get(argv, 2u64)) == "new", scenario == "runner-activation-genesis")
         return Ok(())
     }
     if scenario == "runner-unavailable-genesis" || scenario == "runner-unavailable-install" {

@@ -101,7 +101,7 @@ fn explicit(mut tx: m2b.tx.Tx[m2b.table.Account], arg: i64) -> Result[u64, m2b.t
 fn starved(mut tx: m2b.tx.Tx[m2b.table.Account], arg: u64) -> Result[u64, m2b.tx.Abort] {
     let one = seen(tx, 1)?
     let room: Result[Result[u64, Capacity], Capacity] = bound bytes 0 {
-        let xs: List[u64] = list.with_capacity(arg)?
+        let xs: List[u64] = list.with_capacity(arg)
         Ok(list.len(xs))
     }
     match room {
@@ -142,7 +142,7 @@ fn digits[R](o: m2b.tx.Outcome[R], take reads: Log[u64]) -> u64 {
 // The task goes on: a transfer of 1 from 2 to 1 commits after whatever came before,
 // leaving 2 with `paid`.
 fn continues(mut t: m2b.table.Table[m2b.table.Account], paid: u64) -> Result[u64, Capacity] {
-    let reads: Log[u64] = log.new()?
+    let reads: Log[u64] = log.new()
     match m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
         transfer(mut tx, 2, 1, 1)
     })? {
@@ -157,7 +157,7 @@ fn continues(mut t: m2b.table.Table[m2b.table.Account], paid: u64) -> Result[u64
 
 // Runs body on t: the outcome's digits, then whether the table was left as b1/b2.
 fn case_of(mut t: m2b.table.Table[m2b.table.Account], body: scoped[view] fn(mut m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort], b1: i64, b2: i64) -> Result[u64, Capacity] {
-    let reads: Log[u64] = log.new()?
+    let reads: Log[u64] = log.new()
     let o = m2b.tx.run(mut t, reads, body)?
     let v = digits(o, take reads)
     Ok(v * 10 + holds(t, b1, b2))
@@ -223,7 +223,7 @@ pub fn refused_alloc() -> Result[u64, Capacity] {
 // (MEM-26) and the commit's reserve for the new key 5 is refused.
 fn full_in_bound() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let reads: Log[u64] = log.new()?
+    let reads: Log[u64] = log.new()
     let o = m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
         open(mut tx, 5)
     })?
@@ -270,7 +270,7 @@ pub fn bench(n: u64) -> Result[u64, Capacity] {
     while i < n {
         let from = i % 1000 + 1
         let to = (i * 7 + 3) % 1000 + 1
-        let reads: Log[u64] = log.new()?
+        let reads: Log[u64] = log.new()
         let o = if i % 10 == 9 {
             m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
                 poison(mut tx, from, to, 1)
@@ -400,12 +400,8 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

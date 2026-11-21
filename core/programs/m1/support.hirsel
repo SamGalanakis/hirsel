@@ -18,15 +18,17 @@ pub fn mem[T](take r: Result[T, Capacity]) -> Result[T, Error] {
 }
 
 pub fn push[T](mut xs: List[T], take x: T) -> Result[(), Error] {
-    mem(result.capacity_only(list.push(mut xs, take x)))
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), Error] {
-    mem(result.capacity_only(map.insert(mut m, take k, take v)))
+    map.insert(mut m, take k, take v)
+    Ok(())
 }
 
 pub fn mapped[T, U](xs: List[T], f: scoped fn(T) -> Result[U, Error]) -> Result[List[U], Error] {
-    let mut ys: List[U] = mem(list.with_capacity(list.len(xs)))?
+    let mut ys: List[U] = list.with_capacity(list.len(xs))
     for x in xs {
         push(mut ys, f(x)?)?
     }
@@ -51,11 +53,13 @@ pub fn put(out: Stdout, s: String) -> Result[(), Error] waits {
 }
 
 pub fn add(mut s: String, t: String) -> Result[(), Error] {
-    mem(string.push(mut s, t))
+    string.push(mut s, t)
+    Ok(())
 }
 
 pub fn num(mut s: String, n: u64) -> Result[(), Error] {
-    mem(string.push_u64(mut s, n))
+    string.push_u64(mut s, n)
+    Ok(())
 }
 
 pub fn number(s: String) -> Result[u64, Error] {
@@ -79,7 +83,7 @@ pub fn line(s: String, mut at: u64) -> View[String] in s {
 }
 
 pub fn name(prefix: String, n: u64, suffix: String) -> Result[String, Error] {
-    let mut s = mem(string.from(prefix))?
+    let mut s = string.from(prefix)
     num(mut s, n)?
     add(mut s, suffix)?
     Ok(take s)
@@ -88,7 +92,7 @@ pub fn name(prefix: String, n: u64, suffix: String) -> Result[String, Error] {
 pub fn admission(variant: String, site: String, requested: u64) -> Result[(), Error] {
     if let Some(s) = string.strip_prefix(variant, "capacity:") {
         if s == site {
-            let mut label = mem(string.from("Capacity@"))?
+            let mut label = string.from("Capacity@")
             add(mut label, site)?
             return Error(Error(exit: Exit(status: 3), label: take label, capacity: Some(Capacity(requested: if requested > 18446744073709551608 {
                 18446744073709551615
@@ -104,20 +108,16 @@ pub resource type Marker grant bytes 256 {
     release: String,
     events: Sender[String]
 } drop(m) {
-    match string.from(m.release) {
-        Ok(take s) => {
-            let _ = channel.try_send(m.events, take s)
-        },
-        Error(_) => fail("trace finalizer grant"),
-    }
+    let s = string.from(m.release)
+    let _ = channel.try_send(m.events, take s)
 }
 
 pub fn marker(tx: Sender[String], label: String) -> Result[Marker, Error] {
-    let mut acquired = mem(string.from("acquire="))?
+    let mut acquired = string.from("acquire=")
     add(mut acquired, label)?
-    let mut released = mem(string.from("release="))?
+    let mut released = string.from("release=")
     add(mut released, label)?
-    let owner = mem(result.capacity_only(Marker(release: take released, events: channel.sender(tx))))?
+    let owner = Marker(release: take released, events: channel.sender(tx)) ?=> |(c, _)| Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))
     match channel.try_send(tx, take acquired) {
         Ok(()) => {},
         Error(_) => fail("trace capacity")

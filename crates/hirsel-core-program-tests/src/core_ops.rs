@@ -86,7 +86,7 @@ fn channel_rows_preserve_values_charges_and_closed_errors() {
 fn spawn_adapts_scalar_place_and_unit_results_and_returns_refused_input() {
     let cases = [
         (
-            "fn child(take x: u64) -> u64 { x+1u64 }\nfn f(tasks: Tasks) -> u64 waits { let mut h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, child)); task.cancel(mut h); result.unwrap(task.join(take h)) }",
+            "fn child(take x: u64) -> u64 { x+1u64 }\nfn f(tasks: Tasks) -> u64 waits { let mut h = task.spawn(tasks, bytes 64, 41u64, child); task.cancel(mut h); result.unwrap(task.join(take h)) }",
             1000,
             eval::Outcome::Returned(vec![42]),
         ),
@@ -97,17 +97,17 @@ fn spawn_adapts_scalar_place_and_unit_results_and_returns_refused_input() {
             eval::Outcome::Returned(vec![760]),
         ),
         (
-            "fn child(take x: ()) {}\nfn f(tasks: Tasks) -> u64 waits { let h = result.unwrap(task.spawn(tasks, bytes 0, (), child)); result.unwrap(task.join(take h)); 7u64 }",
+            "fn child(take x: ()) {}\nfn f(tasks: Tasks) -> u64 waits { let h = task.spawn(tasks, bytes 0, (), child); result.unwrap(task.join(take h)); 7u64 }",
             1000,
             eval::Outcome::Returned(vec![7]),
         ),
         (
-            "type Pair: send { a: u64, b: u64 }\nfn child(take x: Pair) -> Pair { Pair(a:x.b,b:x.a) }\nfn f(tasks: Tasks) -> u64 waits { let h = result.unwrap(task.spawn(tasks, bytes 64, Pair(a:7u64,b:11u64), child)); let p = result.unwrap(task.join(take h)); p.a*100u64+p.b }",
+            "type Pair: send { a: u64, b: u64 }\nfn child(take x: Pair) -> Pair { Pair(a:x.b,b:x.a) }\nfn f(tasks: Tasks) -> u64 waits { let h = task.spawn(tasks, bytes 64, Pair(a:7u64,b:11u64), child); let p = result.unwrap(task.join(take h)); p.a*100u64+p.b }",
             1000,
             eval::Outcome::Returned(vec![1107]),
         ),
         (
-            "fn child(take x: u64) -> u64 { x+1u64 }\nfn f(tasks: Tasks) -> u64 waits { let h = result.unwrap(task.spawn(tasks, bytes 64, 18446744073709551615u64, child)); match task.join(take h) { Ok(_) => 0u64, Error(Failed(take causes)) => { let _ = take causes; 9u64 }, Error(Cancelled(_)) => 1u64 } }",
+            "fn child(take x: u64) -> u64 { x+1u64 }\nfn f(tasks: Tasks) -> u64 waits { let h = task.spawn(tasks, bytes 64, 18446744073709551615u64, child); match task.join(take h) { Ok(_) => 0u64, Error(Failed(take causes)) => { let _ = take causes; 9u64 }, Error(Cancelled(_)) => 1u64 } }",
             1000,
             eval::Outcome::Returned(vec![9]),
         ),
@@ -137,7 +137,7 @@ pub(crate) fn arc_share_refund_fold_source(share: bool) -> String {
         ""
     };
     format!(
-        "fn child(take x: u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\nfn folded(tasks: Tasks) -> u64 waits {{ let a = result.unwrap(arc.new(7u64)); let h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, child)); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); second - first }}\n"
+        "fn child(take x: u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\nfn folded(tasks: Tasks) -> u64 waits {{ let a = arc.new(7u64); let h = task.spawn(tasks, bytes 64, 41u64, child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); second - first }}\n"
     )
 }
 
@@ -161,8 +161,8 @@ fn arc_share_folds_a_pending_refund_like_any_owner_event() {
 #[test]
 fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
     let mut cases = vec![
-        ("fn f() -> u64 { box.unbox(result.unwrap(box.new(7u64))) }".to_owned(), 8, eval::Outcome::Returned(vec![7])),
-        ("fn f() -> u64 { box.unbox(result.unwrap(box.new(()))); 7u64 }".to_owned(), 0, eval::Outcome::Returned(vec![7])),
+        ("fn f() -> u64 { box.unbox(box.new(7u64)) }".to_owned(), 8, eval::Outcome::Returned(vec![7])),
+        ("fn f() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(), 0, eval::Outcome::Returned(vec![7])),
         ("fn f() -> u64 { let r = box.new(7u64); match take r { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }".to_owned(), 7, eval::Outcome::Returned(vec![22])),
         ("fn f() -> u64 { let r = bound bytes 0 { box.new(7u64) }; match take r { Ok(Error((e,x))) => e.requested+x, _ => 0u64 } }".to_owned(), 1000, eval::Outcome::Returned(vec![15])),
         // Resource R has a 16-byte block, but its holder in a channel is 8.
@@ -173,7 +173,7 @@ fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
     ];
     for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
         cases.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn f() -> u64 {{ let h = result.unwrap({module}.new(7u64)); let other = {module}.share(h); let h = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take h)) }}").replace("let h = match", "let last = match").replace("try_unwrap(take h))", "try_unwrap(take last))"),16,eval::Outcome::Returned(vec![7])));
-        cases.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn f() -> u64 {{ let b = result.unwrap(box.new(41u64)); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,eval::Outcome::Returned(vec![242341])));
+        cases.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn f() -> u64 {{ let b = box.new(41u64); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,eval::Outcome::Returned(vec![242341])));
     }
     for (source, limit, expected) in cases {
         let (index, modules) = canonical(&source);
@@ -242,7 +242,7 @@ fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
         result.unwrap(host.unlock(mut file));
         result.unwrap(host.close(take file));
         let mut reader = result.unwrap(host.open(d,"file",Read));
-        let mut b:Bytes = result.unwrap(list.with_capacity(4));
+        let mut b:Bytes = list.with_capacity(4);
         if result.unwrap(host.read(mut reader,mut b)) != 4u64 || list.len(b)!=4u64 { return 5u64 }
         if b[0]!=b'd' || b[3]!=b'a' { return 6u64 }
         if result.unwrap(host.read(mut reader,mut b)) != 0u64 { return 7u64 }
@@ -293,7 +293,7 @@ fn string_views_empty_carriers_and_unique_ids_admit_nothing() {
 #[test]
 fn generic_box_resource_moves_use_held_width_and_refund_both_nodes() {
     let source = r#"resource type R:send {a:u64,b:u64}
-fn boxed[T](take x:T)->Box[T] {result.unwrap(box.new(take x))}
+fn boxed[T](take x:T)->Box[T] {box.new(take x)}
 fn unboxed[T](take x:Box[T])->T {box.unbox(take x)}
 fn f()->u64 {
     let r=result.unwrap(R(a:7u64,b:11u64))
@@ -320,7 +320,7 @@ fn host_rename_and_sleep_rows_are_replayable_in_evaluator() {
         result.unwrap(host.close(take file))
         result.unwrap(host.rename(d, "old", "new"))
         let mut read = result.unwrap(host.open(d, "new", Read))
-        let mut b:Bytes = result.unwrap(list.with_capacity(2))
+        let mut b:Bytes = list.with_capacity(2)
         if result.unwrap(host.read(mut read, mut b)) != 2u64 { return 1u64 }
         result.unwrap(host.close(take read))
         let now = host.mono_ns(c)
@@ -350,13 +350,13 @@ type In:send { clock: Clock, h: Latest[u64] }
 fn number(x: u64) -> u64 { x }
 fn child(take s: In) waits {
     let In(clock: clock, h: h) = take s
-    latest.publish(h, result.unwrap(arc.new(2u64)))
+    latest.publish(h, arc.new(2u64))
     let now = host.mono_ns(clock)
     host.sleep_until(clock, now + 20_000_000u64)
 }
 fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
-    let h = result.unwrap(latest.new(result.unwrap(arc.new(1u64))))
-    let t = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, h: latest.handle(h)), child))
+    let h = latest.new(arc.new(1u64))
+    let t = task.spawn(tasks, bytes 4096, In(clock: clock, h: latest.handle(h)), child)
     let now = host.mono_ns(clock)
     host.sleep_until(clock, now + 60_000_000u64)
     let seen = number(latest.read(h))
@@ -376,8 +376,8 @@ fn child(take s: In) waits {
     host.sleep_until(clock, now + 20_000_000u64)
 }
 fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, tx: take tx), child))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, In(clock: clock, tx: take tx), child)
     let v = result.unwrap(channel.receive(rx))
     result.unwrap(task.join(take h))
     v
@@ -431,8 +431,8 @@ fn run_tasks(source: &str, entry: &str) -> eval::Report {
 #[test]
 fn log_boxed_list_append_and_finish_in_evaluator() {
     let source = r#"fn f() -> u64 {
-        let l:Log[u64] = result.unwrap(log.new())
-        result.unwrap(log.append(l, 7u64))
+        let l:Log[u64] = log.new()
+        log.append(l, 7u64)
         let xs = log.finish(take l)
         list.len(xs)
     }"#;
@@ -503,7 +503,7 @@ fn reader(take x: Input) -> (u64, ReadHalf) waits {
     let mut r = r0
     let mut empty: Bytes = list.new()
     let zero = result.unwrap(host.recv_bounded(mut r, mut empty, 0, Never))
-    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    let mut b: Bytes = list.with_capacity(1)
     let signal = match host.recv_bounded(mut r, mut b, 1, Never) { Error(Aborted) => if list.len(b) == 0 && zero == 0 { 7u64 } else { 0u64 }, _ => 0u64 }
     (signal, take r)
 }
@@ -515,14 +515,14 @@ fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
     let (cr, cw0) = net.split(take client)
     let mut cw = cw0
     let (sr, sw) = net.split(take server)
-    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, Input(r: take sr), reader))
+    let mut h = task.spawn(tasks, bytes 4096, Input(r: take sr), reader)
     host.sleep_until(c, 10)
     task.cancel(mut h)
     let payload = result.unwrap(b"x")
     let sent = result.unwrap(host.send_pair(mut cw, payload, string.as_bytes(""), Never))
     let (signal, r0) = result.unwrap(task.join(take h))
     let mut r = r0
-    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    let mut b: Bytes = list.with_capacity(1)
     let received = result.unwrap(host.recv_bounded(mut r, mut b, 1, At(c, 0)))
     if signal == 7 && sent == 1 && received == 1 && b[0] == 120u8 { 7u64 } else { 0u64 }
 }
@@ -561,18 +561,18 @@ fn prefix(n: Net, c: Clock) -> u64 waits {
     let socket = result.unwrap(host.connect(n, peer, Never))
     let child = result.unwrap(net.narrow(n, Tls(names: "alpha.test", ports: (443u16, 443u16), trust: SystemPin)))
     let mut offer: List[String] = list.new()
-    result.unwrap(list.push(mut offer, "h2"))
-    result.unwrap(list.push(mut offer, "http/1.1"))
+    list.push(mut offer, "h2")
+    list.push(mut offer, "http/1.1")
     let (r0, w0, h) = result.unwrap(tls.connect(child, take socket, "ALPHA.TEST.", System, offer, Never))
     let (a, b, c0, d) = h.peer
     if h.protocol != Some(1u64) || a != 72623859790382856u64 || b != 1230066625199609624u64 || c0 != 2387509390608836392u64 || d != 3544952156018063160u64 {
         return 1
     }
     let size = 1048576u64
-    let mut payload: Bytes = result.unwrap(list.with_capacity(size))
+    let mut payload: Bytes = list.with_capacity(size)
     for i in 0u64 .. 256u64 {
-        result.unwrap(list.push(mut payload, int.narrow(i)))
-        result.unwrap(list.fill(mut payload, 4095, 97u8))
+        list.push(mut payload, int.narrow(i))
+        list.fill(mut payload, 4095, 97u8)
     }
     let mut w = w0
     let mut sent = 0u64
@@ -602,7 +602,7 @@ fn prefix(n: Net, c: Clock) -> u64 waits {
     result.unwrap(host.send_pair(mut w, empty, empty, Never))
     close_writer(take w)
     let mut r = r0
-    let mut reply: Bytes = result.unwrap(list.with_capacity(1))
+    let mut reply: Bytes = list.with_capacity(1)
     let count = result.unwrap(host.recv_bounded(mut r, mut reply, 1, Never))
     if short && timed_out && count == 1 && reply[0] == 33u8 { 0u64 } else { 4u64 }
 }
@@ -620,7 +620,7 @@ fn handshake(take job: HandshakeJob) -> u64 waits {
 fn cancel(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
     let peer = Addr(ip: V4(2130706433u32), port: 443)
     let socket = result.unwrap(host.connect(n, peer, Never))
-    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, HandshakeJob(n: n, socket: take socket), handshake))
+    let mut h = task.spawn(tasks, bytes 4096, HandshakeJob(n: n, socket: take socket), handshake)
     host.sleep_until(c, 10)
     task.cancel(mut h)
     result.unwrap(task.join(take h))
@@ -769,11 +769,11 @@ fn f(n: Net, c: Clock) -> u64 waits {
     let (reader, writer, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, empty, Never))
     let mut r = take reader
     let mut w = take writer
-    let b = result.unwrap(string.into_bytes("BCD"))
+    let b = string.into_bytes("BCD")
     let s = result.unwrap(secret.seal(take b, "*.test"))
     let narrowed = result.unwrap(secret.narrow(s, "ALPHA.TEST."))
-    let before = result.unwrap(string.into_bytes("A"))
-    let after = result.unwrap(string.into_bytes("E"))
+    let before = string.into_bytes("A")
+    let after = string.into_bytes("E")
     match tls.send_secret(mut w, before, narrowed, after, At(c, host.mono_ns(c))) {
         Error(TimedOut) => {},
         _ => return 1,
@@ -786,7 +786,7 @@ fn f(n: Net, c: Clock) -> u64 waits {
         Error(Reset) => {},
         _ => return 3,
     }
-    let mut reply: Bytes = result.unwrap(list.with_capacity(1))
+    let mut reply: Bytes = list.with_capacity(1)
     if result.unwrap(host.recv_bounded(mut r, mut reply, 1, Never)) == 1 && reply[0] == 33u8 {
         0u64
     } else {

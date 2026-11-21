@@ -11,19 +11,32 @@
 // OWN-15: `mut x` writes the matched payload in place; the scrutinee keeps it.
 // Each value is counted by hand from the writes below.
 type Source = Text(String) | Count(u64)
-type Lines { input: Source, buffer: String }
+
+type Lines {
+    input: Source,
+    buffer: String
+}
+
 type Pair = Both(u64, u64) | Neither
+
 type Wrap = Inner(Option[u64]) | Bare
 
 fn bump(mut src: Source) {
     match src {
-        Text(mut s) => { let _ = string.push(mut s, "!"); }
-        Count(mut n) => { n += 1 }
+        Text(mut s) => {
+            let _ = string.push(mut s, "!");
+        }
+        Count(mut n) => {
+            n += 1
+        }
     }
 }
 
 fn size(src: Source) -> u64 {
-    match src { Text(s) => string.byte_len(s), Count(n) => n }
+    match src {
+        Text(s) => string.byte_len(s),
+        Count(n) => n
+    }
 }
 
 fn counted() -> u64 {
@@ -34,14 +47,14 @@ fn counted() -> u64 {
 }
 
 fn texted() -> u64 {
-    let mut src = Text(result.unwrap(string.from("ab")))
+    let mut src = Text(string.from("ab"))
     bump(mut src)
     size(src)
 }
 
 // A field beside the lent one stays usable.
 fn beside() -> u64 {
-    let mut l = Lines(input: Text(result.unwrap(string.from("a"))), buffer: string.new())
+    let mut l = Lines(input: Text(string.from("a")), buffer: string.new())
     match l.input {
         Text(mut s) => {
             let _ = string.push(mut l.buffer, "xyz");
@@ -55,64 +68,106 @@ fn beside() -> u64 {
 // The scrutinee's index is resolved once, and the element is written in place.
 fn indexed() -> u64 {
     let mut xs: List[Source] = list.new()
-    result.unwrap(list.push(mut xs, Count(1)))
-    result.unwrap(list.push(mut xs, Text(result.unwrap(string.from("ab")))))
-    if let Text(mut s) = xs[1] { s = result.unwrap(string.from("first")) }
+    list.push(mut xs, Count(1))
+    list.push(mut xs, Text(string.from("ab")))
+    if let Text(mut s) = xs[1] {
+        s = string.from("first")
+    }
     size(xs[1])
 }
 
 // Two fields of one variant do not overlap (OWN-9).
 fn both() -> u64 {
     let mut p = Both(1, 2)
-    match p { Both(mut a, mut b) => { a += 3; b += 5 }, Neither => {} }
-    match p { Both(a, b) => a + b + 1, Neither => 0 }
+    match p {
+        Both(mut a, mut b) => {
+            a += 3;
+            b += 5
+        },
+        Neither => {}
+    }
+    match p {
+        Both(a, b) => a + b + 1,
+        Neither => 0
+    }
 }
 
 fn long(src: Source) -> bool {
-    match src { Text(s) => string.byte_len(s) > 3, Count(_) => false }
+    match src {
+        Text(s) => string.byte_len(s) > 3,
+        Count(_) => false
+    }
 }
 
 // The guard reads the scrutinee: the loan begins only after it holds.
 fn guarded() -> u64 {
-    let mut src = Text(result.unwrap(string.from("abcd")))
+    let mut src = Text(string.from("abcd"))
     match src {
-        Text(mut s) if long(src) => { let _ = string.push(mut s, "!"); }
+        Text(mut s) if long(src) => {
+            let _ = string.push(mut s, "!");
+        }
         _ => {}
     }
     size(src)
 }
 
 fn boxed() -> u64 {
-    let mut b = result.unwrap(box.new(Count(7)))
-    match b { Count(mut n) => { n += 1 }, Text(_) => {} }
-    match b { Count(n) => n, Text(_) => 0 }
+    let mut b = box.new(Count(7))
+    match b {
+        Count(mut n) => {
+            n += 1
+        },
+        Text(_) => {}
+    }
+    match b {
+        Count(n) => n,
+        Text(_) => 0
+    }
 }
 
 fn scalar() -> u64 {
     let mut o: Option[u64] = Some(9)
-    match o { Some(mut n) => { n += 1 }, None => {} }
-    match o { Some(n) => n, None => 0 }
+    match o {
+        Some(mut n) => {
+            n += 1
+        },
+        None => {}
+    }
+    match o {
+        Some(n) => n,
+        None => 0
+    }
 }
 
 // A `mut` binding is a writable scrutinee for an inner match.
 fn nested() -> u64 {
     let mut w = Inner(Some(2))
     match w {
-        Inner(mut o) => match o { Some(mut n) => { n += 1 }, None => {} }
+        Inner(mut o) => match o {
+            Some(mut n) => {
+                n += 1
+            },
+            None => {}
+        }
         Bare => {}
     }
-    match w { Inner(Some(n)) => n, _ => 0 }
+    match w {
+        Inner(Some(n)) => n,
+        _ => 0
+    }
 }
 
-fn install(mut s: String) { s = result.unwrap(string.from("xyz")) }
+fn install(mut s: String) {
+    s = string.from("xyz")
+}
 
 // The place holds what was last installed through the binding (OWN-11).
 fn swapped() -> u64 {
-    let mut src = Text(result.unwrap(string.from("a")))
+    let mut src = Text(string.from("a"))
     let old = match src {
         Text(mut s) => {
             install(mut s);
-            replace(mut s, result.unwrap(string.from("abcdefg")))
+            replace(mut s, string.from("abcdefg"))
         }
         Count(_) => string.new()
     }

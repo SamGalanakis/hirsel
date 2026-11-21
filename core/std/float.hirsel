@@ -1432,8 +1432,8 @@ const POW5: Inline[(u64, u64), 651] =[(0xeef453d6923bd65a, 0x113faa2906a13b3f), 
 /// (`shortest64`), never in exponent form: "0.1", "1", "-0", "1000000000000000000000",
 /// "0.000001"; "NaN", "inf", "-inf". Fails: Error(c); s then holds a prefix of the text.
 /// Alloc: GROWTH of s only. Cost: O(digits of x).
-/// Ex: `float.push_f64(mut line, 0.1)?` appends "0.1"
-pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
+/// Ex: `float.push_f64(mut line, 0.1)` appends "0.1"
+pub fn push_f64(mut s: String, x: f64) {
     push_shortest(mut s, x, false)
 }
 
@@ -1442,7 +1442,7 @@ pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
 /// notation below 1e-5 or at or above 1e16. Nonfinite values append null.
 /// Fails: Error(c); s then holds a prefix of the text. Alloc: GROWTH of s only.
 /// Cost: O(digits).
-pub fn push_json_f64(mut s: String, x: f64) -> Result[(), Capacity] {
+pub fn push_json_f64(mut s: String, x: f64) {
     push_shortest(mut s, x, true)
 }
 
@@ -1451,7 +1451,7 @@ pub fn push_json_f64(mut s: String, x: f64) -> Result[(), Capacity] {
 // whole [. zeros fraction] [zeros] [.0] [e+-exponent]: 0.000ddd and d.ddd/dd.ddd split c
 // at a point, ddd000 keeps c whole and pads p zeros. A zero whole part (0.000ddd only)
 // goes out with its point as one "0." literal.
-fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
+fn push_shortest(mut s: String, x: f64, json: bool) {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
         let representation = if json {
@@ -1462,7 +1462,7 @@ fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
         return string.push(mut s, representation)
     }
     if bits >> 63 != 0 {
-        string.push(mut s, "-")?
+        string.push(mut s, "-")
     }
     let (c, p) = shortest64(x)
     if c == 0 {
@@ -1495,28 +1495,28 @@ fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
         fraction = c % scale
     }
     if whole != 0 {
-        string.push_u64(mut s, whole)?
+        string.push_u64(mut s, whole)
     }
     let zeros: u64 = if places != 0 {
         string.push(mut s, if whole == 0 {
             "0."
         } else {
             "."
-        })?
+        })
         places - decimal_len(fraction)
     } else if scientific {
         0
     } else {
         int.narrow(p)
     }
-    push_zeros(mut s, zeros)?
+    push_zeros(mut s, zeros)
     if places != 0 {
-        string.push_u64(mut s, fraction)?
+        string.push_u64(mut s, fraction)
     } else if json && !scientific {
-        string.push(mut s, ".0")?
+        string.push(mut s, ".0")
     }
     if !scientific {
-        return Ok(())
+        return
     }
     // serde_json 1.0.154 uses Zmij's signed exponent spelling.
     let exponent = point - 1
@@ -1524,7 +1524,7 @@ fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
         "e-"
     } else {
         "e+"
-    })?
+    })
     string.push_u64(mut s, int.narrow(if exponent < 0 {
         -exponent
     } else {
@@ -1541,15 +1541,15 @@ fn decimal_len(v: u64) -> u64 {
     n
 }
 
-fn push_zeros(mut s: String, n: u64) -> Result[(), Capacity] {
+fn push_zeros(mut s: String, n: u64) {
     let zeros = "00000000000000000000000000000000"
     let mut left = n
     while left > 32 {
-        string.push(mut s, zeros)?
+        string.push(mut s, zeros)
         left -= 32
     }
     if left == 0 {
-        return Ok(())
+        return
     }
     string.push(mut s, string.slice(zeros, 0, left))
 }
@@ -1560,14 +1560,14 @@ fn push_zeros(mut s: String, n: u64) -> Result[(), Capacity] {
 /// Fails: Error(c); s then holds a prefix of the text; Fail when the text length overflows
 /// u64. Alloc: the text (at most 310 + digits bytes), then the push into s.
 /// Cost: O(digits + digits of x).
-/// Ex: `float.push_fixed64(mut line, 0.125, 2)?` appends "0.12"
-pub fn push_fixed64(mut s: String, x: f64, digits: u64) -> Result[(), Capacity] {
+/// Ex: `float.push_fixed64(mut line, 0.125, 2)` appends "0.12"
+pub fn push_fixed64(mut s: String, x: f64, digits: u64) {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
         return string.push(mut s, special(bits))
     }
     if bits >> 63 != 0 {
-        string.push(mut s, "-")?
+        string.push(mut s, "-")
     }
     let (m, e) = parts(bits)
     if let Some(q) = fixed_scaled(m, e, digits) {
@@ -1576,7 +1576,7 @@ pub fn push_fixed64(mut s: String, x: f64, digits: u64) -> Result[(), Capacity] 
     push_fixed_decimal64(mut s, m, e, digits)
 }
 
-fn push_fixed_decimal64(mut s: String, m: u64, e: i64, digits: u64) -> Result[(), Capacity] {
+fn push_fixed_decimal64(mut s: String, m: u64, e: i64, digits: u64) {
     let d = exact(m, e)
     let whole: u64 = if d.count != 0 && d.point > 0 {
         int.narrow(d.point)
@@ -1596,8 +1596,8 @@ fn push_fixed_decimal64(mut s: String, m: u64, e: i64, digits: u64) -> Result[()
         Some(t) => t,
         None => fail("float.push_fixed64: text length overflows u64"),
     }
-    let mut o: Bytes = list.with_capacity(n)?
-    list.fill(mut o, n, b'0')?
+    let mut o: Bytes = list.with_capacity(n)
+    list.fill(mut o, n, b'0')
     if digits > 0 {
         o[1 + whole] = b'.'
     }
@@ -2705,14 +2705,14 @@ fn fixed_scaled(m: u64, e: i64, digits: u64) -> Option[u64] {
 }
 
 /// q / 10^digits with `digits` places, as push_fixed64 writes it.
-fn push_scaled(mut s: String, q: u64, digits: u64) -> Result[(), Capacity] {
+fn push_scaled(mut s: String, q: u64, digits: u64) {
     if digits == 0 {
         return string.push_u64(mut s, q)
     }
     let scale = POW10_U64[digits]
     let places = q % scale
-    string.push_u64(mut s, q / scale)?
-    string.push(mut s, ".")?
+    string.push_u64(mut s, q / scale)
+    string.push(mut s, ".")
     let mut width: u64 = 1
     while width < digits && places >= POW10_U64[width] {
         width += 1
@@ -2720,7 +2720,7 @@ fn push_scaled(mut s: String, q: u64, digits: u64) -> Result[(), Capacity] {
     if places == 0 {
         return string.push(mut s, string.slice("0000000000000000000", 0, digits))
     }
-    string.push(mut s, string.slice("0000000000000000000", 0, digits - width))?
+    string.push(mut s, string.slice("0000000000000000000", 0, digits - width))
     string.push_u64(mut s, places)
 }
 
@@ -2744,7 +2744,7 @@ fn place(q: u64, whole: u64) -> u64 {
     }
 }
 
-fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
+fn push_ascii(mut s: String, take o: Bytes) {
     match string.from_utf8(take o) {
         Ok(take t) => string.push(mut s, t),
         Error(_) => fail("float: formatted digits are ASCII"),

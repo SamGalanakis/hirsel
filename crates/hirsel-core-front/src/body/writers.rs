@@ -393,7 +393,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(
                 Inst::SetCase {
                     address: e,
-                    case: 1,
+                    case: 0,
                 },
                 n,
             );
@@ -1146,7 +1146,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let to = self.new_slot(PlaceTy::Declared(rid), n);
         let block = self.value(Ty::Ptr);
         let available = self.value(u64t);
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -1158,35 +1157,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: None,
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, block, null, n);
-        let (yes, refused, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, refused, n);
-        self.start(refused);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
         let from = self.address(AddressBase::Value(source), &[Step::Byte(start)], byte, n);
         let steps = [Step::Byte(head)];
@@ -1204,22 +1180,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
-        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
+        self.put_word(AddressBase::Address(to), &[], 0, block, n)?;
         if let Some((offset, w)) = locator {
             self.put_word(AddressBase::Value(block), &[], 0, bytes, n)?;
             self.put_word(AddressBase::Value(block), &[], 8, w, n)?;
-            self.put_word(AddressBase::Address(to), &ok, 8, offset, n)?;
+            self.put_word(AddressBase::Address(to), &[], 8, offset, n)?;
         }
-        self.jump(join, &[], n);
-        self.start(join);
         Some(self.pointer(to, n))
     }
 
@@ -1287,13 +1253,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(
             Inst::SetCase {
                 address: e,
-                case: 1,
+                case: 0,
             },
             n,
         );
         self.jump(join, &[], n);
         self.start(admit);
-        let (blob, entry) = self.admit_blob(region, bytes, true, to, eid, join, n)?;
+        let (blob, entry) = self.admit_blob(region, bytes, true, n)?;
         let wv = self.u64k(w, n)?;
         let head = self.u64k(HEAD, n)?;
         self.put_word(AddressBase::Value(blob), &[], 0, bytes, n)?;
@@ -1345,9 +1311,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         region: ValueId,
         bytes: ValueId,
         entry: bool,
-        to: AddressId,
-        eid: TypeId,
-        join: BlockId,
         n: NodeId,
     ) -> Option<(ValueId, Option<ValueId>)> {
         let u64t = Ty::Scalar(Scalar::U64);
@@ -1374,7 +1337,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let blob = self.value(Ty::Ptr);
         let available = self.value(u64t);
         let region_entry = entry.then(|| self.value(u64t));
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: blob,
@@ -1386,32 +1348,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: Some(huge),
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, blob, null, n);
-        let (yes, refused) = (self.new_block(&[]), self.new_block(&[]));
-        self.branch(admitted, yes, refused, n);
-        self.start(refused);
-        let e = self.error_place(to, eid, n);
-        self.inst(
-            Inst::SetCase {
-                address: e,
-                case: 0,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(e),
-            &[Step::CaseField { case: 0, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         Some((blob, region_entry))
     }
     /// `x` rounded up to a multiple of 8; `x` is below the blob cap, so it does not wrap.
@@ -1796,7 +1738,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(
                 Inst::SetCase {
                     address: e,
-                    case: 1,
+                    case: 0,
                 },
                 n,
             );
@@ -1826,7 +1768,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.compact_root(ty, w, n)?;
         let (to, eid) = self.build_result(result, n)?;
         let join = self.new_block(&[]);
-        let (blob, _) = self.admit_blob(region, bytes, false, to, eid, join, n)?;
+        let (blob, _) = self.admit_blob(region, bytes, false, n)?;
         // The room a put may use: n, but never past the blob cap of W (MEM-9).
         let cap = if w == 8 {
             u64::MAX - HEAD
@@ -2157,47 +2099,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.region_blob(region, len, super::spans::ElemSize::Known(1), n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, blob, null, n);
-        let (yes, no, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, no, n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         let w = self.u64k(8, n)?;
         self.put_word(AddressBase::Value(blob), &[], 8, w, n)?;
         self.put_word(AddressBase::Value(blob), &[], 16, len, n)?;
         let data = self.u64k(24, n)?;
         self.copy_string(blob, data, s, len, n)?;
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
         let at = self.u64k(16, n)?;
-        self.put_word(AddressBase::Address(to), &ok, 0, blob, n)?;
-        self.put_word(AddressBase::Address(to), &ok, 8, at, n)?;
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(join);
+        self.put_word(AddressBase::Address(to), &[], 0, blob, n)?;
+        self.put_word(AddressBase::Address(to), &[], 8, at, n)?;
         Some(self.pointer(to, n))
     }
 
@@ -2306,7 +2216,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let size = self.add_k(words, 24, n)?;
         let block = self.value(Ty::Ptr);
         let available = self.value(u64t);
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -2318,35 +2227,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: None,
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, block, null, n);
-        let (yes, refused, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, refused, n);
-        self.start(refused);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            size,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(yes);
+        self.raise_unless(admitted, size, available, n);
         for (off, v) in [(0, blob), (8, at), (16, count)] {
             self.put_word(AddressBase::Value(block), &[], off, v, n)?;
         }
@@ -2378,17 +2264,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let i1 = self.add_k(i, 1, n)?;
         self.jump(lp, &[i1, next], n);
         self.start(done);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
-        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
-        self.jump(join, &[], n);
-        self.start(join);
+        self.put_word(AddressBase::Address(to), &[], 0, block, n)?;
         Some(self.pointer(to, n))
     }
     /// `seq.get(x, i)` (MEM-12): a bounds check against the block's count and one

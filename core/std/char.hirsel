@@ -17,7 +17,7 @@ pub fn utf8_len(c: char) -> u64 {
 }
 
 /// 'a'..='z' mapped to 'A'..='Z'; every other scalar unchanged. Cost: O(1).
-/// Ex: `string.push_char(mut out, char.to_ascii_upper(c))?`
+/// Ex: `string.push_char(mut out, char.to_ascii_upper(c))`
 pub fn to_ascii_upper(c: char) -> char {
     if c >= 'a' && c <= 'z' {
         option.unwrap(char.from_u32(char.to_u32(c) - 32))
@@ -27,7 +27,7 @@ pub fn to_ascii_upper(c: char) -> char {
 }
 
 /// 'A'..='Z' mapped to 'a'..='z'; every other scalar unchanged. Cost: O(1).
-/// Ex: `string.push_char(mut out, char.to_ascii_lower(c))?`
+/// Ex: `string.push_char(mut out, char.to_ascii_lower(c))`
 pub fn to_ascii_lower(c: char) -> char {
     if c >= 'A' && c <= 'Z' {
         option.unwrap(char.from_u32(char.to_u32(c) + 32))

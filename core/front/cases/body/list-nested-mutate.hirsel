@@ -5,14 +5,14 @@
 // expect: run replace_restore() = true used 0
 // expect: run swap_pop_restore() = true used 0
 fn rows_new() -> List[List[u64]] {
-    let mut inner: List[u64] = result.unwrap(list.with_capacity(4))
-    result.unwrap(list.push(mut inner, 1u64))
-    result.unwrap(list.push(mut inner, 2u64))
-    let mut rows: List[List[u64]] = result.unwrap(list.with_capacity(2))
-    result.unwrap(list.push(mut rows, take inner))
+    let mut inner: List[u64] = list.with_capacity(4)
+    list.push(mut inner, 1u64)
+    list.push(mut inner, 2u64)
+    let mut rows: List[List[u64]] = list.with_capacity(2)
+    list.push(mut rows, take inner)
     let mut other: List[u64] = list.new()
-    result.unwrap(list.push(mut other, 7u64))
-    result.unwrap(list.push(mut rows, take other))
+    list.push(mut other, 7u64)
+    list.push(mut rows, take other)
     take rows
 }
 
@@ -28,7 +28,7 @@ fn mut_index_push() -> bool {
         list.push(mut rows[0], 9u64)
     }
     match take r {
-        Ok(Ok(())) => list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7,
+        Ok(()) => list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7,
         _ => false
     }
 }
@@ -43,7 +43,7 @@ fn replace_restore() -> bool {
     let mut rows = rows_new()
     let empty: List[u64] = list.new()
     let mut inner = list.set(mut rows, 0, take empty)
-    result.unwrap(list.push(mut inner, 9u64))
+    list.push(mut inner, 9u64)
     let _ = list.set(mut rows, 0, take inner)
     list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7
 }
@@ -53,8 +53,8 @@ fn swap_pop_restore() -> bool {
     let last = list.len(rows) - 1
     list.swap(mut rows, 0, last)
     let mut inner = option.unwrap(list.pop(mut rows))
-    result.unwrap(list.push(mut inner, 9u64))
-    result.unwrap(list.push(mut rows, take inner))
+    list.push(mut inner, 9u64)
+    list.push(mut rows, take inner)
     list.swap(mut rows, 0, last)
     list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7
 }

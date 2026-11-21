@@ -52,9 +52,9 @@ pub fn new[T]() -> Pool[T] {
 /// An empty pool with storage for n slots: `list.with_capacity` of slots.
 /// Fails: Error(c). Alloc: n x size(Slot[T]) rounded to 8, current limit.
 /// Ex: `let mut p: std.pool.Pool[Entry] = std.pool.with_capacity(64)?`
-pub fn with_capacity[T](n: u64) -> Result[Pool[T], Capacity] {
-    let slots: List[Slot[T]] = list.with_capacity(n)?
-    Ok(Pool(me: unique.new(), slots: take slots, free: NONE, live: 0))
+pub fn with_capacity[T](n: u64) -> Pool[T] {
+    let slots: List[Slot[T]] = list.with_capacity(n)
+    Pool(me: unique.new(), slots: take slots, free: NONE, live: 0)
 }
 
 /// Number of live values. Cost: O(1). Ex: `std.pool.len(p)`
@@ -63,20 +63,15 @@ pub fn len[T](p: Pool[T]) -> u64 {
 }
 
 /// Stores x in a vacant slot (the most recently vacated first) or a new one.
-/// Fails: Error((c, x)) when a new slot is needed and GROWTH is refused; p unchanged.
+/// Fails: a refused GROWTH, when a new slot is needed, raises Capacity with p unchanged.
 /// Alloc: GROWTH of slots only when no slot is vacant. Cost: amortised O(1).
-/// Ex: `let h = std.pool.insert(mut l.pool, take entry)?`
-pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)] {
+/// Ex: `let h = std.pool.insert(mut l.pool, take entry)`
+pub fn insert[T](mut p: Pool[T], take x: T) -> Id[T] {
     if p.free == NONE {
         let index = list.len(p.slots)
-        if let Error((c, take slot)) = list.push(mut p.slots, Occupied(0, take x)) {
-            return match slot {
-                Occupied(_, take v) => Error((c, take v)),
-                Vacant(_, _) => fail("pool.insert: push returned another slot"),
-            }
-        }
+        list.push(mut p.slots, Occupied(0, take x))
         p.live += 1
-        return Ok(Id(pool: p.me, index, generation: 0))
+        return Id(pool: p.me, index, generation: 0)
     }
     let index = p.free
     let (generation, free_next) = match p.slots[index] {
@@ -86,7 +81,7 @@ pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)] {
     let _ = list.set(mut p.slots, index, Occupied(generation, take x))
     p.free = free_next
     p.live += 1
-    Ok(Id(pool: p.me, index, generation))
+    Id(pool: p.me, index, generation)
 }
 
 /// A view of h's value. Fails: Error(Stale). View: anchored to p; FREEZE p. Cost: O(1).

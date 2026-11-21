@@ -1,7 +1,7 @@
 // hand-derived stdout: 7
 // The child's END is the only wake the parent's join can use.
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, 6u64, fn(take n: u64) -> u64 { n + 1u64 }))
+    let h = task.spawn(tasks, bytes 4096, 6u64, fn(take n: u64) -> u64 { n + 1u64 })
     if result.unwrap(task.join(take h)) == 7u64 { result.unwrap(stdout.write(out, "7")) }
     Ok(())
 }

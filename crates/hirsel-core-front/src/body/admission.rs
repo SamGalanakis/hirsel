@@ -36,6 +36,85 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(overflow)
     }
 
+    /// MEM-21: end the open block raising `Capacity { requested, available }`
+    /// (FAIL-2); FAIL-8 cleanup drops what the path still owns, a taken argument
+    /// included, since the refused operation consumes nothing.
+    pub(super) fn raise_capacity(&mut self, requested: ValueId, available: ValueId, n: NodeId) {
+        let cleanup = self.fail_to(n);
+        self.end(
+            Terminator::Raise {
+                cause: hirsel_core_ir::RaiseCause::Capacity {
+                    requested,
+                    available,
+                },
+                cleanup,
+            },
+            Some(n),
+        );
+    }
+
+    /// Unless `admitted`, raise `Capacity` (`raise_capacity`); lowering goes on in
+    /// the admitted block.
+    pub(super) fn raise_unless(
+        &mut self,
+        admitted: ValueId,
+        requested: ValueId,
+        available: ValueId,
+        n: NodeId,
+    ) {
+        let (yes, no) = (self.new_block(&[]), self.new_block(&[]));
+        let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
+        self.b.edges[ne.index()].cold = true;
+        self.end(
+            Terminator::Branch {
+                condition: admitted,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        self.start(no);
+        self.raise_capacity(requested, available, n);
+        self.start(yes);
+    }
+
+    /// Admit `allocation` from the current limit and return its block; a refusal
+    /// raises `Capacity` (`raise_capacity`).
+    pub(super) fn admit_owned(
+        &mut self,
+        allocation: OwnedAllocation,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let c = self.konst(Ty::Scalar(Scalar::U64), allocation.charge, n)?;
+        let sz = self.layout_word(
+            LayoutQuery::BlockSize {
+                ty: allocation.row,
+                prefix: allocation.prefix,
+            },
+            n,
+        );
+        let block = self.value(Ty::Ptr);
+        let available = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Alloc {
+                result: block,
+                available,
+                region_entry: None,
+                kind: allocation.kind,
+                place: AllocPlace::Current,
+                charge: c,
+                overflow: None,
+                size: sz,
+                align: allocation.align,
+            },
+            n,
+        );
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let admitted = self.test(CompareOp::Ne, block, null, n);
+        self.raise_unless(admitted, c, available, n);
+        Some(block)
+    }
+
     pub(super) fn admit_with_handback(
         &mut self,
         ty: TyId,
@@ -60,7 +139,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
-        let fail = self.fail_to(n);
         let overflow = if matches!(allocation.kind, AllocKind::Resource { .. }) {
             self.allocation_layout(allocation.row, block, n)
         } else {
@@ -77,7 +155,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow,
                 size: sz,
                 align: allocation.align,
-                fail,
             },
             n,
         );

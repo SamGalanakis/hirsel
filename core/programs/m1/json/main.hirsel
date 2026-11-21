@@ -17,42 +17,39 @@ fn parse_error(e: std.json.Error, n: u64) -> Result[m1.support.Error, m1.support
         Syntax(_) => "Syntax",
         NotFinite(_) => "InvalidNumber",
         Depth => "Depth",
-        Build(Capacity(c)) => return Ok(m1.support.Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))),
         Build(Overflow) => "Build",
     }
-    let mut label = m1.support.mem(string.from(prefix))?
+    let mut label = string.from(prefix)
     m1.support.add(mut label, "@document")?
     m1.support.num(mut label, n)?
     Ok(m1.support.error(take label))
 }
 
-fn write_tree(w: std.json.Writer, j: Json, depth: u64) -> Result[(), Capacity] {
+fn write_tree(w: std.json.Writer, j: Json, depth: u64) {
     match j {
         Null => std.json.write_null(w),
         Bool(b) => std.json.write_bool(w, b),
         Num(s) => std.json.write_number_spelling(w, s),
         Str(s) => std.json.write_string_value(w, s),
-        Arr(xs) => std.json.array(w, depth, scoped fn(child: std.json.Writer, mut items: std.json.Items) -> Result[(), Capacity] {
+        Arr(xs) => std.json.array(w, depth, scoped fn(child: std.json.Writer, mut items: std.json.Items) {
             for x in xs {
-                std.json.element(child, mut items)?
-                write_tree(child, x, items.depth)?
+                std.json.element(child, mut items)
+                write_tree(child, x, items.depth)
             }
-            Ok(())
         }),
-        Obj(fields) => std.json.object(w, depth, scoped fn(child: std.json.Writer, mut items: std.json.Items) -> Result[(), Capacity] {
+        Obj(fields) => std.json.object(w, depth, scoped fn(child: std.json.Writer, mut items: std.json.Items) {
             for (key, value) in fields {
-                std.json.write_member(child, mut items, key)?
-                write_tree(child, value, items.depth)?
+                std.json.write_member(child, mut items, key)
+                write_tree(child, value, items.depth)
             }
-            Ok(())
         }),
     }
 }
 
-fn render(mut out: String, j: Json) -> Result[(), m1.support.Error] {
-    m1.support.mem(std.json.write(mut out, true, scoped fn(w: std.json.Writer) -> Result[(), Capacity] {
+fn render(mut out: String, j: Json) {
+    std.json.write(mut out, true, scoped fn(w: std.json.Writer) {
         write_tree(w, j, 0)
-    }))
+    })
 }
 
 fn query(j: Json, path: String, at: u64) -> Result[View[Json], m1.support.Error] in j {
@@ -99,10 +96,10 @@ fn document(out: Stdout, s: String, path: String, variant: String, n: u64, tx: S
         }
     })?
     let mut pretty = string.new()
-    render(mut pretty, root)?
+    render(mut pretty, root)
     let selected = query(root, path, 1)?
     let mut answer = m1.support.name("query", n, "=")?
-    render(mut answer, selected)?
+    render(mut answer, selected)
     m1.support.add(mut answer, "\n")?
     m1.support.put(out, answer)?
     if variant == "print" {
@@ -150,7 +147,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
         let _ = m1.support.line(input, mut at);
         events += 2
     }
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(events)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

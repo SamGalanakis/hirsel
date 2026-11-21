@@ -1,14 +1,13 @@
-//! MEM-17's own copy, `$clone[T](from, to) -> (requested, available)`, derived from
+//! MEM-17's own copy, `$clone[T](from, to)`, derived from
 //! `T`'s layout recipe like the key glue.
 //!
 //! The copy starts as `T`'s bytes and then replaces each own part in place, depth
 //! first: a `List` or `String` gets a new block of capacity equal to its length, a `Box`
 //! a new node, a counted edge one more holder. Each block is admitted when the walk
-//! reaches it, before what it holds (T1.5). A refusal returns its `requested` charge and
-//! the room left, after dropping what this copy already holds in reverse; `requested`
-//! is 0 exactly when the copy is complete, since a refused admission is never of 0
-//! bytes. Until a part is replaced the copy's bytes still name the original's blocks,
-//! so nothing drops a part that was not replaced.
+//! reaches it, before what it holds (T1.5). A refusal raises `Capacity` (MEM-21), and its
+//! cleanup drops what this copy already holds in reverse. Until a part is replaced the
+//! copy's bytes still name the original's blocks, so nothing drops a part that was not
+//! replaced.
 //!
 //! A core row whose storage is not its structure (a `Deque`'s slots, a `Map`'s index)
 //! declares its own copy, `clone[..](x: T) { .. }` (`Shape::clone`): the row's `$clone` is its
@@ -107,19 +106,16 @@ impl Derive<'_> {
             // a root or an element of a cloned container, is copied as its holder,
             // the block pointer, and its block is shared, not copied (FORM #117).
             copy(c, to, from, hirsel_core_layout::POINTER);
-            let zero = c.constant(0);
-            ret(c, &[zero, zero]);
+            ret(c, &[]);
             return Ok(());
         }
         let size = c.field_size(&FieldTy::Inline(TypeRef(ty.0)));
         copy_value(c, to, from, size);
         if let Some(f) = self.module.types[ty.index()].clone {
-            let requested = c.value(Ty::Scalar(Scalar::U64));
-            let available = c.value(Ty::Scalar(Scalar::U64));
             let f = FuncId(f.0);
             let signature = self.module.functions[f.index()].signature;
             let args = PoolRange::push(&mut c.body.pools.args, [Arg::Value(from), Arg::Value(to)]);
-            let results = PoolRange::push(&mut c.body.pools.values, [requested, available]);
+            let results = PoolRange::push(&mut c.body.pools.values, []);
             let call = CallId(c.body.calls.len() as u32);
             c.body.calls.push(CallSite {
                 callee: Callee::Direct(f),
@@ -130,16 +126,14 @@ impl Derive<'_> {
                 cold: false,
             });
             c.inst(Inst::Call { call });
-            ret(c, &[requested, available]);
+            ret(c, &[]);
             return Ok(());
         }
-        let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+        let fail = c.block(&[]);
         self.clone_parts(c, ty, from, to, fail)?;
-        let zero = c.constant(0);
-        ret(c, &[zero, zero]);
+        ret(c, &[]);
         c.start(fail);
-        let [requested, available] = c.params(fail);
-        ret(c, &[requested, available]);
+        c.end(Terminator::Propagate);
         Ok(())
     }
     /// A box's charge is its target's logical size rounded up to 8 (MEM-24).
@@ -187,7 +181,7 @@ impl Derive<'_> {
         }
     }
     /// Replace the own parts of the copy at `to` of the `ty` at `from`; on a refusal
-    /// drop the parts replaced so far and jump to `fail(requested, available)`.
+    /// drop the parts replaced so far and go on to the cleanup `fail`.
     fn clone_parts(
         &mut self,
         c: &mut Code,
@@ -252,12 +246,11 @@ impl Derive<'_> {
             let [x, y] = places.map(|base| c.project_field_pointer(base, case, i as u32));
             self.clone_field(c, f, x, y, undo)?;
             // A later refusal drops this field, then what came before it.
-            let next = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+            let next = c.block(&[]);
             let here = detour(c);
             c.start(next);
-            let [requested, available] = c.params(next);
             self.drop_field(c, f, y)?;
-            c.jump(undo, &[requested, available]);
+            c.jump(undo, &[]);
             c.start(here);
             undo = next;
         }
@@ -368,37 +361,14 @@ impl Derive<'_> {
                 }
                 if self.owns(item, &mut vec![]) {
                     // A refusal inside drops the elements already copied, then the block.
-                    let undo = c.block(&[Ty::Scalar(Scalar::U64); 3]);
-                    self.each(c, item, old, block, len, undo)?;
-                    let here = detour(c);
-                    c.start(undo);
-                    let ps = c.body.blocks[undo.index()]
-                        .params
-                        .get(&c.body.pools.values)
-                        .unwrap()
-                        .to_vec();
-                    self.drop_items(c, item, block, ps[2])?;
-                    c.inst(Inst::Free { block, charge });
-                    c.jump(fail, &[ps[0], ps[1]]);
-                    c.start(here);
+                    self.each(c, item, old, block, len, Some(charge), fail)?;
                 }
                 c.jump(done, &[]);
                 c.start(done);
             }
             FieldTy::Array(item, n) => {
                 let len = c.constant(*n);
-                let undo = c.block(&[Ty::Scalar(Scalar::U64); 3]);
-                self.each(c, item, from, to, len, undo)?;
-                let here = detour(c);
-                c.start(undo);
-                let ps = c.body.blocks[undo.index()]
-                    .params
-                    .get(&c.body.pools.values)
-                    .unwrap()
-                    .to_vec();
-                self.drop_items(c, item, to, ps[2])?;
-                c.jump(fail, &[ps[0], ps[1]]);
-                c.start(here);
+                self.each(c, item, from, to, len, None, fail)?;
             }
             FieldTy::Map(..) => return Err("a clone of a Map is not built"),
             FieldTy::OwnFn => return Err("a clone of an owning closure is not built"),
@@ -406,8 +376,10 @@ impl Derive<'_> {
         }
         Ok(())
     }
-    /// Clone each of `len` items at `from` into `to`; a refusal at item i jumps to
-    /// `undo(requested, available, i)`.
+    /// Clone each of `len` items at `from` into `to`; a refusal at item i drops items
+    /// i-1 down to 0, frees the block `to` charged `free` when it is new, and goes on
+    /// to the cleanup `undo`.
+    #[allow(clippy::too_many_arguments)]
     fn each(
         &mut self,
         c: &mut Code,
@@ -415,6 +387,7 @@ impl Derive<'_> {
         from: ValueId,
         to: ValueId,
         len: ValueId,
+        free: Option<ValueId>,
         undo: BlockId,
     ) -> Result<(), &'static str> {
         let zero = c.constant(0);
@@ -431,14 +404,17 @@ impl Derive<'_> {
         let at = c.mul(i, stride);
         let x = c.offset_value(from, at);
         let y = c.offset_value(to, at);
-        let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+        let fail = c.block(&[]);
         self.clone_field(c, item, x, y, fail)?;
         let one = c.constant(1);
         let next = c.binary(BinaryOp::Add, i, one);
         c.jump(head, &[next]);
         c.start(fail);
-        let [requested, available] = c.params(fail);
-        c.jump(undo, &[requested, available, i]);
+        self.drop_items(c, item, to, i)?;
+        if let Some(charge) = free {
+            c.inst(Inst::Free { block: to, charge });
+        }
+        c.jump(undo, &[]);
         c.start(done);
         Ok(())
     }
@@ -540,8 +516,8 @@ impl Derive<'_> {
         }
         Ok(())
     }
-    /// Call `$clone` and go on when it completed; otherwise free `block` (when the copy
-    /// was going into a new node) and jump to `fail` with its outcome.
+    /// Call `$clone`; its failure frees `block` (when the copy was going into a new
+    /// node) and goes on to the cleanup `fail`.
     fn call_checked(
         &self,
         c: &mut Code,
@@ -552,34 +528,34 @@ impl Derive<'_> {
         block: Option<(ValueId, u64)>,
     ) {
         let signature = self.module.functions[f.index()].signature;
-        let requested = c.value(Ty::Scalar(Scalar::U64));
-        let available = c.value(Ty::Scalar(Scalar::U64));
+        let fail = match block {
+            None => fail,
+            Some((block, charge)) => {
+                let undo = c.block(&[]);
+                let here = detour(c);
+                c.start(undo);
+                let charge = c.constant(charge);
+                c.inst(Inst::Free { block, charge });
+                c.jump(fail, &[]);
+                c.start(here);
+                undo
+            }
+        };
         let args = PoolRange::push(
             &mut c.body.pools.args,
             [Arg::Address(from), Arg::Address(to)],
         );
-        let results = PoolRange::push(&mut c.body.pools.values, [requested, available]);
+        let results = PoolRange::push(&mut c.body.pools.values, []);
         let call = CallId(c.body.calls.len() as u32);
         c.body.calls.push(CallSite {
             callee: Callee::Direct(f),
             signature,
             args,
             results,
-            fail: None,
+            fail: Some(fail),
             cold: false,
         });
         c.inst(Inst::Call { call });
-        let zero = c.constant(0);
-        let done = c.compare(CompareOp::Eq, requested, zero);
-        let (yes, no) = (c.block(&[]), c.block(&[]));
-        c.branch(done, yes, no);
-        c.start(no);
-        if let Some((block, charge)) = block {
-            let charge = c.constant(charge);
-            c.inst(Inst::Free { block, charge });
-        }
-        c.jump(fail, &[requested, available]);
-        c.start(yes);
     }
 }
 
@@ -623,7 +599,7 @@ fn copy_value(c: &mut Code, to: ValueId, from: ValueId, bytes: ValueId) {
     let from = c.address(from, PlaceTy::Value(Ty::Scalar(Scalar::U8)));
     c.inst(Inst::Copy { to, from, bytes });
 }
-/// Admit from the current limit. A refusal jumps to `fail(charge, available)`.
+/// Admit from the current limit. A refusal raises `Capacity` with cleanup `fail`.
 fn alloc_kind(
     c: &mut Code,
     kind: AllocKind,
@@ -643,7 +619,6 @@ fn alloc_kind(
         overflow: None,
         size,
         align: 8,
-        fail: None,
     });
     let null = c.value(Ty::Ptr);
     c.inst(Inst::Const {
@@ -654,7 +629,13 @@ fn alloc_kind(
     let (yes, no) = (c.block(&[]), c.block(&[]));
     c.branch(admitted, yes, no);
     c.start(no);
-    c.jump(fail, &[charge, available]);
+    c.end(Terminator::Raise {
+        cause: hirsel_core_ir::RaiseCause::Capacity {
+            requested: charge,
+            available,
+        },
+        cleanup: Some(fail),
+    });
     c.start(yes);
     result
 }
@@ -717,64 +698,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let to = self.new_slot(PlaceTy::Declared(rid), n);
         let from = self.address(AddressBase::Value(at), &[], PlaceTy::Declared(id), n);
-        let ok = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 0, field: 0 }],
-            PlaceTy::Declared(id),
-            n,
-        );
         let signature = self.e.source_signature(function);
-        let requested = self.value(Ty::Scalar(Scalar::U64));
-        let available = self.value(Ty::Scalar(Scalar::U64));
+        let fail = self.fail_to(n);
         let args = PoolRange::push(
             &mut self.b.pools.args,
-            [Arg::Address(from), Arg::Address(ok)],
+            [Arg::Address(from), Arg::Address(to)],
         );
-        let results = PoolRange::push(&mut self.b.pools.values, [requested, available]);
+        let results = PoolRange::push(&mut self.b.pools.values, []);
         let call = CallId(self.b.calls.len() as u32);
         self.b.calls.push(CallSite {
             callee: Callee::Direct(function),
             signature,
             args,
             results,
-            fail: None,
+            fail,
             cold: false,
         });
         self.inst(Inst::Call { call }, n);
-        let zero = self.u64k(0, n)?;
-        let done = self.test(CompareOp::Eq, requested, zero, n);
-        let (yes, no, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(done, yes, no, n);
-        self.start(yes);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            requested,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(join);
+        if !self.live() {
+            return None;
+        }
         Some(self.pointer(to, n))
     }
 }

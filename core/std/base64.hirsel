@@ -7,13 +7,13 @@ fn value(x: u8) -> u8 {
 }
 
 /// Appends RFC 4648's standard alphabet with '=' padding. O(n).
-/// Capacity leaves out unchanged. Ex: `base64.encode(b, mut out)?`.
-pub fn encode(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
+/// Capacity leaves out unchanged. Ex: `base64.encode(b, mut out)`.
+pub fn encode(b: Bytes, mut out: Bytes) {
     string.append_base64_bytes(b, mut out)
 }
 
 /// Encodes RFC 4648's standard alphabet with '=' padding as a new String. O(n).
-pub fn encode_string(b: Bytes) -> Result[String, Capacity] {
+pub fn encode_string(b: Bytes) -> String {
     string.encode_base64(b)
 }
 
@@ -41,7 +41,7 @@ fn invalid_blocks(b: Bytes, end: u64) -> bool {
     simd.any(bad)
 }
 
-fn decode_blocks(b: Bytes, end: u64, mut out: Bytes) -> Result[(), Capacity] {
+fn decode_blocks(b: Bytes, end: u64, mut out: Bytes) {
     let mut src: u64 = 0
     // 32 valid digits become 24 bytes.
     while src < end {
@@ -52,19 +52,18 @@ fn decode_blocks(b: Bytes, end: u64, mut out: Bytes) -> Result[(), Capacity] {
         let p: Simd[u16, 16] = simd.cast(d)
         let q: Simd[u32, 8] = simd.cast(((p & simd.splat(63)) << 6) | (p >> 8))
         let r: Simd[u8, 32] = simd.cast(((q & simd.splat(4095)) << 12) | (q >> 16))
-        list.put_lanes(mut out, simd.swizzle(r, simd.from(PACK)), 24)?
+        list.put_lanes(mut out, simd.swizzle(r, simd.from(PACK)), 24)
         src += 32
     }
-    Ok(())
 }
 
 /// Decodes canonical padded RFC 4648 bytes. Ok(None) means malformed input,
 /// Error means Capacity. Whitespace, missing padding and nonzero pad bits fail.
-/// O(n); validates before allocating. Ex: `base64.decode(key)?`.
-pub fn decode(b: Bytes) -> Result[Option[Bytes], Capacity] {
+/// O(n); validates before allocating. Ex: `base64.decode(key)`.
+pub fn decode(b: Bytes) -> Option[Bytes] {
     let n = list.len(b)
     if n % 4 != 0 {
-        return Ok(None)
+        return None
     }
     let mut pad: u64 = 0
     if n > 0 && b[n - 1] == b'=' {
@@ -81,12 +80,12 @@ pub fn decode(b: Bytes) -> Result[Option[Bytes], Capacity] {
     }
     let end = full - full % 32
     if invalid_blocks(b, end) {
-        return Ok(None)
+        return None
     }
     let mut src = end
     while src < full {
         if (value(b[src]) | value(b[src + 1]) | value(b[src + 2]) | value(b[src + 3])) == 255 {
-            return Ok(None)
+            return None
         }
         src += 4
     }
@@ -101,17 +100,17 @@ pub fn decode(b: Bytes) -> Result[Option[Bytes], Capacity] {
             0
         }
         if (a | c | d) == 255 || (pad == 2 && c & 15 != 0) || d & 3 != 0 {
-            return Ok(None)
+            return None
         }
         first = (a << 2) | (c >> 4)
         second = (c << 4) | (d >> 2)
     }
     let size = n / 4 * 3 - pad
-    let mut out: Bytes = list.with_capacity(size)?
-    decode_blocks(b, end, mut out)?
+    let mut out: Bytes = list.with_capacity(size)
+    decode_blocks(b, end, mut out)
     src = end
     let mut dst = list.len(out)
-    list.fill(mut out, size - dst, 0)?
+    list.fill(mut out, size - dst, 0)
     while src < full {
         let a = value(b[src])
         let c = value(b[src + 1])
@@ -129,5 +128,5 @@ pub fn decode(b: Bytes) -> Result[Option[Bytes], Capacity] {
             out[dst + 1] = second
         }
     }
-    Ok(Some(take out))
+    Some(take out)
 }

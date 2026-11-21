@@ -59,11 +59,7 @@ fn node(mut s: Store, key: u32, value: u64, left: Option[u32], right: Option[u32
         i
     } else {
         let i: u32 = int.narrow(list.len(s.slots))
-        if let Error((c, _)) = list.push(mut s.slots, Live(n)) {
-            release(mut s, left)
-            release(mut s, right)
-            return m1.support.mem(Error(c))
-        }
+        list.push(mut s.slots, Live(n))
         i
     }
     s.live += 1
@@ -180,7 +176,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     m1.support.num(mut rendered, s.live)?
     m1.support.add(mut rendered, "\n")?
     m1.support.put(out, rendered)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {
         let closed = tx
     }

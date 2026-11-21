@@ -24,6 +24,6 @@ def generate(directory, algorithm, short, long):
     print('    [')
     for raw, digest in rows:
         literal = ''.join(f'\\x{byte:02x}' for byte in raw)
-        print(f'        (result.unwrap(b"{literal}"), "{digest}"),')
+        print(f'        (b"{literal}", "{digest}"),')
     print('    ]')
     print('}')

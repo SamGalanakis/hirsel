@@ -9,8 +9,8 @@ fn a(take x: In) waits {
 }
 fn b(take out: Stdout) waits { result.unwrap(stdout.write(out, "b")) }
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let ha = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, out: out), a))
-    let hb = result.unwrap(task.spawn(tasks, bytes 4096, out, b))
+    let ha = task.spawn(tasks, bytes 4096, In(clock: clock, out: out), a)
+    let hb = task.spawn(tasks, bytes 4096, out, b)
     result.unwrap(stdout.write(out, "P"))
     result.unwrap(task.join(take ha))
     result.unwrap(task.join(take hb))

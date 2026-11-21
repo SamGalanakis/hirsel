@@ -7,7 +7,7 @@ pub type Account: send + codec {
 
 fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        let a = Account(id: i, balance: int.narrow(i), owner: result.unwrap(string.from("owner000")))
+        let a = Account(id: i, balance: int.narrow(i), owner: string.from("owner000"))
         store.put(mut tx, t, i, a)?
         let back = option.unwrap(store.fetch(tx, store.shape(t), i)?)
         if back.id != i || back.balance != int.narrow(i) || back.owner != "owner000" {
@@ -55,7 +55,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
     let held = store.snapshot(db)
     let sh = store.shape(t)
     let mut gate = result.unwrap(host.open(dir, "gate", Read))
-    let mut byte: Bytes = result.unwrap(list.with_capacity(1))
+    let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))
     if result.unwrap(host.read(mut gate, mut byte)) != 1 {
         return Error(Exit(status: 7))
@@ -76,16 +76,16 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
         }
     } else {
         let payload = Reader(held: take held, sh: take sh)
-        let h = result.unwrap(task.spawn(tasks, bytes 16777216, take payload, reader))
+        let h = task.spawn(tasks, bytes 16777216, take payload, reader)
         sum = result.unwrap(task.join(take h))
     }
     let elapsed = host.mono_ns(clock) - start
     let mut rendered = string.new()
-    result.unwrap(string.push(mut rendered, "DONE "))
-    result.unwrap(string.push_u64(mut rendered, sum))
-    result.unwrap(string.push(mut rendered, " "))
-    result.unwrap(string.push_u64(mut rendered, elapsed))
-    result.unwrap(string.push(mut rendered, "\n"))
+    string.push(mut rendered, "DONE ")
+    string.push_u64(mut rendered, sum)
+    string.push(mut rendered, " ")
+    string.push_u64(mut rendered, elapsed)
+    string.push(mut rendered, "\n")
     result.unwrap(stdout.write(out, rendered))
     list.clear(mut byte)
     if result.unwrap(host.read(mut gate, mut byte)) != 1 {

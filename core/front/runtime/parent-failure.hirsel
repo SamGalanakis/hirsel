@@ -7,14 +7,14 @@ fn sleeper(take c: Clock) waits {
 
 fn parent(take x: Pair) waits {
     let v = take x
-    let _ = result.unwrap(task.spawn(v.tasks, bytes 4096, v.clock, sleeper))
+    let _ = task.spawn(v.tasks, bytes 4096, v.clock, sleeper)
     let now = host.mono_ns(v.clock)
     host.sleep_until(v.clock, now + 1_000_000u64)
     fail("parent")
 }
 
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 16384, Pair(tasks: tasks, clock: clock), parent))
+    let mut h = task.spawn(tasks, bytes 16384, Pair(tasks: tasks, clock: clock), parent)
     match task.join(take h) {
         Error(Failed(take causes)) => { let _ = take causes; result.unwrap(stdout.write(out, "F")); Ok(()) },
         _ => Error(Exit(status: 8))

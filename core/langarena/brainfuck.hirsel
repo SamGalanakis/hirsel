@@ -7,10 +7,8 @@ type Tape {
 }
 
 fn push_byte(mut b: Bytes, x: u8) -> Result[(), helper.Error] {
-    match list.push(mut b, x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Capacity(c))
-    }
+    list.push(mut b, x)
+    Ok(())
 }
 
 fn advance(mut t: Tape) -> Result[(), helper.Error] {
@@ -32,14 +30,11 @@ fn array_run(source: String) -> Result[u32, helper.Error] {
         return Ok(0)
     }
     let mut jumps: List[u64] = list.new()
-    helper.mem(list.fill(mut jumps, list.len(code), 0))?
+    list.fill(mut jumps, list.len(code), 0)
     let mut stack: List[u64] = list.new()
     for i in 0 .. list.len(code) {
         if code[i] == b'[' {
-            match list.push(mut stack, i) {
-                Ok(()) => {},
-                Error((c, _)) => return Error(Capacity(c))
-            }
+            list.push(mut stack, i)
         } else if code[i] == b']' {
             let Some(start) = list.pop(mut stack) else {
                 return Ok(0)
@@ -52,7 +47,7 @@ fn array_run(source: String) -> Result[u32, helper.Error] {
         return Ok(0)
     }
     let mut t = Tape(data: list.new(), pos: 0)
-    helper.mem(list.fill(mut t.data, 30000, 0))?
+    list.fill(mut t.data, 30000, 0)
     let mut pc: u64 = 0
     let mut result: u32 = 0
     while pc < list.len(code) {
@@ -108,10 +103,7 @@ fn parse(b: Bytes, mut at: u64) -> Result[List[Op], helper.Error] {
         } else {
             continue
         }
-        match list.push(mut ops, take op) {
-            Ok(()) => {},
-            Error((cap, take unused)) => return Error(Capacity(cap))
-        }
+        list.push(mut ops, take op)
     }
     Ok(take ops)
 }
@@ -150,7 +142,7 @@ fn recursive_run(source: String) -> Result[u32, helper.Error] {
     let mut at: u64 = 0
     let ops = parse(string.as_bytes(source), mut at)?
     let mut t = Tape(data: list.new(), pos: 0)
-    helper.mem(list.fill(mut t.data, 1, 0))?
+    list.fill(mut t.data, 1, 0)
     let mut result: i64 = 0
     execute(ops, mut t, mut result)?
     Ok(int.truncate(result))

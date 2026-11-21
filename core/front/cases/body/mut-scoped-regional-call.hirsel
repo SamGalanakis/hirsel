@@ -15,7 +15,7 @@ fn forward(mut c: Cursor) {
 }
 
 fn skip_run() -> u64 {
-    let buf: Bytes = result.unwrap(b"abc")
+    let buf: Bytes = b"abc"
     let mut c = Cursor(input: view buf, pos: 0u64)
     for _ in 0u64 .. 3 {
         skip(mut c)
@@ -24,7 +24,7 @@ fn skip_run() -> u64 {
 }
 
 fn forward_run() -> u64 {
-    let buf: Bytes = result.unwrap(b"abc")
+    let buf: Bytes = b"abc"
     let mut c = Cursor(input: view buf, pos: 0u64)
     forward(mut c)
     forward(mut c)
@@ -47,8 +47,8 @@ fn within[in r](mut c: RegionCursor[in r], t: Text in r) {
 
 fn regions() -> u64 {
     region r {
-        let a = result.unwrap(text.copy_in(r, "a"))
-        let b = result.unwrap(text.copy_in(r, "abc"))
+        let a = text.copy_in(r, "a")
+        let b = text.copy_in(r, "abc")
         let mut c: RegionCursor[in r] = RegionCursor(input: view a)
         within(mut c, b)
         string.byte_len(text.as_string(c.input))

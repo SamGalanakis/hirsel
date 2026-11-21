@@ -9,7 +9,7 @@
 //   the length. A stale data word loses element 512 or reads the freed block; a
 //   stale capacity word leaves capacity 512 under length 513.
 // - refused: inside `bound bytes 5000` the 4096-byte block leaves 904 bytes, and
-//   any growth needs more, so reserving room for a 513th is refused. The list keeps 512
+//   any growth needs more, so try_reserve of room for a 513th is refused. The list keeps 512
 //   elements summing to 511 * 512 / 2 = 130816 and capacity 512, and the refusal
 //   reports room 904: 130816 * 1000000 + 512 * 1000 + 904 = 130816512904.
 //   A copy-back of words the helper never wrote breaks the sum or the capacity.
@@ -26,19 +26,16 @@ fn sum(xs: List[u64]) -> u64 {
     s
 }
 
-fn filled(n: u64) -> Result[List[u64], Capacity] {
-    let mut xs: List[u64] = list.with_capacity(512)?
+fn filled(n: u64) -> List[u64] {
+    let mut xs: List[u64] = list.with_capacity(512)
     for i in 0u64 .. n {
-        match list.push(mut xs, i) {
-            Ok(_) => {},
-            Error((e, _)) => return Error(e)
-        }
+        list.push(mut xs, i)
     }
-    Ok(take xs)
+    xs
 }
 
 fn grown() -> u64 {
-    let xs = result.unwrap(filled(513))
+    let xs = filled(513)
     if list.capacity(xs) < list.len(xs) {
         return 0
     }
@@ -47,12 +44,11 @@ fn grown() -> u64 {
 
 fn refused() -> u64 {
     let r: Result[u64, Capacity] = bound bytes 5000 {
-        let mut xs = filled(512)?
-        let room = match list.reserve(mut xs, 1) {
-            Ok(_) => 0u64,
-            Error(e) => e.available
+        let mut xs = filled(512)
+        match list.try_reserve(mut xs, 1) {
+            Ok(()) => 0u64,
+            Error(e) => sum(xs) * 1000000 + list.capacity(xs) * 1000 + e.available,
         }
-        sum(xs) * 1000000 + list.capacity(xs) * 1000 + room
     }
     match r {
         Ok(n) => n,
@@ -61,7 +57,7 @@ fn refused() -> u64 {
 }
 
 fn regrown() -> u64 {
-    let xs = result.unwrap(filled(1024))
+    let xs = filled(1024)
     if list.capacity(xs) < list.len(xs) {
         return 0
     }

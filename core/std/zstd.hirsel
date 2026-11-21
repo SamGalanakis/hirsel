@@ -655,8 +655,8 @@ pub fn dictionary(data: Bytes) -> Result[Dictionary, Error] {
             Error(error) => return Error(data_error(error)),
         }
     }
-    let mut content: Bytes = admit(list.with_capacity(list.len(data) - c.pos))?
-    admit(list.append(mut content, list.slice(data, c.pos, list.len(data))))?
+    let mut content: Bytes = list.with_capacity(list.len(data) - c.pos)
+    list.append(mut content, list.slice(data, c.pos, list.len(data)))
     Ok(Dictionary(id: id, content: take content, tables: tables))
 }
 
@@ -846,30 +846,27 @@ fn smaller(a: u64, b: u64) -> u64 {
     }
 }
 
-fn new_decoder(max_window: u64, max_output: u64) -> Result[Decoder, Capacity] {
+fn new_decoder(max_window: u64, max_output: u64) -> Decoder {
     let block_size = smaller(BLOCK_LIMIT, max_window)
-    let history: Bytes = list.with_capacity(smaller(max_window, max_output))?
-    let pending: Bytes = list.with_capacity(smaller(block_size, max_output))?
-    let literals: Bytes = list.with_capacity(smaller(block_size, max_output))?
-    let header: Bytes = list.with_capacity(14)?
+    let history: Bytes = list.with_capacity(smaller(max_window, max_output))
+    let pending: Bytes = list.with_capacity(smaller(block_size, max_output))
+    let literals: Bytes = list.with_capacity(smaller(block_size, max_output))
+    let header: Bytes = list.with_capacity(14)
     let payload: Bytes = list.with_capacity(if block_size == 0 {
         1
     } else {
         block_size
-    })?
-    let mut tables: List[Tables] = list.with_capacity(1)?
-    match list.push(mut tables, empty_tables()) {
-        Ok(()) => (),
-        Error(e) => return Error(e.0),
-    }
+    })
+    let mut tables: List[Tables] = list.with_capacity(1)
+    list.push(mut tables, empty_tables())
     let frame = Frame(window: 0, size: 0, declared: None(), checksum: false, hash: xxh_start(), last: false)
     let scratch = Scratch(history: take history, pending: take pending, literals: take literals, tables: take tables)
-    Ok(Decoder(max_window: max_window, max_output: max_output, total: 0, phase: Magic(), fault: None(), header: take header, payload: take payload, flushed: 0, frame: frame, scratch: take scratch))
+    Decoder(max_window: max_window, max_output: max_output, total: 0, phase: Magic(), fault: None(), header: take header, payload: take payload, flushed: 0, frame: frame, scratch: take scratch)
 }
 
 /// Start a frame decoder. The history and fixed block buffers are admitted
 /// up front, and step calls use only their existing capacity.
-pub fn decoder(max_window: u64) -> Result[Decoder, Capacity] {
+pub fn decoder(max_window: u64) -> Decoder {
     new_decoder(max_window, 0xffffffffffffffff)
 }
 
@@ -1302,7 +1299,7 @@ fn decode_frames(data: Bytes, max_output: u64, max_window: u64, dict: Option[Vie
     if list.len(data) == 0 {
         return Error(Data(Truncated()))
     }
-    let mut d = admit(new_decoder(max_window, max_output))?
+    let mut d = new_decoder(max_window, max_output)
     let mut out: Bytes = list.new()
     let mut at: u64 = 0
     while true {
@@ -1317,7 +1314,7 @@ fn decode_frames(data: Bytes, max_output: u64, max_window: u64, dict: Option[Vie
                 }
             },
             Ok(Input()) => return Error(Data(Truncated())),
-            Ok(Output()) => admit(list.reserve(mut out, 1))?,
+            Ok(Output()) => list.reserve(mut out, 1),
             Ok(Continue()) => (),
             Error(error) => return Error(data_error(error)),
         }
@@ -1335,7 +1332,7 @@ pub fn decode_with(d: Dictionary, data: Bytes, max_output: u64, max_window: u64)
     decode_frames(data, max_output, max_window, Some(view d))
 }
 
-fn block_header(mut out: Bytes, n: u64, kind: u64, last: bool) -> Result[(), Capacity] {
+fn block_header(mut out: Bytes, n: u64, kind: u64, last: bool) {
     let header = (n << 3) | (kind << 1) | (if last {
         1u64
     } else {
@@ -1343,15 +1340,12 @@ fn block_header(mut out: Bytes, n: u64, kind: u64, last: bool) -> Result[(), Cap
     })
     let lo: u16 = int.truncate(header)
     let hi: u8 = int.narrow(header >> 16)
-    list.put_word_le(mut out, lo)?
+    list.put_word_le(mut out, lo)
     put_byte(mut out, hi)
 }
 
-fn put_byte(mut out: Bytes, x: u8) -> Result[(), Capacity] {
-    match list.push(mut out, x) {
-        Ok(()) => Ok(()),
-        Error(e) => Error(e.0),
-    }
+fn put_byte(mut out: Bytes, x: u8) {
+    list.push(mut out, x)
 }
 
 fn same_byte(data: Bytes, at: u64, n: u64) -> bool {
@@ -1366,7 +1360,7 @@ fn same_byte(data: Bytes, at: u64, n: u64) -> bool {
 
 /// Encode an RFC 8878 frame with content size and an XXH64 checksum.
 /// Levels 1 through 19 use the same raw and run-length block writer.
-pub fn encode(data: Bytes, level: u8) -> Result[Bytes, Capacity] {
+pub fn encode(data: Bytes, level: u8) -> Bytes {
     // The API's level domain is 1..19. All supported levels have the
     // same block limit because this writer has no match search.
     let levels: Inline[u64, 19] =[131072; 19]
@@ -1374,7 +1368,7 @@ pub fn encode(data: Bytes, level: u8) -> Result[Bytes, Capacity] {
     let block_size = levels[level_index - 1]
     let n = list.len(data)
     let mut out: Bytes = list.new()
-    list.put_word_le(mut out, 0xfd2fb528u32)?
+    list.put_word_le(mut out, 0xfd2fb528u32)
     let flag: u8 = if n <= 255 {
         0
     } else if n <= 65791 {
@@ -1389,32 +1383,32 @@ pub fn encode(data: Bytes, level: u8) -> Result[Bytes, Capacity] {
     } else {
         0
     }
-    put_byte(mut out, flag | single | 4)?
+    put_byte(mut out, flag | single | 4)
     if single == 0 {
         // Window descriptor with a 128 KiB base and zero mantissa.
-        put_byte(mut out, 56)?
+        put_byte(mut out, 56)
     }
     if flag == 0 {
-        put_byte(mut out, int.narrow(n))?
+        put_byte(mut out, int.narrow(n))
     } else if flag == 64 {
         let size: u16 = int.narrow(n - 256)
-        list.put_word_le(mut out, size)?
+        list.put_word_le(mut out, size)
     } else if flag == 128 {
         let size: u32 = int.narrow(n)
-        list.put_word_le(mut out, size)?
+        list.put_word_le(mut out, size)
     } else {
-        list.put_word_le(mut out, n)?
+        list.put_word_le(mut out, n)
     }
     let mut at: u64 = 0
     while true {
         let len = smaller(block_size, n - at)
         let last = at + len == n
         if len > 1 && same_byte(data, at, len) {
-            block_header(mut out, len, 1, last)?
-            put_byte(mut out, data[at])?
+            block_header(mut out, len, 1, last)
+            put_byte(mut out, data[at])
         } else {
-            block_header(mut out, len, 0, last)?
-            list.append(mut out, list.slice(data, at, at + len))?
+            block_header(mut out, len, 0, last)
+            list.append(mut out, list.slice(data, at, at + len))
         }
         if last {
             break
@@ -1423,6 +1417,6 @@ pub fn encode(data: Bytes, level: u8) -> Result[Bytes, Capacity] {
     }
     let mut hash = xxh_start()
     xxh_add(mut hash, data)
-    list.put_word_le(mut out, xxh_finish(hash))?
-    Ok(take out)
+    list.put_word_le(mut out, xxh_finish(hash))
+    take out
 }

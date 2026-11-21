@@ -59,13 +59,13 @@ fn append(mut s: Scheduler, p: u64, queue: Option[u64]) -> Option[u64] {
 
 fn create_packet(mut s: Scheduler, link: Option[u64], identity: u64, is_work: bool) -> Result[u64, Capacity] {
     let index = list.len(s.packets)
-    result.capacity_only(list.push(mut s.packets, Packet(link: link, identity: identity, is_work: is_work, datum: 0, data:[0; 4])))?
+    list.push(mut s.packets, Packet(link: link, identity: identity, is_work: is_work, datum: 0, data:[0; 4]))
     Ok(index)
 }
 
 fn create_task(mut s: Scheduler, identity: u64, priority: u64, input: Option[u64], waiting: bool, action: Action) -> Result[(), Capacity] {
     let index = list.len(s.tasks)
-    result.capacity_only(list.push(mut s.tasks, TaskControl(link: s.head, identity: identity, priority: priority, input: input, packet_pending: input != None, waiting: waiting, holding: false, action: action)))?
+    list.push(mut s.tasks, TaskControl(link: s.head, identity: identity, priority: priority, input: input, packet_pending: input != None, waiting: waiting, holding: false, action: action))
     s.head = Some(index)
     s.table[identity] = index
     Ok(())

@@ -7,8 +7,8 @@ fn s(take x: In) waits {
     if v.tag == 1u64 { result.unwrap(stdout.write(v.out, "a")) } else { result.unwrap(stdout.write(v.out, "b")) }
 }
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let ha = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, out: out, ns: 60_000_000u64, tag: 1u64), s))
-    let hb = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, out: out, ns: 20_000_000u64, tag: 2u64), s))
+    let ha = task.spawn(tasks, bytes 4096, In(clock: clock, out: out, ns: 60_000_000u64, tag: 1u64), s)
+    let hb = task.spawn(tasks, bytes 4096, In(clock: clock, out: out, ns: 20_000_000u64, tag: 2u64), s)
     result.unwrap(task.join(take ha))
     result.unwrap(task.join(take hb))
     Ok(())

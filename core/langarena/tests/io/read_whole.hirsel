@@ -8,7 +8,7 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
         result.unwrap(std.file.read_string(d, "input"))
     } else {
         let mut f = result.unwrap(std.file.open(d, "input", Read))
-        let mut b: Bytes = result.unwrap(list.with_capacity(4194304))
+        let mut b: Bytes = list.with_capacity(4194304)
         while list.len(b) < 4194304 {
             let n = result.unwrap(std.file.read_into(mut f, mut b))
             if n == 0 {
@@ -19,10 +19,10 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
         result.unwrap(string.from_utf8(take b))
     }
     let mut message = string.new()
-    result.unwrap(string.push_u64(mut message, string.byte_len(value)))
-    result.unwrap(string.push(mut message, " "))
-    result.unwrap(string.push_u64(mut message, list.capacity(string.as_bytes(value))))
-    result.unwrap(string.push(mut message, "\n"))
+    string.push_u64(mut message, string.byte_len(value))
+    string.push(mut message, " ")
+    string.push_u64(mut message, list.capacity(string.as_bytes(value)))
+    string.push(mut message, "\n")
     result.unwrap(stdout.write(out, message))
     Ok(())
 }

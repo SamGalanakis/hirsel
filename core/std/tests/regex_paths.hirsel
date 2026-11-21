@@ -3,7 +3,7 @@
 // expect: run regex_dfa_clear() = true
 fn regex_dfa_clear() -> bool {
     let re = result.unwrap(new("abcdefghij"))
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     let d = dfa_layout(re, c, false)
     let run = bound bytes 0 {
         forward_end(re, mut c, "xabcdefghij", 0)
@@ -17,7 +17,7 @@ fn regex_dfa_clear() -> bool {
 fn regex_dfa_oversize() -> bool {
     // The second arm prevents a common suffix from bypassing the wide key.
     let re = result.unwrap(new("a?{130}b|c"))
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     let d = dfa_layout(re, c, false)
     let outcome = forward_end(re, mut c, "ab", 0)
     let free_keys = 16 * d.states
@@ -34,7 +34,7 @@ fn regex_dfa_oversize() -> bool {
 // expect: run regex_dfa_give_up() = true
 fn regex_dfa_give_up() -> bool {
     let re = result.unwrap(new("abcdefghijklmnop"))
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     let d = dfa_layout(re, c, false)
     let s = "abcdefghijklmnop"
     // A fresh cache succeeds, and retaining its current state spans several clears.
@@ -53,7 +53,7 @@ fn regex_dfa_give_up() -> bool {
 // expect: run regex_dfa_quit() = true
 fn regex_dfa_quit() -> bool {
     let re = result.unwrap(new("\\B.*"))
-    let mut c = result.unwrap(cache(re, 0))
+    let mut c = cache(re, 0)
     let s = "!˗"
     forward_end(re, mut c, s, 0) == Retry && find(re, mut c, s, 0) == Some(Match(start: 0, end: 3))
 }

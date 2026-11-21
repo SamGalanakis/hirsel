@@ -411,7 +411,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 }
             }
             Terminator::Raise {
-                cause: RaiseCause::Bounds | RaiseCause::Unwrap,
+                cause: RaiseCause::Bounds | RaiseCause::Unwrap | RaiseCause::Capacity { .. },
                 ..
             }
             | Terminator::Jump(_)

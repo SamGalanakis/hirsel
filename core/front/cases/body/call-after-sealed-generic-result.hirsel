@@ -185,7 +185,7 @@ fn poll[T: send](rx: Receiver[T]) -> Option[T] {
 
 // expect: run check_try_receive() = 37
 pub fn check_try_receive() -> u64 {
-    let (tx, rx): (Sender[(u64, u64)], Receiver[(u64, u64)]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[(u64, u64)], Receiver[(u64, u64)]) = channel.new(1)
     result.unwrap(channel.try_send(tx, (19u64, 18u64)))
     match poll(rx) {
         Some(take pair) => {
@@ -199,7 +199,7 @@ pub fn check_try_receive() -> u64 {
 // Scalar runtime outputs retain the fixed operation ABI too.
 // expect: run check_try_receive_scalar() = 37
 pub fn check_try_receive_scalar() -> u64 {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     result.unwrap(channel.try_send(tx, 37u64))
     match poll(rx) {
         Some(take n) => n,
@@ -216,6 +216,6 @@ fn transfer_item[T: send](tx: Sender[T], rx: Receiver[T], take x: T) -> T waits 
 
 // expect: run check_receive_scalar() = 41
 pub fn check_receive_scalar() -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     transfer_item(tx, rx, 41u64)
 }

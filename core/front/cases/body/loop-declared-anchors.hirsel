@@ -12,8 +12,8 @@ fn last(xs: List[String], n: u64) -> Option[View[String]] in xs {
 
 fn accepted() -> u64 {
     let mut xs: List[String] = list.new()
-    result.unwrap(list.push(mut xs, "a"))
-    result.unwrap(list.push(mut xs, "abc"))
+    list.push(mut xs, "a")
+    list.push(mut xs, "abc")
     match last(xs, 3) {
         Some(s) => string.byte_len(s),
         None => 0

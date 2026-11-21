@@ -9,7 +9,7 @@ fn disk_bench_bucket(a: DiskAccount) -> Result[u64, Capacity] { Ok(a.id % 4) }
 
 fn disk_bench_put(mut db: Db, t: Table[u64, DiskAccount], key: u64, balance: u64) waits {
     let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let a = DiskAccount(id: key, balance: int.narrow(balance), owner: result.unwrap(string.from("owner000")))
+        let a = DiskAccount(id: key, balance: int.narrow(balance), owner: string.from("owner000"))
         put(mut tx, t, key, a)
     }))
     if let Committed(_) = done {} else { fail("disk bench put") }
@@ -28,7 +28,7 @@ fn disk_bench_next_pack(d: Dir) -> u64 waits { disk_bench_manifest(d).next_pack 
 // {id c % 16, balance c, owner "owner000"} at key c % 16 and returns c.
 fn disk_bench_commit(mut db: Db, t: Table[u64, DiskAccount], c: u64) -> Ticket waits {
     let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        let a = DiskAccount(id: c % 16, balance: int.narrow(c), owner: result.unwrap(string.from("owner000")))
+        let a = DiskAccount(id: c % 16, balance: int.narrow(c), owner: string.from("owner000"))
         put(mut tx, t, c % 16, a)?
         Ok(c)
     }))
@@ -59,7 +59,7 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
         n += 1
     }
     let mut gate = result.unwrap(host.open(d, "gate", Read))
-    let mut byte: Bytes = result.unwrap(list.with_capacity(1))
+    let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
     let started = host.mono_ns(c)
@@ -88,11 +88,11 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
     }
     let elapsed = host.mono_ns(c) - started
     let mut rendered = string.new()
-    result.unwrap(string.push(mut rendered, "DONE "))
-    result.unwrap(string.push_u64(mut rendered, reported))
-    result.unwrap(string.push(mut rendered, " "))
-    result.unwrap(string.push_u64(mut rendered, elapsed))
-    result.unwrap(string.push(mut rendered, "\n"))
+    string.push(mut rendered, "DONE ")
+    string.push_u64(mut rendered, reported)
+    string.push(mut rendered, " ")
+    string.push_u64(mut rendered, elapsed)
+    string.push(mut rendered, "\n")
     result.unwrap(stdout.write(out, rendered))
     list.clear(mut byte)
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
@@ -113,11 +113,11 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
     }
     if let Some(_) = result.unwrap(next(mut rows)) { fail("disk bench extra row") }
     let mut extra = string.new()
-    result.unwrap(string.push(mut extra, "COMMITS "))
-    result.unwrap(string.push_u64(mut extra, n))
-    result.unwrap(string.push(mut extra, " VERSION "))
-    result.unwrap(string.push_u64(mut extra, closed_at))
-    result.unwrap(string.push(mut extra, "\n"))
+    string.push(mut extra, "COMMITS ")
+    string.push_u64(mut extra, n)
+    string.push(mut extra, " VERSION ")
+    string.push_u64(mut extra, closed_at)
+    string.push(mut extra, "\n")
     result.unwrap(stdout.write(out, extra))
     result.unwrap(close(take reopened))
     Ok(())
@@ -161,17 +161,17 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     if mode == "R7" || mode == "R8-open" {
         result.unwrap(close(take db))
     } else {
-        result.unwrap(list.push(mut holder, take db))
+        list.push(mut holder, take db)
     }
     let mut gate = result.unwrap(host.open(d, "gate", Read))
-    let mut byte: Bytes = result.unwrap(list.with_capacity(1))
+    let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
     let started = host.mono_ns(c)
     if mode == "R7" || mode == "R8-open" {
         options.create = false
         let opened = result.unwrap(open(tasks, child, c, r, options))
-        result.unwrap(list.push(mut holder, take opened))
+        list.push(mut holder, take opened)
     } else if mode == "R6" {
         let cut = result.unwrap(checkpoint(mut holder[0]))
         result.unwrap(durable(mut holder[0], cut))
@@ -181,11 +181,11 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let expected_count = if indexed { 2 * n } else { n }
     if count != expected_count { fail("disk bench row count") }
     let mut rendered = string.new()
-    result.unwrap(string.push(mut rendered, "DONE "))
-    result.unwrap(string.push_u64(mut rendered, n))
-    result.unwrap(string.push(mut rendered, " "))
-    result.unwrap(string.push_u64(mut rendered, elapsed))
-    result.unwrap(string.push(mut rendered, "\n"))
+    string.push(mut rendered, "DONE ")
+    string.push_u64(mut rendered, n)
+    string.push(mut rendered, " ")
+    string.push_u64(mut rendered, elapsed)
+    string.push(mut rendered, "\n")
     result.unwrap(stdout.write(out, rendered))
     list.clear(mut byte)
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
@@ -218,13 +218,13 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         }
     }
     let mut extra = string.new()
-    result.unwrap(string.push(mut extra, "PACK_BYTES "))
-    result.unwrap(string.push_u64(mut extra, written))
-    result.unwrap(string.push(mut extra, " NEW_NODES "))
-    result.unwrap(string.push_u64(mut extra, nodes))
-    result.unwrap(string.push(mut extra, " ACCOUNT "))
-    result.unwrap(string.push_u64(mut extra, holder[0].resident))
-    result.unwrap(string.push(mut extra, "\n"))
+    string.push(mut extra, "PACK_BYTES ")
+    string.push_u64(mut extra, written)
+    string.push(mut extra, " NEW_NODES ")
+    string.push_u64(mut extra, nodes)
+    string.push(mut extra, " ACCOUNT ")
+    string.push_u64(mut extra, holder[0].resident)
+    string.push(mut extra, "\n")
     result.unwrap(stdout.write(out, extra))
     let mut finished = take holder
     let owned = option.unwrap(list.pop(mut finished))

@@ -3,7 +3,6 @@ fn problem(e: std.json.Error, number: u64) -> Result[m1.support.Error, m1.suppor
         Syntax(_) => m1.support.name("Syntax@document", number, "")?,
         NotFinite(_) => m1.support.name("InvalidNumber@document", number, "")?,
         Depth => m1.support.name("Depth@document", number, "")?,
-        Build(Capacity(c)) => return Ok(m1.support.Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))),
         Build(Overflow) => m1.support.name("Build@document", number, "")?,
     }
     Ok(m1.support.error(take label))
@@ -26,7 +25,8 @@ fn parse(r: Region, s: String, number: u64) -> Result[std.json.Json in r, m1.sup
 // Return owned output, so a result view never outlives a local ObjectIndex.
 fn query(mut out: String, j: std.json.Json, path: String, at: u64) -> Result[(), m1.support.Error] {
     if at > string.byte_len(path) {
-        return m1.support.mem(std.json.push_pretty(mut out, j))
+        std.json.push_pretty(mut out, j)
+        return Ok(())
     }
     let end = match string.find(path, at, "/") {
         Some(n) => n,
@@ -35,7 +35,7 @@ fn query(mut out: String, j: std.json.Json, path: String, at: u64) -> Result[(),
     let step = string.slice(path, at, end)
     match j {
         Obj(ms) => {
-            let index = m1.support.mem(std.json.index(ms))?
+            let index = std.json.index(ms)
             let Some(child) = std.json.get(index, step) else {
                 return Error(m1.support.error("MissingPath"))
             }
@@ -68,7 +68,7 @@ fn document(out: Stdout, s: String, path: String, variant: String, number: u64, 
         }
         let root = parse(doc, s, number)?
         let mut pretty = string.new()
-        m1.support.mem(std.json.push_pretty(mut pretty, root))?
+        std.json.push_pretty(mut pretty, root)
         let mut answer = m1.support.name("query", number, "=")?
         query(mut answer, root, path, 1)?
         m1.support.add(mut answer, "\n")?
@@ -119,7 +119,7 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
         let _ = m1.support.line(input, mut at);
         events += 2
     }
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(events)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

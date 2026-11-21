@@ -34,10 +34,8 @@ pub fn get[T](t: Table[T], k: u64) -> Option[View[T]] in t {
 // Installs v at k, replacing and dropping any earlier row. On Capacity the table is
 // unchanged and the row comes back.
 pub fn put[T](mut t: Table[T], k: u64, take v: T) -> Result[(), (Capacity, T)] {
-    match map.insert(mut t.rows, k, take v) {
-        Ok(()) => Ok(()),
-        Error((c, (_, take back))) => Error((c, take back)),
-    }
+    map.insert(mut t.rows, k, take v)
+    Ok(())
 }
 
 pub fn remove[T](mut t: Table[T], k: u64) -> Option[T] {
@@ -45,7 +43,7 @@ pub fn remove[T](mut t: Table[T], k: u64) -> Option[T] {
 }
 
 // Room for n more new keys: afterwards the next n puts of absent keys admit nothing.
-pub fn reserve[T](mut t: Table[T], n: u64) -> Result[(), Capacity] {
+pub fn reserve[T](mut t: Table[T], n: u64) {
     map.reserve(mut t.rows, n)
 }
 
@@ -73,10 +71,10 @@ fn get_u64(b: Bytes, mut at: u64) -> Option[u64] {
 // Layout: id, balance (two's complement), owner byte length, owner UTF-8 bytes;
 // each integer is eight little-endian bytes.
 fn encode_account(a: Account, mut out: Bytes) -> Result[(), Capacity] {
-    list.put_word_le(mut out, a.id)?
+    list.put_word_le(mut out, a.id)
     let balance: u64 = int.truncate(a.balance)
-    list.put_word_le(mut out, balance)?
-    list.put_word_le(mut out, string.byte_len(a.owner))?
+    list.put_word_le(mut out, balance)
+    list.put_word_le(mut out, string.byte_len(a.owner))
     list.append(mut out, string.as_bytes(a.owner))
 }
 
@@ -95,8 +93,8 @@ fn decode_account(b: Bytes, mut at: u64) -> Result[Option[Account], Capacity] {
     if n > list.len(b) - p {
         return Ok(None)
     }
-    let mut raw: Bytes = list.with_capacity(n)?
-    list.append(mut raw, list.slice(b, p, p + n))?
+    let mut raw: Bytes = list.with_capacity(n)
+    list.append(mut raw, list.slice(b, p, p + n))
     let owner = match string.from_utf8(take raw) {
         Ok(take s) => s,
         Error(_) => return Ok(None),

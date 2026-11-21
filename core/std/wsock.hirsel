@@ -223,11 +223,7 @@ pub fn pending(config: Config) -> Result[PendingPool, Error] {
     if !valid(config) {
         return Error(Configuration)
     }
-    let allocation: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(config.pending_max)
-    let (tx, rx) = match allocation {
-        Ok(take pair) => take pair,
-        Error(c) => return Error(Allocation(c))
-    }
+    let (tx, rx): (Sender[()], Receiver[()]) = channel.new(config.pending_max)
     for i in 0u64 .. config.pending_max {
         let _ = channel.try_send(tx, ())
     }
@@ -528,10 +524,7 @@ pub fn prepare(mut w: WriteBuffer, mut out: Outbound) -> Result[bool, Error] {
     match replace(mut w.pong, None) {
         Some(control) => {
             let mut payload = buffer(control.len)?
-            match websocket.control(control, mut payload) {
-                Ok(_) => {},
-                Error(c) => return Error(Allocation(c))
-            }
+            websocket.control(control, mut payload)
             w.pending = encode(mut out, true, 10, payload)?
             Ok(false)
         },
@@ -562,10 +555,7 @@ pub fn decode_buffered(mut r: Reader) -> Result[Option[websocket.Event], Error] 
         return Error(Protocol(1001u16))
     }
     let before = websocket.frame_count(r.decoder)
-    let event = match websocket.next(mut r.decoder, r.input, mut r.cursor) {
-        Ok(take event) => take event,
-        Error(c) => return Error(Allocation(c))
-    }
+    let event = websocket.next(mut r.decoder, r.input, mut r.cursor)
     if websocket.incomplete(r.decoder) {
         if let None = r.message_end {
             r.message_end = Some(int.saturating_add(now, MESSAGE_NS))
@@ -643,11 +633,8 @@ pub type Upgraded: send {
 }
 
 fn buffer(n: u64) -> Result[Bytes, Error] {
-    let allocation: Result[Bytes, Capacity] = list.with_capacity(n)
-    match allocation {
-        Ok(take b) => Ok(take b),
-        Error(c) => Error(Allocation(c))
-    }
+    let allocation: Bytes = list.with_capacity(n)
+    Ok(take allocation)
 }
 
 fn send_response(mut w: WriteHalf, head: Bytes, body: Bytes, deadline: Until) -> Result[(), Error] waits {
@@ -772,10 +759,7 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
             Error(c) => return Error(Allocation(c)),
         }
         if let Some((ready, take body)) = take response {
-            let header = match static_head(ready, "application/json", list.len(string.as_bytes(body))) {
-                Ok(take text) => take text,
-                Error(c) => return Error(Allocation(c)),
-            }
+            let header = static_head(ready, "application/json", list.len(string.as_bytes(body)))
             let Request(writer: take output, deadline, ..) = take request
             let mut writer = take output
             send_response(mut writer, string.as_bytes(header), string.as_bytes(body), deadline)?
@@ -814,35 +798,29 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
         },
     }
     let built_header = static_head(true, selected.content_type, list.len(body))
-    let header = match take built_header {
-        Ok(take text) => take text,
-        Error(c) => return Error(Allocation(c))
-    }
+    let header = built_header
     send_response(mut writer, string.as_bytes(header), body, deadline)?
     Ok(None)
 }
 
-fn static_head(ready: bool, content_type: String, size: u64) -> Result[String, Capacity] {
+fn static_head(ready: bool, content_type: String, size: u64) -> String {
     let mut head = string.from(if ready {
         "HTTP/1.1 200 OK"
     } else {
         "HTTP/1.1 503 Service Unavailable"
-    })?
-    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")?
-    string.push(mut head, content_type)?
-    string.push(mut head, "\r\nContent-Length: ")?
-    string.push_u64(mut head, size)?
-    string.push(mut head, "\r\n\r\n")?
-    Ok(take head)
+    })
+    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")
+    string.push(mut head, content_type)
+    string.push(mut head, "\r\nContent-Length: ")
+    string.push_u64(mut head, size)
+    string.push(mut head, "\r\n\r\n")
+    take head
 }
 
 fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
     let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline) = take request
     let mut writer = take output
-    let upgraded = match websocket.server_head(input, head) {
-        Ok(take value) => take value,
-        Error(c) => return Error(Allocation(c)),
-    }
+    let upgraded = websocket.server_head(input, head)
     match take upgraded {
         Upgraded(end, take response) => {
             let ip = match source_for_head(input, head, peer, ingress) {
@@ -892,10 +870,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
         Error(c) => return Error(Allocation(c))
     }
     let mut key: Bytes = list.new()
-    match base64.encode(nonce, mut key) {
-        Ok(_) => {},
-        Error(c) => return Error(Allocation(c))
-    }
+    base64.encode(nonce, mut key)
     send_response(mut output_half, request, string.as_bytes(""), deadline)?
     let mut input = buffer(8192)?
     let mut attempted = false
@@ -903,11 +878,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
         if attempted && expired(deadline) {
             return Error(Network(TimedOut))
         }
-        let checked = match websocket.client(input, key, true) {
-            Ok(value) => value,
-            Error(c) => return Error(Allocation(c))
-        }
-        match checked {
+        match websocket.client(input, key, true) {
             Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
             Ready(_, false) => return Error(Http(400)),
             Failed(code) => return Error(Http(code)),

@@ -2,10 +2,10 @@
 fn fail_at(failure: u64) -> u64 {
     let mut xs: List[u64] = list.new()
     for i in 0u64 .. 5 {
-        result.unwrap(list.push(mut xs, (i * 3) % 5))
+        list.push(mut xs, (i * 3) % 5)
     }
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -16,7 +16,7 @@ fn fail_at(failure: u64) -> u64 {
         } else {
             Greater
         }
-    }))
+    })
     calls
 }
 

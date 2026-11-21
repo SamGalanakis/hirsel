@@ -29,10 +29,7 @@ fn start(tasks: Tasks, mut t: std.tally.Tally[u64]) -> Result[Task[()], AppError
         Ok(take h) => take h,
         Error(e) => return Error(Issue(e)),
     }
-    match task.spawn(tasks, bytes 4096, take h, worker) {
-        Ok(take spawned) => Ok(take spawned),
-        Error((refused, _)) => Error(Mem(refused)),
-    }
+    Ok(task.spawn(tasks, bytes 4096, take h, worker))
 }
 
 fn joined(take t: Task[()]) -> Result[(), AppError] waits {
@@ -43,10 +40,7 @@ fn joined(take t: Task[()]) -> Result[(), AppError] waits {
 }
 
 pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
-    let mut t: std.tally.Tally[u64] = match std.tally.new(4, zero, sum) {
-        Ok(take t) => take t,
-        Error(c) => return Error(Mem(c)),
-    }
+    let mut t: std.tally.Tally[u64] = std.tally.new(4, zero, sum)
     let a = start(tasks, mut t)?
     let b = start(tasks, mut t)?
     let c = start(tasks, mut t)?
@@ -56,12 +50,8 @@ pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
     joined(take c)?
     joined(take d)?
     let mut line = string.new()
-    if let Error(refused) = string.push_u64(mut line, std.tally.finish(take t)) {
-        return Error(Mem(refused))
-    }
-    if let Error(refused) = string.push(mut line, "\n") {
-        return Error(Mem(refused))
-    }
+    string.push_u64(mut line, std.tally.finish(take t))
+    string.push(mut line, "\n")
     match stdout.write(out, line) {
         Ok(()) => Ok(()),
         Error(e) => Error(Io(e)),

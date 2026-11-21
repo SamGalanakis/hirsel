@@ -1,7 +1,7 @@
 // expect: accept
 // expect: run within_capacity() = true used 0
 // expect: run exact_fit() = true used 0
-// expect: run refused() = true used 0
+// expect: run refused() = true used 32
 // expect: run literal_bytes() = true used 0
 // expect: run unaligned() = true used 0
 // expect: run empty_growth() = true used 0
@@ -17,9 +17,9 @@ fn bytes_match(b: Bytes, at: u64) -> bool {
 }
 
 fn within_capacity() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(32))
+    let mut b: Bytes = list.with_capacity(32)
     let r = bound bytes 0 {
-        list.put_word_le(mut b, 0x0807060504030201u64)?
+        list.put_word_le(mut b, 0x0807060504030201u64)
         list.len(b) == 8 && list.capacity(b) == 32 && bytes_match(b, 0)
     }
     match r {
@@ -29,51 +29,67 @@ fn within_capacity() -> bool {
 }
 
 fn exact_fit() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(8))
-    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    let mut b: Bytes = list.with_capacity(8)
+    list.put_word_le(mut b, 0x0807060504030201u64)
     list.len(b) == 8 && list.capacity(b) == 8 && bytes_match(b, 0)
 }
 
 // Capacity 1 costs 8. Growing to len+8 = 9 costs 16; none remains under bound 8.
 // Refusal must retain data, len, cap, and the original byte.
 fn refused() -> bool {
-    let r = bound bytes 8 {
-        let mut b: Bytes = list.with_capacity(1)?
-        result.unwrap(list.push(mut b, 0xA5))
-        match list.put_word_le(mut b, 0x0807060504030201u64) {
-            Error(c) => c.requested == 16 && c.available == 0 && list.len(b) == 1 && list.capacity(b) == 1 && b[0] == 0xA5,
-            Ok(()) => false
+    let r = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 8 {
+            let mut b: Bytes = list.with_capacity(1)
+            list.push(mut b, 0xA5)
+            list.put_word_le(mut b, 0x0807060504030201u64)
+            false
         }
-    }
-    match r {
-        Ok(ok) => ok,
-        Error(_) => false
+    })
+    match caught(take r) {
+        Some(c) => c.requested == 16 && c.available == 0,
+        None => false
     }
 }
 
 fn literal_bytes() -> bool {
-    let mut b = result.unwrap(b"abc")
-    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
-    let again = result.unwrap(b"abc")
+    let mut b = b"abc"
+    list.put_word_le(mut b, 0x0807060504030201u64)
+    let again = b"abc"
     list.len(b) == 11 && b[0] == 97 && b[1] == 98 && b[2] == 99 && bytes_match(b, 3) && list.len(again) == 3 && again[2] == 99
 }
 
 fn unaligned() -> bool {
-    let mut b: Bytes = result.unwrap(list.with_capacity(9))
-    result.unwrap(list.push(mut b, 0xFF))
-    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    let mut b: Bytes = list.with_capacity(9)
+    list.push(mut b, 0xFF)
+    list.put_word_le(mut b, 0x0807060504030201u64)
     list.len(b) == 9 && list.capacity(b) == 9 && b[0] == 0xFF && bytes_match(b, 1)
 }
 
 fn empty_growth() -> bool {
     let mut b: Bytes = list.new()
-    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    list.put_word_le(mut b, 0x0807060504030201u64)
     list.len(b) == 8 && list.capacity(b) == 8 && bytes_match(b, 0)
 }
 
 fn function_value() -> bool {
-    let put: fn(mut Bytes, u64) -> Result[(), Capacity] = list.put_word_le
+    let put: fn(mut Bytes, u64) = list.put_word_le
     let mut b: Bytes = list.new()
-    result.unwrap(put(mut b, 0x0807060504030201u64))
+    put(mut b, 0x0807060504030201u64)
     bytes_match(b, 0)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

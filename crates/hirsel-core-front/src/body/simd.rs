@@ -99,7 +99,7 @@ impl Cx<'_, '_, '_> {
             self.source_step(n);
             let result = g.result;
             let value = match op {
-                SimdCall::PutLanes => self.put_lanes(header, value, other, shape, result, n),
+                SimdCall::PutLanes => self.put_lanes(header, value, other, shape, n),
                 SimdCall::SetLanes => self.set_lanes(header, other, value, shape, n),
                 SimdCall::Value(_) => unreachable!(),
             };
@@ -324,7 +324,6 @@ impl Cx<'_, '_, '_> {
         vector: Option<ValueId>,
         count: Option<ValueId>,
         shape: Vector,
-        result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         if !self.live() {
@@ -338,24 +337,8 @@ impl Cx<'_, '_, '_> {
 
         let byte_ty = scalar(Scalar::U8);
         let carrier = self.list_carrier(byte_ty, n)?;
-        let row = self.place_row(result, "put_lanes requires a Result place", n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(byte_ty, header, count, lists::Ask::Bounded, result, n)?;
-        let result_at = self.address(AddressBase::Value(reserved), &[], PlaceTy::Declared(row), n);
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: result_at,
-            },
-            n,
-        );
-        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, zero, n);
-        let store = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        self.list_branch(ok, store, done, n);
-        self.start(store);
+        self.list_reserve(byte_ty, header, count, lists::Ask::Bounded, n)?;
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let to = self.address(
             AddressBase::Value(data),
@@ -366,9 +349,7 @@ impl Cx<'_, '_, '_> {
         self.inst(Inst::PutLanes { to, vector, count }, n);
         let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, count, n);
         self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
-        self.jump(done, &[], n);
-        self.start(done);
-        Some(reserved)
+        None
     }
 
     fn set_lanes(

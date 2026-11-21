@@ -25,64 +25,61 @@ fn prepare(n: u64) -> Result[Document, helper.Error] {
         let y = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
         let z = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
         let mut name = string.new()
-        helper.mem(float.push_fixed64(mut name, helper.next_float(mut g, 1.0), 7))?
-        helper.mem(string.push(mut name, " "))?
-        helper.mem(string.push_i64(mut name, int.widen(helper.next_int(mut g, 10000))))?
+        float.push_fixed64(mut name, helper.next_float(mut g, 1.0), 7)
+        string.push(mut name, " ")
+        string.push_i64(mut name, int.widen(helper.next_int(mut g, 10000)))
         let mut opts: Map[String, (i32, bool)] = map.new()
-        let key = helper.mem(string.from("1"))?
-        helper.mem(result.capacity_only(map.insert(mut opts, take key, (1i32, true))))?
-        helper.mem(result.capacity_only(list.push(mut coordinates, NamedCoordinate(point: Coordinate(x, y, z), name: take name, opts: take opts))))?
+        map.insert(mut opts, string.from("1"), (1i32, true))
+        list.push(mut coordinates, NamedCoordinate(point: Coordinate(x, y, z), name: take name, opts: take opts))
     }
     Ok(Document(coordinates: take coordinates, info: "some info"))
 }
 
-fn write_options(w: std.json.Writer, depth: u64, opts: Map[String, (i32, bool)]) -> Result[(), Capacity] {
-    std.json.object(w, depth, scoped fn(object: std.json.Writer, mut fields: std.json.Items) -> Result[(), Capacity] {
+fn write_options(w: std.json.Writer, depth: u64, opts: Map[String, (i32, bool)]) {
+    std.json.object(w, depth, scoped fn(object: std.json.Writer, mut fields: std.json.Items) {
         for (key, opt) in opts {
             let (count, enabled) = opt
-            std.json.write_member(object, mut fields, key)?
-            std.json.array(object, fields.depth, scoped fn(array: std.json.Writer, mut values: std.json.Items) -> Result[(), Capacity] {
-                std.json.element(array, mut values)?
-                std.json.write_i64(array, int.widen(count))?
-                std.json.element(array, mut values)?
+            std.json.write_member(object, mut fields, key)
+            std.json.array(object, fields.depth, scoped fn(array: std.json.Writer, mut values: std.json.Items) {
+                std.json.element(array, mut values)
+                std.json.write_i64(array, int.widen(count))
+                std.json.element(array, mut values)
                 std.json.write_bool(array, enabled)
-            })?
+            })
         }
-        Ok(())
     })
 }
 
-fn write_coordinate(w: std.json.Writer, depth: u64, row: NamedCoordinate) -> Result[(), Capacity] {
-    std.json.object(w, depth, scoped fn(object: std.json.Writer, mut fields: std.json.Items) -> Result[(), Capacity] {
-        std.json.write_member(object, mut fields, "x")?
-        std.json.write_f64(object, row.point.x)?
-        std.json.write_member(object, mut fields, "y")?
-        std.json.write_f64(object, row.point.y)?
-        std.json.write_member(object, mut fields, "z")?
-        std.json.write_f64(object, row.point.z)?
-        std.json.write_member(object, mut fields, "name")?
-        std.json.write_string_value(object, row.name)?
-        std.json.write_member(object, mut fields, "opts")?
+fn write_coordinate(w: std.json.Writer, depth: u64, row: NamedCoordinate) {
+    std.json.object(w, depth, scoped fn(object: std.json.Writer, mut fields: std.json.Items) {
+        std.json.write_member(object, mut fields, "x")
+        std.json.write_f64(object, row.point.x)
+        std.json.write_member(object, mut fields, "y")
+        std.json.write_f64(object, row.point.y)
+        std.json.write_member(object, mut fields, "z")
+        std.json.write_f64(object, row.point.z)
+        std.json.write_member(object, mut fields, "name")
+        std.json.write_string_value(object, row.name)
+        std.json.write_member(object, mut fields, "opts")
         write_options(object, fields.depth, row.opts)
     })
 }
 
 fn render(data: Document) -> Result[String, helper.Error] {
     let mut out = string.new()
-    helper.mem(std.json.write(mut out, false, scoped fn(w: std.json.Writer) -> Result[(), Capacity] {
-        std.json.object(w, 0, scoped fn(object: std.json.Writer, mut fields: std.json.Items) -> Result[(), Capacity] {
-            std.json.write_member(object, mut fields, "coordinates")?
-            std.json.array(object, fields.depth, scoped fn(array: std.json.Writer, mut values: std.json.Items) -> Result[(), Capacity] {
+    std.json.write(mut out, false, scoped fn(w: std.json.Writer) {
+        std.json.object(w, 0, scoped fn(object: std.json.Writer, mut fields: std.json.Items) {
+            std.json.write_member(object, mut fields, "coordinates")
+            std.json.array(object, fields.depth, scoped fn(array: std.json.Writer, mut values: std.json.Items) {
                 for c in data.coordinates {
-                    std.json.element(array, mut values)?
-                    write_coordinate(array, values.depth, c)?
+                    std.json.element(array, mut values)
+                    write_coordinate(array, values.depth, c)
                 }
-                Ok(())
-            })?
-            std.json.write_member(object, mut fields, "info")?
+            })
+            std.json.write_member(object, mut fields, "info")
             std.json.write_string_value(object, data.info)
         })
-    }))?
+    })
     Ok(take out)
 }
 
@@ -161,7 +158,6 @@ fn mean(x: f64, y: f64, z: f64, n: u64) -> Coordinate {
 fn average_mapping(s: String) -> Result[Coordinate, helper.Error] {
     let data = match std.json.decode(s, read_coordinates) {
         Ok(take data) => take data,
-        Error(Build(Capacity(e))) => return Error(Capacity(e)),
         Error(_) => return Error(Config),
     }
     if !data.found {

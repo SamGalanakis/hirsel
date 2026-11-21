@@ -1,12 +1,12 @@
 fn representation(text: String, lower: String, expected: uuid.Uuid, network: Bytes) -> bool {
     let mut rendered = string.new()
-    result.unwrap(string.push(mut rendered, "id="))
-    result.unwrap(uuid.push(mut rendered, expected))
+    string.push(mut rendered, "id=")
+    uuid.push(mut rendered, expected)
     let mut full = string.new()
-    result.unwrap(string.push(mut full, "id="))
-    result.unwrap(string.push(mut full, lower))
-    let mut packed = result.unwrap(b"+")
-    result.unwrap(uuid.push_bytes(mut packed, expected))
+    string.push(mut full, "id=")
+    string.push(mut full, lower)
+    let mut packed = b"+"
+    uuid.push_bytes(mut packed, expected)
     let text_matches = uuid.parse(text) == Ok(expected) && rendered == full
     let bytes_match = packed[0] == b'+' && list.len(packed) == 17 && list.slice(packed, 1, 17) == network
     let from_bytes_matches = uuid.from_bytes(packed, 1) == expected
@@ -27,8 +27,8 @@ fn representation(text: String, lower: String, expected: uuid.Uuid, network: Byt
 fn rfc_v4() -> bool {
     let text = "919108f7-52d1-4320-9bac-f847db4148a8"
     let expected = uuid.Uuid(hi: 0x919108f752d14320, lo: 0x9bacf847db4148a8)
-    let network = result.unwrap(b"\x91\x91\x08\xf7\x52\xd1\x43\x20\x9b\xac\xf8\x47\xdb\x41\x48\xa8")
-    let raw = result.unwrap(b"+\x91\x91\x08\xf7\x52\xd1\x33\x20\x5b\xac\xf8\x47\xdb\x41\x48\xa8!")
+    let network = b"\x91\x91\x08\xf7\x52\xd1\x43\x20\x9b\xac\xf8\x47\xdb\x41\x48\xa8"
+    let raw = b"+\x91\x91\x08\xf7\x52\xd1\x33\x20\x5b\xac\xf8\x47\xdb\x41\x48\xa8!"
     representation(text, text, expected, network) && uuid.v4(raw, 1) == expected
 }
 
@@ -47,8 +47,8 @@ fn rfc_v7() -> bool {
     let text = "017F22E2-79B0-7CC3-98C4-DC0C0C07398F"
     let lower = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
     let expected = uuid.Uuid(hi: 0x017f22e279b07cc3, lo: 0x98c4dc0c0c07398f)
-    let network = result.unwrap(b"\x01\x7f\x22\xe2\x79\xb0\x7c\xc3\x98\xc4\xdc\x0c\x0c\x07\x39\x8f")
-    let raw = result.unwrap(b"+\x0c\xc3\x18\xc4\xdc\x0c\x0c\x07\x39\x8f!")
+    let network = b"\x01\x7f\x22\xe2\x79\xb0\x7c\xc3\x98\xc4\xdc\x0c\x0c\x07\x39\x8f"
+    let raw = b"+\x0c\xc3\x18\xc4\xdc\x0c\x0c\x07\x39\x8f!"
     representation(text, lower, expected, network) && uuid.v7(1645557742000, raw, 1) == Some(expected)
 }
 
@@ -58,11 +58,11 @@ fn rfc_v7() -> bool {
 // expect: run version_variant_masks() = true
 fn version_variant_masks() -> bool {
     // ffffffff-ffff-4fff-bfff-ffffffffffff
-    let ones = uuid.v4(result.unwrap(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), 0)
+    let ones = uuid.v4(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 0)
     // 00000000-0000-4000-8000-000000000000
-    let zeros = uuid.v4(result.unwrap(b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), 0)
+    let zeros = uuid.v4(b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 0)
     // 00000000-0000-7fff-bfff-ffffffffffff
-    let seven = option.unwrap(uuid.v7(0, result.unwrap(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), 0))
+    let seven = option.unwrap(uuid.v7(0, b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 0))
     let ones_match = ones == uuid.Uuid(hi: 0xffffffffffff4fff, lo: 0xbfffffffffffffff)
     let zeros_match = zeros == uuid.Uuid(hi: 0x0000000000004000, lo: 0x8000000000000000)
     let seven_matches = seven == uuid.Uuid(hi: 0x0000000000007fff, lo: 0xbfffffffffffffff)
@@ -148,13 +148,13 @@ fn one_text_form() -> bool {
 // Mutant: compare lo before hi, or compare hi as a signed word.
 // expect: run time_order() = true
 fn time_order() -> bool {
-    let early = option.unwrap(uuid.v7(1, result.unwrap(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), 0))
-    let middle = option.unwrap(uuid.v7(2, result.unwrap(b"\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01"), 0))
-    let late = option.unwrap(uuid.v7(1u64 << 47, result.unwrap(b"\0\0\0\0\0\0\0\0\0\0"), 0))
+    let early = option.unwrap(uuid.v7(1, b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 0))
+    let middle = option.unwrap(uuid.v7(2, b"\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01", 0))
+    let late = option.unwrap(uuid.v7(1u64 << 47, b"\0\0\0\0\0\0\0\0\0\0", 0))
     let mut ids: List[uuid.Uuid] = list.new()
-    result.unwrap(list.push(mut ids, late))
-    result.unwrap(list.push(mut ids, early))
-    result.unwrap(list.push(mut ids, middle))
+    list.push(mut ids, late)
+    list.push(mut ids, early)
+    list.push(mut ids, middle)
     list.sort(mut ids, fn(a: uuid.Uuid, b: uuid.Uuid) -> Order {
         order.compare(a, b)
     })
@@ -165,7 +165,7 @@ fn time_order() -> bool {
 // Mutants: 47-bit timestamp, off-by-one at 2^48, or ignore the variant.
 // expect: run unix_ms_round_trip() = true
 fn unix_ms_round_trip() -> bool {
-    let b = result.unwrap(b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")
+    let b = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
     let max = (1u64 << 48) - 1
     let zero_matches = uuid.unix_ms(option.unwrap(uuid.v7(0, b, 0))) == Some(0)
     let rfc_matches = uuid.unix_ms(option.unwrap(uuid.v7(1645557742000, b, 0))) == Some(1645557742000)
@@ -180,40 +180,19 @@ fn unix_ms_round_trip() -> bool {
 // Mutant: overflow from forming at + 16 before checking the byte range.
 // expect: run from_bytes_large_offset() = fail Bounds
 fn from_bytes_large_offset() -> u64 {
-    uuid.from_bytes(result.unwrap(b""), 0xffffffffffffffff).hi
+    uuid.from_bytes(b"", 0xffffffffffffffff).hi
 }
 
 // U2 v4 byte-range contract. RFC 9562 A.3 rfc9562.txt:2235, 16 input bytes.
 // Mutant: ignore at when checking the byte range.
 // expect: run v4_short_suffix() = fail Bounds
 fn v4_short_suffix() -> u64 {
-    uuid.v4(result.unwrap(b"0123456789abcdef"), 1).hi
+    uuid.v4(b"0123456789abcdef", 1).hi
 }
 
 // U5 v7 byte-range contract. RFC 9562 A.6 rfc9562.txt:2332-2342.
 // Mutant: permit nine bytes by zero-filling the final byte.
 // expect: run v7_short_suffix() = fail Bounds
 fn v7_short_suffix() -> bool {
-    uuid.v7(0, result.unwrap(b"0123456789"), 1) == None
-}
-
-// RFC 9562 appendix A.3. Refused text output must leave the existing
-// prefix intact even though the first digit would fit.
-// expect: run push_refusal_retries() = true
-fn push_refusal_retries() -> bool {
-    let mut out = string.new()
-    result.unwrap(string.reserve(mut out, 8))
-    result.unwrap(string.push(mut out, "id="))
-    let id = uuid.Uuid(hi: 0x919108f752d14320, lo: 0x9bacf847db4148a8)
-    let denied = result.unwrap(bound bytes 0 {
-        uuid.push(mut out, id)
-    })
-    if let Ok(_) = denied {
-        return false
-    }
-    if out != "id=" {
-        return false
-    }
-    result.unwrap(uuid.push(mut out, id))
-    out == "id=919108f7-52d1-4320-9bac-f847db4148a8"
+    uuid.v7(0, b"0123456789", 1) == None
 }

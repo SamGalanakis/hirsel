@@ -28,9 +28,7 @@ pub fn read_all(i: Stdin) -> Result[Bytes, Error] waits {
             } else {
                 list.capacity(buf)
             }
-            if let Error(c) = list.reserve(mut buf, want) {
-                return Error(Capacity(c))
-            }
+            list.reserve(mut buf, want)
         }
         match stdin.read(i, mut buf, Never) {
             Ok(0) => return Ok(take buf),
@@ -52,25 +50,17 @@ pub opaque type Lines {
 
 /// Owns src and reserves two cap-byte blocks (input and unfinished line), except the input
 /// block has at least one byte so cap=0 can distinguish an empty line from EOF.
-/// On Capacity, returns src at its original position. Alloc: cap + max(cap,1),
-/// each rounded to 8, current limit. Ex: let l = io.lines(File(take f),4096)?
-pub fn lines(take src: Input, cap: u64) -> Result[Lines, (Capacity, Input)] {
+/// Fails: a refusal raises Capacity, and cleanup closes src. Alloc: cap + max(cap,1),
+/// each rounded to 8, current limit. Ex: let l = io.lines(File(take f),4096)
+pub fn lines(take src: Input, cap: u64) -> Lines {
     let input_cap: u64 = if cap == 0 {
         1
     } else {
         cap
     }
-    let allocated_input: Result[Bytes, Capacity] = list.with_capacity(input_cap)
-    let buffer = match take allocated_input {
-        Ok(take b) => take b,
-        Error(c) => return Error((c, take src)),
-    }
-    let allocated_line: Result[Bytes, Capacity] = list.with_capacity(cap)
-    let accumulated = match take allocated_line {
-        Ok(take b) => take b,
-        Error(c) => return Error((c, take src)),
-    }
-    Ok(Lines(src: take src, buffer: take buffer, at: 0, pending: take accumulated, cap, eof: false, completed: false))
+    let buffer: Bytes = list.with_capacity(input_cap)
+    let accumulated: Bytes = list.with_capacity(cap)
+    Lines(src: take src, buffer: take buffer, at: 0, pending: take accumulated, cap, eof: false, completed: false)
 }
 
 /// Raw bytes accumulated for the current line, including any trailing partial scalar.
@@ -92,9 +82,7 @@ pub fn read_line(mut l: Lines, mut line: String) -> Result[bool, Error] waits {
     string.truncate(mut line, 0)
     let available = list.capacity(string.as_bytes(line))
     if available < l.cap {
-        if let Error(c) = string.reserve(mut line, l.cap) {
-            return Error(Capacity(c))
-        }
+        string.reserve(mut line, l.cap)
     }
     // A completed line is consumed. An oversized/invalid prefix stays for inspection.
     if l.completed {
@@ -196,11 +184,8 @@ fn copy_prefix(mut l: Lines, mut line: String, partial: bool) -> Result[(), Erro
     }
     // Validate with the ordinary public UTF-8 constructor, retaining raw input.
     // The copy is exactly one line and reuses the caller's admitted storage.
-    let mut raw = match string.into_bytes(replace(mut line, string.new())) {
-        Ok(take b) => take b,
-        Error(_) => fail("io: reserved output owns its storage"),
-    }
-    let _ = list.append(mut raw, list.slice(l.pending, 0, end))
+    let mut raw = string.into_bytes(replace(mut line, string.new()))
+    list.append(mut raw, list.slice(l.pending, 0, end))
     match string.from_utf8(take raw) {
         Ok(take s) => {
             line = s;
@@ -222,10 +207,10 @@ pub opaque type Out {
     buffer: Bytes
 }
 
-/// Reserves exactly cap bytes of buffering, current limit. Error leaves stdout untouched.
-pub fn out(o: Stdout, cap: u64) -> Result[Out, Capacity] {
-    let b: Bytes = list.with_capacity(cap)?
-    Ok(Out(output: o, buffer: take b))
+/// Reserves exactly cap bytes of buffering, current limit. A refusal raises Capacity before stdout sees a write.
+pub fn out(o: Stdout, cap: u64) -> Out {
+    let b: Bytes = list.with_capacity(cap)
+    Out(output: o, buffer: take b)
 }
 
 /// The retained suffix awaiting flush; freezes w. Alloc: none.
@@ -293,18 +278,15 @@ pub opaque type BufferedInput {
 }
 
 /// Takes ownership of src and reserves a reusable read buffer of at least one byte.
-/// On Capacity, returns src at its original position.
-pub fn buffered_input(take src: Input, cap: u64) -> Result[BufferedInput, (Capacity, Input)] {
+/// A refusal raises Capacity, and cleanup closes src.
+pub fn buffered_input(take src: Input, cap: u64) -> BufferedInput {
     let size: u64 = if cap == 0 {
         1
     } else {
         cap
     }
-    let allocated: Result[Bytes, Capacity] = list.with_capacity(size)
-    match take allocated {
-        Ok(take buffer) => Ok(BufferedInput(src: take src, buffer: take buffer, at: 0)),
-        Error(c) => Error((c, take src)),
-    }
+    let buffer: Bytes = list.with_capacity(size)
+    BufferedInput(src: take src, buffer: take buffer, at: 0)
 }
 
 /// Appends the next raw line, including its LF when present. False means EOF
@@ -326,9 +308,7 @@ pub fn read_until_lf(mut input: BufferedInput, mut output: Bytes) -> Result[bool
         if found_lf {
             end += 1
         }
-        if let Error(c) = list.append(mut output, list.slice(input.buffer, start, end)) {
-            return Error(Capacity(c))
-        }
+        list.append(mut output, list.slice(input.buffer, start, end))
         input.at = end
         if found_lf {
             return Ok(true)

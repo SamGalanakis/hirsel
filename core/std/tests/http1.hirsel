@@ -116,21 +116,21 @@ fn request_case(raw: Bytes, expected: http1.Progress, end: u64, method: Option[B
 // Mutant: skip_head_token_check
 // expect: run httparse_00() = true
 fn httparse_00() -> bool {
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\n\r\n"), Complete, 18, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), list.new(), list.new())
+    request_case(b"GET / HTTP/1.1\r\n\r\n", Complete, 18, Some(b"GET"), Some(b"/"), Some(1), list.new(), list.new())
 }
 
 // src/lib.rs:1363 test_request_simple_with_query_params
 // Mutant: skip_head_token_check
 // expect: run httparse_01() = true
 fn httparse_01() -> bool {
-    request_case(result.unwrap(b"GET /thing?data=a HTTP/1.1\r\n\r\n"), Complete, 30, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/thing?data=a")), Some(1), list.new(), list.new())
+    request_case(b"GET /thing?data=a HTTP/1.1\r\n\r\n", Complete, 30, Some(b"GET"), Some(b"/thing?data=a"), Some(1), list.new(), list.new())
 }
 
 // src/lib.rs:1374 test_request_simple_with_whatwg_query_params
 // Mutant: skip_head_token_check
 // expect: run httparse_02() = true
 fn httparse_02() -> bool {
-    request_case(result.unwrap(b"GET /thing?data=a^ HTTP/1.1\r\n\r\n"), Complete, 31, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/thing?data=a^")), Some(1), list.new(), list.new())
+    request_case(b"GET /thing?data=a^ HTTP/1.1\r\n\r\n", Complete, 31, Some(b"GET"), Some(b"/thing?data=a^"), Some(1), list.new(), list.new())
 }
 
 // src/lib.rs:1385 test_request_headers
@@ -138,12 +138,12 @@ fn httparse_02() -> bool {
 // expect: run httparse_03() = true
 fn httparse_03() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Cookie")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Cookie")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: foo.com\r\nCookie: \r\n\r\n"), Complete, 43, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    list.push(mut values, b"")
+    request_case(b"GET / HTTP/1.1\r\nHost: foo.com\r\nCookie: \r\n\r\n", Complete, 43, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1400 test_request_headers_optional_whitespace
@@ -151,12 +151,12 @@ fn httparse_03() -> bool {
 // expect: run httparse_04() = true
 fn httparse_04() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Cookie")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Cookie")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: \tfoo.com\t \r\nCookie: \t \r\n\r\n"), Complete, 48, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    list.push(mut values, b"")
+    request_case(b"GET / HTTP/1.1\r\nHost: \tfoo.com\t \r\nCookie: \t \r\n\r\n", Complete, 48, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1415 test_request_header_value_htab_short
@@ -164,10 +164,10 @@ fn httparse_04() -> bool {
 // expect: run httparse_05() = true
 fn httparse_05() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"User-Agent")))
+    list.push(mut names, b"User-Agent")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"some\tagent")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nUser-Agent: some\tagent\r\n\r\n"), Complete, 42, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"some\tagent")
+    request_case(b"GET / HTTP/1.1\r\nUser-Agent: some\tagent\r\n\r\n", Complete, 42, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1429 test_request_header_value_htab_med
@@ -175,10 +175,10 @@ fn httparse_05() -> bool {
 // expect: run httparse_06() = true
 fn httparse_06() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"User-Agent")))
+    list.push(mut names, b"User-Agent")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"1234567890some\tagent")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nUser-Agent: 1234567890some\tagent\r\n\r\n"), Complete, 52, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"1234567890some\tagent")
+    request_case(b"GET / HTTP/1.1\r\nUser-Agent: 1234567890some\tagent\r\n\r\n", Complete, 52, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1443 test_request_header_value_htab_long
@@ -186,10 +186,10 @@ fn httparse_06() -> bool {
 // expect: run httparse_07() = true
 fn httparse_07() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"User-Agent")))
+    list.push(mut names, b"User-Agent")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"1234567890some\t1234567890agent1234567890")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nUser-Agent: 1234567890some\t1234567890agent1234567890\r\n\r\n"), Complete, 72, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"1234567890some\t1234567890agent1234567890")
+    request_case(b"GET / HTTP/1.1\r\nUser-Agent: 1234567890some\t1234567890agent1234567890\r\n\r\n", Complete, 72, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1457 test_request_header_no_space_after_colon
@@ -197,10 +197,10 @@ fn httparse_07() -> bool {
 // expect: run httparse_08() = true
 fn httparse_08() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"User-Agent")))
+    list.push(mut names, b"User-Agent")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"omg-no-space1234567890some1234567890agent1234567890")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nUser-Agent:omg-no-space1234567890some1234567890agent1234567890\r\n\r\n"), Complete, 82, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"omg-no-space1234567890some1234567890agent1234567890")
+    request_case(b"GET / HTTP/1.1\r\nUser-Agent:omg-no-space1234567890some1234567890agent1234567890\r\n\r\n", Complete, 82, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1471 test_request_headers_max
@@ -208,16 +208,16 @@ fn httparse_08() -> bool {
 // expect: run httparse_09() = true
 fn httparse_09() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"A")))
-    result.unwrap(list.push(mut names, result.unwrap(b"B")))
-    result.unwrap(list.push(mut names, result.unwrap(b"C")))
-    result.unwrap(list.push(mut names, result.unwrap(b"D")))
+    list.push(mut names, b"A")
+    list.push(mut names, b"B")
+    list.push(mut names, b"C")
+    list.push(mut names, b"D")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"A")))
-    result.unwrap(list.push(mut values, result.unwrap(b"B")))
-    result.unwrap(list.push(mut values, result.unwrap(b"C")))
-    result.unwrap(list.push(mut values, result.unwrap(b"D")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nA: A\r\nB: B\r\nC: C\r\nD: D\r\n\r\n"), Complete, 42, None, None, None, names, values)
+    list.push(mut values, b"A")
+    list.push(mut values, b"B")
+    list.push(mut values, b"C")
+    list.push(mut values, b"D")
+    request_case(b"GET / HTTP/1.1\r\nA: A\r\nB: B\r\nC: C\r\nD: D\r\n\r\n", Complete, 42, None, None, None, names, values)
 }
 
 // src/lib.rs:1479 test_request_multibyte
@@ -225,68 +225,68 @@ fn httparse_09() -> bool {
 // expect: run httparse_10() = true
 fn httparse_10() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"User-Agent")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"User-Agent")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"\xe3\x81\xb2\xe3/1.0")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: foo.com\r\nUser-Agent: \xe3\x81\xb2\xe3/1.0\r\n\r\n"), Complete, 55, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    list.push(mut values, b"\xe3\x81\xb2\xe3/1.0")
+    request_case(b"GET / HTTP/1.1\r\nHost: foo.com\r\nUser-Agent: \xe3\x81\xb2\xe3/1.0\r\n\r\n", Complete, 55, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1495 test_request_one_byte_method
 // Mutant: skip_head_token_check
 // expect: run httparse_11() = true
 fn httparse_11() -> bool {
-    request_case(result.unwrap(b"G"), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"G", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1502 test_request_partial_method
 // Mutant: skip_head_token_check
 // expect: run httparse_12() = true
 fn httparse_12() -> bool {
-    request_case(result.unwrap(b"GE"), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GE", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1509 test_request_method_no_delimiter
 // Mutant: skip_head_token_check
 // expect: run httparse_13() = true
 fn httparse_13() -> bool {
-    request_case(result.unwrap(b"GET"), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1517 test_request_method_only
 // Mutant: skip_head_token_check
 // expect: run httparse_14() = true
 fn httparse_14() -> bool {
-    request_case(result.unwrap(b"GET "), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET ", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1523 test_request_partial
 // Mutant: skip_head_token_check
 // expect: run httparse_15() = true
 fn httparse_15() -> bool {
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\n\r"), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET / HTTP/1.1\r\n\r", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1529 test_request_partial_version
 // Mutant: skip_head_token_check
 // expect: run httparse_16() = true
 fn httparse_16() -> bool {
-    request_case(result.unwrap(b"GET / HTTP/1."), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET / HTTP/1.", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1535 test_request_method_path_no_delimiter
 // Mutant: skip_head_token_check
 // expect: run httparse_17() = true
 fn httparse_17() -> bool {
-    request_case(result.unwrap(b"GET /"), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET /", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1541 test_request_method_path_only
 // Mutant: skip_head_token_check
 // expect: run httparse_18() = true
 fn httparse_18() -> bool {
-    request_case(result.unwrap(b"GET / "), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET / ", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1547 test_request_partial_parses_headers_as_much_as_it_can
@@ -294,10 +294,10 @@ fn httparse_18() -> bool {
 // expect: run httparse_19() = true
 fn httparse_19() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    list.push(mut names, b"Host")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"yolo")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: yolo\r\n"), Partial, 0, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"yolo")
+    request_case(b"GET / HTTP/1.1\r\nHost: yolo\r\n", Partial, 0, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // src/lib.rs:1561 test_request_newlines
@@ -305,73 +305,73 @@ fn httparse_19() -> bool {
 // expect: run httparse_20() = true
 fn httparse_20() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    list.push(mut names, b"Host")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.bar")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\nHost: foo.bar\n\n"), Complete, 30, None, None, None, names, values)
+    list.push(mut values, b"foo.bar")
+    request_case(b"GET / HTTP/1.1\nHost: foo.bar\n\n", Complete, 30, None, None, None, names, values)
 }
 
 // src/lib.rs:1567 test_request_empty_lines_prefix
 // Mutant: skip_head_token_check
 // expect: run httparse_21() = true
 fn httparse_21() -> bool {
-    request_case(result.unwrap(b"\r\n\r\nGET / HTTP/1.1\r\n\r\n"), Complete, 22, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), list.new(), list.new())
+    request_case(b"\r\n\r\nGET / HTTP/1.1\r\n\r\n", Complete, 22, Some(b"GET"), Some(b"/"), Some(1), list.new(), list.new())
 }
 
 // src/lib.rs:1578 test_request_empty_lines_prefix_lf_only
 // Mutant: lf_only_rejected
 // expect: run httparse_22() = true
 fn httparse_22() -> bool {
-    request_case(result.unwrap(b"\n\nGET / HTTP/1.1\n\n"), Complete, 18, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), list.new(), list.new())
+    request_case(b"\n\nGET / HTTP/1.1\n\n", Complete, 18, Some(b"GET"), Some(b"/"), Some(1), list.new(), list.new())
 }
 
 // src/lib.rs:1589 test_request_path_backslash
 // Mutant: skip_head_token_check
 // expect: run httparse_23() = true
 fn httparse_23() -> bool {
-    request_case(result.unwrap(b"\n\nGET /\\?wayne\\=5 HTTP/1.1\n\n"), Complete, 28, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/\\?wayne\\=5")), Some(1), list.new(), list.new())
+    request_case(b"\n\nGET /\\?wayne\\=5 HTTP/1.1\n\n", Complete, 28, Some(b"GET"), Some(b"/\\?wayne\\=5"), Some(1), list.new(), list.new())
 }
 
 // src/lib.rs:1600 test_request_with_invalid_token_delimiter
 // Mutant: skip_head_token_check
 // expect: run httparse_24() = true
 fn httparse_24() -> bool {
-    request_case(result.unwrap(b"GET\n/ HTTP/1.1\r\nHost: foo.bar\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET\n/ HTTP/1.1\r\nHost: foo.bar\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1608 test_request_with_invalid_but_short_version
 // Mutant: skip_head_token_check
 // expect: run httparse_25() = true
 fn httparse_25() -> bool {
-    request_case(result.unwrap(b"GET / HTTP/1!"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET / HTTP/1!", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1615 test_request_with_empty_method
 // Mutant: skip_head_token_check
 // expect: run httparse_26() = true
 fn httparse_26() -> bool {
-    request_case(result.unwrap(b" / HTTP/1.1\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b" / HTTP/1.1\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1622 test_request_with_empty_path
 // Mutant: skip_head_token_check
 // expect: run httparse_27() = true
 fn httparse_27() -> bool {
-    request_case(result.unwrap(b"GET  HTTP/1.1\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET  HTTP/1.1\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // src/lib.rs:1629 test_request_with_empty_method_and_path
 // Mutant: skip_head_token_check
 // expect: run httparse_28() = true
 fn httparse_28() -> bool {
-    request_case(result.unwrap(b"  HTTP/1.1\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"  HTTP/1.1\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // Empty-buffer controls (twins of the upstream partial-method/version cases).
 // Mutant: skip_head_token_check
 // expect: run httparse_29() = true
 fn httparse_29() -> bool {
-    request_case(result.unwrap(b""), Partial, 0, None, None, None, list.new(), list.new())
+    request_case(b"", Partial, 0, None, None, None, list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:33, reqTests[0]; head only.
@@ -379,26 +379,26 @@ fn httparse_29() -> bool {
 // expect: run go_head_00() = true
 fn go_head_00() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"User-Agent")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Accept")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Accept-Language")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Accept-Encoding")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Accept-Charset")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Keep-Alive")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Proxy-Connection")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"User-Agent")
+    list.push(mut names, b"Accept")
+    list.push(mut names, b"Accept-Language")
+    list.push(mut names, b"Accept-Encoding")
+    list.push(mut names, b"Accept-Charset")
+    list.push(mut names, b"Keep-Alive")
+    list.push(mut names, b"Content-Length")
+    list.push(mut names, b"Proxy-Connection")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"www.techcrunch.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"Fake")))
-    result.unwrap(list.push(mut values, result.unwrap(b"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")))
-    result.unwrap(list.push(mut values, result.unwrap(b"en-us,en;q=0.5")))
-    result.unwrap(list.push(mut values, result.unwrap(b"gzip,deflate")))
-    result.unwrap(list.push(mut values, result.unwrap(b"ISO-8859-1,utf-8;q=0.7,*;q=0.7")))
-    result.unwrap(list.push(mut values, result.unwrap(b"300")))
-    result.unwrap(list.push(mut values, result.unwrap(b"7")))
-    result.unwrap(list.push(mut values, result.unwrap(b"keep-alive")))
-    request_case(result.unwrap(b"GET http://www.techcrunch.com/ HTTP/1.1\r\nHost: www.techcrunch.com\r\nUser-Agent: Fake\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\nAccept-Language: en-us,en;q=0.5\r\nAccept-Encoding: gzip,deflate\r\nAccept-Charset: ISO-8859-1,utf-8;q=0.7,*;q=0.7\r\nKeep-Alive: 300\r\nContent-Length: 7\r\nProxy-Connection: keep-alive\r\n\r\nabcdef\n???"), Complete, 338, Some(result.unwrap(b"GET")), Some(result.unwrap(b"http://www.techcrunch.com/")), Some(1), names, values)
+    list.push(mut values, b"www.techcrunch.com")
+    list.push(mut values, b"Fake")
+    list.push(mut values, b"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    list.push(mut values, b"en-us,en;q=0.5")
+    list.push(mut values, b"gzip,deflate")
+    list.push(mut values, b"ISO-8859-1,utf-8;q=0.7,*;q=0.7")
+    list.push(mut values, b"300")
+    list.push(mut values, b"7")
+    list.push(mut values, b"keep-alive")
+    request_case(b"GET http://www.techcrunch.com/ HTTP/1.1\r\nHost: www.techcrunch.com\r\nUser-Agent: Fake\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\nAccept-Language: en-us,en;q=0.5\r\nAccept-Encoding: gzip,deflate\r\nAccept-Charset: ISO-8859-1,utf-8;q=0.7,*;q=0.7\r\nKeep-Alive: 300\r\nContent-Length: 7\r\nProxy-Connection: keep-alive\r\n\r\nabcdef\n???", Complete, 338, Some(b"GET"), Some(b"http://www.techcrunch.com/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:79, reqTests[1]; head only.
@@ -406,10 +406,10 @@ fn go_head_00() -> bool {
 // expect: run go_head_01() = true
 fn go_head_01() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    list.push(mut names, b"Host")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n"), Complete, 33, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    request_case(b"GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n", Complete, 33, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:105, reqTests[2]; head only.
@@ -417,10 +417,10 @@ fn go_head_01() -> bool {
 // expect: run go_head_02() = true
 fn go_head_02() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    list.push(mut names, b"Host")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"test")))
-    request_case(result.unwrap(b"GET //user@host/is/actually/a/path/ HTTP/1.1\r\nHost: test\r\n\r\n"), Complete, 60, Some(result.unwrap(b"GET")), Some(result.unwrap(b"//user@host/is/actually/a/path/")), Some(1), names, values)
+    list.push(mut values, b"test")
+    request_case(b"GET //user@host/is/actually/a/path/ HTTP/1.1\r\nHost: test\r\n\r\n", Complete, 60, Some(b"GET"), Some(b"//user@host/is/actually/a/path/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:150, reqTests[5]; head only.
@@ -428,33 +428,33 @@ fn go_head_02() -> bool {
 // expect: run go_head_03() = true
 fn go_head_03() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Transfer-Encoding")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Transfer-Encoding")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"chunked")))
-    request_case(result.unwrap(b"POST / HTTP/1.1\r\nHost: foo.com\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\nTrailer-Key: Trailer-Value\r\n\r\n"), Complete, 62, Some(result.unwrap(b"POST")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    list.push(mut values, b"chunked")
+    request_case(b"POST / HTTP/1.1\r\nHost: foo.com\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\nTrailer-Key: Trailer-Value\r\n\r\n", Complete, 62, Some(b"POST"), Some(b"/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:229, reqTests[8]; head only.
 // Mutant: drop_head_field.
 // expect: run go_head_04() = true
 fn go_head_04() -> bool {
-    request_case(result.unwrap(b"CONNECT www.google.com:443 HTTP/1.1\r\n\r\n"), Complete, 39, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"www.google.com:443")), Some(1), list.new(), list.new())
+    request_case(b"CONNECT www.google.com:443 HTTP/1.1\r\n\r\n", Complete, 39, Some(b"CONNECT"), Some(b"www.google.com:443"), Some(1), list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:253, reqTests[9]; head only.
 // Mutant: drop_head_field.
 // expect: run go_head_05() = true
 fn go_head_05() -> bool {
-    request_case(result.unwrap(b"CONNECT 127.0.0.1:6060 HTTP/1.1\r\n\r\n"), Complete, 35, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"127.0.0.1:6060")), Some(1), list.new(), list.new())
+    request_case(b"CONNECT 127.0.0.1:6060 HTTP/1.1\r\n\r\n", Complete, 35, Some(b"CONNECT"), Some(b"127.0.0.1:6060"), Some(1), list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:277, reqTests[10]; head only.
 // Mutant: drop_head_field.
 // expect: run go_head_06() = true
 fn go_head_06() -> bool {
-    request_case(result.unwrap(b"CONNECT /_goRPC_ HTTP/1.1\r\n\r\n"), Complete, 29, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"/_goRPC_")), Some(1), list.new(), list.new())
+    request_case(b"CONNECT /_goRPC_ HTTP/1.1\r\n\r\n", Complete, 29, Some(b"CONNECT"), Some(b"/_goRPC_"), Some(1), list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:301, reqTests[11]; head only.
@@ -462,10 +462,10 @@ fn go_head_06() -> bool {
 // expect: run go_head_07() = true
 fn go_head_07() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Server")))
+    list.push(mut names, b"Server")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo")))
-    request_case(result.unwrap(b"NOTIFY * HTTP/1.1\r\nServer: foo\r\n\r\n"), Complete, 34, Some(result.unwrap(b"NOTIFY")), Some(result.unwrap(b"*")), Some(1), names, values)
+    list.push(mut values, b"foo")
+    request_case(b"NOTIFY * HTTP/1.1\r\nServer: foo\r\n\r\n", Complete, 34, Some(b"NOTIFY"), Some(b"*"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:325, reqTests[12]; head only.
@@ -473,10 +473,10 @@ fn go_head_07() -> bool {
 // expect: run go_head_08() = true
 fn go_head_08() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Server")))
+    list.push(mut names, b"Server")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo")))
-    request_case(result.unwrap(b"OPTIONS * HTTP/1.1\r\nServer: foo\r\n\r\n"), Complete, 35, Some(result.unwrap(b"OPTIONS")), Some(result.unwrap(b"*")), Some(1), names, values)
+    list.push(mut values, b"foo")
+    request_case(b"OPTIONS * HTTP/1.1\r\nServer: foo\r\n\r\n", Complete, 35, Some(b"OPTIONS"), Some(b"*"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:349, reqTests[13]; head only.
@@ -484,12 +484,12 @@ fn go_head_08() -> bool {
 // expect: run go_head_09() = true
 fn go_head_09() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Connection")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Connection")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"issue8261.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"close")))
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: issue8261.com\r\nConnection: close\r\n\r\n"), Complete, 58, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"issue8261.com")
+    list.push(mut values, b"close")
+    request_case(b"GET / HTTP/1.1\r\nHost: issue8261.com\r\nConnection: close\r\n\r\n", Complete, 58, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:377, reqTests[14]; head only.
@@ -497,28 +497,28 @@ fn go_head_09() -> bool {
 // expect: run go_head_10() = true
 fn go_head_10() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Connection")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Connection")
+    list.push(mut names, b"Content-Length")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"issue8261.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"close")))
-    result.unwrap(list.push(mut values, result.unwrap(b"0")))
-    request_case(result.unwrap(b"HEAD / HTTP/1.1\r\nHost: issue8261.com\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), Complete, 78, Some(result.unwrap(b"HEAD")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"issue8261.com")
+    list.push(mut values, b"close")
+    list.push(mut values, b"0")
+    request_case(b"HEAD / HTTP/1.1\r\nHost: issue8261.com\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", Complete, 78, Some(b"HEAD"), Some(b"/"), Some(1), names, values)
 }
 
 // Historical 64d4d617 target-boundary control 0; head only.
 // Mutant: drop_head_field.
 // expect: run go_head_11() = true
 fn go_head_11() -> bool {
-    request_case(result.unwrap(b"GET /ok%20path?q=%xx HTTP/1.1\r\n\r\n"), Complete, 33, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/ok%20path?q=%xx")), Some(1), list.new(), list.new())
+    request_case(b"GET /ok%20path?q=%xx HTTP/1.1\r\n\r\n", Complete, 33, Some(b"GET"), Some(b"/ok%20path?q=%xx"), Some(1), list.new(), list.new())
 }
 
 // Historical 64d4d617 target-boundary control 1; head only.
 // Mutant: drop_head_field.
 // expect: run go_head_12() = true
 fn go_head_12() -> bool {
-    request_case(result.unwrap(b"CONNECT [::1]:443 HTTP/1.1\r\n\r\n"), Complete, 30, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"[::1]:443")), Some(1), list.new(), list.new())
+    request_case(b"CONNECT [::1]:443 HTTP/1.1\r\n\r\n", Complete, 30, Some(b"CONNECT"), Some(b"[::1]:443"), Some(1), list.new(), list.new())
 }
 
 // Historical 64d4d617 target-boundary control 2; head only.
@@ -526,49 +526,49 @@ fn go_head_12() -> bool {
 // expect: run go_head_13() = true
 fn go_head_13() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Transfer-Encoding")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Connection")))
+    list.push(mut names, b"Transfer-Encoding")
+    list.push(mut names, b"Content-Length")
+    list.push(mut names, b"Connection")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"bogus")))
-    result.unwrap(list.push(mut values, result.unwrap(b"2")))
-    result.unwrap(list.push(mut values, result.unwrap(b"keep-alive")))
-    request_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: bogus\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok"), Complete, 88, Some(result.unwrap(b"POST")), Some(result.unwrap(b"/")), Some(0), names, values)
+    list.push(mut values, b"bogus")
+    list.push(mut values, b"2")
+    list.push(mut values, b"keep-alive")
+    request_case(b"POST / HTTP/1.0\r\nTransfer-Encoding: bogus\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok", Complete, 88, Some(b"POST"), Some(b"/"), Some(0), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:140, invalid-head vector.
 // Mutant: permit_leading_header_space.
 // expect: run go_bad_head_01() = true
 fn go_bad_head_01() -> bool {
-    request_case(result.unwrap(b"GET  HTTP/1.1\r\nHost: test\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET  HTTP/1.1\r\nHost: test\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:402, invalid-head vector.
 // Mutant: permit_leading_header_space.
 // expect: run go_bad_head_04() = true
 fn go_bad_head_04() -> bool {
-    request_case(result.unwrap(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:478, invalid-head vector.
 // Mutant: permit_leading_header_space.
 // expect: run go_bad_head_08() = true
 fn go_bad_head_08() -> bool {
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\n Host: foo\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET / HTTP/1.1\r\n Host: foo\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:480, invalid-head vector.
 // Mutant: permit_leading_header_space.
 // expect: run go_bad_head_09() = true
 fn go_bad_head_09() -> bool {
-    request_case(result.unwrap(b"GET / HTTP/1.1\r\n\tHost: foo\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET / HTTP/1.1\r\n\tHost: foo\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // httparse parse_uri accepts Unicode only as well-formed UTF-8.
 // Mutant: accept_opaque_uri, reject_unicode_uri.
 // expect: run uri_utf8() = true
 fn uri_utf8() -> bool {
-    request_case(result.unwrap(b"GET /\xc3\xa9 HTTP/1.1\r\n\r\n"), Complete, 20, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/\xc3\xa9")), Some(1), list.new(), list.new()) && request_case(result.unwrap(b"GET /\xc3"), Partial, 0, Some(result.unwrap(b"GET")), None, None, list.new(), list.new()) && request_case(result.unwrap(b"GET /\xff HTTP/1.1\r\n\r\n"), Bad, 0, None, None, None, list.new(), list.new())
+    request_case(b"GET /\xc3\xa9 HTTP/1.1\r\n\r\n", Complete, 20, Some(b"GET"), Some(b"/\xc3\xa9"), Some(1), list.new(), list.new()) && request_case(b"GET /\xc3", Partial, 0, Some(b"GET"), None, None, list.new(), list.new()) && request_case(b"GET /\xff HTTP/1.1\r\n\r\n", Bad, 0, None, None, None, list.new(), list.new())
 }
 
 // Go ebe2feefc400 readrequest_test.go:130; rejected by the old adapter, valid head.
@@ -576,10 +576,10 @@ fn uri_utf8() -> bool {
 // expect: run go_adapter_boundary_00() = true
 fn go_adapter_boundary_00() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    list.push(mut names, b"Host")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"test")))
-    request_case(result.unwrap(b"GET ../../../../etc/passwd HTTP/1.1\r\nHost: test\r\n\r\n"), Complete, 51, Some(result.unwrap(b"GET")), Some(result.unwrap(b"../../../../etc/passwd")), Some(1), names, values)
+    list.push(mut values, b"test")
+    request_case(b"GET ../../../../etc/passwd HTTP/1.1\r\nHost: test\r\n\r\n", Complete, 51, Some(b"GET"), Some(b"../../../../etc/passwd"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:182; rejected by the old adapter, valid head.
@@ -587,14 +587,14 @@ fn go_adapter_boundary_00() -> bool {
 // expect: run go_adapter_boundary_02() = true
 fn go_adapter_boundary_02() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Transfer-Encoding")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Transfer-Encoding")
+    list.push(mut names, b"Content-Length")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"chunked")))
-    result.unwrap(list.push(mut values, result.unwrap(b"9999")))
-    request_case(result.unwrap(b"POST / HTTP/1.1\r\nHost: foo.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 9999\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n"), Complete, 84, Some(result.unwrap(b"POST")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    list.push(mut values, b"chunked")
+    list.push(mut values, b"9999")
+    request_case(b"POST / HTTP/1.1\r\nHost: foo.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 9999\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n", Complete, 84, Some(b"POST"), Some(b"/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:213; rejected by the old adapter, valid head.
@@ -602,14 +602,14 @@ fn go_adapter_boundary_02() -> bool {
 // expect: run go_adapter_boundary_03() = true
 fn go_adapter_boundary_03() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Transfer-Encoding")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Transfer-Encoding")
+    list.push(mut names, b"Content-Length")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo.com")))
-    result.unwrap(list.push(mut values, result.unwrap(b"chunked")))
-    result.unwrap(list.push(mut values, result.unwrap(b"notdigits")))
-    request_case(result.unwrap(b"POST / HTTP/1.1\r\nHost: foo.com\r\nTransfer-Encoding: chunked\r\nContent-Length: notdigits\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n"), Complete, 89, Some(result.unwrap(b"POST")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo.com")
+    list.push(mut values, b"chunked")
+    list.push(mut values, b"notdigits")
+    request_case(b"POST / HTTP/1.1\r\nHost: foo.com\r\nTransfer-Encoding: chunked\r\nContent-Length: notdigits\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n", Complete, 89, Some(b"POST"), Some(b"/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:464; rejected by the old adapter, valid head.
@@ -618,7 +618,7 @@ fn go_adapter_boundary_03() -> bool {
 fn go_adapter_boundary_05() -> bool {
     let mut names: List[Bytes] = list.new()
     let mut values: List[Bytes] = list.new()
-    request_case(result.unwrap(b"CONNECT []%20%48%54%54%50%2f%31%2e%31%0a%4d%79%48%65%61%64%65%72%3a%20%31%32%33%0a%0a HTTP/1.0\r\n\r\n"), Complete, 98, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"[]%20%48%54%54%50%2f%31%2e%31%0a%4d%79%48%65%61%64%65%72%3a%20%31%32%33%0a%0a")), Some(0), names, values)
+    request_case(b"CONNECT []%20%48%54%54%50%2f%31%2e%31%0a%4d%79%48%65%61%64%65%72%3a%20%31%32%33%0a%0a HTTP/1.0\r\n\r\n", Complete, 98, Some(b"CONNECT"), Some(b"[]%20%48%54%54%50%2f%31%2e%31%0a%4d%79%48%65%61%64%65%72%3a%20%31%32%33%0a%0a"), Some(0), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:465; rejected by the old adapter, valid head.
@@ -626,12 +626,12 @@ fn go_adapter_boundary_05() -> bool {
 // expect: run go_adapter_boundary_06() = true
 fn go_adapter_boundary_06() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
+    list.push(mut names, b"Content-Length")
+    list.push(mut names, b"Content-Length")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"3")))
-    result.unwrap(list.push(mut values, result.unwrap(b"4")))
-    request_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc\r\n\r\n"), Complete, 57, Some(result.unwrap(b"POST")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"3")
+    list.push(mut values, b"4")
+    request_case(b"POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc\r\n\r\n", Complete, 57, Some(b"POST"), Some(b"/"), Some(1), names, values)
 }
 
 // Go ebe2feefc400 readrequest_test.go:470; rejected by the old adapter, valid head.
@@ -639,14 +639,14 @@ fn go_adapter_boundary_06() -> bool {
 // expect: run go_adapter_boundary_07() = true
 fn go_adapter_boundary_07() -> bool {
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
-    result.unwrap(list.push(mut names, result.unwrap(b"Content-Length")))
+    list.push(mut names, b"Host")
+    list.push(mut names, b"Content-Length")
+    list.push(mut names, b"Content-Length")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"foo")))
-    result.unwrap(list.push(mut values, result.unwrap(b"4")))
-    result.unwrap(list.push(mut values, result.unwrap(b"5")))
-    request_case(result.unwrap(b"HEAD / HTTP/1.1\r\nHost: foo\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\n1234\r\n\r\n"), Complete, 68, Some(result.unwrap(b"HEAD")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"foo")
+    list.push(mut values, b"4")
+    list.push(mut values, b"5")
+    request_case(b"HEAD / HTTP/1.1\r\nHost: foo\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\n1234\r\n\r\n", Complete, 68, Some(b"HEAD"), Some(b"/"), Some(1), names, values)
 }
 
 // Go readrequest_test.go raw rejected adapter vector 10; its head is valid.
@@ -655,7 +655,7 @@ fn go_adapter_boundary_07() -> bool {
 fn go_adapter_boundary_10() -> bool {
     let mut names: List[Bytes] = list.new()
     let mut values: List[Bytes] = list.new()
-    request_case(result.unwrap(b"GET /bad% HTTP/1.1\r\n\r\n"), Complete, 22, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/bad%")), Some(1), names, values)
+    request_case(b"GET /bad% HTTP/1.1\r\n\r\n", Complete, 22, Some(b"GET"), Some(b"/bad%"), Some(1), names, values)
 }
 
 // Go readrequest_test.go raw rejected adapter vector 11; its head is valid.
@@ -664,7 +664,7 @@ fn go_adapter_boundary_10() -> bool {
 fn go_adapter_boundary_11() -> bool {
     let mut names: List[Bytes] = list.new()
     let mut values: List[Bytes] = list.new()
-    request_case(result.unwrap(b"GET /bad%xx HTTP/1.1\r\n\r\n"), Complete, 24, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/bad%xx")), Some(1), names, values)
+    request_case(b"GET /bad%xx HTTP/1.1\r\n\r\n", Complete, 24, Some(b"GET"), Some(b"/bad%xx"), Some(1), names, values)
 }
 
 // Go readrequest_test.go raw rejected adapter vector 12; its head is valid.
@@ -673,7 +673,7 @@ fn go_adapter_boundary_11() -> bool {
 fn go_adapter_boundary_12() -> bool {
     let mut names: List[Bytes] = list.new()
     let mut values: List[Bytes] = list.new()
-    request_case(result.unwrap(b"CONNECT [::1]garbage HTTP/1.1\r\n\r\n"), Complete, 33, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"[::1]garbage")), Some(1), names, values)
+    request_case(b"CONNECT [::1]garbage HTTP/1.1\r\n\r\n", Complete, 33, Some(b"CONNECT"), Some(b"[::1]garbage"), Some(1), names, values)
 }
 
 // UTF-8 scalars and CRLF may split at any byte. RFC 3629 excludes overlongs,
@@ -681,18 +681,18 @@ fn go_adapter_boundary_12() -> bool {
 // restart_cursor_loses_field.
 // expect: run resume_utf8() = true
 fn resume_utf8() -> bool {
-    resume_parity(result.unwrap(b"GET /\xc2\xa2\xe2\x82\xac\xf0\x90\x80\x80 HTTP/1.1\r\nA: x\r\nB: y\r\n\r\nTAIL"), Some(39)) && resume_parity(result.unwrap(b"GET /\xe0\x80 HTTP/1.1\r\n\r\n"), None) && resume_parity(result.unwrap(b"GET /\xed\xa0 HTTP/1.1\r\n\r\n"), None) && resume_parity(result.unwrap(b"GET /\xf4\x90 HTTP/1.1\r\n\r\n"), None) && resume_parity(result.unwrap(b"GET /\xe2\x82"), None)
+    resume_parity(b"GET /\xc2\xa2\xe2\x82\xac\xf0\x90\x80\x80 HTTP/1.1\r\nA: x\r\nB: y\r\n\r\nTAIL", Some(39)) && resume_parity(b"GET /\xe0\x80 HTTP/1.1\r\n\r\n", None) && resume_parity(b"GET /\xed\xa0 HTTP/1.1\r\n\r\n", None) && resume_parity(b"GET /\xf4\x90 HTTP/1.1\r\n\r\n", None) && resume_parity(b"GET /\xe2\x82", None)
 }
 
 // HTTP-3 fixed bounds: exactly 8192 bytes succeeds; needing byte 8193 fails.
 // Terminal results preserve the head and do no more work.
 // expect: run resume_limits() = true
 fn resume_limits() -> bool {
-    let mut raw = result.unwrap(b"GET / HTTP/1.1\r\nX:")
+    let mut raw = b"GET / HTTP/1.1\r\nX:"
     while list.len(raw) < 8188 {
-        result.unwrap(list.push(mut raw, b'a'))
+        list.push(mut raw, b'a')
     }
-    result.unwrap(list.append(mut raw, result.unwrap(b"\r\n\r\n")))
+    list.append(mut raw, b"\r\n\r\n")
     let mut h = http1.head()
     let mut cur = http1.cursor()
     if http1.resume(list.slice(raw, 0, 8191), mut h, mut cur) != Partial || http1.resume(raw, mut h, mut cur) != Complete || h.end != 8192 || cur.examined != 8192 || cur.line_end != 16 {
@@ -712,11 +712,11 @@ fn resume_limits() -> bool {
 // HTTP-3 counts initialized fields, including empty values and duplicates.
 // expect: run resume_field_limit() = true
 fn resume_field_limit() -> bool {
-    let mut raw = result.unwrap(b"GET / HTTP/1.1\r\n")
+    let mut raw = b"GET / HTTP/1.1\r\n"
     for i in 0u64 .. 64u64 {
-        result.unwrap(list.append(mut raw, result.unwrap(b"X:\r\n")))
+        list.append(mut raw, b"X:\r\n")
     }
-    result.unwrap(list.append(mut raw, result.unwrap(b"\r\n")))
+    list.append(mut raw, b"\r\n")
     if !resume_parity(raw, Some(list.len(raw))) {
         return false
     }
@@ -731,9 +731,9 @@ fn resume_field_limit() -> bool {
 // A request-line overflow maps to 414 rather than the field limit's 431.
 // expect: run resume_request_line_limit() = true
 fn resume_request_line_limit() -> bool {
-    let mut raw = result.unwrap(b"GET /")
+    let mut raw = b"GET /"
     while list.len(raw) < 8192 {
-        result.unwrap(list.push(mut raw, b'a'))
+        list.push(mut raw, b'a')
     }
     let mut h = http1.head()
     let mut cur = http1.cursor()
@@ -744,9 +744,9 @@ fn resume_request_line_limit() -> bool {
 // of empty lines consumes head space, never request-line space.
 // expect: run resume_prefixed_limit() = true
 fn resume_prefixed_limit() -> bool {
-    let mut raw = result.unwrap(b"\r\n")
+    let mut raw = b"\r\n"
     while list.len(raw) < 8192 {
-        result.unwrap(list.push(mut raw, b'a'))
+        list.push(mut raw, b'a')
     }
     let mut h = http1.head()
     let mut cur = http1.cursor()
@@ -765,12 +765,12 @@ fn resume_prefixed_limit() -> bool {
 // some splits and does not change when the head first becomes complete.
 // expect: run resume_exact_prefix_progress() = true
 fn resume_exact_prefix_progress() -> bool {
-    let raw = result.unwrap(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody")
+    let raw = b"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody"
     let mut names: List[Bytes] = list.new()
-    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    list.push(mut names, b"Host")
     let mut values: List[Bytes] = list.new()
-    result.unwrap(list.push(mut values, result.unwrap(b"x")))
-    request_case(raw, Complete, 27, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
+    list.push(mut values, b"x")
+    request_case(raw, Complete, 27, Some(b"GET"), Some(b"/"), Some(1), names, values)
 }
 
 // llhttp test/request/uri.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.

@@ -95,13 +95,13 @@ fn input(c: Constraint) -> u64 {
 fn add_variable(mut p: Planner, value: i32) -> Result[u64, Capacity] {
     let index = list.len(p.vars)
     let variable = Variable(value: value, first_edge: NONE, last_edge: NONE, source: None, mark: 0, walk: WEAKEST, stay: true)
-    result.capacity_only(list.push(mut p.vars, take variable))?
+    list.push(mut p.vars, take variable)
     Ok(index)
 }
 
 fn append_edge(mut p: Planner, variable: u64, constraint: u64) -> Result[(), Capacity] {
     let index = list.len(p.edges)
-    result.capacity_only(list.push(mut p.edges, Edge(constraint: constraint, next: NONE)))?
+    list.push(mut p.edges, Edge(constraint: constraint, next: NONE))
     let previous = p.vars[variable].last_edge
     if previous == NONE {
         p.vars[variable].first_edge = index
@@ -274,7 +274,7 @@ fn append_consumers(p: Planner, v: u64, mut todo: List[u64]) -> Result[(), Capac
         let id = p.edges[edge].constraint
         edge = p.edges[edge].next
         if p.vars[v].source != Some(id) && !not_selected(p.constraints[id]) {
-            result.capacity_only(list.push(mut todo, id))?
+            list.push(mut todo, id)
         }
     }
     Ok(())
@@ -282,7 +282,7 @@ fn append_consumers(p: Planner, v: u64, mut todo: List[u64]) -> Result[(), Capac
 
 fn add_propagate(mut p: Planner, id: u64, mark: u64) -> Result[bool, Capacity] {
     let mut todo: List[u64] = list.new()
-    result.capacity_only(list.push(mut todo, id))?
+    list.push(mut todo, id)
     let mut cursor = 0u64
     while cursor < list.len(todo) {
         let next = todo[cursor]
@@ -334,7 +334,7 @@ fn incremental_add(mut p: Planner, id: u64) -> Result[(), Capacity] {
 fn add_constraint(mut p: Planner, kind: Kind, strength: i32, first: u64, second: u64) -> Result[u64, Capacity] {
     let id = list.len(p.constraints)
     let c = Constraint(kind: kind, strength: strength, first: first, second: second, direction: Unchosen, satisfied: false)
-    result.capacity_only(list.push(mut p.constraints, c))?
+    list.push(mut p.constraints, c)
     add_to_graph(mut p, id)?
     incremental_add(mut p, id)?
     Ok(id)
@@ -346,7 +346,7 @@ fn remove_propagate(mut p: Planner, start: u64) -> Result[(), Capacity] {
     p.vars[start].stay = true
     let pending_start = list.len(p.pending)
     let mut todo: List[u64] = list.new()
-    result.capacity_only(list.push(mut todo, start))?
+    list.push(mut todo, start)
     let mut cursor = 0u64
     while cursor < list.len(todo) {
         let v = todo[cursor]
@@ -355,7 +355,7 @@ fn remove_propagate(mut p: Planner, start: u64) -> Result[(), Capacity] {
             let id = p.edges[edge].constraint
             edge = p.edges[edge].next
             if not_selected(p.constraints[id]) {
-                result.capacity_only(list.push(mut p.pending, id))?
+                list.push(mut p.pending, id)
             }
         }
         edge = p.vars[v].first_edge
@@ -365,7 +365,7 @@ fn remove_propagate(mut p: Planner, start: u64) -> Result[(), Capacity] {
             let c = p.constraints[id]
             if p.vars[v].source != Some(id) && !not_selected(c) {
                 recalculate(mut p, id)
-                result.capacity_only(list.push(mut todo, output(c)))?
+                list.push(mut todo, output(c))
             }
         }
         cursor += 1
@@ -407,7 +407,7 @@ fn make_plan(mut p: Planner, edit_id: u64) -> Result[List[u64], Capacity] {
     let mut todo: List[u64] = list.new()
     let mut plan: List[u64] = list.new()
     if edit(p.constraints[edit_id]) && !not_selected(p.constraints[edit_id]) {
-        result.capacity_only(list.push(mut todo, edit_id))?
+        list.push(mut todo, edit_id)
     }
     let mut cursor = 0u64
     while cursor < list.len(todo) {
@@ -415,7 +415,7 @@ fn make_plan(mut p: Planner, edit_id: u64) -> Result[List[u64], Capacity] {
         let c = p.constraints[id]
         let dest = output(c)
         if p.vars[dest].mark != mark && inputs_known(p, id, mark) {
-            result.capacity_only(list.push(mut plan, id))?
+            list.push(mut plan, id)
             p.vars[dest].mark = mark
             append_consumers(p, dest, mut todo)?
         }
@@ -445,7 +445,7 @@ fn chain(size: u64) -> Result[bool, Capacity] {
     let mut vars: List[u64] = list.new()
     for _ in 0 .. size + 1 {
         let v = add_variable(mut p, 0)?
-        result.capacity_only(list.push(mut vars, v))?
+        list.push(mut vars, v)
     }
     for i in 0 .. size {
         let _ = add_constraint(mut p, Equality, REQUIRED, vars[i], vars[i + 1])?
@@ -478,7 +478,7 @@ fn projection(size: u64) -> Result[bool, Capacity] {
         let initial: i32 = int.narrow(i)
         src = add_variable(mut p, initial)?
         dst = add_variable(mut p, initial)?
-        result.capacity_only(list.push(mut destinations, dst))?
+        list.push(mut destinations, dst)
         let _ = add_constraint(mut p, Stay, DEFAULT, src, src)?
         let _ = add_constraint(mut p, Scale(scale, offset), REQUIRED, src, dst)?
     }

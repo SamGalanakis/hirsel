@@ -3,15 +3,15 @@
 // expect: accept
 // expect: run appended() = 606
 // expect: run unchanged() = 0
-// expect: run rejected() = 404009
-fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {
+// expect: run rejected() = 4009 used 32
+fn append[T: plain](mut xs: List[T], ys: List[T]) {
     list.append(mut xs, ys)
 }
 
 fn appended() -> u64 {
-    let mut xs = result.unwrap(b"ab")
-    let ys = result.unwrap(b"cdef")
-    result.unwrap(append(mut xs, ys))
+    let mut xs = b"ab"
+    let ys = b"cdef"
+    append(mut xs, ys)
     let a: u64 = int.widen(xs[0])
     let z: u64 = int.widen(xs[5])
     if a == 97 && z == 102 {
@@ -23,22 +23,38 @@ fn appended() -> u64 {
 
 fn unchanged() -> u64 {
     let mut xs: List[u8] = list.new()
-    let ys = result.unwrap(b"")
-    result.unwrap(append(mut xs, ys))
+    let ys = b""
+    append(mut xs, ys)
     list.capacity(xs)
 }
 
 fn rejected() -> u64 {
-    let ys = result.unwrap(b"01234567890123456789012345678901")
-    let r = bound bytes 17 {
-        let mut xs = result.unwrap(b"abcd")
-        match append(mut xs, ys) {
-            Ok(()) => 999u64,
-            Error(e) => list.len(xs) * 100000 + e.requested * 100 + e.available,
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        let ys = b"01234567890123456789012345678901"
+        bound bytes 17 {
+            let mut xs = b"abcd"
+            append(mut xs, ys)
+            999u64
         }
+    })
+    match caught(take r) {
+        Some(e) => e.requested * 100 + e.available,
+        None => 0
     }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {
-        Ok(n) => n,
-        Error(_) => 0
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

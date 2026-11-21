@@ -19,7 +19,7 @@ pub opaque type Civil: key {
 
 pub type Weekday: key = Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday
 
-pub type Error = Invalid(u64) | Range | Capacity(Capacity)
+pub type Error = Invalid(u64) | Range
 
 const MIN_DAY: i64 = -719528
 
@@ -327,18 +327,18 @@ pub fn parse_date(s: String) -> Result[Date, Error] {
     }
 }
 
-fn write_date(mut out: String, d: Date) -> Result[(), Capacity] {
-    string.push_uint(mut out, int.widen(d.year), 10, 4, '0')?
-    string.push_char(mut out, '-')?
-    string.push_uint(mut out, int.widen(d.month), 10, 2, '0')?
-    string.push_char(mut out, '-')?
+fn write_date(mut out: String, d: Date) {
+    string.push_uint(mut out, int.widen(d.year), 10, 4, '0')
+    string.push_char(mut out, '-')
+    string.push_uint(mut out, int.widen(d.month), 10, 2, '0')
+    string.push_char(mut out, '-')
     string.push_uint(mut out, int.widen(d.day), 10, 2, '0')
 }
 
 /// Appends RFC 3339 full-date, YYYY-MM-DD. The append is atomic.
-/// Fails: Capacity. Alloc: reserves 10 bytes of additional room first. Cost: O(1).
-pub fn push_date(mut out: String, d: Date) -> Result[(), Capacity] {
-    string.reserve(mut out, 10)?
+/// Raises Capacity. Alloc: reserves 10 bytes of additional room first. Cost: O(1).
+pub fn push_date(mut out: String, d: Date) {
+    string.reserve(mut out, 10)
     write_date(mut out, d)
 }
 
@@ -432,26 +432,25 @@ pub fn parse_rfc3339(s: String) -> Result[(Timestamp, i32), Error] {
     }
 }
 
-fn write_clock(mut out: String, c: Civil, digits: u64) -> Result[(), Capacity] {
-    write_date(mut out, c.date)?
-    string.push_char(mut out, 'T')?
-    string.push_uint(mut out, int.widen(c.hour), 10, 2, '0')?
-    string.push_char(mut out, ':')?
-    string.push_uint(mut out, int.widen(c.minute), 10, 2, '0')?
-    string.push_char(mut out, ':')?
-    string.push_uint(mut out, int.widen(c.second), 10, 2, '0')?
+fn write_clock(mut out: String, c: Civil, digits: u64) {
+    write_date(mut out, c.date)
+    string.push_char(mut out, 'T')
+    string.push_uint(mut out, int.widen(c.hour), 10, 2, '0')
+    string.push_char(mut out, ':')
+    string.push_uint(mut out, int.widen(c.minute), 10, 2, '0')
+    string.push_char(mut out, ':')
+    string.push_uint(mut out, int.widen(c.second), 10, 2, '0')
     if digits > 0 {
         let mut f: u64 = int.widen(c.nanos)
         for _ in digits .. 9 {
             f = f / 10
         }
-        string.push_char(mut out, '.')?
-        string.push_uint(mut out, f, 10, digits, '0')?
+        string.push_char(mut out, '.')
+        string.push_uint(mut out, f, 10, digits, '0')
     }
-    Ok(())
 }
 
-fn write_rfc3339(mut out: String, c: Civil, offset: i32, digits: u64) -> Result[(), Capacity] {
+fn write_rfc3339(mut out: String, c: Civil, offset: i32, digits: u64) {
     let fraction_bytes: u64 = if digits == 0 {
         0
     } else {
@@ -462,8 +461,8 @@ fn write_rfc3339(mut out: String, c: Civil, offset: i32, digits: u64) -> Result[
     } else {
         6
     }
-    string.reserve(mut out, 19 + fraction_bytes + zone_bytes)?
-    write_clock(mut out, c, digits)?
+    string.reserve(mut out, 19 + fraction_bytes + zone_bytes)
+    write_clock(mut out, c, digits)
     if offset == 0 {
         return string.push_char(mut out, 'Z')
     }
@@ -476,16 +475,16 @@ fn write_rfc3339(mut out: String, c: Civil, offset: i32, digits: u64) -> Result[
         '-'
     } else {
         '+'
-    })?
-    string.push_uint(mut out, east / 60, 10, 2, '0')?
-    string.push_char(mut out, ':')?
+    })
+    string.push_uint(mut out, east / 60, 10, 2, '0')
+    string.push_char(mut out, ':')
     string.push_uint(mut out, east % 60, 10, 2, '0')
 }
 
 /// Appends YYYY-MM-DDThh:mm:ss, exactly digits fraction digits (truncated), and Z
 /// for offset zero or signed hh:mm. Omits the dot when digits is zero.
 /// Fails: Bounds when digits > 9 or offset is outside -1439..=1439, Range when the
-/// wall reading leaves years 0-9999, or Capacity(c). The append is atomic.
+/// wall reading leaves years 0-9999. Raises Capacity. The append is atomic.
 /// Alloc: reserves the exact additional length first. Cost: O(1).
 /// Ex: `time.push_rfc3339(mut line, now, 0, 3)?` gives 2026-11-18T09:30:00.250Z.
 pub fn push_rfc3339(mut out: String, t: Timestamp, offset: i32, digits: u8) -> Result[(), Error] {
@@ -494,10 +493,8 @@ pub fn push_rfc3339(mut out: String, t: Timestamp, offset: i32, digits: u8) -> R
         Some(value) => value,
         None => return Error(Range),
     }
-    match write_rfc3339(mut out, c, offset, int.widen(digits)) {
-        Ok(()) => Ok(()),
-        Error(cap) => Error(Capacity(cap)),
-    }
+    write_rfc3339(mut out, c, offset, int.widen(digits))
+    Ok(())
 }
 
 const DURATION_LIMIT: u64 = 9223372036854775808
@@ -738,9 +735,9 @@ fn duration_integer(mut text: DurationText, value: u64) {
 /// Appends Go Duration.String text. Below 1s, uses the largest unit with a
 /// nonzero integer part (ns, µs or ms), or writes 0s. Otherwise writes hours,
 /// minutes and seconds, omitting leading zero fields. Strips trailing fraction zeros.
-/// Fails: Capacity. The append is atomic. Alloc: reserves the exact length first.
-/// Cost: O(1). Ex: `time.push_duration(mut out, -1500)?` appends "-1.5µs".
-pub fn push_duration(mut out: String, d: i64) -> Result[(), Capacity] {
+/// Raises Capacity. The append is atomic. Alloc: reserves the exact length first.
+/// Cost: O(1). Ex: `time.push_duration(mut out, -1500)` appends "-1.5µs".
+pub fn push_duration(mut out: String, d: i64) {
     let bits: u64 = int.truncate(d)
     let negative = d < 0
     let value = if negative {
@@ -784,9 +781,8 @@ pub fn push_duration(mut out: String, d: i64) -> Result[(), Capacity] {
     if negative {
         prepend(mut text, '-')
     }
-    string.reserve(mut out, 32 - text.start + extra_bytes)?
+    string.reserve(mut out, 32 - text.start + extra_bytes)
     for i in text.start .. 32 {
-        string.push_char(mut out, text.chars[i])?
+        string.push_char(mut out, text.chars[i])
     }
-    Ok(())
 }

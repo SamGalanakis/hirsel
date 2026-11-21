@@ -48,9 +48,9 @@ def refresh():
 
 
 def literal(hex_bytes):
-    return 'result.unwrap(b"' + "".join(
+    return 'b"' + "".join(
         fr"\x{hex_bytes[at:at + 2]}" for at in range(0, len(hex_bytes), 2)
-    ) + '")'
+    ) + '"'
 
 
 def emit():
@@ -58,17 +58,17 @@ def emit():
     print("fn originals() -> List[Bytes] {")
     print("    let mut items: List[Bytes] = list.new()")
     for plain in corpus["inputs"]:
-        print(f"    result.unwrap(list.push(mut items, {literal(plain)}))")
+        print(f"    list.push(mut items, {literal(plain)})")
     print("    let mut repeated: Bytes = list.new()")
     print("    for i in 0u64 .. 1700 {")
-    print('        result.unwrap(list.append(mut repeated, string.as_bytes("window wrap above 32k\\n")))')
+    print('        list.append(mut repeated, string.as_bytes("window wrap above 32k\\n"))')
     print("    }")
-    print("    result.unwrap(list.push(mut items, take repeated))")
+    print("    list.push(mut items, take repeated)")
     print("    take items\n}")
     print("fn references() -> List[(u8, u64, Bytes)] {")
     print("    let mut items: List[(u8, u64, Bytes)] = list.new()")
     for fmt, original, packed in corpus["rows"]:
-        print(f"    result.unwrap(list.push(mut items, ({fmt}u8, {original}u64, {literal(packed)})))")
+        print(f"    list.push(mut items, ({fmt}u8, {original}u64, {literal(packed)}))")
     print("    take items\n}")
 
 

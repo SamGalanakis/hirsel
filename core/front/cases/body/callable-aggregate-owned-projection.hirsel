@@ -11,7 +11,7 @@ fn checked() -> u64 {
         n += x;
         n
     }, list.new())
-    let _ = result.unwrap(list.push(mut p.1, 10u64))
+    let _ = list.push(mut p.1, 10u64)
     p.1[0] = 20
     let a = p.0(2)
     let mut q = (scoped fn(x: u64) -> u64 {
@@ -23,7 +23,7 @@ fn checked() -> u64 {
     let mut r = (scoped fn(x: u64) -> u64 {
         n += x;
         n
-    }, result.unwrap(box.new(Data(value: 9u64))))
+    }, box.new(Data(value: 9u64)))
     r.1 .value = 11
     let c = r.0(4)
     a + b + c + p.1[0] + q.1[1] + r.1 .value

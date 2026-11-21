@@ -20,7 +20,7 @@
 // expect: run listed_option() = 15
 // expect: run list_charge() = 1
 // native: run deque_rt() = 615
-// native: run deque_charge() = 1
+// native: run deque_charge() = 1 used 32
 @compact(u32)
 type Span3 {
     a: u64,
@@ -110,10 +110,8 @@ fn held() -> u64 {
 }
 
 fn put[T](mut xs: List[T], take x: T) -> u64 {
-    match list.push(mut xs, take x) {
-        Ok(_) => 1,
-        Error(_) => 0
-    }
+    list.push(mut xs, take x)
+    1
 }
 
 fn swapped[T](mut xs: List[T]) {
@@ -180,7 +178,7 @@ fn listed_option() -> u64 {
 
 fn reserve_ask[T](mut xs: List[T]) -> u64 {
     let got = bound bytes 0 {
-        list.reserve(mut xs, 5)
+        list.try_reserve(mut xs, 5)
     }
     match got {
         Ok(Error(e)) => e.requested,
@@ -198,7 +196,7 @@ fn list_charge() -> u64 {
         let mut qs: List[P24] = list.new()
         let mut zs: List[Option[P16]] = list.new()
         let concrete = match (bound bytes 0 {
-            list.reserve(mut xs, 5)
+            list.try_reserve(mut xs, 5)
         }) {
             Ok(Error(e)) => e.requested,
             _ => 0
@@ -242,20 +240,18 @@ fn deque_charge() -> u64 {
     region r {
         match make_span3(r, 1, 2, 3) {
             Ok(s) => {
-                let mut d: Deque[Span3 in r] = deque.new()
-                let mut e: Deque[P16] = deque.new()
-                let x = match (bound bytes 0 {
-                    deque.push_back(mut d, s)
-                }) {
-                    Ok(Error((c, _))) => c.requested,
-                    _ => 0
-                }
-                let y = match (bound bytes 0 {
-                    deque.push_back(mut e, P16(x: 1, y: 2))
-                }) {
-                    Ok(Error((c, _))) => c.requested,
-                    _ => 0
-                }
+                let x = refused_request(isolate(fn() -> Result[(), Capacity] {
+                    bound bytes 0 {
+                        let mut d: Deque[Span3 in r] = deque.new()
+                        deque.push_back(mut d, s)
+                    }
+                }))
+                let y = refused_request(isolate(fn() -> Result[(), Capacity] {
+                    bound bytes 0 {
+                        let mut e: Deque[P16] = deque.new()
+                        deque.push_back(mut e, P16(x: 1, y: 2))
+                    }
+                }))
                 if x == 16 && y == 16 {
                     1
                 } else {
@@ -272,7 +268,30 @@ fn make_span3(r: Region, a: u64, b: u64, c: u64) -> Result[Span3 in r, Capacity]
         dest.put(mut d, Span3(a: a, b: b, c: c))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
+    }
+}
+
+// The bytes a caught refusal asked for, or 0.
+fn refused_request[R](take r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match caught(take r) {
+        Some(e) => e.requested,
+        None => 0,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

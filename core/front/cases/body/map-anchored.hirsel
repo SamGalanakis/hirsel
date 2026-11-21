@@ -34,12 +34,12 @@ fn checked() -> u64 {
         let a = make(r, "same")
         let b = make(r, "same")
         let mut docs: Map[Doc in r, u64] = map.new()
-        let _ = result.unwrap(map.insert(mut docs, a, 7u64))
+        let _ = map.insert(mut docs, a, 7u64)
         let hit = get(docs, b)
-        let t = result.unwrap(text.copy_in(r, "same"))
-        let u = result.unwrap(text.copy_in(r, "same"))
+        let t = text.copy_in(r, "same")
+        let u = text.copy_in(r, "same")
         let mut texts: Map[Text in r, u64] = map.new()
-        let _ = result.unwrap(map.insert(mut texts, t, 11u64))
+        let _ = map.insert(mut texts, t, 11u64)
         hit + get(texts, u)
     }
 }

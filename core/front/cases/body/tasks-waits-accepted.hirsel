@@ -4,7 +4,7 @@ fn child(take n: u64) -> u64 {
     n
 }
 
-fn count(tasks: Tasks) -> Result[Task[u64], (Capacity, u64)] {
+fn count(tasks: Tasks) -> Task[u64] {
     task.spawn(tasks, bytes 4096, 7u64, child)
 }
 

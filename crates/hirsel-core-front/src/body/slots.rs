@@ -389,64 +389,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = self.list_with_capacity(item, count, result, n)?;
         // List uses MAX capacity for ZSTs. A ring still needs its requested
         // power-of-two capacity, even though its slots occupy no bytes.
-        let result_id = self.place_row(result, "a ring without a place is not built", n)?;
-        let payload = match self.t.kind(result) {
-            TyKind::Adt(_, args) => args[0],
-            _ => {
-                self.gap(n, "a ring that is not a declared type is not built");
-                return None;
-            }
-        };
-        let payload_id =
-            self.place_row(payload, "a ring's slots without a place are not built", n)?;
-        let at = self.address(
-            AddressBase::Value(value),
-            &[],
-            PlaceTy::Declared(result_id),
-            n,
-        );
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: at,
-            },
-            n,
-        );
-        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: ok,
-                op: CompareOp::Eq,
-                left: tag,
-                right: zero,
-            },
-            n,
-        );
-        let yes = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        let ye = self.edge(yes, &[]);
-        let ne = self.edge(done, &[]);
-        self.end(
-            Terminator::Branch {
-                condition: ok,
-                yes: ye,
-                no: ne,
-            },
-            Some(n),
-        );
-        self.start(yes);
-        let carrier = self.address(
-            AddressBase::Address(at),
-            &[Step::CaseField { case: 0, field: 0 }],
-            PlaceTy::Declared(payload_id),
-            n,
-        );
-        let pointer = self.pointer(carrier, n);
-        self.sequence_word(pointer, 16, Ty::Scalar(Scalar::U64), count, n);
-        self.jump(done, &[], n);
-        self.start(done);
+        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), count, n);
         Some(value)
     }
 

@@ -16,7 +16,7 @@ fn number_mtv(mut tx: Tx, take a: u64, n: u64) -> Result[u64, u64] {
 }
 
 pub fn number_mtv_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
     let a = 7u64
     let r = result.unwrap(adapt_mtv(code.describe(number_mtv), mut tx, take a, 2u64))
     tx.writes * 10u64 + r
@@ -29,8 +29,8 @@ fn text_mtv(mut tx: Tx, take a: String, n: u64) -> Result[String, u64] {
 }
 
 pub fn text_mtv_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
-    let a = result.unwrap(string.from("ok"))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
+    let a = string.from("ok")
     let r = result.unwrap(adapt_mtv(code.describe(text_mtv), mut tx, take a, 2u64))
     tx.writes * 10u64 + list.len(string.as_bytes(r))
 }
@@ -48,7 +48,7 @@ fn number_mvt(mut tx: Tx, n: u64, take a: u64) -> Result[u64, u64] {
 }
 
 pub fn number_mvt_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
     let a = 7u64
     let r = result.unwrap(adapt_mvt(code.describe(number_mvt), mut tx, 2u64, take a))
     tx.writes * 10u64 + r
@@ -61,8 +61,8 @@ fn text_mvt(mut tx: Tx, n: u64, take a: String) -> Result[String, u64] {
 }
 
 pub fn text_mvt_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
-    let a = result.unwrap(string.from("ok"))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
+    let a = string.from("ok")
     let r = result.unwrap(adapt_mvt(code.describe(text_mvt), mut tx, 2u64, take a))
     tx.writes * 10u64 + list.len(string.as_bytes(r))
 }
@@ -80,7 +80,7 @@ fn number_tmv(take a: u64, mut tx: Tx, n: u64) -> Result[u64, u64] {
 }
 
 pub fn number_tmv_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
     let a = 7u64
     let r = result.unwrap(adapt_tmv(code.describe(number_tmv), take a, mut tx, 2u64))
     tx.writes * 10u64 + r
@@ -93,8 +93,8 @@ fn text_tmv(take a: String, mut tx: Tx, n: u64) -> Result[String, u64] {
 }
 
 pub fn text_tmv_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
-    let a = result.unwrap(string.from("ok"))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
+    let a = string.from("ok")
     let r = result.unwrap(adapt_tmv(code.describe(text_tmv), take a, mut tx, 2u64))
     tx.writes * 10u64 + list.len(string.as_bytes(r))
 }
@@ -112,7 +112,7 @@ fn number_tvm(take a: u64, n: u64, mut tx: Tx) -> Result[u64, u64] {
 }
 
 pub fn number_tvm_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
     let a = 7u64
     let r = result.unwrap(adapt_tvm(code.describe(number_tvm), take a, 2u64, mut tx))
     tx.writes * 10u64 + r
@@ -125,8 +125,8 @@ fn text_tvm(take a: String, n: u64, mut tx: Tx) -> Result[String, u64] {
 }
 
 pub fn text_tvm_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
-    let a = result.unwrap(string.from("ok"))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
+    let a = string.from("ok")
     let r = result.unwrap(adapt_tvm(code.describe(text_tvm), take a, 2u64, mut tx))
     tx.writes * 10u64 + list.len(string.as_bytes(r))
 }
@@ -144,7 +144,7 @@ fn number_vmt(n: u64, mut tx: Tx, take a: u64) -> Result[u64, u64] {
 }
 
 pub fn number_vmt_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
     let a = 7u64
     let r = result.unwrap(adapt_vmt(code.describe(number_vmt), 2u64, mut tx, take a))
     tx.writes * 10u64 + r
@@ -157,8 +157,8 @@ fn text_vmt(n: u64, mut tx: Tx, take a: String) -> Result[String, u64] {
 }
 
 pub fn text_vmt_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
-    let a = result.unwrap(string.from("ok"))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
+    let a = string.from("ok")
     let r = result.unwrap(adapt_vmt(code.describe(text_vmt), 2u64, mut tx, take a))
     tx.writes * 10u64 + list.len(string.as_bytes(r))
 }
@@ -176,7 +176,7 @@ fn number_vtm(n: u64, take a: u64, mut tx: Tx) -> Result[u64, u64] {
 }
 
 pub fn number_vtm_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
     let a = 7u64
     let r = result.unwrap(adapt_vtm(code.describe(number_vtm), 2u64, take a, mut tx))
     tx.writes * 10u64 + r
@@ -189,8 +189,8 @@ fn text_vtm(n: u64, take a: String, mut tx: Tx) -> Result[String, u64] {
 }
 
 pub fn text_vtm_run() -> u64 {
-    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
-    let a = result.unwrap(string.from("ok"))
+    let mut tx = Tx(writes: 1u64, text: string.from("held"))
+    let a = string.from("ok")
     let r = result.unwrap(adapt_vtm(code.describe(text_vtm), 2u64, take a, mut tx))
     tx.writes * 10u64 + list.len(string.as_bytes(r))
 }
@@ -207,7 +207,7 @@ fn bump(mut n: u64) {
 }
 
 fn replace(mut s: String) {
-    s = result.unwrap(string.from("new"))
+    s = string.from("new")
 }
 
 pub fn two[T](f: StaticFn[fn(mut T, mut T)], mut x: T, mut y: T) {
@@ -234,7 +234,7 @@ pub fn generic_scalar() -> u64 {
 
 // expect: run generic_scalar() = 7
 pub fn generic_string() -> u64 {
-    let mut x = result.unwrap(string.from("old value"))
+    let mut x = string.from("old value")
     generic_mut(code.describe(replace), mut x)
     list.len(string.as_bytes(x))
 }

@@ -2761,23 +2761,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         row: TypeId,
         n: NodeId,
     ) -> (TyId, Option<ValueId>) {
-        let (Some(result), Some(cap)) = (self.p.core_decl("Result"), self.p.core_decl("Capacity"))
-        else {
-            return self.gap_ty(n, "owning closures need Result and Capacity declarations");
-        };
-        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
+        let result = callable;
         let types = frame
             .captures
             .iter()
             .map(|c| self.var(c.slot).ty)
             .collect::<Vec<_>>();
-        let fields = if types.len() == 1 {
-            types[0]
-        } else {
-            self.t.mk(TyKind::Tuple(types.clone()))
-        };
-        let back = self.t.mk(TyKind::Tuple(vec![cap, fields]));
-        let result = self.t.mk(TyKind::Adt(result, vec![callable, back]));
         let mut values = vec![];
         let mut reps = vec![];
         for (capture, &ty) in frame.captures.iter().zip(&types) {
@@ -2825,36 +2814,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             charge,
             align: 8,
         };
-        let value =
-            self.admit_with_handback(result, allocation, &reps, &values, n, |cx, to, block| {
-                let prefix = cx.konst(Ty::Scalar(Scalar::U64), 8, n).unwrap();
-                let fields = cx.address(
-                    AddressBase::Value(block),
-                    &[Step::Byte(prefix)],
-                    PlaceTy::Declared(row),
+        let to = self.result_slot(PlaceTy::Declared(id), n);
+        let Some(block) = self.admit_owned(allocation, n) else {
+            return (result, None);
+        };
+        let prefix = self.konst(Ty::Scalar(Scalar::U64), 8, n).unwrap();
+        let fields = self.address(
+            AddressBase::Value(block),
+            &[Step::Byte(prefix)],
+            PlaceTy::Declared(row),
+            n,
+        );
+        for (i, rep) in reps.iter().enumerate() {
+            if let Some(place) = rep.stored() {
+                let at = self.address(
+                    AddressBase::Address(fields),
+                    &[Step::Field(i as u32)],
+                    place,
                     n,
                 );
-                for (i, rep) in reps.iter().enumerate() {
-                    if let Some(place) = rep.stored() {
-                        let at = cx.address(
-                            AddressBase::Address(fields),
-                            &[Step::Field(i as u32)],
-                            place,
-                            n,
-                        );
-                        cx.install(at, reps[i], values[i], n);
-                    }
-                }
-                let ok = cx.address(
-                    AddressBase::Address(to),
-                    &[Step::CaseField { case: 0, field: 0 }],
-                    PlaceTy::Declared(id),
-                    n,
-                );
-                let carrier = cx.pointer(ok, n);
-                cx.store_word(carrier, 0, code, n);
-                cx.store_word(carrier, 8, block, n);
-            });
+                self.install(at, reps[i], values[i], n);
+            }
+        }
+        let carrier = self.pointer(to, n);
+        self.store_word(carrier, 0, code, n);
+        self.store_word(carrier, 8, block, n);
+        self.temp(result, Some(carrier));
+        let value = Some(carrier);
         (result, value)
     }
 }

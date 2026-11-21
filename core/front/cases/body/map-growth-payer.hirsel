@@ -1,14 +1,15 @@
 // MEM-26 charges both the first allocation and growth to the current bound.
 // expect: run existing_payer() = true
-// expect: run first_payer() = 12800
+// expect: run first_payer() = 12800 used 32
 fn existing_payer() -> bool {
     let mut m: Map[u64, u64] = map.new()
     for i in 0u64 .. 4u64 {
-        result.unwrap(map.insert(mut m, i, i))
+        map.insert(mut m, i, i)
     }
+    // try_reserve shares insert's growth charge and leaves m as it was when refused.
     let r: Result[bool, Capacity] = bound bytes 0 {
-        match map.insert(mut m, 4, 40) {
-            Error((c, (k, v))) => c.requested == 256 && c.available == 0 && k == 4 && v == 40,
+        match map.try_reserve(mut m, 1) {
+            Error(c) => c.requested == 256 && c.available == 0,
             Ok(()) => false
         }
     }
@@ -24,12 +25,31 @@ fn existing_payer() -> bool {
 }
 
 fn first_payer() -> u64 {
-    let mut m: Map[u64, u64] = map.new()
-    let r: Result[u64, Capacity] = bound bytes 0 {
-        match map.insert(mut m, 7, 11) {
-            Error((c, _)) => c.requested * 100 + c.available,
-            Ok(()) => 0
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut m: Map[u64, u64] = map.new()
+            map.insert(mut m, 7, 11)
+            0
         }
+    })
+    match caught(take r) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 0
     }
-    result.unwrap(r) + map.len(m)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

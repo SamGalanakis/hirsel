@@ -40,7 +40,7 @@ fn emit(out: Stdout, trace: Log[observe.Obs], take e: observe.Obs) -> () waits {
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(co, e, mut b))
     result.unwrap(stdout.write_bytes(out, b))
-    result.unwrap(log.append(trace, take e))
+    log.append(trace, take e)
 }
 
 fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> Drive {
@@ -52,7 +52,7 @@ fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], c
 
 fn keys() -> List[Bytes] {
     let mut wanted: List[Bytes] = list.new()
-    result.unwrap(list.push(mut wanted, entry()))
+    list.push(mut wanted, entry())
     wanted
 }
 
@@ -64,7 +64,7 @@ fn connect(d: Drive, id: u64) -> Conn waits {
 
 fn connect_in(d: Drive, id: u64, q: u64) -> Conn waits {
     let (take wire, take session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random,
-        Some(ingress.binding()), d.head, d.post, code.describe(place), keys(), Some(result.unwrap(clone(d.token))), q, 2097152u64))
+        Some(ingress.binding()), d.head, d.post, code.describe(place), keys(), Some(clone(d.token)), q, 2097152u64))
     Conn(id: id, clock: d.clock, out: d.out, wire: take wire, task: take session)
 }
 
@@ -156,7 +156,7 @@ fn publish(err: Stderr, take events: List[observe.Obs]) -> () waits {
 }
 
 fn drive(take d: Drive) -> () waits {
-    let trace: Log[observe.Obs] = result.unwrap(log.new())
+    let trace: Log[observe.Obs] = log.new()
     let a = connect(d, 0u64)
     let b = connect(d, 1u64)
     let c = connect(d, 2u64)
@@ -211,10 +211,7 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     let (head, inbox) = result.unwrap((channel.new(64u64) : Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity]))
     let mail = result.unwrap(runner.mailbox(4u64))
     let input = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, seed, mix)
-    let body = match task.spawn(tasks, bytes 33554432u64, take input, drive) {
-        Ok(take t) => take t,
-        Error(_) => return false,
-    }
+    let body = task.spawn(tasks, bytes 33554432u64, take input, drive)
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.migrate), code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
@@ -230,10 +227,10 @@ type JoinDrive: send { drive: Drive, scenario: JoinCase }
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
 pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let db = store.memory(clock, random, store.defaults())
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
-    let trace: Log[observe.Obs] = result.unwrap(log.new())
+    let trace: Log[observe.Obs] = log.new()
     let cn = connect_in(d, 99u64, 1u64)
     let a = args(0u64, 0u64, 0u64, 0u64)
     ask(cn, trace, a, entry(), 2000000u64)
@@ -273,7 +270,7 @@ fn mismatch_result(take c: Conn, trace: Log[observe.Obs]) -> () waits {
 
 fn drive_join(take input: JoinDrive) -> () waits {
     let JoinDrive(drive: take d, scenario: scenario) = take input
-    let trace: Log[observe.Obs] = result.unwrap(log.new())
+    let trace: Log[observe.Obs] = log.new()
     let a = connect(d, 0u64)
     let original = args(0u64, 0u64, 0u64, 1u64)
     let other = args(0u64, 0u64, 0u64, 2u64)
@@ -317,10 +314,7 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
     let input = JoinDrive(drive: take d, scenario: scenario)
-    let body = match task.spawn(tasks, bytes 33554432u64, take input, drive_join) {
-        Ok(take t) => take t,
-        Error(_) => return false,
-    }
+    let body = task.spawn(tasks, bytes 33554432u64, take input, drive_join)
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.migrate), code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)

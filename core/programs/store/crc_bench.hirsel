@@ -24,17 +24,17 @@ fn crc32c_append(prefix: u32, b: Bytes) -> u32 {
 pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let argument = option.unwrap(args.get(argv, 0))
     let loops: u64 = result.unwrap(int.parse(argument))
-    let mut image: Bytes = result.unwrap(list.with_capacity(4096))
+    let mut image: Bytes = list.with_capacity(4096)
     for i in 0u64 .. 4096 {
-        result.unwrap(list.push(mut image, int.truncate(i * 17 + 3)))
+        list.push(mut image, int.truncate(i * 17 + 3))
     }
     let mut crc: u32 = 0
     for _ in 0u64 .. loops {
         crc = crc32c_append(crc, image)
     }
     let mut rendered = string.new()
-    result.unwrap(string.push_u64(mut rendered, int.widen(crc)))
-    result.unwrap(string.push(mut rendered, "\n"))
+    string.push_u64(mut rendered, int.widen(crc))
+    string.push(mut rendered, "\n")
     match stdout.write(out, rendered) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 8))

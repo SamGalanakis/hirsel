@@ -1,12 +1,15 @@
 // Nine bytes cost 16 in either carrier. At a limit of 15 the first literal
-// refuses with requested=16 and available=15, before the one-byte literal.
-// At a limit of 16 that charge survives handing the payer over to the parent.
-// A second byte allocation refuses with requested=8 and available=0 until the
-// first owner's drop, after which a nine-byte allocation fits again.
-// expect: run literal_refusal(false) = 1615
-// expect: run literal_refusal(true) = 1615
-// expect: run refund_after_handover(false) = 890
-// expect: run refund_after_handover(true) = 890
+// raises Capacity with requested=16 and available=15, before the one-byte literal.
+// At a limit of 16 that charge survives handing the payer over to the parent:
+// a second byte allocation raises with requested=8 and available=0 while the
+// first owner lives, and after its drop a nine-byte allocation fits again.
+// A caught failure keeps its 32-byte cause cell admitted.
+// expect: run literal_refusal(false) = 1615 used 32
+// expect: run literal_refusal(true) = 1615 used 32
+// expect: run refusal_after_handover(false) = 800 used 32
+// expect: run refusal_after_handover(true) = 800 used 32
+// expect: run refund_after_handover(false) = 90
+// expect: run refund_after_handover(true) = 90
 // expect: run empty_is_free() = 0
 // expect: run cloned_and_counted() = 18
 // expect: run inline_capacity() = 311
@@ -28,64 +31,71 @@ type FrozenOrShared = Frozen(FrozenBytes) | SharedFrozen(Arc[Bytes])
 
 type HeapOrShared = Heap(Bytes) | SharedHeap(Arc[Bytes])
 
-fn make(frozen: bool) -> Result[FrozenBytes, Capacity] {
+fn make(frozen: bool) -> FrozenBytes {
     if frozen {
         return b"abcdefghi"
     }
-    let heap: Result[Bytes, Capacity] = b"abcdefghi"
-    match take heap {
-        Ok(take b) => Ok(bytebuf.freeze(take b)),
-        Error(c) => Error(c),
-    }
+    let heap: Bytes = b"abcdefghi"
+    bytebuf.freeze(take heap)
 }
 
 fn literal_refusal(frozen: bool) -> u64 {
-    let got = bound bytes 15 {
-        let b = make(frozen)?
-        let one = b"x"?
-        list.len(bytebuf.as_bytes(b)) + list.len(one)
-    }
-    match got {
-        Ok(n) => n,
-        Error(c) => c.requested * 100 + c.available,
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 15 {
+            let b = make(frozen)
+            let one = b"x"
+            list.len(bytebuf.as_bytes(b)) + list.len(one)
+        }
+    })
+    match caught(take outer) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 0,
     }
 }
 
-fn inspect(frozen: bool) -> Result[u64, Capacity] {
-    let before = {
-        let escaped = (bound bytes 16 {
-            make(frozen)
-        })??
-        let b = bytebuf.as_bytes(escaped)
-        let len = list.len(b)
-        let same = list.capacity(b) == 9 && b[8] == b'i'
-        let refusal = match b"x" {
-            Error(e) => e.requested * 100 + e.available,
-            Ok(_) => 5000,
+fn escape(frozen: bool) -> FrozenBytes {
+    result.unwrap(bound bytes 16 {
+        make(frozen)
+    })
+}
+
+fn refusal_after_handover(frozen: bool) -> u64 {
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 16 {
+            let escaped = escape(frozen)
+            let b = bytebuf.as_bytes(escaped)
+            if list.capacity(b) == 9 && b[8] == b'i' {
+                let x = b"x"
+                5000 + list.len(x)
+            } else {
+                6000
+            }
         }
-        if same {
-            refusal + 10 * len
-        } else {
-            6000
-        }
+    })
+    match caught(take outer) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 7000,
     }
-    let again = b"123456789"?
-    Ok(before + list.len(again) - 9)
 }
 
 fn refund_after_handover(frozen: bool) -> u64 {
-    match (bound bytes 16 {
-        inspect(frozen)
-    }) {
-        Ok(Ok(n)) => n,
-        _ => 7000,
+    let got = bound bytes 16 {
+        let before = {
+            let escaped = escape(frozen)
+            10 * list.len(bytebuf.as_bytes(escaped))
+        }
+        let again = b"123456789"
+        before + list.len(again) - 9
+    }
+    match got {
+        Ok(n) => n,
+        Error(_) => 7000,
     }
 }
 
 fn empty_is_free() -> u64 {
     let got = bound bytes 0 {
-        let literal: Result[FrozenBytes, Capacity] = b""
-        let b = result.unwrap(take literal)
+        let b: FrozenBytes = b""
         list.len(bytebuf.as_bytes(b))
     }
     match got {
@@ -100,13 +110,12 @@ fn empty_is_free() -> u64 {
 fn cloned_and_counted() -> u64 {
     let got = bound bytes 64 {
         let length = {
-            let original = make(true)?
-            let attempt: Result[FrozenBytes, Capacity] = clone(original)
-            let copied = attempt?
-            let held = result.unwrap(arc.new(take original))
+            let original = make(true)
+            let copied: FrozenBytes = clone(original)
+            let held = arc.new(take original)
             list.len(bytebuf.as_bytes(held)) + list.len(bytebuf.as_bytes(copied))
         }
-        let proof: Bytes = list.with_capacity(64)?
+        let proof: Bytes = list.with_capacity(64)
         if list.capacity(proof) == 64 {
             length
         } else {
@@ -125,8 +134,8 @@ fn cloned_and_counted() -> u64 {
 // The final 311 encodes length 3 and one point for each retained byte check.
 fn inline_capacity() -> u64 {
     let r = bound bytes 8 {
-        let mut out: Bytes = list.with_capacity(3)?
-        let _ = result.unwrap(list.push(mut out, b'a'))
+        let mut out: Bytes = list.with_capacity(3)
+        list.push(mut out, b'a')
         let src: Inline[u8, 3] =[b'x', b'y', b'z']
         if bytebuf.append_inline(mut out, src, 0, 3) || out != string.as_bytes("a") {
             8001u64
@@ -149,5 +158,21 @@ fn inline_capacity() -> u64 {
     match r {
         Ok(n) => n,
         Error(_) => 9000
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

@@ -1,13 +1,16 @@
 // Module `list` (SEM-4). Bytes is List[u8].
 pub fn new[T]() -> List[T]
 
-pub fn with_capacity[T](n: u64) -> Result[List[T], Capacity]
+pub fn with_capacity[T](n: u64) -> List[T]
 
 pub fn len[T](xs: List[T]) -> u64
 
 pub fn capacity[T](xs: List[T]) -> u64
 
-pub fn reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity]
+pub fn reserve[T](mut xs: List[T], n: u64)
+
+// Like reserve, returning a refusal as a value instead of raising it (MEM-21).
+pub fn try_reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity]
 
 pub fn get[T](xs: List[T], i: u64) -> Option[View[T]] in xs
 
@@ -24,26 +27,26 @@ pub fn word_be[T: integer](b: Bytes, at: u64) -> T
 // The expected type fixes the number of bytes read (SEM-11).
 pub fn lanes(b: Bytes, at: u64) -> Simd[u8, 16]
 
-// Appends exactly k lanes. Capacity leaves the buffer unchanged (SEM-11).
-pub fn put_lanes(mut b: Bytes, v: Simd[u8, 16], k: u64) -> Result[(), Capacity]
+// Appends exactly k lanes. A refusal leaves the buffer unchanged (SEM-11).
+pub fn put_lanes(mut b: Bytes, v: Simd[u8, 16], k: u64)
 
 // Overwrites the lanes of v starting at at. Fails with Bounds unless at + len(v) <= len(b).
 pub fn set_lanes(mut b: Bytes, at: u64, v: Simd[u8, 16])
 
 // Append the little-endian bytes of a u16, u32 or u64 atomically.
-// Capacity leaves the buffer unchanged.
-pub fn put_word_le[T: integer](mut b: Bytes, x: T) -> Result[(), Capacity]
+// A refusal leaves the buffer unchanged.
+pub fn put_word_le[T: integer](mut b: Bytes, x: T)
 
 // Like put_word_le, in big-endian byte order.
-pub fn put_word_be[T: integer](mut b: Bytes, x: T) -> Result[(), Capacity]
+pub fn put_word_be[T: integer](mut b: Bytes, x: T)
 
 // The front expands push in place: a full test, a cold call to grow in its true
 // arm (MEM-24 from needed = len + 1), then a store within capacity.
-pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
+pub fn push[T](mut xs: List[T], take x: T)
 
 // The full arm's growth as a function of its own: reserve is expanded where it
 // is called, so only a call keeps it out of the caller.
-fn grow[T](mut xs: List[T]) -> Result[(), Capacity] {
+fn grow[T](mut xs: List[T]) {
     reserve(mut xs, 1)
 }
 
@@ -55,9 +58,9 @@ pub fn swap[T](mut xs: List[T], i: u64, j: u64)
 
 pub fn clear[T](mut xs: List[T])
 
-pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
+pub fn fill[T: plain](mut xs: List[T], n: u64, x: T)
 
-pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
+pub fn append[T: plain](mut xs: List[T], ys: List[T])
 
 // Overwrite src's length of existing elements starting at at. A range outside
 // dst (including an overflowing end) fails with Bounds before any write.
@@ -90,7 +93,7 @@ type Slots[T] {
 
 fn slots_empty[T]() -> Slots[T]
 
-fn slots_new[T](n: u64) -> Result[Slots[T], Capacity]
+fn slots_new[T](n: u64) -> Slots[T]
 
 fn slots_put[T](mut s: Slots[T], i: u64, take x: T)
 
@@ -115,12 +118,12 @@ fn slots_forget_ring[T](mut s: Slots[T], head: u64)
 // branchless partition sorts it, so random input is one quicksort. Between operations
 // every element is in xs. Scratch, indexed like xs, holds elements only inside one
 // merge, insertion, small sort or partition, and Hole.active describes which.
-pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
+pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) {
     let n = list.len(xs)
     if n < 2 {
-        return Ok(())
+        return
     }
-    let scratch: Slots[T] = slots_new(n)?
+    let scratch: Slots[T] = slots_new(n)
     let mut g = Hole(xs: view xs, scratch: take scratch, active: idle())
     if n <= insertion_len() {
         insertion_sort_hole(mut g, 0, n, before)
@@ -128,7 +131,6 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
         drift(mut g, 0, n, n <= 2 * small_len(), before)
     }
     let _ = take g
-    Ok(())
 }
 
 // Whole lists this short are sorted by insertion, as Rust's (stable/mod.rs

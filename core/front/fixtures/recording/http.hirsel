@@ -1,8 +1,5 @@
 fn reply(req: std.http.Request, scratch: Region, mut out: std.http.Responder, state: ()) -> Result[std.http.Outcome, std.http.HandlerError] {
-    let body = match std.http.copy_bytes(std.http.path(req)) {
-        Ok(take payload) => take payload,
-        Error(capacity) => return Error(Allocation(capacity)),
-    }
+    let body = std.http.copy_bytes(std.http.path(req))
     Ok(Reply(std.http.response(200, take body, false)?))
 }
 
@@ -47,19 +44,18 @@ pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] wai
     let narrowed = result.unwrap(net.narrow(parent, rule))
     let (listener, addr) = result.unwrap(host.listen(narrowed, Addr(ip: ip, port: 0), 8))
     let mut listeners: List[Listener] = list.new()
-    result.unwrap(list.push(mut listeners, take listener))
+    list.push(mut listeners, take listener)
     let mut builder: std.router.Builder[()] = std.router.builder()
     result.unwrap(std.router.add(mut builder, "GET", "/{tail...}", std.router.raw(reply)))
     let routes = result.unwrap(std.router.build(take builder))
     let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
-    let stops: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1)
-    let (send, receive) = result.unwrap(take stops)
-    let stopper = result.unwrap(task.spawn(tasks, bytes 4096, Stop(clock: c, listener: take control, send: take send), stop_server))
+    let (send, receive): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let stopper = task.spawn(tasks, bytes 4096, Stop(clock: c, listener: take control, send: take send), stop_server)
     let mut line = string.new()
-    result.unwrap(string.push_u64(mut line, int.widen(addr.port)))
-    result.unwrap(string.push_char(mut line, ' '))
-    result.unwrap(string.push_u64(mut line, int.widen(stop_addr.port)))
-    result.unwrap(string.push_char(mut line, '\n'))
+    string.push_u64(mut line, int.widen(addr.port))
+    string.push_char(mut line, ' ')
+    string.push_u64(mut line, int.widen(stop_addr.port))
+    string.push_char(mut line, '\n')
     result.unwrap(stdout.write(out, line))
     result.unwrap(std.http.serve_with_stop(take listeners, c, tasks, take cfg, take routes, (), take receive))
     let _ = task.join(take stopper)

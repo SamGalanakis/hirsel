@@ -411,6 +411,13 @@ pub(super) fn emit(
                     RaiseCause::Unwrap => f.record_failure(3)?,
                     RaiseCause::Bounds => f.record_failure(1)?,
                     RaiseCause::Fail(address) => f.record_string(*address)?,
+                    RaiseCause::Capacity {
+                        requested,
+                        available,
+                    } => {
+                        let (requested, available) = (f.get(*requested), f.get(*available));
+                        f.record_capacity(requested, available)?
+                    }
                 }
                 f.fail_to(*cleanup);
             }

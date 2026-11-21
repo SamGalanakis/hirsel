@@ -157,7 +157,7 @@ fn read_string(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Text, E
     while byte(input, c) != 34 {
         if byte(input, c) == 92 {
             decoded = true
-            result.map_err(list.append(mut doc.decoded, list.slice(input, start, c.index)), memory)?
+            list.append(mut doc.decoded, list.slice(input, start, c.index))
             advance(input, mut c)
             let escaped = match byte(input, c) {
                 34 => 34u8,
@@ -170,7 +170,7 @@ fn read_string(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Text, E
                 116 => 9u8,
                 _ => return Error(Syntax),
             }
-            result.map_err(result.capacity_only(list.push(mut doc.decoded, escaped)), memory)?
+            list.push(mut doc.decoded, escaped)
             advance(input, mut c)
             start = c.index
         } else {
@@ -182,7 +182,7 @@ fn read_string(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Text, E
         }
     }
     let range = if decoded {
-        result.map_err(list.append(mut doc.decoded, list.slice(input, start, c.index)), memory)?
+        list.append(mut doc.decoded, list.slice(input, start, c.index))
         text_range(decoded_start, list.len(doc.decoded), true)
     } else {
         text_range(start, c.index, false)
@@ -204,7 +204,7 @@ fn array(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, Error]
             let node = read_node(mut doc, input, mut c)?
             let next = ElementRef(index: int.narrow(list.len(doc.elements) + 1))
             let element = Element(node: node, next: ElementRef(index: 0))
-            result.map_err(result.capacity_only(list.push(mut doc.elements, take element)), memory)?
+            list.push(mut doc.elements, take element)
             if tail.index == 0 {
                 head = next
             } else {
@@ -239,7 +239,7 @@ fn read_object(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, 
             let node = read_node(mut doc, input, mut c)?
             let next = MemberRef(index: int.narrow(list.len(doc.members) + 1))
             let member = Member(name: name, node: node, next: none)
-            result.map_err(result.capacity_only(list.push(mut doc.members, take member)), memory)?
+            list.push(mut doc.members, take member)
             if tail.index == 0 {
                 object.head = next
             } else {
@@ -259,7 +259,7 @@ fn read_object(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, 
         required(input, mut c, 125)?
     }
     let handle = ObjectRef(index: int.narrow(list.len(doc.objects) + 1))
-    result.map_err(result.capacity_only(list.push(mut doc.objects, take object)), memory)?
+    list.push(mut doc.objects, take object)
     Ok(ObjectValue(handle))
 }
 
@@ -287,7 +287,7 @@ fn value(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, Error]
 fn read_node(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[NodeRef, Error] {
     let node = value(mut doc, input, mut c)?
     let handle = NodeRef(index: int.narrow(list.len(doc.nodes) + 1))
-    result.map_err(result.capacity_only(list.push(mut doc.nodes, take node)), memory)?
+    list.push(mut doc.nodes, take node)
     Ok(handle)
 }
 

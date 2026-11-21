@@ -6,17 +6,17 @@
 // expect: run grown(0) = 5
 // expect: run grown(2) = fail Bounds
 fn bump(mut xs: List[u64], i: u64) -> u64 {
-    result.unwrap(list.push(mut xs, 9))
+    list.push(mut xs, 9)
     let a =[1u64, 2u64];
     a[i]
 }
 
 fn grown(i: u64) -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 1))
-    result.unwrap(list.push(mut xs, 2))
-    result.unwrap(list.push(mut xs, 3))
-    result.unwrap(list.push(mut xs, 4))
+    list.push(mut xs, 1)
+    list.push(mut xs, 2)
+    list.push(mut xs, 3)
+    list.push(mut xs, 4)
     if list.len(xs) == list.capacity(xs) {
         bump(mut xs, i);
     }

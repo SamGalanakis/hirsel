@@ -42,9 +42,9 @@ fn chunk(i: Bit) -> u32 {
 }
 
 fn zero_chunk() -> Bytes {
-    let mut data: Bytes = result.unwrap(list.with_capacity(64u64))
+    let mut data: Bytes = list.with_capacity(64u64)
     for _ in 0u64 .. 64u64 {
-        result.unwrap(list.push(mut data, 0u8))
+        list.push(mut data, 0u8)
     }
     data
 }
@@ -79,7 +79,7 @@ fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
 
 fn asset(path: Bytes) -> Option[std.wsock.Asset] {
     if path == string.as_bytes("/") {
-        return Some(std.wsock.Asset(name: result.unwrap(string.from("index.html")), content_type: result.unwrap(string.from("text/html; charset=utf-8"))))
+        return Some(std.wsock.Asset(name: string.from("index.html"), content_type: string.from("text/html; charset=utf-8")))
     }
     let name = if path == string.as_bytes("/client.js") {
         "client.js"
@@ -92,7 +92,7 @@ fn asset(path: Bytes) -> Option[std.wsock.Asset] {
     } else {
         return None
     }
-    Some(std.wsock.Asset(name: result.unwrap(string.from(name)), content_type: result.unwrap(string.from("text/javascript; charset=utf-8"))))
+    Some(std.wsock.Asset(name: string.from(name), content_type: string.from("text/javascript; charset=utf-8")))
 }
 
 type Settings {
@@ -129,7 +129,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             let Some(prefix) = std.wsock.parse_prefix(value) else {
                 return Error(invalid)
             }
-            result.unwrap(list.push(mut proxies, prefix))
+            list.push(mut proxies, prefix)
         } else {
             return Error(invalid)
         }

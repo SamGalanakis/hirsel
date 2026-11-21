@@ -1,9 +1,9 @@
 //! Native memory ABI, FORM v1. Every symbol and failure convention lives here.
 //!
 //! `alloc` and `limit_enter` return null plus Capacity on refusal; on success
-//! `capacity` is zero. Null from the active finalizer grant takes the emitter's
-//! Capacity failure path; an inner bound returns ordinary Capacity. `free`, limit
-//! exit and mechanical release never
+//! `capacity` is zero. Which limit refused does not matter: the emitter raises the
+//! cause `Capacity(c)` where the IR's producer says so (MEM-21), with `c` in the
+//! cause's first two words. `free`, limit exit and mechanical release never
 //! fail. All allocation admits from the current limit.
 //!
 //! `region_alloc`, `resource_alloc` and `task_start` use the same Allocation
@@ -14,9 +14,7 @@
 //! chain, null for empty; cause accessors return borrowed pointers to the exact
 //! core Cause layout, published in abi_layout.rs. rt.cause_next/value take only
 //! the cell, return next/core-view pointers, and have no context or failure status.
-//! allocation_status
-//! returns 1 only for a null result under the current finalizer grant, else 0. Other
-//! entries return unit, except dest_id (u64), compare_bytes (i8) and native_alloc/region_refill
+//! Other entries return unit, except dest_id (u64), compare_bytes (i8) and native_alloc/region_refill
 //! (nonnull native base/payload). Count overflow and physical host exhaustion are run
 //! stops. A drop recipe's boolean means completion, with false requesting resume.
 //! Shipping standalone archives also stop as HostMemory when Rust bookkeeping
@@ -42,8 +40,7 @@
 //! moved, refund, overflow, kind) -> Growth { pointer, available }` consumes an
 //! owned sequence backing. Success installs the carrier, refunds the original
 //! charge and returns the new pointer/zero room; Capacity returns null/room,
-//! unchanged carrier and backing. The caller applies allocation_status for a
-//! grant refusal. Native host refusal stops HostMemory102 without cleanup. No
+//! unchanged carrier and backing. Native host refusal stops HostMemory102 without cleanup. No
 //! new event or refund drain is introduced. Emitters complete a small backing
 //! whose charge fits inline (allocate/copy/free) and call this entry for every
 //! other growth; it reuses the backing in place from
@@ -134,7 +131,7 @@ pub unsafe extern "C" fn hirsel_core_region_open(
 /// # Safety
 /// Context and region are live, task-local, and exclusively used during this call.
 /// Size, alignment and charge describe the emitter's stable allocation. A null
-/// result is Capacity; under a grant the emitter routes it to failure cleanup.
+/// result is Capacity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_region_alloc(
     context: *const Context,
@@ -346,6 +343,26 @@ pub unsafe extern "C" fn hirsel_core_raise(context: *mut Context, cause: Cause) 
 pub unsafe extern "C" fn hirsel_core_raise_builtin(context: *mut Context, kind: u8, site: u64) {
     // SAFETY: the caller supplies the live context and unused obligation.
     unsafe { hirsel_core_raise(context, Cause::new(kind, site)) };
+}
+/// Record `Capacity(c)` for a refused admission (MEM-21) in the current prepaid
+/// cell; the refusal itself admitted nothing.
+/// # Safety
+/// As for `hirsel_core_raise_builtin`.
+#[cold]
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_raise_capacity(
+    context: *mut Context,
+    site: u64,
+    requested: u64,
+    available: u64,
+) {
+    let capacity = Capacity {
+        requested,
+        available,
+    };
+    // SAFETY: the caller supplies the live context and unused obligation.
+    unsafe { hirsel_core_raise(context, Cause::capacity(capacity, site)) };
 }
 /// Deliver the current chain by ownership transfer, without admission/allocation.
 /// # Safety
@@ -960,22 +977,6 @@ pub unsafe extern "C" fn hirsel_core_raise_string(
             },
         );
     }
-}
-
-/// FORM allocation refusal becomes failure only under a finalizer's grant.
-/// # Safety
-/// Context is live and exclusively held by its task.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_allocation_status(
-    context: *const Context,
-    pointer: *mut u8,
-) -> u8 {
-    // SAFETY: the emitter passes its live hidden task context.
-    u8::from(
-        pointer.is_null()
-            && unsafe { &*context }.finalizing != 0
-            && unsafe { &*context }.bound_depth == unsafe { &*context }.grant_depth,
-    )
 }
 
 /// Free a wholly destructured own value or resource.

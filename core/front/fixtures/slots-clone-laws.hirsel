@@ -1,37 +1,28 @@
 
 clone[T](t: TestCopy[T]) {
-    match t.n {
-        0 => Error(Capacity(requested: 7, available: 3))
-        _ => Ok(TestCopy(xs: clone(t.xs)?, n: test_bump(t)))
-    }
+    TestCopy(xs: clone(t.xs), n: test_bump(t))
 }
 fn test_bump[T](t: TestCopy[T]) -> u64 { t.n + 100 }
 type TestPair { a: TestCopy[u64], b: TestCopy[String] }
 fn test_dup[T: plain](seed: T, n: u64) -> u64 {
     let x: TestCopy[T] = TestCopy(xs: list.new(), n: n)
-    let y: TestCopy[T] = result.unwrap(clone(x))
+    let y: TestCopy[T] = clone(x)
     y.n
 }
 
 // expect: run clone_body_law() = 105107110
 fn clone_body_law() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 4))
+    list.push(mut xs, 4)
     let p = TestPair(a: TestCopy(xs: take xs, n: 5), b: TestCopy(xs: list.new(), n: 7))
-    let q: TestPair = result.unwrap(clone(p))
+    let q: TestPair = clone(p)
     let seed: u8 = 0
     q.a.n * 1000000 + q.b.n * 1000 + test_dup(seed, 9) + list.len(q.a.xs)
 }
 
-// expect: run clone_body_refusal_law() = 73
-fn clone_body_refusal_law() -> u64 {
-    let p = TestPair(a: TestCopy(xs: list.new(), n: 5), b: TestCopy(xs: list.new(), n: 0))
-    let q: Result[TestPair, Capacity] = clone(p)
-    match q { Ok(_) => 0, Error(c) => c.requested * 10 + c.available }
-}
 type TestSlotCopy[T] { s: Slots[T], n: u64 }
 clone[T](t: TestSlotCopy[T]) {
-    Ok(TestSlotCopy(s: slots_empty(), n: t.n + 100))
+    TestSlotCopy(s: slots_empty(), n: t.n + 100)
 }
 type TestSlotPair { value: TestSlotCopy[u64] }
 // A declared body stops the structural walk before its private Slots field.
@@ -40,7 +31,7 @@ fn clone_kernel_hook_law() -> u64 {
     let mut s: Slots[u64] = result.unwrap(slots_new(1))
     slots_put(mut s, 0, 7)
     let p = TestSlotPair(value: TestSlotCopy(s: take s, n: 5))
-    let q: TestSlotPair = result.unwrap(clone(p))
+    let q: TestSlotPair = clone(p)
     q.value.n * 10 + list.len(q.value.s.raw)
 }
 

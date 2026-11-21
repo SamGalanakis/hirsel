@@ -24,7 +24,7 @@ fn empty() -> Slot {
 
 fn key(c: Cache, h: u32) -> Result[String, m1.support.Error] {
     let i: u64 = int.widen(h)
-    let mut payload_bytes: Bytes = m1.support.mem(list.with_capacity(int.widen(c.slots[i].key_len)))?
+    let mut payload_bytes: Bytes = list.with_capacity(int.widen(c.slots[i].key_len))
     let mut j: u64 = 0
     while j < int.widen(c.slots[i].key_len) {
         m1.support.push(mut payload_bytes, c.slots[i].key[j])?;
@@ -88,7 +88,7 @@ fn put(mut c: Cache, name: String, value: String) -> Result[bool, m1.support.Err
         touch(mut c, h)
         return Ok(false)
     }
-    let owned = m1.support.mem(string.from(name))?
+    let owned = string.from(name)
     let evicted = list.len(c.slots) == 64
     let h: u32 = if evicted {
         let h = c.tail
@@ -134,7 +134,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
             }
             if let Some(h) = handle {
                 let i: u64 = int.widen(h)
-                let mut value: Bytes = m1.support.mem(list.with_capacity(int.widen(c.slots[i].len)))?
+                let mut value: Bytes = list.with_capacity(int.widen(c.slots[i].len))
                 let mut j: u64 = 0
                 while j < int.widen(c.slots[i].len) {
                     m1.support.push(mut value, c.slots[i].payload[j])?;
@@ -159,7 +159,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
 
 fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
     let owner = m1.support.marker(tx, "cache")?
-    let mut c = Cache(slots: m1.support.mem(list.with_capacity(64))?, index: map.new(), head: NONE, tail: NONE, first: None)
+    let mut c = Cache(slots: list.with_capacity(64), index: map.new(), head: NONE, tail: NONE, first: None)
     let mut hits: u64 = 0
     let mut checksum: u64 = 0
     let mut evictions: u64 = 0
@@ -189,7 +189,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
 
 fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(2))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(2)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

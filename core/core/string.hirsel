@@ -1,20 +1,20 @@
 // Module `string` (SEM-3).
 pub fn new() -> String
 
-pub fn from(s: String) -> Result[String, Capacity] {
+pub fn from(s: String) -> String {
     let src = string.as_bytes(s)
     // Exact capacity: the copy's length.
-    let mut b: Bytes = list.with_capacity(list.len(src))?
-    let _ = list.append(mut b, src)
-    Ok(of_bytes(take b))
+    let mut b: Bytes = list.with_capacity(list.len(src))
+    list.append(mut b, src)
+    of_bytes(take b)
 }
 
 /// An empty string with storage for n bytes. The byte list starts empty.
 /// Fails: Capacity. Alloc: n bytes rounded to 8. Cost: O(1).
-/// Ex: `let mut reply = string.with_capacity(256)?`
-pub fn with_capacity(n: u64) -> Result[String, Capacity] {
-    let b: Bytes = list.with_capacity(n)?
-    Ok(of_bytes(take b))
+/// Ex: `let mut reply = string.with_capacity(256)`
+pub fn with_capacity(n: u64) -> String {
+    let b: Bytes = list.with_capacity(n)
+    of_bytes(take b)
 }
 
 pub fn from_utf8(take b: Bytes) -> Result[String, Bytes] {
@@ -26,10 +26,10 @@ pub fn from_utf8(take b: Bytes) -> Result[String, Bytes] {
 }
 
 // The encoder writes only RFC 4648 alphabet bytes and '=' padding.
-pub fn encode_base64(b: Bytes) -> Result[String, Capacity] {
+pub fn encode_base64(b: Bytes) -> String {
     let mut out: Bytes = list.new()
-    append_base64_bytes(b, mut out)?
-    Ok(of_bytes(take out))
+    append_base64_bytes(b, mut out)
+    of_bytes(take out)
 }
 
 const ALPHABET: Inline[u8, 64] =[b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P', b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n', b'o', b'p', b'q', b'r', b's', b't', b'u', b'v', b'w', b'x', b'y', b'z', b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'+', b'/']
@@ -105,8 +105,8 @@ fn append_base64_blocks(b: Bytes, mut out: Bytes, n: u64, dst_start: u64) -> u64
 }
 
 /// Appends RFC 4648's standard alphabet with '=' padding. O(n).
-/// Capacity leaves out unchanged. Ex: `string.append_base64_bytes(b, mut out)?`.
-pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
+/// A refusal leaves out unchanged. Ex: `string.append_base64_bytes(b, mut out)`.
+pub fn append_base64_bytes(b: Bytes, mut out: Bytes) {
     let n = list.len(b)
     let tail = n % 3
     let full = n - tail
@@ -116,7 +116,7 @@ pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
         1
     }) * 4
     let dst0 = list.len(out)
-    list.fill(mut out, size, b'=')?
+    list.fill(mut out, size, b'=')
     let mut src: u64 = 0
     if n >= 34 {
         // Encode two leading triples (6 bytes -> 8 bytes) so the 32-byte SIMD
@@ -161,7 +161,6 @@ pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
             out[dst + 2] = base64_symbol((c & 15) << 2)
         }
     }
-    Ok(())
 }
 
 // ADAPTED from simdutf8 0.1.5 src/implementation/algorithm.rs:69-170 (Keiser-Lemire).
@@ -399,20 +398,14 @@ pub fn is_utf8(b: Bytes) -> bool {
     }
 }
 
-pub fn into_bytes(take s: String) -> Result[Bytes, (Capacity, String)] {
+pub fn into_bytes(take s: String) -> Bytes {
     if list.capacity(string.as_bytes(s)) != 0 {
-        return Ok(to_bytes(take s))
+        return to_bytes(take s)
     }
     // Static storage: copied into exact capacity.
-    let copied: Result[Bytes, Capacity] = list.with_capacity(string.byte_len(s))
-    match copied {
-        Ok(take b) => {
-            let mut out = b
-            let _ = list.append(mut out, string.as_bytes(s))
-            Ok(take out)
-        },
-        Error(c) => Error((c, take s)),
-    }
+    let mut out: Bytes = list.with_capacity(string.byte_len(s))
+    list.append(mut out, string.as_bytes(s))
+    out
 }
 
 pub fn as_bytes(s: String) -> View[Bytes] in s
@@ -470,25 +463,25 @@ pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)] {
 
 pub fn byte_len(s: String) -> u64
 
-pub fn push(mut s: String, t: String) -> Result[(), Capacity]
+pub fn push(mut s: String, t: String)
 
-pub fn push_char(mut s: String, c: char) -> Result[(), Capacity] {
+pub fn push_char(mut s: String, c: char) {
     let v = char.to_u32(c)
     // ASCII into room the String owns: one byte, no growth. A static String has capacity 0.
     if v < 0x80 && string.byte_len(s) < list.capacity(string.as_bytes(s)) {
         let owned = replace(mut s, string.new())
         let mut b = to_bytes(take owned)
         // There is room, so this admits nothing.
-        let _ = list.push(mut b, int.truncate(v))
+        list.push(mut b, int.truncate(v))
         s = of_bytes(take b)
-        return Ok(())
+        return
     }
     push_scalar(mut s, v)
 }
 
 // Any scalar value v, growing (or copying out of static storage) first. One branch per UTF-8
 // width with constant shifts: no shift loop and no shift-amount check.
-fn push_scalar(mut s: String, v: u32) -> Result[(), Capacity] {
+fn push_scalar(mut s: String, v: u32) {
     let w: u64 = if v < 0x80 {
         1
     } else if v < 0x800 {
@@ -498,42 +491,40 @@ fn push_scalar(mut s: String, v: u32) -> Result[(), Capacity] {
     } else {
         4
     }
-    string.reserve(mut s, w)?
+    string.reserve(mut s, w)
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
     // Room for w bytes is reserved, so no push below admits anything.
     if w == 1 {
-        let _ = list.push(mut b, int.truncate(v))
+        list.push(mut b, int.truncate(v))
     } else if w == 2 {
-        let _ = list.push(mut b, int.truncate(0xC0 | (v >> 6)))
-        let _ = list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
+        list.push(mut b, int.truncate(0xC0 | (v >> 6)))
+        list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
     } else if w == 3 {
-        let _ = list.push(mut b, int.truncate(0xE0 | (v >> 12)))
-        let _ = list.push(mut b, int.truncate(0x80 | ((v >> 6) & 0x3F)))
-        let _ = list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
+        list.push(mut b, int.truncate(0xE0 | (v >> 12)))
+        list.push(mut b, int.truncate(0x80 | ((v >> 6) & 0x3F)))
+        list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
     } else {
-        let _ = list.push(mut b, int.truncate(0xF0 | (v >> 18)))
-        let _ = list.push(mut b, int.truncate(0x80 | ((v >> 12) & 0x3F)))
-        let _ = list.push(mut b, int.truncate(0x80 | ((v >> 6) & 0x3F)))
-        let _ = list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
+        list.push(mut b, int.truncate(0xF0 | (v >> 18)))
+        list.push(mut b, int.truncate(0x80 | ((v >> 12) & 0x3F)))
+        list.push(mut b, int.truncate(0x80 | ((v >> 6) & 0x3F)))
+        list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
     }
     s = of_bytes(take b)
-    Ok(())
 }
 
-pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
+pub fn push_u64(mut s: String, n: u64) {
     let mut digits: Inline[u8, 64] =[0; 64]
     let start = int.radix_digits(n, 10, mut digits)
-    string.reserve(mut s, 64 - start)?
+    string.reserve(mut s, 64 - start)
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
     // The whole suffix was reserved and contains only ASCII digits.
     let _ = bytebuf.append_inline(mut b, digits, start, 64)
     s = of_bytes(take b)
-    Ok(())
 }
 
-pub fn reserve(mut s: String, n: u64) -> Result[(), Capacity]
+pub fn reserve(mut s: String, n: u64)
 
 pub fn truncate(mut s: String, n: u64) {
     {
@@ -548,21 +539,13 @@ pub fn truncate(mut s: String, n: u64) {
     shorten(mut s, n)
 }
 
-pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
+pub fn make_ascii_upper(mut s: String) {
     if list.capacity(string.as_bytes(s)) == 0 && string.byte_len(s) != 0 {
-        // Static storage with bytes: copied first, as into_bytes copies it.
-        let lit = replace(mut s, string.new())
-        match into_bytes(take lit) {
-            Ok(take bs) => {
-                s = of_bytes(take bs)
-            },
-            Error((c, take back)) => {
-                s = back
-                return Error(c)
-            },
-        }
+        // Static storage with bytes: copied first, as into_bytes copies it. A refusal
+        // raises Capacity before s changes.
+        s = string.from(s)
     }
-    // s owns its storage or is empty: the carrier moves to Bytes with no call and no Result.
+    // s owns its storage or is empty: the carrier moves to Bytes with no call.
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
     for i in 0 .. list.len(b) {
@@ -576,24 +559,15 @@ pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
         }
     }
     s = of_bytes(take b)
-    Ok(())
 }
 
-pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
+pub fn make_ascii_lower(mut s: String) {
     if list.capacity(string.as_bytes(s)) == 0 && string.byte_len(s) != 0 {
-        // Static storage with bytes: copied first, as into_bytes copies it.
-        let lit = replace(mut s, string.new())
-        match into_bytes(take lit) {
-            Ok(take bs) => {
-                s = of_bytes(take bs)
-            },
-            Error((c, take back)) => {
-                s = back
-                return Error(c)
-            },
-        }
+        // Static storage with bytes: copied first, as into_bytes copies it. A refusal
+        // raises Capacity before s changes.
+        s = string.from(s)
     }
-    // s owns its storage or is empty: the carrier moves to Bytes with no call and no Result.
+    // s owns its storage or is empty: the carrier moves to Bytes with no call.
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
     for i in 0 .. list.len(b) {
@@ -606,7 +580,6 @@ pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
         }
     }
     s = of_bytes(take b)
-    Ok(())
 }
 
 // The kernel, the only unchecked code in core. The String and Bytes carriers are one layout,

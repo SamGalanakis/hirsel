@@ -26,7 +26,7 @@ fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.
                 let codec: std.codec.Codec[runner.Frame] = std.codec.of()
                 return match std.codec.decode(codec, b) { Ok(Ok(take f)) => Ok(take f), _ => Error(Protocol(1007u16)) }
             },
-            Ping(control) => { let mut b: Bytes = list.new(); result.unwrap(std.websocket.control(control, mut b)); send(mut w, mut out, 10u8, b, c)? },
+            Ping(control) => { let mut b: Bytes = list.new(); std.websocket.control(control, mut b); send(mut w, mut out, 10u8, b, c)? },
             Pong(_) => (),
             Need => (),
             _ => return Error(Protocol(1008u16)),
@@ -70,7 +70,7 @@ fn write(take seed: Write) -> () waits {
                 result.unwrap(std.codec.encode(codec, f, mut b))
                 (2u8, take b)
             },
-            Ok(Control(op, p)) => { let mut b: Bytes = list.new(); result.unwrap(std.websocket.control(p, mut b)); (op, take b) },
+            Ok(Control(op, p)) => { let mut b: Bytes = list.new(); std.websocket.control(p, mut b); (op, take b) },
             _ => (8u8, list.new()),
         }
         if let Error(_) = send(mut w, mut out, opcode, b, c) { return }
@@ -83,11 +83,11 @@ pub fn wants(keys: List[Bytes]) -> List[runner.Want] {
     for key in keys {
         let n = list.len(key)
         let mut id: Bytes = list.new()
-        for i in 0u64 .. n - 16u64 { result.unwrap(list.push(mut id, key[i])) }
+        for i in 0u64 .. n - 16u64 { list.push(mut id, key[i]) }
         let mut at = n - 16u64
         let af = result.unwrap(std.codec.take_u64(key, mut at))
         let rf = result.unwrap(std.codec.take_u64(key, mut at))
-        result.unwrap(list.push(mut ws, runner.Want(identity: take id, args_fp: af, result_fp: rf)))
+        list.push(mut ws, runner.Want(identity: take id, args_fp: af, result_fp: rf))
     }
     ws
 }
@@ -95,7 +95,7 @@ pub fn wants(keys: List[Bytes]) -> List[runner.Want] {
 pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config) -> Result[Conn, std.wsock.Error] waits {
     let socket = match host.connect(n, address, deadline(c)) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
     let mut host_name: Bytes = list.new()
-    result.unwrap(list.append(mut host_name, string.as_bytes("127.0.0.1")))
+    list.append(mut host_name, string.as_bytes("127.0.0.1"))
     let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, host_name, config, c, random)?
     let mut r = take input
     let mut w = take output
@@ -107,17 +107,13 @@ pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, ke
     send(mut w, mut out, 2u8, b, c)?
     let who = match receive(mut r, mut w, mut out, c)? { Welcome(take p, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
     for _ in keys { match receive(mut r, mut w, mut out, c)? { Placed(_) => (), _ => return Error(Protocol(1008u16)) } }
-    let (to, commands): (Sender[Command], Receiver[Command]) = result.unwrap(channel.new(64u64))
-    let (frames, from): (Sender[runner.Frame], Receiver[runner.Frame]) = result.unwrap(channel.new(64u64))
-    let (credit, credits): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (to, commands): (Sender[Command], Receiver[Command]) = channel.new(64u64)
+    let (frames, from): (Sender[runner.Frame], Receiver[runner.Frame]) = channel.new(64u64)
+    let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
     let read_seed = Read(reader: take r, to: take frames, control: channel.sender(to), credits: take credits, clock: c)
-    let reading = match task.spawn(tasks, bytes 1048576u64, take read_seed, read) {
-        Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)),
-    }
+    let reading = task.spawn(tasks, bytes 1048576u64, take read_seed, read)
     let write_seed = Write(writer: take w, outgoing: take out, from: take commands, clock: c)
-    let writing = match task.spawn(tasks, bytes 1048576u64, take write_seed, write) {
-        Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)),
-    }
+    let writing = task.spawn(tasks, bytes 1048576u64, take write_seed, write)
     Ok(Conn(to: take to, from: take from, credit: take credit, caller: take who, reading: take reading, writing: take writing))
 }
 
@@ -177,7 +173,7 @@ pub fn pair_config[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Ran
     let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
     let seed = Server(listener: take l, tasks: tasks, clock: c, random: random, wire: take session_wire, head: channel.sender(head), post: channel.sender(post), config: config, place: place)
     let run: fn(take Server[G, H]) -> Result[(), std.wsock.Error] waits = server
-    let mut h = match task.spawn(tasks, bytes n_session, take seed, run) { Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)) }
+    let mut h = task.spawn(tasks, bytes n_session, take seed, run)
     match connect(tasks, n, address, c, random, keys, take token, config.socket) {
         Ok(take cn) => Ok((take cn, take h)),
         Error(e) => { task.cancel(mut h); let _ = task.join(take h); Error(e) },

@@ -1,10 +1,10 @@
 // Two peak eight-byte allocations fit in 16 bytes beyond main startup.
 pub fn main()->Result[(),Exit] {
     let mut s=string.new()
-    result.unwrap(string.reserve(mut s,3))
-    result.unwrap(string.push(mut s,"abc"))
-    result.unwrap(string.push(mut s,""))
-    result.unwrap(string.push(mut s,"é"))
+    string.reserve(mut s,3)
+    string.push(mut s,"abc")
+    string.push(mut s,"")
+    string.push(mut s,"é")
     if s!="abcé" || string.byte_len(s)!=5u64 { return Error(Exit(status:1)) }
     {
         let b=string.as_bytes(s)

@@ -145,19 +145,19 @@ fn emit(out: Stdout, e: observe.Obs) -> () waits {
 
 fn record(cn: Conn, take e: observe.Obs) -> () waits {
     emit(cn.out, e)
-    result.unwrap(log.append(cn.log, take e))
+    log.append(cn.log, take e)
 }
 
 // Memoize the pure hash by its complete byte inputs, not the slot or deadline.
 fn send_digest(mut cn: Conn, key: Bytes, arg: Bytes) -> Bytes {
     let mut cache_key: Bytes = list.new()
     result.unwrap(std.codec.put_u64(list.len(key), mut cache_key))
-    result.unwrap(list.append(mut cache_key, key))
+    list.append(mut cache_key, key)
     result.unwrap(std.codec.put_u64(list.len(arg), mut cache_key))
-    result.unwrap(list.append(mut cache_key, arg))
+    list.append(mut cache_key, arg)
     if let Some(d) = map.get(cn.digests, cache_key) { return result.unwrap(clone(d)) }
     let d = observe_fixture.digest(key, arg)
-    result.unwrap(map.insert(mut cn.digests, take cache_key, result.unwrap(clone(d))))
+    map.insert(mut cn.digests, take cache_key, result.unwrap(clone(d)))
     d
 }
 '''
@@ -489,7 +489,7 @@ def trace_source(t, name, observer):
               '    result.unwrap(stdout.write_bytes(out, b))', '    true', '}']
     for data, fn in blobs.items():
         lines += [f'fn {fn}() -> Bytes {{', '    let mut b: Bytes = list.new()']
-        lines += [f'    result.unwrap(list.push(mut b, {x}u8))' for x in data]
+        lines += [f'    list.push(mut b, {x}u8)' for x in data]
         lines += ['    b', '}']
     return '\n'.join(lines) + '\n', clauses
 

@@ -4,7 +4,7 @@ fn sleeper(take c: Clock) waits {
 }
 
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, clock, sleeper))
+    let mut h = task.spawn(tasks, bytes 4096, clock, sleeper)
     let now = host.mono_ns(clock)
     host.sleep_until(clock, now + 1_000_000u64)
     task.cancel(mut h)

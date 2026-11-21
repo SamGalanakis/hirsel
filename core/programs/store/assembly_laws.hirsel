@@ -45,9 +45,9 @@ fn test_assembly_indexed_recreate(c: Clock, r: Random) -> Result[(), ()] waits {
 }
 
 fn shared_store_bytes(i: u64) -> Bytes {
-    let mut out: Bytes = result.unwrap(list.with_capacity(1024))
+    let mut out: Bytes = list.with_capacity(1024)
     for _ in 0u64 .. 1024 {
-        result.unwrap(list.push(mut out, int.narrow(i)))
+        list.push(mut out, int.narrow(i))
     }
     take out
 }
@@ -314,7 +314,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
 
 // Disconnect the writer after the runner has admitted a position.
 pub fn fixture_broken_handoff(mut db: Db) {
-    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = result.unwrap(channel.new(1))
+    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
     let mut disconnected = Some(take abandoned)
     disconnected = None
     db.journal = Some(take to)

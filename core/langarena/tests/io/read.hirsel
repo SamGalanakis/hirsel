@@ -4,8 +4,8 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 1))
     }
     let file = result.unwrap(std.file.open(d, path, Read))
-    let mut reader = result.unwrap(std.io.lines(File(take file), 4096))
-    let mut line = result.unwrap(string.with_capacity(4096))
+    let mut reader = std.io.lines(File(take file), 4096)
+    let mut line = string.with_capacity(4096)
     let mut count: u64 = 0
     let mut length: u64 = 0
     while result.unwrap(std.io.read_line(mut reader, mut line)) {
@@ -13,10 +13,10 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
         length += string.byte_len(line)
     }
     let mut rendered = string.new()
-    result.unwrap(string.push_u64(mut rendered, count))
-    result.unwrap(string.push(mut rendered, " "))
-    result.unwrap(string.push_u64(mut rendered, length))
-    result.unwrap(string.push(mut rendered, "\n"))
+    string.push_u64(mut rendered, count)
+    string.push(mut rendered, " ")
+    string.push_u64(mut rendered, length)
+    string.push(mut rendered, "\n")
     result.unwrap(stdout.write(out, rendered))
     Ok(())
 }

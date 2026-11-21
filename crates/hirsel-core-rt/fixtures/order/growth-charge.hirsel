@@ -6,14 +6,14 @@ type Work:send { xs: List[u64], out: Stdout }
 fn child(take x: Work) -> u64 waits {
     let Work(xs: ys, out: out) = take x
     let mut xs = take ys
-    result.unwrap(list.push(mut xs, 4u64))
+    list.push(mut xs, 4u64)
     result.unwrap(stdout.write(out, "c"))
     list.len(xs)
 }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(4u64))
-    for i in 0u64 .. 4u64 { result.unwrap(list.push(mut xs, i)) }
-    let h = result.unwrap(task.spawn(tasks, bytes 64, Work(xs: take xs, out: out), child))
+    let mut xs: List[u64] = list.with_capacity(4u64)
+    for i in 0u64 .. 4u64 { list.push(mut xs, i) }
+    let h = task.spawn(tasks, bytes 64, Work(xs: take xs, out: out), child)
     match task.join(take h) {
         Ok(5u64) => { result.unwrap(stdout.write(out, "r")); Ok(()) },
         _ => Error(Exit(status: 1)),

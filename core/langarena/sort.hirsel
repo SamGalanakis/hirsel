@@ -70,7 +70,7 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     }
     let n: u64 = int.narrow(size)
     let mut data: List[i32] = list.new()
-    helper.mem(list.fill(mut data, n, 0))?
+    list.fill(mut data, n, 0)
     let mut g = helper.lcg()
     for i in 0 .. n {
         data[i] = helper.next_int(mut g, 1000000)
@@ -89,17 +89,17 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
             let at: u64 = int.narrow(helper.next_int(mut g, int.narrow(size)))
             total = int.wrapping_add(total, int.narrow(data[at]))
             let mut t: List[i32] = list.new()
-            helper.mem(list.append(mut t, data))?
+            list.append(mut t, data)
             if name == "Sort::Quick" {
                 quick(mut t, 0, n)
             } else if name == "Sort::Merge" {
                 let mut temp: List[i32] = list.new()
-                helper.mem(list.fill(mut temp, n, 0))?
+                list.fill(mut temp, n, 0)
                 merge(mut t, mut temp, 0, n)
             } else {
-                helper.mem(list.sort_stable(mut t, fn(a: i32, b: i32) -> Order {
+                list.sort_stable(mut t, fn(a: i32, b: i32) -> Order {
                     std.order.compare(a, b)
-                }))?
+                })
             }
             let sorted_at: u64 = int.narrow(helper.next_int(mut g, int.narrow(size)))
             total = int.wrapping_add(total, int.narrow(t[sorted_at]))

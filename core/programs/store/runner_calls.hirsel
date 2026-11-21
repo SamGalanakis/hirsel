@@ -28,7 +28,7 @@ fn digest_matches(exported: List[runner.Exported], expected: String) -> bool {
 
 fn digest_bytes(text: String) -> Bytes {
     let mut owned: Bytes = list.new()
-    result.unwrap(list.append(mut owned, string.as_bytes(text)))
+    list.append(mut owned, string.as_bytes(text))
     take owned
 }
 
@@ -37,14 +37,14 @@ pub fn law_release_digest() -> bool {
     if !digest_matches(no_exports, "eab2586620e88429ab011d50b6feaa03da24133743c844bbb7f35208df7c5c35") { return false }
     let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64, revision: digest_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
     let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64, revision: digest_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
-    let mut exported: List[runner.Exported] = result.unwrap(list.with_capacity(2u64))
-    result.unwrap(list.push(mut exported, take left))
-    result.unwrap(list.push(mut exported, take right))
+    let mut exported: List[runner.Exported] = list.with_capacity(2u64)
+    list.push(mut exported, take left)
+    list.push(mut exported, take right)
     if !digest_matches(exported, "733dcaf399e0bc57b9ad79b0245dc2f30673271337edc80d5d66c1b53adad2fc") { return false }
     let second = list.remove(mut exported, 1u64)
     let first = list.remove(mut exported, 0u64)
-    result.unwrap(list.push(mut exported, take second))
-    result.unwrap(list.push(mut exported, take first))
+    list.push(mut exported, take second)
+    list.push(mut exported, take first)
     if !digest_matches(exported, "ecfa56f2b7013163dbe7a52d8aa2b2f346751d7619af96ca2d476bdcb4cade39") { return false }
     exported[1u64].revision = digest_bytes("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
     digest_matches(exported, "ffc3202a22ae75d9f4c3a24b7ddfd0ab94d912ef6dd2cf7ff6f03597c6c52a48")
@@ -97,10 +97,8 @@ fn crash(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[
 // aborted ones included, plus the law's answers.
 fn tally(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
-    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
-    if let Ok((to, _)) = take made {
-        let _ = channel.try_send(to, k)
-    }
+    let (to, _): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let _ = channel.try_send(to, k)
     let xs: List[u64] = list.new()
     Ok(xs[k])
 }
@@ -128,14 +126,12 @@ fn flood(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[
 // Send k is step 165 + 2*k - 1, so the body attempts exactly 32,686 sends.
 fn hung(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
-    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
     // Keep the receiver alive so the hung body's sends can poll a full channel.
-    let (to, inbox) = result.unwrap(take made)
+    let (to, inbox): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     loop { let _ = channel.try_send(to, 0u64) }
 }
 fn answer(take k: u64) -> Result[u64, Capacity] {
-    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
-    let (to, _) = result.unwrap(take made)
+    let (to, _): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let _ = channel.try_send(to, k)
     Ok(k)
 }
@@ -171,7 +167,7 @@ const N_PLACE: u64 = 1048576u64
 // reply is what Returned carries: Result[R, E] for transact, R for compute (v2.11.2).
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, id))
+    list.append(mut key, id)
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
     key
@@ -203,12 +199,12 @@ fn k_named() -> Bytes {
 fn string_arg(n: u64, trailing: bool) -> Bytes {
     let mut s: Bytes = list.new()
     for _ in 0u64 .. n {
-        result.unwrap(list.push(mut s, 97u8))
+        list.push(mut s, 97u8)
     }
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.put_string(result.unwrap(string.from_utf8(take s)), mut b))
     if trailing {
-        result.unwrap(list.push(mut b, 0u8))
+        list.push(mut b, 0u8)
     }
     b
 }
@@ -304,14 +300,14 @@ fn client_keys() -> List[Bytes] {
         key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply()),
         key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64()),
         key_of(code.identity(code.describe(write)), std.codec.of_u32(), reply())] {
-        result.unwrap(list.push(mut requested_keys, result.unwrap(clone(key))))
+        list.push(mut requested_keys, clone(key))
     }
     requested_keys
 }
 
 fn try_conn(d: Drive, q: u64, n_session: u64) -> Option[Conn] waits {
     match wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(ingress.binding()), d.head, d.post,
-        code.describe(place), client_keys(), Some(result.unwrap(clone(d.token))), q, n_session) {
+        code.describe(place), client_keys(), Some(clone(d.token)), q, n_session) {
         Ok((take cn, take h)) => Some(Socket(take cn, take h)),
         Error(_) => None,
     }
@@ -370,24 +366,20 @@ fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(
 
 fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits) -> bool waits {
     let db = take fresh
-    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
-    let (head, inbox) = result.unwrap(take made)
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let credential = ingress.credential(r)
-    result.unwrap(list.append(mut token, credential))
+    list.append(mut token, credential)
     let mut forwarding: Option[Task[()]] = None
     let (to_head, grouped_ack) = if grouped != 0u64 {
-        let (to, from): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
-        let (ack, hear): (Sender[()], Receiver[()]) = result.unwrap(channel.new(grouped))
+        let (to, from): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+        let (ack, hear): (Sender[()], Receiver[()]) = channel.new(grouped)
         let seed = Group(head: take head, from: take from, initial: grouped, accepted: take ack)
-        forwarding = Some(result.unwrap(task.spawn(tasks, bytes 65536u64, take seed, group)))
+        forwarding = Some(task.spawn(tasks, bytes 65536u64, take seed, group))
         (take to, Some(take hear))
     } else { (take head, None) }
-    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: result.unwrap(clone(credential)), accepted: take grouped_ack)
-    let driving = match task.spawn(tasks, bytes 33554432u64, take d, f) {
-        Ok(take t) => take t,
-        Error(_) => return false,
-    }
+    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack)
+    let driving = task.spawn(tasks, bytes 33554432u64, take d, f)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
@@ -408,7 +400,7 @@ type Group: send { head: Sender[runner.Req], from: Receiver[runner.Req], initial
 fn group(take g: Group) -> () waits {
     let mut initial: List[runner.Req] = list.new()
     for _ in 0u64 .. g.initial {
-        result.unwrap(list.push(mut initial, result.unwrap(channel.receive(g.from))))
+        list.push(mut initial, result.unwrap(channel.receive(g.from)))
         let _ = channel.send(g.accepted, ())
     }
     for take request in take initial { result.unwrap(channel.try_send(g.head, take request)) }
@@ -492,7 +484,7 @@ fn survives(d: Drive, n: u64, frames: u64) -> bool waits {
     let mut all = true
     let mut i = 0u64
     while all && i < frames {
-        let arg: Bytes = result.unwrap(clone(bad))
+        let arg: Bytes = clone(bad)
         ask(cn, d.clock, 0u64, 0u64, k_named(), take arg, LATER)
         all = match down(cn) {
             Batched(b) => b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {
@@ -642,7 +634,7 @@ fn anonymous_reply(d: Drive) -> Option[u64] waits {
     let requested = client_keys()
     let unbound: Option[runner.Wire[()]] = None
     let (take wire, take session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
-        code.describe(place), requested, Some(result.unwrap(clone(d.token))), 0u64, 2097152u64))
+        code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
     wire_client.send_frame(wire, Call(7u32, 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
         Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 =>
@@ -682,7 +674,7 @@ fn stamp_place(mut registry: runner.Registry[WireStamp, Hd]) -> Result[(), runne
 
 fn drive_granted_copies(take d: Drive) -> () waits {
     let mut requested: List[Bytes] = list.new()
-    result.unwrap(list.push(mut requested, key_of(code.identity(code.describe(stamp_wire)), std.codec.of_u64(), std.codec.of_u64())))
+    list.push(mut requested, key_of(code.identity(code.describe(stamp_wire)), std.codec.of_u64(), std.codec.of_u64()))
     let mut config = runner.wire_defaults(524288u64, 65536u64)
     config.q = 0u64
     config.budget = 65536u64
@@ -769,7 +761,7 @@ pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wai
 fn data_key(k: u8) -> Bytes {
     let mut out: Bytes = list.new()
     for x in [0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, k] {
-        result.unwrap(list.push(mut out, x))
+        list.push(mut out, x)
     }
     out
 }
@@ -777,7 +769,7 @@ fn data_key(k: u8) -> Bytes {
 fn data_value(k: u8) -> Bytes {
     let mut out: Bytes = list.new()
     for x in [k, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8] {
-        result.unwrap(list.push(mut out, x))
+        list.push(mut out, x)
     }
     out
 }
@@ -786,7 +778,7 @@ fn keyed(take outcomes: List[runner.Done]) -> List[runner.KeyedDone] {
     let mut out: List[runner.KeyedDone] = list.new()
     for take d in outcomes {
         let runner.Done(stream: stream, p: p, outcome: take o) = take d
-        result.unwrap(list.push(mut out, runner.KeyedDone(stream: sid(int.widen(stream)), p: p, outcome: take o)))
+        list.push(mut out, runner.KeyedDone(stream: sid(int.widen(stream)), p: p, outcome: take o))
     }
     take out
 }
@@ -865,7 +857,7 @@ fn content(d: runner.Down, version: u64, complete: Option[u32], sub: u32, want_k
 fn keys(from: u8, n: u8) -> List[u8] {
     let mut out: List[u8] = list.new()
     for i in 0u8 .. n {
-        result.unwrap(list.push(mut out, from + 10u8 * i))
+        list.push(mut out, from + 10u8 * i)
     }
     out
 }
@@ -909,7 +901,7 @@ const STALL_WRITES: u64 = 150u64
 fn row_key(k: u64) -> Bytes {
     let mut out: Bytes = list.new()
     for x in [0u8, 0u8, 0u8, 1u8] {
-        result.unwrap(list.push(mut out, x))
+        list.push(mut out, x)
     }
     result.unwrap(std.codec.put_key_u64(k, mut out))
     out
@@ -949,7 +941,7 @@ fn apply(mut c: Cache, take d: runner.Down) {
                 want(row.sub == 1u32, "repair: A's rows are sub 1's")
                 let runner.Row(sub: _, key: take key, value: take value) = take row
                 match take value {
-                    Some(take v) => result.unwrap(result.capacity_only(map.insert(mut c.rows, take key, take v))),
+                    Some(take v) => map.insert(mut c.rows, take key, take v),
                     None => { let _ = map.remove(mut c.rows, key) },
                 }
             }
@@ -1118,7 +1110,7 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
         Some(v) => match got {
             Some(b) => {
                 let mut w: Bytes = list.new()
-                result.unwrap(list.append(mut w, v))
+                list.append(mut w, v)
                 list.len(b) == 32u64 && b == w
             },
             None => false,
@@ -1152,7 +1144,7 @@ fn disk_options() -> store.Options {
 }
 
 fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
-    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = result.unwrap(channel.new(2u64))
+    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(2u64)
     let req = runner.head_request(store.Caller(issuer: 1, subject: list.new()), digest_bytes(stream), position, k_write(), u64_arg(argument), take reply_to)
     result.unwrap(channel.send(to, RunRequest(take req)))
     take reply_from
@@ -1171,7 +1163,7 @@ fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
     let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = result.unwrap(channel.new(8u64))
+    let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(8u64)
     let first = drain_send(to, "held", 0u64, 40u64)
     let fifo = drain_send(to, "held", 1u64, 41u64)
     result.unwrap(channel.send(to, HeadClose))
@@ -1199,7 +1191,7 @@ fn test_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] 
 
 @test
 fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    let mut name = result.unwrap(string.with_capacity(32u64))
+    let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     if !drained(result.unwrap(store.open(tasks, dir, c, r, disk_options())), tasks) { return Error(()) }
     let mut options = disk_options()
@@ -1242,12 +1234,12 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
 }
 
 fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, ()], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
-    let (stop_to, stop_from): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     if stop_pending { result.unwrap(channel.send(stop_to, ())) }
-    let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let request = ManagedRun(settings: take settings, stop: take stop_from, status: latest.handle(status), watch: take handoff)
-    let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take request, run_managed))
+    let running = task.spawn(tasks, bytes 50331648u64, take request, run_managed)
     (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
 }
 
@@ -1266,7 +1258,7 @@ fn probe_ready(network: Net, address: Addr, clock: Clock) -> () waits {
     while sent < list.len(request) {
         sent += result.unwrap(host.send_pair(mut writer, list.slice(request, sent, list.len(request)), string.as_bytes(""), until))
     }
-    let mut response: Bytes = result.unwrap(list.with_capacity(1024u64))
+    let mut response: Bytes = list.with_capacity(1024u64)
     while list.len(response) < 1024u64 {
         let remaining = 1024u64 - list.len(response)
         if result.unwrap(host.recv_bounded(mut reader, mut response, remaining, until)) == 0u64 { break }
@@ -1277,7 +1269,7 @@ fn probe_ready(network: Net, address: Addr, clock: Clock) -> () waits {
 }
 
 pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
-    let mut name = result.unwrap(string.with_capacity(32u64))
+    let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
@@ -1344,7 +1336,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     0u64
 }
 
-fn managed_release(status: runner.Status) -> Bytes { result.unwrap(clone(status.release)) }
+fn managed_release(status: runner.Status) -> Bytes { clone(status.release) }
 
 @test
 fn test_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
@@ -1353,7 +1345,7 @@ fn test_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks:
 
 @test
 fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    let mut name = result.unwrap(string.with_capacity(32u64))
+    let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let bounds = runner.Stop(lag_ms: 500u64, grace_ms: 2000u64)
     let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
@@ -1407,7 +1399,7 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
 // stop walks with a consuming loop. A client stays connected through the stop.
 // The run hands its argument through a channel, so it waits as a granted entry must.
 fn ping(g: (), caller: runner.Caller, take k: u64) -> Result[u64, Capacity] waits {
-    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)?
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     result.unwrap(channel.send(to, k))
     Ok(result.unwrap(channel.receive(from)))
 }
@@ -1474,7 +1466,7 @@ fn ping_call(client: wire_client.Conn, ping_keys: List[Bytes], key: Bytes, posit
 }
 
 pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let mut name = result.unwrap(string.with_capacity(32u64))
+    let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut settings = managed_settings(dir, clock, random, tasks, net, Addr(ip: V4(0x7f000001u32), port: 0u16), runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
     settings.place = code.describe(ping_place)
@@ -1490,8 +1482,8 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
     let k_schedule = key_of(code.identity(code.describe(schedule_ping)), std.codec.of_u64(), reply())
     let k_outcome = key_of(code.identity(code.describe(ping_outcome)), std.codec.of_u64(), reply())
     let mut ping_keys: List[Bytes] = list.new()
-    result.unwrap(list.push(mut ping_keys, result.unwrap(clone(k_schedule))))
-    result.unwrap(list.push(mut ping_keys, result.unwrap(clone(k_outcome))))
+    list.push(mut ping_keys, clone(k_schedule))
+    list.push(mut ping_keys, clone(k_outcome))
     let client = match wire_client.connect(tasks, net, managed_address(latest.read(status)), clock, random, ping_keys, Some(ingress.credential(random)), socket) {
         Ok(take connected) => take connected,
         Error(_) => fail("stop: connection refused"),
@@ -1522,8 +1514,8 @@ fn test_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tasks:
 }
 
 pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    let mut name = result.unwrap(string.with_capacity(64u64))
-    result.unwrap(string.push(mut name, "runner-recorded-"))
+    let mut name = string.with_capacity(64u64)
+    string.push(mut name, "runner-recorded-")
     let dir = result.unwrap(host.mkdtemp(d, mut name))
     let db = result.unwrap(store.open(tasks, dir, c, r, disk_options()))
     let mut token: Bytes = list.new()
@@ -1723,13 +1715,12 @@ pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> boo
 // - L15, a joined send takes a slot: with q = 0 a second send of a held position is
 //   Overloaded at once, and the first is Abandoned at its deadline (join_outside_account).
 pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
-    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
-    let (head, inbox) = result.unwrap(take made)
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(1u64))
     let post = runner.post(mail)
     let credential = ingress.credential(r)
     let db = store.memory(c, r, store.defaults())
-    let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, token: result.unwrap(clone(credential)), accepted: None)
+    let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: None)
     let s0 = conn(d, 0u64)
     ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     let a = frame(s0)
@@ -1859,7 +1850,7 @@ fn drive_deadline_hung(take d: Drive) -> () waits {
     let s1 = conn(d, 1u64)
     let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
     let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
-    ask(s0, d.clock, 0u64, 0u64, result.unwrap(clone(kh)), u64_arg(5u64), LATER)
+    ask(s0, d.clock, 0u64, 0u64, clone(kh), u64_arg(5u64), LATER)
     ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)
     let computed = frame(s1)
     match computed.outcome {
@@ -1918,7 +1909,7 @@ fn migration_tables_absent(catalog: store.Schema) -> Result[bool, store.Error] {
 pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let options = disk_options()
     let db = result.unwrap(store.open(tasks, d, c, r, options))
-    let (_, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(1))
+    let (_, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(1)
     let mail = result.unwrap(runner.mailbox(1))
     let opened = runner.place_head(take db, code.describe(place), N_PLACE,
         code.describe(migration_second_refuses), code.describe(handles), take inbox, take mail, tasks, 1048576)
@@ -1932,7 +1923,7 @@ pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
 
 @test
 fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    let mut name = result.unwrap(string.with_capacity(32))
+    let mut name = string.with_capacity(32)
     let directory = result.unwrap(host.mkdtemp(parent, mut name))
     let good = law_atomic_migration(directory, c, r, tasks)
     result.unwrap(std.dir.remove_all(parent, name))
@@ -1981,11 +1972,11 @@ type NoteDriver: send { head: Sender[runner.Req] }
 
 fn note_send(d: NoteDriver, owner: u8, stream: u32, p: u64, f: StaticFn[fn(mut store.Tx, NoteHandles, runner.Caller, take u64) -> Result[u64, u32]], arg: u64) -> runner.Outcome waits {
     let mut subject: Bytes = list.new()
-    result.unwrap(list.push(mut subject, owner))
+    list.push(mut subject, owner)
     let caller = store.Caller(issuer: 1u8, subject: take subject)
     let name = result.unwrap(runner.stream_key(caller, stream))
     let key = key_of(code.identity(f), std.codec.of_u64(), reply())
-    let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = result.unwrap(channel.new(1u64))
+    let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(1u64)
     result.unwrap(channel.send(d.head, runner.head_request(take caller, take name, p, take key, u64_arg(arg), take to)))
     let delivery = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
     let runner.KeyedDone(outcome: take outcome, ..) = take delivery
@@ -2013,9 +2004,9 @@ pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits 
         store.put(mut tx, hd.members, 2u64, 1u64)
     }))
     if let Committed(_) = seeded {} else { return false }
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(4u64))
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(4u64)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let driving = result.unwrap(task.spawn(tasks, bytes 1048576u64, NoteDriver(head: take head), drive_notes))
+    let driving = task.spawn(tasks, bytes 1048576u64, NoteDriver(head: take head), drive_notes)
     let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, code.describe(already_migrated), code.describe(note_handles), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     match (take ended, take drove) { (Ok(()), Ok(())) => true, _ => false }
@@ -2081,12 +2072,12 @@ fn lagged_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(),
 type DirectoryRun { directory: places.Directory, opener: places.Opener, dir_name: String, changes: Receiver[places.Change] }
 
 fn start_directory(parent: Dir, make: fn(take places.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> DirectoryRun waits {
-    let mut dir_name = result.unwrap(string.with_capacity(32u64))
+    let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
-    let (watch, changes): (Sender[places.Change], Receiver[places.Change]) = result.unwrap(channel.new(16u64))
+    let (watch, changes): (Sender[places.Change], Receiver[places.Change]) = channel.new(16u64)
     let mut listed: List[places.Listed] = list.new()
-    result.unwrap(list.push(mut listed, places.Listed(name: result.unwrap(string.from("a")), factory: result.unwrap(places.place_factory(make)),
-        backing: Disk(dir, disk_options()), selection: Current(0u64))))
+    list.push(mut listed, places.Listed(name: string.from("a"), factory: result.unwrap(places.place_factory(make)),
+        backing: Disk(dir, disk_options()), selection: Current(0u64)))
     let config = places.DirectoryConfig(idle_ms: idle_ms, max_places: 1u64, place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net,
         watch: Some(take watch))
     let directory = match places.directory(take listed, take config) { Ok(take made) => take made, Error(_) => fail("directory: refused a valid configuration") }
@@ -2150,11 +2141,11 @@ fn change_is_down(changes: Receiver[places.Change]) -> bool {
 // cannot open the store.
 pub fn law_dir_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let run = start_directory(parent, quick_place, 60000u64, clock, random, tasks, net)
-    let (port_to, ports): (Sender[u16], Receiver[u16]) = result.unwrap(channel.new(2u64))
-    let (release_to, release_from): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let (second_to, second_from): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let first = result.unwrap(task.spawn(tasks, bytes 65536u64, Opening(opener: places.opener(run.directory), port: channel.sender(port_to), release: take release_from), open_port))
-    let second = result.unwrap(task.spawn(tasks, bytes 65536u64, Opening(opener: places.opener(run.directory), port: channel.sender(port_to), release: take second_from), open_port))
+    let (port_to, ports): (Sender[u16], Receiver[u16]) = channel.new(2u64)
+    let (release_to, release_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (second_to, second_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let first = task.spawn(tasks, bytes 65536u64, Opening(opener: places.opener(run.directory), port: channel.sender(port_to), release: take release_from), open_port)
+    let second = task.spawn(tasks, bytes 65536u64, Opening(opener: places.opener(run.directory), port: channel.sender(port_to), release: take second_from), open_port)
     let a = result.unwrap(channel.receive(ports))
     let b = result.unwrap(channel.receive(ports))
     let started = change_is_up(run.changes)
@@ -2182,7 +2173,7 @@ pub fn law_dir_open_during_close(parent: Dir, clock: Clock, random: Random, task
     let first = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: first open refused") }
     let old = places.status(first)
     let _ = take first
-    let closing = result.unwrap(task.spawn(tasks, bytes 65536u64, places.opener(run.directory), close_a))
+    let closing = task.spawn(tasks, bytes 65536u64, places.opener(run.directory), close_a)
     wait_draining(old, clock)
     let second = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: open during a close refused") }
     let fresh = match lease_phase(second) { Ready => true, _ => false }
@@ -2256,9 +2247,9 @@ fn keeping_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[()
 
 fn kept_keys() -> List[Bytes] {
     let mut wanted: List[Bytes] = list.new()
-    result.unwrap(list.push(mut wanted, key_of(code.identity(code.describe(keep)), std.codec.of_u64(), reply())))
-    result.unwrap(list.push(mut wanted, key_of(code.identity(code.describe(kept)), std.codec.of_u64(), reply())))
-    result.unwrap(list.push(mut wanted, key_of(code.identity(code.describe(ping_outcome)), std.codec.of_u64(), reply())))
+    list.push(mut wanted, key_of(code.identity(code.describe(keep)), std.codec.of_u64(), reply()))
+    list.push(mut wanted, key_of(code.identity(code.describe(kept)), std.codec.of_u64(), reply()))
+    list.push(mut wanted, key_of(code.identity(code.describe(ping_outcome)), std.codec.of_u64(), reply()))
     wanted
 }
 

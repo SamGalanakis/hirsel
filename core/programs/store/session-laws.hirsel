@@ -5,9 +5,9 @@ pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     let config = wire_defaults(0u64, 0u64)
     let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 64u64, 2u64)
     let (pool, take pooled_task) = result.unwrap(take allocated)
-    let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
-    let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
-    let (write, pending): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(1u64))
+    let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
+    let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
+    let (write, pending): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
     let first = result.unwrap(wire_pack(pool, one_to, one_from, Reset(17u64, list.new())))
     let second = result.unwrap(wire_pack(pool, two_to, two_from, Reset(19u64, list.new())))
     result.unwrap(channel.try_send(write, take first))
@@ -31,7 +31,7 @@ fn pool_call_peer(take peer: PoolCallPeer) -> () waits {
     let end: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
     let socket = result.unwrap(host.connect(net, address, end))
     let mut name: Bytes = list.new()
-    result.unwrap(list.append(mut name, string.as_bytes("127.0.0.1")))
+    list.append(mut name, string.as_bytes("127.0.0.1"))
     let std.wsock.Connected(reader: take reader, writer: take initial, outgoing: take outgoing, timers: _) =
         result.unwrap(std.wsock.client(take socket, take name, config, clock, random))
     let mut writer = take initial
@@ -55,17 +55,17 @@ fn pool_call_owner(take owner: PoolCallOwner) -> () waits {
     let PoolCallOwner(tasks: tasks, clock: clock, config: config, pool: take pool,
         upgraded: take upgraded, ready: take ready, proceed: take proceed) = take owner
     let std.wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
-    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
-    let (credit, credits): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
     result.unwrap(channel.try_send(credit, ()))
     let reading = WireRead(reader: take input, to: take to, credits: take credits, clock: clock, config: config, pool: take pool)
-    let mut reader = result.unwrap(task.spawn(tasks, bytes reader_bytes(), take reading, wire_read))
+    let mut reader = task.spawn(tasks, bytes reader_bytes(), take reading, wire_read)
 
     // Park the reader's handoff at the head of the owner's deferred queue.
     let WireEvent(e: take event) = result.unwrap(channel.receive(inbox))
     let Input(take f, at) = take event else { fail("expected a decoded Call") }
     let mut deferred: List[(Frame, u64)] = list.new()
-    result.unwrap(list.push(mut deferred, (take f, at)))
+    list.push(mut deferred, (take f, at))
     result.unwrap(channel.send(ready, true))
     result.unwrap(channel.receive(proceed))
 
@@ -89,15 +89,15 @@ fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, net: Net, config
     let (take listening, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take listening
     let peer = PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config.socket, payload: take payload)
-    let sending = result.unwrap(task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer))
+    let sending = task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer)
     let deadline: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
     let (take socket, addr) = result.unwrap(host.accept(mut listener, deadline))
     let upgraded = result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config.socket, clock, host.mono_ns(clock)))
-    let (ready, heard): (Sender[bool], Receiver[bool]) = result.unwrap(channel.new(1u64))
-    let (go, proceed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (ready, heard): (Sender[bool], Receiver[bool]) = channel.new(1u64)
+    let (go, proceed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let state = PoolCallOwner(tasks: tasks, clock: clock, config: config.socket, pool: channel.sender(pool),
         upgraded: take upgraded, ready: take ready, proceed: take proceed)
-    let mut owner = result.unwrap(task.spawn(tasks, bytes 65536u64, take state, pool_call_owner))
+    let mut owner = task.spawn(tasks, bytes 65536u64, take state, pool_call_owner)
 
     let _ = result.unwrap(channel.receive(heard))
     let before = probe() && pool_slot_unavailable(pending)
@@ -123,7 +123,7 @@ fn pool_durable_add(mut tx: store.Tx, table: store.Table[u64, u32], author: Call
 
 fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     take key: Bytes, take arg: Bytes, version: u64) -> bool waits {
-    let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
+    let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut stream: Bytes = list.new()
     result.unwrap(std.codec.put_u32(0u32, mut stream))
     let request = head_request(store.Caller(issuer: 1, subject: list.new()), take stream, 0u64, take key, take arg, take to)
@@ -142,7 +142,7 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
 
 fn pool_full_frame() -> Frame {
     let mut body: Bytes = list.new()
-    for i in 0u8 .. 14u8 { result.unwrap(list.push(mut body, i)) }
+    for i in 0u8 .. 14u8 { list.push(mut body, i) }
     Ended(0u32, Returned(take body))
 }
 
@@ -155,13 +155,13 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64, 2u64)
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (reply, result_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) =
-        result.unwrap(channel.new(1u64))
+        channel.new(1u64)
     let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new())))
     let mut arg: Bytes = list.new()
     result.unwrap(std.codec.put_u32(7u32, mut arg))
     let call_frame = Call(0u32, 0u64, 0u32, 10000u32, take arg)
     let frames: std.codec.Codec[Frame] = std.codec.of()
-    let mut payload: Bytes = result.unwrap(list.with_capacity(wire_output_size(call_frame)))
+    let mut payload: Bytes = list.with_capacity(wire_output_size(call_frame))
     result.unwrap(std.codec.encode(frames, call_frame, mut payload))
 
     let mut db = store.memory(clock, random, store.defaults())
@@ -170,7 +170,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let mut entries: Registry[(), store.Table[u64, u32]] = registry()
     let add = code.describe(pool_durable_add)
     result.unwrap(transact(mut entries, add, 65536u64, DEFAULT_STEPS))
-    let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(1u64))
+    let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let mut head = Head(db: take db, r: take entries, replay_identity: list.new(),
         h: table, out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, minted: 0u64, cut: false, trigger_drive: None)
@@ -178,7 +178,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     // The retained writer block costs 32 bytes. An Ended frame with a 30-byte
     // payload encodes in place in capacity 44, charged 48: the remaining 48,
     // so even one retained decoder charge refuses it until the refund.
-    let held = pool_call_queued(tasks, clock, random, net, config, pool, pending, result.unwrap(clone(payload)),
+    let held = pool_call_queued(tasks, clock, random, net, config, pool, pending, clone(payload),
         scoped fn() -> bool waits {
             match wire_pack(pool, reply, result_from, pool_full_frame()) { Error(Protocol(1013u16)) => true, _ => false }
         })
@@ -204,7 +204,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let reply_codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(add), code.revision(add), Transact, std.codec.of_u32(), reply_codec))
     let Call(_, _, _, _, take retry_arg) = result.unwrap(wire_decode(payload)) else { return false }
-    let committed = pool_retry(mut head, releases, result.unwrap(clone(key)), result.unwrap(clone(retry_arg)), 3u64)
+    let committed = pool_retry(mut head, releases, clone(key), clone(retry_arg), 3u64)
     let replayed = pool_retry(mut head, releases, take key, take retry_arg, 3u64)
     let one_effect = result.unwrap(store.get(store.snapshot(head.db), store.shape(head.h), 0u64)) == Some(7u32)
     held && bytes_refunded && slot_returned_once && untouched && committed && replayed && one_effect
@@ -227,17 +227,17 @@ pub fn law_serving_budget() -> bool {
 
 pub fn law_subscription_room_refunded() -> bool {
     let mut quota = result.unwrap(subscription_room(400u64, 2u64))
-    let (to, from): (Sender[SubscriptionInput], Receiver[SubscriptionInput]) = result.unwrap(channel.new(1u64))
-    let arg: Bytes = result.unwrap(list.with_capacity(128u64))
+    let (to, from): (Sender[SubscriptionInput], Receiver[SubscriptionInput]) = channel.new(1u64)
+    let arg: Bytes = list.with_capacity(128u64)
     let first = result.unwrap(subscription_hold(mut quota, list.new(), take arg))
     result.unwrap(channel.try_send(to, take first))
-    let same_size: Bytes = result.unwrap(list.with_capacity(128u64))
+    let same_size: Bytes = list.with_capacity(128u64)
     let refused = match subscription_hold(mut quota, list.new(), take same_size) {
         Error(Capacity(requested: 192u64, available: 120u64)) => true,
         _ => false,
     }
     let _ = result.unwrap(channel.try_receive(from))
-    let after_drop: Bytes = result.unwrap(list.with_capacity(128u64))
+    let after_drop: Bytes = list.with_capacity(128u64)
     let readmitted = match subscription_hold(mut quota, list.new(), take after_drop) { Ok(_) => true, _ => false }
     refused && readmitted
 }
@@ -252,9 +252,9 @@ pub fn law_writer_one_frame() -> bool {
     // Option of a u64 and two Latest handles 32, plus 64). A third charged byte cannot
     // fit; the writer cannot reserve or retain another frame.
     let checked = bound bytes (2u64 * 262160u64 + 120u64) {
-        let (tx, rx): (Sender[WireUnit], Receiver[WireUnit]) = result.unwrap(channel.new(1u64))
-        let first: Bytes = result.unwrap(list.with_capacity(262158u64))
-        let second: Bytes = result.unwrap(list.with_capacity(262158u64))
+        let (tx, rx): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
+        let first: Bytes = list.with_capacity(262158u64)
+        let second: Bytes = list.with_capacity(262158u64)
         let mut busy = false
         let handed = if wire_ready(busy) {
             match wire_offer(tx, mut busy, WireUnit(frame: take first, check: None, write_ack: false)) { Ok(()) => true, _ => false }
@@ -264,8 +264,7 @@ pub fn law_writer_one_frame() -> bool {
             let _ = wire_offer(tx, mut busy, WireUnit(frame: take second, check: None, write_ack: false))
             false
         } else {
-            let extra: Result[Bytes, Capacity] = list.with_capacity(1u64)
-            let charged = match extra { Error(_) => true, _ => false }
+            let charged = match list.with_capacity(1u64) { Error(_) => true, _ => false }
             charged && list.capacity(second) == 262158u64
         }
         let empty = match channel.try_receive(rx) { Error(Empty) => true, _ => false }
@@ -277,10 +276,10 @@ pub fn law_writer_one_frame() -> bool {
 fn wire_park(take rx: Receiver[()]) -> () waits { let _ = channel.receive(rx) }
 
 pub fn law_children_joined_on_close(tasks: Tasks) -> bool waits {
-    let (a, ar): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let (b, br): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let reader = result.unwrap(task.spawn(tasks, bytes 4096u64, take ar, wire_park))
-    let writer = result.unwrap(task.spawn(tasks, bytes 4096u64, take br, wire_park))
+    let (a, ar): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (b, br): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let reader = task.spawn(tasks, bytes 4096u64, take ar, wire_park)
+    let writer = task.spawn(tasks, bytes 4096u64, take br, wire_park)
     wire_join(take reader, take writer)
     let read_closed = match channel.try_send(a, ()) { Error(Closed(_)) => true, _ => false }
     let write_closed = match channel.try_send(b, ()) { Error(Closed(_)) => true, _ => false }
@@ -298,17 +297,16 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
     // two unit-returning task records of 288 and the owner record of 328 (it holds a
     // Result[(), std.wsock.Error], widened by NetError's Tls(TlsFailure) arm).
     let checked = bound bytes 3594u64 {
-        let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
-        let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = result.unwrap(channel.new(1u64))
-        let (credit, read_credit): (Sender[()], Receiver[()]) = result.unwrap(channel.new(5u64))
-        let (a, ar): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-        let (b, br): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-        let (end, er): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-        let mut owner = result.unwrap(task.spawn(tasks, bytes 0u64, take er, wire_owner_park))
-        let reader = result.unwrap(task.spawn(tasks, bytes 0u64, take ar, wire_park))
-        let writer = result.unwrap(task.spawn(tasks, bytes 0u64, take br, wire_park))
-        let extra: Result[Bytes, Capacity] = list.with_capacity(1u64)
-        let exact = match extra { Error(_) => true, _ => false }
+        let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
+        let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
+        let (credit, read_credit): (Sender[()], Receiver[()]) = channel.new(5u64)
+        let (a, ar): (Sender[()], Receiver[()]) = channel.new(1u64)
+        let (b, br): (Sender[()], Receiver[()]) = channel.new(1u64)
+        let (end, er): (Sender[()], Receiver[()]) = channel.new(1u64)
+        let mut owner = task.spawn(tasks, bytes 0u64, take er, wire_owner_park)
+        let reader = task.spawn(tasks, bytes 0u64, take ar, wire_park)
+        let writer = task.spawn(tasks, bytes 0u64, take br, wire_park)
+        let exact = match list.with_capacity(1u64) { Error(_) => true, _ => false }
         task.cancel(mut owner)
         wire_join(take reader, take writer)
         let _ = task.join(take owner)

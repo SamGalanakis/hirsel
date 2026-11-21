@@ -5,7 +5,7 @@ pub fn main(c: Clock, out: Stdout, a: Args) -> Result[(), Exit] {
     let m = host.mono_ns(c)
     result.unwrap(stdout.write(out, "taped"))
     let mut s = string.new()
-    result.unwrap(string.push_u64(mut s, m))
+    string.push_u64(mut s, m)
     result.unwrap(stdout.write(out, s))
     result.unwrap(stdout.write(out, "|"))
     let mut i = 0u64

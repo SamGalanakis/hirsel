@@ -27,20 +27,17 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
     }
 }
 
-pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, (K, V))] {
+pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) {
     let (h, index, existing) = probe_insert(m, k)
     if existing {
         let _ = swap_value(mut m, index, take v)
         let _ = take k
-        return Ok(())
+        return
     }
     let mut j = index
     let cap = capacity(m)
     if slots(m) == cap {
-        match make_room(mut m) {
-            Error(c) => return Error((c, (take k, take v))),
-            Ok(()) => {}
-        }
+        make_room(mut m)
         let mask = int.wrapping_sub(index_len(m), 1)
         j = h & mask
         while index_get(m, j) != 0 {
@@ -54,7 +51,6 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
     let w = index_word(m, h, s)
     push_entry(mut m, h, take k, take v)
     index_set(mut m, j, w)
-    Ok(())
 }
 
 // The existing entry, or the first empty index word if the key is absent.
@@ -99,33 +95,54 @@ pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
 // Room for n more absent keys: afterwards the next n insertions admit nothing, whatever
 // removals, replacements and updates come between. Growth follows MEM-24 from needed = len + n;
 // when the capacity already holds len + n but removed entries fill the slots, it compacts
-// in place and admits nothing. On Capacity the map is unchanged.
-pub fn reserve[K: key, V](mut m: Map[K, V], n: u64) -> Result[(), Capacity] {
-    let cap = capacity(m)
-    let needed = int.saturating_add(len(m), n)
-    if needed > cap {
-        let doubled = int.saturating_add(cap, cap)
-        let mut target = if needed > doubled {
-            needed
-        } else {
-            doubled
-        }
-        if target < 4 {
-            target = 4
-        }
-        // An entry charges at least 16 bytes, so no limit admits 2^60 entries: a larger
-        // need is refused at that request, inside the index size regrow can compute.
-        if target > 1152921504606846976 {
-            target = 1152921504606846976
-        }
+// in place and admits nothing. A refusal raises Capacity and leaves the map unchanged.
+pub fn reserve[K: key, V](mut m: Map[K, V], n: u64) {
+    let target = reserve_target(m, n)
+    if target != 0 {
         // Growth keeps only live entries, in insertion order.
-        regrow(mut m, target)?
+        regrow(mut m, target)
         reindex(mut m)
-    } else if int.saturating_add(slots(m), n) > cap {
+    } else if int.saturating_add(slots(m), n) > capacity(m) {
+        compact(mut m)
+        reindex(mut m)
+    }
+}
+
+// Like reserve, returning a refusal as a value instead of raising it (MEM-21).
+pub fn try_reserve[K: key, V](mut m: Map[K, V], n: u64) -> Result[(), Capacity] {
+    let target = reserve_target(m, n)
+    if target != 0 {
+        try_regrow(mut m, target)?
+        reindex(mut m)
+    } else if int.saturating_add(slots(m), n) > capacity(m) {
         compact(mut m)
         reindex(mut m)
     }
     Ok(())
+}
+
+// The capacity reserve grows to, or 0 when the capacity already holds len + n.
+fn reserve_target[K: key, V](m: Map[K, V], n: u64) -> u64 {
+    let cap = capacity(m)
+    let needed = int.saturating_add(len(m), n)
+    if needed <= cap {
+        return 0
+    }
+    let doubled = int.saturating_add(cap, cap)
+    let mut target = if needed > doubled {
+        needed
+    } else {
+        doubled
+    }
+    if target < 4 {
+        target = 4
+    }
+    // An entry charges at least 16 bytes, so no limit admits 2^60 entries: a larger
+    // need is refused at that request, inside the index size regrow can compute.
+    if target > 1152921504606846976 {
+        target = 1152921504606846976
+    }
+    target
 }
 
 // Only this module can access entries and its private lookup index.
@@ -195,11 +212,13 @@ fn push_entry[K: key, V](mut m: Map[K, V], h: u64, take k: K, take v: V)
 // allocation or admission, preserving live insertion order; rebuild the index.
 fn compact[K: key, V](mut m: Map[K, V])
 
-fn regrow[K: key, V](mut m: Map[K, V], cap: u64) -> Result[(), Capacity]
+fn regrow[K: key, V](mut m: Map[K, V], cap: u64)
+
+fn try_regrow[K: key, V](mut m: Map[K, V], cap: u64) -> Result[(), Capacity]
 
 // Keep rebuilding and admission on the full-table path, outside the ordinary
 // insertion probe. The caller still owns its key and value if admission fails.
-fn make_room[K: key, V](mut m: Map[K, V]) -> Result[(), Capacity] {
+fn make_room[K: key, V](mut m: Map[K, V]) {
     let cap = capacity(m)
     if cap != 0 && len(m) <= cap / 2 {
         compact(mut m)
@@ -209,10 +228,9 @@ fn make_room[K: key, V](mut m: Map[K, V]) -> Result[(), Capacity] {
         } else {
             cap * 2
         }
-        regrow(mut m, new_cap)?
+        regrow(mut m, new_cap)
     }
     reindex(mut m)
-    Ok(())
 }
 
 // Reindexing changes only index words, never the entry count or index length.
@@ -246,29 +264,15 @@ clone[K: key, V](x: Map[K, V]) {
     let mut copied: Map[K, V] = new()
     let count = len(x)
     if count == 0 {
-        return Ok(take copied)
+        return take copied
     }
-    regrow(mut copied, count)?
+    // A refusal raises Capacity; cleanup drops the entries copied so far.
+    regrow(mut copied, count)
     let mut i: u64 = 0
     while i < slots(x) {
         if slot_live(x, i) {
-            let key_result: Result[K, Capacity] = clone(slot_key(x, i))
-            let key: K = match take key_result {
-                Ok(key) => take key,
-                Error(c) => {
-                    undo_clone(mut copied);
-                    return Error(c)
-                }
-            }
-            let value_result: Result[V, Capacity] = clone(slot_value(x, i))
-            let value: V = match take value_result {
-                Ok(value) => take value,
-                Error(c) => {
-                    let _ = take key;
-                    undo_clone(mut copied);
-                    return Error(c)
-                }
-            }
+            let key: K = clone(slot_key(x, i))
+            let value: V = clone(slot_value(x, i))
             let h = slot_hash(x, i)
             let s = slots(copied) + 1
             push_entry(mut copied, h, take key, take value)
@@ -276,21 +280,12 @@ clone[K: key, V](x: Map[K, V]) {
         }
         i += 1
     }
-    Ok(take copied)
-}
-
-// Only clone rollback consumes the new contiguous live prefix in reverse.
-fn pop_entry[K: key, V](mut m: Map[K, V]) -> (K, V)
-
-fn undo_clone[K: key, V](mut m: Map[K, V]) {
-    while slots(m) != 0 {
-        let _ = pop_entry(mut m)
-    }
+    take copied
 }
 
 // Insert initial only for an absent key, then call f once on the entry.
-// On Capacity, return k and initial untouched and leave m unchanged.
-pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial: V, f: scoped fn(mut V) -> R) -> Result[R, (Capacity, (K, V))] {
+// A refusal raises Capacity and leaves m unchanged.
+pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial: V, f: scoped fn(mut V) -> R) -> R {
     let (h, index, existing) = probe_insert(m, k)
     let entry = if existing {
         let _ = take k
@@ -299,9 +294,7 @@ pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial:
     } else {
         let full = slots(m) == capacity(m)
         if full {
-            if let Error(c) = make_room(mut m) {
-                return Error((c, (take k, take initial)))
-            }
+            make_room(mut m)
         }
         let i = slots(m)
         let entry_word = int.wrapping_add(i, 1)
@@ -314,5 +307,5 @@ pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial:
         }
         i
     }
-    Ok(with_value(mut m, entry, f))
+    with_value(mut m, entry, f)
 }

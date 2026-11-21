@@ -36,28 +36,28 @@ fn half(take x: f64) -> f64 {
 }
 
 fn scalar(tasks: Tasks) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, add_one))
+    let h = task.spawn(tasks, bytes 64, 41u64, add_one)
     result.unwrap(task.join(take h))
 }
 
 fn record_input(tasks: Tasks) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, Pair(a: 19, b: 23), add_pair))
+    let h = task.spawn(tasks, bytes 64, Pair(a: 19, b: 23), add_pair)
     result.unwrap(task.join(take h))
 }
 
 fn record_result(tasks: Tasks) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, 20u64, pair))
+    let h = task.spawn(tasks, bytes 64, 20u64, pair)
     let p = result.unwrap(task.join(take h));
     p.a * 100u64 + p.b
 }
 
 fn empty_input(tasks: Tasks) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, (), unit))
+    let h = task.spawn(tasks, bytes 64, (), unit)
     result.unwrap(task.join(take h))
 }
 
 fn floating(tasks: Tasks) -> bool waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, 42f64, half))
+    let h = task.spawn(tasks, bytes 64, 42f64, half)
     float.to_bits64(result.unwrap(task.join(take h))) == 4631178160564600832u64
 }
 
@@ -67,7 +67,7 @@ fn dynamic(tasks: Tasks, c: bool) -> u64 waits {
     } else {
         add_two
     }
-    let h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, f))
+    let h = task.spawn(tasks, bytes 64, 41u64, f)
     result.unwrap(task.join(take h))
 }
 

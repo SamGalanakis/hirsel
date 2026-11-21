@@ -37,10 +37,7 @@ pub fn list(d: Dir) -> Result[List[Entry], file.Error] waits {
         Ok(take h) => take h,
         Error(e) => return Error(Io(e)),
     }
-    let mut buf: Bytes = match (list.with_capacity(4096) : Result[Bytes, Capacity]) {
-        Ok(take b) => take b,
-        Error(c) => return Error(Capacity(c)),
-    }
+    let mut buf: Bytes = list.with_capacity(4096)
     let mut result: List[Entry] = list.new()
     loop {
         match next_entries(mut handle, mut buf) {
@@ -59,20 +56,13 @@ pub fn list(d: Dir) -> Result[List[Entry], file.Error] waits {
             let size: u16 = list.word_le(buf, at + 1)
             let from = at + 3
             at = from + int.widen(size)
-            let mut name_bytes: Bytes = match (list.with_capacity(int.widen(size)) : Result[Bytes, Capacity]) {
-                Ok(take b) => take b,
-                Error(c) => return Error(Capacity(c)),
-            }
-            if let Error(c) = list.append(mut name_bytes, list.slice(buf, from, at)) {
-                return Error(Capacity(c))
-            }
+            let mut name_bytes: Bytes = list.with_capacity(int.widen(size))
+            list.append(mut name_bytes, list.slice(buf, from, at))
             let name = match string.from_utf8(take name_bytes) {
                 Ok(take name) => take name,
                 Error(_) => return Error(NotUtf8),
             }
-            if let Error((c, _)) = list.push(mut result, Entry(name: take name, kind: kind)) {
-                return Error(Capacity(c))
-            }
+            list.push(mut result, Entry(name: take name, kind: kind))
         }
         list.clear(mut buf)
     }
@@ -106,7 +96,7 @@ pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits {
 /// Fails: Bounds (failure), checked before issue, when name has less than 32 bytes spare;
 /// Error(Denied | Other(_)), name unchanged. Prefix: on failure nothing was created; a
 /// cancellation observed at delivery leaves the directory created and name unchanged.
-/// Ex: `let mut name = string.with_capacity(32)?; let tmp = std.dir.create_temp(d, mut name)?; ..; std.dir.remove_all(d, name)?`
+/// Ex: `let mut name = string.with_capacity(32); let tmp = std.dir.create_temp(d, mut name)?; ..; std.dir.remove_all(d, name)?`
 pub fn create_temp(d: Dir, mut name: String) -> Result[Dir, IoError] waits {
     host.mkdtemp(d, mut name)
 }

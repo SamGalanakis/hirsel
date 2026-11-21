@@ -32,10 +32,10 @@ pub fn rx5_main(out: Stdout) -> Result[(), Exit] waits {
         return Error(Exit(status: 1))
     }
     let mut answer = "RX5 threshold "
-    result.unwrap(string.push_u64(mut answer, threshold))
-    result.unwrap(string.push(mut answer, " "))
-    result.unwrap(string.push_u64(mut answer, fixed_capture))
-    result.unwrap(string.push(mut answer, "\\n"))
+    string.push_u64(mut answer, threshold)
+    string.push(mut answer, " ")
+    string.push_u64(mut answer, fixed_capture)
+    string.push(mut answer, "\\n")
     result.unwrap(stdout.write(out, answer))
     Ok(())
 }

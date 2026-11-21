@@ -19,7 +19,7 @@ fn version(mut s: State, conn: u64, v: u64) {
     if let Some(previous) = map.get(s.versions, conn) {
         if v < previous { observe.failed(mut s.w3, sub_key(conn, 0u64), s.index, s.index) }
     }
-    result.unwrap(map.insert(mut s.versions, conn, v))
+    map.insert(mut s.versions, conn, v)
 }
 
 pub fn step(mut s: State, e: observe.Obs) {
@@ -30,10 +30,10 @@ pub fn step(mut s: State, e: observe.Obs) {
             if tag == 2u32 {
                 let id: u64 = int.widen(result.unwrap(std.codec.take_u32(w.frame, mut at)))
                 let k = sub_key(w.conn, id)
-                result.unwrap(map.insert(mut s.live, take k, true))
+                map.insert(mut s.live, take k, true)
                 let mut ids = match map.remove(mut s.issued, w.conn) { Some(take old) => take old, None => list.new() }
-                result.unwrap(list.push(mut ids, id))
-                result.unwrap(map.insert(mut s.issued, w.conn, take ids))
+                list.push(mut ids, id)
+                map.insert(mut s.issued, w.conn, take ids)
             }
         },
         Rx(w) => {
@@ -43,7 +43,7 @@ pub fn step(mut s: State, e: observe.Obs) {
                 version(mut s, w.conn, result.unwrap(std.codec.take_u64(w.frame, mut at)))
                 let done = result.unwrap(std.codec.take_list(w.frame, mut at, std.codec.of_u32()))
                 for id in done {
-                    result.unwrap(map.insert(mut s.complete, sub_key(w.conn, int.widen(id)), true))
+                    map.insert(mut s.complete, sub_key(w.conn, int.widen(id)), true)
                 }
                 let n: u64 = int.widen(result.unwrap(std.codec.take_u32(w.frame, mut at)))
                 for _ in 0u64 .. n {
@@ -67,7 +67,7 @@ pub fn step(mut s: State, e: observe.Obs) {
                             let k = sub_key(w.conn, id)
                             let _ = map.remove(mut s.live, k)
                             let _ = map.remove(mut s.complete, k)
-                            result.unwrap(map.insert(mut s.retired, take k, true))
+                            map.insert(mut s.retired, take k, true)
                         }
                     }
                 }
@@ -80,8 +80,8 @@ pub fn step(mut s: State, e: observe.Obs) {
 
 pub fn finish(s: State, h: observe.Header) -> List[observe.Verdict] {
     let mut vs: List[observe.Verdict] = list.new()
-    result.unwrap(list.push(mut vs, observe.verdict(s.w3, h)))
-    result.unwrap(list.push(mut vs, observe.verdict(s.w4, h)))
-    result.unwrap(list.push(mut vs, observe.verdict(s.w5, h)))
+    list.push(mut vs, observe.verdict(s.w3, h))
+    list.push(mut vs, observe.verdict(s.w4, h))
+    list.push(mut vs, observe.verdict(s.w5, h))
     vs
 }

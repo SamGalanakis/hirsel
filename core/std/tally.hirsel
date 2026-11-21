@@ -57,14 +57,14 @@ pub type HandleError = Exhausted | Capacity(Capacity)
 /// `list.with_capacity(n)`. Fails: Error(c), nothing kept.
 /// Alloc: the channel's charge for max(n, 1) items of (u64, T), and n x size(Option[T]).
 /// Ex: `let mut hits = std.tally.new(64, fn() -> u64 { 0 }, fn(take a: u64, take b: u64) -> u64 { a + b })?`
-pub fn new[T: send](n: u64, start: fn() -> T, combine: fn(take T, take T) -> T) -> Result[Tally[T], Capacity] {
+pub fn new[T: send](n: u64, start: fn() -> T, combine: fn(take T, take T) -> T) -> Tally[T] {
     let (tx, rx): (Sender[(u64, T)], Receiver[(u64, T)]) = channel.new(if n == 0 {
         1
     } else {
         n
-    })?
-    let slots: List[Option[T]] = list.with_capacity(n)?
-    Ok(Tally(tx: take tx, rx: take rx, slots: take slots, cap: n, start, combine))
+    })
+    let slots: List[Option[T]] = list.with_capacity(n)
+    Tally(tx: take tx, rx: take rx, slots: take slots, cap: n, start, combine)
 }
 
 /// Issues the next handle, its partial start(); its index is the number issued before it.
@@ -78,9 +78,7 @@ pub fn handle[T: send](mut t: Tally[T]) -> Result[Handle[T], HandleError] {
     }
     let f = t.start
     let first = f()
-    if let Error((c, _)) = list.push(mut t.slots, None) {
-        return Error(Capacity(c))
-    }
+    list.push(mut t.slots, None)
     match Handle(tx: channel.sender(t.tx), index: next, local: take first, start: f) {
         Ok(take h) => Ok(take h),
         Error((c, _)) => {

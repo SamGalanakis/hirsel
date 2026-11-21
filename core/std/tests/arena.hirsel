@@ -41,12 +41,12 @@ fn streaming_runs_once() -> u64 {
 fn sized_and_unknown_spans() -> u64 {
     region r {
         let mut xs: List[u64] = list.new()
-        result.unwrap(list.push(mut xs, 3))
-        result.unwrap(list.push(mut xs, 5))
-        result.unwrap(list.push(mut xs, 8))
-        let a = result.unwrap(arena.copy_span(r, xs))
+        list.push(mut xs, 3)
+        list.push(mut xs, 5)
+        list.push(mut xs, 8)
+        let a = arena.copy_span(r, xs)
         let mut at: u64 = 0
-        let b = result.unwrap(arena.collect_span(r, fn() -> Option[u64] {
+        let b = arena.collect_span(r, fn() -> Option[u64] {
             at += 1
             if at == 1 {
                 Some(3)
@@ -57,7 +57,7 @@ fn sized_and_unknown_spans() -> u64 {
             } else {
                 None
             }
-        }))
+        })
         if span.len(a) != 3 || span.len(b) != 3 {
             return 0
         }
@@ -65,26 +65,40 @@ fn sized_and_unknown_spans() -> u64 {
     }
 }
 
-// Refusal at each of three admissions. A Text "x" is 8+1 rounded to16;
-// no earlier text is refunded when a later admission fails. Returned available is0.
-fn prefix_at(limit: u64) -> bool {
-    result.unwrap(bound bytes limit {
-        region r {
-            let mut admitted: u64 = 0
-            for i in 0u64 .. 3 {
-                match text.copy_in(r, "x") {
-                    Ok(t) => {
-                        if text.as_string(t) != "x" {
-                            return false
-                        }
-                        admitted += 1
-                    }
-                    Error(c) => return admitted == limit / 16 && c.requested == 16 && c.available == 0,
+// n copies of a Text "x" (8+1 rounded to 16) under `bound bytes limit`.
+fn copies(limit: u64, n: u64) -> Result[Result[Result[bool, Capacity], Causes], Capacity] {
+    isolate(fn() -> Result[bool, Capacity] {
+        bound bytes limit {
+            region r {
+                let mut same = true
+                for i in 0u64 .. n {
+                    same = same && text.as_string(text.copy_in(r, "x")) == "x"
                 }
+                same
             }
-            admitted == 3
         }
     })
+}
+
+// Refusal at each of three admissions: limit / 16 copies fit, the next raises Capacity
+// with requested 16 and available 0; no earlier text is refunded.
+fn prefix_at(limit: u64) -> bool {
+    let fits = if limit >= 48 {
+        3u64
+    } else {
+        limit / 16
+    }
+    let admitted = match copies(limit, fits) {
+        Ok(Ok(Ok(b))) => b,
+        _ => false,
+    }
+    if fits == 3 {
+        return admitted
+    }
+    admitted && match caught(copies(limit, fits + 1)) {
+        Some(c) => c.requested == 16 && c.available == 0,
+        None => false,
+    }
 }
 
 // expect: run admission_prefixes() = true
@@ -96,25 +110,30 @@ fn admission_prefixes() -> bool {
 // A rollback/refund mutant admits the second document and returns false.
 // expect: run failed_document_retains_reservation() = true
 fn failed_document_retains_reservation() -> bool {
-    result.unwrap(bound bytes 16 {
-        region r {
-            let first: Result[Builder[Note, in r], BuildError] = build_in(r, bytes 16, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
-                let _ = dest.put(mut d, Note(id: 1, body: "hi"))?
-                Error(Overflow)
-            })
-            let failed = match first {
-                Error(Overflow) => true,
-                _ => false
-            }
-            let second: Result[Builder[Note, in r], BuildError] = build_in(r, bytes 16, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
-                dest.put(mut d, Note(id: 2, body: "hi"))
-            })
-            failed && match second {
-                Error(Capacity(c)) => c.requested == 16 && c.available == 0,
-                _ => false
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 16 {
+            region r {
+                let first: Result[Builder[Note, in r], BuildError] = build_in(r, bytes 16, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
+                    let _ = dest.put(mut d, Note(id: 1, body: "hi"))?
+                    Error(Overflow)
+                })
+                let failed = match first {
+                    Error(Overflow) => true,
+                    _ => false
+                }
+                if failed {
+                    let _second: Result[Builder[Note, in r], BuildError] = build_in(r, bytes 16, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
+                        dest.put(mut d, Note(id: 2, body: "hi"))
+                    })
+                }
+                false
             }
         }
     })
+    match caught(take out) {
+        Some(c) => c.requested == 16 && c.available == 0,
+        None => false,
+    }
 }
 
 // A 64-byte stream writes Text's 8-byte header +2 bytes, rounded16; trim refunds48.
@@ -128,40 +147,49 @@ fn streaming_refunds_only_unused_tail() -> bool {
             }))
             let first: Text in r = finish_trim(take b)
             let second = text.copy_in(r, "1234567890123456789012345678901234567890")
-            text.as_string(first) == "hi" && match second {
-                Ok(t) => text.len(t) == 40,
-                Error(_) => false
-            }
+            text.as_string(first) == "hi" && text.len(second) == 40
         }
     })
 }
 
 // GROWTH: capacities4,8,16 cost40,72,136 including the eight-byte header.
 // Abandoned region storage is not refunded: cumulative charges40,112,248.
-fn collect_prefix(limit: u64, refused: u64, charge: u64) -> bool {
-    result.unwrap(bound bytes limit {
-        region r {
-            let mut called: u64 = 0
-            let result: Result[FixedSpan[u64] in r, (Capacity, u64)] = arena.collect_span(r, fn() -> Option[u64] {
-                called += 1
-                if called <= 10 {
-                    Some(called)
-                } else {
-                    None
-                }
-            })
-            match result {
-                Error((c, x)) => {
-                    let prefix_held = match text.copy_in(r, "x") {
-                        Error(more) => more.available == 0,
-                        _ => false
+fn collected(limit: u64, n: u64) -> Result[Result[Result[bool, Capacity], Causes], Capacity] {
+    isolate(fn() -> Result[bool, Capacity] {
+        bound bytes limit {
+            region r {
+                let mut called: u64 = 0
+                let xs: FixedSpan[u64] in r = arena.collect_span(r, fn() -> Option[u64] {
+                    called += 1
+                    if called <= n {
+                        Some(called)
+                    } else {
+                        None
                     }
-                    called == refused && x == refused && c.requested == charge && c.available == 0 && prefix_held
-                }
-                Ok(xs) => called == 11 && span.len(xs) == 10 && xs[0] == 1 && xs[9] == 10 && refused == 0,
+                })
+                called == n + 1 && span.len(xs) == n && (n == 0 || xs[0] == 1 && xs[n - 1] == n)
             }
         }
     })
+}
+
+// Ten items under limit: the first refused-1 items fit, item `refused` raises Capacity
+// for `charge` with nothing available (abandoned blocks stay charged).
+fn collect_prefix(limit: u64, refused: u64, charge: u64) -> bool {
+    if refused == 0 {
+        return match collected(limit, 10) {
+            Ok(Ok(Ok(b))) => b,
+            _ => false,
+        }
+    }
+    let prefix = match collected(limit, refused - 1) {
+        Ok(Ok(Ok(b))) => b,
+        _ => false,
+    }
+    prefix && match caught(collected(limit, 10)) {
+        Some(c) => c.requested == charge && c.available == 0,
+        None => false,
+    }
 }
 
 // A mutant refunding abandoned span blocks admits the ninth element under112.
@@ -176,10 +204,10 @@ fn empty_builders_admit_nothing() -> bool {
     let xs: List[u64] = list.new()
     result.unwrap(bound bytes 0 {
         region r {
-            let a = result.unwrap(arena.copy_span(r, xs))
-            let b = result.unwrap(arena.collect_span(r, fn() -> Option[u64] {
+            let a = arena.copy_span(r, xs)
+            let b = arena.collect_span(r, fn() -> Option[u64] {
                 None
-            }))
+            })
             span.len(a) == 0 && span.len(b) == 0
         }
     })
@@ -188,26 +216,31 @@ fn empty_builders_admit_nothing() -> bool {
 // A failed stream does not invoke trim: its whole16-byte reservation stays charged.
 // expect: run failed_stream_retains_reservation() = true
 fn failed_stream_retains_reservation() -> bool {
-    result.unwrap(bound bytes 16 {
-        region r {
-            let mut called: u64 = 0
-            let first: Result[Builder[Text, in r], BuildError] = build_stream_in(r, bytes 16, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-                called += 1
-                writer.push(mut w, "hi")?
-                writer.push(mut w, "too-long")?
-                writer.close(take w)
-            })
-            let failed = match first {
-                Error(Overflow) => true,
-                _ => false
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 16 {
+            region r {
+                let mut called: u64 = 0
+                let first: Result[Builder[Text, in r], BuildError] = build_stream_in(r, bytes 16, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                    called += 1
+                    writer.push(mut w, "hi")?
+                    writer.push(mut w, "too-long")?
+                    writer.close(take w)
+                })
+                let failed = match first {
+                    Error(Overflow) => true,
+                    _ => false
+                }
+                if failed && called == 1 {
+                    let _ = text.copy_in(r, "x")
+                }
+                false
             }
-            let retained = match text.copy_in(r, "x") {
-                Error(c) => c.requested == 16 && c.available == 0,
-                _ => false
-            }
-            failed && retained && called == 1
         }
     })
+    match caught(take out) {
+        Some(c) => c.requested == 16 && c.available == 0,
+        None => false,
+    }
 }
 
 // SeqSpan[u64] has a16-byte header plus two eight-byte scalars:32 used bytes.
@@ -243,37 +276,42 @@ fn streaming_batch_runs_once() -> u64 {
 // fails, and its whole reservation stays charged. Discarding a failed blob breaks it.
 // expect: run completed_view_survives_failed_stream() = true
 fn completed_view_survives_failed_stream() -> bool {
-    result.unwrap(bound bytes 32 {
-        region r {
-            let mut saved: Option[View[u64]] = None
-            let built: Result[Builder[SeqSpan[u64], in r], BuildError] = build_stream_in(r, bytes 32, fn(take w: Writer[SeqSpan[u64], in r]) -> Result[Child[SeqSpan[u64]], BuildError] {
-                writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
-                    emit(take e, 7u64)
-                })?
-                saved = writer.last_completed(w)
-                writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
-                    emit(take e, 9u64)
-                })?
-                writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
-                    emit(take e, 11u64)
-                })?
-                writer.close(take w)
-            })
-            let failed = match built {
-                Error(Overflow) => true,
-                _ => false
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 32 {
+            region r {
+                let mut saved: Option[View[u64]] = None
+                let built: Result[Builder[SeqSpan[u64], in r], BuildError] = build_stream_in(r, bytes 32, fn(take w: Writer[SeqSpan[u64], in r]) -> Result[Child[SeqSpan[u64]], BuildError] {
+                    writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
+                        emit(take e, 7u64)
+                    })?
+                    saved = writer.last_completed(w)
+                    writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
+                        emit(take e, 9u64)
+                    })?
+                    writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
+                        emit(take e, 11u64)
+                    })?
+                    writer.close(take w)
+                })
+                let failed = match built {
+                    Error(Overflow) => true,
+                    _ => false
+                }
+                let value = match saved {
+                    Some(x) => x == 7,
+                    None => false
+                }
+                if failed && value {
+                    let _ = text.copy_in(r, "x")
+                }
+                false
             }
-            let value = match saved {
-                Some(x) => x == 7,
-                None => false
-            }
-            let retained = match text.copy_in(r, "x") {
-                Error(c) => c.requested == 16 && c.available == 0,
-                _ => false
-            }
-            failed && value && retained
         }
     })
+    match caught(take out) {
+        Some(c) => c.requested == 16 && c.available == 0,
+        None => false,
+    }
 }
 
 // This formal-Region writer isolates original-payer refunds. The local-Region
@@ -289,25 +327,50 @@ fn reserved_text(r: Region) -> Result[Builder[Text, in r], BuildError] {
 // fails, then the outer payer can admit an exactly48-byte Text while the first survives.
 // expect: run trim_refunds_original_payer() = true
 fn trim_refunds_original_payer() -> bool {
-    result.unwrap(bound bytes 64 {
-        region r {
-            let b = result.unwrap(reserved_text(r))
-            let first: Text in r = result.unwrap(bound bytes 0 {
-                let t: Text in r = finish_trim(take b)
-                let child_empty = match text.copy_in(r, "x") {
-                    Error(c) => c.requested == 16 && c.available == 0,
-                    _ => false,
+    let child = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 64 {
+            region r {
+                let b = result.unwrap(reserved_text(r))
+                let inner = bound bytes 0 {
+                    let t: Text in r = finish_trim(take b)
+                    let _ = text.copy_in(r, "x")
+                    text.len(t)
                 }
-                if !child_empty {
-                    return false
+                match inner {
+                    Ok(n) => n,
+                    Error(_) => 0,
                 }
-                t
-            })
-            let second = text.copy_in(r, "1234567890123456789012345678901234567890")
-            text.as_string(first) == "hi" && match second {
-                Ok(t) => text.len(t) == 40,
-                Error(_) => false
             }
         }
     })
+    let child_empty = match caught(take child) {
+        Some(c) => c.requested == 16 && c.available == 0,
+        None => false,
+    }
+    child_empty && result.unwrap(bound bytes 64 {
+        region r {
+            let b = result.unwrap(reserved_text(r))
+            let first: Text in r = result.unwrap(bound bytes 0 {
+                finish_trim(take b)
+            })
+            let second = text.copy_in(r, "1234567890123456789012345678901234567890")
+            text.as_string(first) == "hi" && text.len(second) == 40
+        }
+    })
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

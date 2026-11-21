@@ -19,7 +19,7 @@ fn render(take job: Job) -> Bytes {
     let width = job.width
     let width_float: f64 = float.from_int(width)
     let inverse = 2.0 / width_float
-    let mut block: Bytes = result.unwrap(list.with_capacity((job.end - job.start) * (width / 8)))
+    let mut block: Bytes = list.with_capacity((job.end - job.start) * (width / 8))
     for y in job.start .. job.end {
         let y_float: f64 = float.from_int(y)
         let ci = inverse * y_float - 1.0
@@ -31,7 +31,7 @@ fn render(take job: Job) -> Bytes {
                 byte <<= 1u8
                 if inside(cr, ci) { byte |= 1u8 }
             }
-            result.unwrap(list.push(mut block, byte))
+            list.push(mut block, byte)
         }
     }
     take block
@@ -41,29 +41,29 @@ pub fn main(tasks: Tasks, out: Stdout, err: Stderr, clock: Clock, argv: Args) ->
     let Some(number) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let width: u64 = result.unwrap(int.parse(number))
     if width == 0 || width % 8 != 0 { return Error(Exit(status: 2)) }
-    let mut jobs: List[Task[Bytes]] = result.unwrap(list.with_capacity(BLOCKS))
-    let mut image: Bytes = result.unwrap(list.with_capacity(width * (width / 8)))
+    let mut jobs: List[Task[Bytes]] = list.with_capacity(BLOCKS)
+    let mut image: Bytes = list.with_capacity(width * (width / 8))
     let start = host.mono_ns(clock)
     for index in 0 .. BLOCKS {
         let block = BLOCKS - index - 1
         let job = Job(width: width, start: block * width / BLOCKS, end: (block + 1) * width / BLOCKS)
-        let h = result.unwrap(task.spawn(tasks, bytes 1048576, job, render))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(tasks, bytes 1048576, job, render)
+        list.push(mut jobs, take h)
     }
     while let Some(take h) = list.pop(mut jobs) {
         let block = result.unwrap(task.join(take h))
-        result.unwrap(list.append(mut image, block))
+        list.append(mut image, block)
     }
     let elapsed = host.mono_ns(clock) - start
-    let mut timing = result.unwrap(string.from("multicore-kernel-ns="))
-    result.unwrap(string.push_u64(mut timing, elapsed))
-    result.unwrap(string.push(mut timing, "\n"))
+    let mut timing = string.from("multicore-kernel-ns=")
+    string.push_u64(mut timing, elapsed)
+    string.push(mut timing, "\n")
     result.unwrap(stderr.write(err, timing))
-    let mut header = result.unwrap(string.from("P4\n"))
-    result.unwrap(string.push_u64(mut header, width))
-    result.unwrap(string.push(mut header, " "))
-    result.unwrap(string.push_u64(mut header, width))
-    result.unwrap(string.push(mut header, "\n"))
+    let mut header = string.from("P4\n")
+    string.push_u64(mut header, width)
+    string.push(mut header, " ")
+    string.push_u64(mut header, width)
+    string.push(mut header, "\n")
     result.unwrap(stdout.write(out, header))
     result.unwrap(stdout.write_bytes(out, image))
     Ok(())

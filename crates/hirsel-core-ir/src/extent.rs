@@ -258,6 +258,10 @@ pub(crate) fn terminator_uses(b: &Body, bi: usize) -> Vec<usize> {
             .collect(),
         Terminator::Raise { cause, .. } => match cause {
             RaiseCause::Fail(a) => vec![b.values.len() + a.index()],
+            RaiseCause::Capacity {
+                requested,
+                available,
+            } => vec![requested.index(), available.index()],
             _ => vec![],
         },
         Terminator::Return(r) => vals(*r),

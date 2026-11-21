@@ -26,14 +26,14 @@ fn large(mut tx: store.Tx, h: H, author: store.runner.Caller, take count: u32) -
     if let Error(_) = store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
-    for _ in 0u64 .. n { if let Error(_) = list.push(mut b, 1u8) { return Error(2u32) } }
+    for _ in 0u64 .. n { list.push(mut b, 1u8) }
     Ok(take b)
 }
 
 fn big(take count: u32) -> Result[Bytes, Capacity] {
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
-    for _ in 0u64 .. n { result.capacity_only(list.push(mut b, 2u8))? }
+    for _ in 0u64 .. n { list.push(mut b, 2u8) }
     Ok(take b)
 }
 
@@ -53,7 +53,7 @@ fn read(tx: store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capaci
 
 fn retired() -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, string.as_bytes("retired")))
+    list.append(mut key, string.as_bytes("retired"))
     result.unwrap(std.codec.put_u64(0u64, mut key))
     result.unwrap(std.codec.put_u64(0u64, mut key))
     key
@@ -139,14 +139,14 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     // An admitted, unreplied position on the retained key exercises V5 on resend.
     // The key is the runner's own stream key for the client's fixed token and stream 77.
     let mut token: Bytes = list.new()
-    for _ in 0u64 .. 16u64 { result.unwrap(list.push(mut token, 0u8)) }
+    for _ in 0u64 .. 16u64 { list.push(mut token, 0u8) }
     let caller = result.unwrap(store.ingress.caller((), token))
     let stream = result.unwrap(store.runner.stream_key(caller, 77u32))
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(retired(), list.new())))
-    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(64u64))
+    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(store.runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail))
-    let h = result.unwrap(task.spawn(tasks, bytes 1073741824u64, take seed, server))
+    let h = task.spawn(tasks, bytes 1073741824u64, take seed, server)
     let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)
     Ok(())

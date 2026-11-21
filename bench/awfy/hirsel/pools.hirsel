@@ -63,8 +63,8 @@ fn run_pool(out: Stdout, workload: Pool, expected: u64, outer: u64, inner: u64, 
 fn pool_line(verified: bool, checksum: u64) -> Result[String, Capacity] {
     let mut line = string.new()
     let prefix = if verified { "verified checksum=" } else { "failed checksum=" }
-    string.push(mut line, prefix)?
-    string.push_u64(mut line, checksum)?
-    string.push(mut line, "\n")?
+    string.push(mut line, prefix)
+    string.push_u64(mut line, checksum)
+    string.push(mut line, "\n")
     Ok(take line)
 }

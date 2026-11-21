@@ -86,7 +86,7 @@ fn listed(b: u64, neg: bool) -> u64 {
 
 // Memory: the element moves when the list grows past its capacity.
 fn grown(b: u64, neg: bool) -> u64 {
-    let mut xs: List[f64] = result.unwrap(list.with_capacity(1))
+    let mut xs: List[f64] = list.with_capacity(1)
     let _ = list.push(mut xs, nan(b, neg))
     for i in 0u64 .. 9 {
         let _ = list.push(mut xs, 1.0f64)
@@ -105,9 +105,7 @@ fn field(b: u64, neg: bool) -> u64 {
 
 // Memory: a Box payload.
 fn boxed(b: u64, neg: bool) -> u64 {
-    let Ok(p) = box.new(Vec3(x: 1.0, y: nan(b, neg), z: 2.0)) else {
-        return 0
-    }
+    let p = box.new(Vec3(x: 1.0, y: nan(b, neg), z: 2.0))
     let v = box.unbox(take p)
     float.to_bits64(v.y)
 }
@@ -184,20 +182,19 @@ fn task_same(take x: f64) -> f64 {
 
 // A spawned task's input.
 fn task_input(tasks: Tasks, b: u64, neg: bool) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, nan(b, neg), task_bits))
+    let h = task.spawn(tasks, bytes 64, nan(b, neg), task_bits)
     result.unwrap(task.join(take h))
 }
 
 // A joined task's result.
 fn task_result(tasks: Tasks, b: u64, neg: bool) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 64, nan(b, neg), task_same))
+    let h = task.spawn(tasks, bytes 64, nan(b, neg), task_same)
     float.to_bits64(result.unwrap(task.join(take h)))
 }
 
 // A channel item, sent and received.
 fn channeled(b: u64, neg: bool) -> u64 waits {
-    let made: Result[(Sender[f64], Receiver[f64]), Capacity] = channel.new(1)
-    let (tx, rx) = result.unwrap(take made)
+    let (tx, rx): (Sender[f64], Receiver[f64]) = channel.new(1)
     let _ = channel.send(tx, nan(b, neg))
     float.to_bits64(result.unwrap(channel.receive(rx)))
 }
@@ -205,13 +202,10 @@ fn channeled(b: u64, neg: bool) -> u64 waits {
 // The field passes through an own clone and is observed after a region build.
 fn cloned(b: u64, neg: bool) -> u64 {
     let x = P(v: nan(b, neg), k: 1)
-    let copied: Result[P, Capacity] = clone(x)
+    let p: P = clone(x)
     region r {
-        match copied {
-            Ok(p) => match build_sized(r, p.v, 16) {
-                Ok(c) => float.to_bits64(c.v),
-                Error(_) => 0,
-            },
+        match build_sized(r, p.v, 16) {
+            Ok(c) => float.to_bits64(c.v),
             Error(_) => 0,
         }
     }

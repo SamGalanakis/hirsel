@@ -5,7 +5,7 @@
 // expect: run run_use_it() = 2
 // expect: run lines() = 3
 fn grow(mut s: String) -> Result[View[String], Capacity] in s {
-    string.push(mut s, "x")?
+    string.push(mut s, "x")
     Ok(string.slice(s, 0, 1))
 }
 
@@ -38,7 +38,7 @@ fn next_line(mut l: Lines) -> Option[View[String]] in l {
 }
 
 fn lines() -> u64 {
-    let mut l = Lines(text: result.unwrap(string.from("abc")), pos: 0)
+    let mut l = Lines(text: string.from("abc"), pos: 0)
     let mut n: u64 = 0
     while let Some(line) = next_line(mut l) {
         n += string.byte_len(line)

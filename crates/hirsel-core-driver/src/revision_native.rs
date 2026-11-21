@@ -246,8 +246,8 @@ fn revision_cases() -> Vec<RevisionCase> {
                 Std::Tree,
                 Std::Edit(
                     "codec.hirsel",
-                    "Codec(encoder: put_u64, decoder: take_u64, describer: describe_u64, smallest: 8)",
-                    "Codec(encoder: put_u64, decoder: take_u64, describer: describe_u64, smallest: 9)",
+                    "make(put_u64, take_u64, describe_u64, 8)",
+                    "make(put_u64, take_u64, describe_u64, 9)",
                 ),
             ),
             expect: Differ,

@@ -339,7 +339,7 @@ fn law_decline(mut tx: store.Tx, add: u64) -> Result[u64, LawError] {
     if now == add { Error(Declined) } else { Ok(now) }
 }
 
-fn law_target(clock: Clock, take n: u64) -> Result[u64, Capacity] waits {
+fn law_target(clock: Clock, caller: runner.Caller, take n: u64) -> Result[u64, Capacity] waits {
     host.sleep_until(clock, host.mono_ns(clock))
     Ok(n)
 }

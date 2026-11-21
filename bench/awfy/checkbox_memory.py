@@ -40,10 +40,8 @@ def retain_snapshots(scratch, out):
 
 def sample(work, output, snapshots, prepared, mode, clients, server_cpu, loader_cpu):
     checkbox, executable, address, wants, tools = prepared
-    admission = str(max(20_000, clients))
-    overrides = ["--per-ip-sessions", admission, "--per-ip-new-principals", admission, "--principal-rate", "1000000000"]
     env = build.capped_env(work)
-    command = checkbox.command(executable, address, overrides)
+    command = checkbox.command(executable, address, [])
     output.mkdir()
     try:
         with board.private_server(command, address, output, env, server_cpu) as pid:

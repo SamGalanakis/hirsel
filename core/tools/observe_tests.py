@@ -120,13 +120,10 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(64u64))
-    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
-    let mut policy_task = take policy_handle
-    let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
     let db = store.memory(c, r, store.defaults())
     let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
-        tasks: tasks, net: n, random: r, policy: ingress.share(policy),
-        token: result.unwrap(clone(ingress.principal(principal))), accepted: None)
+        tasks: tasks, net: n, random: r,
+        token: ingress.credential(r), accepted: None)
     let mut cn = conn(d, 1u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
@@ -136,8 +133,6 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let _ = frame(cn)
     let _ = frame(cn)
     hang(take cn)
-    task.cancel(mut policy_task)
-    let _ = task.join(take policy_task)
     true
 }
 

@@ -72,7 +72,10 @@ fn upgrade_checks() -> bool {
 // Mutant: protocol_case_fold, accept_duplicate_key, interpret_body_as_frames.
 // expect: run protocol_and_ambiguity() = true
 fn protocol_and_ambiguity() -> bool {
-    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.1\r\n")) == 101 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: HIRSEL.1\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Content-Length: 3\r\n")) == 400
+    if status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: hirsel.1\r\n")) != 400 {
+        return false
+    }
+    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.2\r\n")) == 101 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: HIRSEL.2\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Content-Length: 3\r\n")) == 400
 }
 
 // Mutant: drop_tail. The masked binary frame is hand-derived with zero mask.
@@ -110,7 +113,7 @@ fn client_negotiation_tail() -> bool {
     let mut protocol_response: Bytes = list.new()
     let response = response_bytes()
     result.unwrap(list.append(mut protocol_response, list.slice(response, 0, list.len(response) - 2)))
-    result.unwrap(list.append(mut protocol_response, result.unwrap(b"Sec-WebSocket-Protocol: hirsel.1\r\n\r\n")))
+    result.unwrap(list.append(mut protocol_response, result.unwrap(b"Sec-WebSocket-Protocol: hirsel.2\r\n\r\n")))
     let offered = match result.unwrap(websocket.client(protocol_response, challenge(), true)) {
         Ready(_, selected) => selected,
         _ => false

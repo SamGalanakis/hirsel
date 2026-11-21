@@ -65,7 +65,7 @@ outcomes are:
 - `Failed(OutOfBytes)`: the body exhausts n after entry;
 - `Failed(Raised)`: the body faults.
 
-The decoder's peak memory therefore counts against n. `start(r, tasks, g, key,
+The decoder's peak memory therefore counts against n. `start(r, tasks, g, caller, key,
 arg)` spawns a task under the entry's `bytes n` that holds the grant g and decodes and runs
 the granted entry, a body `fn(G, Caller, take A) -> Result[R, Capacity] waits`. A trigger
 moves its attempt's `G` into `start`. A wire call reaches a granted entry only when the
@@ -190,7 +190,7 @@ reuses it. `hang_up()` closes the session.
 `Frame` is the dormant WIRE-SPEC v2 wire envelope. Its declared variants fix tags
 0 through 8: Hello, Call, Subscribe, Unsubscribe, Welcome, Placed, Batch, Ended,
 Reset. `Want`, `Entry`, `Done` and `Row` are its codec payload types. Welcome carries
-the principal, q, budget, executable digest, target and n_place. Batch carries the
+the Caller, q, budget, executable digest, target and n_place. Batch carries the
 version, completing subscription ids, rows and outcomes, in that order. A Row key
 is the physical data-tree key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
@@ -231,18 +231,9 @@ and one assembly allowance under that reservation. It runs on the evaluator and
 native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
 
 
-`serve` owns a bounded accept loop and an owner/reader/writer group per connection.
-`serve_admitted` adds the shared `ingress.Ingress` policy before writing 101, after
-`wsock.source` sanitizes the IP. Per-IP sessions and pending capacity produce HTTP
-503 while one of sixteen refusal workers is free, otherwise a bare close.
-`max_sessions` bounds active owner handles independently of `socket.pending_max`.
-
-`ingress.start` owns the shared mint and call buckets, with at most 8192 keys of
-each kind and a 256-item inbox. Every ask has a fresh capacity-one reply, answered
-by `try_send`. Only full inactive buckets retire. Socket leases return on drop;
-Hello passes its credential to the application's binding, or, with none, binds a fresh
-anonymous Caller. Defaults are 32 sessions per source and 20 calls/second per Caller
-with burst 40. Hello refusal is Close 1013; call refusal is `Refused(Overloaded)`.
+`serve` owns a bounded accept loop and an owner, reader and writer per connection.
+`max_sessions` bounds active owners independently of `socket.pending_max`.
+The listener can respond with HTTP 503 while a refusal worker is available.
 
 `runner.admitted` carries the bound `Caller`, attenuated entry keys,
 recorded arrival and decision times, and byte allowances. Ingress binds the
@@ -252,17 +243,15 @@ current/gone/unknown keys, applies attenuation, decodes under byte and step
 bounds, computes the digest, and forms `caller_key || u32-BE(stream)`.
 `caller_key` writes the issuer byte, subject length byte and up to 64 subject bytes.
 
-Deploy RC1 with a fresh runner store directory. Older stores hold bearer tokens
-in stream keys. The SDK starts a fresh recovery generation and reports prior
-pending work as locally unknown. An anonymous session's pending work never
-survives a reconnect (v2.24), since the next connection is a new Caller.
+After an anonymous reconnect, the SDK settles pending work as `LocallyUnknown`
+and starts at position zero for the new Caller (v2.24).
 The composition root supplies retained activation keys through `retain_gone`.
-`Send` is opaque. The same policy and preparation functions serve other transports.
+`Send` is opaque. Other transports use the same preparation and stream-key functions.
 
 `wire_place_service` runs place under `n_place` inside the owner. `Service[C]`
-has synchronous step, readiness and finish callbacks. `WireWork` keeps the owned
-policy and deadline tasks inside that owner. It receives policy results through
-its existing inbox. Welcome and Placed precede calls; a second Hello closes 1008.
+has synchronous step, readiness and finish callbacks. `WireWork` keeps the
+binding, granted call and deadline tasks inside the owner. Their results arrive
+through its inbox. Welcome and Placed precede calls; a second Hello closes 1008.
 Each send keeps its unit through writer handoff. Gone calls reach V5; out-of-range
 or unknown slots answer NoEntry. The publisher joins lazily on the first Subscribe.
 A close flag plus Drained releases publisher state even if the owner closes before
@@ -301,9 +290,9 @@ the factory's bounded state (at most n_service) and a copied ingress list
 the completion channel `64+8*(max_sessions+16)`, the pending credit channel (64), and
 owner-map growth (at most `96*max(4,max_sessions)`); these shared records are counted
 once. At most sixteen refusal tasks each reserve 16384 working bytes and a
-320-byte record. The shared ingress task and its bounded tables have their own
-caller-supplied reservation. Logical reservations, live charge, virtual stacks and RSS are different
-quantities.
+320-byte record. `WireConfig.n_granted` adds an explicit per-owner reservation
+for granted entry tasks, inside the session's byte ceiling. It defaults to zero.
+The place chooses it to cover the grant tasks it intends to keep live.
 
 RUNNER-SPEC v2.19 defines the Caller in slices RC1, RS, RR and RC4. `Caller{issuer: u8, subject: Bytes}` names the admitted caller. It is not
 secret, and its subject is at most 64 bytes. Issuer 1 is anonymous: its subject is 16

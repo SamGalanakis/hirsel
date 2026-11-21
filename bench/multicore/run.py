@@ -447,8 +447,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
         board = bins / "checkbox"
         port = int((board / "port").read_text())
         listen = f"127.0.0.1:{port}"
-        options = ["--listen", listen, "--per-ip-sessions", "20000",
-                   "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
+        options = ["--listen", listen]
         if language == "Hirsel":
             # The grant names this path at link time. Move the old tree aside
             # between samples and retain it with that sample's raw evidence.
@@ -458,6 +457,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
         else:
             server_env["TOKIO_WORKER_THREADS"] = str(width)
             server = [bins / "wire/release/wire-reference", *options,
+                      "--per-ip-sessions", "20000", "--principal-rate", "1000000000",
                       "--wants", board / "wants.bin", "--n-place", "1048576",
                       "--wal", directory / "checkbox.wal"]
         load = [bins / "wire/release/wire-load", "converge", "--url", f"ws://{listen}/hirsel",

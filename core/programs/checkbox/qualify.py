@@ -14,8 +14,7 @@ from wire_process import stop_process
 
 BROWSER = {"canvas_click", "browser_ticks"}
 WIRE = {
-    "bit_pixels", "toggle_smoke", "toggle_no_rerun", "session_limit_503", "owner_limit_503",
-    "principal_limit_1013", "call_rate_overloaded",
+    "bit_pixels", "toggle_smoke", "toggle_no_rerun", "owner_limit_503",
 }
 SDK_MUTANTS = {"resend_new_p", "skip_resubscribe_after_reset", "clear_on_first_batch"}
 SERVER_EDITS = {
@@ -36,11 +35,6 @@ SERVER_EDITS = {
                              "    let requested = wire_rows_size(live_rows)"),
     "old_owner_limit": ("main", "max_sessions: store.runner.WIRE_OWNER_LIMIT,",
                         "max_sessions: 1024u64,"),
-    "no_ip_session_limit": ("ingress", "if s.free == 0u64 { RejectedPolicy } else {",
-                            "if false { RejectedPolicy } else {"),
-    "no_principal_rate": ("ingress", "if s.mint_count >= c.mint_burst { false } else {", "if false { false } else {"),
-    "no_call_rate": ("ingress", "take_credit(mut b, now, c.call_burst, c.call_period_ns)",
-                     "true"),
 }
 
 
@@ -51,9 +45,6 @@ MUTANT_CASES = {
     "no_publish_to_others": "browser_ticks",
     "drop_row_on_coalesce": "converge",
     "old_owner_limit": "owner_limit_503",
-    "no_ip_session_limit": "session_limit_503",
-    "no_principal_rate": "principal_limit_1013",
-    "no_call_rate": "call_rate_overloaded",
     **dict.fromkeys(SDK_MUTANTS, "converge"),
 }
 
@@ -85,8 +76,6 @@ def scratch_sources(work, case, mutant):
     if mutant in SERVER_EDITS:
         module, before, after = SERVER_EDITS[mutant]
         changed[module] = replace(changed.get(module, paths[module].read_text()), before, after)
-        if mutant == "no_ip_session_limit":
-            changed[module] = replace(changed[module], "s.free -= 1u64", "s.free = int.saturating_sub(s.free, 1u64)")
     for module, text in changed.items():
         paths[module] = work / (module + ".hirsel")
         paths[module].write_text(text)
@@ -104,10 +93,6 @@ def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
     source, store = scratch_sources(work, case, mutant)
     executable = build(compiler, work, web, listen, source, store)
     prepare_web(compiler, executable, web)
-    overrides = []
-    if case in ("toggle_no_rerun", "converge", "owner_limit_503"):
-        overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000"]
-        print("per_ip_sessions=20000 per_ip_new_principals=20000/min", flush=True)
     if case in BROWSER:
         law = ["browser-laws.mjs", case, origin]
     elif case in WIRE:
@@ -116,7 +101,7 @@ def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
         law = ["converge.mjs", origin, web, clients, toggles, pace, seed]
         if mutant in SDK_MUTANTS:
             law.append(mutant)
-    with subprocess.Popen(command(executable, listen, overrides), cwd=ROOT) as server:
+    with subprocess.Popen(command(executable, listen, []), cwd=ROOT) as server:
         try:
             wait_for_listener(server, listen)
             return subprocess.run(["node", PROGRAM / law[0], *map(str, law[1:])], cwd=ROOT).returncode

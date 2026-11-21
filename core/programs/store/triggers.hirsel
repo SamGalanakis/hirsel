@@ -154,7 +154,7 @@ pub fn transact[H, A: codec, R, E](f: StaticFn[fn(mut store.Tx, H, store.Caller,
     entry(f, false)
 }
 
-pub fn granted[G, A: codec, R](f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits]) -> Result[Entry[A], Capacity] {
+pub fn granted[G, A: codec, R](f: StaticFn[fn(G, store.Caller, take A) -> Result[R, Capacity] waits]) -> Result[Entry[A], Capacity] {
     entry(f, true)
 }
 
@@ -370,7 +370,7 @@ pub fn law_options() -> store.Options {
     options
 }
 
-fn sample_granted(g: Clock, take arg: u64) -> Result[u64, Capacity] waits {
+fn sample_granted(g: Clock, caller: store.Caller, take arg: u64) -> Result[u64, Capacity] waits {
     host.sleep_until(g, host.mono_ns(g))
     Ok(arg)
 }

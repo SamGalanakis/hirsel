@@ -8,7 +8,7 @@ random client nonces and a fresh four-byte mask for each encoded client frame.
 
 `server` parses a bounded upgrade and returns its response and consumed byte
 offset. `client` checks a 101 against the actual challenge and the client's
-protocol offer. `Ready(end, selected)` reports whether hirsel.1 was selected.
+protocol offer. `Ready(end, selected)` reports whether hirsel.2 was selected.
 An offer may be declined; the runner requires `selected` through its own
 configuration. Unoffered protocols and every extension are refused. Preserve
 `input[end..]` as the initial frame input. `request` constructs the fixed

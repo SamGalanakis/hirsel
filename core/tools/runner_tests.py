@@ -3,11 +3,11 @@
 
 R0 owns core, session, and frame laws, including the generated p19 and L12
 fixtures. Its L4/L20 cases compare exact retained bytes across native runs.
-R1 owns calls, admission, and ingress. The wire target runs the socket cases.
+R1 owns calls and admission. The wire target runs the socket cases.
 Without --part, both R0 and R1 run.
 
 The crash adapter runs the W2 filesystem cuts and one failed journal sync.
-RC1's L31 checks that the disk store never writes the plaintext Hello token.
+RC1's L31 checks that the disk store never writes the plaintext Hello credential.
 """
 import argparse
 import base64
@@ -36,7 +36,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
+CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'anonymous_fresh', 'granted_copied', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'repair_delivered',
          'dir_one_head', 'dir_open_during_close', 'dir_idle_unload', 'dir_reopen_keeps')
 # The place directory's laws (RUNNER-SPEC §13.6) bind sockets and use disk stores.
@@ -446,7 +446,7 @@ def no_secret_at_rest(args, root, work, engine, row):
         command += ['--cc', str(args.cc.resolve())]
     checked(command, os.environ, engine=engine, case=f'{name}:build')
     nonce = os.urandom(16)
-    encoded = base64.b64encode(b'anon:' + nonce).decode('ascii')
+    encoded = base64.b64encode(nonce).decode('ascii')
     ran = run_case(name, engine, [str(binary), encoded], capture_output=True, text=True)
     files = [p for p in directory.rglob('*') if p.is_file()]
     found = sorted(str(p.relative_to(directory)) for p in files if nonce in p.read_bytes())
@@ -492,6 +492,20 @@ def evaluate(evaluator, inputs_path, definition, launch_image=None):
     out = report.get('outcome') or {}
     value = out.get('values', [None])[0] if result.returncode == 0 and out.get('kind') == 'returned' else None
     return value, report
+
+
+def granted_bound(args, root, work, row):
+    name = 'wire_granted_nonplain'
+    rejected = manifest(root, work, name, extra=[(root / f'core/programs/store/{name}.hirsel', name)])
+    command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
+               '--source-core', '--source-std', '--store', str(work / name), '--json']
+    checked = run_case(name, 'checker', command, capture_output=True, text=True)
+    report = json.loads(checked.stdout)
+    actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
+    expected = [('LANG-12', '`store@1/wire_granted_nonplain/OwnedGrant` is not plain')]
+    passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
+              and not report.get('incomplete') and not report.get('resources'))
+    row(engine='checker', law=name, passed=passed, result=report)
 
 
 def activation_body_edit(root, work):
@@ -602,22 +616,6 @@ def session_laws(args, root, work, engines, row):
                 and all(t.get('passed') for t in tests), result=report)
 
 
-def ingress_laws(args, root, work, engines, row):
-    names = ('limits', 'rates_and_expiry', 'retirement_steps', 'reply_isolated')
-    selected = manifest(root, work, 'ingress')
-    if 'evaluator' in engines:
-        for name in names:
-            value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/ingress/law_' + name)
-            row(engine='evaluator', law='ingress_' + name, passed=value == 1, result=report)
-    for engine in (e for e in engines if e != 'evaluator'):
-        definition = 'store@1/ingress/test_ingress'
-        code, report = native_run(args, engine, selected, work / f'ingress-store-{engine}', definition)
-        tests = report.get('tests', [])
-        row(engine=engine, law='ingress', passed=code == 0
-            and [t['definition'] for t in tests] == [definition]
-            and all(t.get('passed') for t in tests), result=report)
-
-
 SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
 # L28's owner half: a dropped unit's Outcome rows ride in a Reset that never closes 1008,
 # and an owner removal reaches the publisher only while the writer holds no content unit.
@@ -664,7 +662,6 @@ def admission_laws(args, root, work, engines, row):
 
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
-             'session_limit_503', 'principal_limit_1013', 'call_rate_overloaded',
              'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget',
              'cli_call_exact_value', 'cli_call_fingerprint_mismatch'}
     for engine in (e for e in engines if e != 'evaluator'):
@@ -811,7 +808,7 @@ def main():
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     if args.stop_case and args.part != 'deadline':
         p.error('--stop-case requires --part deadline')
@@ -848,8 +845,6 @@ def main():
             return int(not rows or any(not result['passed'] for result in rows))
         if args.part == 'admission' or (r1 and args.part != 'calls'):
             admission_laws(args, root, work, engines, row)
-        if args.part == 'ingress' or (r1 and args.part != 'calls'):
-            ingress_laws(args, root, work, engines, row)
         if r0 or args.part == 'session':
             session_laws(args, root, work, engines, row)
         if r0:
@@ -859,13 +854,15 @@ def main():
         if args.part in (None, 'r1', 'rc1'):
             for engine in (e for e in engines if e != 'evaluator'):
                 no_secret_at_rest(args, root, work, engine, row)
-        if args.part in ('wire', 'session', 'ingress', 'admission', 'socket', 'rc1'):
+        if args.part in ('wire', 'session', 'admission', 'socket', 'rc1'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             for r in rows:
                 if not r['passed']:
                     print('FAIL', json.dumps(r)[:2000])
             return int(any(not r['passed'] for r in rows))
+        if r1 and 'granted_copied' in selected_calls and args.compiler is not None:
+            granted_bound(args, root, work, row)
         base = manifest(root, work, 'inputs')
         if r0:
             values = l12_values(evaluator, root, work, 'tree')

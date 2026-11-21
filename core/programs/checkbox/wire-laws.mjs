@@ -18,11 +18,10 @@ const {values, keys} = await imported('codec.js');
 const {want, identity, bind} = await imported('entries.js');
 const sockets = new Set();
 
-const none = {tag: 'None'};
 const some = value => ({tag: 'Some', value});
 
-async function raw(token = none, entries = want) {
-  const socket = new WebSocket(url, 'hirsel.1');
+async function raw(credential = some(randomBytes(16)), entries = want) {
+  const socket = new WebSocket(url, 'hirsel.2');
   sockets.add(socket);
   socket.binaryType = 'arraybuffer';
   const queue = [];
@@ -44,12 +43,12 @@ async function raw(token = none, entries = want) {
     wake = undefined;
     return queue.shift();
   };
-  send({tag: 'Hello', values: [token, entries]});
+  send({tag: 'Hello', values: [credential, entries]});
   return {socket, send, next};
 }
 
-async function welcome(token, entries = want) {
-  const client = await raw(token, entries);
+async function welcome(credential, entries = want) {
+  const client = await raw(credential, entries);
   const answer = await client.next();
   assert.equal(answer.tag, 'Welcome');
   const slots = [];
@@ -59,7 +58,7 @@ async function welcome(token, entries = want) {
     assert.equal(placed.value.tag, 'Ready');
     slots.push(placed.value.value);
   }
-  return {...client, token: some(answer.values[0]), slots};
+  return {...client, slots};
 }
 
 function call(client, stream, p, bit) {
@@ -88,7 +87,7 @@ async function toggle_smoke() {
   const state = await mkdtemp(join(tmpdir(), 'checkbox-client-'));
   let client;
   try {
-    client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, identity,
+    client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, identity, credential: randomBytes(16),
       storage: new runtime.NodeStorage(state)});
     await client.whenReady();
     const {toggle} = bind(client).call;
@@ -166,7 +165,7 @@ function upgradeStatus() {
   return new Promise((finish, reject) => {
     const upgrade = request(new URL('/hirsel', origin), {headers: {
       Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
-      'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': 'hirsel.1',
+      'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': 'hirsel.2',
     }}, response => {
       response.resume();
       finish(response.statusCode);
@@ -177,16 +176,10 @@ function upgradeStatus() {
   });
 }
 
-async function session_limit_503() {
-  const first = await welcome(none, []);
-  for (let i = 1; i < 32; i++) await welcome(first.token, []);
-  assert.equal(await upgradeStatus(), 503);
-}
-
 async function owner_limit_503() {
   for (let owner = 0; owner < 10000; owner++) {
     try {
-      await welcome(none, []);
+      await welcome(undefined, []);
     } catch (error) {
       throw new Error(`only ${owner} owners welcomed`, {cause: error});
     }
@@ -194,41 +187,7 @@ async function owner_limit_503() {
   assert.equal(await upgradeStatus(), 503);
 }
 
-async function principal_limit_1013() {
-  for (let i = 0; i < 10; i++) {
-    const client = await welcome(none, []);
-    client.socket.close();
-  }
-  const refused = await raw(none, []);
-  const answer = await refused.next();
-  assert.equal(answer.tag, 'Close');
-  assert.equal(answer.value, 1013);
-}
-
-async function call_rate_overloaded() {
-  const first = await welcome();
-  const clients = [first];
-  for (let i = 1; i < 9; i++) clients.push(await welcome(first.token));
-  // Five outstanding units per session. Distinct streams each start at p = 0.
-  for (let i = 0; i < 41; i++) call(clients[i % clients.length], i, 0n, i);
-  const answers = await Promise.all(clients.map(async (client, connection) => {
-    const done = [];
-    while (done.length < Math.floor((40 - connection) / clients.length) + 1) {
-      const batch = await client.next();
-      assert.equal(batch.tag, 'Batch');
-      done.push(...batch.values[3]);
-    }
-    return done;
-  }));
-  const results = answers.flat().sort((a, b) => a.stream - b.stream);
-  assert.deepEqual(results.map(done => done.stream), Array.from({length: 41}, (_, i) => i));
-  assert(results.every(done => done.p === 0n));
-  assert(results.every(({outcome}) => outcome.tag === 'Returned' ||
-    (outcome.tag === 'Refused' && outcome.value.tag === 'Overloaded')));
-  assert.equal(results.filter(({outcome}) => outcome.tag === 'Refused').length, 1);
-}
-
-const laws = {toggle_smoke, bit_pixels, toggle_no_rerun, session_limit_503, owner_limit_503, principal_limit_1013, call_rate_overloaded};
+const laws = {toggle_smoke, bit_pixels, toggle_no_rerun, owner_limit_503};
 try {
   assert(laws[name], `unknown law: ${name}`);
   await laws[name]();

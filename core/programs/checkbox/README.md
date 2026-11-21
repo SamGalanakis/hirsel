@@ -30,9 +30,7 @@ python3 -B core/programs/checkbox/qualify.py --hirsel "$(command -v hirsel)" con
 `qualify.py --help` lists the selectors and the convergence parameters. The
 default `converge` uses 64 Node SDK clients, 1,000 toggles each at a target pace
 of 10/s, and one browser. It gives each client one disconnect and checks all
-images and a fresh subscription against the returned-call XOR fold. The
-convergence and query-count laws use 20,000 sessions and 20,000 new principals
-per IP per minute. Limit laws run at the defaults.
+images and a fresh subscription against the returned-call XOR fold.
 
 For an already-running endpoint, invoke `converge.mjs ORIGIN GENERATED
 [CLIENTS] [TOGGLES] [PACE] [SEED]` with Node, where `GENERATED` contains the

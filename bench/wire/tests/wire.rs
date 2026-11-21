@@ -1,4 +1,4 @@
-use hirsel_wire_bench::codec::{self, Frame, Row};
+use hirsel_wire_bench::codec::{self, Row};
 use hirsel_wire_bench::{BITS, IMAGE_BYTES, Result, client, flip, reference};
 
 fn launch() -> reference::Launch {
@@ -39,55 +39,36 @@ fn bit_and_chunk_law_uses_key_codec_and_zero_tail() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_session_and_new_principal_limits_refuse_at_distinct_boundaries() -> Result<()> {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::{Error, Message};
-    for sessions in [true, false] {
-        let dir = tempfile::tempdir()?;
-        let wal = dir.path().join("wal");
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("ws://{}/hirsel", listener.local_addr()?);
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            reference::serve(
-                listener,
-                &wal,
-                codec::checkbox_wants(),
-                reference::Limits::default(),
-                launch(),
-                async {
-                    let _ = rx.await;
-                },
-            )
-            .await
-        });
-        let wants = codec::checkbox_wants();
-        let mut clients = Vec::new();
-        let first = client::Client::connect(&url, &wants, None).await?;
-        let token = first.token.clone();
-        clients.push(first);
-        for _ in 1..if sessions { 32 } else { 10 } {
-            clients.push(
-                client::Client::connect(&url, &wants, sessions.then(|| token.clone())).await?,
-            );
-        }
-        if sessions {
-            let result = tokio_tungstenite::connect_async(&url).await;
-            assert!(matches!(result, Err(Error::Http(response)) if response.status() == 503));
-        } else {
-            let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
-            ws.send(Message::Binary(
-                codec::encode(&Frame::Hello(None, wants)).into(),
-            ))
-            .await?;
-            assert!(
-                matches!(ws.next().await.transpose()?, Some(Message::Close(Some(c))) if u16::from(c.code) == 1013)
-            );
-        }
-        drop(clients);
-        tx.send(()).unwrap();
-        server.await??;
+async fn default_session_limit_refuses_excess_sockets() -> Result<()> {
+    use tokio_tungstenite::tungstenite::Error;
+    let dir = tempfile::tempdir()?;
+    let wal = dir.path().join("wal");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("ws://{}/hirsel", listener.local_addr()?);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        reference::serve(
+            listener,
+            &wal,
+            codec::checkbox_wants(),
+            reference::Limits::default(),
+            launch(),
+            async {
+                let _ = rx.await;
+            },
+        )
+        .await
+    });
+    let wants = codec::checkbox_wants();
+    let mut clients = Vec::new();
+    for _ in 0..32 {
+        clients.push(client::Client::connect(&url, &wants, None).await?);
     }
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(matches!(result, Err(Error::Http(response)) if response.status() == 503));
+    drop(clients);
+    tx.send(()).unwrap();
+    server.await??;
     Ok(())
 }
 

@@ -182,7 +182,7 @@ export async function converge(origin, generated, {
     const wire = transport(Frame, failure, options);
     const storage = new runtime.NodeStorage(join(state, String(id)));
     const sdk = await runtime.Client.open({
-      url: url.href, frame: Frame, wants: want, identity, storage, socket: wire.connect,
+      url: url.href, frame: Frame, wants: want, identity, storage, credential: crypto.getRandomValues(new Uint8Array(16)), socket: wire.connect,
       onBatch: version => { board.version = version; wire.onBatch(); },
       onState: state => {
         if (['StorageUnavailable', 'Retired', 'Incompatible', 'Fenced'].includes(state)) {

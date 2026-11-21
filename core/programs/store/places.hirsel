@@ -5,7 +5,7 @@
 
 // What a factory's `make` gets to build its PlaceConfig from. The directory replaces the
 // config's backing and selection with the listed ones (§13.3).
-pub type Supplied: send { tasks: Tasks, clock: Clock, random: Random, net: Net, policy: ingress.Ingress }
+pub type Supplied: send { tasks: Tasks, clock: Clock, random: Random, net: Net }
 
 pub opaque type Factory: send { start: own[send] fn(take Launch) -> Result[Started, Refused] }
 
@@ -13,7 +13,7 @@ pub type Listed: send { name: String, factory: Factory, backing: runner.Backing,
 
 pub type DirectoryConfig: send {
     idle_ms: u64, max_places: u64, place_bytes: u64,
-    tasks: Tasks, clock: Clock, random: Random, net: Net, policy: ingress.Ingress,
+    tasks: Tasks, clock: Clock, random: Random, net: Net,
     watch: Option[Sender[Change]],
 }
 
@@ -57,11 +57,11 @@ type State = Absent | Starting(Live, Waiters) | Running(Live, Option[u64]) | Clo
 type Slot { name: String, factory: Factory, backing: runner.Backing, selection: runner.Selection, volatile: bool, state: State }
 // What the directory task starts from; it builds its slots, which hold task handles, itself.
 type Seed: send { listed: List[Listed], inbox: Receiver[DirIn], to: Sender[DirIn], idle_ms: u64, max_places: u64, place_bytes: u64,
-    tasks: Tasks, clock: Clock, random: Random, net: Net, policy: ingress.Ingress, watch: Option[Sender[Change]] }
+    tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]] }
 
 type Actor {
     slots: List[Slot], inbox: Receiver[DirIn], to: Sender[DirIn], idle_ms: u64, max_places: u64, place_bytes: u64,
-    tasks: Tasks, clock: Clock, random: Random, net: Net, policy: ingress.Ingress, watch: Option[Sender[Change]],
+    tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]],
     used: u64, live: u64, stopping: bool, unloaded: List[Unloaded],
 }
 
@@ -151,11 +151,11 @@ pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Res
         }
     }
     let DirectoryConfig(idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net,
-        policy: take policy, watch: take watch) = take config
+        watch: take watch) = take config
     let made: Result[(Sender[DirIn], Receiver[DirIn]), Capacity] = channel.new(64u64)
     let (to, inbox) = match take made { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
     let seed = Seed(listed: take places, inbox: take inbox, to: channel.sender(to), idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, policy: take policy, watch: take watch)
+        tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
     let own = int.saturating_add(DIRECTORY_BYTES, int.saturating_mul(count, DIRECTORY_SLOT_BYTES))
     let running = match task.spawn(tasks, bytes int.saturating_add(place_bytes, own), take seed, run_directory) {
         Ok(take handle) => take handle, Error((cap, _)) => return Error(Full(cap)),
@@ -261,7 +261,7 @@ fn launch(mut a: Actor, index: u64, take waiters: Waiters) waits {
     let made: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
     let (stop_to, stop_from) = match take made { Ok(take pair) => take pair, Error(cap) => { answer_all(take waiters, Full(Reserve(room(cap)))); return } }
     let root = match runner.status_root() { Ok(take made_root) => take made_root, Error(cap) => { answer_all(take waiters, Full(Reserve(room(cap)))); return } }
-    let supplied = Supplied(tasks: a.tasks, clock: a.clock, random: a.random, net: a.net, policy: ingress.share(a.policy))
+    let supplied = Supplied(tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
     let launched = Launch(supplied: take supplied, backing: copy_backing(a.slots[index].backing), selection: a.slots[index].selection,
         available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.to), slot: index)
     let started = (a.slots[index].factory.start)(take launched)
@@ -297,7 +297,7 @@ fn begin_close(take live: Live) -> Live {
 
 fn run_directory(take seed: Seed) -> List[Unloaded] waits {
     let Seed(listed: take listed, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, policy: take policy, watch: take watch) = take seed
+        tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take seed
     let reserved: Result[List[Slot], Capacity] = list.with_capacity(list.len(listed))
     let mut slots = match take reserved { Ok(take made) => take made, Error(_) => return no_unloaded() }
     let mut left = take listed
@@ -309,7 +309,7 @@ fn run_directory(take seed: Seed) -> List[Unloaded] waits {
     }
     list.reverse(mut slots)
     let mut a = Actor(slots: take slots, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, policy: take policy, watch: take watch,
+        tasks: tasks, clock: clock, random: random, net: net, watch: take watch,
         used: 0u64, live: 0u64, stopping: false, unloaded: no_unloaded())
     loop {
         if a.stopping && a.live == 0u64 { return replace(mut a.unloaded, no_unloaded()) }

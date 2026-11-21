@@ -35,7 +35,6 @@ async fn serve() -> Result<()> {
             "--listen" => listen = value,
             "--wal" => wal = value,
             "--per-ip-sessions" => limits.per_ip_sessions = value.parse()?,
-            "--per-ip-new-principals" => limits.per_ip_new_principals = value.parse()?,
             "--principal-rate" => limits.principal_rate = value.parse()?,
             "--principal-burst" => limits.principal_burst = value.parse()?,
             "--wants" => wants = codec::wants_file(std::path::Path::new(&value))?,

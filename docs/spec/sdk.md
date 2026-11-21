@@ -45,7 +45,7 @@ The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.
 
 `frame.js` exports the Frame, Outcome, Fault and Refusal codecs, the fixed Raised
-and BadKind number tables, and `subprotocol = "hirsel.1"`. Frame is a protocol
+and BadKind number tables, and `subprotocol = "hirsel.2"`. Frame is a protocol
 type shared by every executable. The generator computes
 `std.codec.schema(of[runner.Frame]())` from the compiler's bundled runner and
 std sources. Describe contains only per-program data. A Frame change requires
@@ -69,7 +69,7 @@ generated Frame codec and Want list. Browser storage uses strict IndexedDB
 transactions and generation-scoped Web Locks; Node storage uses durable file
 replacement and `flock` leases. Generation validation and each work send share
 the installation lock. Missing allocated stream records fence the generation;
-lost pending requests never migrate to a new principal.
+pending requests are tied to the Caller saved for that stream.
 
 Pending identity and admission uncertainty are durable before send. Returned
 and Failed outcomes commit together with the next position. A definitive V1
@@ -80,6 +80,12 @@ terminal until an explicit reconnect or bindings reload. Reconnection waits for
 all Placed frames, recovers pending calls, and restores subscriptions using new
 ids. Cache replacement waits for Batch.complete.
 
+The application may supply credential bytes in Client options. The client
+sends them in Hello and stores the returned Caller with the stream. It replays
+pending work only when Welcome returns the same Caller. If an anonymous
+connection receives a new anonymous Caller, the client reports any pending
+outcome as LocallyUnknown and starts at position zero for that Caller.
+
 ## Calling an entry from the terminal
 
 `hirsel call SERVER --url ws://HOST:PORT/PATH [-- ENTRY [--FLAG VALUE...]]`
@@ -89,12 +95,11 @@ command prints every entry with its kind, flags and result type. `-- ENTRY
 --help` also prints the entry's named types.
 
 **Transport.** The call is an ordinary client session on the server's ingress,
-as the TypeScript client's is. It sends Hello with no token, so ingress mints a
-fresh anonymous principal; the CLI has no other identity and no privilege. It
-sends one Call on stream 0 at position 0, then reads Batch and Reset frames until
+as the TypeScript client's is. It sends Hello without an application credential.
+It sends one Call on stream 0 at position 0, then reads Batch and Reset frames until
 the Done for that position arrives. There is no debug entry point or second call
-path: a place that admits the TypeScript client admits the CLI the same way, and
-nothing else. The upgrade offers `hirsel.1` and checks
+path: a place applies its credential binding to the CLI's empty credential as it
+would to any other client. The upgrade offers `hirsel.2` and checks
 `Sec-WebSocket-Accept` and the selected subprotocol. `--timeout` bounds the
 connection and is the Call's `deadline_ms`; default 10 seconds. A session that
 ends after the Call was sent reports that the outcome is unknown, and the call

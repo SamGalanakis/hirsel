@@ -27,7 +27,7 @@ source policy after sanitization and before 101, under the original accept
 deadline; refusal is 503. `hello_deadline` exposes the fixed Hello deadline to
 the runner owner. `refuse_socket` sends a bounded HTTP refusal while keeping
 its socket halves inside wsock. `client` uses sixteen
-bytes from host.random for its challenge, requires hirsel.1, rejects extensions,
+bytes from host.random for its challenge, requires hirsel.2, rejects extensions,
 and retains response read-ahead. It returns `Connected` and a client encoder.
 
 `read` drives the pure decoder over the ReadHalf with 8192-byte scratch.

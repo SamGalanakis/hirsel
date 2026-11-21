@@ -693,7 +693,7 @@ def private_server(command, address, out, env, cpu):
 def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
     checkbox, executable, address, wants, tools = prepared
     env = build.capped_env(out)
-    overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
+    overrides = ["--per-ip-sessions", "20000", "--principal-rate", "1000000000"]
     siblings = sibling_cpus((server_cpu, loader_cpu))
     clients, toggles = CHECKBOX_CLIENTS, 200
     for index, (mode, metric) in enumerate(CHECKBOX_METRICS.items()):
@@ -702,7 +702,7 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
             directory = out / f"{mode}-{side}"
             directory.mkdir()
             if side == "hirsel":
-                command = checkbox.command(executable, address, overrides)
+                command = checkbox.command(executable, address, [])
             else:
                 command = [tools / "wire-reference", "--listen", address, "--wal", directory / "wire.wal",
                            "--n-place", checkbox.N_PLACE, "--wants", wants, *overrides]

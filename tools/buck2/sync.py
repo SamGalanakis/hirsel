@@ -108,7 +108,7 @@ TEST_DATA = {
     "hirsel-core-diag-unittest": ["docs/spec/**", "crates/hirsel-core-syntax/src/**", "crates/hirsel-core-resolve/src/**", "crates/hirsel-core-front/src/**"],
     "hirsel-core-resolve-unittest": ["core/core/**", "core/std/*.hirsel"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
-    "hirsel-core-program-tests-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel", "docs/spec/**"],
+    "hirsel-core-program-tests-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel", "docs/PRIMER.md", "docs/spec/**"],
     "hirsel-core-program-tests-test-cranelift_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-program-tests-test-cranelift_source_aarch64": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],

@@ -1509,7 +1509,7 @@ fn net_resolve_fail(tasks: Tasks) -> bool waits {
     reset && fail_cause(task.join(take server))
 }
 
-fn seal_for_unit(_: ()) -> Secret {
+fn seal_for_unit(take _unused: u64) -> Secret {
     sealed_pencil(string.from("beta.test"))
 }
 
@@ -1519,7 +1519,7 @@ fn seal_for_unit(_: ()) -> Secret {
 fn sealed_secret_from_unit(tasks: Tasks) -> bool waits {
     let local = sealed_pencil(string.from("alpha.test"))
     let checked = bound bytes 4392 {
-        let worker = result.unwrap(task.spawn_unit(tasks, bytes 4096, (), seal_for_unit))
+        let worker = result.unwrap(task.spawn_unit(tasks, bytes 4096, 0u64, seal_for_unit))
         let received = result.unwrap(task.join(take worker))
         let available: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 4320)
         let held = match available {

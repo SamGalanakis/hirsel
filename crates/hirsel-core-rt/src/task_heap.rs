@@ -19,9 +19,9 @@
 //! mimalloc's `purge_delay` does for freed arena memory: they stay resident
 //! for reuse, and their native pages go back to the host once a worker has
 //! waited `RELEASE_DELAY_MS` with nothing to run (`purge`). A
-//! heap's retained dedicated payload never takes its dedicated footprint
-//! (live plus retained) above its peak live dedicated bytes, so a program
-//! that repeats the same work reuses the same resident pages.
+//! heap reuses the closest suitable resident dedicated extent, even when
+//! the new block has a different stride. Its live plus retained backing
+//! never exceeds its peak live backing.
 mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
@@ -554,10 +554,10 @@ struct Nursery {
 #[derive(Default)]
 struct DedicatedCache {
     clean: VecDeque<PagePointer>,
-    /// Empty pages with resident payload, oldest first.
+    /// Empty pages with resident backing, oldest first.
     retained: VecDeque<PagePointer>,
     retained_bytes: usize,
-    /// Block strides of live pages: what the program asked for.
+    /// Backing that can be resident in live mappings, including reuse slack.
     demand: usize,
     peak_demand: usize,
     /// The heap is on `RETAINING`.
@@ -786,25 +786,21 @@ impl State {
         }
     }
 
-    /// An empty page for `class`, and the payload bytes reuse makes newly resident.
-    fn cached(&mut self, class: Class) -> Option<(PagePointer, usize)> {
+    fn cached(&mut self, class: Class) -> Option<PagePointer> {
         if class.fits_slab() {
-            return self.empty_slabs.pop_back().map(|page| (page, 0));
+            return self.empty_slabs.pop_back();
         }
         self.dedicated.take(class)
     }
 }
 
 impl DedicatedCache {
-    /// Count a live block's change from stride `from` to `to`. When `fresh`
-    /// bytes became resident, purge the oldest retained pages while live
-    /// demand plus retained payload exceeds the peak demand. Reusing resident
-    /// payload adds nothing, so a program that repeats its work keeps its
-    /// pages.
-    fn add_live(&mut self, from: usize, to: usize, fresh: usize) {
+    /// When backing grows, return older stock above the peak live footprint.
+    /// Moving the same backing between the live and retained sets adds nothing.
+    fn add_live(&mut self, from: usize, to: usize, grew: bool) {
         self.demand = self.demand - from + to;
         self.peak_demand = self.peak_demand.max(self.demand);
-        while fresh != 0
+        while grew
             && !self.retained.is_empty()
             && self.demand + self.retained_bytes > self.peak_demand
         {
@@ -813,40 +809,53 @@ impl DedicatedCache {
         }
     }
 
-    fn take(&mut self, class: Class) -> Option<(PagePointer, usize)> {
-        // A retained page goes back only to a block of the stride it was first
-        // allocated at, as an emptied slab serves only its own class: a program
-        // that repeats its work gets the same pages back, and a page never
-        // gathers the touched bytes of differently shaped blocks. Otherwise
-        // take a clean page, which holds none of its payload.
-        let fits = |page: &PagePointer, born: bool| {
+    fn take(&mut self, class: Class) -> Option<PagePointer> {
+        let needed = class.stride.checked_next_multiple_of(page_bytes())?;
+        let fit = |page: PagePointer| {
             // SAFETY: the heap owns these empty pages and their mappings.
-            let page = unsafe { page.as_ref() };
-            let payload = unsafe { (*page.slots.get()).first };
-            let backing = page.backing.dedicated();
-            (!born || backing.born.get() == class.stride)
-                && backing.extent(payload) >= class.stride
-                && payload.addr().get() & (class.align - 1) == 0
-                && backing.headroom(payload) >= own_prefix(class.kind)
-        };
-        let (page, resident) =
-            if let Some(index) = self.retained.iter().rposition(|page| fits(page, true)) {
-                let page = self.remove_retained(index);
-                // SAFETY: this heap exclusively owns the removed empty page.
-                (page, unsafe {
-                    page.as_ref().backing.dedicated().writable.get()
-                })
-            } else {
-                let index = self.clean.iter().position(|page| fits(page, false))?;
-                (self.clean.swap_remove_back(index).unwrap(), 0)
+            let (backing, payload) = unsafe {
+                let page = page.as_ref();
+                (page.backing.dedicated(), (*page.slots.get()).first)
             };
+            let extent = backing.extent(payload);
+            (extent >= needed
+                && payload.addr().get() & (class.align - 1) == 0
+                && backing.headroom(payload) >= own_prefix(class.kind))
+            .then(|| (extent, backing.used.get()))
+        };
+        // Prefer the smallest resident fit, then the one that needs the least
+        // growth. A block may carry at most its own size in resident payload
+        // slack. Larger mismatches remain reclaimable as stock.
+        let retained =
+            self.retained
+                .iter()
+                .copied()
+                .enumerate()
+                .rev()
+                .filter_map(|(index, page)| {
+                    let (_, used) = fit(page)?;
+                    (used.saturating_sub(needed) <= needed)
+                        .then_some((index, (used < needed, used.abs_diff(needed))))
+                });
+        let page = if let Some((index, _)) = retained.min_by_key(|&(_, rank)| rank) {
+            self.remove_retained(index)
+        } else {
+            let (index, _) = self
+                .clean
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(index, page)| fit(page).map(|(extent, _)| (index, extent)))
+                .min_by_key(|&(_, extent)| extent)?;
+            self.clean.swap_remove_back(index).unwrap()
+        };
         // SAFETY: the page has been taken off the cache and has no live slots.
         unsafe {
             let header = page.as_ref();
             let payload = (*header.slots.get()).first;
             let backing = header.backing.dedicated();
             if backing.extend(payload, class.stride) {
-                Some((page, backing.writable.get() - resident))
+                Some(page)
             } else {
                 Page::destroy(page);
                 None
@@ -854,17 +863,15 @@ impl DedicatedCache {
         }
     }
 
-    /// Keep an emptied page resident for reuse; its stride leaves the live
-    /// demand and its payload joins the retained bytes. Returns whether the heap must be put on `RETAINING`.
+    /// Move an emptied page's backing from live demand to retained stock.
+    /// Returns whether the heap must be put on `RETAINING`.
     fn retain(&mut self, page: PagePointer) -> bool {
         // SAFETY: this heap owns the empty page, its mapping and its key.
-        let (bytes, stride) = unsafe {
-            (
-                page.as_ref().backing.dedicated().writable.get(),
-                Page::key(page).class.stride,
-            )
+        let bytes = unsafe {
+            let page = page.as_ref();
+            page.backing.dedicated().backed((*page.slots.get()).first)
         };
-        self.demand -= stride;
+        self.demand -= bytes;
         self.retained_bytes += bytes;
         self.retained.push_back(page);
         !std::mem::replace(&mut self.listed, true)
@@ -873,7 +880,10 @@ impl DedicatedCache {
     fn remove_retained(&mut self, index: usize) -> PagePointer {
         let page = self.retained.remove(index).unwrap();
         // SAFETY: this heap exclusively owns the removed empty page.
-        self.retained_bytes -= unsafe { page.as_ref().backing.dedicated().writable.get() };
+        self.retained_bytes -= unsafe {
+            let page = page.as_ref();
+            page.backing.dedicated().backed((*page.slots.get()).first)
+        };
         page
     }
 
@@ -881,7 +891,7 @@ impl DedicatedCache {
         // SAFETY: the heap owns this empty page and its separate descriptor.
         let header = unsafe { page.as_ref() };
         let payload = unsafe { (*header.slots.get()).first };
-        if !header.backing.dedicated().discard_writable(payload) {
+        if !header.backing.dedicated().discard_used(payload) {
             // SAFETY: the page is empty and detached from both queues.
             unsafe { Page::destroy(page) };
             return;
@@ -1061,21 +1071,20 @@ impl Heap {
             {
                 return state.finish_allocation(pointer, class);
             }
-            let (page, fresh) = if let Some(page) = ready {
-                (page, None)
-            } else if let Some((page, fresh)) = state.cached(class) {
+            let page = if let Some(page) = ready {
+                page
+            } else if let Some(page) = state.cached(class) {
                 Page::reuse(page, payer, key);
-                (page, Some(fresh))
+                page
             } else {
-                (Page::new(heap, payer, key), None)
+                Page::new(heap, payer, key)
             };
             if !slab {
+                let payload = (*page.as_ref().slots.get()).first;
                 let backing = page.as_ref().backing.dedicated();
-                backing.born.set(class.stride);
-                let writable = backing.writable.get();
-                state
-                    .dedicated
-                    .add_live(0, class.stride, fresh.unwrap_or(writable));
+                let before = backing.backed(payload);
+                let after = backing.use_extent(payload, class.stride);
+                state.dedicated.add_live(0, after, after > before);
             }
             if (*page.as_ref().slots.get()).free.is_null() {
                 extend(&mut state, page, class);
@@ -1286,14 +1295,14 @@ pub(crate) unsafe fn try_grow_in_place(
         let key = Page::key(page);
         let class = Class::for_block(bytes, align, kind, true);
         let backing = header.backing.dedicated();
-        let before = backing.writable.get();
         if !backing.extend(payload, class.stride) {
             return false;
         }
-        let added = backing.writable.get() - before;
+        let before = backing.backed(payload);
+        let after = backing.use_extent(payload, class.stride);
         heap.lock()
             .dedicated
-            .add_live(key.class.stride, class.stride, added);
+            .add_live(before, after, after > before);
         header.key.get().write(Key { class, ..key });
         #[cfg(feature = "memcheck")]
         {
@@ -1633,9 +1642,9 @@ struct Mapping {
     // Dedicated payload bytes made writable. A live slot's sole owner or the
     // empty cache under the heap mutex can update this extent.
     writable: Cell<usize>,
-    // The stride of the block a dedicated page was last allocated for, before
-    // any growth in place. Updated by the allocating heap under its mutex.
-    born: Cell<usize>,
+    // The payload extent that may have been touched since the last purge.
+    // Writable pages beyond it are still clean.
+    used: Cell<usize>,
 }
 impl Mapping {
     const WRITABLE: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
@@ -1707,7 +1716,7 @@ impl Mapping {
                 base,
                 len,
                 writable: Cell::new(bytes),
-                born: Cell::new(0),
+                used: Cell::new(0),
             };
             if space != bytes
                 && libc::mprotect(base.as_ptr().cast(), headroom + bytes, Self::WRITABLE) != 0
@@ -1753,10 +1762,29 @@ impl Mapping {
         true
     }
 
-    fn discard_writable(&self, payload: NonNull<u8>) -> bool {
-        let bytes = self.headroom(payload) + self.writable.get();
+    fn backed(&self, payload: NonNull<u8>) -> usize {
+        let used = self.used.get();
+        if used == 0 {
+            0
+        } else {
+            self.headroom(payload) + used
+        }
+    }
+
+    fn use_extent(&self, payload: NonNull<u8>, bytes: usize) -> usize {
+        self.used
+            .set(self.used.get().max(bytes.next_multiple_of(page_bytes())));
+        self.backed(payload)
+    }
+
+    fn discard_used(&self, payload: NonNull<u8>) -> bool {
         // SAFETY: the empty dedicated mapping owns this whole writable range.
-        unsafe { Mapping::discard(self.base, bytes) }
+        if unsafe { Mapping::discard(self.base, self.backed(payload)) } {
+            self.used.set(0);
+            true
+        } else {
+            false
+        }
     }
 
     /// # Safety
@@ -2008,9 +2036,12 @@ mod tests {
         let context = Context::new(OVERSIZED as u64);
         let payer = context.payer();
         let heap = context.heap.get_or_init(Arc::default);
-        let allocate = |bytes, kind| {
+        let allocate_unwritten = |bytes, kind| {
             block::admit_storage(payer, Some(bytes as u64)).unwrap();
-            let pointer = Heap::allocate(heap, payer, bytes, 8, kind, true);
+            Heap::allocate(heap, payer, bytes, 8, kind, true)
+        };
+        let allocate = |bytes, kind| {
+            let pointer = allocate_unwritten(bytes, kind);
             // SAFETY: this test owns the new buffer and initializes its first page.
             unsafe { pointer.as_ptr().write_bytes(0x5a, 4096) };
             pointer
@@ -2033,9 +2064,26 @@ mod tests {
         // keeping the 8 KiB page would hold more than the peak.
         let large = allocate(LARGE, block::PLAIN);
         let (base, len) = mapping(large);
+        // SAFETY: the test owns LARGE writable bytes.
+        unsafe { large.add(page_bytes()).write(0x5a) };
         assert!(!resident(small));
         free(large, LARGE);
         assert!(resident(large));
+
+        // A different stride that fits the resident mapping reuses it without
+        // faulting, and MEM-21 charges the new request independently of its backing.
+        const MEDIUM: usize = LARGE / 2;
+        let medium = allocate_unwritten(MEDIUM, block::PLAIN);
+        // SAFETY: the second page lies within MEDIUM. Allocation itself
+        // touches the first page to thread the slot, so observe the second.
+        assert!(
+            resident(unsafe { medium.add(page_bytes()) }),
+            "a compatible dedicated page lost residency before reuse"
+        );
+        assert_eq!(medium, large);
+        assert_eq!(context.available(), (OVERSIZED - MEDIUM) as u64);
+        free(medium, MEDIUM);
+
         // However long the heap stays busy, its payload stays until a worker idles.
         purge();
         assert_eq!(heap.lock().dedicated.retained_bytes, 0);

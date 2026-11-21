@@ -35,12 +35,13 @@ def board_window_ok():
 class Block:
     """with Block(cpus) as b: ... ; b.clean says whether to keep the data."""
 
-    def __init__(self, cpus, log=print):
+    def __init__(self, cpus, log=print, board=None):
         self.cpus = set(cpus)
         bad = self.cpus & FORBIDDEN
         if bad:
             raise SystemExit(f"forbidden CPUs {sorted(bad)}")
-        self.board = bool(self.cpus & {10, 11})
+        # The board lock too when the block touches CPUs 10-11, or when asked.
+        self.board = bool(self.cpus & {10, 11}) if board is None else board
         self.log = log
         self.files = []
         self.clean = False

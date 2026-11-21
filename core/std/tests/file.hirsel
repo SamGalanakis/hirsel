@@ -274,7 +274,7 @@ fn peer_replies_during_sleep(_net: Net, clock: Clock, tasks: Tasks) -> bool wait
 // The native FIFO fixture writes one byte 50 ms after it reads "ready".
 fn peer_replies_during_fifo(d: Dir, clock: Clock, tasks: Tasks, out: Stdout) -> bool waits {
     let mut f = result.unwrap(host.open(d, "handoff.fifo", Read))
-    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    let mut b: Bytes = list.with_capacity(1)
     let (take peer, requests, replies) = handoff_start(clock, tasks)
     result.unwrap(stdout.write(out, "ready\n"))
     let start = host.mono_ns(clock)

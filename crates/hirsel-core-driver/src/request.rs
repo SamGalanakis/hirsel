@@ -580,7 +580,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         options.logical_charge_report = logical_charge_report;
         options.recording = needs_recording;
         let recipe = release_manifest.as_ref().map(|_| recipe.clone());
-        let product = publication.assemble(&options, Default::default())?;
+        let prebuilt = installed_std.as_ref().map(|image| {
+            image
+                .store_root()
+                .join(crate::native::std_release::PREBUILT)
+        });
+        let product =
+            publication.assemble_with(&options, Default::default(), None, prebuilt.as_deref())?;
         if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
             crate::release_manifest::write(
                 &path,
@@ -624,10 +630,19 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 if let Some(runtime) = &runtime {
                     let bytes = std::fs::read(runtime)?;
                     crate::installation::check_runtime(runtime, &bytes, false)?;
+                    let recording = recording_runtime
+                        .as_deref()
+                        .map(|path| {
+                            let bytes = std::fs::read(path)?;
+                            crate::installation::check_runtime(path, &bytes, true)?;
+                            std::io::Result::Ok(bytes)
+                        })
+                        .transpose()?;
                     crate::installation::prebuild_release(
                         &package.image,
                         &target,
                         &bytes,
+                        recording.as_deref(),
                         &mut meter,
                     )?;
                 }
@@ -1027,29 +1042,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     let recipe = release_manifest
                         .as_ref()
                         .map(|_| publication.recipe.clone());
-                    // The separate release std (std-reuse-1520 S1) stays
-                    // behind this selector until Guard B passes.
-                    let std = (std::env::var_os("HIRSEL_STD_SEPARATE").is_some()
-                        && options.optimize
-                        && matches!(options.backend, crate::native::Backend::Llvm))
-                    .then(|| {
-                        let runtime = match &options.observed {
-                            Some(observed) => observed.0.runtime,
-                            None => {
-                                crate::tool_inputs::toolchain(
-                                    &options.link,
-                                    &options.target,
-                                    &options.runtime,
-                                )?
-                                .0
-                                .runtime
-                            }
-                        };
-                        product.std_side(options, runtime)
-                    })
-                    .transpose();
-                    let built = std
-                        .and_then(|std| publication.assemble_with(options, reached.counters, std));
+                    let built =
+                        publication.assemble_with(options, reached.counters, Some(&product), None);
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, recipe)
                     {

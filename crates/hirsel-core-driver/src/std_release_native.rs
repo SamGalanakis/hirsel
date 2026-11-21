@@ -1,21 +1,27 @@
-// The release std (std-reuse-1520 S1, S2). Two laws over the image-backed std:
+// The release std (std-reuse-1520 S1, S2; std-cutover-1569). Two laws over
+// the separately lowered std every optimised LLVM build takes:
 //
-// Independence: the std's parts, and the bodies it lends, are a function of
-// the std product. The std product's own prebuild, and a program's build over
-// the same image lowering the std cold into its own parts store, hold equal
-// record and part bytes. Mutant: the
-// std's roots less the definitions a program reaches, red on "the std's record".
+// Independence: a std side is a function of its units' content, toolchain and
+// variant. The std product's own prebuild, and a program's build over another
+// image of the same std lowering the std cold into its own parts store, hold
+// equal key, record, part and lent bytes. A recipe assembled after its source
+// and image are gone takes the side its build stored and links the same
+// executable. A program checked over library sources whose one std function it
+// reaches through other std roots was edited misses the side lowered before
+// the edit, and does what the edited std says. Mutant: the std's roots less
+// the definitions a program reaches, red on "the std's record".
 //
 // Semantic differential: a program assembled over the separately lowered std,
 // calling it out of line (Parts) or importing and inlining its small bodies
-// (Imported), does and reports what the same program assembled whole does: its
+// (Imported), does and reports what the same program's Cranelift development
+// build, which holds every std body it reaches as its own object, does: its
 // exit, output and failure report, its logical charge report, its failure
-// under a root step limit, and how its recorded tape replays. Oracle: the
-// out-of-line assembly over the same std parts. Mutants: the std's site points
-// left out of the program's source map, and imported bodies whose site rows
-// are rebased to the program, each red on "fails plain Imported: what the
-// program does and reports"; imported bodies that charge one step more than
-// their parts, red on the same assertion (the printed step thresholds).
+// under a root step limit, and how its recorded tape replays. Mutants: the
+// std's site points left out of the program's source map, and imported bodies
+// whose site rows are rebased to the program, each red on "fails plain
+// Imported: what the program does and reports"; imported bodies that charge
+// one step more than their parts, red on the same assertion (the printed step
+// thresholds).
 
 /// A program over small plain std bodies the program imports and inlines (the
 /// std part holds each out of line): it prints the fewest steps under which three
@@ -96,12 +102,12 @@ fn std_checked(dir: &Path, project: &str, source: &str, cache: &str) -> Arc<Chec
     product
 }
 
-fn std_of(product: &CheckProduct, options: &NativeOptions) -> crate::native::std_release::StdSide {
-    let runtime = crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)
-        .unwrap()
-        .0
-        .runtime;
-    product.std_side(options, runtime).unwrap()
+fn std_of(
+    product: &CheckProduct,
+    options: &NativeOptions,
+    publication: &crate::native::recipe_build::Publication,
+) -> Option<crate::native::std_release::StdSide> {
+    publication.std_side(options, Some(product), None).unwrap()
 }
 
 /// What a run of a program shows: exit, stdout, stderr, charge report, tape.
@@ -110,8 +116,8 @@ type Shown = (Option<i32>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 /// How a program's build takes the std.
 #[derive(Clone, Copy, Debug)]
 enum StdBuild {
-    /// Composed with the program.
-    Whole,
+    /// The Cranelift development build: every std body it reaches is its own.
+    Dev,
     /// Over the std's parts alone: each call reaches the out-of-line part.
     Parts,
     /// Over the std's parts, with its lent bodies imported for inlining.
@@ -124,21 +130,27 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
     use crate::native::recipe_build::Publication;
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let code = crate::code_store::CodeStore::new(dir.join("code"));
+    let dev = NativeOptions {
+        backend: Backend::Cranelift,
+        optimize: false,
+        ..options.clone()
+    };
+    let options = if matches!(build, StdBuild::Dev) { &dev } else { options };
     let reached = product.reachable(&entry, options.instance_limit).unwrap();
     let publication = product
         .publish_release(&entry, &reached, options, &code, 16 * 1024 * 1024)
         .unwrap();
     let std = match build {
-        StdBuild::Whole => None,
-        StdBuild::Parts => Some(crate::native::std_release::StdSide { lent: Vec::new(), ..std_of(product, options) }),
-        StdBuild::Imported => Some(std_of(product, options)),
+        StdBuild::Dev => None,
+        // A program reaching no plain library root lowers its library
+        // instances itself, as every leg does.
+        StdBuild::Parts => std_of(product, options, &publication)
+            .map(|std| crate::native::std_release::StdSide { lent: Vec::new(), ..std }),
+        StdBuild::Imported => std_of(product, options, &publication),
     };
-    if let Some(std) = &std {
-        assert!(!std.roots.is_empty(), "the std holds roots");
-    }
     let built = Publication::open(&code, publication.root, &crate::request::local_admission_limits())
         .unwrap()
-        .assemble_with(options, reached.counters, std)
+        .assemble_over(options, reached.counters, std)
         .unwrap();
     if let Some(report) = &options.logical_charge_report {
         let _ = std::fs::remove_file(report);
@@ -165,37 +177,94 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
 #[test]
 #[ignore = "explicit native integration target"]
 fn a_separate_std_is_the_std_products_alone() {
+    use crate::native::recipe_build::Publication;
     let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut parts = Vec::new();
     // The first program's std comes from the std product's own prebuild in
     // its image; the second's image holds none, so its build lowers the std.
-    for ((name, source), cache) in [(UNIT_PROGRAMS[0], "cache"), (UNIT_PROGRAMS[2], "cache-b")] {
+    for ((name, source), cache) in [(UNIT_PROGRAMS[1], "cache"), (UNIT_PROGRAMS[2], "cache-b")] {
         let product = std_checked(dir.path(), name, source, cache);
         let mut options = native_options(Backend::Llvm, &dir.path().join(name));
         options.optimize = true;
         options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+        options.grant_mask = if source.contains("out: Stdout") { 1 << 4 } else { 0 };
         let image = product.image.as_ref().unwrap().store_root().join("release-std");
         if cache == "cache" {
             let runtime = crate::tool_inputs::runtime_identity(hirsel_core_ids::ContentHash::of_bytes(
                 &std::fs::read(&options.runtime).unwrap(),
             ));
-            product.prebuild_release_std(&options.target, runtime).unwrap();
+            product.prebuild_release_std(&options.target, &[(runtime, options.debug_lines)]).unwrap();
         }
-        let std = std_of(&product, &options);
+        let code = crate::code_store::CodeStore::new(dir.path().join(name).join("code"));
+        let reached = product.reachable(&entry, options.instance_limit).unwrap();
+        let publication =
+            product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
+        let std = std_of(&product, &options, &publication).expect("the program reaches a plain std root");
         let store = Store::new(if cache == "cache" { &image } else { &options.parts }).unwrap();
         let record = store.get(std.key).unwrap().expect("the std record");
         let bytes: Vec<Vec<u8>> =
             std.objects.iter().map(|object| std::fs::read(&object.path).unwrap()).collect();
         assert!(!std.lent.is_empty(), "the std lends bodies");
         parts.push((std.key, record, bytes, std.lent));
+        if cache == "cache-b" {
+            // The recipe outlives its inputs: with the program's source and
+            // image gone, it assembles over the side its build stored.
+            let root = publication.root();
+            let built = publication.assemble_with(&options, reached.counters, Some(&product), None).unwrap();
+            let first = std::fs::read(&built.executable).unwrap();
+            drop(product);
+            std::fs::remove_dir_all(dir.path().join(cache)).unwrap();
+            std::fs::remove_file(dir.path().join(name).join("main.hirsel")).unwrap();
+            std::fs::remove_file(&built.executable).unwrap();
+            let again = Publication::open(&code, root, &crate::request::local_admission_limits())
+                .unwrap()
+                .assemble_with(&options, Default::default(), None, None)
+                .unwrap();
+            assert!(std::fs::read(&again.executable).unwrap() == first, "the recipe's executable");
+        }
     }
     assert_eq!(parts[0].0, parts[1].0, "the std key");
     assert!(parts[0].1 == parts[1].1, "the std's record");
     assert!(parts[0].2 == parts[1].2, "the std's parts");
     assert!(parts[0].3 == parts[1].3, "the std's lent bodies");
+
+    // A std edit the program reaches only through other std roots misses:
+    // with `list.find_byte` finding nothing, `string.split_once` finds no
+    // separator and the program ends with its status 2 and writes nothing,
+    // where over the unedited std it writes "right" and ends 0.
+    let libraries = dir.path().join("libraries");
+    copy_tree(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core"), &libraries);
+    let (name, source) = UNIT_PROGRAMS[2];
+    let project = dir.path().join("sources");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("main.hirsel"), source).unwrap();
+    let mut options = native_options(Backend::Llvm, &project);
+    options.optimize = true;
+    options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+    options.grant_mask = 1 << 4;
+    let run = |label: &str| {
+        let request = CheckRequest::program(&project, &libraries, &project.join(label)).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        assert!(product.accepted() && product.image.is_none(), "{name} {label}");
+        let code = crate::code_store::CodeStore::new(project.join(label).join("code"));
+        let reached = product.reachable(&entry, options.instance_limit).unwrap();
+        let publication =
+            product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
+        let built = publication.assemble_with(&options, reached.counters, Some(&product), None).unwrap();
+        let run = Command::new(&built.executable).current_dir(&project).output().unwrap();
+        (run.status.code(), run.stdout)
+    };
+    assert_eq!(run("before"), (Some(0), b"right".to_vec()), "over the unedited std");
+    let list = libraries.join("std/list.hirsel");
+    let text = std::fs::read_to_string(&list).unwrap();
+    let head = "pub fn find_byte(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {\n";
+    assert!(text.contains(head), "list.find_byte");
+    std::fs::write(&list, text.replace(head, &format!("{head}    if end >= start {{\n        return None\n    }}\n"))).unwrap();
+    assert_eq!(run("after"), (Some(2), Vec::new()), "over the edited std");
 }
 
-/// Each corpus program, assembled whole and over the separate std, under each
+/// Each corpus program, built for development and over the separate std, under each
 /// of `modes` (the options a mode changes from the base); the number of runs
 /// whose tape both builds replayed.
 fn std_differential(modes: &[&str]) -> usize {
@@ -233,12 +302,13 @@ fn std_differential(modes: &[&str]) -> usize {
                 },
                 _ => unreachable!("{mode}"),
             };
-            // The out-of-line parts are the oracle: a composed build, and an
-            // inlined copy of a std body, does and reports what its part does.
-            let parts = std_run(&product, &options, StdBuild::Parts, &project);
-            let builds = [StdBuild::Parts, StdBuild::Whole, StdBuild::Imported];
-            let mut tapes = vec![(StdBuild::Parts, parts.4.clone())];
-            for build in [StdBuild::Whole, StdBuild::Imported] {
+            // The development build is the oracle: a call to the std's part,
+            // and an inlined copy of a std body, does and reports what the
+            // program's own copy of the std body does.
+            let parts = std_run(&product, &options, StdBuild::Dev, &project);
+            let builds = [StdBuild::Dev, StdBuild::Parts, StdBuild::Imported];
+            let mut tapes = vec![(StdBuild::Dev, parts.4.clone())];
+            for build in [StdBuild::Parts, StdBuild::Imported] {
                 let shown = std_run(&product, &options, build, &project);
                 assert_eq!(
                     (parts.0, &parts.1, &parts.2),
@@ -264,7 +334,7 @@ fn std_differential(modes: &[&str]) -> usize {
                     grant_mask: 0,
                     ..options.clone()
                 };
-                let on_parts = std_run(&product, &replay, StdBuild::Parts, &project);
+                let on_parts = std_run(&product, &replay, StdBuild::Dev, &project);
                 for build in builds {
                     let on = std_run(&product, &replay, build, &project);
                     assert_eq!(

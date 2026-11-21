@@ -1,6 +1,6 @@
 //! Publish the checked program and assemble its recipe with a local toolchain.
 
-use super::std_release::StdSide;
+use super::std_release::{StdSide, std_side};
 use super::*;
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
@@ -39,6 +39,7 @@ impl AssemblyRecord {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Unit {
     code: BodyRef,
     pub(super) module: Module,
@@ -97,7 +98,7 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
 pub struct Publication {
     pub(crate) root: ContentHash,
     pub(crate) recipe: Recipe,
-    units: BTreeMap<Identity, Unit>,
+    pub(super) units: BTreeMap<Identity, Unit>,
     addresses: BTreeMap<Identity, ContentHash>,
 }
 
@@ -705,37 +706,79 @@ impl Publication {
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
     ) -> Result<BuildProduct, NativeStop> {
-        self.assemble_with(options, counters, None)
+        self.assemble_with(options, counters, None, None)
     }
 
-    /// [`Self::assemble`], with the program's plain std units taken from
-    /// `std` (a separately lowered release std) when given: the program holds
-    /// none of their bodies and calls each by its exported symbol.
+    /// [`Self::assemble`] of a program checked as `product`. An optimised
+    /// LLVM build takes the program's plain library units from a separately
+    /// lowered release std ([`std_side`]): the program holds none of their
+    /// bodies and calls each by its exported symbol. That std is read first
+    /// from `prebuilt` (a library image's store), else from `product`'s image.
     pub(crate) fn assemble_with(
+        self,
+        options: &NativeOptions,
+        counters: crate::reach::ReachCounters,
+        product: Option<&CheckProduct>,
+        prebuilt: Option<&Path>,
+    ) -> Result<BuildProduct, NativeStop> {
+        let std = self.std_side(options, product, prebuilt)?;
+        self.assemble_over(options, counters, std)
+    }
+
+    /// The separately lowered release std an optimised LLVM build of this
+    /// publication under `options` takes ([`std_side`]); None for any other.
+    pub(crate) fn std_side(
+        &self,
+        options: &NativeOptions,
+        product: Option<&CheckProduct>,
+        prebuilt: Option<&Path>,
+    ) -> Result<Option<StdSide>, NativeStop> {
+        let (options, _) = self.launch(options)?;
+        if !matches!(options.backend, Backend::Llvm) || !options.optimize {
+            return Ok(None);
+        }
+        let runtime = match &options.observed {
+            Some(observed) => observed.0.runtime,
+            None => {
+                crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?
+                    .0
+                    .runtime
+            }
+        };
+        std_side(
+            &self.units,
+            &self.recipe.entry,
+            product,
+            prebuilt,
+            &options,
+            runtime,
+        )
+    }
+
+    /// The options the recipe's launch fixes over `options`, and its entry's
+    /// declaration.
+    fn launch(&self, options: &NativeOptions) -> Result<(NativeOptions, EntryDecl), NativeStop> {
+        let names = self.units[&self.recipe.entry]
+            .annex
+            .1
+            .as_deref()
+            .ok_or_else(|| {
+                NativeStop::Entry("recipe entry has no startup parameter names".into())
+            })?;
+        launch_options(&self.recipe, names, options)
+    }
+
+    /// Assemble the program over `std` (a separately lowered release std)
+    /// when given: the program holds none of its roots' bodies and calls each
+    /// by its exported symbol.
+    pub(crate) fn assemble_over(
         mut self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
         std: Option<StdSide>,
     ) -> Result<BuildProduct, NativeStop> {
         let entry_identity = self.recipe.entry.clone();
-        if let Some(std) = &std {
-            self.units
-                .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
-        }
-        let entry = &self.recipe.entry;
-        let names = self.units[entry].annex.1.as_deref().ok_or_else(|| {
-            NativeStop::Entry("recipe entry has no startup parameter names".into())
-        })?;
-        let (options, decl) = launch_options(&self.recipe, names, options)?;
-        let no_points = BTreeMap::new();
-        let sources = bind_annexes(
-            &mut self.units,
-            std.as_ref().map_or(&no_points, |std| &std.points),
-            !matches!(options.backend, Backend::Llvm) || !options.optimize,
-        )?;
-        let root = &self.units[entry];
-        let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
-            .map_err(NativeStop::Entry)?;
+        let (options, decl) = self.launch(options)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)
             .filter(|_| options.backend.supports_target(&options.target))
             .ok_or_else(|| {
@@ -747,6 +790,20 @@ impl Publication {
                 crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?
             }
         };
+        if let Some(std) = &std {
+            self.units
+                .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
+        }
+        let entry = &self.recipe.entry;
+        let no_points = BTreeMap::new();
+        let sources = bind_annexes(
+            &mut self.units,
+            std.as_ref().map_or(&no_points, |std| &std.points),
+            !matches!(options.backend, Backend::Llvm) || !options.optimize,
+        )?;
+        let root = &self.units[entry];
+        let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
+            .map_err(NativeStop::Entry)?;
         // Native bodies and lent std code can operate on the same live Map.
         let emission = environment(&options, tools.runtime)?;
         let emitter = key(

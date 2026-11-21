@@ -25,9 +25,15 @@ def main():
     cmd = [ROOT / "tools/capped", compiler, "run" if record else "build", "--inputs", inputs,
            "--entry", f"multicore@1/{case}/main", "--backend", "llvm", "--release",
            "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
-           "--dir", os.environ.get("UNITS_DIR", str(out)), "--grant", "Tasks", "--grant", "Clock",
-           "--grant", "Stderr", "--grant", net, "--limit", os.environ.get("UNITS_LIMIT", "1073741824"),
+           "--grant", "Tasks", "--grant", "Clock",
+           "--grant", "Stderr", "--limit", os.environ.get("UNITS_LIMIT", "1073741824"),
            "--debug-lines", "on", "--json", "-o", out / case]
+    # Grant Net and a directory only to a program whose entry takes them.
+    text = src.read_text()
+    if "Net" in text:
+        cmd += ["--grant", net]
+    if "Dir" in text:
+        cmd += ["--dir", os.environ.get("UNITS_DIR", str(out))]
     for g in grants:
         cmd += ["--grant", g]
     if record:

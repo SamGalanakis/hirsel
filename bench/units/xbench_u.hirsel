@@ -1,7 +1,18 @@
-// mc-units-untied crossing microbenchmarks (16-bit unit addresses). Crossing
-// modes run under HIRSEL_UNTIED=W HIRSEL_UNITS=K; the launcher appends the
-// unit id, K and the unit's role to the arguments.
+// Unit and connection microbenchmarks. The x_ modes run helper units made with
+// task.spawn_unit and meet them only through connections; run them under
+// HIRSEL_UNTIED=W so the units share W pool workers. The c_ modes are the same
+// shapes on local channels inside one unit.
+//
+// Arguments: mode n size, then
+//   x_pingpong, x_pipe, c_pingpong: nothing more
+//   c_pipe: depth
+//   x_fanin, c_fanin: grain producers (c_fanin: producers grain)
+//   x_svc: nothing more (size is ignored)
+//   x_ring: units
+// Each reports `<mode> n=<n> ns=<elapsed> check=<sum>` on stderr.
 const TASK_BYTES: u64 = 65536
+const HELPER_BYTES: u64 = 1048576
+const PIPE_DEPTH: u64 = 64
 
 fn kernel(seed: u64, rounds: u64) -> u64 {
     let mut x = seed
@@ -18,42 +29,12 @@ fn arg(argv: Args, i: u64) -> u64 {
     result.unwrap(int.parse(v))
 }
 
-fn unit_addr(unit: u64, port: u16) -> Addr {
-    let lo: u32 = int.truncate(unit)
-    Addr(ip: V4(0x7f4d0000 | lo), port: port)
-}
-
-fn connect_retry(nw: Net, clock: Clock, a: Addr) -> Socket waits {
-    loop {
-        match host.connect(nw, a, Never) {
-            Ok(take s) => return take s,
-            Error(_) => host.sleep_until(clock, host.mono_ns(clock) + 200000),
-        }
-    }
-}
-
 fn payload(size: u64, seed: u64) -> Bytes {
     let mut b: Bytes = result.unwrap(list.with_capacity(size))
     for i in 0 .. size {
         result.unwrap(list.push(mut b, int.truncate(i * 31 + seed)))
     }
     b
-}
-
-fn send_all(mut w: WriteHalf, b: Bytes) waits {
-    let n = result.unwrap(host.send_pair(mut w, b, string.as_bytes(""), Never))
-    if n != list.len(b) { fail("short crossing send") }
-}
-
-// Receive exactly `size` bytes into buf (cleared first). Returns false at end.
-fn recv_exact(mut r: ReadHalf, mut buf: Bytes, size: u64) -> bool waits {
-    list.clear(mut buf)
-    while list.len(buf) < size {
-        let want = size - list.len(buf)
-        let got = result.unwrap(host.recv_bounded(mut r, mut buf, want, Never))
-        if got == 0 { return false }
-    }
-    true
 }
 
 fn report(err: Stderr, name: String, n: u64, ns: u64, check: u64) waits {
@@ -69,128 +50,234 @@ fn report(err: Stderr, name: String, n: u64, ns: u64, check: u64) waits {
     result.unwrap(stderr.write(err, line))
 }
 
-// ---- crossing request/reply: unit 0 asks, unit 1 echoes (first byte + 1).
-fn x_echo(nw: Net, n: u64, size: u64) waits {
-    let (take l, _) = result.unwrap(host.listen(nw, unit_addr(1, 1), 16))
-    let mut listener = take l
-    let (take s, _) = result.unwrap(host.accept(mut listener, Never))
-    let (rh, wh) = net.split(take s)
-    let mut r = take rh
-    let mut w = take wh
-    let mut buf: Bytes = result.unwrap(list.with_capacity(size))
-    for _ in 0 .. n {
-        if !recv_exact(mut r, mut buf, size) { fail("echo: closed") }
-        let first: u8 = buf[0]
-        let _ = list.set(mut buf, 0, int.wrapping_add(first, 1u8))
-        send_all(mut w, buf)
-    }
+// The room a connection of `cap` items of `size` bytes needs: each item is
+// charged its content, round8(size).
+fn room(cap: u64, size: u64) -> u64 {
+    cap * ((size + 7) / 8 * 8)
 }
 
-fn x_ask(nw: Net, clock: Clock, err: Stderr, n: u64, size: u64) waits {
-    let s = connect_retry(nw, clock, unit_addr(1, 1))
-    let (rh, wh) = net.split(take s)
-    let mut r = take rh
-    let mut w = take wh
-    let mut req = payload(size, 7)
-    let mut buf: Bytes = result.unwrap(list.with_capacity(size))
+// ---- request/reply: the root asks, a helper unit echoes (first byte + 1).
+// An inbox does not cross, so the helper makes its own connection and sends
+// its client back over `hello`.
+type Echoer: cross {
+    hello: Client[Client[Bytes]],
+    back: Client[Bytes],
+    n: u64,
+    depth: u64,
+    size: u64
+}
+
+fn echoer(take e: Echoer) -> u64 waits {
+    let Echoer(hello: hello, back: back, n: n, depth: depth, size: size) = take e
+    let (c, i): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(depth, bytes room(depth, size)))
+    result.unwrap(conn.send(hello, take c))
+    for _ in 0 .. n {
+        let mut b = result.unwrap(conn.receive(i))
+        let first: u8 = b[0]
+        let _ = list.set(mut b, 0, int.wrapping_add(first, 1u8))
+        result.unwrap(conn.send(back, take b))
+    }
+    n
+}
+
+fn start_echo(tasks: Tasks, back: Client[Bytes], n: u64, depth: u64, size: u64) -> (Task[u64], Client[Bytes]) waits {
+    let (hello, hello_in): (Client[Client[Bytes]], Inbox[Client[Bytes]]) = result.unwrap(conn.new(1, bytes 0))
+    let e = Echoer(hello: take hello, back: conn.client(back), n: n, depth: depth, size: size)
+    let t = result.unwrap(task.spawn_unit(tasks, bytes HELPER_BYTES, take e, echoer))
+    let peer = result.unwrap(conn.receive(hello_in))
+    (take t, take peer)
+}
+
+// One buffer circulates: each crossing copies it into the receiver.
+fn x_pingpong(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64) waits {
+    let (back, answers): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes room(1, size)))
+    let (take t, take peer) = start_echo(tasks, back, n, 1, size)
+    let mut buf = payload(size, 7)
     let mut check = 0u64
     let started = host.mono_ns(clock)
     for i in 0 .. n {
-        let _ = list.set(mut req, 0, int.truncate(i))
-        send_all(mut w, req)
-        if !recv_exact(mut r, mut buf, size) { fail("ask: closed") }
+        let _ = list.set(mut buf, 0, int.truncate(i))
+        result.unwrap(conn.send(peer, take buf))
+        buf = result.unwrap(conn.receive(answers))
         let got: u8 = buf[0]
-        if got != int.wrapping_add(int.truncate(i), 1u8) { fail("ask: bad reply") }
+        if got != int.wrapping_add(int.truncate(i), 1u8) { fail("pingpong: bad reply") }
         check = int.wrapping_add(check, int.widen(got))
     }
-    report(err, "x_pingpong", n, host.mono_ns(clock) - started, check)
+    let ns = host.mono_ns(clock) - started
+    result.unwrap(task.join(take t))
+    report(err, "x_pingpong", n, ns, check)
 }
 
-// ---- crossing pipelined request/reply: a writer task keeps the ring full.
-type Writer: send {
-    w: WriteHalf,
+// ---- pipelined request/reply: a feeder task keeps PIPE_DEPTH requests in flight.
+type Feeder: send {
+    to: Client[Bytes],
     n: u64,
-    size: u64,
+    size: u64
 }
 
-fn writer(take job: Writer) -> () waits {
-    let Writer(w: take wh, n: n, size: size) = take job
-    let mut w = take wh
-    let mut req = payload(size, 7)
+fn feeder(take f: Feeder) waits {
+    let Feeder(to: to, n: n, size: size) = take f
+    let req = payload(size, 7)
     for i in 0 .. n {
-        let _ = list.set(mut req, 0, int.truncate(i))
-        send_all(mut w, req)
+        let mut m: Bytes = result.unwrap(list.with_capacity(size))
+        result.unwrap(list.append(mut m, req))
+        let _ = list.set(mut m, 0, int.truncate(i))
+        result.unwrap(conn.send(to, take m))
     }
 }
 
-fn x_pipe(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, n: u64, size: u64) waits {
-    let s = connect_retry(nw, clock, unit_addr(1, 1))
-    let (rh, wh) = net.split(take s)
-    let mut r = take rh
-    let mut buf: Bytes = result.unwrap(list.with_capacity(size))
+fn x_pipe(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64) waits {
+    let (back, answers): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(PIPE_DEPTH, bytes room(PIPE_DEPTH, size)))
+    let (take t, take peer) = start_echo(tasks, back, n, PIPE_DEPTH, size)
     let started = host.mono_ns(clock)
-    let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Writer(w: take wh, n: n, size: size), writer))
+    let f = result.unwrap(task.spawn(tasks, bytes TASK_BYTES + 4 * (size + 64), Feeder(to: take peer, n: n, size: size), feeder))
     let mut check = 0u64
     for i in 0 .. n {
-        if !recv_exact(mut r, mut buf, size) { fail("pipe: closed") }
-        let got: u8 = buf[0]
+        let b = result.unwrap(conn.receive(answers))
+        let got: u8 = b[0]
         if got != int.wrapping_add(int.truncate(i), 1u8) { fail("pipe: bad reply") }
         check = int.wrapping_add(check, int.widen(got))
     }
-    result.unwrap(task.join(take h))
-    report(err, "x_pipe", n, host.mono_ns(clock) - started, check)
+    let ns = host.mono_ns(clock) - started
+    result.unwrap(task.join(take f))
+    result.unwrap(task.join(take t))
+    report(err, "x_pipe", n, ns, check)
 }
 
-// ---- crossing fan-in: units 1..K-1 each send n messages to unit 0.
-type Drain: send {
-    r: ReadHalf,
+// ---- fan-in: `producers` helper units each send n messages to the root.
+type Source: cross {
+    to: Client[Bytes],
     n: u64,
-    size: u64,
-    grain: u64,
+    size: u64
 }
 
-fn drain(take job: Drain) -> u64 waits {
-    let Drain(r: take rh, n: n, size: size, grain: grain) = take job
-    let mut r = take rh
-    let mut buf: Bytes = result.unwrap(list.with_capacity(size))
-    let mut sum = 0u64
-    for _ in 0 .. n {
-        if !recv_exact(mut r, mut buf, size) { fail("drain: closed") }
-        let b: u8 = buf[0]
-        sum = int.wrapping_add(sum, kernel(int.widen(b), grain) & 0xff)
+fn source(take s: Source) -> u64 waits {
+    let Source(to: to, n: n, size: size) = take s
+    let req = payload(size, 7)
+    for i in 0 .. n {
+        let mut m: Bytes = result.unwrap(list.with_capacity(size))
+        result.unwrap(list.append(mut m, req))
+        let _ = list.set(mut m, 0, int.truncate(i))
+        result.unwrap(conn.send(to, take m))
     }
-    sum
+    n
 }
 
-fn x_sink(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, n: u64, size: u64, producers: u64, grain: u64) waits {
-    let (take l, _) = result.unwrap(host.listen(nw, unit_addr(0, 2), 128))
-    let mut listener = take l
+fn x_fanin(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, grain: u64, producers: u64) waits {
+    let (to, inbox): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(64, bytes room(64, size)))
+    let started = host.mono_ns(clock)
     let mut jobs: List[Task[u64]] = list.new()
-    let mut writers: List[WriteHalf] = list.new()
-    let mut started = 0u64
-    for p in 0 .. producers {
-        let (take s, _) = result.unwrap(host.accept(mut listener, Never))
-        if p == 0 { started = host.mono_ns(clock) }
-        let (rh, wh) = net.split(take s)
-        result.unwrap(list.push(mut writers, take wh))
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Drain(r: take rh, n: n, size: size, grain: grain), drain))))
+    for _ in 0 .. producers {
+        let s = Source(to: conn.client(to), n: n, size: size)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn_unit(tasks, bytes HELPER_BYTES, take s, source))))
     }
     let mut check = 0u64
-    while let Some(take h) = list.pop(mut jobs) {
-        check = int.wrapping_add(check, result.unwrap(task.join(take h)))
+    for _ in 0 .. n * producers {
+        let b = result.unwrap(conn.receive(inbox))
+        let got: u8 = b[0]
+        check = int.wrapping_add(check, kernel(int.widen(got), grain) & 0xff)
     }
-    report(err, "x_fanin", n * producers, host.mono_ns(clock) - started, check)
+    let ns = host.mono_ns(clock) - started
+    join_all(take jobs)
+    report(err, "x_fanin", n * producers, ns, check)
 }
 
-fn x_source(nw: Net, clock: Clock, n: u64, size: u64) waits {
-    let s = connect_retry(nw, clock, unit_addr(0, 2))
-    let (_, wh) = net.split(take s)
-    let mut w = take wh
-    let mut req = payload(size, 7)
-    for i in 0 .. n {
-        let _ = list.set(mut req, 0, int.truncate(i))
-        send_all(mut w, req)
+fn join_all(take pending: List[Task[u64]]) waits {
+    let mut jobs = take pending
+    while let Some(take h) = list.pop(mut jobs) {
+        let _ = result.unwrap(task.join(take h))
     }
+}
+
+// ---- service: two helper units send words to one inbox; the root folds them
+// in arrival order, which the check witnesses.
+type Teller: cross {
+    to: Client[u64],
+    unit: u64,
+    n: u64
+}
+
+fn teller(take t: Teller) -> u64 waits {
+    let Teller(to: to, unit: unit, n: n) = take t
+    for i in 0 .. n {
+        result.unwrap(conn.send(to, (unit << 32) | i))
+    }
+    n
+}
+
+fn x_svc(tasks: Tasks, clock: Clock, err: Stderr, n: u64) waits {
+    let (to, inbox): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(64, bytes 0))
+    let started = host.mono_ns(clock)
+    let mut jobs: List[Task[u64]] = list.new()
+    for unit in 1u64 .. 3 {
+        let t = Teller(to: conn.client(to), unit: unit, n: n)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn_unit(tasks, bytes HELPER_BYTES, take t, teller))))
+    }
+    let mut state = 1u64
+    let mut order = 0u64
+    for i in 0 .. 2 * n {
+        let v = result.unwrap(conn.receive(inbox))
+        state = kernel(state ^ v, 3)
+        // Count how often the source changes: an arrival-order witness.
+        if i > 0 && (v >> 32) != order { state = int.wrapping_add(state, 1) }
+        order = v >> 32
+    }
+    let ns = host.mono_ns(clock) - started
+    join_all(take jobs)
+    report(err, "x_svc", 2 * n, ns, state)
+}
+
+// ---- a closed lock-step ring of `units` units: unit u receives from its
+// inbox and sends to unit (u+1) % units; the root, unit 0, injects each round.
+type Stage: cross {
+    hello: Client[Client[Bytes]],
+    next: Client[Bytes],
+    unit: u64,
+    n: u64,
+    size: u64
+}
+
+fn stage(take s: Stage) -> u64 waits {
+    let Stage(hello: hello, next: next, unit: unit, n: n, size: size) = take s
+    let (c, i): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes room(1, size)))
+    result.unwrap(conn.send(hello, take c))
+    let mut check = 0u64
+    for _ in 0 .. n {
+        let mut buf = result.unwrap(conn.receive(i))
+        let first: u8 = buf[0]
+        let wide: u64 = int.widen(first)
+        let _ = list.set(mut buf, 1, int.truncate(kernel(wide + unit, 50)))
+        let second: u8 = buf[1]
+        check = int.wrapping_add(check, int.widen(second))
+        result.unwrap(conn.send(next, take buf))
+    }
+    check
+}
+
+fn x_ring(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, units: u64) waits {
+    let (first, inbox): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes room(1, size)))
+    let (hello, hello_in): (Client[Client[Bytes]], Inbox[Client[Bytes]]) = result.unwrap(conn.new(1, bytes 0))
+    // Made last to first, each stage learns its successor's client.
+    let mut next = conn.client(first)
+    let mut stages: List[Task[u64]] = list.new()
+    for k in 1u64 .. units {
+        let s = Stage(hello: conn.client(hello), next: take next, unit: units - k, n: n, size: size)
+        result.unwrap(list.push(mut stages, result.unwrap(task.spawn_unit(tasks, bytes HELPER_BYTES, take s, stage))))
+        next = result.unwrap(conn.receive(hello_in))
+    }
+    let mut buf = payload(size, 0)
+    let mut check = 0u64
+    let started = host.mono_ns(clock)
+    for i in 0 .. n {
+        let _ = list.set(mut buf, 0, int.truncate(i))
+        result.unwrap(conn.send(next, take buf))
+        buf = result.unwrap(conn.receive(inbox))
+        let second: u8 = buf[1]
+        check = int.wrapping_add(check, int.widen(second))
+    }
+    let ns = host.mono_ns(clock) - started
+    join_all(take stages)
+    report(err, "x_ring", n, ns, check)
 }
 
 // ---- local channel shapes inside one run.
@@ -287,128 +374,26 @@ fn c_fanin(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, producers
     report(err, "c_fanin", n * producers, host.mono_ns(clock) - started, check)
 }
 
-// ---- replay demo: unit 0 folds messages from two ports in arrival order.
-type Forward: send {
-    r: ReadHalf,
-    out: Sender[u64],
-    n: u64,
-}
-
-fn forward(take job: Forward) -> () waits {
-    let Forward(r: take rh, out: out, n: n) = take job
-    let mut r = take rh
-    let mut buf: Bytes = result.unwrap(list.with_capacity(8))
-    for _ in 0 .. n {
-        if !recv_exact(mut r, mut buf, 8) { fail("svc: closed") }
-        result.unwrap(channel.send(out, list.word_le(buf, 0)))
-    }
-}
-
-fn x_svc(tasks: Tasks, nw: Net, err: Stderr, n: u64) waits {
-    let (take l, _) = result.unwrap(host.listen(nw, unit_addr(0, 3), 16))
-    let mut listener = take l
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(4096))
-    let mut jobs: List[Task[()]] = list.new()
-    for _ in 0 .. 2u64 {
-        let (take s, _) = result.unwrap(host.accept(mut listener, Never))
-        let (rh, _) = net.split(take s)
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Forward(r: take rh, out: channel.sender(tx), n: n), forward))))
-    }
-    let mut state = 1u64
-    let mut order = 0u64
-    for i in 0 .. 2 * n {
-        let v = result.unwrap(channel.receive(rx))
-        state = kernel(state ^ v, 3)
-        // Count how often the source port changes: an arrival-order witness.
-        if i > 0 && (v >> 32) != order { state = int.wrapping_add(state, 1) }
-        order = v >> 32
-    }
-    join_units(take jobs)
-    report(err, "x_svc", 2 * n, 0, state)
-}
-
-fn join_units(take pending: List[Task[()]]) waits {
-    let mut jobs = take pending
-    while let Some(take h) = list.pop(mut jobs) {
-        result.unwrap(task.join(take h))
-    }
-}
-
-fn x_client(nw: Net, clock: Clock, unit: u64, n: u64) waits {
-    let s = connect_retry(nw, clock, unit_addr(0, 3))
-    let (_, wh) = net.split(take s)
-    let mut w = take wh
-    let mut b: Bytes = result.unwrap(list.with_capacity(8))
-    for i in 0 .. n {
-        list.clear(mut b)
-        result.unwrap(list.put_word_le(mut b, (unit << 32) | i))
-        send_all(mut w, b)
-    }
-}
-
-// ---- law 2/3: a closed lock-step ring. Unit u listens on port 2 and sends
-// to unit (u+1)%K; unit 0 injects each round. No clock reads, so a unit's
-// recording is a function of the program and its peers' bytes only.
-fn x_ring(nw: Net, clock: Clock, err: Stderr, unit: u64, units: u64, n: u64, size: u64) waits {
-    let (take l, _) = result.unwrap(host.listen(nw, unit_addr(unit, 2), 16))
-    let mut listener = take l
-    let out = connect_retry(nw, clock, unit_addr((unit + 1) % units, 2))
-    let (take inc, _) = result.unwrap(host.accept(mut listener, Never))
-    let (orh, owh) = net.split(take out)
-    let (irh, iwh) = net.split(take inc)
-    let mut r = take irh
-    let mut w = take owh
-    let mut buf = payload(size, unit)
-    let mut check = 0u64
-    for i in 0 .. n {
-        if unit == 0 {
-            let _ = list.set(mut buf, 0, int.truncate(i))
-            send_all(mut w, buf)
-            if !recv_exact(mut r, mut buf, size) { fail("ring: closed") }
-        } else {
-            if !recv_exact(mut r, mut buf, size) { fail("ring: closed") }
-            let first: u8 = buf[0]
-            let wide: u64 = int.widen(first)
-            let _ = list.set(mut buf, 1, int.truncate(kernel(wide + unit, 50)))
-            send_all(mut w, buf)
-        }
-        let second: u8 = buf[1]
-        let second_wide: u64 = int.widen(second)
-        check = int.wrapping_add(check, second_wide)
-    }
-    if unit == 0 { report(err, "x_ring", n, 0, check) }
-    let _keep = (take orh, take iwh)
-}
-
-pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+pub fn main(tasks: Tasks, clock: Clock, err: Stderr, argv: Args) -> Result[(), Exit] waits {
     let Some(mode) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let n = arg(argv, 1)
     let size = arg(argv, 2)
     if mode == "c_pingpong" {
         c_pingpong(tasks, clock, err, n, size)
-        return Ok(())
-    }
-    if mode == "c_pipe" {
+    } else if mode == "c_pipe" {
         c_pipe(tasks, clock, err, n, size, arg(argv, 3))
-        return Ok(())
-    }
-    if mode == "c_fanin" {
+    } else if mode == "c_fanin" {
         c_fanin(tasks, clock, err, n, size, arg(argv, 3), arg(argv, 4))
-        return Ok(())
-    }
-    let count = args.len(argv)
-    let unit = arg(argv, count - 3)
-    let units = arg(argv, count - 2)
-    if mode == "x_pingpong" {
-        if unit == 1 { x_echo(nw, n, size) } else { x_ask(nw, clock, err, n, size) }
-    } else if mode == "x_ring" {
-        x_ring(nw, clock, err, unit, units, n, size)
+    } else if mode == "x_pingpong" {
+        x_pingpong(tasks, clock, err, n, size)
     } else if mode == "x_pipe" {
-        if unit == 1 { x_echo(nw, n, size) } else { x_pipe(tasks, nw, clock, err, n, size) }
-    } else if mode == "x_svc" {
-        if unit == 0 { x_svc(tasks, nw, err, n) } else { x_client(nw, clock, unit, n) }
+        x_pipe(tasks, clock, err, n, size)
     } else if mode == "x_fanin" {
-        if unit == 0 { x_sink(tasks, nw, clock, err, n, size, units - 1, arg(argv, 3)) } else { x_source(nw, clock, n, size) }
+        x_fanin(tasks, clock, err, n, size, arg(argv, 3), arg(argv, 4))
+    } else if mode == "x_svc" {
+        x_svc(tasks, clock, err, n)
+    } else if mode == "x_ring" {
+        x_ring(tasks, clock, err, n, size, arg(argv, 3))
     } else {
         return Error(Exit(status: 2))
     }

@@ -578,6 +578,42 @@ pub(super) fn params_helper_forward(r: &mut dyn FnMut(u64, u64) -> u64) {
     PARAM[1].store(r(0, 6_000), Ordering::Relaxed); // unit 2 drops its share after this
 }
 
+/// A receive's lone-item take serves only its own inbox: with one item
+/// published for inbox `a`, a take for inbox `b` leaves it on the port, and
+/// `a`'s own take then gets it.
+#[test]
+fn lone_item_stays_with_its_inbox() {
+    let mut u = UnitCtx::root_as(4096, "U0");
+    let (a, to_a) = u.conn_new(1, 8, 64).unwrap();
+    let (b, to_b) = u.conn_new(1, 8, 64).unwrap();
+    let mut v = u.alloc_block(16).unwrap();
+    v.tag = 7;
+    assert!(matches!(u.send(&to_a, v, false), Sent::Accepted));
+    assert!(!u.take_single_item(&b.0), "b took a's item");
+    assert!(u.port.pending(), "a refused take moved the item");
+    assert!(b.0.side().taken.is_empty());
+    assert!(u.take_single_item(&a.0));
+    match u.receive(&a) {
+        Received::Ok(v) => {
+            assert_eq!(v.tag, 7);
+            assert!(u.drop_value(v).is_none());
+        }
+        other => panic!("a's receive: {other:?}"),
+    }
+    u.drop_client(to_a);
+    u.drop_client(to_b);
+    for inbox in [&a, &b] {
+        u.seal(inbox);
+        while u.wait().0 != Took::SealAnswer {}
+        let (causes, took) = u.clean(inbox);
+        assert!(causes.is_empty());
+        if !took.iter().any(|t| t.0 == Took::LastRelease) {
+            while u.wait().0 != Took::LastRelease {}
+        }
+    }
+    assert_eq!(u.current_used(), 0, "the root kept a charge");
+}
+
 /// An edge queued before the send belongs to the receiving registration.
 #[test]
 fn socket_crosses_pending_readiness() {

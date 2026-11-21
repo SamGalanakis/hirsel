@@ -821,11 +821,12 @@ impl DedicatedCache {
             (extent >= needed
                 && payload.addr().get() & (class.align - 1) == 0
                 && backing.headroom(payload) >= own_prefix(class.kind))
-            .then(|| (extent, backing.used.get()))
+            .then(|| (extent, backing.used.get(), backing.born.get()))
         };
-        // Prefer the smallest resident fit, then the one that needs the least
-        // growth. A block may carry at most its own size in resident payload
-        // slack. Larger mismatches remain reclaimable as stock.
+        // A growable block can start the same growth sequence again. Keep
+        // that reservation even if its resident extent is large for the
+        // first request. Otherwise prefer the closest resident fit, with at
+        // most the request's size in slack.
         let retained =
             self.retained
                 .iter()
@@ -833,9 +834,13 @@ impl DedicatedCache {
                 .enumerate()
                 .rev()
                 .filter_map(|(index, page)| {
-                    let (_, used) = fit(page)?;
-                    (used.saturating_sub(needed) <= needed)
-                        .then_some((index, (used < needed, used.abs_diff(needed))))
+                    let (_, used, born) = fit(page)?;
+                    if class.growable && born == class.stride {
+                        Some((index, (false, false, 0)))
+                    } else {
+                        (used.saturating_sub(needed) <= needed)
+                            .then_some((index, (true, used < needed, used.abs_diff(needed))))
+                    }
                 });
         let page = if let Some((index, _)) = retained.min_by_key(|&(_, rank)| rank) {
             self.remove_retained(index)
@@ -845,7 +850,7 @@ impl DedicatedCache {
                 .iter()
                 .copied()
                 .enumerate()
-                .filter_map(|(index, page)| fit(page).map(|(extent, _)| (index, extent)))
+                .filter_map(|(index, page)| fit(page).map(|(extent, _, _)| (index, extent)))
                 .min_by_key(|&(_, extent)| extent)?;
             self.clean.swap_remove_back(index).unwrap()
         };
@@ -1082,6 +1087,7 @@ impl Heap {
             if !slab {
                 let payload = (*page.as_ref().slots.get()).first;
                 let backing = page.as_ref().backing.dedicated();
+                backing.born.set(class.stride);
                 let before = backing.backed(payload);
                 let after = backing.use_extent(payload, class.stride);
                 state.dedicated.add_live(0, after, after > before);
@@ -1645,6 +1651,8 @@ struct Mapping {
     // The payload extent that may have been touched since the last purge.
     // Writable pages beyond it are still clean.
     used: Cell<usize>,
+    // The starting stride of the last live allocation, before in-place growth.
+    born: Cell<usize>,
 }
 impl Mapping {
     const WRITABLE: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
@@ -1717,6 +1725,7 @@ impl Mapping {
                 len,
                 writable: Cell::new(bytes),
                 used: Cell::new(0),
+                born: Cell::new(0),
             };
             if space != bytes
                 && libc::mprotect(base.as_ptr().cast(), headroom + bytes, Self::WRITABLE) != 0
@@ -2088,6 +2097,32 @@ mod tests {
         purge();
         assert_eq!(heap.lock().dedicated.retained_bytes, 0);
         assert_eq!(resident_pages(base, len), 0);
+
+        // A repeated growth sequence starts small and needs its previously
+        // touched larger extent again. Admit the full replacement charge
+        // before growth and refund the old charge when the extent commits.
+        const GROWN: usize = 8 * SMALL;
+        let grow = |pointer: NonNull<u8>| {
+            block::admit_storage(payer, Some(GROWN as u64)).unwrap();
+            // SAFETY: the test owns the slot and admitted the replacement.
+            assert!(unsafe { try_grow_in_place(heap, pointer, payer, GROWN, 8, block::PLAIN) });
+            payer.settle(SMALL as u64);
+            assert_eq!(context.available(), (OVERSIZED - GROWN) as u64);
+            // SAFETY: the returned page is within the grown payload.
+            unsafe { pointer.add(GROWN - page_bytes()) }
+        };
+        let start = allocate_unwritten(SMALL, block::PLAIN);
+        let tail = grow(start);
+        // SAFETY: the test owns GROWN writable bytes.
+        unsafe { tail.write(0x5a) };
+        free(start, GROWN);
+        let start_again = allocate_unwritten(SMALL, block::PLAIN);
+        assert!(
+            resident(grow(start_again)),
+            "restarting growth lost residency at the end of the grown extent"
+        );
+        free(start_again, GROWN);
+        purge();
 
         // A GRAPH buffer's cleanup frame uses the preceding native page;
         // release discards that page too, and the reservation is reused.

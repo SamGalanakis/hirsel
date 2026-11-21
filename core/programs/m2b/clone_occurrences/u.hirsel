@@ -3,7 +3,7 @@ pub type U {
 }
 
 clone(x: U) {
-    Ok(U(n: x.n + 100u64))
+    U(n: x.n + 100u64)
 }
 
 pub fn clone_u() -> u64 {

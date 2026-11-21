@@ -88,15 +88,19 @@ def probe_source(main_source, package, names):
     params = [tuple(x.strip() for x in p.split(':')) for p in signature.split(',')]
     by_type = {t: n for n, t in params}
     lines = ['fn available() -> u64 {',
+             '    let mut probe: Bytes = list.new()',
              '    let huge: u64 = 18446744073709551615',
-             '    let r: Result[Bytes, Capacity] = list.with_capacity(huge)',
-             '    match r {', '        Ok(_) => 0,', '        Error(c) => c.available,', '    }', '}', '',
-             'fn report(out: Stdout, v: u64, before: u64, after: u64) -> Result[(), Exit] waits {',
+             '    match list.try_reserve(mut probe, huge) {',
+             '        Ok(_) => 0,', '        Error(c) => c.available,', '    }', '}', '',
+             'fn report_text(v: u64, before: u64, after: u64) -> String {',
              '    let mut s = string.new()']
     for part, sep in (('v', ' '), ('before', ' '), ('after', '\\n')):
-        lines += [f'    if let Error(_) = string.push_u64(mut s, {part}) {{', '        return Error(Exit(status: 3))', '    }',
-                  f'    if let Error(_) = string.push(mut s, "{sep}") {{', '        return Error(Exit(status: 3))', '    }']
-    lines += ['    match stdout.write(out, s) {', '        Ok(()) => Ok(()),', '        Error(_) => Error(Exit(status: 2)),',
+        lines += [f'    string.push_u64(mut s, {part})', f'    string.push(mut s, "{sep}")']
+    lines += ['    s', '}', '',
+              'fn report(out: Stdout, v: u64, before: u64, after: u64) -> Result[(), Exit] waits {',
+              '    let Ok(Ok(s)) = isolate(scoped fn() -> String { report_text(v, before, after) }) else {',
+              '        return Error(Exit(status: 3))', '    }',
+              '    match stdout.write(out, s) {', '        Ok(()) => Ok(()),', '        Error(_) => Error(Exit(status: 2)),',
               '    }', '}', '', f'pub fn main({signature}) -> Result[(), Exit] waits {{',
               f'    let Some(name) = args.get({by_type["Args"]}, 0) else {{', '        return Error(Exit(status: 2))', '    }']
     for name in names:

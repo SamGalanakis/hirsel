@@ -1,0 +1,150 @@
+// test-vectors
+fn same_outputs(input: Bytes, expected: Bytes, max_window: u64, single: bool) -> bool {
+    let mut d = result.unwrap(zstd.decoder(max_window))
+    let mut out: Bytes = list.new()
+    let mut piece: Bytes = result.unwrap(list.with_capacity(1))
+    let n = list.len(input)
+    let mut at: u64 = 0
+    let mut seed: u64 = 0x8878
+    while true {
+        seed = (seed * 48271) % 2147483647
+        let width: u64 = if single {
+            1
+        } else {
+            seed % 23 + 1
+        }
+        let hi = if n - at < width {
+            n
+        } else {
+            at + width
+        }
+        if single {
+            list.clear(mut piece)
+        } else {
+            piece = result.unwrap(list.with_capacity((seed / 23) % 29 + 1))
+        }
+        let step = result.unwrap(zstd.decode_step(mut d, input, at, hi, mut piece))
+        at += step.consumed
+        if step.produced != list.len(piece) || step.produced > list.capacity(piece) {
+            return false
+        }
+        result.unwrap(list.append(mut out, piece))
+        if step.ended && at == n {
+            return out == expected
+        }
+        if step.consumed == 0 && step.produced == 0 {
+            return false
+        }
+    }
+    false
+}
+
+// zstd CLI levels 1 through 19, long window, checksums, and dictionaries.
+// expect: run differential_decode() = true
+fn differential_decode() -> bool {
+    let plain = inputs()
+    let dicts = dictionaries()
+    let wires = references()
+    for row in wires {
+        let (original, dictionary, wire) = row
+        let expected = plain[original]
+        let n = list.len(expected)
+        let decoded = if dictionary == 0 {
+            result.unwrap(zstd.decode(wire, n, 8388608))
+        } else {
+            let d = result.unwrap(zstd.dictionary(dicts[dictionary - 1]))
+            result.unwrap(zstd.decode_with(d, wire, n, 8388608))
+        }
+        if decoded != expected {
+            return false
+        }
+    }
+    true
+}
+
+// dictionary frames use decode_with. The public push decoder takes no dictionary.
+// expect: run split_decode() = true
+fn split_decode() -> bool {
+    let plain = inputs()
+    let wires = references()
+    for row in wires {
+        let (original, dictionary, wire) = row
+        let expected = plain[original]
+        if dictionary == 0 && (!same_outputs(wire, expected, 8388608, true) || !same_outputs(wire, expected, 8388608, false)) {
+            return false
+        }
+    }
+    true
+}
+
+fn is_error(wire: Bytes, max_output: u64, max_window: u64, expected: zstd.ZstdError) -> bool {
+    match zstd.decode(wire, max_output, max_window) {
+        Error(Data(error)) => error == expected,
+        _ => false,
+    }
+}
+
+fn refunds(input: Bytes) -> bool {
+    result.unwrap(bound bytes 65536 {
+        let mut d = result.unwrap(zstd.decoder(5))
+        let mut output: Bytes = list.new()
+        let occupied = match (bound bytes 65536 {
+            true
+        }) {
+            Error(_) => true,
+            _ => false,
+        }
+        let malformed = zstd.decode_step(mut d, input, 0, list.len(input), mut output)
+        let recovered = match (bound bytes 65536 {
+            true
+        }) {
+            Ok(true) => true,
+            _ => false,
+        }
+        let sticky = zstd.decode_step(mut d, input, 0, 0, mut output)
+        occupied && recovered && match (malformed, sticky) {
+            (Error(BadMagic()), Error(BadMagic())) => true,
+            _ => false,
+        }
+    })
+}
+
+// libzstd's golden decompression errors and predecessor SEM-3 RFC 8878 cases.
+fn entropy_edges() -> bool {
+    let off0 = result.unwrap(b"(\xb5/\xfd\x00\x00E\x00\x00\x08\x00\x02\x00/C\x0b\xae")
+    let huff = result.unwrap(b"(\xb5/\xfd\x00\x00U\x00\x00r\x80\x01\x04 ~\x1f\x02\xaa\x00")
+    let extra = result.unwrap(b"(\xb5/\xfd\x00\x00\x95\x00\x00hHello World!\x0a\x80\x00\x00\x00")
+    let endless = result.unwrap(b"\x28\xb5\x2f\xfd\x00\x00\x5d\x00\x00\x12\xc0\x01\x05\x10\xf8\x01\x00\x04\x02\x00")
+    let single_symbol = result.unwrap(b"\x28\xb5\x2f\xfd\x00\x00\x6d\x00\x00\x08\x61\x01\xa8\x10\xf8\x01\xf0\x03\xf0\x03\x00\x80")
+    let actual = result.unwrap(zstd.decode(single_symbol, 4, 1024))
+    let original = string.as_bytes("aaaa")
+    actual == original && same_outputs(single_symbol, original, 1024, true) && is_error(off0, 1024, 1024, Corrupt()) && is_error(huff, 1024, 1024, Corrupt()) && is_error(extra, 1024, 1024, Corrupt()) && is_error(endless, 1024, 1024, Corrupt())
+}
+
+// RFC 8878 framing, including vectors carried over from SEM-3-zstd-bounds-run.
+// expect: run hostile_decode() = true
+fn hostile_decode() -> bool {
+    let frame = result.unwrap(b"\x28\xb5\x2f\xfd\x24\x05\x29\x00\x00hello\xa3\x6d\x9f\x88")
+    let bad_sum = result.unwrap(b"\x28\xb5\x2f\xfd\x24\x05\x29\x00\x00hello\xa3\x6d\x9f\x89")
+    for i in 0u64 .. list.len(frame) {
+        if !is_error(list.slice(frame, 0, i), 5, 5, Truncated()) {
+            return false
+        }
+    }
+    let mut d = result.unwrap(zstd.decoder(5))
+    let mut out: Bytes = result.unwrap(list.with_capacity(5))
+    let first = zstd.decode_step(mut d, bad_sum, 0, list.len(bad_sum), mut out)
+    let sticky = zstd.decode_step(mut d, frame, 0, list.len(frame), mut out)
+    let checksums = match (first, sticky) {
+        (Error(Checksum()), Error(Checksum())) => true,
+        _ => false,
+    }
+    let reserved = result.unwrap(b"\x28\xb5\x2f\xfd\x28")
+    let wrong_size = result.unwrap(b"\x28\xb5\x2f\xfd\x20\x05\x21\x00\x00hell")
+    let oversize = result.unwrap(b"\x28\xb5\x2f\xfd\x20\x05\x31\x00\x00helloo")
+    let bad_magic = result.unwrap(b"\x29\xb5\x2f\xfd")
+    let trailing = result.unwrap(b"\x28\xb5\x2f\xfd\x20\x05\x29\x00\x00hello\xff")
+    let short_block = result.unwrap(b"\x28\xb5\x2f\xfd\x00\x00\x95\x00\x00\xbc\xf3\xae\xa5\x9f\xe3")
+    let large_window = result.unwrap(b"\x28\xb5\x2f\xfd\x00\xff")
+    checksums && refunds(bad_magic) && entropy_edges() && is_error(frame, 4, 5, TooLarge()) && is_error(frame, 5, 4, WindowTooLarge(5)) && is_error(large_window, 65536, 1024, WindowTooLarge(4123168604160)) && is_error(reserved, 5, 5, ReservedBit()) && is_error(wrong_size, 5, 5, ContentSize()) && is_error(oversize, 6, 5, BlockOversize()) && is_error(bad_magic, 5, 5, BadMagic()) && is_error(trailing, 5, 5, TrailingData(14)) && is_error(short_block, 1024, 1024, Truncated())
+}

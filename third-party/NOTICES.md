@@ -45,6 +45,9 @@ upstream license texts under the bundle's `notices/` directory; see
 | GNU C Library | glibc 2.28's `Scrt1.o`, `crti.o`, `crtn.o` and `libc_nonshared.a` (Debian 2.28-10+deb10u1) linked into every executable; its libraries' public dynamic symbol tables generate the link kit's stubs | link kit (`tools/buck2/native-toolchain/link_kit.py`) | glibc 2.28 (Debian 2.28-10+deb10u1) | LGPL-2.1-or-later, with glibc's exception granting unlimited permission to link these compiled startup and nonshared files into other programs; `tools/toolchain-dist/licenses/common-licenses/LGPL-2.1` |
 | Go standard library | Block decoding and Huffman completeness in `src/compress/flate/inflate.go`, hash-chain match search in `src/compress/flate/deflate.go`, framing in `src/compress/gzip/gunzip.go` and `src/compress/zlib/reader.go` | `core/std/flate.hirsel`, `core/std/tests/flate.hirsel` | golang/go `ebe2feefc400f813aefdc8a036e66d2619da6649` | BSD-3-Clause (Go) |
 | zlib | Canonical Huffman decoding and construction in `contrib/puff/puff.c:235-255,340-379`. Copyright (C) 2002-2013 Mark Adler, all rights reserved. | `core/std/flate.hirsel` | madler/zlib `09155eaa2f9270dc4ed1fa13e2b4b2613e6e4851` | Zlib |
+| Zig standard library | Entropy decoding and repeat offsets in `lib/std/compress/zstd.zig` and `lib/std/compress/zstd/Decompress.zig`. Copyright (c) Zig contributors. | `core/std/zstd.hirsel` | ziglang/zig `bff490a23889750de7096d9057c0a432efc929a8` | MIT |
+| Zstandard | `lib/common/fse_decompress.c:59-160` FSE table construction and `tests/golden-decompression-errors/` inputs | `core/std/zstd.hirsel`, `core/std/tests/zstd.hirsel` | facebook/zstd `49cf51799ea051457f57243527aa2058f999f005` | BSD-3-Clause (Zstandard) |
+| cespare/xxhash | XXH64 stripes and digest finalization in `xxhash.go:72-109` and `xxhash_other.go:64-75`. Copyright (c) 2016 Caleb Spare. | `core/std/zstd.hirsel` | cespare/xxhash `ab37246c889f9db16b606fda1c232d659df9271d` | MIT |
 
 Where an upstream offers MIT or Apache-2.0, the MIT option is used.
 
@@ -525,3 +528,36 @@ freely, subject to the following restrictions:
    misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
 ```
+
+## BSD-3-Clause License (Zstandard)
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

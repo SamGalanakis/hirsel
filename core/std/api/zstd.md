@@ -4,12 +4,10 @@
 
 `std.zstd` reads and writes RFC 8878 Zstandard frames.
 
-**What exists.** Main has no Zstandard code yet. The predecessor tree's
-`stdlib/std@1/zstd.hir` is a whole-buffer decoder adapted from Zig's `std.compress.zstd`,
-with FSE table construction ported from libzstd. It checks every access against its
-containing section, always verifies checksums, and supports raw-content and formatted
-dictionaries. Its corpus has the single-symbol FSE and Huffman cases from the compression
-prior-art audit. It is the port source for the decoder below. The encoder is new.
+The decoder buffers one compressed block for the reverse bitstream. It
+retains entropy tables and match history across blocks in a frame. It checks
+each input access against its section and verifies the frame's declared
+content size and checksum.
 
 ```
 pub type ZstdError = Truncated | BadMagic | ReservedBit | Corrupt | BlockOversize | Checksum | ContentSize | WindowTooLarge(u64) | TooLarge | TrailingData(u64)

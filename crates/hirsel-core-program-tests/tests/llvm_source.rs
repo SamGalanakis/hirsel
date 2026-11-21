@@ -865,6 +865,320 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
     }
 }
 
+// Closed stack memory (counter_range.h): each case is a way a cell summary
+// could miss a value a field really holds, so a check it guards must still
+// fire, at the evaluator's site. Each case is its own program: the release
+// pipeline turns an element-repeat fill into the memset that gives a closed
+// object `init` only in the first looped function it meets, so a case that
+// shares a program with another may never reach the cell rule it pins.
+#[test]
+fn closed_cells_keep_reachable_failures() {
+    const TYPES: &str = r#"
+type Ball { x: i32, y: i32, vx: i32, vy: i32 }
+type Pair { x: i32, y: i32, z: i32, w: i32 }
+type Edit { x: u32, y: u32, z: u32, w: u32 }
+"#;
+    const NEXT_RANDOM: &str = r#"
+fn next_random(mut seed: u32) -> u32 {
+    seed = (seed * 1309 + 13849) & 65535
+    seed
+}
+"#;
+    const STEP: &str = r#"
+fn step(mut ball: Ball) -> bool {
+    let mut bounced = false
+    ball.x += ball.vx
+    ball.y += ball.vy
+    if ball.x > 500 {
+        ball.x = 500
+        ball.vx = 0 - int.abs(ball.vx)
+        bounced = true
+    }
+    if ball.x < 0 {
+        ball.x = 0
+        ball.vx = int.abs(ball.vx)
+        bounced = true
+    }
+    if ball.y > 500 {
+        ball.y = 500
+        ball.vy = 0 - int.abs(ball.vy)
+        bounced = true
+    }
+    if ball.y < 0 {
+        ball.y = 0
+        ball.vy = int.abs(ball.vy)
+        bounced = true
+    }
+    bounced
+}
+"#;
+    const POISON: &str = r#"
+fn poison(mut a: Inline[Pair, 100], d: u64) {
+    if d == 0 { a[0].z = 2147483647 } else { poison(mut a, d - 1u64) }
+}
+"#;
+    const EDIT: &str = r#"
+fn edit(mut p: Edit, i: u64, skip: u64) -> u32 {
+    p.y = 7
+    if i != skip { p.z = 1 }
+    p.z - 1u32
+}
+"#;
+    // Hand-derived. `half_clamped` has no lower clamp: x starts at 250 and
+    // falls by 10^9 per step, so after 2 steps it is -1999999750 and the third
+    // add passes i32::MIN. `two_bases` writes 5 through a[i], then i32::MAX
+    // through a[k]; when i == k the reload through a[i] is i32::MAX and the
+    // add overflows. `poison` writes i32::MAX to a[0].z from a recursive,
+    // non-inlined callee; `escaped` reads it from j = 1, and the copies in
+    // `copied_open` and `copied_chain` carry it from the start. `probe` skips
+    // the write of z = 1 at j = skip, so z stays at its fill 0 and 0 - 1
+    // underflows. `copy_unflushed` copies s with s[k].z = i32::MAX; o[0].z is
+    // i32::MAX when k == 0.
+    let overflow = || Some(eval::Outcome::Failed(vec!["Overflow".into()]));
+    let returned = |x: u64| Some(eval::Outcome::Returned(vec![x]));
+    // Arguments, and the evaluator's outcome (None: must return).
+    type Laws = Vec<(Vec<u64>, Option<eval::Outcome>)>;
+    let programs: [(&str, Vec<&str>, &str, Laws); 8] = [
+        (
+            "bounce",
+            vec![NEXT_RANDOM, STEP],
+            r#"
+fn bounce(steps: u64) -> u32 {
+    let mut seed = 74755u32
+    let mut balls: Inline[Ball, 100] =[Ball(x: 0, y: 0, vx: 0, vy: 0); 100]
+    for i in 0u64 .. 100 {
+        let x: i32 = int.narrow(next_random(mut seed) % 500)
+        let y: i32 = int.narrow(next_random(mut seed) % 500)
+        let vx: i32 = int.narrow(next_random(mut seed) % 300)
+        let vy: i32 = int.narrow(next_random(mut seed) % 300)
+        balls[i] = Ball(x: x, y: y, vx: vx - 150, vy: vy - 150)
+    }
+    let mut count = 0u32
+    for _ in 0 .. steps {
+        for j in 0u64 .. 100 {
+            if step(mut balls[j]) {
+                count += 1
+            }
+        }
+    }
+    count
+}
+"#,
+            vec![(vec![60], None)],
+        ),
+        (
+            "half_clamped",
+            vec![],
+            r#"
+fn half_clamped(n: u64, v: i64) -> u64 {
+    let mut balls: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    for i in 0u64 .. 100 {
+        let c = if v < 0i64 - 1000000000i64 { 0i64 - 1000000000i64 } else if v > 0i64 { 0i64 } else { v }
+        balls[i] = Pair(x: 250, y: int.narrow(c), z: 0, w: 0)
+    }
+    for _ in 0 .. n {
+        for j in 0u64 .. 100 {
+            balls[j].x += balls[j].y
+            if balls[j].x > 500 {
+                balls[j].x = 500
+                balls[j].y = 0 - int.abs(balls[j].y)
+            }
+        }
+    }
+    if balls[0].x < 0 { 1u64 } else { 0u64 }
+}
+"#,
+            vec![
+                (vec![2, (-1_000_000_000i64) as u64], returned(1)),
+                (vec![3, (-1_000_000_000i64) as u64], overflow()),
+            ],
+        ),
+        (
+            "two_bases",
+            vec![NEXT_RANDOM],
+            r#"
+fn two_bases(n: u64, k: u64) -> u64 {
+    let mut a: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        a[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        let i = j % 100u64
+        a[i].z = 5
+        a[k].z = 2147483647
+        if a[i].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![3, 3], returned(3)), (vec![1, 0], overflow())],
+        ),
+        (
+            "escaped",
+            vec![NEXT_RANDOM, POISON],
+            r#"
+fn escaped(n: u64, d: u64) -> u64 {
+    let mut a: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        a[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        if j == 1 { poison(mut a, d) }
+        if a[0].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![1, 3], returned(1)), (vec![2, 3], overflow())],
+        ),
+        (
+            "copied_open",
+            vec![NEXT_RANDOM, POISON],
+            r#"
+fn copied_open(n: u64, d: u64) -> u64 {
+    let mut s: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        s[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    poison(mut s, d)
+    let o: Inline[Pair, 100] = s
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        if o[j % 100u64].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![1, 3], overflow())],
+        ),
+        (
+            "copied_chain",
+            vec![NEXT_RANDOM, POISON],
+            r#"
+fn copied_chain(n: u64, d: u64) -> u64 {
+    let mut s: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        s[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    poison(mut s, d)
+    let m: Inline[Pair, 100] = s
+    let o: Inline[Pair, 100] = m
+    let mut out = 0u64
+    for j in 0u64 .. n {
+        if o[j % 100u64].z + 1 > 0 { out += 1 }
+    }
+    out
+}
+"#,
+            vec![(vec![1, 3], overflow())],
+        ),
+        (
+            "probe",
+            vec![NEXT_RANDOM, EDIT],
+            r#"
+fn probe(n: u64, skip: u64) -> u32 {
+    let mut a: Inline[Edit, 100] = [Edit(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: u32 = int.narrow(next_random(mut seed) % 500)
+        a[i] = Edit(x: r, y: 0, z: 0, w: 0)
+    }
+    let mut out = 0u32
+    for j in 0u64 .. n {
+        out = edit(mut a[j], j, skip)
+    }
+    out
+}
+"#,
+            vec![(vec![2, 7], returned(0)), (vec![2, 1], overflow())],
+        ),
+        (
+            "copy_unflushed",
+            vec![NEXT_RANDOM],
+            r#"
+fn copy_unflushed(n: u64, k: u64) -> i32 {
+    let mut s: Inline[Pair, 100] = [Pair(x: 0, y: 0, z: 0, w: 0); 100]
+    let mut seed = 74755u32
+    for i in 0u64 .. 100 {
+        let r: i32 = int.narrow(next_random(mut seed) % 500)
+        s[i] = Pair(x: r, y: 0, z: 0, w: 0)
+    }
+    s[k].z = 2147483647
+    let o: Inline[Pair, 100] = s
+    let mut acc = 0i32
+    for j in 0u64 .. n { acc = o[j % 100u64].z + 1 }
+    acc
+}
+"#,
+            vec![(vec![1, 1], returned(1)), (vec![1, 0], overflow())],
+        ),
+    ];
+    for (name, helpers, body, laws) in programs {
+        let source = format!("{TYPES}{}{body}", helpers.concat());
+        let (program, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+        let cases: Vec<_> = laws
+            .iter()
+            .map(|(args, _)| Case {
+                function: names[name],
+                args: args.clone(),
+                limit: 10_000_000,
+                injection: None,
+            })
+            .collect();
+        let evaluated: Vec<_> = cases
+            .iter()
+            .zip(&laws)
+            .map(|(case, (_, outcome))| {
+                let run = eval::run(&program, case.function, &case.args, case.limit);
+                match outcome {
+                    Some(outcome) => assert_eq!(&run.outcome, outcome, "{name}{:?}", case.args),
+                    None => assert!(
+                        matches!(run.outcome, eval::Outcome::Returned(_)),
+                        "{:?}",
+                        run.outcome
+                    ),
+                }
+                run
+            })
+            .collect();
+        let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+        let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[names[name]]);
+        for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)]
+        {
+            let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+            for ((case, evaluated), native) in cases.iter().zip(&evaluated).zip(reports) {
+                assert_eq!(
+                    native.outcome, evaluated.outcome,
+                    "{name}{:?} {optimization:?}",
+                    case.args
+                );
+                let sites: Vec<_> = evaluated
+                    .sites
+                    .iter()
+                    .map(|anchor| {
+                        anchor.map_or(0, |a| program.sites[a.item.index()] + u64::from(a.start))
+                    })
+                    .collect();
+                assert_eq!(
+                    native.sites, sites,
+                    "{name}{:?} {optimization:?}",
+                    case.args
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);

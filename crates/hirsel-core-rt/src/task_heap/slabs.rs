@@ -93,6 +93,7 @@ impl Slab {
 }
 
 impl Drop for Slab {
+    #[inline(never)]
     fn drop(&mut self) {
         let mut shard = SHARDS[self.shard].lock().unwrap();
         shard.retained.push((self.range, self.index));

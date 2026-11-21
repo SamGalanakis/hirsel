@@ -27,7 +27,7 @@ mod shared;
 mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::{HashMap, VecDeque};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -83,11 +83,12 @@ pub(crate) fn purge() {
     // The free path takes the list lock under a heap lock, so the list lock
     // is released before any heap lock is taken.
     for heap in heaps {
-        let mut state = heap.lock();
-        state.dedicated.listed = false;
-        while !state.dedicated.retained.is_empty() {
-            let oldest = state.dedicated.remove_retained(0);
-            state.dedicated.purge(oldest);
+        let mut locked = heap.lock();
+        let pages = locked.private_pages();
+        pages.dedicated.listed = false;
+        while !pages.dedicated.retained.is_empty() {
+            let oldest = pages.dedicated.remove_retained(0);
+            pages.dedicated.purge(oldest);
         }
     }
 }
@@ -369,6 +370,7 @@ impl Page {
 
     /// A slab whose first native page bump-allocates blocks of any stride
     /// for one payer and kind.
+    #[inline(never)]
     fn nursery(
         heap: &Arc<Heap>,
         payer: Payer,
@@ -448,6 +450,7 @@ impl Page {
         }
     }
 
+    #[inline(never)]
     unsafe fn reuse(page: PagePointer, payer: Payer, key: Key) {
         // SAFETY: the caller holds the heap mutex and verified the empty page fits.
         unsafe {
@@ -493,8 +496,9 @@ pub(crate) struct Heap {
     /// slabs exceed `EMPTY_SLAB_LIMIT`.
     pending: AtomicBool,
     closed: Cell<bool>,
-    start: std::cell::UnsafeCell<[Start; 3]>,
-    state: Cell<NonNull<State>>,
+    start: UnsafeCell<[Start; 3]>,
+    // Either EMPTY_HEADS or the start of this heap's State allocation.
+    heads: Cell<NonNull<Heads>>,
 }
 
 impl Default for Heap {
@@ -504,17 +508,17 @@ impl Default for Heap {
             pending: AtomicBool::new(false),
             closed: Cell::new(false),
             start: Default::default(),
-            state: Cell::new(NonNull::from(&EMPTY_STATE.0)),
+            heads: Cell::new(empty_heads()),
         }
     }
 }
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        let pages = self.state.get();
-        if pages != NonNull::from(&EMPTY_STATE.0) {
-            // SAFETY: the heap owns this box, and no guard outlives the heap.
-            drop(unsafe { Box::from_raw(pages.as_ptr()) });
+        let heads = self.heads.get();
+        if heads != empty_heads() {
+            // SAFETY: this is the start of the heap's State box, and no guard outlives the heap.
+            drop(unsafe { Box::from_raw(heads.cast::<State>().as_ptr()) });
         }
     }
 }
@@ -547,8 +551,39 @@ impl Default for Start {
 struct Locked<'a>(&'a Heap);
 
 impl Locked<'_> {
-    fn has_pages(&self) -> bool {
-        self.0.state.get() != NonNull::from(&EMPTY_STATE.0)
+    #[inline(always)]
+    fn head(&self, class: Class) -> Option<PagePointer> {
+        // SAFETY: the guard pins the private heads, or reads the shared empty heads.
+        let heads = unsafe { self.0.heads.get().as_ref() };
+        heads[usize::from(class.kind)][usize::from(class.bin)]
+    }
+
+    fn pages(&mut self) -> Option<&mut State> {
+        let heads = self.0.heads.get();
+        if heads == empty_heads() {
+            return None;
+        }
+        // SAFETY: a non-sentinel pointer starts this heap's State box. The guard
+        // owns the box for the returned borrow.
+        Some(unsafe { heads.cast::<State>().as_mut() })
+    }
+
+    #[inline(never)]
+    fn private_pages(&mut self) -> &mut State {
+        self.pages().expect("the heap owns private pages")
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn ensure_pages(&mut self) -> &mut State {
+        let mut heads = self.0.heads.get();
+        if heads == empty_heads() {
+            heads = NonNull::from(Box::leak(Box::new(State::empty()))).cast();
+            self.0.heads.set(heads);
+        }
+        // SAFETY: the pointer starts this heap's initialized State box and the
+        // guard owns the box for the returned borrow.
+        unsafe { heads.cast::<State>().as_mut() }
     }
 
     fn start(&mut self) -> &mut [Start; 3] {
@@ -556,6 +591,7 @@ impl Locked<'_> {
         unsafe { &mut *self.0.start.get() }
     }
 
+    #[inline(never)]
     fn retire_regions(&mut self, close: bool) {
         for entry in self.start() {
             if let Some(page) = entry.page {
@@ -584,24 +620,6 @@ impl Locked<'_> {
     }
 }
 
-impl std::ops::Deref for Locked<'_> {
-    type Target = State;
-    fn deref(&self) -> &State {
-        // SAFETY: the guard pins the heap's state or reads the immutable empty state.
-        unsafe { self.0.state.get().as_ref() }
-    }
-}
-impl std::ops::DerefMut for Locked<'_> {
-    fn deref_mut(&mut self) -> &mut State {
-        if !self.has_pages() {
-            self.0
-                .state
-                .set(NonNull::from(Box::leak(Box::new(State::empty()))));
-        }
-        // SAFETY: this private state is initialized and the guard owns it.
-        unsafe { self.0.state.get().as_mut() }
-    }
-}
 impl Drop for Locked<'_> {
     #[inline(always)]
     fn drop(&mut self) {
@@ -616,11 +634,27 @@ fn partial_key(key: Key) -> PartialKey {
     (key.payer, key.class.kind, key.class.bin, key.class.align)
 }
 
+type Heads = [[Option<PagePointer>; SLAB_BINS]; 3];
+
+struct EmptyHeads(UnsafeCell<Heads>);
+
+// SAFETY: the sentinel is only read. The cell lets the linker place its
+// zero-initialized heads in BSS.
+unsafe impl Sync for EmptyHeads {}
+
+fn empty_heads() -> NonNull<Heads> {
+    static EMPTY_HEADS: EmptyHeads = EmptyHeads(UnsafeCell::new([[None; SLAB_BINS]; 3]));
+    NonNull::new(EMPTY_HEADS.0.get()).unwrap()
+}
+
+// The pointer in Heap names the leading heads field and retains the provenance
+// of the entire allocation when it points to a private State.
+#[repr(C)]
 struct State {
     /// Each slab class's current list: pages of one payer and alignment, the
     /// key read off its first page. The first page may be empty, as the
     /// class's spare; every page after it is partial.
-    heads: [[Option<PagePointer>; SLAB_BINS]; 3],
+    heads: Heads,
     /// Every other key's partial pages, so a payer's slow allocation finds
     /// its pages without visiting other payers'. Never holds an empty page or
     /// the current list's key.
@@ -656,14 +690,6 @@ struct DedicatedCache {
     listed: bool,
 }
 
-struct EmptyState(State);
-
-// SAFETY: every access to this one state is a shared read. Mutation first
-// installs a private copy in the heap.
-unsafe impl Sync for EmptyState {}
-
-static EMPTY_STATE: EmptyState = EmptyState(State::empty());
-
 impl State {
     const fn empty() -> Self {
         Self {
@@ -692,6 +718,7 @@ impl State {
 
     /// Unlink the class's head if the inline path filled it. Only the head may
     /// be full while linked, so a list that moves on leaves no full page behind.
+    #[inline(never)]
     fn drop_full_head(&mut self, class: Class) {
         // SAFETY: this heap owns the head and its page's slots.
         unsafe {
@@ -900,6 +927,7 @@ impl DedicatedCache {
     /// When backing grows, return older stock above the live high-water mark.
     /// Reusing a reservation can bring back a later phase of the same
     /// workload, so leave room for its other extents.
+    #[inline(never)]
     fn add_live(&mut self, from: usize, to: usize, grew: bool, reused_reservation: bool) {
         self.demand = self.demand - from + to;
         self.peak_demand = self.peak_demand.max(self.demand);
@@ -936,24 +964,25 @@ impl DedicatedCache {
         // Preserve the reservation for a repeated growth sequence. Only
         // extents that have never grown can serve a different starting size.
         // Among those, prefer the smallest already resident fit.
-        let retained =
-            self.retained
-                .iter()
-                .copied()
-                .enumerate()
-                .rev()
-                .filter_map(|(index, page)| {
-                    let (used, born) = fit(page)?;
-                    if born == class.stride {
-                        Some((index, (false, 0)))
-                    } else {
-                        (used >= needed
-                            && used <= born.next_multiple_of(page_bytes())
-                            && used - needed <= needed)
-                            .then_some((index, (true, used)))
-                    }
-                });
-        let page = if let Some((index, _)) = retained.min_by_key(|&(_, rank)| rank) {
+        let mut best = None;
+        let mut best_used = usize::MAX;
+        for (index, &page) in self.retained.iter().enumerate().rev() {
+            if let Some((used, born)) = fit(page) {
+                if born == class.stride {
+                    best = Some(index);
+                    break;
+                }
+                if used >= needed
+                    && used < best_used
+                    && used <= born.next_multiple_of(page_bytes())
+                    && used - needed <= needed
+                {
+                    best = Some(index);
+                    best_used = used;
+                }
+            }
+        }
+        let page = if let Some(index) = best {
             self.remove_retained(index)
         } else {
             let index = self
@@ -1081,7 +1110,7 @@ impl Heap {
         // linked until the class's list next moves.
         // Direct classes are below a native page, so they always fit a slab.
         unsafe {
-            if let Some(page) = state.heads[usize::from(class.kind)][usize::from(class.bin)]
+            if let Some(page) = state.head(class)
                 && (*page.as_ref().key.get()).payer == payer.record_pointer().addr()
                 && (*page.as_ref().key.get()).class.align == class.align
             {
@@ -1124,7 +1153,9 @@ impl Heap {
         // SAFETY: the caller's contract; the lock pins the page's key.
         unsafe {
             let class = Page::key(page).class;
-            extend(&mut state, page, class);
+            let heap = state.0;
+            let pages = state.private_pages();
+            extend(heap, pages, page, class);
             let pointer = Self::take(page, class, bytes);
             state.finish_allocation(pointer, class)
         }
@@ -1175,8 +1206,8 @@ impl Heap {
         // SAFETY: this heap owns all queues and the live slot until publication.
         unsafe {
             let slab = class.fits_slab();
-            let ready = if slab && state.has_pages() {
-                state.available(payer, key)
+            let ready = if slab {
+                state.pages().and_then(|pages| pages.available(payer, key))
             } else {
                 None
             };
@@ -1218,17 +1249,18 @@ impl Heap {
                     }
                 }
             }
+            let pages = state.ensure_pages();
             if ready.is_none()
                 && !private
                 && class.stride <= NURSERY_STRIDE
                 && !growable
-                && let Some(pointer) = Self::nurse(heap, &mut state, payer, class, bytes)
+                && let Some(pointer) = Self::nurse(heap, pages, payer, class, bytes)
             {
                 return state.finish_allocation(pointer, class);
             }
             let page = if let Some(page) = ready {
                 page
-            } else if let Some(page) = state.cached(class) {
+            } else if let Some(page) = pages.cached(class) {
                 Page::reuse(page, payer, key);
                 page
             } else {
@@ -1241,21 +1273,21 @@ impl Heap {
                 backing.born.set(class.stride);
                 let before = backing.backed(payload);
                 let after = backing.use_extent(payload, class.stride);
-                state
+                pages
                     .dedicated
                     .add_live(0, after, after > before, reused_reservation);
             }
             if (*page.as_ref().slots.get()).free.is_null() {
-                extend(&mut state, page, class);
+                extend(heap, pages, page, class);
             }
             let pointer = Self::take(page, class, bytes);
             let slots = &*page.as_ref().slots.get();
             if slots.live == slots.limit {
                 if ready.is_some() {
-                    state.unlink(page, class);
+                    pages.unlink(page, class);
                 }
             } else if ready.is_none() {
-                state.link(page, class);
+                pages.link(page, class);
             }
             state.finish_allocation(pointer, class)
         }
@@ -1264,16 +1296,16 @@ impl Heap {
     /// Place a block of a class without a page in the payer's nursery,
     /// while the class has placements left.
     /// # Safety
-    /// The caller holds the heap lock as `state`.
+    /// The caller holds the heap lock and owns `pages`.
     unsafe fn nurse(
         heap: &Arc<Self>,
-        state: &mut Locked<'_>,
+        pages: &mut State,
         payer: Payer,
         class: Class,
         bytes: usize,
     ) -> Option<NonNull<u8>> {
         let key = (payer.record_pointer().addr(), class.kind);
-        let nursery = state.nurseries.entry(key).or_insert_with(|| Nursery {
+        let nursery = pages.nurseries.entry(key).or_insert_with(|| Nursery {
             page: None,
             left: [NURSERY_BLOCKS; SLAB_BINS],
         });
@@ -1298,8 +1330,8 @@ impl Heap {
             }
             // Full: it leaves with its last block.
             nursery.page = None;
-            state.idle_nurseries = true;
-            state.0.pending.store(true, Ordering::Relaxed);
+            pages.idle_nurseries = true;
+            heap.pending.store(true, Ordering::Relaxed);
             if (*page.as_ref().slots.get()).live == 0 {
                 Page::destroy(page);
             }
@@ -1309,6 +1341,7 @@ impl Heap {
 
     /// # Safety
     /// The heap flag owns this nursery. `extent` is exactly its backing size.
+    #[inline(never)]
     unsafe fn place_nursery(
         page: PagePointer,
         class: Class,
@@ -1349,12 +1382,12 @@ impl Heap {
     #[cold]
     #[inline(never)]
     pub(crate) fn trim(&self) {
-        let mut state = self.lock();
+        let mut locked = self.lock();
         self.pending.store(false, Ordering::Relaxed);
-        state.retire_regions(false);
-        if !state.has_pages() {
+        locked.retire_regions(false);
+        let Some(state) = locked.pages() else {
             return;
-        }
+        };
         let mut listed = std::mem::take(&mut state.listed);
         for page in listed.drain(..) {
             // SAFETY: listed pages are live slab pages owned by this heap;
@@ -1388,13 +1421,13 @@ impl Heap {
     /// Retire the task's cache; pages with transferred blocks keep their heap
     /// alive and are released by the last free on whichever task owns that block.
     pub(crate) fn close(&self) {
-        let mut state = self.lock();
+        let mut locked = self.lock();
         self.closed.set(true);
         self.pending.store(false, Ordering::Relaxed);
-        state.retire_regions(true);
-        if !state.has_pages() {
+        locked.retire_regions(true);
+        let Some(state) = locked.pages() else {
             return;
-        }
+        };
         state.listed = Vec::new();
         let nurseries = std::mem::take(&mut state.nurseries)
             .into_values()
@@ -1403,16 +1436,16 @@ impl Heap {
             .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
             .collect::<Vec<_>>();
         state.partial = HashMap::default();
-        let spares = std::mem::replace(&mut state.heads, [[None; SLAB_BINS]; 3])
-            .into_iter()
-            .flatten()
-            .flatten()
+        let mut spares = std::mem::replace(&mut state.heads, [[None; SLAB_BINS]; 3]);
+        for head in spares.iter_mut().flatten() {
             // SAFETY: the heap lock owns the queued pages' slots.
-            .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
-            .collect::<Vec<_>>();
+            if head.is_some_and(|page| unsafe { (*page.as_ref().slots.get()).live != 0 }) {
+                *head = None;
+            }
+        }
         let slabs = std::mem::take(&mut state.empty_slabs);
         let dedicated = std::mem::take(&mut state.dedicated);
-        drop(state);
+        drop(locked);
         if dedicated.listed {
             // An idle worker may have taken the entry already.
             let mut heaps = RETAINING.lock().unwrap();
@@ -1424,7 +1457,14 @@ impl Heap {
                 RETAINING_HEAPS.fetch_sub(1, Ordering::Relaxed);
             }
         }
-        for page in spares.into_iter().chain(slabs).chain(nurseries) {
+        for page in spares
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .chain(slabs)
+            .chain(nurseries)
+        {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
         }
@@ -1510,9 +1550,12 @@ pub(crate) unsafe fn try_grow_in_place(
         }
         let before = backing.backed(payload);
         let after = backing.use_extent(payload, class.stride);
-        heap.lock()
-            .dedicated
-            .add_live(before, after, after > before, reused_reservation);
+        heap.lock().private_pages().dedicated.add_live(
+            before,
+            after,
+            after > before,
+            reused_reservation,
+        );
         header.key.get().write(Key { class, ..key });
         #[cfg(feature = "memcheck")]
         {
@@ -1585,24 +1628,24 @@ unsafe fn push_free(slots: &mut Slots, payload: NonNull<u8>) {
 
 /// Put a spread page on its heap's trim list.
 /// # Safety
-/// The heap lock is held as `state` and owns `page`.
-unsafe fn list(state: &mut Locked<'_>, page: PagePointer) {
+/// The heap lock is held and owns `pages` and `page`.
+unsafe fn list(heap: &Heap, pages: &mut State, page: PagePointer) {
     // SAFETY: the heap lock owns the page's spread record.
     let spread = unsafe { &mut *page.as_ref().spread.get() };
-    if !spread.listed && !state.0.closed.get() {
+    if !spread.listed && !heap.closed.get() {
         spread.listed = true;
-        state.listed.push(page);
-        state.0.pending.store(true, Ordering::Relaxed);
+        pages.listed.push(page);
+        heap.pending.store(true, Ordering::Relaxed);
     }
 }
 
 /// Thread fresh slots onto an empty free list.
 /// # Safety
-/// The heap lock is held as `state`; `page` has a free slot of `class`
-/// and an empty free list.
+/// The heap lock is held and owns `pages` and `page`. The page has a free
+/// slot of `class` and an empty free list.
 #[cold]
 #[inline(never)]
-unsafe fn extend(state: &mut Locked<'_>, page: PagePointer, class: Class) {
+unsafe fn extend(heap: &Heap, pages: &mut State, page: PagePointer, class: Class) {
     // SAFETY: the heap lock owns the slots. Every threaded slot lies in the
     // page's mapping below `limit`.
     unsafe {
@@ -1639,7 +1682,7 @@ unsafe fn extend(state: &mut Locked<'_>, page: PagePointer, class: Class) {
                 if end > 2 * native {
                     spread.spread = true;
                     slots.watch = (slots.bump / 8).max(1);
-                    list(state, page);
+                    list(heap, pages, page);
                 }
             }
         }
@@ -1776,8 +1819,10 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
                     }
                     return;
                 }
-                if !state.0.closed.get()
-                    && state
+                let heap = state.0;
+                let pages = state.private_pages();
+                if !heap.closed.get()
+                    && pages
                         .nurseries
                         .get(&(key.payer, class.kind))
                         .is_some_and(|nursery| nursery.page == Some(page))
@@ -1785,8 +1830,8 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
                     // Kept for the payer's next block; the park trim
                     // returns it if the payer allocates nothing until then.
                     slots.bump = 0;
-                    state.idle_nurseries = true;
-                    state.0.pending.store(true, Ordering::Relaxed);
+                    pages.idle_nurseries = true;
+                    heap.pending.store(true, Ordering::Relaxed);
                 } else {
                     drop(state);
                     Page::destroy(page);
@@ -1804,8 +1849,10 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             }
             return;
         }
+        let heap = state.0;
+        let pages = state.private_pages();
         if payload.addr().get() & (SLAB - 1) == 0 {
-            if state.dedicated.retain(page) {
+            if pages.dedicated.retain(page) {
                 RETAINING
                     .lock()
                     .unwrap()
@@ -1818,9 +1865,9 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
         if (*page.as_ref().spread.get()).spread && slots.live <= slots.watch {
             // The owner trims its listed pages when it parks. Another task's
             // release may come after that park, so it trims here.
-            if ptr::eq(crate::tasks::current_heap(), state.0) {
+            if ptr::eq(crate::tasks::current_heap(), heap) {
                 slots.watch = 1;
-                list(&mut state, page);
+                list(heap, pages, page);
             } else {
                 trim_page(page);
                 slots.watch = if (*page.as_ref().spread.get()).spread {
@@ -1832,25 +1879,25 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
         }
         if slots.live != 0 {
             if was_out {
-                state.link(page, class);
+                pages.link(page, class);
             }
         } else if !was_out && slots.head {
             // Already the queue head: it stays as the spare.
-        } else if state.spare(class).is_none() {
+        } else if pages.spare(class).is_none() {
             // The emptied page becomes the spare, its key the current list's.
             if !was_out {
-                state.unlink(page, class);
+                pages.unlink(page, class);
             }
-            state.file_current(class);
-            state.link(page, class);
+            pages.file_current(class);
+            pages.link(page, class);
         } else {
             if !was_out {
-                state.unlink(page, class);
+                pages.unlink(page, class);
             }
-            state.empty_slabs.push_back(page);
-            if state.empty_slabs.len() > EMPTY_SLAB_LIMIT {
+            pages.empty_slabs.push_back(page);
+            if pages.empty_slabs.len() > EMPTY_SLAB_LIMIT {
                 // A running task reuses its burst's slabs; it trims them when it parks.
-                state.0.pending.store(true, Ordering::Relaxed);
+                heap.pending.store(true, Ordering::Relaxed);
             }
         }
     }
@@ -1958,6 +2005,7 @@ impl Mapping {
         self.len - self.headroom(payload)
     }
 
+    #[inline(never)]
     fn extend(&self, payload: NonNull<u8>, bytes: usize) -> bool {
         let Some(end) = bytes.checked_next_multiple_of(page_bytes()) else {
             return false;
@@ -1994,6 +2042,7 @@ impl Mapping {
         }
     }
 
+    #[inline(never)]
     fn use_extent(&self, payload: NonNull<u8>, bytes: usize) -> usize {
         self.used
             .set(self.used.get().max(bytes.next_multiple_of(page_bytes())));
@@ -2110,7 +2159,8 @@ mod tests {
         // Every listed page is listed once with matching back links, and
         // only a current list's first page may be full.
         let check = || {
-            let state = heap.lock();
+            let mut locked = heap.lock();
+            let state = locked.pages().unwrap();
             let mut seen = HashSet::new();
             let firsts = state
                 .heads
@@ -2309,7 +2359,7 @@ mod tests {
 
         // However long the heap stays busy, its payload stays until a worker idles.
         purge();
-        assert_eq!(heap.lock().dedicated.retained_bytes, 0);
+        assert_eq!(heap.lock().pages().unwrap().dedicated.retained_bytes, 0);
         assert_eq!(resident_pages(base, len), 0);
 
         // A repeated growth sequence starts small and needs its previously

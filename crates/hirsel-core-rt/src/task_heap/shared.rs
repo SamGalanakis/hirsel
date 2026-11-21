@@ -11,7 +11,7 @@ pub(super) const REGION_BYTES: usize = 512;
 pub(super) const MAX_STRIDE: usize = 256;
 const SHARDS: usize = 16;
 const FREE: u8 = 0b0000_1111;
-static POOLS: [Mutex<Pool>; SHARDS] = [const { Mutex::new(Pool(Vec::new())) }; SHARDS];
+static POOLS: [Mutex<Pool>; SHARDS] = [const { Mutex::new(Pool(None)) }; SHARDS];
 
 const _: () = assert!(
     PRIVATE_START / REGION_BYTES == 4
@@ -27,14 +27,49 @@ struct SharedPage {
 
 struct Placement {
     free: u8,
-    index: usize,
+    previous: Option<NonNull<SharedPage>>,
+    next: Option<NonNull<SharedPage>>,
 }
 
-struct Pool(Vec<NonNull<SharedPage>>);
+/// Slabs with a free region. Each slab carries its own links.
+struct Pool(Option<NonNull<SharedPage>>);
 
 // SAFETY: the shard mutex owns the list and all placement edits. A region
 // lease keeps its shared page alive across workers.
 unsafe impl Send for Pool {}
+
+impl Pool {
+    /// # Safety
+    /// The shard owns this available page, which is outside the list.
+    unsafe fn push(&mut self, page: NonNull<SharedPage>) {
+        // SAFETY: the shard owns the list and its linked pages.
+        unsafe {
+            let placement = &mut *page.as_ref().placement.get();
+            placement.previous = None;
+            placement.next = self.0;
+            if let Some(next) = self.0.replace(page) {
+                (*next.as_ref().placement.get()).previous = Some(page);
+            }
+        }
+    }
+
+    /// # Safety
+    /// The shard owns the list, and this page is linked in it.
+    unsafe fn remove(&mut self, page: NonNull<SharedPage>) {
+        // SAFETY: the shard owns the list and its linked pages.
+        unsafe {
+            let placement = &*page.as_ref().placement.get();
+            if let Some(previous) = placement.previous {
+                (*previous.as_ref().placement.get()).next = placement.next;
+            } else {
+                self.0 = placement.next;
+            }
+            if let Some(next) = placement.next {
+                (*next.as_ref().placement.get()).previous = placement.previous;
+            }
+        }
+    }
+}
 
 pub(super) struct Region(NonNull<u8>);
 
@@ -42,7 +77,7 @@ impl Region {
     pub(super) fn claim(heap: usize) -> (Self, NonNull<u8>) {
         let shard = (heap ^ (heap >> 12)) / 16 % SHARDS;
         let mut pool = POOLS[shard].lock().unwrap();
-        let page = pool.0.last().copied().unwrap_or_else(|| {
+        let page = pool.0.unwrap_or_else(|| {
             let (slab, base) = slabs::Slab::allocate(heap);
             // SAFETY: the new slab is exclusively owned. Pages after the first
             // can still be resident from the slab's earlier use.
@@ -60,12 +95,13 @@ impl Region {
                     shard,
                     placement: Placement {
                         free: FREE,
-                        index: 0,
+                        previous: None,
+                        next: None,
                     }
                     .into(),
                 });
+                pool.push(page);
             }
-            pool.0.push(page);
             page
         });
         // SAFETY: the shard owns placement and this region is unleased.
@@ -74,7 +110,7 @@ impl Region {
             let index = placement.free.trailing_zeros();
             placement.free &= !(1 << index);
             if placement.free == 0 {
-                pool.0.pop();
+                pool.remove(page);
             }
             let region = page
                 .cast::<u8>()
@@ -101,17 +137,11 @@ impl Drop for Region {
             debug_assert_eq!(placement.free & bit, 0);
             placement.free |= bit;
             if placement.free == FREE {
-                if !was_full {
-                    pool.0.swap_remove(placement.index);
-                    if let Some(moved) = pool.0.get(placement.index) {
-                        (*moved.as_ref().placement.get()).index = placement.index;
-                    }
-                }
+                pool.remove(page);
                 // Move the owner out before the slab can return to its pool.
                 drop(page.read());
             } else if was_full {
-                placement.index = pool.0.len();
-                pool.0.push(page);
+                pool.push(page);
             }
         }
     }

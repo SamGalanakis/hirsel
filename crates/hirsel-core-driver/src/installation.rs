@@ -195,6 +195,33 @@ pub fn register(
 fn hex(hash: ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+pub(crate) fn print_version() -> io::Result<()> {
+    let executable = std::env::current_exe()?;
+    let installed = Installed::discover(&executable)?;
+    let compiler = crate::reuse::compiler_identity()?;
+    println!("hirsel {}", env!("CARGO_PKG_VERSION"));
+    println!("compiler {}", hex(compiler));
+    if let Some(installed) = installed {
+        for (mode, runtimes) in [
+            ("runtime", &installed.registration.runtimes),
+            (
+                "recording runtime",
+                &installed.registration.recording_runtimes,
+            ),
+        ] {
+            for (target, archive) in runtimes {
+                let identity = archive
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| io::Error::other("installed runtime path has no identity"))?;
+                println!("{mode} {target} {identity}");
+            }
+        }
+    }
+    Ok(())
+}
 #[derive(Serialize)]
 pub struct ProductEnvironment {
     pub directory: PathBuf,

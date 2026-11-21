@@ -59,6 +59,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             print!("{help}");
             std::process::exit(0);
         }
+        crate::cli::Action::Version => {
+            crate::installation::print_version()?;
+            std::process::exit(0);
+        }
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     let command = invocation.command.name;
@@ -402,6 +406,12 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     } else {
         None
     };
+    let dir = dir.or_else(|| {
+        (manifest.is_none()
+            && stored_recipe.is_none()
+            && matches!(command, "check" | "build" | "run" | "test"))
+        .then(|| PathBuf::from("."))
+    });
     let runner = match (emulator, sysroot) {
         (None, None) => crate::Runner::Native,
         (Some(emulator), Some(sysroot)) => crate::Runner::qemu(&emulator, &sysroot, &target)?,

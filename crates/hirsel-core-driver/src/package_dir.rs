@@ -13,6 +13,25 @@ use std::path::{Component, Path, PathBuf};
 
 const MANIFEST: &str = "manifest.json";
 
+pub(crate) fn scaffold_manifest(sources: impl Iterator<Item = &'static str>) -> String {
+    use serde_json::json;
+    let sources = sources
+        .map(|file| json!({"file": file, "modules": [file.trim_end_matches(".hirsel")], "signatures": false}))
+        .collect::<Vec<_>>();
+    let manifest = json!({
+        "packages": [{
+            "package": crate::package("app"),
+            "dependencies": [crate::package("core"), crate::package("std")],
+            "sources": sources,
+        }],
+        "tests": {
+            "sources": [{"file": "tests.hirsel", "modules": ["tests"], "signatures": false}],
+            "limit": 64 * 1024 * 1024,
+        },
+    });
+    format!("{manifest:#}\n")
+}
+
 /// One run's grants, as `--dir` and `--grant` give them or a package's
 /// manifest declares them, in the same syntax.
 #[derive(Clone, Default)]

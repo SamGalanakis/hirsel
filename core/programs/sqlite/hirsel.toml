@@ -10,12 +10,13 @@ charge = "charge-v1"
 [foreign.native]
 symbols = "hsq_"
 archives = [
-  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_sqlite.a", sha256 = "b90fbdeca7f416f284d68eaa773e019ee92619f824bce068fa7cdc0660df4fbb" },
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_sqlite.a", sha256 = "cd8e4d635e16291d6737ba42d831dfff06db88da9aefcc25d0cdfa4f63a484a5" },
 ]
 
 [tests]
 limit = 67108864
 grants = ["Foreign=sqlite@1/sqlite/Sqlite", "Tasks", "Stdout"]
+dirs = ["."]
 
 [tests.sources]
 "tests.hirsel" = "tests"

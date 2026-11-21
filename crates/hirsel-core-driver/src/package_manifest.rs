@@ -145,7 +145,7 @@ pub(crate) const STAGED_FOREIGN: [(&str, &str, &str, &str); 2] = [
         "sqlite",
         "hsq_",
         "libhirsel_sqlite.a",
-        "b90fbdeca7f416f284d68eaa773e019ee92619f824bce068fa7cdc0660df4fbb",
+        "cd8e4d635e16291d6737ba42d831dfff06db88da9aefcc25d0cdfa4f63a484a5",
     ),
 ];
 

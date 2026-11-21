@@ -1,9 +1,16 @@
 pub opaque type Sqlite {}
+
 pub opaque type DbHandle {}
+
 pub opaque type StmtHandle {}
 
-pub type SqliteError { code: i32, message: String }
+pub type SqliteError {
+    code: i32,
+    message: String
+}
+
 pub type Step = Row | Done
+
 pub type Kind = Integer | Float | Text | Blob | Null
 
 pub opaque resource type Db: send {
@@ -48,7 +55,11 @@ fn read_error(e: Bytes) -> SqliteError {
 }
 
 fn status(rc: i32, e: Bytes) -> Result[(), SqliteError] {
-    if rc == 0 { Ok(()) } else { Error(read_error(e)) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Error(read_error(e))
+    }
 }
 
 fn release_error(f: Foreign[Sqlite], rc: i32) -> SqliteError {
@@ -162,12 +173,22 @@ pub fn step(mut s: Stmt) -> Result[Step, SqliteError] waits {
     let mut e = error_buffer()
     let rc = native.step(s.f, s.p, mut e)
     s.row = rc == 100
-    if s.row { Ok(Row) } else if rc == 101 { Ok(Done) } else { Error(read_error(e)) }
+    if s.row {
+        Ok(Row)
+    } else if rc == 101 {
+        Ok(Done)
+    } else {
+        Error(read_error(e))
+    }
 }
 
 fn check_column(s: Stmt, i: u32) {
-    if !s.row { fail("sqlite: no current row") }
-    if i >= s.columns { fail("sqlite: column index out of range") }
+    if !s.row {
+        fail("sqlite: no current row")
+    }
+    if i >= s.columns {
+        fail("sqlite: column index out of range")
+    }
 }
 
 pub fn column_kind(mut s: Stmt, i: u32) -> Kind waits {
@@ -195,7 +216,9 @@ pub fn column_bytes(mut s: Stmt, i: u32, mut out: Bytes) -> Result[(), SqliteErr
     check_column(s, i)
     let mut e = error_buffer()
     let count = native.column_len(s.f, s.p, i, mut e)
-    if count < 0 { return Error(read_error(e)) }
+    if count < 0 {
+        return Error(read_error(e))
+    }
     let start = list.len(out)
     list.fill(mut out, int.narrow(count), 0)
     let rc = native.column_copy(s.f, s.p, i, mut out, start, mut e)
@@ -212,35 +235,106 @@ pub fn reset(mut s: Stmt) -> Result[(), SqliteError] waits {
 pub fn close(take db: Db) -> Result[(), SqliteError] waits {
     let Db(f: f, p: p) = take db
     let rc = native.close(f, p)
-    if rc == 0 { Ok(()) } else { Error(release_error(f, rc)) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Error(release_error(f, rc))
+    }
 }
 
 pub fn finalize(take s: Stmt) -> Result[(), SqliteError] waits {
     let Stmt(f: f, p: p, columns: _, row: _) = take s
     let rc = native.finalize(f, p)
-    if rc == 0 { Ok(()) } else { Error(release_error(f, rc)) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Error(release_error(f, rc))
+    }
 }
 
 @test
 fn fl20_error_buffer() -> Result[(), ()] {
     let mut e = error_buffer()
     e[0] = 1
-    for i in 4u64 .. 260u64 { e[i] = b'a' }
+    for i in 4u64 .. 260u64 {
+        e[i] = b'a'
+    }
     let full = read_error(e)
-    if full.code != 1 || string.byte_len(full.message) != 256 { return Error(()) }
+    if full.code != 1 || string.byte_len(full.message) != 256 {
+        return Error(())
+    }
     for byte in string.as_bytes(full.message) {
-        if byte != b'a' { return Error(()) }
+        if byte != b'a' {
+            return Error(())
+        }
     }
     e[0] = 0x0a
     e[1] = 0x04
-    if read_error(e).code != 1034 { return Error(()) }
-    for i in 0u64 .. 4u64 { e[i] = 0xff }
-    if read_error(e).code != -1 { return Error(()) }
+    if read_error(e).code != 1034 {
+        return Error(())
+    }
+    for i in 0u64 .. 4u64 {
+        e[i] = 0xff
+    }
+    if read_error(e).code != -1 {
+        return Error(())
+    }
     e[4] = 0xc3
     e[5] = 0x28
     e[6] = 0
-    if read_error(e).message != "sqlite: error text is not UTF-8" { return Error(()) }
+    if read_error(e).message != "sqlite: error text is not UTF-8" {
+        return Error(())
+    }
     e[4] = 0
-    if read_error(e).message != "sqlite: no error text" { return Error(()) }
+    if read_error(e).message != "sqlite: no error text" {
+        return Error(())
+    }
     Ok(())
+}
+
+fn leaf_ends_with(name: Bytes, suffix: Bytes) -> bool {
+    let n = list.len(name)
+    let m = list.len(suffix)
+    if n < m {
+        return false
+    }
+    for i in 0u64 .. m {
+        if name[n - m + i] != suffix[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn valid_leaf(name: Bytes) -> bool {
+    let n = list.len(name)
+    if n == 0 || n > 200 || name[0] == b'.' {
+        return false
+    }
+    for byte in name {
+        let alpha = (b'A' <= byte && byte <= b'Z') || (b'a' <= byte && byte <= b'z')
+        let digit = b'0' <= byte && byte <= b'9'
+        if !(alpha || digit || byte == b'.' || byte == b'_' || byte == b'-') {
+            return false
+        }
+    }
+    !leaf_ends_with(name, b"-journal") && !leaf_ends_with(name, b"-wal") && !leaf_ends_with(name, b"-shm")
+}
+
+pub fn open(f: Foreign[Sqlite], d: Dir, name: String) -> Result[Db, SqliteError] waits {
+    let leaf = string.as_bytes(name)
+    if !valid_leaf(leaf) {
+        return Error(SqliteError(code: 14, message: "sqlite: name is not one leaf in the directory"))
+    }
+    let mut e = error_buffer()
+    match native.open(f, d, leaf, mut e) {
+        None => Error(read_error(e)),
+        Some(p) => match Db(f: f, p: p) {
+            Ok(take db) => Ok(take db),
+            Error((_, (grant, handle))) => {
+                let _ = native.close(grant, handle)
+                Error(handle_capacity())
+            },
+        },
+    }
 }

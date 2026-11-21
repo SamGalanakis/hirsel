@@ -35,3 +35,5 @@ pub fn finalize(f: Foreign[sqlite.Sqlite], take s: foreign.Ptr[sqlite.StmtHandle
 pub fn close(f: Foreign[sqlite.Sqlite], take db: foreign.Ptr[sqlite.DbHandle]) -> i32 waits
 
 pub fn errstr(f: Foreign[sqlite.Sqlite], code: i32, mut e: Bytes)
+
+pub fn open(f: Foreign[sqlite.Sqlite], d: Dir, name: Bytes, mut e: Bytes) -> Option[foreign.Ptr[sqlite.DbHandle]] waits

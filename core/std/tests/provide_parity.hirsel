@@ -1,8 +1,9 @@
 // Charge parity (MEM-24, CAP-5) of served ports. These laws live outside core
 // because a call inside core takes no step of its own (MEM-30): from here each
-// host operation is one step, as in any program. The granted host Dir is the
-// oracle: the same client against it and against a provide.dir must stop at
-// the same admission and the same step, whatever the bound.
+// host operation is one step, as in any program. The granted host Dir and
+// the granted network are the oracles: the same client against one and
+// against a provide.dir or provide.net must stop at the same admission and
+// the same step, whatever the bound.
 
 fn answer(mut s: Served[DirOp], take c: Call[DirOp], r: DirReply) -> bool {
     match provide.reply(mut s, take c, provide.dir_reply(r)) {
@@ -163,6 +164,192 @@ fn dir_parity(dir: Dir, tasks: Tasks) -> bool waits {
         let (value, _, _) = host
         short = short || value == 1000000 + n
         n = n + 1
+    }
+    let served = result.unwrap(task.join(take server)) > 0
+    same && refused && whole && short && served
+}
+
+fn net_answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+type Dial: send {
+    n: Net,
+    steps: u64
+}
+
+// Listen on 127.0.0.1, connect to the bound address, accept, send "hello"
+// from the dialed socket and receive at most 8 bytes on the accepted one.
+// A send or receive may move part of the bytes (TCP; the model network
+// does), so the value counts each step that worked and whether the bytes
+// received begin "hello"'s; a step bound that runs out gives 1000000 and
+// the bound.
+fn dial_client(take d: Dial) -> u64 waits {
+    let Dial(n, steps: limit) = take d
+    let run = bound steps limit {
+        match host.listen(n, Addr(ip: V4(2130706433), port: 0), 1) {
+            Ok(take pair) => {
+                let (take listener, at) = take pair
+                let mut l = take listener
+                let rest: u64 = match host.connect(n, at, Never) {
+                    Ok(take dialed) => match host.accept(mut l, Never) {
+                        Ok(take accepted) => {
+                            let (take far, _) = take accepted
+                            let (dr, dw) = net.split(take dialed)
+                            let (ar, aw) = net.split(take far)
+                            let mut w = take dw
+                            let mut r = take ar
+                            let sent: u64 = match host.send_pair(mut w, string.as_bytes("hello"), string.as_bytes(""), Never) {
+                                Ok(k) => if k > 0 { 1000u64 } else { 0u64 },
+                                Error(_) => 0
+                            }
+                            let mut b: Bytes = list.with_capacity(8)
+                            let got: u64 = match host.recv_bounded(mut r, mut b, 8, Never) {
+                                Ok(k) => if k > 0 { 10000u64 } else { 0u64 },
+                                Error(_) => 0
+                            }
+                            let same = list.len(b) >= 1 && list.len(b) <= 5 && b[0] == 0x68
+                            let _ = take dr
+                            let _ = take w
+                            let _ = take r
+                            let _ = take aw
+                            110 + sent + got + if same { 100000u64 } else { 0u64 }
+                        },
+                        Error(_) => {
+                            let _ = take dialed
+                            10
+                        }
+                    },
+                    Error(_) => 0
+                }
+                let _ = take l
+                1 + rest
+            },
+            Error(_) => 0
+        }
+    }
+    match run {
+        Ok(v) => v,
+        Error(o) => 1000000 + o.steps
+    }
+}
+
+// A loopback behind a port: Listen binds port 4000, Connect and Accept
+// issue fresh sockets, Send keeps its payload (only the last, since a
+// client stopped between its send and its receive leaves one behind) and
+// Recv fills it back; it
+// serves until quiescence and counts the calls it answered.
+fn loopback(take s: Served[NetOp]) -> u64 waits {
+    let mut served = take s
+    let mut data: Bytes = list.with_capacity(64)
+    let mut id: u64 = 4
+    let mut calls: u64 = 0
+    let mut going = true
+    while going {
+        match provide.next(mut served) {
+            Some(take call) => {
+                let mut c = take call
+                let op = provide.net_op(c)
+                let here = Addr(ip: V4(2130706433), port: 4000)
+                let reply: Option[NetReply] = match op {
+                    Listen(addr, backlog) => {
+                        id = id + 4
+                        Some(Listener(id, here))
+                    },
+                    Connect(addr) => {
+                        id = id + 4
+                        Some(Socket(id, here))
+                    },
+                    Accept(listener) => {
+                        id = id + 4
+                        Some(Socket(id, Addr(ip: V4(2130706433), port: 5000)))
+                    },
+                    Send(socket, prefix, tail) => {
+                        list.clear(mut data)
+                        provide.payload(c, 1, mut data)
+                        provide.payload(c, 2, mut data)
+                        Some(Count(prefix + tail))
+                    },
+                    Recv(socket, room, max) => {
+                        let took = provide.fill(mut served, mut c, data)
+                        list.clear(mut data)
+                        Some(Count(took))
+                    },
+                    Released(id: _, part: _) => None,
+                    _ => Some(Failed(Denied))
+                }
+                match reply {
+                    Some(r) => {
+                        if net_answer(mut served, take c, r) {
+                            calls = calls + 1
+                        }
+                    },
+                    None => {
+                        let _ = take c
+                    }
+                }
+            },
+            None => {
+                going = false
+            }
+        }
+    }
+    calls
+}
+
+// The dial client in a task of `b` bytes under a bound of `n` steps: its
+// value, or the requested and available bytes of the admission that stopped
+// it.
+fn dial(tasks: Tasks, n: Net, b: u64, steps: u64) -> (u64, u64, u64) waits {
+    let child = task.spawn(tasks, bytes b, Dial(n: n, steps: steps), dial_client)
+    match task.join(take child) {
+        Ok(v) => (v, 0, 0),
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => (1, k.requested, k.available),
+                    _ => (2, 0, 0),
+                }
+            }
+            (3, 0, 0)
+        },
+        Error(_) => (4, 0, 0)
+    }
+}
+
+// MEM-24 for Net: the dial client against the granted network and against a
+// served loopback, for every task size up to 320 bytes and every step bound
+// up to 24, agrees on the value or on the admission that stopped it. Both
+// sweeps cross over: no bytes refuses (value 1), no steps runs out (1000000
+// and the bound), and the whole client gives 111111 (listened 1, connected
+// 10, accepted 100, sent 1000, received 10000, the bytes back 100000).
+// expect: run net_parity(network) = true
+fn net_parity(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (v, s) = provide.net(bytes 4096)
+    let server = task.spawn(tasks, bytes 65536, take s, loopback)
+    let mut same = true
+    let mut refused = false
+    let mut whole = false
+    let mut b: u64 = 0
+    while b <= 320 {
+        let host = dial(tasks, n, b, 1000)
+        same = same && host == dial(tasks, v, b, 1000)
+        let (value, _, _) = host
+        refused = refused || value == 1
+        whole = whole || value == 111111
+        b = b + 1
+    }
+    let mut short = false
+    let mut k: u64 = 0
+    while k <= 24 {
+        let host = dial(tasks, n, 65536, k)
+        same = same && host == dial(tasks, v, 65536, k)
+        let (value, _, _) = host
+        short = short || value == 1000000 + k
+        k = k + 1
     }
     let served = result.unwrap(task.join(take server)) > 0
     same && refused && whole && short && served

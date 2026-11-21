@@ -1214,9 +1214,10 @@ struct Cx<'c, 'a, 'e> {
     /// Freeze and reservation records, and the steps of their places.
     freezes: Vec<Freeze>,
     steps: Vec<PStep>,
-    /// A place already evaluated while testing whether an ascription denotes
-    /// it directly. A conversion reads this place without repeating its indices.
-    ascribed_operand: Option<(NodeId, At)>,
+    /// A place already evaluated for its node: while testing whether an ascription
+    /// denotes it directly, or whether a `copy` operand is plain. The next `place` of
+    /// that node reads it without repeating its indices.
+    resolved_operand: Option<(NodeId, At)>,
     /// LANG-18: while a `?=>` path mapper is applied, its one argument is the
     /// error payload already in hand: the mapping node, its type and value.
     mapped_error: Option<(NodeId, TyId, Option<ValueId>)>,
@@ -1391,7 +1392,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             dead: false,
             freezes: vec![],
             steps: vec![],
-            ascribed_operand: None,
+            resolved_operand: None,
             mapped_error: None,
             depth: 0,
             synth_ty: UNIT,

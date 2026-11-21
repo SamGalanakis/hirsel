@@ -54,6 +54,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (t, self.emit_unary(UnaryOp::BitNot, t, v, n))
             }
             "copy" => {
+                // OWN-6: `copy x` of a whole slot reads `x` with its declared type. One
+                // that is not plain is refused here and only viewed, so it is not also
+                // moved. Other operands keep their value path, which may give a view.
+                if self.kind(e) == NodeKind::Path {
+                    match self.place(e) {
+                        Ok(Some(at))
+                            if at.place.len == 0
+                                && !copyable(&self.p.decls, &self.t, at.ty, &self.params) =>
+                        {
+                            self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                            let a = self.shown(at.ty);
+                            self.refuse("OWN-6", n, format!("`{a}` is not plain"));
+                            return (at.ty, None);
+                        }
+                        Ok(Some(at)) => self.resolved_operand = Some((e, at)),
+                        Ok(None) => {}
+                        Err(()) => return (ERROR, None),
+                    }
+                }
                 let (t, v) = self.expr(e, None);
                 if !copyable(&self.p.decls, &self.t, t, &self.params) {
                     let a = self.shown(t);
@@ -64,7 +83,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "take" => match self.place(e) {
                 // OWN-6: `take` moves a place.
                 Ok(Some(at)) => {
+                    // OWN-15 refuses taking a binding that views the scrutinee; the
+                    // refused `take` gives no value, so it is not also mistyped.
+                    let views = self.var(at.place.slot).origin == Origin::PatternView;
                     self.use_place(at, Use::Take, n);
+                    if views {
+                        return (ERROR, None);
+                    }
                     let v = self.emit_place(at, n);
                     if !self.copies(at.ty) {
                         self.temp(at.ty, v);

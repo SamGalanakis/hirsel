@@ -398,7 +398,7 @@ fn g(v: Option[u64]) -> bool { v == None }
 ```hirsel
 fn f() -> bool { let x = None; x == Some(1u64) }          // refused: LANG-12, at None: T is open
 fn h(v: Option[u64]) -> bool { None == v }                // refused: LANG-12, at None: T is open
-fn g() -> u64 { let y = Ok(1u64); 0 }                     // refused: LANG-12, at Ok(1u64): E is open
+fn g() -> u64 { let y = Error(1u64); 0 }                  // refused: LANG-12, at Error(1u64): T is open
 ```
 ```hirsel
 fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at the call: f64 is not integer
@@ -605,7 +605,7 @@ fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError
 fn whole(mut s: String) { match s { mut t => {} } }      // refused: LANG-17, a mut binding is a payload
 ```
 ```hirsel
-fn unpack(mut o: Option[String]) { let Some(mut s) = o else { return } }   // refused: LANG-17
+fn unpack(take o: Option[String]) { let Some(mut s) = o else { return } }  // refused: LANG-17
 ```
 
 ### LANG-18: Errors

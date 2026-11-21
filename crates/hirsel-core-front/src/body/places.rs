@@ -387,8 +387,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
     /// `n` is not a place; Err when it was refused or is not built.
     pub(super) fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
-        if self.ascribed_operand.is_some_and(|(source, _)| source == n) {
-            let (_, at) = self.ascribed_operand.take().unwrap();
+        if self.resolved_operand.is_some_and(|(source, _)| source == n) {
+            let (_, at) = self.resolved_operand.take().unwrap();
             self.anchors.place = Some((n, at));
             return Ok(Some(at));
         }
@@ -406,7 +406,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     if at.ty == ty {
                         Ok(Some(at))
                     } else {
-                        self.ascribed_operand = Some((*value, at));
+                        self.resolved_operand = Some((*value, at));
                         Ok(None)
                     }
                 } else {

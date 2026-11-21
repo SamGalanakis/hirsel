@@ -1,0 +1,6 @@
+// OWN-15: a non-taking arm binds a view, so `take` of it is refused at the `take`. The
+// refused `take` gives no value, so the arm's result is not also refused under LANG-11.
+// expect: refuse OWN-15 at 5:24
+fn f(take o: Option[String]) -> String {
+  match o { Some(s) => take s, None => string.new() }
+}

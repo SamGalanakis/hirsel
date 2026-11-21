@@ -72,6 +72,8 @@ use super::{
 };
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
+#[path = "units_conn_check.rs"]
+mod conn;
 use std::fmt::Write as _;
 use std::panic::Location;
 use std::sync::atomic::Ordering;
@@ -321,7 +323,10 @@ impl State {
         s
     }
     fn finish(&self, code: i32, what: &str) -> ! {
-        let text = format!("{what}\n{}", self.dump());
+        let mut text = format!("{what}\n{}", self.dump());
+        if code == 0 {
+            text.push_str(&conn::obs_text());
+        }
         let _ = std::fs::write(&self.out, &text);
         if std::env::var_os("HIRSEL_CHECK_PRINT").is_some() {
             eprintln!("{text}");
@@ -1334,6 +1339,38 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
+    // 5-7. The connection path and the ledger on pool units
+    // (`units_conn_check.rs`, which states the cases and their laws).
+    Case {
+        name: "conn_wait_serve",
+        workers: 2,
+        units: 2,
+        body: conn::wait_serve,
+        producers: &[],
+        goals: 0b11,
+        params: conn::params_wait_serve,
+        pct: None,
+    },
+    Case {
+        name: "conn_seal_in_flight",
+        workers: 2,
+        units: 2,
+        body: conn::seal_in_flight,
+        producers: &[],
+        goals: 0b11,
+        params: conn::params_seal_in_flight,
+        pct: None,
+    },
+    Case {
+        name: "conn_helper_forward",
+        workers: 3,
+        units: 3,
+        body: conn::helper_forward,
+        producers: &[],
+        goals: 0b111,
+        params: conn::params_helper_forward,
+        pct: None,
+    },
 ];
 
 /// Run one schedule of `case` and exit the process with its verdict.
@@ -1632,6 +1669,7 @@ mod tests {
         let mut ran = 0;
         let mut running: Vec<(u64, std::process::Child, std::path::PathBuf)> = Vec::new();
         let mut found = None;
+        let mut law = super::conn::Law::default();
         while (seed < first + count && (all || found.is_none())) || !running.is_empty() {
             while running.len() < jobs && seed < first + count && (all || found.is_none()) {
                 let out = dir.join(format!("{case}-{seed}.txt"));
@@ -1655,7 +1693,14 @@ mod tests {
             let text = std::fs::read_to_string(&out).unwrap_or_default();
             let _ = std::fs::remove_file(&out);
             match status.code() {
-                Some(0) => {}
+                Some(0) => {
+                    if let Some(v) = law.add(s, &text) {
+                        fails.push(s);
+                        if found.as_ref().is_none_or(|(f, _): &(u64, String)| s < *f) {
+                            found = Some((s, format!("FAIL determinism: {v}\n")));
+                        }
+                    }
+                }
                 Some(2) => {
                     inconclusive += 1;
                     eprintln!("{case} seed {s}: inconclusive");
@@ -1708,7 +1753,7 @@ mod tests {
         let secs = t.elapsed().as_secs_f64();
         if let Some((seed, report)) = found {
             panic!(
-                "{case}: liveness violated at seed {seed} (schedule {ran} of the search, {secs:.1}s)\n{report}"
+                "{case}: law violated at seed {seed} (schedule {ran} of the search, {secs:.1}s)\n{report}"
             );
         }
         eprintln!("{case}: {ran} schedules hold the law ({secs:.1}s)");
@@ -1729,5 +1774,17 @@ mod tests {
     #[test]
     fn injector_starved() {
         check("injector_starved");
+    }
+    #[test]
+    fn conn_wait_serve() {
+        check("conn_wait_serve");
+    }
+    #[test]
+    fn conn_seal_in_flight() {
+        check("conn_seal_in_flight");
+    }
+    #[test]
+    fn conn_helper_forward() {
+        check("conn_helper_forward");
     }
 }

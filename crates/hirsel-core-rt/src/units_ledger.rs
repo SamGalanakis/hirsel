@@ -318,6 +318,9 @@ unsafe impl Send for Arrival {}
 pub(crate) struct Names {
     pub(crate) src: String,
     pub(crate) ident: String,
+    /// What the arrival carried, written at its take (for the checker's
+    /// determinism law: an arrival's content is part of its taker's input).
+    pub(crate) content: String,
 }
 
 /// Name arrivals (test builds, when a harness asks for it).
@@ -351,6 +354,26 @@ pub(crate) enum Body {
 }
 
 impl Body {
+    #[cfg(test)]
+    fn content(&self) -> String {
+        let amounts = |cs: &[Credit]| cs.iter().map(|c| c.amount.to_string()).collect::<Vec<_>>().join(",");
+        match self {
+            Body::Credits(cs) => amounts(cs),
+            Body::LastRelease(c) => c.amount.to_string(),
+            // SAFETY: the end arrival owns the ended helper's context.
+            Body::HelperEnd(e) => {
+                let h = unsafe { e.0.as_ref() };
+                let info = h.helper.as_ref().unwrap();
+                format!("root {} ret {}", h.used(info.root), info.ret.as_ref().map_or(0, |v| v.bytes()))
+            }
+            Body::Settlement(_, Settle::Accepted(cs)) => amounts(cs),
+            Body::Settlement(_, Settle::Closed(v) | Settle::Withdrawn(v)) | Body::Item(_, v) => {
+                format!("{} bytes", v.bytes())
+            }
+            Body::Close(_) | Body::SealAnswer(_) => String::new(),
+        }
+    }
+
     /// Forwarded from an ended helper to its owner: credits and notices only.
     fn forwarded(&self) -> bool {
         matches!(self, Body::Credits(_) | Body::LastRelease(_))
@@ -385,6 +408,7 @@ pub(crate) fn name_it(mut a: Box<Arrival>, src: impl FnOnce() -> String, ident: 
         a.names = Some(Box::new(Names {
             src: src(),
             ident: ident(),
+            content: String::new(),
         }));
     }
     a
@@ -536,10 +560,43 @@ impl UnitCtx {
 
     /// A run root with `limit` bytes.
     pub(crate) fn root(limit: u64) -> UnitCtx {
-        let mut u = UnitCtx::blank("U0".into());
-        let r = u.new_rec(limit, None, Kind::Root, true, Some("U0".into()));
+        Self::root_as(limit, "U0")
+    }
+
+    /// A run root labelled `label` (labels name records and arrivals in
+    /// test builds; elsewhere they are dropped).
+    pub(crate) fn root_as(limit: u64, #[allow(unused)] label: &str) -> UnitCtx {
+        #[cfg(test)]
+        let mut u = UnitCtx::blank(label.into());
+        #[cfg(not(test))]
+        let mut u = UnitCtx::blank(String::new());
+        let r = u.new_rec(limit, None, Kind::Root, true, Some(label.into()));
         u.stack.push(r);
         u
+    }
+
+    /// Bind the unit to the pool unit `id`: a publish to a parked port wakes it.
+    pub(crate) fn bind(&self, id: u32) {
+        self.port.set_wake(id);
+    }
+
+    /// Take the next arrival, parking the pool unit until one is published.
+    /// Must run on the bound pool unit.
+    pub(crate) fn wait(&mut self) -> (Took, Box<Arrival>) {
+        loop {
+            if let Some(t) = self.take() {
+                return t;
+            }
+            if self.port.arm() {
+                super::park(None);
+                self.port.disarm();
+            }
+        }
+    }
+
+    /// The balance of the record that admits now (its `used`).
+    pub(crate) fn current_used(&self) -> u64 {
+        self.used(self.cur())
     }
 
     fn tag(&self) -> usize {
@@ -919,6 +976,10 @@ impl UnitCtx {
     /// End a helper: its unused primary cell goes back to the cell
     /// reservation (or joins the returned cause chain), and the whole helper
     /// travels to its owner as one arrival.
+    /// End a helper. Publishing its end hands the context to the owner, so
+    /// this is the helper's last touch of it; the pointer returned may be
+    /// read only by a caller that knows the end has not been taken (the
+    /// single-threaded ledger law).
     pub(crate) fn end_helper(mut self: Box<Self>, ret: Option<Value>, with_cell: bool) -> NonNull<UnitCtx> {
         let cell = self.cell.take().expect("only a helper ends this way");
         let ret = if with_cell {
@@ -938,6 +999,9 @@ impl UnitCtx {
         let owner = info.owner.clone();
         #[cfg(test)]
         let label = self.label.clone();
+        // The helper's pool unit ends now: no publish may wake it again.
+        self.port.wake.store(0, Ordering::Release);
+        self.port.disarm();
         let p = NonNull::from(Box::leak(self));
         let a = named!(
             Arrival::new(Body::HelperEnd(HelperEnd(p))),
@@ -1250,6 +1314,10 @@ impl UnitCtx {
             self.intake();
         }
         let mut a = self.reached.pop_front()?;
+        #[cfg(test)]
+        if let Some(n) = a.names.as_mut() {
+            n.content = a.body.content();
+        }
         let body = std::mem::replace(&mut a.body, Body::Credits(Vec::new()));
         let t = match body {
             Body::Credits(cs) => {

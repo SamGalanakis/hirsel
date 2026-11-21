@@ -16,6 +16,8 @@ hirsel_guard::install!();
 mod host_memory;
 include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
+#[path = "support/llvm_codegen.rs"]
+mod llvm_codegen;
 
 #[test]
 fn scalar_record_calls_agree_with_evaluator() {

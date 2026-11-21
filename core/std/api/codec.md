@@ -20,8 +20,9 @@ dictionary. `of` at a type without the codec bound is LANG-12 at the call.
 prefix. `decode(c, b)` and `decode_at(c, b, start)` read exactly the bytes encode writes:
 `Ok(Error(e))` for bytes no value encodes to, `Error(c)` for a refused admission, with
 nothing admitted kept either way. `schema(c)` is the bytes a store keeps beside the data;
-`fingerprint(c)` is its CRC-64-AVRO. `resolve(c, writer)` resolves an older writer's
-schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
+`fingerprint(c)` is its CRC-64-AVRO. `fingerprint_of(b)` folds the bytes through
+Avro's 256-entry Rabin table and allocates nothing. `resolve(c, writer)` resolves
+an older writer's schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
 and `read`/`read_at` decode under it. `key_make`, `encode_key` and `decode_key` are the
 order-preserving key format for u8..i64, bool, Bytes, String and tuples of them.
 

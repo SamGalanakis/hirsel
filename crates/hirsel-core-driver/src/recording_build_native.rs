@@ -1798,6 +1798,7 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
     )
     .unwrap();
+    let refused_output = dir.path().join("rl1-refuse-out");
     let args = vec![
         "build".to_owned(),
         app.display().to_string(),
@@ -1812,13 +1813,17 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         "--store".into(),
         dir.path().join("rl1-refuse-store").display().to_string(),
         "-o".into(),
-        dir.path().join("rl1-refuse-out").display().to_string(),
+        refused_output.display().to_string(),
     ];
     let (code, _, err) = process::tape_request(&args, dir.path());
     assert_ne!(code, Some(0), "expected refusal with release archive");
     assert!(
-        err.contains("recording build requires a recording runtime archive"),
+        err.contains("requires a recording runtime archive"),
         "{err}"
+    );
+    assert!(
+        !refused_output.exists(),
+        "refused build emitted an executable"
     );
 }
 

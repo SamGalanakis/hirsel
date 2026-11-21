@@ -153,7 +153,11 @@ impl Fixture {
         let sources = hirsel_core_ir::source::SourceMap::default();
         let (body, mut annex) = normal::encode_with_annex(&module, FuncId(0), &sources.positions());
         if identity(name) == self.recipe.entry {
-            annex.1 = Some(vec![]);
+            annex.1 = Some(if params == "(u64)" {
+                vec!["f".into()]
+            } else {
+                vec![]
+            });
         }
         let row = BodyRef {
             body: self.object(ObjectKind::Body, body.bytes),
@@ -274,7 +278,10 @@ fn failure(result: Result<AdmittedRelease<'_>, AdmissionError>) -> AdmissionErro
 
 #[test]
 fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
-    use hirsel_core_ir::release_recipe::{GrantBinding, GrantKind};
+    use hirsel_core_ir::release_recipe::{
+        ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
+    };
+    use sha2::{Digest, Sha256};
 
     let harness = Harness::new(LARGE);
     let local = tempfile::tempdir().unwrap();
@@ -284,7 +291,9 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
         crate::call::hex(&archive.hash.0),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
-    let mut fixture = Fixture::leaf();
+    let mut fixture = Fixture::new("entry");
+    let body = fixture.body("entry", "(u64)", "", "return");
+    fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
     fixture.recipe.launch.grants.push(GrantBinding {
         ordinal: 0,
         kind: GrantKind::Foreign,
@@ -317,6 +326,61 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
 
     fixture.recipe.launch.grants.clear();
     assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == archive.hash));
+
+    // The address binds the full table even when the selected archive is unchanged.
+    let grant = GrantBinding {
+        ordinal: 0,
+        kind: GrantKind::Foreign,
+        values: vec!["app@1/main/I".into()],
+        archive: Some(archive),
+    };
+    let header = "(core@1/core/Foreign[app@1/main/I])->()";
+    let definition = DefPath::from_full("app@1/native/f").unwrap();
+    let leaf = ForeignLeaf {
+        module: DefPath::from_full("app@1/native").unwrap(),
+        symbols: "hfl_".into(),
+        targets: vec![ForeignTarget {
+            target: TARGET.into(),
+            archive,
+        }],
+        functions: vec![ForeignFunction {
+            identity: Identity::plain(definition),
+            header: header.into(),
+        }],
+    };
+    let mut table = b"\x18x86_64-unknown-linux-gnu".to_vec();
+    table.extend_from_slice(&archive.hash.0);
+    table.push(3);
+    let mut address_frame =
+        b"\x0eapp@1/native/f\0\0\x27(core@1/core/Foreign[app@1/main/I])->()\x05hfl_f".to_vec();
+    address_frame.extend_from_slice(&Sha256::digest(table));
+    let address = ContentHash::of_parts("hirsel.code-foreign.v1", [address_frame.as_slice()]);
+
+    fixture.recipe.launch.grants.push(grant.clone());
+    fixture.recipe.foreign_modules.push(leaf.clone());
+    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == address));
+
+    let mut fixture = Fixture::new("entry");
+    fixture.recipe.launch.grants.push(grant);
+    fixture.recipe.foreign_modules.push(leaf);
+    fixture.recipe.foreign_archives.push(archive);
+    let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
+    let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
+    fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
+    let error = admit(&fixture, b"abc").to_string();
+    assert!(error.ends_with("is not an indexed ar archive"), "{error}");
+
+    fixture.recipe.foreign_modules[0].targets.insert(
+        0,
+        ForeignTarget {
+            target: "aarch64-unknown-linux-gnu".into(),
+            archive: ObjectRef {
+                hash: ContentHash(Sha256::digest(b"").into()),
+                len: 0,
+            },
+        },
+    );
+    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Missing(hash) if hash == address));
 }
 
 // DESIGN §6.2 M1: the attested hash covers the exact bytes in every object kind.

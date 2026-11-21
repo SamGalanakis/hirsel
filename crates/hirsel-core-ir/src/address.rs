@@ -6,6 +6,7 @@ use crate::normal::{
     uleb,
     wire::{Read, Wire, invalid},
 };
+use crate::release_recipe::{ForeignFunction, text};
 use hirsel_core_ids::ContentHash;
 use std::collections::BTreeMap;
 
@@ -149,6 +150,22 @@ fn hash_builtin(identity: &Identity, semantics: u32) -> ContentHash {
     let mut bytes = crate::normal::encode_identity(identity);
     bytes.extend_from_slice(&semantics.to_le_bytes());
     ContentHash::of_parts("hirsel.code-builtin.v1", [&bytes[..]])
+}
+
+/// FFI-9 binds a foreign function's identity, header, C symbol and full archive set.
+pub fn foreign_address(
+    function: &ForeignFunction,
+    prefix: &str,
+    archives: ContentHash,
+) -> ContentHash {
+    let mut bytes = crate::normal::encode_identity(&function.identity);
+    text(&mut bytes, &function.header);
+    let name = &function.identity.definition.0.name;
+    uleb(&mut bytes, (prefix.len() + name.len()) as u64);
+    bytes.extend_from_slice(prefix.as_bytes());
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.extend_from_slice(&archives.0);
+    ContentHash::of_parts("hirsel.code-foreign.v1", [&bytes[..]])
 }
 
 /// Addresses of all instances reached by these roots. A missing row means an

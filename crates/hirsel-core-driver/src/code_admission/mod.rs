@@ -418,6 +418,9 @@ fn verify_release(
     })?;
     if recipe.has_foreign() {
         check_foreign_archive_inventory(&recipe, budget)?;
+    }
+    closure::check(&recipe, &groups, &bodies, semantics, budget)?;
+    if recipe.has_foreign() {
         let mut sealed = std::collections::BTreeMap::new();
         charge_rows::<(ObjectRef, &hirsel_core_ids::DefPath)>(
             budget,
@@ -457,7 +460,6 @@ fn verify_release(
             "foreign modules are not enabled yet",
         ));
     }
-    closure::check(&recipe, &groups, &bodies, semantics, budget)?;
     budget.check()?;
     Ok(VerifiedRelease {
         root,

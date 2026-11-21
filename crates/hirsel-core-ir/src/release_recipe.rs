@@ -141,7 +141,7 @@ impl ObjectRef {
     }
 }
 
-fn text(bytes: &mut Vec<u8>, value: &str) {
+pub(crate) fn text(bytes: &mut Vec<u8>, value: &str) {
     uleb(bytes, value.len() as u64);
     bytes.extend_from_slice(value.as_bytes());
 }
@@ -159,14 +159,19 @@ fn ordered<T: Ord + Copy>(
 }
 
 impl ForeignLeaf {
-    fn encode(&self, bytes: &mut Vec<u8>) {
-        text(bytes, &self.module.definition_identity());
-        text(bytes, &self.symbols);
-        uleb(bytes, self.targets.len() as u64);
+    /// FFI-9 hashes these rows without their count or the selected target.
+    pub fn encode_archive_rows(&self, bytes: &mut Vec<u8>) {
         for row in &self.targets {
             text(bytes, &row.target);
             row.archive.encode(bytes);
         }
+    }
+
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        text(bytes, &self.module.definition_identity());
+        text(bytes, &self.symbols);
+        uleb(bytes, self.targets.len() as u64);
+        self.encode_archive_rows(bytes);
         uleb(bytes, self.functions.len() as u64);
         for function in &self.functions {
             bytes.extend_from_slice(&encode_identity(&function.identity));

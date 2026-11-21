@@ -164,7 +164,9 @@ def supervise(command, *, raw_json=False):
     if libc.prctl(37, ctypes.byref(previous_subreaper), 0, 0, 0) != 0 or libc.prctl(36, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), 'cannot establish test descendant ownership')
     scratch = os.environ.get('HIRSEL_SCRATCH_OWNER', str(Path(__file__).with_name('scratch.py')))
-    owner = [sys.executable, scratch]
+    # The pool runs this without PATH, where sys.executable can be empty; the
+    # running interpreter is always /proc/self/exe.
+    owner = [os.readlink('/proc/self/exe'), scratch]
     parent = '/dev/shm' if os.environ.get('HIRSEL_TEST_POOL') else os.environ.get('TMPDIR') or '/tmp'
     phases = None
     try:

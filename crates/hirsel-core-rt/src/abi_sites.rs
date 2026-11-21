@@ -1,15 +1,14 @@
 //! FORM #91: late source binding for the existing Cause.site word at offset24.
-//! A linked site is its file's first site word plus the byte offset into the
-//! file (`source_positions::SITE_END`). The driver supplies files and starts. Nothing
-//! reads these borrowed tables before failure reporting; no global registry.
+//! A linked site is its file's first site word plus a byte offset or an annex
+//! position ordinal. Failure reporting borrows the tables supplied by the driver.
 use crate::{causes::Cause, entry::OsProcess};
 use hirsel_core_layout::source_positions;
 
 #[unsafe(export_name = "hirsel_core_relative_source_table_v2")]
 pub static RELATIVE_SOURCE_TABLE_V1: u8 = source_positions::TAG;
 
-#[unsafe(export_name = "hirsel_core_annex_source_table_v1")]
-pub static ANNEX_SOURCE_TABLE_V1: u8 = source_positions::POINTS_TAG;
+#[unsafe(export_name = "hirsel_core_annex_source_table_v2")]
+pub static ANNEX_SOURCE_TABLE_V2: u8 = source_positions::POINTS_TAG;
 
 #[repr(C)]
 pub struct SourceView {
@@ -82,10 +81,7 @@ pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) ->
         let (line, column) = if let Some(markers) = source.strip_prefix(&[source_positions::TAG]) {
             source_positions::position(markers, offset)
         } else if let Some(points) = source.strip_prefix(&[source_positions::POINTS_TAG]) {
-            let at = offset * 8;
-            let line = u32::from_le_bytes(points[at..at + 4].try_into().unwrap()) as usize;
-            let column = u32::from_le_bytes(points[at + 4..at + 8].try_into().unwrap()) as usize;
-            (line, column)
+            source_positions::point_position(points, offset)
         } else {
             let prefix = &source[..offset];
             let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;

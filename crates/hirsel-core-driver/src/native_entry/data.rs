@@ -172,14 +172,7 @@ fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Result<Vec<u8>> 
     for ((row, file), start) in sources.files.iter().enumerate().zip(sources.site_starts()?) {
         files[40 * row + 32..40 * row + 40].copy_from_slice(&start.to_le_bytes());
         let positions = match sources.points.get(&file.path) {
-            Some(points) => {
-                let mut bytes = vec![source_positions::POINTS_TAG];
-                for &(line, column) in points {
-                    bytes.extend_from_slice(&line.to_le_bytes());
-                    bytes.extend_from_slice(&column.to_le_bytes());
-                }
-                bytes
-            }
+            Some(points) => source_positions::encode_points(points),
             None => source_positions::encode(&file.text),
         };
         for (view, content) in [file.path.as_bytes(), &positions].into_iter().enumerate() {

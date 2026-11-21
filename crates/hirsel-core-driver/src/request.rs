@@ -683,34 +683,39 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if entry.is_some() {
         request.entry = entry;
     }
+    let manifest_runs = if (test_command || inspection.as_ref().is_some_and(|i| i.includes_tests()))
+        && !explicit_inputs
+        && let Some(dir) = &package_dir
+        && let crate::package_dir::PackageDir {
+            package,
+            tests: Some((sources, runs)),
+            ..
+        } = crate::package_dir::PackageDir::open(dir)?
+    {
+        request
+            .inputs
+            .packages
+            .iter_mut()
+            .find(|p| p.package == package.package)
+            .ok_or("the package's manifest names no checked package")?
+            .sources
+            .extend(sources);
+        Some(runs)
+    } else {
+        None
+    };
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.
     let test_runs = if test_command {
         request.entry = None;
-        let app = match &package_dir {
-            Some(dir) if !explicit_inputs => Some(crate::package_dir::PackageDir::open(dir)?),
-            _ => None,
-        };
-        Some(match app {
-            Some(crate::package_dir::PackageDir {
-                package,
-                tests: Some((sources, runs)),
-                ..
-            }) => {
+        Some(match manifest_runs {
+            Some(runs) => {
                 if explicit_limit || !grants.is_empty() {
                     return Err("the package's manifest declares its tests' run configuration; test takes no --limit, --dir or --grant".into());
                 }
-                request
-                    .inputs
-                    .packages
-                    .iter_mut()
-                    .find(|p| p.package == package.package)
-                    .ok_or("the package's manifest names no checked package")?
-                    .sources
-                    .extend(sources);
                 runs
             }
-            _ => {
+            None => {
                 if !explicit_limit {
                     return Err("test requires an explicit --limit <bytes> for each run".into());
                 }
@@ -861,7 +866,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
     if accepted && let Some(inspection) = inspection {
-        inspection.write(&product, json)?;
+        inspection.write(&product, selected_entry.as_ref(), json)?;
         std::process::exit(0);
     }
     let native_options = if native_command && (test_command || accepted) {

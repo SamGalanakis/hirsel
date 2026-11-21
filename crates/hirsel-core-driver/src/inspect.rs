@@ -79,9 +79,19 @@ impl Inspection {
         })
     }
 
-    pub(crate) fn write(self, product: &CheckProduct, json: bool) -> io::Result<()> {
+    pub(crate) fn includes_tests(&self) -> bool {
+        !matches!(self.query, Query::Interface)
+    }
+
+    pub(crate) fn write(
+        self,
+        product: &CheckProduct,
+        entry: Option<&DefPath>,
+        json: bool,
+    ) -> io::Result<()> {
         hirsel_core_ids::published::catch_io(|| {
-            let package = crate::package(if self.std { "std" } else { "app" });
+            let package =
+                entry.map_or_else(|| crate::package("std"), |path| path.0.package.clone());
             if matches!(self.query, Query::Interface) {
                 return interface(product, package).write(json);
             }
@@ -95,7 +105,7 @@ impl Inspection {
                     let definition = graph.resolve(&name)?;
                     graph.affected_tests(definition)?
                 }
-                Query::Unused => graph.unused(self.library || self.std),
+                Query::Unused => graph.unused(entry, self.library),
                 Query::Interface => unreachable!(),
             };
             for path in paths {
@@ -318,11 +328,9 @@ impl<'a> Definitions<'a> {
         self.own_paths(|id| id != definition && users.contains(&id))
     }
 
-    fn unused(&self, library: bool) -> Vec<DefPath> {
-        let entry = DefPath::from_full("app@1/main/main").unwrap();
-        let main = self
-            .names
-            .get(&entry)
+    fn unused(&self, entry: Option<&DefPath>, library: bool) -> Vec<DefPath> {
+        let main = entry
+            .and_then(|path| self.names.get(path))
             .copied()
             .filter(|&id| self.product.index.get(id).kind == DefinitionKind::Function);
         let mut roots = Vec::new();

@@ -15,7 +15,9 @@ use crate::{
         NativeSemantics, ObjectKey, ReleaseLease, send_release,
     },
     code_store::{CodeStore, ObjectKind},
-    native::recipe_build::{foreign_recording_refusal, parse_root},
+    native::recipe_build::{
+        foreign_grant_lines, foreign_grant_refusal, foreign_recording_refusal, parse_root,
+    },
     sdk::{Describe, Reader},
 };
 use hirsel_core_ids::ContentHash;
@@ -91,6 +93,7 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
     let mut recording = None;
     let mut pin_seconds = 30 * 86400;
     let mut added = false;
+    let mut grants = crate::package_dir::Grants::default();
     let mut max_pause = 2_000;
     let mut memory = 2 << 30;
     let mut staging = 512 << 20;
@@ -112,6 +115,8 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
                     .filter(|&seconds| seconds != 0)
                     .ok_or("invalid tape retention")?;
             }
+            Opt::Grant if value.starts_with("Foreign=") => grants.grant(&value)?,
+            Opt::Grant => return Err("deploy takes only Foreign grants via --grant".into()),
             Opt::GrantAdded => added = true,
             Opt::MaxPause => max_pause = value.parse()?,
             Opt::MaxRecipeBytes => admission.recipe_bytes = value.parse()?,
@@ -136,9 +141,23 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
             return Err("deploy takes no place arguments".into());
         }
         let source = source.ok_or("deploy requires --code-store DIR")?;
+        let recipe = read_recipe(&source, root, admission.recipe_bytes)?;
+        if let Some(reason) = foreign_grant_refusal(&recipe, &grants.foreign) {
+            eprintln!("deploy: refused: {reason}");
+            return Ok(2);
+        }
         let mut peer = UnixStream::connect(socket)?;
         peer.set_write_timeout(admission.timeout)?;
-        peer.write_all(&[u8::from(added)])?;
+        peer.write_all(&[u8::from(added) | (u8::from(!grants.foreign.is_empty()) << 1)])?;
+        if !grants.foreign.is_empty() {
+            let names = grants
+                .foreign
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            write_frame(&mut peer, names.as_bytes())?;
+        }
         match send_release(&mut peer, &source, root, &admission) {
             Err(AdmissionError::Refused(reason)) if reason.starts_with("FFI-8: ") => {
                 eprintln!("deploy: refused: {reason}");
@@ -148,6 +167,16 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
         }
         peer.set_read_timeout(Some(DEPLOY_TIMEOUT))?;
         let mut report = read_frame(&mut peer, admission.recipe_bytes)?;
+        if report.starts_with(b"foreign: ") {
+            if report != deploy_foreign_lines(&recipe, root).as_bytes() {
+                return Err("the host reported different Foreign bindings".into());
+            }
+            let mut out = io::stdout().lock();
+            out.write_all(&report)?;
+            out.flush()?;
+            peer.write_all(&[1])?;
+            report = read_frame(&mut peer, admission.recipe_bytes)?;
+        }
         if report.is_empty() {
             // The activation is ready. Only the timing report is pending.
             peer.set_read_timeout(None)?;
@@ -491,8 +520,11 @@ impl Host {
                 &self.limits,
                 &NativeSemantics,
                 self.recording.is_some(),
+                Some(&BTreeSet::new()),
             );
-            if let Err(AdmissionError::RecordingForeign(reason)) = &admitted {
+            if let Err(AdmissionError::RecordingForeign(reason) | AdmissionError::Refused(reason)) =
+                &admitted
+            {
                 let _ = connection.refuse_before_need(reason);
             }
             drop(connection);
@@ -886,8 +918,10 @@ impl Host {
     ) -> Result<(Report, Option<Replacement>), Error> {
         let mut report = Report::default();
         let start = Instant::now();
-        let added = match operator.deploy_permission(self.limits.timeout.unwrap()) {
-            Ok(added) => added,
+        let (added, approved) = match operator
+            .deploy_permission(self.limits.timeout.unwrap(), self.limits.recipe_bytes)
+        {
+            Ok(permission) => permission,
             Err(error) => {
                 let reason = format!("Refused(Admit({error}))");
                 let _ = operator.refuse_before_need(&reason);
@@ -900,11 +934,14 @@ impl Host {
             &self.limits,
             &NativeSemantics,
             self.recording.is_some(),
+            Some(&approved),
         ) {
             Ok(admitted) => admitted,
             Err(error) => {
                 let reason = match error {
-                    AdmissionError::RecordingForeign(reason) => reason,
+                    AdmissionError::RecordingForeign(reason) | AdmissionError::Refused(reason) => {
+                        reason
+                    }
                     error => format!("Refused(Admit({error}))"),
                 };
                 let _ = operator.refuse_before_need(&reason);
@@ -937,6 +974,13 @@ impl Host {
             }
         };
         report.assemble_ms = build.elapsed().as_millis();
+        let lines = deploy_foreign_lines(&recipe, assembly.recipe);
+        if !lines.is_empty()
+            && let Err(error) = operator.confirm_foreign(lines.as_bytes(), START_TIMEOUT)
+        {
+            report.refused = Some(format!("Refused(ForeignConfirmation({error}))"));
+            return Ok((report, None));
+        }
         let mut record = Deploy {
             attempt: attempt()?,
             prior_activation: old.active.version,
@@ -1340,6 +1384,15 @@ fn write_frame(peer: &mut UnixStream, value: &[u8]) -> io::Result<()> {
     let size = u32::try_from(value.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
     peer.write_all(&size.to_le_bytes())?;
     peer.write_all(value)
+}
+
+fn deploy_foreign_lines(recipe: &Recipe, root: ContentHash) -> String {
+    let mut output = String::new();
+    for line in foreign_grant_lines(recipe, root) {
+        output.push_str(&line);
+        output.push('\n');
+    }
+    output
 }
 
 fn grants_added(old: &Recipe, new: &Recipe) -> bool {

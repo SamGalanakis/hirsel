@@ -452,13 +452,19 @@ fn verify_release(
             let archive = leaf.targets[row].archive;
             let mut check = || {
                 let bytes = load(ObjectKind::ForeignArchive, &archive, budget)?;
-                crate::foreign_archive::SealedArchive::open(bytes, archive, &leaf.module, target)
+                crate::foreign_archive::SealedArchive::open(
+                    bytes,
+                    archive,
+                    &leaf.module,
+                    target,
+                    None,
+                )
             };
             let sealed = match sealed.entry(archive.hash) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => entry.insert(check()?),
             };
-            sealed.check_headers(archive, leaf, target, &recipe.entry.definition)?;
+            sealed.check_headers(archive, leaf, target, &recipe.entry.definition, None)?;
             selected.push((archive, &leaf.module));
         }
         crate::foreign_archive::check_distinct_definitions(

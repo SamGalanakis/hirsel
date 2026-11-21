@@ -459,6 +459,7 @@ pub struct CheckProduct {
     pub(crate) environment: ContentHash,
     pub(crate) foreign_inputs:
         BTreeMap<PackageId, BTreeMap<Vec<String>, hirsel_core_resolve::ForeignModuleCapture>>,
+    pub(crate) foreign_headers: BTreeMap<DefPath, (DefPath, String)>,
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
@@ -480,6 +481,7 @@ impl CheckProduct {
             snapshot: ContentHash::default(),
             environment: ContentHash::default(),
             foreign_inputs: BTreeMap::new(),
+            foreign_headers: BTreeMap::new(),
             image: None,
             library: None,
             native_entry: None,
@@ -985,6 +987,16 @@ impl Driver {
                 )
             });
             p.entry = request.entry.clone();
+            if !result.foreign_inputs.is_empty() {
+                result.foreign_headers = p
+                    .fns
+                    .iter()
+                    .filter_map(|function| {
+                        p.foreign_function_header(function)
+                            .map(|header| (function.path.clone(), header))
+                    })
+                    .collect();
+            }
             #[cfg(test)]
             if self.layers.law {
                 self.layers.tables = p.tables();

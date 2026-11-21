@@ -5,7 +5,7 @@ use hirsel_core_ids::{ContentHash, DefPath};
 use hirsel_core_ir::decode::DecodeBudget;
 use hirsel_core_ir::release_recipe::{ForeignLeaf, ObjectRef};
 use object::read::archive::{ArchiveFile, ArchiveKind};
-use object::read::elf::{ElfFile64, FileHeader, Rel, Rela, SectionHeader, Sym};
+use object::read::elf::{ElfFile64, FileHeader, SectionHeader, Sym};
 use object::{LittleEndian, elf};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -85,10 +85,13 @@ fn refuse(context: &str, problem: impl std::fmt::Display) -> AdmissionError {
     AdmissionError::Refused(format!("FFI-3: {context}{problem}"))
 }
 
-fn context(archive: ObjectRef, module: &DefPath, target: &str) -> String {
+fn context(archive: ObjectRef, module: &DefPath, target: &str, path: Option<&str>) -> String {
+    let file = path.map_or_else(
+        || format!("object {}", crate::call::hex(&archive.hash.0)),
+        str::to_owned,
+    );
     format!(
-        "archive object {} of {} for {target}",
-        crate::call::hex(&archive.hash.0),
+        "archive {file} of {} for {target}",
         module.definition_identity(),
     )
 }
@@ -99,11 +102,12 @@ impl SealedArchive {
         archive: ObjectRef,
         module: &DefPath,
         target: &str,
+        path: Option<&str>,
     ) -> Result<Self, AdmissionError> {
         let seal_error =
             || AdmissionError::Refused("FFI-3: this host cannot seal staged archives".into());
         let mut file = seal(&bytes).map_err(|_| seal_error())?;
-        let context = context(archive, module, target);
+        let context = context(archive, module, target, path);
         let length = file.metadata()?.len();
         file.seek(SeekFrom::Start(0))?;
         let observed = if length == bytes.len() as u64 {
@@ -220,8 +224,9 @@ impl SealedArchive {
         leaf: &ForeignLeaf,
         target: &str,
         entry: &DefPath,
+        path: Option<&str>,
     ) -> Result<(), AdmissionError> {
-        let context = context(archive, &leaf.module, target);
+        let context = context(archive, &leaf.module, target, path);
         let site = entry.definition_identity();
         for function in &leaf.functions {
             let symbol = format!("{}{}", leaf.symbols, function.identity.definition.0.name);

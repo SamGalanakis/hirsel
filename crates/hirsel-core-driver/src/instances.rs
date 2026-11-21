@@ -2,7 +2,7 @@
 //! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
 //! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::{CodeRow, Identity, address::code_groups, code_revision};
+use hirsel_core_ir::{CodeRow, Identity, address::code_groups_with_external, code_revision};
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
@@ -303,7 +303,15 @@ impl InstanceSet {
         prior: Option<&crate::reach::Reach>,
     ) -> Option<&BTreeMap<Identity, ContentHash>> {
         self.addresses
-            .get_or_init(|| self.groups(instances, prior, instances.iter().cloned(), |_, _| {}))
+            .get_or_init(|| {
+                self.groups(
+                    instances,
+                    prior,
+                    instances.iter().cloned(),
+                    &BTreeMap::new(),
+                    |_, _| {},
+                )
+            })
             .as_ref()
     }
 
@@ -314,6 +322,7 @@ impl InstanceSet {
         instances: &[Identity],
         prior: Option<&crate::reach::Reach>,
         roots: impl IntoIterator<Item = Identity>,
+        foreign: &BTreeMap<Identity, ContentHash>,
         group: impl FnMut(ContentHash, Vec<u8>),
     ) -> Option<BTreeMap<Identity, ContentHash>> {
         let mut rows = BTreeMap::new();
@@ -348,13 +357,14 @@ impl InstanceSet {
         }
         for (_, _, signatures) in rows.values() {
             for (identity, expected) in &signatures.slots {
-                let (_, _, actual) = rows.get(identity)?;
-                if *expected != actual.own {
-                    return None;
+                match rows.get(identity) {
+                    Some((_, _, actual)) if *expected == actual.own => (),
+                    None if foreign.contains_key(identity) => (),
+                    _ => return None,
                 }
             }
         }
-        code_groups(
+        code_groups_with_external(
             roots,
             |identity| {
                 let (body, slots, _) = rows.get(identity)?;
@@ -363,6 +373,7 @@ impl InstanceSet {
                     slots: (*slots).clone(),
                 })
             },
+            |identity| foreign.get(identity).copied(),
             group,
         )
     }

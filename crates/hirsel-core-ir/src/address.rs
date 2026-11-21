@@ -183,10 +183,21 @@ pub fn code_groups(
     row: impl FnMut(&Identity) -> Option<CodeRow>,
     group: impl FnMut(ContentHash, Vec<u8>),
 ) -> Option<BTreeMap<Identity, ContentHash>> {
+    code_groups_with_external(roots, row, |_| None, group)
+}
+
+/// A bodyless foreign function supplies a verified FFI-9 external address.
+pub fn code_groups_with_external(
+    roots: impl IntoIterator<Item = Identity>,
+    row: impl FnMut(&Identity) -> Option<CodeRow>,
+    external: impl Fn(&Identity) -> Option<ContentHash>,
+    group: impl FnMut(ContentHash, Vec<u8>),
+) -> Option<BTreeMap<Identity, ContentHash>> {
     addresses(
         roots,
         row,
         |identity| builtin_semantics::number(&identity.definition),
+        external,
         group,
     )
 }
@@ -195,21 +206,28 @@ fn addresses(
     roots: impl IntoIterator<Item = Identity>,
     mut row: impl FnMut(&Identity) -> Option<CodeRow>,
     builtin: impl Fn(&Identity) -> Option<u32>,
+    external: impl Fn(&Identity) -> Option<ContentHash>,
     group: impl FnMut(ContentHash, Vec<u8>),
 ) -> Option<BTreeMap<Identity, ContentHash>> {
     let mut checked = BTreeMap::new();
     let mut builtins = BTreeMap::new();
+    let mut externals = BTreeMap::new();
     let mut pending: Vec<_> = roots.into_iter().collect();
     while let Some(identity) = pending.pop() {
-        if checked.contains_key(&identity) || builtins.contains_key(&identity) {
+        if checked.contains_key(&identity)
+            || builtins.contains_key(&identity)
+            || externals.contains_key(&identity)
+        {
             continue;
         }
         if let Some(code) = row(&identity) {
             pending.extend(code.slots.iter().cloned());
             checked.insert(identity, code);
-        } else {
-            let number = builtin(&identity)?;
+        } else if let Some(number) = builtin(&identity) {
             builtins.insert(identity, number);
+        } else {
+            let address = external(&identity)?;
+            externals.insert(identity, address);
         }
     }
 
@@ -224,7 +242,10 @@ fn addresses(
                 .iter()
                 .map(|slot| match indices.get(slot) {
                     Some(&i) => Slot::Instance(i),
-                    None => Slot::Builtin(builtins[slot]),
+                    None => match builtins.get(slot) {
+                        Some(&number) => Slot::Builtin(number),
+                        None => Slot::External(externals[slot]),
+                    },
                 })
                 .collect(),
         })
@@ -235,6 +256,7 @@ fn addresses(
         let address = hash_builtin(&identity, number);
         (identity, address)
     }));
+    result.extend(externals);
     Some(result)
 }
 
@@ -247,6 +269,7 @@ struct Node {
 enum Slot {
     Instance(usize),
     Builtin(u32),
+    External(ContentHash),
 }
 
 #[derive(Default)]
@@ -349,6 +372,7 @@ fn hash_group(
                 None => Binding::External(addresses[child]),
             },
             Slot::Builtin(number) => Binding::Builtin(number),
+            Slot::External(address) => Binding::External(address),
         });
         Group::write_member(&mut bytes, node.body, slots);
     }

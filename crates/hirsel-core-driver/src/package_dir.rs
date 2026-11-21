@@ -35,13 +35,20 @@ pub(crate) struct Grants {
     pub mask: u64,
     pub net_rules: Vec<GrantRule>,
     pub secrets: Vec<SecretGrant>,
+    pub foreign: std::collections::BTreeSet<String>,
     pub env: Option<EnvPatterns>,
 }
 
 impl Grants {
     /// Add one `--grant` value.
     pub fn grant(&mut self, value: &str) -> Result<(), Box<dyn Error>> {
-        if value == "Secret" || value.starts_with("Secret:") {
+        if let Some(interface) = value.strip_prefix("Foreign=") {
+            DefPath::from_full(interface)
+                .ok_or("expected Foreign=package@major/module/interface")?;
+            if !self.foreign.insert(interface.to_owned()) {
+                return Err("a Foreign interface can be granted only once".into());
+            }
+        } else if value == "Secret" || value.starts_with("Secret:") {
             let grant = SecretGrant::parse(value).ok_or(SecretGrant::SYNTAX)?;
             if self
                 .secrets
@@ -77,7 +84,10 @@ impl Grants {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.directories.is_empty() && self.mask == 0 && self.secrets.is_empty()
+        self.directories.is_empty()
+            && self.mask == 0
+            && self.secrets.is_empty()
+            && self.foreign.is_empty()
     }
 
     pub fn apply(&self, options: &mut NativeOptions) {
@@ -85,6 +95,7 @@ impl Grants {
         options.grant_mask = self.mask;
         options.net_rules.clone_from(&self.net_rules);
         options.secret_grants.clone_from(&self.secrets);
+        options.foreign_grants.clone_from(&self.foreign);
         options.env_patterns.clone_from(&self.env);
     }
 }

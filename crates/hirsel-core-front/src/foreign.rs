@@ -107,6 +107,20 @@ struct KindUse {
 }
 
 impl Program<'_> {
+    pub fn foreign_function_header(&self, function: &FnDecl) -> Option<(DefPath, String)> {
+        if !self.index.modules[function.site.module.0 as usize].foreign {
+            return None;
+        }
+        let interface = Marker::Interface.argument(self, function.params.first()?.ty)?;
+        let TyKind::Adt(declaration, _) = self.types.kind(interface) else {
+            return None;
+        };
+        let encoded = crate::identity::code_identity(&self.decls, &self.types, function)?;
+        let start = 1 + function.path.definition_identity().len();
+        let header = String::from_utf8(encoded[start..].to_vec()).ok()?;
+        Some((self.decls[declaration.index()].path.clone(), header))
+    }
+
     /// The C ABI of a module whose declarations have passed FFI-2 and FFI-4 to FFI-6.
     pub fn foreign_abi(&self, module: ModuleId) -> Option<Vec<AbiSignature>> {
         if !self.index.modules[module.0 as usize].foreign || !self.refusals.is_empty() {

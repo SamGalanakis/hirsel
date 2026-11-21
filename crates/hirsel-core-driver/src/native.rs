@@ -97,6 +97,7 @@ pub struct NativeOptions {
     pub grant_mask: u64,
     pub net_rules: Vec<hirsel_core_net::GrantRule>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    pub foreign_grants: BTreeSet<String>,
     pub env_patterns: Option<hirsel_core_net::EnvPatterns>,
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
@@ -141,6 +142,7 @@ impl NativeOptions {
             grant_mask: 0,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: BTreeSet::new(),
             env_patterns: None,
             logical_charge_report: None,
             observed: None,
@@ -153,6 +155,7 @@ pub enum NativeStop {
     Instances(InstanceStop),
     Entry(String),
     ForeignRecording(String),
+    Archive(crate::code_admission::AdmissionError),
     Emit {
         definition: DefPath,
         message: String,
@@ -173,6 +176,7 @@ impl fmt::Display for NativeStop {
             Self::Instances(s) => write!(f, "instances: {s:?}"),
             Self::Entry(s) => write!(f, "entry: {s}"),
             Self::ForeignRecording(s) => write!(f, "refused: {s}"),
+            Self::Archive(error) => error.fmt(f),
             Self::Emit {
                 definition,
                 message,
@@ -187,6 +191,11 @@ impl std::error::Error for NativeStop {}
 impl From<io::Error> for NativeStop {
     fn from(e: io::Error) -> Self {
         Self::Input(e)
+    }
+}
+impl From<crate::code_admission::AdmissionError> for NativeStop {
+    fn from(error: crate::code_admission::AdmissionError) -> Self {
+        Self::Archive(error)
     }
 }
 pub struct ObjectProduct {
@@ -1256,11 +1265,23 @@ pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
             .params
             .iter()
             .map(|param| {
-                let TyKind::Adt(d, _) = p.types.kind(param.ty) else {
+                let TyKind::Adt(d, args) = p.types.kind(param.ty) else {
                     return Err("entry parameter has no provider handle type");
                 };
+                let mut ty = p.decls[d.index()].path.to_string();
+                if ty == "core@1/core/Foreign" {
+                    let [argument] = args.as_slice() else {
+                        return Err("Foreign requires its interface");
+                    };
+                    let TyKind::Adt(interface, _) = p.types.kind(*argument) else {
+                        return Err("Foreign requires its interface");
+                    };
+                    ty.push('[');
+                    ty.push_str(&p.decls[interface.index()].path.definition_identity());
+                    ty.push(']');
+                }
                 Ok(EntryParameter {
-                    ty: p.decls[d.index()].path.to_string(),
+                    ty,
                     name: p.index.symbols.text(param.name).to_owned(),
                 })
             })
@@ -1982,6 +2003,7 @@ pub(crate) mod tests {
             grant_mask: 0,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: BTreeSet::new(),
             env_patterns: None,
             logical_charge_report: None,
             observed: None,

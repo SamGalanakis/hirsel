@@ -16,7 +16,7 @@ pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
     bytes.push(value as u8);
 }
 
-pub(crate) fn encode_identity(identity: &Identity) -> Vec<u8> {
+pub fn encode_identity(identity: &Identity) -> Vec<u8> {
     let empty = Module::default();
     let mut order = ModuleOrder::new(&empty);
     let mut out = Write::module(&mut order);

@@ -65,6 +65,11 @@ impl Reachable<'_> {
                 "foreign modules are not enabled yet".into(),
             ));
         }
+        if !options.foreign_grants.is_empty() {
+            return Err(NativeStop::Entry(
+                "foreign modules are not enabled yet".into(),
+            ));
+        }
         Ok(instances)
     }
 

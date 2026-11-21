@@ -6,14 +6,19 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
 use crate::code_store::{CodeStore, ObjectKind};
+use crate::foreign_archive::SealedArchive;
 use hirsel_core_ir::{
     FuncId, ItemId,
-    address::{Binding, Group, builtin_semantics_number},
+    address::{Binding, Group, builtin_semantics_number, foreign_address},
     decode::DecodeBudget,
     normal::{self, Annex, Site, Slot},
-    release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, ObjectRef, Recipe},
+    release_recipe::{
+        self as wire, BodyRef, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding,
+        GrantKind, Launch, ObjectRef, Recipe,
+    },
     source::{ItemSource, SourceFile, SourceMap, anchored_items},
 };
+use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
@@ -155,8 +160,14 @@ impl CheckProduct {
         store: &CodeStore,
         n_place: u64,
     ) -> Result<Publication, NativeStop> {
-        let instances = reached.require_native(entry, options)?;
+        let instances = reached.require()?;
+        if options.recording
+            && let Some(reason) = reached.recording_refusal(entry)
+        {
+            return Err(NativeStop::ForeignRecording(reason));
+        }
         let decl = self.entry_decl(entry)?;
+        let foreign = self.release_foreign(reached, entry, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
         let items = instances
             .iter()
@@ -200,9 +211,15 @@ impl CheckProduct {
         let mut pending = Vec::new();
         let addresses = reached
             .materialized
-            .groups(instances, None, [entry.clone()], |_, bytes| {
-                pending.push(bytes);
-            })
+            .groups(
+                instances,
+                None,
+                [entry.clone()],
+                &foreign.addresses,
+                |_, bytes| {
+                    pending.push(bytes);
+                },
+            )
             .ok_or_else(|| NativeStop::Entry("incomplete or inconsistent recipe closure".into()))?;
         for bytes in pending {
             groups.push(store.put(ObjectKind::Group, &bytes)?);
@@ -220,15 +237,15 @@ impl CheckProduct {
             root_limit: options.root_limit,
             n_place,
             exit_status: decl.exit,
-            grants: bindings(decl, options)?,
+            grants: foreign.grants,
         };
         let recipe = Recipe {
             address: addresses[&entry],
             entry,
             groups,
             bodies,
-            foreign_modules: vec![],
-            foreign_archives: vec![],
+            foreign_modules: foreign.modules,
+            foreign_archives: foreign.archives,
             launch,
         };
         let root = store.put(ObjectKind::Recipe, &recipe.encode())?.hash;
@@ -239,6 +256,200 @@ impl CheckProduct {
             addresses,
         })
     }
+}
+
+struct ForeignRelease {
+    modules: Vec<ForeignLeaf>,
+    archives: Vec<ObjectRef>,
+    addresses: BTreeMap<Identity, ContentHash>,
+    grants: Vec<GrantBinding>,
+}
+
+fn archive_ref(row: &ForeignArchiveCapture) -> ObjectRef {
+    ObjectRef {
+        hash: ContentHash(row.pin),
+        len: row.bytes.len() as u64,
+    }
+}
+
+impl CheckProduct {
+    fn release_foreign(
+        &self,
+        reached: &Reachable<'_>,
+        entry: &DefPath,
+        options: &NativeOptions,
+        decl: &EntryDecl,
+        store: &CodeStore,
+    ) -> Result<ForeignRelease, NativeStop> {
+        let mut selected = BTreeMap::new();
+        let target = options.target.as_str();
+        for interface in &options.foreign_grants {
+            if !self
+                .foreign_headers
+                .values()
+                .any(|(path, _)| path.definition_identity() == *interface)
+            {
+                return Err(NativeStop::Entry(format!(
+                    "unknown grant Foreign={interface}"
+                )));
+            }
+        }
+        let grants = bindings(decl, options, |interface| {
+            let mut functions = self
+                .foreign_headers
+                .iter()
+                .filter(|(_, (path, _))| path.definition_identity() == interface);
+            let (function, _) = functions
+                .next()
+                .ok_or_else(|| NativeStop::Entry(format!("unknown grant Foreign={interface}")))?;
+            if functions.any(|(other, _)| {
+                other.0.package != function.0.package || other.0.modules != function.0.modules
+            }) {
+                return Err(NativeStop::Entry(format!(
+                    "FFI-4: two foreign modules name {interface}"
+                )));
+            }
+            let (module, capture) = self.foreign_capture(function)?;
+            let row = select_archive(&module, capture, target)?;
+            let object = archive_ref(row);
+            selected.insert(object.hash, row);
+            Ok(object)
+        })?;
+
+        let mut modules = BTreeMap::new();
+        for identity in &reached.materialized.foreign {
+            let function = &identity.definition;
+            let (module, capture) = self.foreign_capture(function)?;
+            let (_, header) = self.foreign_headers.get(function).ok_or_else(|| {
+                NativeStop::Entry(format!("no checked foreign header for {function}"))
+            })?;
+            let leaf = modules
+                .entry(module.definition_identity())
+                .or_insert_with(|| ForeignLeaf {
+                    module,
+                    symbols: capture.symbols.clone(),
+                    targets: capture
+                        .archives
+                        .iter()
+                        .map(|(target, row)| ForeignTarget {
+                            target: target.clone(),
+                            archive: archive_ref(row),
+                        })
+                        .collect(),
+                    functions: Vec::new(),
+                });
+            leaf.functions.push(ForeignFunction {
+                identity: identity.clone(),
+                header: header.clone(),
+            });
+        }
+
+        let mut sealed = BTreeMap::new();
+        let mut checked = Vec::new();
+        let mut addresses = BTreeMap::new();
+        for leaf in modules.values_mut() {
+            let function = &leaf.functions[0].identity.definition;
+            let (_, capture) = self.foreign_capture(function)?;
+            let row = select_archive(&leaf.module, capture, target)?;
+            let object = archive_ref(row);
+            if let std::collections::btree_map::Entry::Vacant(at) = sealed.entry(object.hash) {
+                at.insert(SealedArchive::open(
+                    row.bytes.to_vec(),
+                    object,
+                    &leaf.module,
+                    target,
+                    Some(&row.path),
+                )?);
+            }
+            sealed[&object.hash].check_headers(object, leaf, target, entry, Some(&row.path))?;
+            checked.push((object, &leaf.module));
+            selected.insert(object.hash, row);
+            let mut rows = Vec::new();
+            leaf.encode_archive_rows(&mut rows);
+            let archive_set = ObjectKind::ForeignArchive.hash(&rows);
+            leaf.functions
+                .sort_by_cached_key(|f| normal::encode_identity(&f.identity));
+            addresses.extend(leaf.functions.iter().map(|function| {
+                (
+                    function.identity.clone(),
+                    foreign_address(function, &leaf.symbols, archive_set),
+                )
+            }));
+        }
+        crate::foreign_archive::check_distinct_definitions(
+            checked
+                .into_iter()
+                .map(|(object, module)| (&sealed[&object.hash], object, module)),
+            &mut DecodeBudget::unlimited(),
+        )?;
+
+        let archives = selected
+            .into_values()
+            .map(|row| {
+                let object = store.put(ObjectKind::ForeignArchive, &row.bytes)?;
+                if object.hash.0 != row.pin {
+                    return Err(AdmissionError::Hash(ContentHash(row.pin)).into());
+                }
+                Ok(object)
+            })
+            .collect::<Result<_, NativeStop>>()?;
+        let mut modules = modules.into_values().collect::<Vec<_>>();
+        modules.sort_by_cached_key(|leaf| {
+            normal::encode_identity(&Identity::plain(leaf.module.clone()))
+        });
+        Ok(ForeignRelease {
+            modules,
+            archives,
+            addresses,
+            grants,
+        })
+    }
+
+    fn foreign_capture(
+        &self,
+        function: &DefPath,
+    ) -> Result<(DefPath, &ForeignModuleCapture), NativeStop> {
+        let path = &function.0;
+        let capture = self
+            .foreign_inputs
+            .get(&path.package)
+            .and_then(|modules| modules.get(&path.modules));
+        let (Some(capture), Some((name, parent))) = (capture, path.modules.split_last()) else {
+            return Err(NativeStop::Entry(format!(
+                "no captured foreign table for {function}"
+            )));
+        };
+        let module = DefPath(hirsel_core_ids::ItemPath {
+            package: path.package.clone(),
+            modules: parent.to_vec(),
+            name: name.clone(),
+        });
+        Ok((module, capture))
+    }
+}
+
+fn select_archive<'a>(
+    module: &DefPath,
+    capture: &'a ForeignModuleCapture,
+    target: &str,
+) -> Result<&'a ForeignArchiveCapture, NativeStop> {
+    capture.archives.get(target).ok_or_else(|| {
+        let targets = if capture.archives.is_empty() {
+            "none".into()
+        } else {
+            capture
+                .archives
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        AdmissionError::Refused(format!(
+            "FFI-3: {} has no archive for target {target}; its archives are for {targets}",
+            module.definition_identity()
+        ))
+        .into()
+    })
 }
 
 fn grant_name(kind: GrantKind) -> &'static str {
@@ -274,10 +485,34 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
     }
 }
 
-fn bindings(decl: &EntryDecl, options: &NativeOptions) -> Result<Vec<GrantBinding>, NativeStop> {
+fn bindings(
+    decl: &EntryDecl,
+    options: &NativeOptions,
+    mut archive: impl FnMut(&str) -> Result<ObjectRef, NativeStop>,
+) -> Result<Vec<GrantBinding>, NativeStop> {
     let mut next = [0usize; GRANT_NAMES.len()];
     let mut bound = Vec::new();
+    let mut named = BTreeSet::new();
     for (ordinal, param) in decl.parameters.iter().enumerate() {
+        if let Some(interface) = param
+            .ty
+            .strip_prefix("core@1/core/Foreign[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            if !options.foreign_grants.contains(interface) {
+                return Err(NativeStop::Entry(format!(
+                    "not granted: Foreign[{interface}]"
+                )));
+            }
+            named.insert(interface);
+            bound.push(GrantBinding {
+                ordinal: ordinal as u32,
+                kind: GrantKind::Foreign,
+                values: vec![interface.to_owned()],
+                archive: Some(archive(interface)?),
+            });
+            continue;
+        }
         let tag = param
             .ty
             .strip_prefix("core@1/core/")
@@ -327,6 +562,7 @@ fn bindings(decl: &EntryDecl, options: &NativeOptions) -> Result<Vec<GrantBindin
         });
     }
     if options.directories.len() > next[GrantKind::Dir as usize]
+        || options.foreign_grants.len() != named.len()
         || (!options.net_rules.is_empty() && next[GrantKind::Net as usize] == 0)
         || GRANT_NAMES
             .iter()

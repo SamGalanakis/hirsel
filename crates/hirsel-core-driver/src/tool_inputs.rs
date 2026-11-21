@@ -1465,8 +1465,9 @@ mod tests {
         let digest = |text| crate::native::recipe_build::parse_root(text).unwrap();
         let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        let open =
-            |bytes, hash, len| SealedArchive::open(bytes, ObjectRef { hash, len }, &module, target);
+        let open = |bytes, hash, len| {
+            SealedArchive::open(bytes, ObjectRef { hash, len }, &module, target, None)
+        };
         let prefix = |hash: ContentHash| {
             format!(
                 "FFI-3: archive object {} of ffi_laws@1/native for {target}",
@@ -1550,7 +1551,7 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         };
         let (valid, valid_object) = build("");
         valid
-            .check_headers(valid_object, &leaf, target, &entry)
+            .check_headers(valid_object, &leaf, target, &entry, None)
             .unwrap();
         let second_module = DefPath::from_full("other@1/native").unwrap();
         let first_row = (&valid, valid_object, &module);
@@ -1577,7 +1578,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
             }],
         };
         second
-            .check_headers(second_object, &other_leaf, target, &entry)
+            .check_headers(second_object, &other_leaf, target, &entry, None)
             .unwrap();
         let collision = check_distinct_definitions(
             [first_row, (&second, second_object, &second_module)],
@@ -1595,7 +1596,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
         let (invalid, object) =
             build("__attribute__((constructor)) static void initialize(void) { flag = 1; }\n");
         let problem = invalid
-            .check_headers(object, &leaf, target, &entry)
+            .check_headers(object, &leaf, target, &entry, None)
             .unwrap_err();
         assert_eq!(
             problem.to_string(),
@@ -1610,7 +1611,7 @@ __asm__(".data\n.globl hfl_unique\n.type hfl_unique,@gnu_unique_object\nhfl_uniq
 "#,
         );
         let problem = invalid
-            .check_headers(object, &leaf, target, &entry)
+            .check_headers(object, &leaf, target, &entry, None)
             .unwrap_err();
         assert_eq!(
             problem.to_string(),
@@ -1635,7 +1636,7 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         ] {
             let (invalid, object) = build(source);
             let error = invalid
-                .check_headers(object, &leaf, target, &entry)
+                .check_headers(object, &leaf, target, &entry, None)
                 .unwrap_err();
             assert_eq!(
                 error.to_string(),
@@ -1644,7 +1645,7 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         }
         let (invalid, object) = build_source("int hfl_touch(void) { return 0; }");
         let error = invalid
-            .check_headers(object, &leaf, target, &entry)
+            .check_headers(object, &leaf, target, &entry, None)
             .unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -1674,7 +1675,7 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         };
         let duplicate = open(bytes, object.hash, object.len).unwrap();
         let error = duplicate
-            .check_headers(object, &leaf, target, &entry)
+            .check_headers(object, &leaf, target, &entry, None)
             .unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -1685,7 +1686,7 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         );
         leaf.functions[0].header = "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->u64".into();
         let problem = valid
-            .check_headers(valid_object, &leaf, target, &entry)
+            .check_headers(valid_object, &leaf, target, &entry, None)
             .unwrap_err();
         assert_eq!(
             problem.to_string(),

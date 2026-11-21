@@ -662,6 +662,76 @@ hfl_release waits (take ffi_laws@1/laws/Obj) -> i32\n"
     );
 }
 
+#[test]
+fn foreign_publication_pins_grants_and_walks_only_reached_functions() {
+    use crate::code_admission::{AdmissionError, admit_local, NativeSemantics};
+    use crate::code_store::{CodeStore, ObjectKind};
+    use hirsel_core_ir::decode::DecodeBudget;
+    use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
+    use sha2::{Digest, Sha256};
+
+    let law = PackageLaw::new();
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else { unreachable!() };
+    law.write("app/native.c", r#"
+unsigned long long hfl_value(void) { return 1; }
+#define ABI "hfl_value stack () -> u64\n"
+__attribute__((used, section(".hirsel_abi")))
+static const char abi[sizeof(ABI) - 1] = ABI;
+"#);
+    let compile = Command::new(&cc).current_dir(law.path("app"))
+        .args(["-std=c11", "-fPIC", "-c", "native.c", "-o", "native.o"]).output().unwrap();
+    assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+    let archive = Command::new(cc.with_file_name("llvm-ar")).current_dir(law.path("app"))
+        .args(["rcs", "native.a", "native.o"]).output().unwrap();
+    assert!(archive.status.success(), "{}", String::from_utf8_lossy(&archive.stderr));
+    let bytes = std::fs::read(law.path("app/native.a")).unwrap();
+    let pin = ContentHash(Sha256::digest(&bytes).into());
+    let pin_text = crate::request::hex(pin);
+    law.manifest("app", "app", 1, &format!(r#"
+[sources]
+"main.hirsel" = "main"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hfl_"
+archives = [{{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = "{pin_text}" }}]
+"#));
+    law.write("app/native.hirsel", "pub fn value(f: Foreign[main.I]) -> u64\n");
+    let main = |body| law.write("app/main.hirsel", format!(
+        "pub opaque type I {{}}\npub fn main(f: Foreign[I]) -> Result[(), Exit] {{ {body} }}\n"
+    ));
+    let store = CodeStore::new(law.path("code-store"));
+    let publish = || {
+        let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Foreign=app@1/main/I"]));
+        let root = crate::native::recipe_build::parse_root(root.trim()).unwrap();
+        let recipe = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
+        let recipe = Recipe::decode(&recipe, &mut DecodeBudget::unlimited()).unwrap();
+        (root, recipe)
+    };
+
+    main("Ok(())");
+    let (_, grant_only) = publish();
+    assert!(grant_only.foreign_modules.is_empty());
+    let [archive] = grant_only.foreign_archives.as_slice() else { panic!("expected one pinned archive") };
+    assert_eq!((archive.hash, archive.len), (pin, bytes.len() as u64));
+    assert_eq!(std::fs::read(store.path(ObjectKind::ForeignArchive, pin)).unwrap(), bytes);
+    let [grant] = grant_only.launch.grants.as_slice() else { panic!("expected one grant") };
+    assert_eq!((grant.kind, grant.values.as_slice(), grant.archive), (GrantKind::Foreign, ["app@1/main/I".to_owned()].as_slice(), Some(*archive)));
+
+    main("let _ = native.value(f); Ok(())");
+    let (root, called) = publish();
+    assert_eq!(called.foreign_archives, grant_only.foreign_archives);
+    let [leaf] = called.foreign_modules.as_slice() else { panic!("expected one reached module") };
+    let [reached] = leaf.functions.as_slice() else { panic!("expected one reached function") };
+    assert_eq!(reached.identity.definition.definition_identity(), "app@1/native/value");
+    assert_eq!(reached.header, "(core@1/core/Foreign[app@1/main/I])->u64");
+    assert!(matches!(
+        admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics),
+        Err(AdmissionError::Unsupported("foreign modules are not enabled yet")),
+    ));
+}
+
 struct PackageLaw {
     dir: tempfile::TempDir,
     libraries: PathBuf,

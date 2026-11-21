@@ -77,8 +77,8 @@ Refused edits:
 
 - Make the region block's value `w` instead of `w.len`: refused, LANG-11 at 29:7, the bound's
   body must be the `u64` that `measure` returns.
-- Drop the region parameter from `Word` (`type Word { text: Text, len: u64 }`): refused,
-  MEM-6 at 2:13, a region field of an own type names its region.
+- Drop the region from `Word`'s field (`type Word[in r] { text: Text, len: u64 }`): refused,
+  MEM-6 at 2:19, a stored region field names its region.
 
 ## 2. Expression tree in one compact blob
 

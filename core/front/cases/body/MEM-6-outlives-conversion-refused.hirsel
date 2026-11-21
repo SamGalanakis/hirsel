@@ -1,0 +1,11 @@
+// MEM-6: an inner region does not outlive an outer one, so its text cannot be stored
+// in a slot typed for the outer region.
+// expect: refuse MEM-6 at 9:73
+// expect: compared MEM-6 at 9:73 | core@1/core/Text in inner | core@1/core/Text in outer
+type Token[in src] { text: Text in src, line: u32 }
+fn tok(t: String) {
+  region outer {
+    let mut k: Option[Token[in outer]] = None
+    region inner { let x = text.copy_in(inner, t); k = Some(Token(text: x, line: 1)) }
+  }
+}

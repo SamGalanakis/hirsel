@@ -2428,3 +2428,104 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 }
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// MEM-4: whether `callee` takes a writer and returns a `Result`, read from its
+    /// declared signature or, for a local callable, its type.
+    pub(super) fn writer_call(&self, callee: NodeId) -> bool {
+        let writer = |ty: TyId| {
+            matches!(self.t.kind(ty), TyKind::Adt(d, _)
+                if self.p.decls[d.index()].role == Some(Role::Writer))
+        };
+        let result = |ty: TyId| {
+            matches!(self.t.kind(ty), TyKind::Adt(d, _)
+                if is_core_prelude(&self.p.decls[d.index()].path, &["Result"]))
+        };
+        match self.call_target(callee) {
+            Some(Target::Definition(id)) => match self.p.by_definition[id.0 as usize].as_ref() {
+                Some(Def::Fn(f)) => {
+                    let g = &self.p.fns[*f as usize];
+                    result(g.result) && g.params.iter().any(|p| writer(p.ty))
+                }
+                _ => false,
+            },
+            Some(&Target::Binder(b)) => {
+                self.vars
+                    .get(b as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|v| {
+                        matches!(self.t.kind(v.ty), TyKind::Fn(ps, r, _, _)
+                    if result(*r) && ps.iter().any(|&(_, p)| writer(p)))
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// MEM-4: whether the call `n` is the operand of a `?` or in its body's returned
+    /// tail (the operand of `return`, or the result reached through blocks and `if`
+    /// and `match` arms), never a `let` initializer, an argument, a scrutinee or a
+    /// discarded expression.
+    pub(super) fn writer_placed(&mut self, n: NodeId) -> bool {
+        if self.writer_sites.is_none() {
+            let tree = &self.item.tree;
+            let mut sites = HashSet::default();
+            let mut stack = vec![(self.item.root, false)];
+            while let Some((m, tail)) = stack.pop() {
+                let kids = tree.children(m);
+                match tree.node(m).kind {
+                    NodeKind::Call => {
+                        if tail {
+                            sites.insert(m);
+                        }
+                        stack.extend(kids.iter().map(|&k| (k, false)));
+                    }
+                    NodeKind::Group | NodeKind::Return | NodeKind::Region | NodeKind::Labelled => {
+                        let tail = tail || tree.node(m).kind == NodeKind::Return;
+                        stack.extend(kids.iter().map(|&k| (k, tail)));
+                    }
+                    NodeKind::Try => {
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, i == 0)));
+                    }
+                    NodeKind::Block => {
+                        for (i, &st) in kids.iter().enumerate() {
+                            if i + 1 == kids.len()
+                                && tree.node(st).kind == NodeKind::ExpressionStatement
+                            {
+                                stack.push((tree.children(st)[0], tail));
+                            } else {
+                                stack.push((st, false));
+                            }
+                        }
+                    }
+                    NodeKind::If => {
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, tail && i > 0)));
+                    }
+                    NodeKind::Arm => {
+                        let last = kids.len().saturating_sub(1);
+                        stack.extend(
+                            kids.iter()
+                                .enumerate()
+                                .map(|(i, &k)| (k, tail && i == last)),
+                        );
+                    }
+                    NodeKind::Match => {
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, tail && i > 0)));
+                    }
+                    NodeKind::Function
+                    | NodeKind::Drop
+                    | NodeKind::CloneHook
+                    | NodeKind::Closure
+                    | NodeKind::ScopedClosure => {
+                        let last = kids.len().saturating_sub(1);
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, i == last)));
+                    }
+                    _ => stack.extend(kids.iter().map(|&k| (k, false))),
+                }
+            }
+            self.writer_sites = Some(sites);
+        }
+        self.writer_sites.as_ref().is_some_and(|s| s.contains(&n))
+    }
+}

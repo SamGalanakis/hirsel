@@ -1118,6 +1118,8 @@ struct Frame {
     /// Where its exit edges begin in `exits`.
     exits: usize,
     scopes: usize,
+    /// `scope_slots`' length at its start: the slots declared inside it follow.
+    slots: usize,
     /// The owners begun before it.
     owners: usize,
 }
@@ -1225,6 +1227,9 @@ struct Cx<'c, 'a, 'e> {
     /// The synthesised type of the tail of the block being closed; unit without one.
     tail_ty: TyId,
     scope_slots: Vec<u32>,
+    /// MEM-4: the call nodes where a writer call's Result may stand, found on the
+    /// first writer call of the item.
+    writer_sites: Option<HashSet<NodeId>>,
     step_scopes: Vec<(u32, u32)>,
     copies: Vec<CopySize>,
     allocations: Vec<AllocationLayout>,
@@ -1392,6 +1397,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             synth_ty: UNIT,
             tail_ty: UNIT,
             scope_slots: vec![],
+            writer_sites: None,
             step_scopes: vec![],
             copies: vec![],
             allocations: vec![],
@@ -1697,6 +1703,18 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if t == w.ty {
             return;
         }
+        // MEM-6: a published `T in a` is usable as `T in r` when `a` outlives `r`.
+        match self.region_fit(t, w.ty) {
+            Some(true) => return,
+            Some(false) => {
+                let (a, b) = (self.shown(w.ty), self.shown(t));
+                let message =
+                    format!("expected `{a}`, found `{b}`, whose region does not outlive it");
+                self.refuse_compared("MEM-6", n, b, a, message);
+                return;
+            }
+            None => {}
+        }
         let plain_view = self.plain_view(t, w.ty);
         let viewed = w.view
             && (matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty)
@@ -1738,6 +1756,110 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             let (a, b) = (self.shown(w.ty), self.shown(t));
             let message = format!("expected `{a}`, found `{b}`");
             self.refuse_compared("LANG-11", n, b, a, message);
+        }
+    }
+
+    /// MEM-6: whether `from` differs from `to` only in region roots, in an anchored
+    /// type's root, a type's region arguments, or inside `Option` and tuples; then
+    /// whether each of `from`'s roots there outlives `to`'s. `None` when the types
+    /// differ otherwise, or a differing root is not a region.
+    fn region_fit(&self, from: TyId, to: TyId) -> Option<bool> {
+        if from == to {
+            return Some(true);
+        }
+        match (self.t.kind(from), self.t.kind(to)) {
+            (TyKind::Region(a), TyKind::Region(b)) => {
+                let (a, b) = (*a, *b);
+                Some(
+                    self.region_root(a)?
+                        && self.region_root(b)?
+                        && self.outlives_root(a, b, from, to),
+                )
+            }
+            (TyKind::Anchored(x, a), TyKind::Anchored(y, b)) => {
+                let (x, a, y, b) = (*x, *a, *y, *b);
+                Some(self.region_fit(x, y)? & self.region_fit(a, b)?)
+            }
+            (TyKind::Tuple(xs), TyKind::Tuple(ys)) if xs.len() == ys.len() => {
+                let mut ok = true;
+                for (&x, &y) in xs.iter().zip(ys) {
+                    ok &= self.region_fit(x, y)?;
+                }
+                Some(ok)
+            }
+            (TyKind::Adt(d, xs), TyKind::Adt(e, ys)) if d == e && xs.len() == ys.len() => {
+                let option = is_core_prelude(&self.p.decls[d.index()].path, &["Option"]);
+                let mut ok = true;
+                for (&x, &y) in xs.iter().zip(ys) {
+                    if x == y {
+                        continue;
+                    }
+                    let region = matches!(self.t.kind(x), TyKind::Region(_))
+                        && matches!(self.t.kind(y), TyKind::Region(_));
+                    if !(option || region) {
+                        return None;
+                    }
+                    ok &= self.region_fit(x, y)?;
+                }
+                Some(ok)
+            }
+            _ => None,
+        }
+    }
+    /// Whether `root` names a region: a region generic, a `Region` parameter or a
+    /// local bound to a `Region` (MEM-6). Other roots anchor to places (OWN-20).
+    fn region_root(&self, root: Root) -> Option<bool> {
+        let region = match root {
+            Root::Generic(i) => self.fd.generics.get(i as usize).is_some_and(|g| g.region),
+            Root::Parameter(i) => self
+                .fd
+                .params
+                .get(i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            Root::Local(slot) => self
+                .vars
+                .get(slot as usize)
+                .copied()
+                .flatten()
+                .is_some_and(|v| self.region_handle(v.ty)),
+            Root::Enclosing | Root::CallableParameter { .. } => false,
+        };
+        region.then_some(true)
+    }
+    /// MEM-6 outlives, from the lexical nesting and the signature only: `a` is `b`;
+    /// a signature region outlives every region the body opens; a region opened in
+    /// an enclosing block outlives one opened inside it; `where` edges, transitively.
+    fn outlives_root(&self, a: Root, b: Root, a_ty: TyId, b_ty: TyId) -> bool {
+        if a == b {
+            return true;
+        }
+        let signature = |r: Root| matches!(r, Root::Generic(_) | Root::Parameter(_));
+        match (a, b) {
+            (Root::Local(x), Root::Local(y)) => {
+                let (Some(x), Some(y)) = (self.vars[x as usize], self.vars[y as usize]) else {
+                    return false;
+                };
+                // Both are in scope here, so the shallower one's block encloses the other's.
+                (x.frame_level, x.depth) < (y.frame_level, y.depth)
+            }
+            (a, Root::Local(_)) => signature(a),
+            _ if signature(a) && signature(b) => {
+                let mut seen = vec![a_ty];
+                let mut i = 0;
+                while i < seen.len() {
+                    if seen[i] == b_ty {
+                        return true;
+                    }
+                    for &(p, q) in &self.fd.outlives {
+                        if p == seen[i] && !seen.contains(&q) {
+                            seen.push(q);
+                        }
+                    }
+                    i += 1;
+                }
+                false
+            }
+            _ => false,
         }
     }
 

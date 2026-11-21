@@ -127,8 +127,8 @@ fn digits(n: u64, r: Region) -> FixedSpan[u8] in r {
 }
 ```
 ```hirsel
-fn names(r: Region, s: String) -> FixedSpan[String] in r {
-  let mut b = span.builder(r)                                // refused: MEM-3, String is not plain
+fn names(r: Region, s: String) -> FixedSpan[String] in r {  // refused: MEM-12, String is not plain
+  let mut b = span.builder(r)
   span.push(mut b, s)
   span.finish(take b)
 }
@@ -349,8 +349,9 @@ on types; nothing is traversed.
 fn width(s: String) -> u64 { region r { let t = text.copy_in(r, s); text.len(t) } }
 ```
 ```hirsel
-fn leak(s: String) -> Text {
-  region r { text.copy_in(r, s) }                           // refused: MEM-7
+fn leak(s: String) -> u64 {
+  let t = region r { text.copy_in(r, s) }                   // refused: MEM-7, t names r
+  text.len(t)
 }
 ```
 
@@ -633,7 +634,7 @@ fn twice(mut a: Arc[Hits]) -> Option[u64] {
 type Leaf: shareable + send { n: u64 }
 type Pair: shareable + send { leaf: Arc[Leaf] }
 fn reach(mut p: Arc[Pair]) -> Option[()] {
-  arc.with_unique(mut p.leaf, scoped fn(mut l: Leaf) { l.n = 1 })   // refused: OWN-11, p.leaf is reached through an Arc
+  arc.with_unique(mut p.leaf, scoped fn(mut l: Leaf) { l.n = 1 })   // refused: OWN-8, p.leaf is reached through an Arc
 }
 ```
 

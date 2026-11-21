@@ -1,0 +1,41 @@
+// MEM-7: a value whose type names a region opened by a block cannot leave the block,
+// whether the region sits in a record field, a tuple, an Option, an alias of the handle,
+// or a `break` out of a loop.
+// expect: refuse MEM-7 at 19:20
+// expect: refuse MEM-7 at 23:20
+// expect: refuse MEM-7 at 27:20
+// expect: refuse MEM-7 at 31:20
+// expect: refuse MEM-7 at 35:20
+// expect: refuse MEM-7 at 39:35
+// expect: cause MEM-7 at 19:20 from 19:18
+// expect: cause MEM-7 at 23:20 from 23:18
+// expect: cause MEM-7 at 27:20 from 27:18
+// expect: cause MEM-7 at 35:20 from 35:18
+type Word[in r] { text: Text in r, len: u64 }
+fn word(r: Region, s: String) -> Word[in r] {
+  Word(text: text.copy_in(r, s), len: string.byte_len(s))
+}
+fn field(s: String) -> u64 {
+  let w = region r { word(r, s) }
+  text.len(w.text)
+}
+fn tuple(s: String) -> u64 {
+  let t = region r { (text.copy_in(r, s), 1u64) }
+  t.1
+}
+fn option(s: String) -> u64 {
+  let t = region r { Some(word(r, s)) }
+  0
+}
+fn alias(s: String) -> u64 {
+  let w = region r { let q = r; word(q, s) }
+  w.len
+}
+fn arm(s: String) -> u64 {
+  let w = region r { match 1u64 { 1 => word(r, s), _ => word(r, s) } }
+  w.len
+}
+fn leave(s: String) -> u64 {
+  let w = loop { region r { break word(r, s) } }
+  w.len
+}

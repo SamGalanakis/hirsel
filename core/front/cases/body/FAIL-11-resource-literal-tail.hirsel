@@ -1,0 +1,17 @@
+// expect: accept
+// FAIL-11 / T1.2: a resource literal is its Result, so it is the tail under an expected
+// `Result[File, (Capacity, HostFile)]` the same as a `match` on it is.
+resource type File {
+    handle: HostFile
+} drop(f) {
+    let _ = host.unlock(mut f.handle)
+}
+
+pub fn open(take h: HostFile) -> Result[File, (Capacity, HostFile)] {
+    File(handle: take h)
+}
+
+pub fn close(take f: File) -> Result[(), IoError] waits {
+    let File(handle: h) = take f
+    host.close(take h)
+}

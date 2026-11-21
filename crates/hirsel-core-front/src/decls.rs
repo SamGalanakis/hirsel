@@ -457,10 +457,12 @@ pub(crate) enum Pending {
         site: Site,
         rule: &'static str,
     },
-    /// A type argument of a generic other than Option and Result is not scoped (OWN-19).
+    /// A type argument of a generic other than Option and Result is not scoped (OWN-19);
+    /// a `Log`'s element holds no view or scoped value (MEM-29).
     NotScoped {
         ty: TyId,
         site: Site,
+        log: bool,
     },
     Root {
         base: TyId,
@@ -1472,7 +1474,11 @@ impl Program<'_> {
         let role = d.role;
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
-                self.pending.push(Pending::NotScoped { ty: *t, site: *s });
+                self.pending.push(Pending::NotScoped {
+                    ty: *t,
+                    site: *s,
+                    log: role == Some(Role::Log),
+                });
                 if d.generics[i].region {
                     self.pending.pop();
                     if !matches!(self.types.kind(*t), TyKind::Region(_)) && *t != ERROR {
@@ -1912,15 +1918,24 @@ impl Program<'_> {
                         }
                     }
                 }
-                Pending::NotScoped { ty, site } => {
+                Pending::NotScoped { ty, site, log } => {
                     if kind(&self.decls, &self.types, ty, &[]) == Kind::Scoped {
-                        self.refusals.push(
-                            refusal(
+                        let (rule, wanted, message) = if log {
+                            (
+                                "MEM-29",
+                                "no view or scoped value",
+                                "a Log's element holds no view or scoped value",
+                            )
+                        } else {
+                            (
                                 "OWN-19",
-                                site,
+                                "not scoped",
                                 "a scoped type is not a type argument of a generic other than Option and Result",
                             )
-                            .with_comparison(canonical(&self.decls, &self.types, ty), "not scoped"),
+                        };
+                        self.refusals.push(
+                            refusal(rule, site, message)
+                                .with_comparison(canonical(&self.decls, &self.types, ty), wanted),
                         );
                     }
                 }

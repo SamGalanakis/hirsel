@@ -319,7 +319,7 @@ fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwr
 ```hirsel
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
-fn f() -> i64 { ev(box.new(Lit(6i64))) }  // refused: LANG-11, at box.new: T is N
+fn f(take o: Option[Box[N]]) -> i64 { ev(option.unwrap(take o)) }  // refused: LANG-11, at take o: T is N
 ```
 ```hirsel unbuilt
 fn fits(s: String) -> bool { match (int.parse(s) : Result[u8, ParseError]) { Ok(_) => true, Error(_) => false } }
@@ -383,7 +383,7 @@ fields and variants ([SEM-10](semantics.md#sem-10-codecs)) count.
 fn same[T: key](a: T, b: T) -> bool { a == b }
 ```
 ```hirsel
-fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T is not key
+fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-21, T is not key
 ```
 ```hirsel
 fn keep(r: Option[Rc[HostFile]]) -> u64 { 0 }             // refused: LANG-12, at HostFile: not shareable

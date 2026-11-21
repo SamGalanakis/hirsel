@@ -847,6 +847,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             DeclBody::Record(fs) if visible && decl.path.0.name == text => Some((None, fs, true)),
             _ => None,
         };
+        // FAIL-11, T1.2: a resource literal is itself the `Result`, so under an expected
+        // `Result` its name is the resource type's, as with no expected type.
+        if found.is_none() && is_core_prelude(&decl.path, &["Result"]) {
+            let resource = p.index.constructor_candidates(from, name).find_map(|id| {
+                let Some(Def::Type(r)) = p.by_definition[id.0 as usize] else {
+                    return None;
+                };
+                let rd = &p.decls[r.index()];
+                match &rd.body {
+                    DeclBody::Record(fs) if matches!(rd.repr, Repr::Resource) => Some((r, fs)),
+                    _ => None,
+                }
+            });
+            if let Some((r, fields)) = resource {
+                return self.construct(n, r, None, fields, true, args, want);
+            }
+        }
         let Some((case, fields, labelled)) = found else {
             let a = self.shown(want.map_or(ERROR, |w| w.ty));
             let message = format!("expected `{a}`, found variant `{text}`");

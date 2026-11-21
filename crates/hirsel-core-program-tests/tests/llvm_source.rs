@@ -3514,50 +3514,6 @@ fn go(n: u64, cap: u64) -> u64 {
         }
     }
 }
-fn zero_after_poison(cap: u64) -> u64 {
-    let mut seen = 0u64
-    region r {
-        let made = build_stream_in(r, bytes cap, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-            let _ = writer.push(mut w, "ab")
-            seen = match writer.push(mut w, "") { Ok(()) => 1u64, Error(Overflow) => 2u64, Error(_) => 3u64 }
-            match writer.close(take w) {
-                Ok(child) => { seen += 10; Ok(child) },
-                Error(e) => { seen += 20; Error(e) },
-            }
-        })
-        match made {
-            Ok(take b) => 100u64 * seen + text.len(finish(take b)),
-            Error(Overflow) => 9000u64 + seen,
-            Error(_) => 9999u64,
-        }
-    }
-}
-fn prior_completed(cap: u64) -> u64 {
-    let mut seen = 0u64
-    region r {
-        let made = build_stream_in(r, bytes cap, fn(take w: Writer[IndexedSpan[Text], in r]) -> Result[Child[IndexedSpan[Text]], BuildError] {
-            writer.append(mut w, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-                writer.push(mut t, "ok")?
-                writer.close(take t)
-            })?
-            let old: Option[View[Text]] = writer.last_completed(w)
-            let old_len = match old { Some(t) => text.len(t), None => 0u64 }
-            let _ = writer.append(mut w, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-                writer.push(mut t, "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz")?
-                writer.close(take t)
-            })
-            let saved: Option[View[Text]] = writer.completed(w, 0)
-            let saved_len = match saved { Some(t) => text.len(t), None => 0u64 }
-            seen = 100u64 * old_len + saved_len
-            writer.close(take w)
-        })
-        match made {
-            Ok(take b) => seq.len(finish(take b)),
-            Error(Overflow) => 9000u64 + seen,
-            Error(_) => 9999u64,
-        }
-    }
-}
 fn metered(s: u64, n: u64, cap: u64) -> u64 {
     match (bound steps s { go(n, cap) }) {
         Ok(v) => v, Error(e) => 1000000000u64 + e.steps,
@@ -3597,9 +3553,6 @@ fn metered(s: u64, n: u64, cap: u64) -> u64 {
             loop_cases.push(("go", vec![n, cap], expected));
         }
     }
-    loop_cases.push(("prior_completed", vec![64], 9202));
-    loop_cases.push(("zero_after_poison", vec![9], 9022));
-    loop_cases.push(("zero_after_poison", vec![10], 1102));
     for (source, hand) in [
         (indexed, indexed_cases.as_slice()),
         (destination, destination_cases.as_slice()),

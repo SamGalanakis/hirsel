@@ -1,0 +1,24 @@
+// expect: accept
+// MEM-6: a `T in a` stores into a slot typed `T in r` when `a` outlives `r`: a signature
+// region outlives a local one, and an outer block's region outlives an inner one.
+type Token[in src] {
+    text: Text in src,
+    line: u32
+}
+
+fn tok(s: Region, t: Text in s) -> u64 {
+    region r {
+        let k: Token[in r] = Token(text: t, line: 1)
+        text.len(k.text)
+    }
+}
+
+fn nested(t: String) -> u64 {
+    region outer {
+        let x = text.copy_in(outer, t)
+        region inner {
+            let k: Token[in inner] = Token(text: x, line: 1)
+            text.len(k.text)
+        }
+    }
+}

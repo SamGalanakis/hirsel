@@ -422,8 +422,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
                 let a = self.shown(t);
-                let message = "a scoped type is not a type argument of a generic other than Option and Result";
-                self.refuse_compared("OWN-19", at, a, "not scoped", message);
+                let (rule, wanted, message) = if decl.role == Some(Role::Log) {
+                    (
+                        "MEM-29",
+                        "no view or scoped value",
+                        "a Log's element holds no view or scoped value",
+                    )
+                } else {
+                    (
+                        "OWN-19",
+                        "not scoped",
+                        "a scoped type is not a type argument of a generic other than Option and Result",
+                    )
+                };
+                self.refuse_compared(rule, at, a, wanted, message);
                 return ERROR;
             }
             let missing =

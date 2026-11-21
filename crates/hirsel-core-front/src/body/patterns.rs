@@ -2243,12 +2243,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let body = self.kids(n)[0];
         let (t, v) = self.result_expr(body, want);
-        if !self.contains_region_value(t) {
-            self.region_result_anchors(scope, body, t)
-        }
-        // Region values cannot leave their scope. Rooted stable/scoped values need
-        // the declaration lane's body-root relation before emission is possible.
-        if self.contains_region_value(t) {
+        // MEM-7: neither the region's handle nor a value whose type names the region
+        // (or one opened inside it) leaves the block. The check reads the type alone.
+        let message = if self.contains_region_value(t) {
+            Some("a Region value cannot leave its region scope")
+        } else if self.opened_region_in(t, scope).is_some() {
+            Some("a value whose type names this region cannot leave its block")
+        } else {
+            self.region_result_anchors(scope, body, t);
+            None
+        };
+        if let Some(message) = message {
             // The cause is the region's name, when the scope names one.
             let cause = self
                 .item
@@ -2260,7 +2265,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 "MEM-7",
                 self.span(body),
                 cause.into_iter().collect(),
-                "a Region value cannot leave its region scope",
+                message,
             );
         }
         self.close_scope(scope, holds, body, t);
@@ -2270,6 +2275,43 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.patterns.scopes.truncate(mark);
         self.epoch += 1;
         (t, v)
+    }
+    /// A region declared by a block whose slots start at `from` in `scope_slots`,
+    /// which `ty` names (MEM-7): the block's own `region r` or a local bound to a
+    /// `Region` value, either of which ends with the block. A parameter's or an
+    /// enclosing block's region is still open where the value goes.
+    pub(super) fn opened_region_in(&self, ty: TyId, from: usize) -> Option<u32> {
+        let opened = &self.scope_slots[from.min(self.scope_slots.len())..];
+        if opened.is_empty() {
+            return None;
+        }
+        let region = |slot: u32| {
+            opened.contains(&slot)
+                && self
+                    .vars
+                    .get(slot as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|v| {
+                        matches!(self.t.kind(v.ty), TyKind::Adt(d, _)
+                        if self.p.decls[d.index()].role == Some(Role::Region))
+                    })
+        };
+        fn walk(t: &impl TyRead, ty: TyId, region: &impl Fn(u32) -> bool) -> Option<u32> {
+            match t.kind(ty) {
+                TyKind::Region(Root::Local(slot)) => region(*slot).then_some(*slot),
+                TyKind::Tuple(xs) | TyKind::Adt(_, xs) => {
+                    xs.iter().find_map(|&x| walk(t, x, region))
+                }
+                TyKind::Array(x, _) | TyKind::View(x) => walk(t, *x, region),
+                TyKind::Anchored(x, r) => walk(t, *x, region).or_else(|| walk(t, *r, region)),
+                TyKind::Fn(ps, r, _, _) => {
+                    walk(t, *r, region).or_else(|| ps.iter().find_map(|&(_, x)| walk(t, x, region)))
+                }
+                _ => None,
+            }
+        }
+        walk(&self.t, ty, &region)
     }
     fn contains_region_value(&self, ty: TyId) -> bool {
         match self.t.kind(ty) {

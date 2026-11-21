@@ -140,6 +140,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
         let c = self.kids(n);
+        if self.writer_call(c[0]) && !self.writer_placed(n) {
+            self.refuse(
+                "MEM-4",
+                n,
+                "a writer call's Result is the operand of a `?` or the returned tail",
+            );
+        }
         let result = self.call_inner(n, c[0], &c[1..], want, &mut scratch);
         self.call_scratch.push(scratch);
         result

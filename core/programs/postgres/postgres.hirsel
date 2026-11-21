@@ -1,0 +1,1224 @@
+// PostgreSQL 17+ direct TLS client, protocol 3.0.
+//
+// A frame body is at most 2 MiB. DataRow may use all 2 MiB, descriptions,
+// notifications and diagnostics use at most 64 KiB, authentication and
+// ParameterStatus at most 8 KiB, and CommandComplete at most 128 bytes.
+// Fixed-width messages have their exact size in body_limit. A row has at most
+// 1024 fields, with one body buffer and one metadata entry per field. Startup
+// strings and retained parameters are individually limited to 4 KiB. A query
+// holds at most 256 KiB of SQL, one 2 MiB Bind and 1024 parameter OIDs.
+// These buffers and the retained metadata are allocated on the run's memory
+// budget. Each admitted length is checked before reserving body storage.
+const BODY_LIMIT: u64 = 2097152
+
+const FIELD_LIMIT: u64 = 1024
+
+const SQL_LIMIT: u64 = 262144
+
+const STARTUP_VALUE_LIMIT: u64 = 4096
+
+const CONTROL_LIMIT: u64 = 65536
+
+const AUTH_LIMIT: u64 = 8192
+
+pub type Config {
+    host: String,
+    port: u16,
+    user: String,
+    database: String,
+    password: Secret,
+    random: Random,
+    clock: Clock,
+    deadline: u64
+}
+
+pub type SqlError {
+    sqlstate: String,
+    severity: String,
+    message: String,
+    detail: Option[String]
+}
+
+pub type AuthMethod = Trust | Cleartext | Md5 | Gss | Sspi | Other(i32) | NoScram
+
+pub type ProtocolError = Length | Tag(u8) | Truncated | Fields | AuthenticationOrder | UnverifiedServer
+
+pub type Error = Protocol(ProtocolError) | Network(NetError) | OutcomeUnknown(NetError) | EndOfStream | MissingAlpn | UnsupportedAuthentication(AuthMethod) | Scram(secret.ScramError) | Encoding | Sql(SqlError) | Fatal(SqlError) | InvalidRequest | RequestTooLarge | NoAddress | ConnectionClosed | RollbackRequired
+
+pub type Transaction: key = Idle | InTransaction | Failed
+
+pub type Param = Null | Bool(bool) | Int2(i16) | Int4(i32) | Int8(i64) | Float8(f64) | Text(String) | Bytea(Bytes)
+
+pub type Value = Null | Bool(bool) | Int2(i16) | Int4(i32) | Int8(i64) | Float8(f64) | Text | Bytea | OtherText
+
+pub type Field {
+    oid: u32,
+    value: Value
+}
+
+pub type Parameters {
+    server_version: Option[String],
+    client_encoding: Option[String],
+    standard_conforming_strings: Option[String]
+}
+
+type Session {
+    reader: ReadHalf,
+    writer: WriteHalf,
+    until: Until,
+    transaction: Transaction,
+    portal_open: bool,
+    parameters: Parameters
+}
+
+pub opaque type Conn {
+    live: Option[Session]
+}
+
+type Cell {
+    field: Field,
+    low: u64,
+    high: u64
+}
+
+pub opaque type Row {
+    body: Bytes,
+    cells: List[Cell]
+}
+
+type CursorPhase: key = Unstarted | Fetch | AfterRow | Complete
+
+// The cursor owns the session while an exchange is outstanding. Finishing a
+// completed cursor returns the session. Dropping a cursor releases the stream.
+pub opaque type Rows {
+    live: Option[Session],
+    phase: CursorPhase,
+    parse: Bytes,
+    bind: Bytes,
+    types: List[u32],
+    columns: List[u32],
+    returns_rows: bool,
+    row: Row,
+    affected: i64
+}
+
+fn fields() -> Error {
+    Protocol(Fields)
+}
+
+fn transport(e: NetError) -> Error {
+    match e {
+        TimedOut => OutcomeUnknown(e),
+        Aborted => OutcomeUnknown(e),
+        _ => Network(e),
+    }
+}
+
+fn scram_error(e: secret.ScramError) -> Error {
+    match e {
+        Net(reason) => transport(reason),
+        _ => Scram(e),
+    }
+}
+
+fn has(b: Bytes, x: u8) -> bool {
+    match std.list.find_byte(b, 0, list.len(b), x) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn equal(a: Bytes, b: Bytes) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn bytes_copy(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    take out
+}
+
+fn start_frame(mut b: Bytes, tag: u8, size: u64) {
+    list.push(mut b, tag)
+    let length: u32 = int.narrow(size + 4)
+    list.put_word_be(mut b, length)
+}
+
+fn put_string(mut b: Bytes, s: String) {
+    list.append(mut b, string.as_bytes(s))
+    list.push(mut b, 0)
+}
+
+fn send(mut w: WriteHalf, b: Bytes, until: Until) -> Result[(), Error] waits {
+    let end = list.len(b)
+    let empty = list.slice(b, end, end)
+    let mut sent: u64 = 0
+    while sent < end {
+        let n = match host.send_pair(mut w, list.slice(b, sent, end), empty, until) {
+            Ok(n) => n,
+            Error(e) => return Error(transport(e)),
+        }
+        if n == 0 {
+            return Error(EndOfStream)
+        }
+        sent += n
+    }
+    Ok(())
+}
+
+fn fill(mut r: ReadHalf, mut b: Bytes, end: u64, header: bool, until: Until) -> Result[(), Error] waits {
+    while list.len(b) < end {
+        let remaining = end - list.len(b)
+        match host.recv_bounded(mut r, mut b, remaining, until) {
+            Ok(0) => return Error(if header && list.len(b) == 0 {
+                EndOfStream
+            } else {
+                Protocol(Truncated)
+            }),
+            Ok(_) => {},
+            Error(Tls(Truncated)) => return Error(Protocol(Truncated)),
+            Error(e) => return Error(transport(e)),
+        }
+    }
+    Ok(())
+}
+
+fn body_limit(tag: u8) -> u64 {
+    match tag {
+        b'D' => BODY_LIMIT,
+        b'T' => CONTROL_LIMIT,
+        b't' => CONTROL_LIMIT,
+        b'N' => CONTROL_LIMIT,
+        b'E' => CONTROL_LIMIT,
+        b'A' => CONTROL_LIMIT,
+        b'R' => AUTH_LIMIT,
+        b'S' => AUTH_LIMIT,
+        b'C' => 128,
+        b'K' => 8,
+        b'Z' => 1,
+        _ => 0,
+    }
+}
+
+fn frame(mut r: ReadHalf, mut body: Bytes, expected: Bytes, until: Until) -> Result[u8, Error] waits {
+    let mut header: Bytes = list.with_capacity(5)
+    fill(mut r, mut header, 5, true, until)?
+    let wire: u32 = list.word_be(header, 1)
+    let length: i32 = int.truncate(wire)
+    let max_length: i32 = int.narrow(BODY_LIMIT + 4)
+    if length < 4 || length > max_length {
+        return Error(Protocol(Length))
+    }
+    let tag = header[0]
+    if !has(expected, tag) && !has(b"NSA", tag) {
+        return Error(Protocol(Tag(tag)))
+    }
+    let size: u64 = int.narrow(length - 4)
+    if size > body_limit(tag) {
+        return Error(Protocol(Length))
+    }
+    if size > list.capacity(body) {
+        body = list.with_capacity(size)
+    } else {
+        list.clear(mut body)
+    }
+    fill(mut r, mut body, size, false, until)?
+    Ok(tag)
+}
+
+fn end_at(b: Bytes, mut at: u64, size: u64) -> Result[u64, Error] {
+    if size > list.len(b) - at {
+        return Error(fields())
+    }
+    let begin = at
+    at += size
+    Ok(begin)
+}
+
+fn u16_at(b: Bytes, mut at: u64) -> Result[u16, Error] {
+    let begin = end_at(b, mut at, 2)?
+    Ok(list.word_be(b, begin))
+}
+
+fn u32_at(b: Bytes, mut at: u64) -> Result[u32, Error] {
+    let begin = end_at(b, mut at, 4)?
+    Ok(list.word_be(b, begin))
+}
+
+fn i32_at(b: Bytes, mut at: u64) -> Result[i32, Error] {
+    let bits = u32_at(b, mut at)?
+    Ok(int.truncate(bits))
+}
+
+fn cstring_end(b: Bytes, mut at: u64) -> Result[u64, Error] {
+    let Some(end) = std.list.find_byte(b, at, list.len(b), 0) else {
+        return Error(fields())
+    }
+    if !string.is_utf8(list.slice(b, at, end)) {
+        return Error(fields())
+    }
+    at = end + 1
+    Ok(end)
+}
+
+fn text(b: Bytes) -> Result[String, Error] {
+    match string.from_utf8(bytes_copy(b)) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(fields()),
+    }
+}
+
+fn consumed(b: Bytes, at: u64) -> Result[(), Error] {
+    if at == list.len(b) {
+        Ok(())
+    } else {
+        Error(fields())
+    }
+}
+
+fn parameter(mut p: Parameters, b: Bytes) -> Result[(), Error] {
+    let mut at: u64 = 0
+    let key_end = cstring_end(b, mut at)?
+    let start = at
+    let value_end = cstring_end(b, mut at)?
+    consumed(b, at)?
+    if key_end == 0 || value_end - start > STARTUP_VALUE_LIMIT {
+        return Error(fields())
+    }
+    let key = list.slice(b, 0, key_end)
+    let value = list.slice(b, start, value_end)
+    if equal(key, b"client_encoding") {
+        if !equal(value, b"UTF8") {
+            return Error(Encoding)
+        }
+        p.client_encoding = Some(text(value)?)
+    } else if equal(key, b"server_version") {
+        p.server_version = Some(text(value)?)
+    } else if equal(key, b"standard_conforming_strings") {
+        p.standard_conforming_strings = Some(text(value)?)
+    }
+    Ok(())
+}
+
+type Diagnostic {
+    code: Option[String],
+    severity: Option[String],
+    localized: Option[String],
+    message: Option[String],
+    detail: Option[String]
+}
+
+fn diagnostic(b: Bytes) -> Result[SqlError, Error] {
+    let mut at: u64 = 0
+    let mut d = Diagnostic(code: None, severity: None, localized: None, message: None, detail: None)
+    let mut seen: Inline[bool, 256] =[false; 256]
+    loop {
+        let start = end_at(b, mut at, 1)?
+        let tag = b[start]
+        if tag == 0 {
+            break
+        }
+        let index: u64 = int.widen(tag)
+        if seen[index] {
+            return Error(fields())
+        }
+        seen[index] = true
+        let low = at
+        let high = cstring_end(b, mut at)?
+        let raw = list.slice(b, low, high)
+        match tag {
+            b'C' => {
+                if list.len(raw) != 5 {
+                    return Error(fields())
+                }
+                for byte in raw {
+                    if !(b'0' <= byte && byte <= b'9' || b'A' <= byte && byte <= b'Z') {
+                        return Error(fields())
+                    }
+                }
+                d.code = Some(text(raw)?)
+            },
+            b'V' => {
+                d.severity = Some(text(raw)?)
+            },
+            b'S' => {
+                d.localized = Some(text(raw)?)
+            },
+            b'M' => {
+                d.message = Some(text(raw)?)
+            },
+            b'D' => {
+                d.detail = Some(text(raw)?)
+            },
+            _ => {},
+        }
+    }
+    consumed(b, at)?
+    let Diagnostic(code: take code, severity: take canonical, localized: take localized, message: take primary, detail: take detail) = take d
+    let Some(take sqlstate) = take code else {
+        return Error(fields())
+    }
+    let Some(take primary_text) = take primary else {
+        return Error(fields())
+    }
+    let Some(take severity) = (match take canonical {
+        Some(take s) => Some(take s),
+        None => take localized,
+    }) else {
+        return Error(fields())
+    }
+    Ok(SqlError(sqlstate: take sqlstate, severity: take severity, message: take primary_text, detail: take detail))
+}
+
+fn notify(b: Bytes) -> Result[(), Error] {
+    let mut at: u64 = 0
+    let _ = u32_at(b, mut at)?
+    let _ = cstring_end(b, mut at)?
+    let _ = cstring_end(b, mut at)?
+    consumed(b, at)
+}
+
+fn receive(mut s: Session, mut buf: Bytes, expected: Bytes) -> Result[u8, Error] waits {
+    let until = s.until
+    loop {
+        let tag = frame(mut s.reader, mut buf, expected, until)?
+        match tag {
+            b'N' => {
+                let _ = diagnostic(buf)?
+            },
+            b'S' => parameter(mut s.parameters, buf)?,
+            b'A' => notify(buf)?,
+            _ => return Ok(tag),
+        }
+    }
+}
+
+fn ready(mut s: Session, b: Bytes) -> Result[(), Error] {
+    consumed(b, 1)?
+    let status: Transaction = match b[0] {
+        b'I' => Idle,
+        b'T' => InTransaction,
+        b'E' => Failed,
+        _ => return Error(fields()),
+    }
+    if s.transaction == Failed && status == InTransaction {
+        return Error(fields())
+    }
+    s.transaction = status
+    Ok(())
+}
+
+fn is_fatal(e: SqlError) -> bool {
+    let severity = string.as_bytes(e.severity)
+    equal(severity, b"FATAL") || equal(severity, b"PANIC")
+}
+
+fn sql_error(take e: SqlError) -> Error {
+    if is_fatal(e) {
+        Fatal(take e)
+    } else {
+        Sql(take e)
+    }
+}
+
+fn startup_error(b: Bytes) -> Result[(), Error] {
+    let e = diagnostic(b)?
+    Error(sql_error(take e))
+}
+
+fn authentication_offer(b: Bytes) -> Result[bool, Error] {
+    let mut at: u64 = 0
+    let kind = i32_at(b, mut at)?
+    if kind != 10 {
+        let method: AuthMethod = match kind {
+            0 => {
+                consumed(b, at)?;
+                Trust
+            },
+            3 => {
+                consumed(b, at)?;
+                Cleartext
+            },
+            5 => {
+                let _ = end_at(b, mut at, 4)?;
+                consumed(b, at)?;
+                Md5
+            },
+            7 => {
+                consumed(b, at)?;
+                Gss
+            },
+            8 => Gss,
+            9 => {
+                consumed(b, at)?;
+                Sspi
+            },
+            _ => Other(kind),
+        }
+        return Error(UnsupportedAuthentication(method))
+    }
+    let mut base = false
+    let mut plus = false
+    loop {
+        let low = at
+        let high = cstring_end(b, mut at)?
+        if low == high {
+            break
+        }
+        let mechanism = list.slice(b, low, high)
+        if equal(mechanism, b"SCRAM-SHA-256") {
+            base = true
+        } else if equal(mechanism, b"SCRAM-SHA-256-PLUS") {
+            plus = true
+        }
+    }
+    consumed(b, at)?
+    if !base && !plus {
+        return Error(UnsupportedAuthentication(NoScram))
+    }
+    Ok(plus)
+}
+
+fn auth_reply(mut s: Session, mut b: Bytes, kind: i32) -> Result[(), Error] waits {
+    if receive(mut s, mut b, b"RE")? == b'E' {
+        return startup_error(b)
+    }
+    let mut at: u64 = 0
+    if i32_at(b, mut at)? != kind {
+        return Error(Protocol(AuthenticationOrder))
+    }
+    if kind == 0 {
+        consumed(b, at)?
+    }
+    Ok(())
+}
+
+fn authenticate(mut s: Session, mut b: Bytes, password: Secret, nonce: Bytes) -> Result[(), Error] waits {
+    if receive(mut s, mut b, b"RE")? == b'E' {
+        return startup_error(b)
+    }
+    let plus = authentication_offer(b)?
+    let (mechanism, gs2): (Bytes, Bytes) = if plus {
+        (b"SCRAM-SHA-256-PLUS", b"p=tls-server-end-point,,n=,r=")
+    } else {
+        (b"SCRAM-SHA-256", b"n,,n=,r=")
+    }
+    let mut client: Bytes = list.with_capacity(list.len(gs2) + list.len(nonce))
+    list.append(mut client, gs2)
+    list.append(mut client, nonce)
+    let size = list.len(mechanism) + 5 + list.len(client)
+    let mut first: Bytes = list.with_capacity(5 + size)
+    start_frame(mut first, b'p', size)
+    list.append(mut first, mechanism)
+    list.push(mut first, 0)
+    let initial_size: u32 = int.narrow(list.len(client))
+    list.put_word_be(mut first, initial_size)
+    list.append(mut first, client)
+    send(mut s.writer, first, s.until)?
+    auth_reply(mut s, mut b, 11)?
+    let check = {
+        let server = list.slice(b, 4, list.len(b))
+        let final_size = match secret.scram_final_len(s.writer, client, server) {
+            Ok(n) => n,
+            Error(e) => return Error(scram_error(e)),
+        }
+        let mut header: Bytes = list.with_capacity(5)
+        start_frame(mut header, b'p', final_size)
+        let empty: Bytes = b""
+        match secret.scram_sha256(mut s.writer, password, client, server, header, empty, s.until) {
+            Ok(take c) => take c,
+            Error(e) => return Error(scram_error(e)),
+        }
+    }
+    auth_reply(mut s, mut b, 12)?
+    {
+        let final = list.slice(b, 4, list.len(b))
+        if !secret.scram_verify(take check, final) {
+            return Error(Protocol(UnverifiedServer))
+        }
+    }
+    auth_reply(mut s, mut b, 0)
+}
+
+fn valid_startup_value(s: String) -> bool {
+    let raw = string.as_bytes(s)
+    list.len(raw) != 0 && list.len(raw) <= STARTUP_VALUE_LIMIT && !has(raw, 0)
+}
+
+fn startup_packet(user: String, database: String) -> Bytes {
+    let length = 46u64 + string.byte_len(user) + string.byte_len(database)
+    let mut b: Bytes = list.with_capacity(length)
+    let wire_length: u32 = int.narrow(length)
+    list.put_word_be(mut b, wire_length)
+    list.put_word_be(mut b, 196608u32)
+    put_string(mut b, "user")
+    put_string(mut b, user)
+    put_string(mut b, "database")
+    put_string(mut b, database)
+    put_string(mut b, "client_encoding")
+    put_string(mut b, "UTF8")
+    list.push(mut b, 0)
+    take b
+}
+
+fn dial(n: Net, hostname: String, port: u16, until: Until) -> Result[Socket, Error] waits {
+    if let Ok(ip) = std.net.parse_ip(string.as_bytes(hostname)) {
+        return match host.connect(n, Addr(ip, port), until) {
+            Ok(take s) => Ok(take s),
+            Error(e) => Error(transport(e)),
+        }
+    }
+    let addresses = match std.net.lookup(n, hostname, until) {
+        Ok(take a) => take a,
+        Error(Network(e)) => return Error(transport(e)),
+        Error(NoAddress) => return Error(NoAddress),
+    }
+    let mut last: NetError = Unreachable
+    for ip in addresses {
+        match host.connect(n, Addr(ip, port), until) {
+            Ok(take s) => return Ok(take s),
+            Error(TimedOut) => return Error(OutcomeUnknown(TimedOut)),
+            Error(Aborted) => return Error(OutcomeUnknown(Aborted)),
+            Error(e) => {
+                last = e
+            },
+        }
+    }
+    Error(transport(last))
+}
+
+fn secure(n: Net, take socket: Socket, hostname: String, trust: Trust, until: Until) -> Result[Session, Error] waits {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, string.from("postgresql"))
+    let (take reader, take writer, handshake) = match tls.connect(n, take socket, hostname, trust, alpn, until) {
+        Ok((take r, take w, h)) => (take r, take w, h),
+        Error(e) => return Error(transport(e)),
+    }
+    if let Some(0) = handshake.protocol {
+        return Ok(Session(reader: take reader, writer: take writer, until, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None)))
+    }
+    Error(MissingAlpn)
+}
+
+fn login(take session: Session, user: String, database: String, password: Secret, nonce: Bytes) -> Result[Conn, Error] waits {
+    let mut s = take session
+    let startup = startup_packet(user, database)
+    send(mut s.writer, startup, s.until)?
+    let mut b: Bytes = list.new()
+    authenticate(mut s, mut b, password, nonce)?
+    startup_ready(mut s, mut b)?
+    Ok(Conn(live: Some(take s)))
+}
+
+pub fn connect(net: Net, tls_trust: Trust, config: Config) -> Result[Conn, Error] waits {
+    if !valid_startup_value(config.user) || !valid_startup_value(config.database) {
+        return Error(InvalidRequest)
+    }
+    let until = At(config.clock, config.deadline)
+    let socket = dial(net, config.host, config.port, until)?
+    let session = secure(net, take socket, config.host, tls_trust, until)?
+    let mut entropy: Bytes = list.with_capacity(18)
+    host.random(config.random, mut entropy)
+    let nonce = std.base64.encode_string(entropy)
+    login(take session, config.user, config.database, config.password, string.as_bytes(nonce))
+}
+
+fn startup_ready(mut s: Session, mut b: Bytes) -> Result[(), Error] waits {
+    let mut tag = receive(mut s, mut b, b"KZE")?
+    if tag == b'K' {
+        consumed(b, 8)?
+        // CancelRequest is outside this API. The key stays in the receive
+        // buffer and has the same recording treatment as any backend bytes.
+        tag = receive(mut s, mut b, b"ZE")?
+    }
+    if tag == b'E' {
+        return startup_error(b)
+    }
+    ready(mut s, b)?;
+    if s.transaction != Idle {
+        return Error(fields())
+    }
+    if let None = s.parameters.client_encoding {
+        return Error(Encoding)
+    }
+    Ok(())
+}
+
+pub fn transaction(c: Conn) -> Option[Transaction] {
+    match c.live {
+        Some(s) => Some(s.transaction),
+        None => None,
+    }
+}
+
+const PORTAL: String = "hirsel_rows"
+
+fn parameter_oid(p: Param) -> u32 {
+    match p {
+        Null => 0,
+        Bool(_) => 16,
+        Int2(_) => 21,
+        Int4(_) => 23,
+        Int8(_) => 20,
+        Float8(_) => 701,
+        Text(_) => 25,
+        Bytea(_) => 17,
+    }
+}
+
+fn column_format(oid: u32) -> u16 {
+    match oid {
+        16 => 1,
+        17 => 1,
+        20 => 1,
+        21 => 1,
+        23 => 1,
+        25 => 1,
+        701 => 1,
+        _ => 0,
+    }
+}
+
+fn parameter_size(p: Param) -> u64 {
+    match p {
+        Null => 0,
+        Bool(_) => 1,
+        Int2(_) => 2,
+        Int4(_) => 4,
+        Int8(_) => 8,
+        Float8(_) => 8,
+        Text(s) => string.byte_len(s),
+        Bytea(b) => list.len(b),
+    }
+}
+
+fn put_parameter(mut b: Bytes, p: Param) {
+    let len: u32 = match p {
+        Null => 4294967295,
+        _ => int.narrow(parameter_size(p)),
+    }
+    list.put_word_be(mut b, len)
+    match p {
+        Null => {},
+        Bool(v) => list.push(mut b, if v {
+            1
+        } else {
+            0
+        }),
+        Int2(v) => {
+            let bits: u16 = int.truncate(v);
+            list.put_word_be(mut b, bits)
+        },
+        Int4(v) => {
+            let bits: u32 = int.truncate(v);
+            list.put_word_be(mut b, bits)
+        },
+        Int8(v) => {
+            let bits: u64 = int.truncate(v);
+            list.put_word_be(mut b, bits)
+        },
+        Float8(v) => list.put_word_be(mut b, float.to_bits64(v)),
+        Text(s) => list.append(mut b, string.as_bytes(s)),
+        Bytea(v) => list.append(mut b, v),
+    }
+}
+
+fn sql_space(b: u8) -> bool {
+    has(b" \t\n\r\x0b\x0c", b)
+}
+
+fn rollback(sql: Bytes) -> bool {
+    let n = list.len(sql)
+    let mut low: u64 = 0
+    while low < n && sql_space(sql[low]) {
+        low += 1
+    }
+    let mut high = n
+    while low < high && sql_space(sql[high - 1]) {
+        high -= 1
+    }
+    if low < high && sql[high - 1] == b';' {
+        high -= 1
+        while low < high && sql_space(sql[high - 1]) {
+            high -= 1
+        }
+    }
+    if high - low != 8 {
+        return false
+    }
+    let name: Bytes = b"rollback"
+    for i in 0u64 .. 8 {
+        if sql[low + i] | 32u8 != name[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn parse_packet(sql: String, types: List[u32]) -> Bytes {
+    let size = 4 + string.byte_len(sql) + 4 * list.len(types)
+    let mut b: Bytes = list.with_capacity(17 + size)
+    start_frame(mut b, b'P', size)
+    list.push(mut b, 0)
+    put_string(mut b, sql)
+    let n: u16 = int.narrow(list.len(types))
+    list.put_word_be(mut b, n)
+    for id in types {
+        list.put_word_be(mut b, id)
+    }
+    list.append(mut b, b"D\x00\x00\x00\x06S\x00H\x00\x00\x00\x04")
+    take b
+}
+
+fn bind_parameters(params: List[Param]) -> Result[Bytes, Error] {
+    // Leave room for the result-format count and up to FIELD_LIMIT formats.
+    let mut size = string.byte_len(PORTAL) + 15 + 2 * FIELD_LIMIT
+    for p in params {
+        let n = parameter_size(p)
+        if n > BODY_LIMIT - size - 4 {
+            return Error(RequestTooLarge)
+        }
+        size += 4 + n
+        if let Text(s) = p {
+            if has(string.as_bytes(s), 0) {
+                return Error(InvalidRequest)
+            }
+        }
+    }
+    let mut b: Bytes = list.with_capacity(size)
+    start_frame(mut b, b'B', 0)
+    put_string(mut b, PORTAL)
+    list.push(mut b, 0)
+    list.put_word_be(mut b, 1u16)
+    list.put_word_be(mut b, 1u16)
+    let n: u16 = int.narrow(list.len(params))
+    list.put_word_be(mut b, n)
+    for param in params {
+        put_parameter(mut b, param)
+    }
+    Ok(take b)
+}
+
+fn bind_results(mut b: Bytes, columns: List[u32]) {
+    let n: u16 = int.narrow(list.len(columns))
+    list.put_word_be(mut b, n)
+    for id in columns {
+        list.put_word_be(mut b, column_format(id))
+    }
+    let length: u64 = list.len(b) - 1
+    for i in 0u64 .. 4 {
+        let byte: u8 = int.truncate(length >> (24 - 8 * i))
+        let _ = list.set(mut b, i + 1, byte)
+    }
+}
+
+pub fn query(mut conn: Conn, sql: String, params: List[Param]) -> Result[Rows, Error] {
+    let Some(status) = transaction(conn) else {
+        return Error(ConnectionClosed)
+    }
+    if string.byte_len(sql) > SQL_LIMIT || list.len(params) > FIELD_LIMIT {
+        return Error(RequestTooLarge)
+    }
+    let raw = string.as_bytes(sql)
+    if has(raw, 0) {
+        return Error(InvalidRequest)
+    }
+    if status == Failed && !rollback(raw) {
+        return Error(RollbackRequired)
+    }
+    let mut types: List[u32] = list.with_capacity(list.len(params))
+    for p in params {
+        list.push(mut types, parameter_oid(p))
+    }
+    let b = bind_parameters(params)?
+    let p = parse_packet(sql, types)
+    let live = replace(mut conn.live, None)
+    Ok(Rows(live: take live, phase: Unstarted, parse: take p, bind: take b, types: take types, columns: list.new(), returns_rows: false, row: Row(body: list.new(), cells: list.new()), affected: 0))
+}
+
+fn parameter_description(b: Bytes, types: List[u32]) -> Result[(), Error] {
+    let mut at: u64 = 0
+    let count: u64 = int.widen(u16_at(b, mut at)?)
+    if count != list.len(types) {
+        return Error(fields())
+    }
+    for expected in types {
+        let actual = u32_at(b, mut at)?
+        if actual == 0 || expected != 0 && actual != expected {
+            return Error(fields())
+        }
+    }
+    consumed(b, at)
+}
+
+fn row_description(b: Bytes) -> Result[List[u32], Error] {
+    let mut at: u64 = 0
+    let count: u64 = int.widen(u16_at(b, mut at)?)
+    if count > FIELD_LIMIT || count * 19 > list.len(b) - at {
+        return Error(fields())
+    }
+    let mut columns: List[u32] = list.with_capacity(count)
+    for _ in 0u64 .. count {
+        let _ = cstring_end(b, mut at)?
+        let _ = end_at(b, mut at, 6)?
+        let oid = u32_at(b, mut at)?
+        let _ = end_at(b, mut at, 6)?
+        let format = u16_at(b, mut at)?
+        if oid == 0 || format != 0 {
+            return Error(fields())
+        }
+        list.push(mut columns, oid)
+    }
+    consumed(b, at)?
+    Ok(take columns)
+}
+
+fn decode_value(oid: u32, b: Bytes) -> Result[Value, Error] {
+    let n = list.len(b)
+    match oid {
+        16 => {
+            if n != 1 || b[0] > 1 {
+                return Error(fields())
+            }
+            Ok(Bool(b[0] == 1))
+        },
+        21 => {
+            if n != 2 {
+                return Error(fields())
+            }
+            let bits: u16 = list.word_be(b, 0)
+            Ok(Int2(int.truncate(bits)))
+        },
+        23 => {
+            if n != 4 {
+                return Error(fields())
+            }
+            let bits: u32 = list.word_be(b, 0)
+            Ok(Int4(int.truncate(bits)))
+        },
+        20 => {
+            if n != 8 {
+                return Error(fields())
+            }
+            let bits: u64 = list.word_be(b, 0)
+            Ok(Int8(int.truncate(bits)))
+        },
+        701 => {
+            if n != 8 {
+                return Error(fields())
+            }
+            Ok(Float8(float.from_bits64(list.word_be(b, 0))))
+        },
+        17 => Ok(Bytea),
+        _ => {
+            if !string.is_utf8(b) || has(b, 0) {
+                return Error(fields())
+            }
+            Ok(if oid == 25 {
+                Text
+            } else {
+                OtherText
+            })
+        },
+    }
+}
+
+fn decode_row(mut current: Row, columns: List[u32]) -> Result[(), Error] {
+    let mut at: u64 = 0
+    let n: u64 = int.widen(u16_at(current.body, mut at)?)
+    if n != list.len(columns) || n * 4 > list.len(current.body) - at {
+        return Error(fields())
+    }
+    if n > list.capacity(current.cells) {
+        current.cells = list.with_capacity(n)
+    }
+    for oid in columns {
+        let size = i32_at(current.body, mut at)?
+        let low = at
+        let value: Value = if size == -1 {
+            Null
+        } else {
+            if size < 0 {
+                return Error(fields())
+            }
+            let length: u64 = int.narrow(size)
+            let _ = end_at(current.body, mut at, length)?
+            decode_value(oid, list.slice(current.body, low, at))?
+        }
+        list.push(mut current.cells, Cell(field: Field(oid, value), low, high: at))
+    }
+    consumed(current.body, at)
+}
+
+pub fn field(r: Row, index: u64) -> Option[Field] {
+    match list.get(r.cells, index) {
+        Some(cell) => Some(cell.field),
+        None => None,
+    }
+}
+
+pub fn data(r: Row, index: u64) -> Option[View[Bytes]] in r {
+    let Some(cell) = list.get(r.cells, index) else {
+        return None
+    }
+    match cell.field.value {
+        Bytea => Some(list.slice(r.body, cell.low, cell.high)),
+        Text => Some(list.slice(r.body, cell.low, cell.high)),
+        OtherText => Some(list.slice(r.body, cell.low, cell.high)),
+        _ => None,
+    }
+}
+
+pub fn row(rows: Rows) -> Option[View[Row]] in rows {
+    if rows.phase == AfterRow {
+        Some(view rows.row)
+    } else {
+        None
+    }
+}
+
+fn command_count(b: Bytes) -> Result[i64, Error] {
+    let mut at: u64 = 0
+    let end = cstring_end(b, mut at)?
+    consumed(b, at)?
+    if end == 0 {
+        return Error(fields())
+    }
+    let split = match std.list.find_byte(b, 0, end, b' ') {
+        Some(i) => i,
+        None => end,
+    }
+    let command = list.slice(b, 0, split)
+    if equal(command, b"INSERT") {
+        if split + 3 >= end || b[split + 1] != b'0' || b[split + 2] != b' ' {
+            return Error(fields())
+        }
+        return count_at(b, split + 3, end)
+    }
+    if equal(command, b"SELECT") || equal(command, b"UPDATE") || equal(command, b"DELETE") || equal(command, b"MERGE") || equal(command, b"FETCH") || equal(command, b"MOVE") || equal(command, b"COPY") {
+        if split == end {
+            return Error(fields())
+        }
+        return count_at(b, split + 1, end)
+    }
+    for i in 0u64 .. end {
+        if !(b'A' <= b[i] && b[i] <= b'Z' || b[i] == b' ') {
+            return Error(fields())
+        }
+    }
+    Ok(0)
+}
+
+fn count_at(b: Bytes, start: u64, end: u64) -> Result[i64, Error] {
+    match std.int.parse_decimal_span(b, start, end, 9223372036854775807u64) {
+        Ok(n) => Ok(int.narrow(n)),
+        Error(_) => Error(fields()),
+    }
+}
+
+fn portal_message(tag: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(15 + string.byte_len(PORTAL))
+    if tag == b'E' {
+        start_frame(mut b, tag, string.byte_len(PORTAL) + 5)
+        put_string(mut b, PORTAL)
+        list.put_word_be(mut b, 1u32)
+    } else {
+        start_frame(mut b, tag, string.byte_len(PORTAL) + 2)
+        list.push(mut b, b'P')
+        put_string(mut b, PORTAL)
+    }
+    list.append(mut b, b"H\x00\x00\x00\x04")
+    take b
+}
+
+fn drain_error(mut rows: Rows, mut s: Session, synced: bool) -> Result[bool, Error] waits {
+    let e = diagnostic(rows.row.body)?
+    if is_fatal(e) {
+        return Error(Fatal(take e))
+    }
+    if !synced {
+        send(mut s.writer, b"S\x00\x00\x00\x04", s.until)?
+    }
+    let _ = receive(mut s, mut rows.row.body, b"Z")?
+    ready(mut s, rows.row.body)?
+    rows.phase = Complete
+    Error(Sql(take e))
+}
+
+fn close_portal(mut s: Session, mut b: Bytes) -> Result[bool, Error] waits {
+    let packet = portal_message(b'C')
+    send(mut s.writer, packet, s.until)?
+    if receive(mut s, mut b, b"3E")? == b'E' {
+        return Ok(false)
+    }
+    s.portal_open = false
+    Ok(true)
+}
+
+fn start_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    // Error recovery skips all frontend commands until Sync. A named portal
+    // can survive that Sync in a failed transaction, so close it before Bind.
+    if s.portal_open && !close_portal(mut s, mut rows.row.body)? {
+        return drain_error(mut rows, mut s, false)
+    }
+    let parse = replace(mut rows.parse, list.new())
+    send(mut s.writer, parse, s.until)?
+    drop(take parse)
+    if receive(mut s, mut rows.row.body, b"1E")? == b'E' {
+        return drain_error(mut rows, mut s, false)
+    }
+    if receive(mut s, mut rows.row.body, b"tE")? == b'E' {
+        return drain_error(mut rows, mut s, false)
+    }
+    parameter_description(rows.row.body, rows.types)?
+    match receive(mut s, mut rows.row.body, b"TnE")? {
+        b'T' => {
+            rows.columns = row_description(rows.row.body)?
+            rows.returns_rows = true
+        },
+        b'E' => return drain_error(mut rows, mut s, false),
+        _ => {},
+    }
+    let mut bind = replace(mut rows.bind, list.new())
+    bind_results(mut bind, rows.columns)
+    send(mut s.writer, bind, s.until)?
+    drop(take bind)
+    send(mut s.writer, b"H\x00\x00\x00\x04", s.until)?
+    if receive(mut s, mut rows.row.body, b"2E")? == b'E' {
+        return drain_error(mut rows, mut s, false)
+    }
+    s.portal_open = true
+    rows.phase = Fetch
+    Ok(false)
+}
+
+fn end_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    if !close_portal(mut s, mut rows.row.body)? {
+        return drain_error(mut rows, mut s, false)
+    }
+    send(mut s.writer, b"S\x00\x00\x00\x04", s.until)?
+    if receive(mut s, mut rows.row.body, b"ZE")? == b'E' {
+        return drain_error(mut rows, mut s, true)
+    }
+    ready(mut s, rows.row.body)?
+    rows.phase = Complete
+    Ok(false)
+}
+
+fn advance(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    list.clear(mut rows.row.cells)
+    if rows.phase == Unstarted {
+        let _ = start_exchange(mut rows, mut s)?
+    }
+    if rows.phase == AfterRow {
+        match receive(mut s, mut rows.row.body, b"sCE")? {
+            b'E' => return drain_error(mut rows, mut s, false),
+            b'C' => {
+                rows.affected = command_count(rows.row.body)?
+                return end_exchange(mut rows, mut s)
+            },
+            _ => {},
+        }
+    }
+    let execute_packet = portal_message(b'E')
+    send(mut s.writer, execute_packet, s.until)?
+    let expected: Bytes = if rows.returns_rows {
+        b"DCE"
+    } else {
+        b"CIE"
+    }
+    match receive(mut s, mut rows.row.body, expected)? {
+        b'D' => {
+            decode_row(mut rows.row, rows.columns)?
+            rows.phase = AfterRow
+            Ok(true)
+        },
+        b'E' => drain_error(mut rows, mut s, false),
+        b'C' => {
+            rows.affected = command_count(rows.row.body)?
+            end_exchange(mut rows, mut s)
+        },
+        _ => end_exchange(mut rows, mut s),
+    }
+}
+
+/// Read one row. Its views expire when the caller advances the cursor.
+/// An ordinary SQL error is returned after ReadyForQuery has been validated.
+pub fn next(mut rows: Rows) -> Result[bool, Error] waits {
+    if rows.phase == Complete {
+        return Ok(false)
+    }
+    let Some(take session) = replace(mut rows.live, None) else {
+        return Error(ConnectionClosed)
+    }
+    // The local owner releases both halves on an allocation or task failure.
+    let mut s = take session
+    let outcome = advance(mut rows, mut s)
+    match outcome {
+        Ok(_) => {
+            rows.live = Some(take s)
+        },
+        Error(Sql(_)) => {
+            rows.live = Some(take s)
+        },
+        _ => {
+            rows.phase = Complete
+        },
+    }
+    take outcome
+}
+
+/// Recover the session after exhaustion or a drained SQL error. Finishing an
+/// unfinished exchange retires the connection. A cursor never leaves a second
+/// live connection behind in the original Conn.
+pub fn finish(take rows: Rows) -> Conn {
+    let Rows(live: take session, phase: phase, ..) = take rows
+    if phase == Complete || phase == Unstarted {
+        Conn(live: take session)
+    } else {
+        Conn(live: None)
+    }
+}
+
+pub fn execute(mut conn: Conn, sql: String, params: List[Param]) -> Result[i64, Error] waits {
+    let mut rows = query(mut conn, sql, params)?
+    loop {
+        match next(mut rows) {
+            Ok(true) => {},
+            Ok(false) => {
+                let affected = rows.affected
+                conn = finish(take rows)
+                return Ok(affected)
+            },
+            Error(take e) => {
+                conn = finish(take rows)
+                return Error(take e)
+            },
+        }
+    }
+}
+
+pub fn parameters(c: Conn) -> Option[View[Parameters]] in c {
+    match c.live {
+        Some(s) => Some(view s.parameters),
+        None => None,
+    }
+}
+
+/// Send Terminate once and release both directional owners.
+pub fn close(take conn: Conn) -> Result[(), Error] waits {
+    let Conn(live: take live) = take conn
+    let Some(take session) = take live else {
+        return Ok(())
+    }
+    let mut s = take session
+    send(mut s.writer, b"X\x00\x00\x00\x04", s.until)
+}

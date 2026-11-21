@@ -7,6 +7,7 @@ import socket
 from pathlib import Path
 import subprocess
 import time
+import tomllib
 import webbrowser
 
 PROGRAM = Path(__file__).resolve().parent
@@ -16,14 +17,26 @@ N_PLACE = "1048576"
 
 
 def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
-    store = json.loads((PROGRAM.parent / "store/manifest.json").read_text())["packages"][0]
+    directory = PROGRAM.parent / "store"
+    with (directory / "hirsel.toml").open("rb") as manifest_file:
+        manifest = tomllib.load(manifest_file)
+    package = manifest["package"]
     store_sources = store_sources or {}
-    store["sources"] = [
-        {**item, "file": str(store_sources.get(item["modules"][0], PROGRAM.parent / "store" / item["file"]))}
-        for item in store["sources"] if item["modules"] in (["store"], ["triggers"], ["runner"], ["ingress"])
-    ]
     core = {"name": "core", "version": "1"}
     std = {"name": "std", "version": "1"}
+    store = {
+        "package": {"name": package["name"], "version": str(package["major"])},
+        "dependencies": [core] + [
+            {"name": name, "version": str(dep["major"])}
+            for name, dep in manifest["dependencies"].items()
+        ],
+        "sources": [
+            {"file": str(store_sources.get(module, directory / file)),
+             "modules": module.split("."), "signatures": False}
+            for file, module in manifest["sources"].items()
+            if module in ("store", "triggers", "runner", "ingress")
+        ],
+    }
     packages = []
     for name, dependencies in [("core", []), ("std", [core])]:
         packages.append({

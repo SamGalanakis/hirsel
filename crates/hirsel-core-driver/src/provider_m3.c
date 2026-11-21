@@ -280,7 +280,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     s.entry=main;memcpy(s.file,is("read")?"abc":"old",3);s.length=3;
     HirselCoreProvider provider={&s,ready_wait,issue,never_resume,never_abort,deliver};
     HirselCoreEntryGrant caps[4];uint64_t grants[4];
-    for(size_t i=0;i<4;i++) {uint8_t k=input->parameters[i].kind;caps[i]=(HirselCoreEntryGrant){k,&provider,k==0?7:0};grants[i]=i+1;}
+    for(size_t i=0;i<4;i++) {uint8_t k=input->parameters[i].kind;caps[i]=(HirselCoreEntryGrant){k,&provider,k==0?7:0,false};grants[i]=i+1;}
     HirselCoreBuffer args[1];for(size_t i=0;i<1;i++) args[i]=(HirselCoreBuffer){(uint8_t*)input->args[i].data,input->args[i].len,0};
     HirselCoreProcessConfig cfg={0};cfg.root_limit=input->root_limit;cfg.args=args;cfg.args_len=1;
     cfg.grants=grants;cfg.grants_len=4;cfg.provider=&provider;cfg.state=&s;cfg.diagnostic=diagnostic;

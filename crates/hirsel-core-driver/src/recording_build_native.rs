@@ -12,6 +12,70 @@ fn env_record_runtime() -> PathBuf {
         .expect("recording runtime archive")
 }
 
+#[test]
+fn foreign_source_replay_refuses_before_reading_tape() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name, text| std::fs::write(dir.path().join(name), text).unwrap();
+    write("hirsel.toml", r#"
+[package]
+name = "app"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"main.hirsel" = "main"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hfl_"
+archives = []
+"#);
+    write("main.hirsel", r#"
+pub opaque type Law {}
+fn enter(f: Foreign[Law]) {
+    native.zed(f)
+    native.alpha(f)
+}
+pub fn main(f: Foreign[Law]) -> Result[(), Exit] {
+    enter(f)
+    Ok(())
+}
+@test
+fn touches(f: Foreign[Law]) -> Result[(), ()] {
+    enter(f)
+    Ok(())
+}
+"#);
+    write("native.hirsel", "pub fn zed(f: Foreign[main.Law])\npub fn alpha(f: Foreign[main.Law])\n");
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let runtime = env_record_runtime();
+    let run = |command: &str, args: &[&str]| {
+        let mut argv = vec![command.to_owned(), dir.path().display().to_string()];
+        argv.extend([
+            "--runtime".into(), runtime.display().to_string(),
+            "--cc".into(), llvm.join("bin/clang").display().to_string(),
+            "--libraries".into(), root.join("core").display().to_string(),
+            "--source-core".into(), "--source-std".into(),
+            "--store".into(), dir.path().join("cache").display().to_string(),
+        ]);
+        argv.extend(args.iter().map(|s| (*s).to_owned()));
+        process::tape_request(&argv, dir.path())
+    };
+    let expected_main = "FFI-8: a recording build cannot reach foreign code: app@1/main/main reaches app@1/native/alpha";
+    let (code, _, error) = run("replay", &["--tape", "missing.tape"]);
+    assert_eq!(code, Some(2), "{error}");
+    let expected_replay = format!("replay: refused: {expected_main}");
+    assert_eq!(error.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock")).collect::<Vec<_>>(), [expected_replay], "{error}");
+    let (code, _, error) = run("build", &["--recording"]);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(error.lines().any(|line| line == format!("refused: {expected_main}")), "{error}");
+    let (code, output, error) = run("test", &["--replay", "--limit", "67108864"]);
+    assert_eq!(code, Some(1), "{output}\n{error}");
+    assert!(output.lines().any(|line| line.ends_with("refused: FFI-8: a recording build cannot reach foreign code: app@1/main/touches reaches app@1/native/alpha")), "{output}\n{error}");
+    assert!(!dir.path().join("program").exists());
+}
+
 /// The symbol's bytes, read from the executable's own symbol table.
 fn code_revision_of(executable: &Path) -> [u8; 32] {
     use object::{Object, ObjectSection, ObjectSymbol};
@@ -2018,22 +2082,33 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
             .output()
             .unwrap();
         let out = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(output.status.code(), Some(0), "{invocation:?}\n{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{invocation:?}\n{out}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         out.split_once(process::CHILD_MARK).unwrap().1.to_owned()
     };
     let inspect = |args| command("inspect", &app, args);
     let interface: serde_json::Value =
         serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
-    assert_eq!(interface, serde_json::json!({
-        "version": 1,
-        "package": {"name": "app", "version": "1"},
-        "modules": [{"path": ["main"], "extends_core": false, "items": [
-            {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
-            {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
-            {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
-        ]}],
-    }));
-    assert_eq!(inspect(&["--dependents", "main/base"]), "app@1/main/middle\n");
+    assert_eq!(
+        interface,
+        serde_json::json!({
+            "version": 1,
+            "package": {"name": "app", "version": "1"},
+            "modules": [{"path": ["main"], "extends_core": false, "items": [
+                {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
+                {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
+                {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
+            ]}],
+        })
+    );
+    assert_eq!(
+        inspect(&["--dependents", "main/base"]),
+        "app@1/main/middle\n"
+    );
     assert_eq!(
         inspect(&["--dependents", "app@1/main/base", "--transitive"]),
         "app@1/main/from_base\napp@1/main/middle\n",
@@ -2049,19 +2124,35 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     let executed = || {
         let clang = llvm.join("bin/clang");
         let output: serde_json::Value = serde_json::from_str(&command(
-            "test", &app, &[
-                "--json", "--limit", "1048576", "--runtime", runtime.to_str().unwrap(),
-                "--cc", clang.to_str().unwrap(),
+            "test",
+            &app,
+            &[
+                "--json",
+                "--limit",
+                "1048576",
+                "--runtime",
+                runtime.to_str().unwrap(),
+                "--cc",
+                clang.to_str().unwrap(),
             ],
-        )).unwrap();
+        ))
+        .unwrap();
         let tests = output["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 3);
-        tests.iter()
+        tests
+            .iter()
             .filter(|row| row["source"] == "executed")
             .map(|row| row["definition"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(executed(), ["app@1/main/from_base", "app@1/main/from_constant", "app@1/main/independent"]);
+    assert_eq!(
+        executed(),
+        [
+            "app@1/main/from_base",
+            "app@1/main/from_constant",
+            "app@1/main/independent"
+        ]
+    );
 
     let affected = inspect(&["--affected-tests", "main/base"]);
     assert_eq!(affected, "app@1/main/from_base\n");
@@ -2077,19 +2168,24 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     let manifest_app = dir.path().join("manifest-app");
     std::fs::create_dir(&manifest_app).unwrap();
     std::fs::write(
-        manifest_app.join("manifest.json"),
-        r#"{
-            "packages": [{
-                "package": {"name": "counter", "version": "2"},
-                "dependencies": [{"name": "core", "version": "1"}],
-                "sources": [{"file": "app.hirsel", "modules": ["counter"], "signatures": false}]
-            }],
-            "entries": [{"package": {"name": "counter", "version": "2"}, "module": "counter"}],
-            "tests": {
-                "sources": [{"file": "laws.hirsel", "modules": ["counter"], "signatures": false}],
-                "limit": 1048576
-            }
-        }"#,
+        manifest_app.join("hirsel.toml"),
+        r#"[package]
+name = "counter"
+major = 2
+charge = "charge-v1"
+
+[sources]
+"app.hirsel" = "counter"
+
+[program]
+module = "counter"
+
+[tests]
+limit = 1048576
+
+[tests.sources]
+"laws.hirsel" = "counter"
+"#,
     )
     .unwrap();
     std::fs::write(
@@ -2113,15 +2209,18 @@ pub fn spare() -> u64 { 0u64 }
     let inspect = |args| command("inspect", &manifest_app, args);
     let interface: serde_json::Value =
         serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
-    assert_eq!(interface, serde_json::json!({
-        "version": 1,
-        "package": {"name": "counter", "version": "2"},
-        "modules": [{"path": ["counter"], "extends_core": false, "items": [
-            {"definition": "counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
-            {"definition": "counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
-            {"definition": "counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
-        ]}],
-    }));
+    assert_eq!(
+        interface,
+        serde_json::json!({
+            "version": 1,
+            "package": {"name": "counter", "version": "2"},
+            "modules": [{"path": ["counter"], "extends_core": false, "items": [
+                {"definition": "counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
+                {"definition": "counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
+                {"definition": "counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
+            ]}],
+        })
+    );
     assert_eq!(
         inspect(&["--affected-tests", "counter/start"]),
         "counter@2/counter/counts\n",
@@ -2235,4 +2334,590 @@ fn rejected() -> Result[(), ()] { Error(()) }
     assert_eq!(run(&rerun_with_dir, 0), "pass executed app@1/main/good\n");
     assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
     assert!(!missing.exists());
+}
+
+#[test]
+fn run_tape_replays_granted_terminal_bits() {
+    use crate::host::terminal_fixture;
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bits = dir.path().join("bits");
+    let tape = dir.path().join("terminals.tape");
+    let product = terminal_fixture::product(dir.path());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = terminal_fixture::options(Backend::Cranelift, dir.path());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    let record = product.build(&entry, &options).unwrap();
+    let (_master, slave) = terminal_fixture::pty();
+    let output = Command::new(&record.executable)
+        .env("HIRSEL_RECORD", &tape)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(std::fs::read(&bits).unwrap(), [1, 1, 0]);
+    std::fs::remove_file(&bits).unwrap();
+
+    options.grant_mask = 0;
+    options.directories.clear();
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let output = Command::new(replay.executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(!bits.exists());
+}
+
+#[test]
+fn run_tape_records_scram_outcome_without_key_material() {
+    use hirsel_core_net::{GrantRule, SecretGrant};
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    use std::{
+        io::{Read, Write},
+        net::{Ipv4Addr, TcpListener},
+        sync::Arc,
+    };
+
+    const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/ca.pem");
+    const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.pem");
+    const KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.key.pem");
+    const CLIENT_FINAL: &[u8] = b"c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=";
+    const SERVER_FINAL: &[u8] = b"v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
+                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+            )
+            .unwrap();
+
+    let source = r#"
+pub fn main(n: Net, password: Secret, out: Stdout) -> Result[(), Exit] waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 12345u16)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let alpn: List[String] = list.new()
+    let (r, w, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, alpn, Never))
+    let mut read = take r
+    let mut write = take w
+    let client: Bytes = b"n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+    let server: Bytes = b"r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+    let empty: Bytes = list.new()
+    if result.unwrap(secret.scram_final_len(write, client, server)) != 106 {
+        return Error(Exit(status: 1))
+    }
+    let mut response: Bytes = list.with_capacity(46)
+    let check = result.unwrap(secret.scram_sha256(mut write, password, client, server, empty, empty, Never))
+    while list.len(response) < 46 {
+        if result.unwrap(host.recv_bounded(mut read, mut response, 46, Never)) == 0 {
+            return Error(Exit(status: 2))
+        }
+    }
+    if !secret.scram_verify(take check, response) {
+        return Error(Exit(status: 3))
+    }
+    result.unwrap(stdout.write(out, "verified"))
+    Ok(())
+}
+"#.replace("12345", &port.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    let roots = dir.path().join("roots.pem");
+    std::fs::write(&roots, CA).unwrap();
+    let tape = dir.path().join("scram.tape");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = (1 << grant_kind("Net").unwrap()) | (1 << grant_kind("Stdout").unwrap());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.net_rules = [
+        format!("Connect 127.0.0.1/32 {port}-{port}"),
+        format!("Tls alpha.test {port}-{port} System"),
+    ]
+    .map(|text| GrantRule::parse(&text).unwrap())
+    .into();
+    options.secret_grants =
+        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "alpha.test").unwrap()];
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let record = product.build(&entry, &options).unwrap();
+
+    let peer = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut peer = StreamOwned::new(ServerConnection::new(Arc::new(config)).unwrap(), socket);
+        let mut proof = [0; 106];
+        peer.read_exact(&mut proof).unwrap();
+        assert_eq!(&proof, CLIENT_FINAL);
+        peer.write_all(SERVER_FINAL).unwrap();
+        peer.conn.send_close_notify();
+        peer.flush().unwrap();
+    });
+    let output = Command::new(record.executable)
+        .env("SSL_CERT_FILE", &roots)
+        .env_remove("SSL_CERT_DIR")
+        .env("HIRSEL_SCRAM_PASSWORD", "pencil")
+        .env("HIRSEL_RECORD", &tape)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"verified");
+    peer.join().unwrap();
+
+    let sealed = std::fs::read(&tape).unwrap();
+    let key_material = [
+        "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d",
+        "a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b",
+        "586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6",
+        "c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5",
+        "747cdb65aa56224e2352137e52d7bdcad6a0f738df30782caa69a2cfb0277554",
+    ];
+    let check_absent = |bytes: &[u8]| {
+        for form in [
+            bytes,
+            crate::call::hex(bytes).as_bytes(),
+            crate::call::base64(bytes).as_bytes(),
+        ] {
+            assert!(
+                !sealed.windows(form.len()).any(|window| window == form),
+                "SCRAM key material in tape"
+            );
+        }
+    };
+    check_absent(b"pencil");
+    for hex in key_material {
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        check_absent(&bytes);
+    }
+    assert!(
+        sealed
+            .windows(SERVER_FINAL.len())
+            .any(|window| window == SERVER_FINAL)
+    );
+
+    let mut input = sealed.as_slice();
+    let (mut blocks, _) = hirsel_tape_format::Blocks::open(|buffer| input.read(buffer)).unwrap();
+    let mut decoder = hirsel_tape_format::Decoder::default();
+    let mut calls = Vec::new();
+    let mut issued = std::collections::BTreeMap::new();
+    while let Some((flags, payload)) = blocks.next(|buffer| input.read(buffer)).unwrap() {
+        use hirsel_tape_format::{Frame, op};
+        for frame in decoder
+            .block(payload, flags & hirsel_tape_format::END != 0)
+            .unwrap()
+        {
+            let (operation, out) = match frame {
+                Frame::Issue { task, op, .. } => {
+                    issued.insert(task, op);
+                    continue;
+                }
+                Frame::Op { op, out, .. } => (op, out),
+                Frame::Done { task, out, .. } => (issued.remove(&task).unwrap(), out),
+                _ => continue,
+            };
+            if matches!(operation, op::SCRAM | op::SCRAM_VERIFY) {
+                assert_eq!(out.status, hirsel_tape_format::OK);
+                assert!(out.payload.is_empty());
+                calls.push(operation);
+            }
+        }
+    }
+    assert_eq!(
+        calls,
+        [
+            hirsel_tape_format::op::SCRAM,
+            hirsel_tape_format::op::SCRAM_VERIFY
+        ]
+    );
+
+    options.grant_mask = 0;
+    options.net_rules.clear();
+    options.secret_grants.clear();
+    options.backend = Backend::Llvm;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let output = Command::new(replay.executable)
+        .env_remove("HIRSEL_SCRAM_PASSWORD")
+        .env_remove("SSL_CERT_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn postgres_scripted_peer_laws() {
+    use hirsel_core_net::{GrantRule, SecretGrant};
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    use std::{
+        io::{ErrorKind, Read, Write},
+        net::{Ipv4Addr, TcpListener, TcpStream},
+        sync::Arc,
+    };
+
+    type Peer = StreamOwned<ServerConnection, TcpStream>;
+
+    const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/ca.pem");
+    const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.pem");
+    const KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.key.pem");
+    const PASSWORD: &str = "pencil";
+    const FIRST: &[u8] = b"n,,n=,r=rOprNGfwEbeRWgbNEkqO";
+    const NONCE: &[u8] = b"r=rOprNGfwEbeRWgbNEkqO,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+    const EXTENDED: &[u8] =
+        b"r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+    // RFC 7677's salt, nonce and password with PostgreSQL's empty SCRAM name.
+    // Independently derived using PBKDF2, HMAC and SHA-256 from RFC 5802 §3.
+    const PROOF: &[u8] = b"c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=qvT2SWdEH5Q06albL+hjSYuUhCG7VndFyzIb7CK4n9k=";
+    const VERIFIER: &[u8] = b"v=3HO6Qt1M4MKJrmlKaoOqLAI0/0TV0HZe7J9H3MBtSOg=";
+    const SQL_ERROR: &[u8] = b"SERROR\0VERROR\0C22012\0Mdivision by zero\0Dscripted detail\0\0";
+    // One int4 column. Table, attribute and modifier are unset. Width is
+    // four and statement Describe reports format zero per protocol 3.0.
+    const DESCRIPTION: &[u8] =
+        b"\x00\x01x\0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\xff\xff\xff\xff\x00\x00";
+    const PORTAL: &[u8] = b"hirsel_rows\0";
+
+    fn packet(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
+        let len = u32::try_from(body.len() + 4).unwrap().to_be_bytes();
+        out.push(tag);
+        out.extend_from_slice(&len);
+        out.extend_from_slice(body);
+    }
+
+    fn send(peer: &mut Peer, tag: u8, body: &[u8]) {
+        let mut out = Vec::new();
+        packet(&mut out, tag, body);
+        peer.write_all(&out).unwrap();
+    }
+
+    fn recv(peer: &mut Peer, tag: u8) -> Vec<u8> {
+        let mut header = [0; 5];
+        peer.read_exact(&mut header).unwrap();
+        assert_eq!(header[0], tag, "expected frontend tag {}", char::from(tag));
+        let len = u32::from_be_bytes(header[1..].try_into().unwrap());
+        assert!((4..=1024).contains(&len));
+        let mut body = vec![0; (len - 4) as usize];
+        peer.read_exact(&mut body).unwrap();
+        body
+    }
+
+    fn ended(peer: &mut Peer) {
+        match peer.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+                ) => {}
+            other => panic!("expected stream retirement, got {other:?}"),
+        }
+    }
+
+    fn authenticate(peer: &mut Peer, name: &str) -> bool {
+        const STARTUP: &[u8] =
+            b"\x00\x03\x00\x00user\0user\0database\0postgres\0client_encoding\0UTF8\0\0";
+        let mut startup = vec![0; 4 + STARTUP.len()];
+        peer.read_exact(&mut startup).unwrap();
+        assert_eq!(startup[..4], (startup.len() as u32).to_be_bytes());
+        assert_eq!(&startup[4..], STARTUP);
+
+        // Send no body for malformed lengths or tags. Any attempted read of the
+        // claimed body returns a timeout rather than the expected protocol error.
+        let header = match name {
+            "short" => Some(*b"R\x00\x00\x00\x03"),
+            "negative" => Some(*b"R\xff\xff\xff\xff"),
+            "large" => Some(*b"R\x7f\xff\xff\xff"),
+            "tag" => Some(*b"?\x00\x00\x00\x04"),
+            _ => None,
+        };
+        if let Some(header) = header {
+            peer.write_all(&header[..2]).unwrap();
+            peer.write_all(&header[2..]).unwrap();
+            ended(peer);
+            return false;
+        }
+
+        send(peer, b'R', b"\x00\x00\x00\x0aSCRAM-SHA-256\0\0");
+        let mut first = b"SCRAM-SHA-256\0".to_vec();
+        first.extend_from_slice(&(FIRST.len() as i32).to_be_bytes());
+        first.extend_from_slice(FIRST);
+        assert_eq!(recv(peer, b'p'), first);
+
+        let mut continuation = vec![0, 0, 0, 11];
+        continuation.extend_from_slice(if name == "nonce" { NONCE } else { EXTENDED });
+        send(peer, b'R', &continuation);
+        if name == "nonce" {
+            ended(peer);
+            return false;
+        }
+        assert_eq!(recv(peer, b'p'), PROOF);
+
+        let mut final_message = vec![0, 0, 0, 12];
+        final_message.extend_from_slice(VERIFIER);
+        if name == "signature" {
+            final_message[6] = b'4';
+        }
+        let mut ready = Vec::new();
+        packet(&mut ready, b'R', &final_message);
+        packet(&mut ready, b'R', &[0; 4]);
+        packet(&mut ready, b'S', b"client_encoding\0UTF8\0");
+        packet(&mut ready, b'K', &[0; 8]);
+        packet(&mut ready, b'Z', b"I");
+        peer.write_all(&ready).unwrap();
+        true
+    }
+
+    fn begin(peer: &mut Peer, sql: &str, returns_rows: bool) {
+        let mut parse = vec![0];
+        parse.extend_from_slice(sql.as_bytes());
+        parse.extend_from_slice(&[0; 3]);
+        assert_eq!(recv(peer, b'P'), parse);
+        assert_eq!(recv(peer, b'D'), b"S\0");
+        assert!(recv(peer, b'H').is_empty());
+        send(peer, b'1', b"");
+        send(peer, b't', b"\0\0");
+        if returns_rows {
+            send(peer, b'T', DESCRIPTION);
+        } else {
+            send(peer, b'n', b"");
+        }
+
+        let mut bind = PORTAL.to_vec();
+        bind.extend_from_slice(b"\0\x00\x01\x00\x01\x00\x00");
+        bind.extend_from_slice(if returns_rows {
+            b"\x00\x01\x00\x01"
+        } else {
+            b"\0\0"
+        });
+        assert_eq!(recv(peer, b'B'), bind);
+        assert!(recv(peer, b'H').is_empty());
+        send(peer, b'2', b"");
+        demand(peer);
+    }
+
+    fn demand(peer: &mut Peer) {
+        let mut execute = PORTAL.to_vec();
+        execute.extend_from_slice(&1u32.to_be_bytes());
+        assert_eq!(recv(peer, b'E'), execute);
+        assert!(recv(peer, b'H').is_empty());
+    }
+
+    fn close_portal(peer: &mut Peer) {
+        let mut close = vec![b'P'];
+        close.extend_from_slice(PORTAL);
+        assert_eq!(recv(peer, b'C'), close);
+        assert!(recv(peer, b'H').is_empty());
+        send(peer, b'3', b"");
+    }
+
+    fn sync(peer: &mut Peer, status: &[u8]) {
+        assert!(recv(peer, b'S').is_empty());
+        send(peer, b'Z', status);
+    }
+
+    fn recover(peer: &mut Peer) {
+        begin(peer, "SELECT 1 / x FROM inputs", true);
+        send(peer, b'A', b"\0\0\0\x01channel\0payload\0");
+        send(
+            peer,
+            b'N',
+            b"SNOTICE\0VNOTICE\0C00000\0Mscripted notice\0\0",
+        );
+        send(peer, b'S', b"standard_conforming_strings\0off\0");
+        send(peer, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x07");
+        send(peer, b's', b"");
+        demand(peer);
+        send(peer, b'E', SQL_ERROR);
+        sync(peer, b"I");
+
+        close_portal(peer);
+        begin(peer, "SELECT 42", true);
+        send(peer, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x2a");
+        send(peer, b's', b"");
+        demand(peer);
+        send(peer, b'C', b"SELECT 1\0");
+        close_portal(peer);
+        sync(peer, b"I");
+
+        begin(peer, "SELECT 'late'", true);
+        send(peer, b'C', b"SELECT 0\0");
+        close_portal(peer);
+        assert!(recv(peer, b'S').is_empty());
+        send(peer, b'E', SQL_ERROR);
+        send(peer, b'Z', b"I");
+
+        begin(peer, "BEGIN", false);
+        send(peer, b'C', b"BEGIN\0");
+        close_portal(peer);
+        sync(peer, b"T");
+        begin(peer, "SELECT 1 / x FROM inputs", true);
+        send(peer, b'E', SQL_ERROR);
+        sync(peer, b"E");
+
+        // The rejected SELECT must send nothing. The next exchange closes
+        // the old portal before binding the ROLLBACK in the failed session.
+        close_portal(peer);
+        begin(peer, "ROLLBACK", false);
+        send(peer, b'C', b"ROLLBACK\0");
+        close_portal(peer);
+        sync(peer, b"I");
+        assert!(recv(peer, b'X').is_empty());
+        ended(peer);
+    }
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
+                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+            )
+            .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let roots = dir.path().join("roots.pem");
+    std::fs::write(&roots, CA).unwrap();
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../../core/programs/postgres/postgres.hirsel"),
+        include_str!("../../../core/front/fixtures/recording/postgres-peer.hirsel")
+            .replace("12345", &port.to_string()),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core"), package("core"), true).unwrap();
+    let mut std = PackageManifest::directory(&root.join("std"), package("std"), false).unwrap();
+    std.dependencies.push(package("core"));
+    request.inputs.packages.push(std);
+    request.inputs.packages[0].dependencies.push(package("std"));
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = ["Clock", "Net"]
+        .iter()
+        .map(|name| 1 << grant_kind(name).unwrap())
+        .sum();
+    options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+    options.net_rules = [
+        format!("Connect 127.0.0.1/32 {port}-{port}"),
+        format!("Tls alpha.test {port}-{port} System"),
+    ]
+    .map(|rule| GrantRule::parse(&rule).unwrap())
+    .into();
+    options.secret_grants =
+        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "alpha.test").unwrap()];
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let program = product.build(&entry, &options).unwrap();
+
+    let cases = [
+        "short",
+        "negative",
+        "large",
+        "tag",
+        "nonce",
+        "signature",
+        "alpn",
+        "short-row",
+        "trailing",
+        "reuse",
+    ];
+    let peer = std::thread::spawn(move || {
+        for name in cases {
+            let (socket, _) = listener.accept().unwrap();
+            let mut tls = config.clone();
+            if name != "alpn" {
+                tls.alpn_protocols = vec![b"postgresql".to_vec()];
+            }
+            let mut peer = StreamOwned::new(ServerConnection::new(Arc::new(tls)).unwrap(), socket);
+            if name == "alpn" {
+                ended(&mut peer);
+            } else if authenticate(&mut peer, name) {
+                match name {
+                    "signature" => ended(&mut peer),
+                    "reuse" => recover(&mut peer),
+                    _ => {
+                        begin(&mut peer, "SELECT 1", true);
+                        let row: &[u8] = if name == "short-row" {
+                            b"\x00\x01\x7f\xff\xff\xff"
+                        } else {
+                            b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x01\x99"
+                        };
+                        send(&mut peer, b'D', row);
+                        ended(&mut peer);
+                    }
+                }
+            }
+        }
+    });
+    for name in cases {
+        let outcome = Command::new(&program.executable)
+            .arg(name)
+            .env("SSL_CERT_FILE", &roots)
+            .env_remove("SSL_CERT_DIR")
+            .env("HIRSEL_SCRAM_PASSWORD", PASSWORD)
+            .output()
+            .unwrap();
+        assert!(
+            outcome.status.success(),
+            "{name}: {} {}",
+            outcome.status,
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+    }
+    peer.join().unwrap();
 }

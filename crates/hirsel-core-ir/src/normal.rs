@@ -16,7 +16,7 @@ pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
     bytes.push(value as u8);
 }
 
-pub(crate) fn encode_identity(identity: &Identity) -> Vec<u8> {
+pub fn encode_identity(identity: &Identity) -> Vec<u8> {
     let empty = Module::default();
     let mut order = ModuleOrder::new(&empty);
     let mut out = Write::module(&mut order);
@@ -1709,15 +1709,15 @@ fn f0 = n0 g0 {
 ",
         );
         let encoded = encode(&module, FuncId(0));
-        // Literal v2 body wire fields and SHA-256 computed independently with
-        // Python hashlib over the two u64le length-prefixed parts.
+        // Literal v2 wire fields and hashes derived independently from PROG-10.
+        // SHA-256 frames the domain and payload with u64le lengths.
         let body = hex(concat!(
-            "484952424f4459000200",
-            "00010001000900000001",
-            "0c61707040312f6d61696e2f66000000",
-            "01000000010100010000",
-            "0700000000000000",
-            "0301000001000900000000",
+            "484952424f4459000200",               // HIRBODY, NUL, u16le version 2
+            "000100010009000000",                 // types, () -> u64 signature, statics
+            "010c61707040312f6d61696e2f66000000", // instance app@1/main/f
+            "01000000010100010000",               // one function and block, const v0
+            "0700000000000000",                   // u64le 7
+            "0301000001000900000000",             // return v0, compact roots, local rows
         ));
         assert_eq!(encoded.bytes, body);
         let hash = encoded.hash();

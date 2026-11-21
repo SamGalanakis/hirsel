@@ -1,0 +1,2 @@
+fn outside(p: foreign.Ptr[ffi_laws.laws.Obj]) {}
+// expect: refuse FFI-6 at 1:15

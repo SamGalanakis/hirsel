@@ -21,7 +21,7 @@ raised it:
 | `Bounds` | indexing and slicing out of range; `channel.new(0)` |
 | `Division` | integer division or remainder by zero |
 | `Unwrap` | [`option.unwrap`](../../core/core/option.hirsel) of `None`, [`result.unwrap`](../../core/core/result.hirsel) of `Error` ([core](core.md#contracts-the-signatures-do-not-state)) |
-| `Fail(text)` | `fail(msg)`, which has type `Never`; a foreign call refused by its handle checks, with one of four fixed texts ([FFI-6](foreign.md#ffi-6-handles)) |
+| `Fail(text)` | `fail(msg)`, which has type `Never`; a foreign call refused by its handle checks, with one of the fixed texts `foreign handle released`, `foreign handle in use`, `foreign handle of another kind` and `foreign pointer already held` ([FFI-6](foreign.md#ffi-6-handles)), or `foreign call needs a host Dir` (the `sqlite` package's slice 2) |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity(c)` | an admission the current limit refuses ([MEM-21](budgets.md#mem-21-admission)), `c` the refused charge ([MEM-22](budgets.md#mem-22-the-capacity-value)) |
 | `OutOfTime` | a step past the current step bound ([MEM-30](budgets.md#mem-30-step-bounds)) |
@@ -235,7 +235,8 @@ callee that aborts, overflows its stack or corrupts memory is termination by the
 reported as the run's outcome and is not a failure: no cause chain is formed, no cleanup or
 finalizer runs, and no joiner observes it. In a process it exits with status 102 and
 writes one line to stderr, `run stop: ` and the stop's name
-([PROG-3](programs.md#prog-3-entry)):
+([PROG-3](programs.md#prog-3-entry)), except termination by the host, whose status and output
+are the host's, PROG-3's exception, a native abort's included:
 
 | stop | name |
 |---|---|

@@ -115,6 +115,8 @@ impl Fixture {
                 address: ContentHash::default(),
                 groups: vec![],
                 bodies: vec![],
+                foreign_modules: vec![],
+                foreign_archives: vec![],
                 launch: Launch {
                     backend: Backend::Cranelift,
                     target: TARGET.into(),
@@ -151,7 +153,11 @@ impl Fixture {
         let sources = hirsel_core_ir::source::SourceMap::default();
         let (body, mut annex) = normal::encode_with_annex(&module, FuncId(0), &sources.positions());
         if identity(name) == self.recipe.entry {
-            annex.1 = Some(vec![]);
+            annex.1 = Some(if params == "(u64)" {
+                vec!["f".into()]
+            } else {
+                vec![]
+            });
         }
         let row = BodyRef {
             body: self.object(ObjectKind::Body, body.bytes),
@@ -231,6 +237,7 @@ fn read_need(peer: &mut UnixStream) -> Option<Vec<ObjectKey>> {
                     1 => ObjectKind::Group,
                     2 => ObjectKind::Body,
                     3 => ObjectKind::Annex,
+                    4 => ObjectKind::ForeignArchive,
                     tag => panic!("unexpected Need tag {tag}"),
                 },
                 hash: ContentHash(read(peer)),
@@ -244,6 +251,7 @@ fn object_header(key: ObjectKey) -> Vec<u8> {
         ObjectKind::Group => 1,
         ObjectKind::Body => 2,
         ObjectKind::Annex => 3,
+        ObjectKind::ForeignArchive => 4,
         ObjectKind::Recipe => panic!("recipe object frame"),
     }];
     bytes.extend_from_slice(&key.hash.0);
@@ -266,6 +274,132 @@ fn start(peer: &mut UnixStream, fixture: &Fixture) -> Vec<ObjectKey> {
 #[track_caller]
 fn failure(result: Result<AdmittedRelease<'_>, AdmissionError>) -> AdmissionError {
     result.err().expect("admission must refuse before assembly")
+}
+
+#[test]
+fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
+    use hirsel_core_ir::release_recipe::{
+        ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
+    };
+    use sha2::{Digest, Sha256};
+
+    let harness = Harness::new(LARGE);
+    let local = tempfile::tempdir().unwrap();
+    let store = CodeStore::new(local.path());
+    let archive = store.put(ObjectKind::ForeignArchive, b"abc").unwrap();
+    assert_eq!(
+        crate::call::hex(&archive.hash.0),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    let mut fixture = Fixture::new("entry");
+    let body = fixture.body("entry", "(u64)", "", "return");
+    fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
+    fixture.recipe.launch.grants.push(GrantBinding {
+        ordinal: 0,
+        kind: GrantKind::Foreign,
+        values: vec!["ffi_laws@1/laws/Laws".into()],
+        archive: Some(archive),
+    });
+    let admit = |fixture: &Fixture, archive_bytes: &[u8]| {
+        failure(harness.run(limits(), &NativeSemantics, |peer| {
+            for key in start(peer, fixture) {
+                let bytes = if key.kind == ObjectKind::ForeignArchive {
+                    archive_bytes
+                } else {
+                    &fixture.objects[&key]
+                };
+                send_object(peer, key, bytes);
+            }
+            peer.write_all(&[0]).unwrap();
+        }))
+    };
+    assert!(
+        matches!(admit(&fixture, b"abc"), AdmissionError::Missing(hash) if hash == archive.hash)
+    );
+
+    fixture.recipe.foreign_archives.push(archive);
+    assert!(matches!(admit(&fixture, b"abd"), AdmissionError::Hash(hash) if hash == archive.hash));
+    assert!(matches!(
+        admit(&fixture, b"abc"),
+        AdmissionError::Unsupported("foreign modules are not enabled yet")
+    ));
+
+    fixture.recipe.launch.grants.clear();
+    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == archive.hash));
+
+    // The address binds the full table even when the selected archive is unchanged.
+    let grant = GrantBinding {
+        ordinal: 0,
+        kind: GrantKind::Foreign,
+        values: vec!["app@1/main/I".into()],
+        archive: Some(archive),
+    };
+    let header = "(core@1/core/Foreign[app@1/main/I])->()";
+    let definition = DefPath::from_full("app@1/native/f").unwrap();
+    let leaf = ForeignLeaf {
+        module: DefPath::from_full("app@1/native").unwrap(),
+        symbols: "hfl_".into(),
+        targets: vec![ForeignTarget {
+            target: TARGET.into(),
+            archive,
+        }],
+        functions: vec![ForeignFunction {
+            identity: Identity::plain(definition),
+            header: header.into(),
+        }],
+    };
+    let mut table = b"\x18x86_64-unknown-linux-gnu".to_vec();
+    table.extend_from_slice(&archive.hash.0);
+    table.push(3);
+    let mut address_frame =
+        b"\x0eapp@1/native/f\0\0\x27(core@1/core/Foreign[app@1/main/I])->()\x05hfl_f".to_vec();
+    address_frame.extend_from_slice(&Sha256::digest(table));
+    let address = ContentHash::of_parts("hirsel.code-foreign.v1", [address_frame.as_slice()]);
+
+    fixture.recipe.launch.grants.push(grant.clone());
+    fixture.recipe.foreign_modules.push(leaf.clone());
+    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == address));
+
+    let mut fixture = Fixture::new("entry");
+    fixture.recipe.launch.grants.push(grant);
+    fixture.recipe.foreign_modules.push(leaf.clone());
+    fixture.recipe.foreign_archives.push(archive);
+    let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
+    let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
+    fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
+    let error = admit(&fixture, b"abc").to_string();
+    assert!(error.ends_with("is not an indexed ar archive"), "{error}");
+
+    // An exact FFI-9 address and matching identity cannot substitute for the
+    // slot's machine signature. A recipe may otherwise make the shared bridge
+    // return through a different register class than its caller expects.
+    let mut wrong_abi = Fixture::new("entry");
+    wrong_abi.recipe.launch.grants = fixture.recipe.launch.grants.clone();
+    wrong_abi.recipe.foreign_modules.push(leaf);
+    wrong_abi.recipe.foreign_archives.push(archive);
+    let body = wrong_abi.body(
+        "entry",
+        "(u64)",
+        "sig g1 = (u64) -> (f64)\ninst n1 = app@1/native/f [] []\nfn f1 = n1 g1 extern\n",
+        "v1: f64 = call f1 g1 (v0)\nreturn",
+    );
+    wrong_abi.recipe.address = wrong_abi.group(&[(body, vec![Binding::External(address)])], 0);
+    assert!(matches!(
+        admit(&wrong_abi, b"abc"),
+        AdmissionError::Binding("slot signature differs from its bound foreign header")
+    ));
+
+    fixture.recipe.foreign_modules[0].targets.insert(
+        0,
+        ForeignTarget {
+            target: "aarch64-unknown-linux-gnu".into(),
+            archive: ObjectRef {
+                hash: ContentHash(Sha256::digest(b"").into()),
+                len: 0,
+            },
+        },
+    );
+    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Missing(hash) if hash == address));
 }
 
 // DESIGN §6.2 M1: the attested hash covers the exact bytes in every object kind.
@@ -518,7 +652,7 @@ fn m6_requires_canonical_object_frames() {
     });
     let mut uleb = fixture.recipe.encode();
     // The first identity text starts immediately after the recipe headers.
-    let len = b"HIRRECIP\0\x01\x00\x01\x00".len();
+    let len = b"HIRRECIP\0\x02\x00\x02\x00".len();
     uleb.splice(len..=len, [uleb[len] | 128, 0]);
     let mut trailing = fixture.recipe.encode();
     trailing.push(0);

@@ -51,7 +51,7 @@ pub(crate) fn check(p: &mut Program<'_>) {
                         param.ty,
                         &[
                             "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env",
-                            "Process", "Tasks", "Secret",
+                            "Process", "Tasks", "Secret", "Foreign",
                         ],
                     )
                     .is_none())

@@ -143,7 +143,7 @@ pub(super) fn write(
         1,
     )?;
     let files = bytes(object, None, source_files(sources)?, 8)?;
-    // The versioned symbol binds the source layout to the supplied runtime.
+    // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object
         .declare_data(
             if sources.points.is_empty() {

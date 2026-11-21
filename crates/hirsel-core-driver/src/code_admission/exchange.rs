@@ -138,6 +138,7 @@ impl<'a> Exchange<'a> {
             1 => ObjectKind::Group,
             2 => ObjectKind::Body,
             3 => ObjectKind::Annex,
+            4 => ObjectKind::ForeignArchive,
             _ => return Err(AdmissionError::Malformed("object frame tag")),
         };
         Ok(Some(ObjectKey {
@@ -160,7 +161,7 @@ impl<'a> Exchange<'a> {
         if len > max_bytes - self.received {
             return Err(AdmissionError::Limit(super::Limit::ObjectBytes));
         }
-        let hash = ContentHash::of_stream(key.kind.domain(), len, |hasher| {
+        let hash = key.kind.hash_stream(len, |hasher| {
             let mut remaining = len;
             let mut scratch = [0; 8192];
             while remaining != 0 {
@@ -345,6 +346,7 @@ fn tag(kind: ObjectKind) -> u8 {
         ObjectKind::Group => 1,
         ObjectKind::Body => 2,
         ObjectKind::Annex => 3,
+        ObjectKind::ForeignArchive => 4,
         ObjectKind::Recipe => unreachable!("recipes are in the request header"),
     }
 }

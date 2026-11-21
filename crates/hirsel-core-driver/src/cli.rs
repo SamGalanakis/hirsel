@@ -24,6 +24,7 @@ pub enum OptionId {
     Filter,
     TestJobs,
     Interface,
+    ForeignHeader,
     Dependents,
     Transitive,
     AffectedTests,
@@ -47,6 +48,10 @@ pub enum OptionId {
     Libraries,
     Store,
     Inputs,
+    PackageStore,
+    Locked,
+    Frozen,
+    PackOut,
     Metrics,
     ProfileFront,
     Image,
@@ -99,6 +104,9 @@ macro_rules! commands {
 commands! {
     "help", "help [command]", "Show commands or help for one command.";
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
+    "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
+    "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
+    "pack", "pack [package-dir] --out FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
@@ -108,7 +116,7 @@ commands! {
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process.";
-    "inspect", "inspect [package-dir | --std] (--interface [--json] | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
+    "inspect", "inspect [package-dir | --std] (--interface [--json] | --foreign-header MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
@@ -126,11 +134,55 @@ macro_rules! option {
 }
 static OPTIONS: &[OptionSpec] = &[
     option!(
+        PackageStore,
+        ["--package-store"],
+        Some("DIR"),
+        [
+            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
+            "fetch", "pack"
+        ],
+        "Select the verified library store."
+    ),
+    option!(
+        Locked,
+        ["--locked"],
+        None,
+        [
+            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
+            "fetch", "pack"
+        ],
+        "Require a current workspace lock."
+    ),
+    option!(
+        Frozen,
+        ["--frozen"],
+        None,
+        [
+            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
+            "fetch", "pack"
+        ],
+        "Require a current workspace lock and use only the package store."
+    ),
+    option!(
+        PackOut,
+        ["--out"],
+        Some("FILE"),
+        ["pack"],
+        "Write the library archive to this file."
+    ),
+    option!(
         Interface,
         ["--interface"],
         None,
         ["inspect"],
         "Print public declarations."
+    ),
+    option!(
+        ForeignHeader,
+        ["--foreign-header"],
+        Some("MODULE"),
+        ["inspect"],
+        "Print the C header of a foreign module by its full definition path."
     ),
     option!(
         Dependents,
@@ -827,8 +879,10 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         if argument.starts_with('-') {
             let option = OPTIONS
                 .iter()
-                .find(|o| o.names.contains(&argument.as_str()))
-                .filter(|o| o.commands.is_empty() || o.commands.contains(&command.name))
+                .find(|o| {
+                    o.names.contains(&argument.as_str())
+                        && (o.commands.is_empty() || o.commands.contains(&command.name))
+                })
                 .ok_or_else(|| {
                     format!("unknown option `{argument}` for {name}; use help {name}")
                 })?;
@@ -879,7 +933,7 @@ pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
     for (name, source) in [
         ("main.hirsel", main),
         ("tests.hirsel", test),
-        ("manifest.json", &manifest),
+        (crate::package_dir::MANIFEST, &manifest),
     ]
     .into_iter()
     .chain(library.then_some(("lib.hirsel", lib)))

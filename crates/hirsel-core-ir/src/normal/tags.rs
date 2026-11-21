@@ -356,13 +356,16 @@ tags!(RtOp {
     44 => MapHashAddWord,
     45 => MapHashAddBytes,
     46 => MapHashFinish,
-    47 => ConnNew { item },
-    48 => ConnClient,
-    49 => ConnSend { item },
-    50 => ConnTrySend { item },
-    51 => ConnReceive { item },
-    52 => ConnTryReceive { item },
-    53 => SpawnUnit { x, r },
+    47 => Ed25519Verify,
+    48 => P256Verify,
+    49 => P256VerifyDer,
+    50 => ConnNew { item },
+    51 => ConnClient,
+    52 => ConnSend { item },
+    53 => ConnTrySend { item },
+    54 => ConnReceive { item },
+    55 => ConnTryReceive { item },
+    56 => SpawnUnit { x, r },
 });
 
 tags!(HostOp {
@@ -429,6 +432,13 @@ tags!(HostOp {
     60 => PortReply,
     61 => ProvideDir,
     62 => PortFill,
+    63 => StreamTerminal,
+    64 => NetJoin,
+    65 => ScramSha256,
+    66 => ScramFinalLen,
+    67 => ScramVerify,
+    68 => ProvideNet,
+    69 => CallSecret,
 });
 
 tags!(RaiseCause {

@@ -2,7 +2,7 @@
 //! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
 //! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::{CodeRow, Identity, address::code_groups, code_revision};
+use hirsel_core_ir::{CodeRow, Identity, address::code_groups_with_external, code_revision};
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
@@ -105,6 +105,8 @@ pub(crate) struct InstanceSet {
     pub table: std::collections::BTreeMap<Identity, u32>,
     /// The record fields of each materialised instance, for its record.
     pub fields: std::collections::BTreeMap<Identity, Fields>,
+    summarize_foreign: bool,
+    pub(crate) foreign: BTreeSet<Identity>,
 }
 /// Which store an instance's object and record live in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -230,6 +232,13 @@ impl InstanceBody {
     }
 }
 impl InstanceSet {
+    pub(crate) fn for_reach() -> Self {
+        Self {
+            summarize_foreign: true,
+            ..Self::default()
+        }
+    }
+
     /// Each of `instances`' index in the reach record's table, if expanded,
     /// by one walk of both: `instances` is in identity order, as the table is.
     pub(crate) fn expansions<'a>(
@@ -294,7 +303,15 @@ impl InstanceSet {
         prior: Option<&crate::reach::Reach>,
     ) -> Option<&BTreeMap<Identity, ContentHash>> {
         self.addresses
-            .get_or_init(|| self.groups(instances, prior, instances.iter().cloned(), |_, _| {}))
+            .get_or_init(|| {
+                self.groups(
+                    instances,
+                    prior,
+                    instances.iter().cloned(),
+                    &BTreeMap::new(),
+                    |_, _| {},
+                )
+            })
             .as_ref()
     }
 
@@ -305,6 +322,7 @@ impl InstanceSet {
         instances: &[Identity],
         prior: Option<&crate::reach::Reach>,
         roots: impl IntoIterator<Item = Identity>,
+        foreign: &BTreeMap<Identity, ContentHash>,
         group: impl FnMut(ContentHash, Vec<u8>),
     ) -> Option<BTreeMap<Identity, ContentHash>> {
         let mut rows = BTreeMap::new();
@@ -339,13 +357,14 @@ impl InstanceSet {
         }
         for (_, _, signatures) in rows.values() {
             for (identity, expected) in &signatures.slots {
-                let (_, _, actual) = rows.get(identity)?;
-                if *expected != actual.own {
-                    return None;
+                match rows.get(identity) {
+                    Some((_, _, actual)) if *expected == actual.own => (),
+                    None if foreign.contains_key(identity) => (),
+                    _ => return None,
                 }
             }
         }
-        code_groups(
+        code_groups_with_external(
             roots,
             |identity| {
                 let (body, slots, _) = rows.get(identity)?;
@@ -354,6 +373,7 @@ impl InstanceSet {
                     slots: (*slots).clone(),
                 })
             },
+            |identity| foreign.get(identity).copied(),
             group,
         )
     }
@@ -405,6 +425,39 @@ impl InstanceSet {
     }
 }
 impl CheckProduct {
+    /// A body stopped before emission can have only a request-level refusal.
+    /// Use the current sites, since a conflicting name can move in another item
+    /// without changing this body's record.
+    fn body_source_stop(&self, definition: &DefPath) -> io::Result<Option<String>> {
+        let Some(header) = self.headers.get(definition) else {
+            return Ok(None);
+        };
+        let (_, source, item) = header.anchor;
+        let syntax = self
+            .files
+            .iter()
+            .find(|f| f.file == source)
+            .and_then(|f| f.syntax.items.get(item as usize))
+            .filter(|range| range.has_errors);
+        let owns = |site: &Site| {
+            site.source == Some(source)
+                && (site.item == item
+                    || site.item == u32::MAX
+                        && syntax.is_some_and(|range| range.owned.contains(&site.span.start)))
+        };
+        if let Some(refusal) = self.diagnostics.iter().find(|r| owns(&r.primary)) {
+            return self.render_refusal(refusal).map(Some);
+        }
+        if let Some(resource) = self.resources.iter().find(|r| owns(&r.primary)) {
+            return Ok(Some(format!(
+                "{}: resource {}",
+                self.render_site(&resource.primary)?,
+                resource.message
+            )));
+        }
+        Ok(None)
+    }
+
     /// Materialize every unit reached from `roots`, without native object records.
     /// A program entry is one root; source corpora can select several definitions.
     pub fn units(
@@ -464,9 +517,13 @@ impl CheckProduct {
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
         let mut resolver = Resolver::default();
-        collect_instances(roots, limit, |key| {
+        let mut reached = collect_instances(roots, limit, |key| {
             self.instance_step(key, instances, records, &mut resolver, &mut observe)
-        })
+        })?;
+        if !instances.foreign.is_empty() {
+            reached.retain(|identity| !instances.foreign.contains(identity));
+        }
+        Ok(reached)
     }
     /// Walk one instance: its record on a hit, else its materialised body,
     /// into `instances`; the instances it reaches.
@@ -480,6 +537,20 @@ impl CheckProduct {
     ) -> Result<Vec<Identity>, InstanceStop> {
         {
             observe(key, "start");
+            if self
+                .foreign_inputs
+                .get(&key.definition.0.package)
+                .is_some_and(|modules| modules.contains_key(&key.definition.0.modules))
+            {
+                if instances.summarize_foreign {
+                    instances.foreign.insert(key.clone());
+                    return Ok(Vec::new());
+                }
+                return Err(InstanceStop::Incomplete {
+                    definition: key.definition.clone(),
+                    message: "foreign modules are not enabled yet".into(),
+                });
+            }
             if let Some((_, expand)) = records
                 && let Some(i) = expand.entry(key)
             {
@@ -522,12 +593,14 @@ impl CheckProduct {
                     Some(format!("{}: {}", refusal.rule, refusal.message))
                 } else if let Some(gap) = product.incomplete.first() {
                     Some(gap.message.clone())
+                } else if product.check.function.is_none() {
+                    Some(
+                        self.body_source_stop(&key.definition)
+                            .map_err(|e| input(e.to_string()))?
+                            .unwrap_or_else(|| "body has no complete native product".to_owned()),
+                    )
                 } else {
-                    product
-                        .check
-                        .function
-                        .is_none()
-                        .then(|| "body has no complete native product".to_owned())
+                    None
                 };
                 if let Some(message) = message {
                     return Err(InstanceStop::Incomplete {

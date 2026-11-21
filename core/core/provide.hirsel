@@ -12,15 +12,22 @@ pub fn process() -> (Process, StopTrigger)
 // queued on the port; `next` takes the oldest, and returns None only once
 // every task waits. A Call's Op holds scalars: a data field is its byte
 // length, which `payload` appends to `out`.
-pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
+pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
 
-pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
+pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
 
 pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
+
+pub fn net(bytes n: u64) -> (Net, Served[NetOp])
 
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
+
+// A SendSecret call's Secret, narrowed to the stream's verified name: a new
+// designation charged as `secret.narrow` (TLS-5). Never its bytes; any other
+// call fails the server.
+pub fn secret(c: Call[NetOp]) -> Secret
 
 // Stage the first bytes of `b` in the room for the reply, at most what the
 // call's `room` still offers; returns how many it took.
@@ -97,6 +104,53 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
     }
 }
 
+// An address's words: family (V4 0, V6 1), high and low bits, port.
+fn addr(family: u64, hi: u64, lo: u64, port: u64) -> Addr {
+    let ip: Ip = if family == 0 {
+        V4(int.truncate(lo))
+    } else {
+        V6(hi, lo)
+    }
+    Addr(ip: ip, port: int.truncate(port))
+}
+
+fn part(w: u64) -> Part {
+    if w == 1 {
+        Read
+    } else if w == 2 {
+        Write
+    } else {
+        Whole
+    }
+}
+
+pub fn net_op(c: Call[NetOp]) -> NetOp {
+    let t = word(c, 0)
+    let a = word(c, 1)
+    let b = word(c, 2)
+    let d = word(c, 3)
+    let e = word(c, 4)
+    if t == 0 {
+        Connect(addr: addr(a, b, d, e))
+    } else if t == 1 {
+        Resolve(name: a, room: b)
+    } else if t == 2 {
+        Listen(addr: addr(a, b, d, e), backlog: int.truncate(word(c, 5)))
+    } else if t == 3 {
+        Accept(listener: a)
+    } else if t == 4 {
+        Recv(socket: a, room: b, max: d)
+    } else if t == 5 {
+        Send(socket: a, prefix: b, tail: d)
+    } else if t == 6 {
+        Handshake(socket: a, name: b, alpn: d, system: e == 1)
+    } else if t == 7 {
+        SendSecret(socket: a, before: b, after: d)
+    } else {
+        Released(id: a, part: part(b))
+    }
+}
+
 // The provider's answer: a variant and up to six scalars.
 pub opaque type Reply[Op] {
     tag: u64,
@@ -168,6 +222,80 @@ pub fn dir_reply(r: DirReply) -> Reply[DirOp] {
         File(id) => words(6, id, 0, 0),
         Dir(id) => words(7, id, 0, 0),
         Entries(id) => words(8, id, 0, 0),
+    }
+}
+
+// The run time's error tag and code for a NetError (Tls: the failure's case,
+// with the certificate failure or protocol byte above it).
+fn net_words(e: NetError) -> (u64, u64) {
+    match e {
+        Denied => (1, 0),
+        Refused => (2, 0),
+        Unreachable => (3, 0),
+        InUse => (4, 0),
+        Reset => (5, 0),
+        TimedOut => (6, 0),
+        Aborted => (7, 0),
+        Other(code) => (8, int.widen(code)),
+        Tls(f) => {
+            let code: u64 = match f {
+                Certificate(cert) => {
+                    let detail: u64 = match cert {
+                        UnknownIssuer => 0,
+                        NameMismatch => 1,
+                        Expired => 2,
+                        NotYetValid => 3,
+                        Invalid => 4,
+                    }
+                    detail << 8
+                },
+                Name => 1,
+                Alpn => 2,
+                Roots => 3,
+                Protocol(byte) => {
+                    let wide: u64 = int.widen(byte)
+                    4 | (wide << 8)
+                },
+                Closed => 5,
+                Truncated => 6,
+            }
+            (9, code)
+        },
+    }
+}
+
+fn ip_words(a: Addr) -> (u64, u64, u64) {
+    match a.ip {
+        V4(lo) => (0, 0, int.widen(lo)),
+        V6(hi, lo) => (1, hi, lo),
+    }
+}
+
+fn addr_reply(tag: u64, id: u64, a: Addr) -> Reply[NetOp] {
+    let (family, hi, lo) = ip_words(a)
+    Reply(tag: tag, w0: id, w1: family, w2: hi, w3: lo, w4: int.widen(a.port), w5: 0)
+}
+
+// NetReply tags share the DirReply numbering where the variants agree: Done
+// 0, Failed 1, Count 3, then Socket 9, Listener 10 and Secured 11.
+pub fn net_reply(r: NetReply) -> Reply[NetOp] {
+    match r {
+        Done => words(0, 0, 0, 0),
+        Failed(e) => {
+            let (tag, code) = net_words(e)
+            words(1, tag, code, 0)
+        },
+        Count(n) => words(3, n, 0, 0),
+        Socket(id, a) => addr_reply(9, id, a),
+        Listener(id, a) => addr_reply(10, id, a),
+        Secured(h) => {
+            let (some, protocol): (u64, u64) = match h.protocol {
+                Some(p) => (1, p),
+                None => (0, 0),
+            }
+            let (p0, p1, p2, p3) = h.peer
+            Reply(tag: 11, w0: some, w1: protocol, w2: p0, w3: p1, w4: p2, w5: p3)
+        },
     }
 }
 

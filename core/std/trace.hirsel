@@ -1,0 +1,352 @@
+// Module `trace`: caller-owned spans and their OTLP JSON encoding. Contract: api/trace.md.
+/// A span's place in a trace: the 128-bit trace id (hi then lo, network order) and the
+/// 64-bit span id. Neither is all zeros: OTLP calls such an id invalid.
+pub opaque type Context: key {
+    trace_hi: u64,
+    trace_lo: u64,
+    span: u64
+}
+
+/// ZeroTrace and ZeroSpan: an all-zero id. OtherTrace: the parent is in another trace.
+/// SelfParent: the parent is the span itself.
+pub type Error: key = ZeroTrace | ZeroSpan | OtherTrace | SelfParent
+
+/// OTLP Span.SpanKind 1 to 5.
+pub type SpanKind: key = Internal | Server | Client | Producer | Consumer
+
+/// OTLP Status.StatusCode 0 (UNSET), 1 (OK) and 2 (ERROR).
+pub type Status: key = Unset | Succeeded | Failed
+
+/// OTLP AnyValue: stringValue, boolValue, intValue, doubleValue, bytesValue.
+pub type Value = Str(String) | Bool(bool) | Int(i64) | Double(f64) | Blob(Bytes)
+
+/// One OTLP KeyValue.
+pub type Attribute {
+    key: String,
+    value: Value
+}
+
+/// The spans ended so far, and the anchor that turns Clock readings into Unix time.
+pub opaque type Recorder {
+    unix_ns: u64,
+    mono_ns: u64,
+    spans: Log[Ended]
+}
+
+/// A started span. Dropping it records nothing.
+pub opaque type Span {
+    own: Context,
+    parent: Option[u64],
+    name: String,
+    kind: SpanKind,
+    start_ns: u64,
+    attributes: List[Attribute],
+    links: List[Context],
+    status: Status
+}
+
+/// An ended span, as `finish` returns it.
+pub opaque type Ended {
+    span: Span,
+    end_ns: u64
+}
+
+/// The context with these ids.
+/// Fails: Error(ZeroTrace) when both trace words are 0, else Error(ZeroSpan) when span is 0.
+/// Alloc: nothing. Ex: `let parent = trace.context(hi, lo, span)?`
+pub fn context(trace_hi: u64, trace_lo: u64, span: u64) -> Result[Context, Error] {
+    if trace_hi == 0 && trace_lo == 0 {
+        return Error(ZeroTrace)
+    }
+    if span == 0 {
+        return Error(ZeroSpan)
+    }
+    Ok(Context(trace_hi, trace_lo, span))
+}
+
+/// The trace id as (hi, lo). Alloc: nothing.
+pub fn trace_id(x: Context) -> (u64, u64) {
+    (x.trace_hi, x.trace_lo)
+}
+
+/// The span id. Alloc: nothing.
+pub fn span_id(x: Context) -> u64 {
+    x.span
+}
+
+/// A recorder anchored at c's current readings: a later reading m of `host.mono_ns(c)` is
+/// the Unix time `host.wall_ms(c) * 1_000_000 + (m - host.mono_ns(c))` of this call.
+/// Fails: Overflow (failure) when the wall time in nanoseconds exceeds 2^64 - 1.
+/// Alloc: the log's node (MEM-29). Ex: `let r = trace.recorder(c)`
+pub fn recorder(c: Clock) -> Recorder {
+    let unix_ns = host.wall_ms(c) * 1000000
+    Recorder(unix_ns, mono_ns: host.mono_ns(c), spans: log.new())
+}
+
+/// Fails: Overflow when c reads below the anchor (another Clock), or past 2^64 - 1 ns.
+fn now(r: Recorder, c: Clock) -> u64 {
+    r.unix_ns + (host.mono_ns(c) - r.mono_ns)
+}
+
+fn nonzero(mut g: rand.Pcg) -> u64 {
+    let mut n = rand.next(mut g)
+    while n == 0 {
+        n = rand.next(mut g)
+    }
+    n
+}
+
+fn opened(r: Recorder, c: Clock, own: Context, parent: Option[u64], take name: String, kind: SpanKind) -> Span {
+    Span(own, parent, name, kind, start_ns: now(r, c), attributes: list.new(), links: list.new(), status: Unset)
+}
+
+/// Starts a span at now on c, under parent, or as a trace root when parent is None.
+/// Ids come from g: a root draws trace hi, then trace lo, then its span id; a child draws its
+/// span id and keeps the parent's trace id. A draw of zero (both trace words zero) is drawn
+/// again. Fails: as `recorder` for c. Alloc: nothing until attributes or links are added.
+/// Ex: `let s = trace.start(r, c, Some(trace.ids(parent)), mut g, "fetch", Client)`
+pub fn start(r: Recorder, c: Clock, parent: Option[Context], mut g: rand.Pcg, take name: String, kind: SpanKind) -> Span {
+    match parent {
+        Some(p) => {
+            let own = Context(trace_hi: p.trace_hi, trace_lo: p.trace_lo, span: nonzero(mut g))
+            opened(r, c, own, Some(p.span), take name, kind)
+        },
+        None => {
+            let mut hi = rand.next(mut g)
+            let mut lo = rand.next(mut g)
+            while hi == 0 && lo == 0 {
+                hi = rand.next(mut g)
+                lo = rand.next(mut g)
+            }
+            opened(r, c, Context(trace_hi: hi, trace_lo: lo, span: nonzero(mut g)), None, take name, kind)
+        },
+    }
+}
+
+/// Starts a span with caller-supplied ids own, as `start` does otherwise.
+/// Fails: Error(OtherTrace) when parent's trace id is not own's, Error(SelfParent) when
+/// parent's span id is own's; nothing is started. Ex: `trace.start_with(r, c, None, own, "job", Consumer)?`
+pub fn start_with(r: Recorder, c: Clock, parent: Option[Context], own: Context, take name: String, kind: SpanKind) -> Result[Span, Error] {
+    match parent {
+        Some(p) => {
+            if p.trace_hi != own.trace_hi || p.trace_lo != own.trace_lo {
+                return Error(OtherTrace)
+            }
+            if p.span == own.span {
+                return Error(SelfParent)
+            }
+            Ok(opened(r, c, own, Some(p.span), take name, kind))
+        },
+        None => Ok(opened(r, c, own, None, take name, kind)),
+    }
+}
+
+/// The span's own context: the parent to give its children. Alloc: nothing.
+pub fn ids(s: Span) -> Context {
+    s.own
+}
+
+/// Sets attribute key to v. Attributes stay sorted by key bytes with one value per key, as
+/// OTLP requires; setting a key again replaces its value.
+/// Alloc: GROWTH of the attribute list for a new key. Cost: O(attributes).
+/// Ex: `trace.set(mut s, "http.response.status_code", Int(200))`
+pub fn set(mut s: Span, take key: String, take v: Value) {
+    let n = list.len(s.attributes)
+    let mut i: u64 = 0
+    while i < n && s.attributes[i].key < key {
+        i += 1
+    }
+    if i < n && s.attributes[i].key == key {
+        let _ = list.set(mut s.attributes, i, Attribute(key, value: v))
+    } else {
+        list.insert(mut s.attributes, i, Attribute(key, value: v))
+    }
+}
+
+/// Adds a link to another span's context, after the links added before.
+/// Alloc: GROWTH of the link list.
+pub fn link(mut s: Span, to: Context) {
+    list.push(mut s.links, to)
+}
+
+/// Sets the status, replacing the previous one. Alloc: nothing.
+pub fn set_status(mut s: Span, st: Status) {
+    s.status = st
+}
+
+/// Ends s at now on c and appends it to r. An append stays (MEM-29).
+/// Fails: as `recorder` for c; Overflow when c reads below the anchor. Alloc: GROWTH of r.
+pub fn end(r: Recorder, c: Clock, take s: Span) {
+    let end_ns = now(r, c)
+    log.append(r.spans, Ended(span: s, end_ns))
+}
+
+/// The ended spans in the order they ended. Alloc: nothing (MEM-29).
+pub fn finish(take r: Recorder) -> List[Ended] {
+    let Recorder(spans: take spans, ..) = take r
+    log.finish(take spans)
+}
+
+fn quoted(mut out: String, s: String) {
+    json.write(mut out, false, scoped fn(w: json.Writer) {
+        json.write_string_value(w, s)
+    })
+}
+
+fn push_hex(mut out: String, n: u64) {
+    let mut digits: Inline[u8, 64] =[b'0'; 64]
+    let _ = int.radix_digits(n, 16, mut digits)
+    for i in 48u64 .. 64u64 {
+        let code: u32 = int.widen(digits[i])
+        let _ = string.push_char(mut out, option.unwrap(char.from_u32(code)))
+    }
+}
+
+fn push_value(mut out: String, v: Value) {
+    match v {
+        Str(s) => {
+            string.push(mut out, "{\"stringValue\":")
+            quoted(mut out, s)
+        },
+        Bool(b) => {
+            string.push(mut out, if b {
+                "{\"boolValue\":true"
+            } else {
+                "{\"boolValue\":false"
+            })
+        },
+        Int(n) => {
+            string.push(mut out, "{\"intValue\":\"")
+            string.push_i64(mut out, n)
+            string.push(mut out, "\"")
+        },
+        Double(x) => {
+            string.push(mut out, "{\"doubleValue\":")
+            if float.is_finite(x) {
+                float.push_json_f64(mut out, x)
+            } else if float.gt(x, 0.0) {
+                string.push(mut out, "\"Infinity\"")
+            } else if float.lt(x, 0.0) {
+                string.push(mut out, "\"-Infinity\"")
+            } else {
+                string.push(mut out, "\"NaN\"")
+            }
+        },
+        Blob(b) => {
+            string.push(mut out, "{\"bytesValue\":\"")
+            string.push(mut out, base64.encode_string(b))
+            string.push(mut out, "\"")
+        },
+    }
+    string.push(mut out, "}")
+}
+
+fn push_attributes(mut out: String, xs: List[Attribute]) {
+    string.push(mut out, "[")
+    for i in 0 .. list.len(xs) {
+        if i > 0 {
+            string.push(mut out, ",")
+        }
+        string.push(mut out, "{\"key\":")
+        quoted(mut out, xs[i].key)
+        string.push(mut out, ",\"value\":")
+        push_value(mut out, xs[i].value)
+        string.push(mut out, "}")
+    }
+    string.push(mut out, "]")
+}
+
+fn push_nanos(mut out: String, key: String, ns: u64) {
+    string.push(mut out, key)
+    string.push(mut out, "\"")
+    string.push_u64(mut out, ns)
+    string.push(mut out, "\"")
+}
+
+fn push_trace_id(mut out: String, x: Context) {
+    string.push(mut out, "\"traceId\":\"")
+    push_hex(mut out, x.trace_hi)
+    push_hex(mut out, x.trace_lo)
+    string.push(mut out, "\"")
+}
+
+fn push_span_id(mut out: String, key: String, n: u64) {
+    string.push(mut out, key)
+    string.push(mut out, "\"")
+    push_hex(mut out, n)
+    string.push(mut out, "\"")
+}
+
+fn kind_code(k: SpanKind) -> u64 {
+    match k {
+        Internal => 1,
+        Server => 2,
+        Client => 3,
+        Producer => 4,
+        Consumer => 5,
+    }
+}
+
+fn status_code(s: Status) -> u64 {
+    match s {
+        Unset => 0,
+        Succeeded => 1,
+        Failed => 2,
+    }
+}
+
+fn push_span(mut out: String, s: Span, end_ns: u64) {
+    string.push(mut out, "{\"attributes\":")
+    push_attributes(mut out, s.attributes)
+    push_nanos(mut out, ",\"endTimeUnixNano\":", end_ns)
+    string.push(mut out, ",\"kind\":")
+    string.push_u64(mut out, kind_code(s.kind))
+    string.push(mut out, ",\"links\":[")
+    for i in 0 .. list.len(s.links) {
+        if i > 0 {
+            string.push(mut out, ",")
+        }
+        push_span_id(mut out, "{\"spanId\":", s.links[i].span)
+        string.push(mut out, ",")
+        push_trace_id(mut out, s.links[i])
+        string.push(mut out, "}")
+    }
+    string.push(mut out, "],\"name\":")
+    quoted(mut out, s.name)
+    if let Some(p) = s.parent {
+        push_span_id(mut out, ",\"parentSpanId\":", p)
+    }
+    push_span_id(mut out, ",\"spanId\":", s.own.span)
+    push_nanos(mut out, ",\"startTimeUnixNano\":", s.start_ns)
+    string.push(mut out, ",\"status\":{\"code\":")
+    string.push_u64(mut out, status_code(s.status))
+    string.push(mut out, "},")
+    push_trace_id(mut out, s.own)
+    string.push(mut out, "}")
+}
+
+/// Appends one OTLP/JSON ExportTraceServiceRequest: one resource with the resource
+/// attributes in their list order, one scope named scope at version, and spans in list
+/// order. Object members are in key order and nothing is spaced, so the text equals
+/// Python's `json.dumps(sort_keys=True, separators=(",", ":"))` of the same document for
+/// ASCII strings. Ids are lowercase hex; times and intValue are decimal strings; a
+/// finite double has std.json's spelling, a nonfinite one "NaN", "Infinity" or
+/// "-Infinity"; bytes are padded base64. Pure: no capability.
+/// Fails: Capacity, leaving a prefix of the document in out. Alloc: GROWTH of out.
+/// Cost: O(output bytes). Ex: `trace.otlp_json(mut body, about, "shop", "1", spans)`
+pub fn otlp_json(mut out: String, about: List[Attribute], scope: String, version: String, spans: List[Ended]) {
+    string.push(mut out, "{\"resourceSpans\":[{\"resource\":{\"attributes\":")
+    push_attributes(mut out, about)
+    string.push(mut out, "},\"scopeSpans\":[{\"scope\":{\"name\":")
+    quoted(mut out, scope)
+    string.push(mut out, ",\"version\":")
+    quoted(mut out, version)
+    string.push(mut out, "},\"spans\":[")
+    for i in 0 .. list.len(spans) {
+        if i > 0 {
+            string.push(mut out, ",")
+        }
+        push_span(mut out, spans[i].span, spans[i].end_ns)
+    }
+    string.push(mut out, "]}]}]}")
+}

@@ -73,9 +73,10 @@ Each type declaration publishes one **summary**. This is its whole content:
 - its logical size ([MEM-24](budgets.md#mem-24-logical-charges)), its layout obligations
   ([MEM-9](memory.md#mem-9-compact-types)), whether it is `packed` and `streamable`
   ([MEM-12](memory.md#mem-12-region-sequences));
-- its **holds** set: which of resource, capability, scoped value, region reference and
+- its **holds** set: which of resource, capability, scoped value, region reference,
   **opaque owner** (a builder, `Causes` or an owning closure: an owner with no copy
-  contract) it contains at any depth.
+  contract) and **raw handle** (`foreign.Ptr[K]`,
+  [FFI-6](foreign.md#ffi-6-handles)) it contains at any depth.
 
 Kind, size and layout read only the fields held inline. The indirections `Box`, `List`,
 `Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and region references have a
@@ -91,7 +92,7 @@ types that name each other through fields, at any depth, form a group, and every
 a group holds the union of what the group's fields hold directly and what the other types
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
 holding every category its bounds do not exclude: `plain` excludes resource, scoped value,
-region reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
+region reference and opaque owner, but not capability or raw handle, so `Wrap[T: plain] { item: T }` may hold a
 capability; `inert` (OWN-4) excludes every category, and so does `codec`, which implies it. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
 parameter that no field **mentions** contributes nothing to it: a field mentions `T` when its
@@ -147,7 +148,8 @@ The bounds are:
 - `plain`: exactly the types of plain kind (OWN-2, OWN-3). An own type, `List[T]` and
   `Box[T]` included, never has it, whatever its arguments.
 - `shareable`: plain types, counted types, and own types that declare it and whose fields
-  are shareable; never resources, scoped or region types, or owning closures. Required of
+  are shareable; never resources, scoped or region types, owning closures, or types that hold
+  a raw handle. Required of
   `Rc` and `Arc` payloads.
 - `send`: [CONC-2](tasks.md#conc-2-the-send-bound).
 - `key`: equality and hashing ([SEM-7](semantics.md#sem-7-equality-and-order)).
@@ -167,7 +169,7 @@ The bounds are:
   type arguments, and a `via` type whose field holds anything is refused at that field. So
   decoding never builds authority, and a body may rely on `inert` for `T: codec`.
 - `inert`: exactly the types whose holds set (OWN-2) is empty: no resource, capability,
-  scoped value, region reference or opaque owner at any depth. It is computed from the
+  scoped value, region reference, opaque owner or raw handle at any depth. It is computed from the
   summary, like `plain`, and independent of it: `List[u64]` is inert and not plain, and a
   `Dir` is plain and not inert. On a type parameter it is a bound the argument must have,
   and a body may rely on it: a value of type `T: inert` carries no authority, so an owning

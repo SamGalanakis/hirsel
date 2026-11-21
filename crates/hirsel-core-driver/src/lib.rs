@@ -7,6 +7,8 @@ pub mod code_admission;
 pub mod code_store;
 pub mod describe;
 mod diagnostics;
+mod foreign_archive;
+mod foreign_header;
 mod host;
 mod image;
 mod image_index;
@@ -31,7 +33,14 @@ mod native_entry;
 mod native_facts;
 mod native_object;
 mod native_sources;
+mod package_content;
 mod package_dir;
+mod package_files;
+mod package_lock;
+mod package_manifest;
+mod package_resolve;
+mod package_store;
+mod package_workspace;
 mod prebuild;
 mod release_manifest;
 pub use prebuild::Prebuilt;
@@ -75,7 +84,7 @@ use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
     Refusal, Resolution, ResolutionScratch, Site, SourceId,
 };
-use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile};
+use hirsel_core_syntax::{Symbols, SyntaxFile};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -112,22 +121,25 @@ pub struct CheckRequest {
     pub manifest: Option<PathBuf>,
 }
 impl CheckRequest {
+    pub(crate) fn capture_sources(&mut self) -> io::Result<()> {
+        for package in &mut self.inputs.packages {
+            for source in &mut package.sources {
+                if source.captured.is_none() {
+                    source.captured = Some(hirsel_core_resolve::CapturedSource {
+                        bytes: source.read()?,
+                        name: source.name(self.manifest.as_deref())?,
+                        test: false,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn source_std(root: &Path) -> io::Result<PackageManifest> {
         let mut manifest = PackageManifest::directory(root, package("std"), true)?;
         manifest.dependencies.push(package("core"));
         Ok(manifest)
-    }
-
-    /// A package directory over core and std: the directory convention
-    /// depends on both, a manifest names its own dependencies.
-    fn app(dir: &Path) -> io::Result<package_dir::PackageDir> {
-        let mut app = package_dir::PackageDir::open(dir)?;
-        if app.manifest.is_none() {
-            app.package
-                .dependencies
-                .extend([package("core"), package("std")]);
-        }
-        Ok(app)
     }
 
     pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
@@ -149,70 +161,99 @@ impl CheckRequest {
         })
     }
     pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let mut app = package_dir::PackageDir::open(dir)?;
-        if app.manifest.is_none() {
-            app.package.dependencies.extend(
-                image
-                    .directory()?
-                    .inputs
-                    .packages
-                    .iter()
-                    .map(|p| p.package.clone()),
-            );
+        let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+        let mut request =
+            Self::from_app(package_dir::PackageDir::open(dir)?, &libraries, store, true)?;
+        if !request.use_image(image)? {
+            return Err(io::Error::other(
+                "the image holds packages outside the request",
+            ));
         }
-        Ok(Self {
-            manifest: app.manifest,
-            inputs: CorpusManifest {
-                core: image.directory()?.inputs.core.clone(),
-                packages: vec![app.package],
-            },
-            store: store.to_owned(),
-            library: LibraryInput::Image(image),
-            entry: Some(app.entry),
-        })
+        Ok(request)
     }
-    /// Installed program libraries are the published root modules, not their contract-test corpus.
+
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        if product::normalized(libraries)
-            != product::normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core"))
-            && product::normalized(libraries) != product::normalized(Path::new("core"))
-        {
-            return Self::directory(dir, libraries, store);
-        }
-        let app = Self::app(dir)?;
-        Ok(Self {
-            manifest: app.manifest,
-            inputs: CorpusManifest {
-                core: package("core"),
-                packages: vec![
-                    PackageProduct::bundled_manifest(&libraries.join("core")),
-                    PackageProduct::bundled_std_manifest(&libraries.join("std")),
-                    app.package,
-                ],
-            },
-            store: store.to_owned(),
-            library: LibraryInput::Sources,
-            entry: Some(app.entry),
-        })
+        Self::from_app(package_dir::PackageDir::open(dir)?, libraries, store, true)
     }
+
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
+        Self::from_app(package_dir::PackageDir::open(dir)?, libraries, store, false)
+    }
+
+    pub(crate) fn from_app(
+        app: package_dir::PackageDir,
+        libraries: &Path,
+        store: &Path,
+        program: bool,
+    ) -> io::Result<Self> {
+        let default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+        let bundled = program
+            && (product::normalized(libraries) == product::normalized(&default)
+                || product::normalized(libraries) == product::normalized(Path::new("core")));
+        let core = if bundled || libraries == default {
             PackageProduct::bundled_manifest(&libraries.join("core"))
         } else {
             PackageManifest::directory(&libraries.join("core"), package("core"), true)?
         };
-        let std = Self::source_std(&libraries.join("std"))?;
-        let app = Self::app(dir)?;
+        let mut packages = vec![core];
+        if app.needs_std() {
+            packages.push(if bundled {
+                PackageProduct::bundled_std_manifest(&libraries.join("std"))
+            } else {
+                Self::source_std(&libraries.join("std"))?
+            });
+        }
+        packages.extend(app.dependencies);
+        packages.push(app.package);
         Ok(Self {
             manifest: app.manifest,
             inputs: CorpusManifest {
                 core: package("core"),
-                packages: vec![core, std, app.package],
+                packages,
             },
             store: store.to_owned(),
             library: LibraryInput::Sources,
             entry: Some(app.entry),
         })
+    }
+
+    pub(crate) fn use_image(&mut self, image: Arc<CoreImage>) -> io::Result<bool> {
+        self.capture_sources()?;
+        self.inputs.normalise(self.manifest.as_deref());
+        let directory = image.directory()?;
+        let supplied = &directory.inputs.packages;
+        for in_image in supplied {
+            let Some(requested) = self
+                .inputs
+                .packages
+                .iter()
+                .find(|p| p.package == in_image.package)
+            else {
+                return Ok(false);
+            };
+            if in_image.dependencies != requested.dependencies
+                || directory
+                    .stamps
+                    .get(&in_image.package)
+                    .map(|stamp| stamp.hash)
+                    != Some(
+                        image::stamp(requested, self.manifest.as_deref(), self.entry.as_ref())?
+                            .hash,
+                    )
+            {
+                return Ok(false);
+            }
+        }
+        self.inputs.packages.retain_mut(|package| {
+            if !supplied.iter().any(|row| row.package == package.package) {
+                return true;
+            }
+            // Keep this request's native archive captures for assembly.
+            package.sources.clear();
+            package.namespace.is_some()
+        });
+        self.library = LibraryInput::Image(image);
+        Ok(true)
     }
 }
 
@@ -415,6 +456,10 @@ pub struct CheckProduct {
     pub rechecked: Vec<DefPath>,
     pub root: ContentHash,
     pub snapshot: ContentHash,
+    pub(crate) environment: ContentHash,
+    pub(crate) foreign_inputs:
+        BTreeMap<PackageId, BTreeMap<Vec<String>, hirsel_core_resolve::ForeignModuleCapture>>,
+    pub(crate) foreign_headers: BTreeMap<DefPath, (DefPath, String)>,
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
@@ -434,6 +479,9 @@ impl CheckProduct {
             rechecked: vec![],
             root: ContentHash::default(),
             snapshot: ContentHash::default(),
+            environment: ContentHash::default(),
+            foreign_inputs: BTreeMap::new(),
+            foreign_headers: BTreeMap::new(),
             image: None,
             library: None,
             native_entry: None,
@@ -623,24 +671,20 @@ impl Driver {
                 let bytes = {
                     hirsel_core_front::cost_scope!("non-check", "source file reads");
                     crate::meter::count(crate::meter::Count::FilesOpened, 1);
-                    std::fs::read(&s.file)?
+                    s.read()?
                 };
                 let hash = {
                     hirsel_core_front::cost_scope!("non-check", "source byte hashing");
                     ContentHash::of_bytes(&bytes)
                 };
                 bytes_total += bytes.len();
-                let name = request
-                    .manifest
-                    .as_deref()
-                    .map(|root| hirsel_core_resolve::manifest_name(root, &s.file))
-                    .transpose()?;
+                let name = s.name(request.manifest.as_deref())?;
                 sources.push((
                     ModulePath {
                         package: p.package.clone(),
                         modules: s.modules.clone(),
                     },
-                    s.signatures,
+                    s.mode(),
                     bytes,
                     hash,
                     name,
@@ -654,22 +698,37 @@ impl Driver {
             LibraryInput::Image(i) | LibraryInput::ReachableImage(i) => Some(Arc::clone(i)),
             _ => None,
         };
+        let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
+
+        let mut resolution_inputs = request.inputs.clone();
+        if let Some(directory) = &image_directory {
+            for package in &directory.inputs.packages {
+                if !resolution_inputs
+                    .packages
+                    .iter()
+                    .any(|p| p.package == package.package)
+                {
+                    let mut package = package.clone();
+                    package.sources.clear();
+                    package.namespace = directory
+                        .stamps
+                        .get(&package.package)
+                        .ok_or_else(|| io::Error::other("image package is missing its stamp"))?
+                        .namespace
+                        .clone();
+                    resolution_inputs.packages.push(package);
+                }
+            }
+        }
+        let environment = reuse::environment(&resolution_inputs, compiler)?;
         let produce = matches!(request.library, LibraryInput::Produce);
         let reachable_only = matches!(request.library, LibraryInput::ReachableImage(_));
         // A file is read for its bytes alone: the snapshot names each source
         // by its module, digest and manifest-relative name, never by where
         // the checkout lives.
         let source_stamps: Vec<_> = sources.iter().map(|s| (&s.0, s.1, s.3, &s.4)).collect();
-        let dependencies: Vec<_> = request
-            .inputs
-            .packages
-            .iter()
-            .map(|p| (&p.package, &p.dependencies))
-            .collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
-            compiler,
-            &request.inputs.core,
-            dependencies,
+            environment,
             source_stamps,
             image.as_ref().map(|i| i.identity),
             produce,
@@ -697,23 +756,7 @@ impl Driver {
         let prior = check_index::ProgramIndex::open(&store)?;
         let mut publication = check_index::Publication::new();
         meter.finish("load/program index");
-        let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
         meter.finish("package index demand");
-
-        let mut resolution_inputs = request.inputs.clone();
-        if let Some(directory) = &image_directory {
-            for package in &directory.inputs.packages {
-                if !resolution_inputs
-                    .packages
-                    .iter()
-                    .any(|p| p.package == package.package)
-                {
-                    let mut package = package.clone();
-                    package.sources.clear();
-                    resolution_inputs.packages.push(package);
-                }
-            }
-        }
         let mut symbols = image_directory
             .as_ref()
             .map_or_else(Symbols::default, |i| i.index.symbols.as_ref().clone());
@@ -723,7 +766,7 @@ impl Driver {
         let mut modules = vec![];
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
-        for (file, (path, signatures, bytes, _, _)) in sources.iter().enumerate() {
+        for (file, (path, mode, bytes, _, _)) in sources.iter().enumerate() {
             let derive = request
                 .inputs
                 .packages
@@ -732,16 +775,8 @@ impl Driver {
                 .and_then(|p| {
                     hirsel_core_resolve::codec_derive(&p.package, &p.dependencies, &path.modules)
                 });
-            let output = hirsel_core_resolve::parse_module(
-                bytes,
-                if *signatures {
-                    ParseMode::Signatures
-                } else {
-                    ParseMode::Source
-                },
-                &mut symbols,
-                derive.as_ref(),
-            );
+            let output =
+                hirsel_core_resolve::parse_module(bytes, *mode, &mut symbols, derive.as_ref());
             syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (file, d)));
             if let Some(r) = output.resource_refusal {
                 syntax_resources.push((file, r.site(), format!("parser resource refusal: {r}")));
@@ -811,6 +846,17 @@ impl Driver {
             result.resources.extend(directory.resources.iter().cloned());
         }
         result.snapshot = snapshot;
+        result.environment = environment;
+        result.foreign_inputs = request
+            .inputs
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let namespace = package.namespace.as_ref()?;
+                (!namespace.foreign_inputs.is_empty())
+                    .then(|| (package.package.clone(), namespace.foreign_inputs.clone()))
+            })
+            .collect();
         // Modules are the sources in order, one file each.
         for (file, d) in syntax_diagnostics {
             let m = &modules[file];
@@ -831,13 +877,13 @@ impl Driver {
         // The gate (OPTION-L L2): the shape reads the environment and every
         // item header, never a resolution, so it is decided before resolve.
         // The store selects this shape's record of declared tables, or not.
-        let shape = reuse::Shape::new(&index, &modules, &resolution_inputs, compiler)?;
+        let shape = reuse::Shape::new(&index, &modules, environment)?;
         publication.shape = shape.key(&encode(&(
             &request.entry,
             image.as_ref().map(|i| i.identity),
             produce,
             reachable_only,
-            sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
+            sources.iter().map(|s| s.1).collect::<Vec<_>>(),
         ))?);
         let layer = layers::Layer::read(&store, publication.shape)?;
         meter.result.layer_class = Some(if layer.selected {
@@ -941,6 +987,16 @@ impl Driver {
                 )
             });
             p.entry = request.entry.clone();
+            if !result.foreign_inputs.is_empty() {
+                result.foreign_headers = p
+                    .fns
+                    .iter()
+                    .filter_map(|function| {
+                        p.foreign_function_header(function)
+                            .map(|header| (function.path.clone(), header))
+                    })
+                    .collect();
+            }
             #[cfg(test)]
             if self.layers.law {
                 self.layers.tables = p.tables();

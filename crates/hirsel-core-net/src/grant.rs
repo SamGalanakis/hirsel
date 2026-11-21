@@ -8,6 +8,19 @@ impl ResolveRule {
         Some(Self(Pattern::parse_list(patterns)?))
     }
 
+    /// A served Net's root rule: every name.
+    pub fn served() -> Self {
+        Self(Box::new([Pattern::Any]))
+    }
+
+    /// A rule as stored in a rule row: `*` only as the served root wrote it.
+    pub fn stored(patterns: &str) -> Option<Self> {
+        if patterns == "*" {
+            return Some(Self::served());
+        }
+        Self::new(patterns)
+    }
+
     fn parse(text: &str) -> Option<Self> {
         let mut words = text.split_whitespace();
         match (words.next(), words.next(), words.next()) {
@@ -57,6 +70,15 @@ impl GrantRule {
         }
     }
 
+    /// Whether this is a served Net's root rule, which no grant may carry.
+    pub fn is_served(&self) -> bool {
+        match self {
+            Self::Address(_) => false,
+            Self::Tls(rule) => rule.is_served(),
+            Self::Resolve(rule) => rule.0.contains(&Pattern::Any),
+        }
+    }
+
     pub fn logical_size(&self) -> u64 {
         37 + match self {
             Self::Address(_) => 0,
@@ -94,6 +116,7 @@ impl RuleView {
         let (trust, roots) = match rule.trust() {
             TlsTrust::System => (0, [0; 32]),
             TlsTrust::Roots(roots) => (1, roots),
+            TlsTrust::Any => (2, [0; 32]),
         };
         Self {
             address: Rule {
@@ -143,13 +166,14 @@ impl RuleView {
         let patterns = unsafe { std::slice::from_raw_parts(self.patterns, self.patterns_len) };
         let patterns = std::str::from_utf8(patterns).ok()?;
         if self.address.dir == 3 {
-            return ResolveRule::new(patterns).map(GrantRule::Resolve);
+            return ResolveRule::stored(patterns).map(GrantRule::Resolve);
         }
         let trust = match self.trust {
             0 => TlsTrust::System,
             1 => TlsTrust::Roots(self.roots),
+            2 => TlsTrust::Any,
             _ => return None,
         };
-        TlsRule::new(patterns, self.address.first, self.address.last, trust).map(GrantRule::Tls)
+        TlsRule::stored(patterns, self.address.first, self.address.last, trust).map(GrantRule::Tls)
     }
 }

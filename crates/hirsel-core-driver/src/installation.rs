@@ -442,19 +442,25 @@ pub fn publish(
         }
     }
     if std && let Some((bytes, target)) = &runtime {
-        prebuild_release(&product.image, target, bytes, meter)?;
+        let recording = recording_runtime
+            .as_ref()
+            .filter(|(_, recording)| recording == target)
+            .map(|(bytes, _)| bytes.as_slice());
+        prebuild_release(&product.image, target, bytes, recording, meter)?;
     }
     Ok(product)
 }
 
 /// Lower the release std of a std product's image for a default release
-/// build on `target` linking the runtime archive `runtime`, into the image's
-/// store, where every build over the image finds it before lowering std
-/// itself. Every checked plain root is lowered; a refused one is skipped.
+/// build on `target` linking the runtime archive `runtime`, with and without
+/// debug lines, and for a recording build linking `recording`, into the
+/// image's store, where every build over the image finds it before lowering
+/// std itself. Every checked plain root is lowered; a refused one is skipped.
 pub(crate) fn prebuild_release(
     image: &Arc<CoreImage>,
     target: &str,
     runtime: &[u8],
+    recording: Option<&[u8]>,
     meter: &mut Meter,
 ) -> io::Result<()> {
     let scratch = tempfile::tempdir()?;
@@ -469,11 +475,12 @@ pub(crate) fn prebuild_release(
         entry: None,
     };
     let product = crate::Driver::default().check(request, meter)?;
+    let identity =
+        |bytes: &[u8]| crate::tool_inputs::runtime_identity(ContentHash::of_bytes(bytes));
+    let mut variants = vec![(identity(runtime), false), (identity(runtime), true)];
+    variants.extend(recording.map(|bytes| (identity(bytes), false)));
     product
-        .prebuild_release_std(
-            target,
-            crate::tool_inputs::runtime_identity(ContentHash::of_bytes(runtime)),
-        )
+        .prebuild_release_std(target, &variants)
         .map_err(|stop| io::Error::other(format!("prebuilding the release std: {stop}")))?;
     meter.finish("std product/release prebuild");
     Ok(())

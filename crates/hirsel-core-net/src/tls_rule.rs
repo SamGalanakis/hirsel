@@ -46,6 +46,9 @@ impl Name {
 pub enum Pattern {
     Exact(Name),
     Wildcard(Box<str>),
+    /// Every name: only a served Net's root holds it (`*`); no grant text
+    /// or program rule can name it.
+    Any,
 }
 
 impl Pattern {
@@ -95,6 +98,7 @@ impl Pattern {
                     text.push_str("*.");
                     text.push_str(suffix);
                 }
+                Pattern::Any => text.push('*'),
             }
         }
         text
@@ -105,7 +109,7 @@ impl Pattern {
             .iter()
             .map(|pattern| match pattern {
                 Pattern::Exact(Name::Dns(name)) | Pattern::Wildcard(name) => name.len() as u64 + 32,
-                Pattern::Exact(Name::Ip(_)) => 32,
+                Pattern::Exact(Name::Ip(_)) | Pattern::Any => 32,
             })
             .sum()
     }
@@ -117,6 +121,7 @@ impl Pattern {
 
     pub fn covers(&self, name: &Name) -> bool {
         match (self, name) {
+            (Self::Any, _) => true,
             (Self::Exact(exact), name) => exact == name,
             (Self::Wildcard(suffix), Name::Dns(name)) => Self::includes_suffix(name, suffix),
             (Self::Wildcard(_), Name::Ip(_)) => false,
@@ -125,6 +130,8 @@ impl Pattern {
 
     fn is_subset_of(&self, other: &Self) -> bool {
         match (self, other) {
+            (_, Self::Any) => true,
+            (Self::Any, _) => false,
             (Self::Exact(name), pattern) => pattern.covers(name),
             (Self::Wildcard(a), Self::Wildcard(b)) => a == b || Self::includes_suffix(a, b),
             (Self::Wildcard(_), Self::Exact(_)) => false,
@@ -136,6 +143,9 @@ impl Pattern {
 pub enum TlsTrust {
     System,
     Roots([u8; 32]),
+    /// Whatever the caller pins: only a served Net's root holds it, since
+    /// its server answers the handshake. No grant text can name it.
+    Any,
 }
 
 impl TlsTrust {
@@ -195,8 +205,35 @@ impl TlsRule {
         )
     }
 
+    /// A served Net's root rule: every name, port and trust.
+    pub fn served() -> Self {
+        Self {
+            patterns: Box::new([Pattern::Any]),
+            first: 0,
+            last: u16::MAX,
+            trust: TlsTrust::Any,
+        }
+    }
+
+    /// A rule as stored in a rule row: `*` and `Any` only as the served root
+    /// wrote them.
+    pub fn stored(patterns: &str, first: u16, last: u16, trust: TlsTrust) -> Option<Self> {
+        if patterns == "*" && trust == TlsTrust::Any {
+            return ((first, last) == (0, u16::MAX)).then(Self::served);
+        }
+        if trust == TlsTrust::Any {
+            return None;
+        }
+        Self::new(patterns, first, last, trust)
+    }
+
+    /// Whether this is a served Net's root rule, which no grant may carry.
+    pub fn is_served(&self) -> bool {
+        self.trust == TlsTrust::Any || self.patterns.contains(&Pattern::Any)
+    }
+
     pub fn permits(&self, name: &Name, port: u16, trust: TlsTrust) -> bool {
-        self.trust == trust
+        (self.trust == trust || self.trust == TlsTrust::Any)
             && (self.first..=self.last).contains(&port)
             && self.patterns.iter().any(|pattern| pattern.covers(name))
     }
@@ -204,7 +241,12 @@ impl TlsRule {
     pub fn intersect(&self, other: &Self) -> Option<Self> {
         let first = self.first.max(other.first);
         let last = self.last.min(other.last);
-        if self.trust != other.trust || first > last {
+        let trust = match (self.trust, other.trust) {
+            (TlsTrust::Any, trust) | (trust, TlsTrust::Any) => trust,
+            (a, b) if a == b => a,
+            _ => return None,
+        };
+        if first > last {
             return None;
         }
         let patterns = Pattern::intersection(&self.patterns, &other.patterns);
@@ -212,7 +254,7 @@ impl TlsRule {
             patterns,
             first,
             last,
-            trust: self.trust,
+            trust,
         })
     }
 }

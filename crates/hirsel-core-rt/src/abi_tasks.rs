@@ -25,6 +25,8 @@ pub(crate) fn task_child(
     context.events = unsafe { (*parent).events };
     // SAFETY: every task borrows the root run's provider-file registry.
     context.host_files = unsafe { (*parent).host_files };
+    // SAFETY: the same run pins its foreign state until the last child ends.
+    context.foreign = unsafe { (*parent).foreign };
     context
 }
 /// # Safety

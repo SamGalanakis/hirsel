@@ -108,6 +108,7 @@ pub struct Reply {
     /// Received plaintext or the selected ALPN protocol bytes.
     pub bytes: Vec<u8>,
     pub peer: [u8; 32],
+    pub binding: crate::scram::Binding,
 }
 impl Reply {
     fn error(error: u8) -> Self {
@@ -315,6 +316,18 @@ impl Model {
         };
         *owners = 6;
         (key | 1, key | 2)
+    }
+    /// Turn a client endpoint's two directional owners back into its whole owner.
+    pub fn rejoin_client(&self, key: u64) -> bool {
+        let mut state = self.state();
+        let Record::Endpoint { side, owners, .. } = state.records.get_mut(&key).unwrap() else {
+            unreachable!()
+        };
+        if *side != 0 {
+            return false;
+        }
+        *owners = 1;
+        true
     }
     pub fn release(&self, key: u64) {
         self.state().release(key);
@@ -580,13 +593,16 @@ impl State {
                         self.scripts.remove(&address);
                     }
                     let client = self.key();
+                    let mut directions = Default::default();
+                    let mut peer = Box::new(ScriptedPeer::new(script));
+                    peer.drive(&mut directions, self.config.queue_bytes);
                     self.connections.insert(
                         client,
                         Connection {
-                            directions: Default::default(),
+                            directions,
                             reset: false,
                             endpoints: [client, 0],
-                            script: Some(Box::new(ScriptedPeer::new(script))),
+                            script: Some(peer),
                         },
                     );
                     self.records.insert(
@@ -716,10 +732,16 @@ impl State {
                 if !d.readable.is_empty() {
                     let bound = spare.min(d.readable.len()).min(self.config.max_prefix);
                     let n = self.choose(Choice::Receive, bound) + 1;
-                    let bytes = self.connections.get_mut(&id).unwrap().directions[1 - side]
+                    let connection = self.connections.get_mut(&id).unwrap();
+                    let bytes = connection.directions[1 - side]
                         .readable
                         .drain(..n)
                         .collect();
+                    if let Some(peer) = &mut connection.script
+                        && !peer.established()
+                    {
+                        peer.drive(&mut connection.directions, self.config.queue_bytes);
+                    }
                     self.enable_delivery();
                     return Some(Reply {
                         bytes,
@@ -740,6 +762,9 @@ impl State {
         let c = self.connections.get_mut(&key).unwrap();
         if c.reset {
             return Some(Reply::error(5));
+        }
+        if !c.directions[1].readable.is_empty() {
+            return Some(TlsFailure::Protocol(0).reply());
         }
         let Some(peer) = &mut c.script else {
             return Some(tls::unsupported());

@@ -1973,6 +1973,9 @@ impl Scheduler {
                     // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
                     // Cancellation wins even if the callback returns Ready.
                     if wake == Wake::Cancel {
+                        if (*request).operation == crate::foreign::helpers::WAIT_OP {
+                            (p.abort)(p.state, request, token, ABORT_CANCEL);
+                        }
                         #[cfg(feature = "record")]
                         if let Some(group) = (*task).group {
                             group.cancel_wait(request);
@@ -2505,7 +2508,7 @@ unsafe fn operation<C: Calls>(
             let start = Start::Entry(Some(wait));
             return slow(context, task, provider, request, token, start, issued);
         }
-        let step = (provider.issue)(provider.state, request, token);
+        let step = crate::provider::issue(provider, request, token);
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
             return slow(context, task, provider, request, token, start, issued);
@@ -2681,7 +2684,7 @@ unsafe fn parked(
                 Some(step) => step,
                 None => match op.state {
                     OperationState::ReadyToIssue => {
-                        (op.provider.issue)(op.provider.state, request, token)
+                        crate::provider::issue(&op.provider, request, token)
                     }
                     OperationState::ReadyToDeliver(outcome) => break outcome,
                     _ => unreachable!("resumed provider operation has no next action"),
@@ -2690,10 +2693,13 @@ unsafe fn parked(
             match step.kind {
                 STEP_DONE => break Some(step.outcome),
                 STEP_PENDING => {
-                    // An issued sync is not cancellable: its task waits for the
-                    // real result, and a cancel takes effect at the next
-                    // cancellation point.
-                    if matches!((*request).operation, SYNC | SYNC_DIR) {
+                    // Sync disables cancellation after issue. A submitted
+                    // foreign call decides the race with cancellation when
+                    // its helper takes custody of the pinned frame.
+                    if matches!(
+                        (*request).operation,
+                        SYNC | SYNC_DIR | crate::foreign::helpers::WAIT_OP
+                    ) {
                         op.observes_cancel = false;
                     }
                     op.state = OperationState::Issued {
@@ -2889,7 +2895,7 @@ unsafe fn alone(
                 _ => crate::process::stop(b"Provider"),
             }
         }
-        let mut step = (p.issue)(p.state, request, token);
+        let mut step = crate::provider::issue(p, request, token);
         loop {
             match step.kind {
                 STEP_DONE => return Some(step.outcome),
@@ -3842,6 +3848,20 @@ pub(crate) unsafe fn cancel_pending_for(context: *mut Context, task: *mut Task) 
         unsafe { cancel_flag(task) }
     };
     cancel_takes_effect(current, requested)
+}
+
+/// # Safety
+/// The caller is the current task and pins its cancellation flag through
+/// delivery. Other threads may only load the flag atomically.
+pub(crate) unsafe fn foreign_cancel_flag(context: *const Context) -> *const AtomicBool {
+    // SAFETY: the current task pins this context and its request flag.
+    unsafe {
+        if (*context).cancel_shield != 0 || (*context).finalizing != 0 {
+            ptr::null()
+        } else {
+            cancel_flag(CURRENT.get())
+        }
+    }
 }
 
 /// # Safety
@@ -5026,49 +5046,31 @@ pub(crate) unsafe fn host_operation(
         *mut crate::provider::Request,
     ) -> crate::provider::Outcome,
 ) -> crate::provider::Outcome {
-    struct Call {
-        state: *mut u8,
-        request: *mut crate::provider::Request,
-        operation: unsafe extern "C" fn(
-            *mut u8,
-            *mut crate::provider::Request,
-        ) -> crate::provider::Outcome,
-        saved: *mut u8,
-        result: std::mem::MaybeUninit<crate::provider::Outcome>,
-    }
-    unsafe extern "C" fn invoke(first: *mut u8, _: *mut u8) -> ! {
-        // SAFETY: caller pins this call frame; OS operation cannot suspend.
-        unsafe {
-            let call = first.cast::<Call>();
-            (*call)
-                .result
-                .write(((*call).operation)((*call).state, (*call).request));
-            let mut discard = ptr::null_mut();
-            hirsel_stack::switch(&mut discard, (*call).saved);
-            std::hint::unreachable_unchecked();
-        }
-    }
+    // SAFETY: the provider's operands remain live and its callback cannot suspend.
+    unsafe { on_host_stack(false, || operation(state, request)) }
+}
+
+/// # Safety
+/// The callback cannot re-enter the scheduler, suspend or unwind across its
+/// host-stack frame. All borrowed operands stay live until the call returns.
+pub(crate) unsafe fn on_host_stack<T>(require_stack: bool, call: impl FnOnce() -> T) -> T {
     let task = CURRENT.get();
-    // SAFETY: task owns the shared host stack until this non-suspending call completes.
-    unsafe {
-        if task.is_null() {
-            return operation(state, request);
+    if task.is_null() {
+        if !require_stack {
+            return call();
         }
-        let run = (*task).run;
-        let mut call = Call {
-            state,
-            request,
-            operation,
-            saved: ptr::null_mut(),
-            result: std::mem::MaybeUninit::uninit(),
-        };
-        let host = (*worker_stock(run)).take();
-        let target = host.prepare(invoke, (&mut call as *mut Call).cast(), ptr::null_mut());
-        crate::fiber::guard(host.bounds());
-        hirsel_stack::switch(&mut call.saved, target);
-        crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-        (*worker_stock(run)).recycle(host);
-        call.result.assume_init()
+        crate::fiber::arm();
+        // SAFETY: this fresh stack belongs to this call alone.
+        return unsafe { crate::fiber::Stack::new().call(call) };
+    }
+    // SAFETY: the current task pins the worker's stock and no other task can
+    // take this stack until the synchronous call returns.
+    unsafe {
+        let stock = worker_stock((*task).run);
+        let host = (*stock).take();
+        let result = host.call(call);
+        (*stock).recycle(host);
+        result
     }
 }
 

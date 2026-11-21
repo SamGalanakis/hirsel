@@ -31,7 +31,6 @@ GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256", "image_sha256")
-CANDIDATE_FIELDS = (*CANDIDATE_HASHES, build.STD_SEPARATE)
 WORKLOAD_IDENTITY = ("suite", "mode", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
 
@@ -105,7 +104,7 @@ def verified_build(row):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
-    return record.get("flags") == row["flags"] and record.get(build.STD_SEPARATE) == row.get(build.STD_SEPARATE)
+    return record.get("flags") == row["flags"]
 
 
 def runtime_case(suite, name, directory, command, marker, fixture, tools):
@@ -146,7 +145,6 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         "image_sha256": image,
         "build_record": build_record(report),
         "marker": marker.decode(),
-        **({build.STD_SEPARATE: provenance[build.STD_SEPARATE]} if build.STD_SEPARATE in provenance else {}),
         **fixture,
         **tools,
     }
@@ -324,7 +322,6 @@ def validate_row(key, row):
                 else mode != "release")
             or any(not re.fullmatch("[a-f0-9]{64}", row[field])
                    for field in (*CANDIDATE_HASHES, "fixture_sha256"))
-            or (build.STD_SEPARATE in row and row[build.STD_SEPARATE] not in ("on", "off"))
             or not all(isinstance(row[field], list)
                        and all(isinstance(value, str) and value for value in row[field])
                        for field in ("argv", "flags"))
@@ -352,8 +349,7 @@ def rows_from(path):
 
 
 def candidate_identity(row):
-    hashes = tuple(row[field] for field in CANDIDATE_HASHES)
-    return (*hashes, row.get(build.STD_SEPARATE, "unrecorded"))
+    return tuple(row[field] for field in CANDIDATE_HASHES)
 
 
 def match_rows(key, left, right):
@@ -395,14 +391,14 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
 
     changed_pairs = sorted((left, right) for left, right in candidate_pairs if left != right)
     if aa and changed_pairs:
-        fields = [field for index, field in enumerate(CANDIDATE_FIELDS)
+        fields = [field for index, field in enumerate(CANDIDATE_HASHES)
                   if any(left[index] != right[index] for left, right in changed_pairs)]
         print(f"--aa requires identical candidate hashes. Differing hashes: {', '.join(fields)}", file=sys.stderr)
         return REFUSED
     if not aa and not changed_pairs and not refusals:
         print("nothing differs: A/A. Use --aa for deliberate A/A comparisons.", file=sys.stderr)
         for hashes, _ in sorted(candidate_pairs):
-            print(", ".join(f"{field}={value}" for field, value in zip(CANDIDATE_FIELDS, hashes)), file=sys.stderr)
+            print(", ".join(f"{field}={value}" for field, value in zip(CANDIDATE_HASHES, hashes)), file=sys.stderr)
         return REFUSED
 
     failed = False
@@ -413,7 +409,7 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
-    for index, field in enumerate(CANDIDATE_FIELDS):
+    for index, field in enumerate(CANDIDATE_HASHES):
         values = sorted({(left[index], right[index]) for left, right in changed_pairs})
         for left, right in values:
             if field == "runtime_archive_sha256":
@@ -842,7 +838,7 @@ def profile(args):
     candidate = right["sample"]["instructions"]
     percent = Decimal(100) * (candidate - baseline) / baseline
     print(f"{args.row} PMU instructions:u {baseline:,} -> {candidate:,} ({percent:+.3f}%)", flush=True)
-    for field, before_value, after_value in zip(CANDIDATE_FIELDS, base_identity, candidate):
+    for field, before_value, after_value in zip(CANDIDATE_HASHES, base_identity, candidate):
         if before_value != after_value:
             print(f"{field} {before_value} -> {after_value}")
     sides = []

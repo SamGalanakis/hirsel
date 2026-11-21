@@ -1,11 +1,13 @@
 use super::{AdmissionError, BackendSemantics, Body, EngineTag, Limit, SlotContract, charge_rows};
+use crate::foreign_header::Abi;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::Identity;
-use hirsel_core_ir::address::{Binding, Group};
+use hirsel_core_ir::address::{Binding, Group, foreign_address};
 use hirsel_core_ir::decode::DecodeBudget;
-use hirsel_core_ir::normal::DecodedBody;
-use hirsel_core_ir::release_recipe::{Backend, Recipe};
-use std::collections::HashMap;
+use hirsel_core_ir::normal::{DecodedBody, Slot};
+use hirsel_core_ir::release_recipe::{Backend, ForeignFunction, ObjectRef, Recipe};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Copy)]
 struct MemberIndex {
@@ -26,7 +28,90 @@ struct GroupIndex {
 #[derive(Clone, Copy, PartialEq)]
 enum BoundIdentity {
     Member(ContentHash),
+    Foreign(ContentHash),
     Builtin(u32),
+}
+
+struct ForeignIndex<'a> {
+    addresses: HashMap<ContentHash, usize>,
+    functions: Vec<ForeignSlot<'a>>,
+}
+
+struct ForeignSlot<'a> {
+    address: ContentHash,
+    function: &'a ForeignFunction,
+    abi: Abi<'a>,
+    archive: ObjectRef,
+    reached: bool,
+}
+
+impl<'a> ForeignIndex<'a> {
+    fn new(recipe: &'a Recipe, budget: &mut DecodeBudget) -> Result<Self, AdmissionError> {
+        let mut index = Self {
+            addresses: HashMap::new(),
+            functions: Vec::new(),
+        };
+        let mut rows = Vec::new();
+        for leaf in &recipe.foreign_modules {
+            if leaf.functions.is_empty() {
+                return Err(AdmissionError::Refused(format!(
+                    "Extra(foreign module {})",
+                    leaf.module
+                )));
+            }
+            budget.check()?;
+            rows.clear();
+            charge_rows::<u8>(
+                budget,
+                leaf.targets.iter().map(|row| row.target.len() + 43).sum(),
+            )?;
+            leaf.encode_archive_rows(&mut rows);
+            let archives = ContentHash(Sha256::digest(&rows).into());
+            let selected = leaf
+                .targets
+                .binary_search_by(|row| row.target.cmp(&recipe.launch.target))
+                .expect("archive inventory selects a row for each reached module");
+            for function in &leaf.functions {
+                budget.charge_slots(1)?;
+                let abi = Abi::parse(&function.header)
+                    .ok_or(AdmissionError::Binding("invalid foreign function header"))?;
+                let address = foreign_address(function, &leaf.symbols, archives);
+                charge_map::<ContentHash, usize>(budget, 1)?;
+                if index
+                    .addresses
+                    .insert(address, index.functions.len())
+                    .is_some()
+                {
+                    return Err(AdmissionError::Binding("duplicate foreign address"));
+                }
+                push_row(
+                    &mut index.functions,
+                    ForeignSlot {
+                        address,
+                        function,
+                        abi,
+                        archive: leaf.targets[selected].archive,
+                        reached: false,
+                    },
+                    budget,
+                )?;
+            }
+        }
+        Ok(index)
+    }
+
+    fn reach(&mut self, address: ContentHash) -> Option<&ForeignSlot<'a>> {
+        let &index = self.addresses.get(&address)?;
+        let row = &mut self.functions[index];
+        row.reached = true;
+        Some(row)
+    }
+
+    fn extra(&self) -> Option<ContentHash> {
+        self.functions
+            .iter()
+            .find_map(|row| (!row.reached).then_some(row.address))
+    }
 }
 
 pub(super) fn check(
@@ -40,6 +125,7 @@ pub(super) fn check(
     let entry = *addresses
         .get(&recipe.address)
         .ok_or(AdmissionError::Missing(recipe.address))?;
+    let mut foreign = ForeignIndex::new(recipe, budget)?;
 
     charge_rows::<bool>(budget, groups.len() + bodies.len())?;
     charge_rows::<usize>(budget, groups.len() * 3)?;
@@ -90,9 +176,9 @@ pub(super) fn check(
                 binding.get_or_insert("group binding count differs from the body slots");
             }
 
-            for (slot, target) in row.slots.iter().enumerate() {
+            for (slot_index, target) in row.slots.iter().enumerate() {
                 budget.check()?;
-                let slot = decoded.slots.get(slot);
+                let slot = decoded.slots.get(slot_index);
                 let target = match *target {
                     Binding::Internal(target) => {
                         let target = target as usize;
@@ -107,9 +193,38 @@ pub(super) fn check(
                         }
                     }
                     Binding::External(address) => {
-                        let &target = addresses
-                            .get(&address)
-                            .ok_or(AdmissionError::Missing(address))?;
+                        let Some(&target) = addresses.get(&address) else {
+                            let function = foreign
+                                .reach(address)
+                                .ok_or(AdmissionError::Missing(address))?;
+                            if let Some(slot) = slot {
+                                if slot.identity != function.function.identity
+                                    || slot.signature.is_none()
+                                {
+                                    binding.get_or_insert(
+                                        "slot identity differs from its bound foreign function",
+                                    );
+                                } else if let Slot::External(id) = decoded.decoded.slots[slot_index]
+                                {
+                                    let module = &decoded.decoded.module;
+                                    let signature = &module.signatures
+                                        [module.functions[id.index()].signature.index()];
+                                    if !function.abi.matches_slot(signature, module) {
+                                        binding.get_or_insert(
+                                            "slot signature differs from its bound foreign header",
+                                        );
+                                    }
+                                }
+                                record_identity(
+                                    &mut identities,
+                                    &slot.identity,
+                                    BoundIdentity::Foreign(address),
+                                    &mut conflict,
+                                    budget,
+                                )?;
+                            }
+                            continue;
+                        };
                         if target.group == group {
                             binding.get_or_insert("external binding stays within the group");
                         } else {
@@ -160,6 +275,9 @@ pub(super) fn check(
     if let Some(n) = reached_bodies.iter().position(|&seen| !seen) {
         return Err(AdmissionError::Extra(recipe.bodies[n].body.hash));
     }
+    if let Some(address) = foreign.extra() {
+        return Err(AdmissionError::Extra(address));
+    }
     if let Some(reason) = binding {
         return Err(AdmissionError::Binding(reason));
     }
@@ -170,6 +288,30 @@ pub(super) fn check(
     }
     if let Some(identity) = conflict {
         return Err(AdmissionError::Conflict(Box::new(identity.clone())));
+    }
+    let mut prefixes = BTreeSet::new();
+    for leaf in &recipe.foreign_modules {
+        charge_rows::<&str>(budget, 1)?;
+        if !prefixes.insert(leaf.symbols.as_str()) {
+            return Err(AdmissionError::Conflict(Box::new(Identity::plain(
+                leaf.module.clone(),
+            ))));
+        }
+    }
+    let mut grants = BTreeSet::new();
+    for grant in &recipe.launch.grants {
+        if let Some(archive) = grant.archive {
+            charge_rows::<(&str, ContentHash)>(budget, 1)?;
+            grants.insert((grant.values[0].as_str(), archive.hash));
+        }
+    }
+    for row in &foreign.functions {
+        budget.check()?;
+        if !grants.contains(&(row.abi.interface, row.archive.hash)) {
+            return Err(AdmissionError::Binding(
+                "foreign function has no matching archive grant",
+            ));
+        }
     }
     let entry_body = members[entry.group][entry.member]
         .body
@@ -235,7 +377,7 @@ fn record_identity<'a>(
     conflict: &mut Option<&'a Identity>,
     budget: &mut DecodeBudget,
 ) -> Result<(), AdmissionError> {
-    if matches!(target, BoundIdentity::Builtin(_)) {
+    if !matches!(target, BoundIdentity::Member(_)) {
         charge_map::<&Identity, BoundIdentity>(budget, 1)?;
     }
     if let Some(previous) = identities.insert(identity, target)

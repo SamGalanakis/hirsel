@@ -88,6 +88,18 @@ void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len)
    context or status; zero blocks read nothing. */
 void hirsel_core_sha256_blocks(uint32_t *state, const uint8_t *data, uint64_t blocks);
 
+/* Signature verification. Returns 1 for a valid signature, 0 otherwise.
+   Empty ranges are never read. No context or failure status. */
+uint64_t hirsel_core_ed25519_verify(const uint8_t *key, uint64_t key_len,
+                                   const uint8_t *msg, uint64_t msg_len,
+                                   const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_p256_verify(const uint8_t *key, uint64_t key_len,
+                                const uint8_t *msg, uint64_t msg_len,
+                                const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_p256_verify_der(const uint8_t *key, uint64_t key_len,
+                                    const uint8_t *msg, uint64_t msg_len,
+                                    const uint8_t *sig, uint64_t sig_len);
+
 /* XXH3-64 seed zero for a span of at most 240 bytes. */
 uint64_t hirsel_core_xxh3_short(const uint8_t *data, uint64_t len);
 

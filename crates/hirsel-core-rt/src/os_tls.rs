@@ -4,7 +4,7 @@ use crate::{
     os_net,
     provider::*,
 };
-use hirsel_core_net::Name;
+use hirsel_core_net::{Name, scram::Binding};
 use rustls::{
     CertificateError, ClientConfig, ClientConnection, RootCertStore, client::Resumption,
     pki_types::ServerName,
@@ -77,12 +77,19 @@ impl Stream {
         }
     }
 
-    pub(crate) fn handshake_result(&self, protocol: &mut [u8], peer: &mut [u8; 32]) -> usize {
+    pub(crate) fn handshake_result(
+        &self,
+        protocol: &mut [u8],
+        peer: &mut [u8; 32],
+    ) -> (usize, Binding) {
         let chosen = self.connection.alpn_protocol().unwrap_or_default();
         protocol[..chosen.len()].copy_from_slice(chosen);
         let leaf = &self.connection.peer_certificates().unwrap()[0];
         peer.copy_from_slice(sha256(leaf.as_ref()).as_ref());
-        chosen.len()
+        (
+            chosen.len(),
+            certificate_binding(leaf.as_ref()).unwrap_or_default(),
+        )
     }
 }
 
@@ -275,4 +282,65 @@ impl Write for SocketIo {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// X.509 Certificate contains TBSCertificate, signatureAlgorithm and
+/// signatureValue. rustls has already verified the leaf; select the digest
+/// from the outer AlgorithmIdentifier, including the explicit PSS hash.
+fn certificate_binding(leaf: &[u8]) -> Option<Binding> {
+    use ring::digest::{SHA256, SHA384, SHA512};
+    let (certificate, _) = der_field(leaf, 0x30)?;
+    let (_, rest) = der_field(certificate, 0x30)?;
+    let (signature_algorithm, _) = der_field(rest, 0x30)?;
+    let (oid, parameters) = der_field(signature_algorithm, 0x06)?;
+    const RSA: &[u8] = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01";
+    const ECDSA_SHA2: &[u8] = b"\x2a\x86\x48\xce\x3d\x04\x03";
+    const SHA2: &[u8] = b"\x60\x86\x48\x01\x65\x03\x04\x02";
+    let algorithm = match (oid.strip_prefix(RSA), oid.strip_prefix(ECDSA_SHA2)) {
+        (Some([0x04 | 0x05 | 0x0b]), _) | (_, Some([2])) => &SHA256,
+        (Some([0x0c]), _) | (_, Some([3])) => &SHA384,
+        (Some([0x0d]), _) | (_, Some([4])) => &SHA512,
+        (Some([0x0a]), _) => {
+            let (parameters, _) = der_field(parameters, 0x30)?;
+            if parameters.first() != Some(&0xa0) {
+                // RSASSA-PSS-params defaults the hash to SHA-1.
+                &SHA256
+            } else {
+                let (hash, _) = der_field(parameters, 0xa0)?;
+                let (hash, _) = der_field(hash, 0x30)?;
+                let (oid, _) = der_field(hash, 0x06)?;
+                match oid.strip_prefix(SHA2) {
+                    Some([1]) => &SHA256,
+                    Some([2]) => &SHA384,
+                    Some([3]) => &SHA512,
+                    _ if oid == b"\x2b\x0e\x03\x02\x1a" => &SHA256,
+                    _ => return None,
+                }
+            }
+        }
+        _ if oid == b"\x2a\x86\x48\xce\x3d\x04\x01" => &SHA256,
+        _ => return None,
+    };
+    Binding::from_bytes(ring::digest::digest(algorithm, leaf).as_ref())
+}
+
+fn der_field(bytes: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
+    let [actual, length, tail @ ..] = bytes else {
+        return None;
+    };
+    if *actual != tag {
+        return None;
+    }
+    if *length < 0x80 {
+        return tail.split_at_checked(usize::from(*length));
+    }
+    let size = usize::from(*length & 0x7f);
+    if size == 0 || size > size_of::<usize>() {
+        return None;
+    }
+    let (encoded, content) = tail.split_at_checked(size)?;
+    let length = encoded
+        .iter()
+        .fold(0usize, |n, &b| (n << 8) | usize::from(b));
+    content.split_at_checked(length)
 }

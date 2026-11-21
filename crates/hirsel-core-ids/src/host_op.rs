@@ -65,3 +65,9 @@ pub const CLOSE_CALL: u8 = 64;
 pub const PROVIDE_DIR: u8 = 65;
 pub const RELEASE: u8 = 66;
 pub const PORT_FILL: u8 = 67;
+// The SCRAM sink issues proof bytes on the live stream and retains a verdict key.
+pub const SCRAM: u8 = 68;
+pub const SCRAM_VERIFY: u8 = 69;
+// A Net port: its sockets and listeners are the port's (core.md, Provide).
+pub const PROVIDE_NET: u8 = 70;
+pub const CALL_SECRET: u8 = 71;

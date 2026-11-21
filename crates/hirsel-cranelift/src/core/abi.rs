@@ -7,7 +7,7 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::isa::CallConv;
 use hirsel_core_ir::native_layout::{CallLayouts, ScalarRecord};
 
-pub(super) struct Signature {
+pub struct Signature {
     pub clif: ir::Signature,
     pub offsets: Vec<u32>,
     pub results: Vec<Ty>,
@@ -21,7 +21,12 @@ pub(super) struct Signature {
 }
 impl Signature {
     pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts) -> Self {
-        Self::build(s, Some(layouts), aarch64(object))
+        Self::build(s, Some(layouts), aarch64(object), true)
+    }
+    /// A Hirsel entry with no scalar-record parameter or result rewrites.
+    /// Scalars, pointers and a destination follow the same ABI as unit code.
+    pub fn foreign(s: &c::Signature, object: &ObjectModule) -> Self {
+        Self::build(s, None, aarch64(object), true)
     }
     pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
@@ -33,6 +38,7 @@ impl Signature {
             },
             None,
             aarch64(object),
+            false,
         );
         // C bool parameters carry zero-extension in Rust/LLVM's ABI. Without
         // it, upper register bits can leak into an event's u64 boolean value.
@@ -44,8 +50,7 @@ impl Signature {
         }
         signature
     }
-    fn build(s: &c::Signature, layouts: Option<&CallLayouts>, arm: bool) -> Self {
-        let context = layouts.is_some();
+    fn build(s: &c::Signature, layouts: Option<&CallLayouts>, arm: bool, context: bool) -> Self {
         let record = layouts.and_then(|layouts| layouts.result(s));
         let dest = s.dest.is_some() && record.is_none();
         let mut results: Vec<Ty> = if let Some(record) = record {

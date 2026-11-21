@@ -117,6 +117,18 @@ impl Machine<'_> {
             .fold(0u64, u64::saturating_add)
     }
 
+    pub(super) fn check_cross_sockets(&self, at: u64, owners: &[[u64; 4]]) {
+        for owner in owners.iter().filter(|owner| owner[1] == SOCKET) {
+            let key = self.load(at + owner[0], 8);
+            if key & 3 != 0
+                || self.world.port_keys.contains_key(&key)
+                || self.world.tls_writes.contains_key(&key)
+            {
+                std::panic::resume_unwind(Box::new(RunStop("UnitSocket")));
+            }
+        }
+    }
+
     /// Copy the value at `at` out and free its buffers to their records; its
     /// clients move with the bytes.
     pub(super) fn cross_take(&mut self, at: u64, ty: TypeRef, owners: &[[u64; 4]]) -> Item {
@@ -254,6 +266,7 @@ impl Machine<'_> {
             self.check_cancel(t)?;
         }
         let owners = self.cross_owners(self.conns[i].item);
+        self.check_cross_sockets(at, &owners);
         let charge = self.cross_charge(at, &owners);
         if charge > self.conns[i].room {
             return Err(Stop::Cause("Bounds"));

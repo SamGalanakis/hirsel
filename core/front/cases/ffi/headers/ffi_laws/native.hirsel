@@ -1,0 +1,11 @@
+pub fn version(f: Foreign[wrapper.Laws]) -> u64
+pub fn with_body(f: u64) -> u64 { 3 }
+fn private(f: u64) -> u64
+pub type Record {}
+pub const VERSION: u64 = 3
+@test pub fn attributed(f: u64) -> u64
+// expect: refuse FFI-2 at 2:33
+// expect: refuse FFI-2 at 3:1
+// expect: refuse FFI-2 at 4:1
+// expect: refuse FFI-2 at 5:1
+// expect: refuse FFI-2 at 6:1

@@ -126,8 +126,10 @@ a pending request only at a **cancellation point**: the entry of every core `wai
 operation (`send`, `receive`, `join` and the waiting provider operations of
 [CAP-5](capabilities.md#cap-5-provider-operations)), the entry of every foreign `waits`
 call ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), each moment such an operation or call
-would wait before its issue, and `task.check_cancel()`. An issued foreign call is not reached
-by cancellation at all. At an entry, a pending request is observed before anything
+would wait before its issue, and `task.check_cancel()`. A foreign release
+([FFI-6](foreign.md#ffi-6-handles)) is the exception: its entry and its waits are not
+cancellation points, so a reached release is always issued. An issued foreign call is not
+reached by cancellation at all. At an entry, a pending request is observed before anything
 else is done. A provider operation that has been issued completes and delivers a result
 ([CAP-8](capabilities.md#cap-8-the-replay-point)). Cancellation reaches it at issue, and,
 while it waits in progress for readiness, through its provider's abort, whose result is the

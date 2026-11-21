@@ -116,7 +116,7 @@ fn virtual_sleep() -> u64 waits {
 // A write to a port the writer serves itself waits for a `next` that no task
 // can reach: the run is quiescent with the Served end still held (FAIL-15).
 fn self_served() -> u64 waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let served = take s
     let _ = stdout.write(o, "x")
     let _ = take served

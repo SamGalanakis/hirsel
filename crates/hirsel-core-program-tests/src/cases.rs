@@ -1213,16 +1213,16 @@ fn recovered_header_cases() -> Vec<String> {
             crate::std_manifest(),
         ];
         let (owner, module, entry) = if name == "store" {
-            let manifest: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(repo().join("core/programs/store/manifest.json")).unwrap(),
+            let mut request = hirsel_core_driver::CheckRequest::program(
+                &repo().join("core/programs/store"),
+                &repo().join("core"),
+                &files.path().join("store"),
             )
             .unwrap();
-            let mut store: PackageManifest =
-                serde_json::from_value(manifest["packages"][0].clone()).unwrap();
-            for source in &mut store.sources {
-                source.file = repo().join("core/programs/store").join(&source.file);
-            }
+            let mut store = request.inputs.packages.pop().unwrap();
             store.sources.push(ModuleSource {
+                foreign: false,
+                captured: None,
                 file: path,
                 modules: vec!["ice_places_358_store".into()],
                 signatures: false,
@@ -1231,9 +1231,12 @@ fn recovered_header_cases() -> Vec<String> {
             ("store", "ice_places_358_store", None)
         } else {
             packages.push(PackageManifest {
+                namespace: None,
                 package: package("app"),
                 dependencies: vec![package("core"), package("std")],
                 sources: vec![ModuleSource {
+                    foreign: false,
+                    captured: None,
                     file: path,
                     modules: vec!["main".into()],
                     signatures: false,
@@ -1304,9 +1307,12 @@ fn flow_transform_rejects() {
         .dependencies
         .push(package("dep"));
     inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("dep"),
         dependencies: vec![package("core")],
         sources: vec![ModuleSource {
+            foreign: false,
+            captured: None,
             file: dep.clone(),
             modules: vec!["api".into()],
             signatures: false,
@@ -1377,6 +1383,8 @@ pub fn worker() -> u64 { 0 }
             let file = files.path().join(format!("{module}.hirsel"));
             std::fs::write(&file, source).unwrap();
             ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![module.into()],
                 signatures: false,
@@ -1384,6 +1392,7 @@ pub fn worker() -> u64 { 0 }
         })
         .collect();
     inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("dep"),
         dependencies: vec![package("core")],
         sources,
@@ -1446,10 +1455,14 @@ pub fn worker() -> u64 { 0 }
 
 #[test]
 fn corpus() {
-    let paths = case_source::files(&root().join("cases")).expect("cases dir");
+    let cases = root().join("cases");
+    let paths = case_source::files(&cases).expect("cases dir");
     assert!(!paths.is_empty());
     let mut report = vec![];
-    for path in &paths {
+    for path in paths
+        .iter()
+        .filter(|path| !path.starts_with(cases.join("ffi")))
+    {
         let failures = std::panic::catch_unwind(|| run_case(path)).unwrap_or_else(|fault| {
             vec![
                 fault
@@ -1468,6 +1481,155 @@ fn corpus() {
     }
     report.extend(recovered_header_cases());
     assert!(report.is_empty(), "\n{}", report.join("\n"));
+}
+
+#[test]
+fn foreign_frontend_cases() {
+    for name in ["headers", "types"] {
+        foreign_case(name);
+    }
+}
+
+fn foreign_case(name: &str) {
+    let fixture = root().join("cases/ffi").join(name);
+    let files = tempfile::tempdir().unwrap();
+    let mut request = crate::CheckRequest::program(
+        &fixture.join("app"),
+        &repo().join("core"),
+        &files.path().join("check"),
+    )
+    .unwrap();
+    request.entry = None;
+    let mut sources = HashMap::new();
+    for package in request
+        .inputs
+        .packages
+        .iter()
+        .filter(|p| p.package.name != "core")
+    {
+        for source in &package.sources {
+            let file = source.name(request.manifest.as_deref()).unwrap().unwrap();
+            let module = format!(
+                "{}@{}/{}",
+                package.package.name,
+                package.package.version,
+                source.modules.join("/")
+            );
+            let text = String::from_utf8(source.read().unwrap().to_vec()).unwrap();
+            sources.insert(file, (module, text));
+        }
+    }
+    let checked = crate::Driver::default()
+        .check(request, &mut crate::Meter::new(false))
+        .unwrap();
+    let diagnostics = checked.machine_diagnostics().unwrap();
+    let mut expected = Vec::new();
+    for (file, (module, source)) in &sources {
+        for expectation in case_source::expectations(source) {
+            let words: Vec<_> = expectation.split_whitespace().collect();
+            match DiagnosticExpectation::parse(expectation, &words) {
+                Some(DiagnosticExpectation::Refuse { rule, at }) => {
+                    expected.push((file.as_str(), rule, at.to_owned()));
+                }
+                Some(DiagnosticExpectation::Message { rule, at, text }) => {
+                    let wanted = expected_site(source, at);
+                    assert!(
+                        diagnostics.iter().any(|d| {
+                            &d.primary.module == file
+                                && d.primary.span.start as usize == wanted
+                                && d.rule == rule
+                                && d.message == text
+                        }),
+                        "{module}: missing {rule} at {at} with message {text:?}"
+                    );
+                }
+                _ if let ["call", name, callee] = words.as_slice() => {
+                    let path = DefPath::from_full(&format!("{module}/{name}")).unwrap();
+                    let body = &checked.definitions[&path];
+                    let ir = body.ir().unwrap();
+                    let function = body.check.function.unwrap_or_else(|| {
+                        panic!(
+                            "{path} did not emit: {:?}; {}",
+                            body.check.gaps,
+                            serde_json::to_string(&diagnostics).unwrap()
+                        )
+                    });
+                    let function = &ir.functions[function.index()];
+                    let target = DefPath::from_full(callee).unwrap();
+                    let body = function.body.as_ref().unwrap();
+                    let anchor = body
+                        .insts
+                        .iter()
+                        .zip(&body.inst_anchors)
+                        .find_map(|(inst, anchor)| {
+                            let hirsel_core_ir::Inst::Call { call } = inst else {
+                                return None;
+                            };
+                            let hirsel_core_ir::Callee::Direct(callee) =
+                                body.calls[call.index()].callee
+                            else {
+                                return None;
+                            };
+                            let foreign = &ir.functions[callee.index()];
+                            (foreign.body.is_none()
+                                && ir.instances[foreign.instance.index()].definition == target)
+                                .then_some(*anchor)
+                        })
+                        .unwrap_or_else(|| panic!("{path}: missing call to {callee}"));
+                    assert!(anchor.is_some(), "{path}: call has no source location");
+                    assert_eq!(
+                        body.insts
+                            .iter()
+                            .zip(&body.inst_anchors)
+                            .filter(|(i, at)| {
+                                matches!(i, hirsel_core_ir::Inst::Step { .. }) && **at == anchor
+                            })
+                            .count(),
+                        1,
+                        "{path}: a foreign call takes one step"
+                    );
+                }
+                _ => {
+                    let ["emit", name] = words.as_slice() else {
+                        panic!("{module}: unexpected case assertion {expectation}");
+                    };
+                    let path = DefPath::from_full(&format!("{module}/{name}")).unwrap();
+                    let body = &checked.definitions[&path];
+                    assert!(body.check.function.is_some(), "{path} did not emit");
+                }
+            }
+        }
+    }
+    let mut actual: Vec<_> = diagnostics
+        .iter()
+        .map(|d| {
+            let file = d.primary.module.as_str();
+            let before = &sources[file].1[..d.primary.span.start as usize];
+            let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
+            let column = before.rsplit('\n').next().unwrap().chars().count() + 1;
+            (file, d.rule, format!("{line}:{column}"))
+        })
+        .collect();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
+    assert!(checked.resources.is_empty());
+}
+
+fn expected_site(source: &str, at: &str) -> usize {
+    let (line, column) = at.split_once(':').unwrap();
+    let line: usize = line.parse().unwrap();
+    let column: usize = column.parse().unwrap();
+    let mut rows = source.split_inclusive('\n');
+    let offset = rows.by_ref().take(line - 1).map(str::len).sum::<usize>();
+    offset
+        + rows
+            .next()
+            .unwrap()
+            .char_indices()
+            .nth(column - 1)
+            .unwrap()
+            .0
 }
 
 #[test]

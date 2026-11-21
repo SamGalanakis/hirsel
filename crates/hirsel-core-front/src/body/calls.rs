@@ -246,6 +246,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => return self.call_value(n, callee, args, want, scratch),
         };
+        let g = &p.fns[f];
         // MEM-4: `emit(take w, x)` writes the literal `x` in place; it is a form.
         if self.is_emit(f) {
             self.builtin_use(f, n);
@@ -255,7 +256,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.builtin_use(f, n);
             return self.put_form(n, f, args, want);
         }
-        let g = &p.fns[f];
         if g.body.is_none()
             && let Some(op) = core_ops::simd_call(p.core_operations[f])
         {
@@ -396,7 +396,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if let Some(result) = self.expected_part(g.result, w) {
                 self.unify_rooted(result, w.ty, found, roots);
             }
-            self.determined(f, found, checked, n);
+            self.determined(f, found, checked, n, n);
         }
         // With no width from context, retain the original u64 word read.
         if matches!(found.as_slice(), [None])
@@ -476,7 +476,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 self.step_callback(g.params[i].ty, vals[i], e);
                 self.activate(vals[i], call, e);
-                self.determined(f, found, checked, e);
+                self.determined(f, found, checked, e, n);
                 continue;
             }
             // A literal operand waits for the other arguments and the result (LANG-21).
@@ -615,7 +615,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             v = self.fit_plain_callable(v, t, e);
                         }
                     }
-                    self.determined(f, found, checked, e);
+                    self.determined(f, found, checked, e, n);
                     v
                 }
             };
@@ -1198,6 +1198,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         found: &[Option<TyId>],
         checked: &mut [bool],
         n: NodeId,
+        use_site: NodeId,
     ) {
         let p: &'c Program<'a> = self.p;
         for (i, t) in found.iter().enumerate() {
@@ -1206,6 +1207,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             checked[i] = true;
+            if crate::foreign::holds_raw_handle(&p.decls, &self.t, t) {
+                self.refuse(
+                    "FFI-6",
+                    use_site,
+                    "a raw handle cannot be an inferred type argument",
+                );
+                return;
+            }
             if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR {
                 return;
             }
@@ -1640,6 +1649,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);
+        if let Some(release) = self.p.foreign_release_for(g) {
+            let (function, _) = match self.instance_row(release, &[]) {
+                Ok(row) => row,
+                Err(what) => {
+                    self.gap(n, what);
+                    return None;
+                }
+            };
+            let result = self.value(Ty::Ptr);
+            self.inst(Inst::FunctionRef { result, function }, n);
+        }
         if result == NEVER {
             // The callee never returns normally; nothing follows the call (FORM v1a).
             self.end(Terminator::Unreachable, Some(n));

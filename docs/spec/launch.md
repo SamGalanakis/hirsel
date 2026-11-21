@@ -161,8 +161,9 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   registry and reports it on the status route.
 - `grants` is every grant baked into the executable, one canonical string each,
   sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
-  `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, and `Dir=`
-  followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
+  `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, `Foreign=`
+  followed by the interface's definition path `D` (`Foreign=sqlite@1/sqlite/Sqlite`), and
+  `Dir=` followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
   (below), which say which parameter receives each one. A directory path stays as
   given. It is resolved against the launch's working directory at startup, which
   the manifest does not know.
@@ -194,21 +195,26 @@ version and these parts:
   of hash;
 - every body in that closure, as its hash and byte length with its annex's hash and byte
   length, in strictly ascending order of body hash;
-- the **foreign archives** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
-  each admitted archive's SHA-256, byte length and symbol prefix, in strictly ascending order
-  of hash; an archive's bytes are a code-store object named by that SHA-256;
+- the **foreign modules** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
+  one foreign leaf per reached foreign module, with its identity, symbol prefix, whole archive
+  table and reached functions, in strictly ascending order of module identity;
+- the **foreign archives** (FFI-3): the distinct archives the leaves and Foreign bindings
+  select for the recipe's target, each its SHA-256 and byte length, in strictly ascending
+  order of hash. An archive's bytes are a code-store object named by that SHA-256;
 - the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
   `n_place`, and the **grant bindings**.
 
 The grant bindings follow `main`'s capability parameters in declaration order. Each binding
 gives the parameter's ordinal, its kind, and the values that parameter receives, in order and
 with their count: each directory path a `Dir` parameter takes, each rule text a `Net`
-parameter takes, or the one interface definition identity a `Foreign` parameter takes. So exchanging the paths given to two `Dir` parameters changes R. The
+parameter takes, or the one interface definition identity a `Foreign` parameter takes.
+A `Foreign` binding then holds the SHA-256 and byte length of the selected archive.
+So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
 
 Its root is `R = H("hirsel.release-recipe.v2", recipe)`; the version is 2, and version 1, which
-had no foreign archives part, is never read or written. A place's `place`, `migrate`, handle
+had no foreign parts, is never read or written. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. R does not
 cover the host's toolchain: one R can assemble to different bytes under another toolchain, and
@@ -232,7 +238,10 @@ deployment service that only schedules deploys for others, never forwards a raw 
 selects a publication the host has recorded, by its R, or submits source, which the host
 publishes itself with the normal checker, using the host's own compiler caches and package
 images and the bounds below. The operator still approves the grant bindings each deploy would
-give, as the preview shows them. One local principal that both publishes and deploys needs no
+give, as the preview shows them. A recipe that grants `Foreign=D` is deployed only when the
+request passes `--grant Foreign=D` itself, and the deploy's output shows, before any child runs,
+the interface, target, selected archive digest and recipe of each such grant
+([FFI-4](foreign.md#ffi-4-the-foreign-capability)). One local principal that both publishes and deploys needs no
 signature. A request from another machine would add publisher authentication at this point: a
 signature over R by a key the host is configured to trust establishes who vouched for R, and
 the operator still decides whether to deploy it.
@@ -263,12 +272,23 @@ objects it lacks.
    A body in a different normal-form version is `Unsupported`. Republish from source.
    Invalid frames are `Malformed`.
 6. The closure walked from the entry through the groups' `External` bindings, compared as typed
-   sets of groups, bodies and the annex paired with each body, equals the listed objects
-   exactly (`Missing`, `Extra`).
+   sets of groups, bodies, the annex paired with each body, foreign leaves and foreign
+   archives, equals the listed objects exactly (`Missing`, `Extra`). An `External` address
+   that is no listed group's member is resolved to a foreign function by recomputing FFI-9's
+   address from each foreign leaf: its archive-set digest from the leaf's table, and each
+   function's address from its identity, header text and C symbol, the leaf's prefix followed
+   by the function's name. An address that neither a group nor a leaf gives is `Missing`. A
+   leaf, or a function of one, that no slot reaches is `Extra`. Each leaf's table has a row
+   for the recipe's target (`Missing` otherwise), and the foreign archives part is exactly the
+   set of the pins and lengths selected by those rows and by the `Foreign` bindings
+   (`Missing`, `Extra`).
 7. Every slot's identity equals the bound member's or builtin's identity, every `Internal`
    index is in range, each group's members form one strongly connected component, the entry's
    identity matches, and the closure has one address per identity with every slot's signature
-   equal to its target's (PROG-10) (`Binding`, `Conflict(identity)`).
+   equal to its target's (PROG-10), a foreign function's signature being the one its header
+   text states (`Binding`, `Conflict(identity)`). No two leaves have one prefix
+   (`Conflict(identity)`, the second leaf's). Before anything is linked, each foreign archive
+   passes FFI-3's format and symbol checks for the leaves that select it.
 8. Every `Builtin(n)` and every engine-operation tag is one the recipe's backend implements at
    exactly that number (`Unsupported`).
 
@@ -315,12 +335,15 @@ so the store's `releases` rows keep their format, and a recording pin names the 
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
-`hirsel host --record DIRECTORY` assembles with the recording runtime. The host
+`hirsel host --record DIRECTORY` assembles with the recording runtime, and refuses at
+admission any recipe with a foreign leaf
+([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)). The host
 assigns each serving process a recording ID and syncs its pin before launching
 the process. A pin names the assembly record and carries its expiry. The
 default retention period is 30 days, set by `--tape-retention DAYS`.
 `hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
-the pin and runs the verified image from the host image store. Replay takes the
+the pin, refuses a recipe with a foreign leaf before reading any record of the tape
+(FFI-8), and runs the verified image from the host image store. Replay takes the
 arguments and launch metadata from the recording.
 
 When the host starts, before any collection, it reconciles every attempt. Staging with no

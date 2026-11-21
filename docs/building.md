@@ -51,7 +51,7 @@ hirsel build
 
 A package is a directory of `.hirsel` files. `check`, `test`, `run` and `build`
 default to the current directory. `new` creates a runnable `main`, a test and its
-limit in `manifest.json`. With `--lib` it also creates `lib.hirsel`.
+limit in `hirsel.toml`. With `--lib` it also creates `lib.hirsel`.
 `hirsel check DIR` checks every
 definition and declaration in it; `--json` prints the outcome, its diagnostics, its
 incomplete features and its resource refusals. `hirsel explain RULE` prints a
@@ -143,7 +143,7 @@ hirsel test app --limit 1048576 --grant Stdout
 
 `hirsel test` discovers each `@test` function ([PROG-4](spec/programs.md#prog-4-tests))
 in the package and runs each execution in its own process. A package whose
-`manifest.json` declares its tests' run configuration (PROG-4) runs under it, and
+`hirsel.toml` declares its tests' run configuration (PROG-4) runs under it, and
 `--limit`, `--dir` and `--grant` are refused. Otherwise `--limit BYTES` is
 mandatory and is each test run's root limit; `--dir` and `--grant` configure
 capabilities as for `run`. A test receives only the grants its parameters take.

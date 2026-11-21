@@ -14,6 +14,7 @@ from pathlib import Path
 import shlex
 import shutil
 import tempfile
+import tomllib
 
 from case_progress import run_case
 from std_native import ROOT
@@ -37,13 +38,21 @@ def inputs(root, tests=False):
             'dependencies': [] if name == 'core' else [{'name': 'core', 'version': '1'}],
             'sources': [{'file': str(p), 'modules': [p.stem], 'signatures': name == 'core'}
                         for p in sorted((root / 'core' / name).glob('*.hirsel'))]})
-    store = json.loads((root / 'core/programs/store/manifest.json').read_text())['packages'][0]
-    for source in store['sources']:
-        source['file'] = str(root / 'core/programs/store' / source['file'])
+    directory = root / 'core/programs/store'
+    with (directory / 'hirsel.toml').open('rb') as file:
+        manifest = tomllib.load(file)
+    package = manifest['package']
+    listed = dict(manifest['sources'])
     if tests:
-        manifest = json.loads((root / 'core/programs/store/manifest.json').read_text())
-        store['sources'] += [dict(source, file=str(root / 'core/programs/store' / source['file']))
-                             for source in manifest['tests']['sources']]
+        listed.update(manifest['tests']['sources'])
+    store = {
+        'package': {'name': package['name'], 'version': str(package['major'])},
+        'dependencies': [{'name': 'core', 'version': '1'}] +
+                        [{'name': name, 'version': str(dep['major'])}
+                         for name, dep in manifest['dependencies'].items()],
+        'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
+                    for file, module in listed.items()],
+    }
     return {'core': {'name': 'core', 'version': '1'}, 'packages': packages + [store]}
 
 

@@ -20,10 +20,9 @@
 //! (a `List` of plain elements or a `String`) occupies the room at length
 //! capacity. Clients move as handles. Sockets move with their registrations detached.
 use crate::{
-    Capacity, Context,
-    block,
-    limit::Payer,
+    Capacity, Context, block,
     causes::{self, Cause, Causes, Cell},
+    limit::Payer,
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
@@ -137,15 +136,22 @@ unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
     total
 }
 
-fn socket_offsets(owners: &[[u64; 4]]) -> impl Iterator<Item = u64> {
+fn socket_offsets(owners: &[[u64; 4]]) -> impl Iterator<Item = u64> + Clone {
     owners.iter().filter(|o| o[1] == SOCKET).map(|o| o[0])
 }
 
 unsafe fn detach_sockets(
     context: *mut Context,
     value: *const u8,
-    offsets: impl Iterator<Item = u64>,
+    offsets: impl Iterator<Item = u64> + Clone,
 ) -> Option<CrossingSockets> {
+    for offset in offsets.clone() {
+        // SAFETY: the initialized item pins each socket word during the preflight.
+        unsafe {
+            let key = word(value.add(offset as usize));
+            CrossedSocket::check(&*(*context).host_files, key);
+        }
+    }
     let sockets: Vec<_> = offsets
         .map(|offset| {
             // SAFETY: the item exclusively owns each socket in this unit.
@@ -495,11 +501,7 @@ pub(crate) fn adopt(readies: &Arc<Readies>) -> *mut LangUnit {
 
 /// A root unit, made at the first unit operation of a run that is not a helper.
 pub(crate) fn root_unit(readies: &Arc<Readies>) -> *mut LangUnit {
-    Box::into_raw(LangUnit::new(
-        Box::new(UnitCtx::unfunded()),
-        readies,
-        None,
-    ))
+    Box::into_raw(LangUnit::new(Box::new(UnitCtx::unfunded()), readies, None))
 }
 
 /// # Safety
@@ -837,7 +839,10 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             }
             drop(commit);
             if tasks::park_unit_alone(task, || {
-                (*unit).ctx.port.spin_before_park(Some(client.receiver_port()))
+                (*unit)
+                    .ctx
+                    .port
+                    .spin_before_park(Some(client.receiver_port()))
             }) {
                 commit = tasks::before_commit_for(task);
                 continue;
@@ -1126,6 +1131,14 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         u.helpers.insert(k, h);
         u.waits += 1;
         let run = (*context).run;
+        let foreign = (*context).foreign;
+        let map_hash_key = (*context).map_hash_key;
+        let registry = (*context)
+            .host_files
+            .as_ref()
+            .map_or_else(crate::host_file::Registry::default, |files| {
+                files.registry.for_unit()
+            });
         let job = SendPtr((
             hctx,
             data,
@@ -1135,6 +1148,9 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             rx.bytes,
             rx.owned(),
             run,
+            foreign,
+            map_hash_key,
+            registry,
             body,
             layout,
             n,
@@ -1142,9 +1158,39 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         ));
         let start = move || {
             let job = job;
-            let (hctx, data, sockets, xb, xo, rb, ro, run, body, layout, n, shared) = job.0;
+            let (
+                hctx,
+                data,
+                sockets,
+                xb,
+                xo,
+                rb,
+                ro,
+                run,
+                foreign,
+                map_hash_key,
+                registry,
+                body,
+                layout,
+                n,
+                shared,
+            ) = job.0;
             helper_main(
-                hctx, data, sockets, xb, xo, rb, ro, run, body, layout, n, shared,
+                hctx,
+                data,
+                sockets,
+                xb,
+                xo,
+                rb,
+                ro,
+                run,
+                foreign,
+                map_hash_key,
+                registry,
+                body,
+                layout,
+                n,
+                shared,
             );
         };
         // On the pool the helper is a unit beside its owner; without one it
@@ -1175,6 +1221,9 @@ fn helper_main(
     rb: u64,
     ro: Vec<[u64; 4]>,
     run: *const crate::process::Config,
+    foreign: *const crate::foreign::Run,
+    map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
+    registry: crate::host_file::Registry,
     body: Body,
     layout: TaskLayout,
     n: u64,
@@ -1185,7 +1234,9 @@ fn helper_main(
         // The task record and primary cell are the owner's (outside n).
         let mut context = Context::new(n + 256 + 32);
         context.run = run;
-        let mut files = crate::host_file::Files::default();
+        context.foreign = foreign;
+        context.map_hash_key = map_hash_key;
+        let mut files = crate::host_file::Files::with_registry(registry);
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {
             crate::process::stop(b"UnitLedger");
@@ -1254,6 +1305,7 @@ fn helper_main(
             .unwrap()
             .insert(Arc::as_ptr(&lu.ctx.port) as usize, ended);
         files.close_all(&mut context);
+        drop(files);
         drop(context);
         let LangUnit { ctx, .. } = *lu;
         ctx.end_helper(Some(ret), false);

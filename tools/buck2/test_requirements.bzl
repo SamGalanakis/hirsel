@@ -24,6 +24,7 @@ OPENAT2_TEST_CASES = {
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
     ],
     "hirsel-core-driver-unittest": [
+        "host::child::terminal_fixture::terminal_bits_follow_each_granted_descriptor",
         "native::tests::dir_cranelift_entry",
         "native::tests::dir_llvm_entry",
         "native::tests::host_operations_cranelift",
@@ -35,6 +36,8 @@ OPENAT2_TEST_CASES = {
         "native::tests::tape_run_replays_cranelift",
         "native::tests::tape_run_replays_llvm",
         "native::tests::run_tape_replays_stdin_and_env_without_host_sources",
+        "native::tests::run_tape_replays_granted_terminal_bits",
+        "native::tests::run_tape_records_scram_outcome_without_key_material",
         "native::tests::tape_code_revision_is_the_entry_revision",
         "native::tests::tape_http_replays_both_native_engines",
         "native::tests::rl3_replays_tls_offline",

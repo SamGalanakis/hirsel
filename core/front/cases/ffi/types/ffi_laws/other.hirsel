@@ -1,0 +1,2 @@
+pub fn use_obj(f: Foreign[laws.Other], p: foreign.Ptr[laws.Obj]) -> i32
+// expect: refuse FFI-6 at 1:43

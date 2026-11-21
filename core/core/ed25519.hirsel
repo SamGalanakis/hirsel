@@ -1,0 +1,3 @@
+// Module `ed25519`: pure Ed25519 signature verification.
+/// Verify sig over msg against a 32-byte Ed25519 public key.
+pub fn verify(key: Bytes, msg: Bytes, sig: Bytes) -> bool

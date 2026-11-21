@@ -120,6 +120,8 @@ pub opaque type Tasks
 
 pub opaque type Secret
 
+pub opaque type Foreign[I]
+
 pub type SecretError = Invalid()
 
 pub type MacError = Denied()

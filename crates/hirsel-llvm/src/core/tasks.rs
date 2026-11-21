@@ -131,11 +131,15 @@ impl FunctionEmitter<'_> {
             | HostOp::Resolve
             | HostOp::TlsConnect
             | HostOp::SendSecret
+            | HostOp::ScramSha256
+            | HostOp::ScramFinalLen
+            | HostOp::ScramVerify
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
             | HostOp::SecretHmac
             | HostOp::SecretVerifyHmac
             | HostOp::StdinRead
+            | HostOp::StreamTerminal
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName
@@ -151,11 +155,14 @@ impl FunctionEmitter<'_> {
             | HostOp::ProvideStderr
             | HostOp::PortNext
             | HostOp::CallWord
+            | HostOp::CallSecret
             | HostOp::CallPayload
             | HostOp::PortReply
             | HostOp::ProvideDir
+            | HostOp::ProvideNet
             | HostOp::PortFill
-            | HostOp::NetSplit => {
+            | HostOp::NetSplit
+            | HostOp::NetJoin => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
                     let hirsel_core_ir::Param::Value(t) = p else {
@@ -163,6 +170,7 @@ impl FunctionEmitter<'_> {
                     };
                     operands.push(match *t {
                         Ty::Ptr => ptr(value.clone()),
+                        Ty::Scalar(Scalar::Bool) => zeroext(Type::I1, value.clone()),
                         Ty::Scalar(Scalar::U8) => zeroext(Type::I8, value.clone()),
                         Ty::Scalar(Scalar::U16) => zeroext(Type::Int(16), value.clone()),
                         _ => word(value.clone()),
@@ -329,9 +337,7 @@ impl FunctionEmitter<'_> {
                 "hirsel_core_map_hash_bytes",
                 &[ptr(CONTEXT), p(&args[0]), u(&args[1])],
             ),
-            RtOp::MapHashWord => {
-                self.map_hash("hirsel_core_map_hash_word", &[ptr(CONTEXT), u(&args[0])])
-            }
+            RtOp::MapHashWord => vec![self.map_hash_word(&args[0])],
             RtOp::MapHashStart => self.native_call(
                 "hirsel_core_map_hash_start",
                 &[],
@@ -366,6 +372,26 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+                let name = match op {
+                    RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
+                    RtOp::P256Verify => "hirsel_core_p256_verify",
+                    RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
+                    _ => unreachable!(),
+                };
+                self.native_call(
+                    name,
+                    &[U],
+                    &[
+                        p(&args[0]),
+                        u(&args[1]),
+                        p(&args[2]),
+                        u(&args[3]),
+                        p(&args[4]),
+                        u(&args[5]),
+                    ],
+                )
+            }
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&args[..4])]
             }

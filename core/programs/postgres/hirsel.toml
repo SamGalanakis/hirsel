@@ -1,0 +1,10 @@
+[package]
+name = "postgres"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"postgres.hirsel" = "postgres"
+
+[dependencies]
+std = { major = 1 }

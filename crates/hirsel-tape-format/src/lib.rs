@@ -10,7 +10,7 @@ use hirsel_core_net::{EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, Tl
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 7;
+pub const FORMAT: u16 = 8;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -260,6 +260,11 @@ pub struct Header {
 pub struct HeaderTooLarge;
 
 const NET_KIND: u8 = 1;
+/// Stream grants carry a single canonical terminal bit in a GRANT frame.
+pub const fn is_stream_grant(kind: u8) -> bool {
+    matches!(kind, 4..=6)
+}
+
 const ENV_KIND: u8 = 7;
 const SECRET_KIND: u8 = 11;
 const NET_RULE_LEN: usize = 23;
@@ -358,6 +363,9 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
                         out.push(1);
                         out.extend_from_slice(&digest);
                     }
+                    // Only a served Net's root holds Any, and a tape never
+                    // records one: the reader refuses it as Corrupt.
+                    TlsTrust::Any => out.push(2),
                 }
                 let (first, last) = rule.ports();
                 out.extend_from_slice(&first.to_le_bytes());
@@ -878,6 +886,21 @@ pub fn carries_payload(op: u8) -> bool {
     )
 }
 
+/// A successful TLS_CONNECT carries a length-prefixed ALPN, the fixed peer
+/// digest and a length-prefixed channel binding (zero length when absent).
+pub fn tls_connect_payload(bytes: &[u8]) -> Result<(&[u8], &[u8; 32], &[u8]), Corrupt> {
+    let (&alpn_len, rest) = bytes.split_first().ok_or(Corrupt)?;
+    let (alpn, rest) = rest
+        .split_at_checked(usize::from(alpn_len))
+        .ok_or(Corrupt)?;
+    let (peer, rest) = rest.split_first_chunk::<32>().ok_or(Corrupt)?;
+    let (&binding_len, binding) = rest.split_first().ok_or(Corrupt)?;
+    if !matches!(binding_len, 0 | 32 | 48 | 64) || usize::from(binding_len) != binding.len() {
+        return Err(Corrupt);
+    }
+    Ok((alpn, peer, binding))
+}
+
 /// An outcome as the tape stores it. `value` is stored as given: the recorder
 /// passes a clock reading as its zig-zag delta and a new handle as its ordinal.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -899,7 +922,7 @@ impl Out {
             out.push(self.error.0);
             put_varint(out, self.error.1);
         }
-        if writes(op) || (op == op::SEND_SECRET && self.status != OK) {
+        if writes(op) || (matches!(op, op::SEND_SECRET | op::SCRAM) && self.status != OK) {
             put_varint(out, self.written);
         }
         if carries_payload(op) {
@@ -914,6 +937,12 @@ impl Out {
             return Err(Corrupt);
         }
         let value = c.varint()?;
+        if op == op::SCRAM_VERIFY && (status != OK || value > 1) {
+            return Err(Corrupt);
+        }
+        if op == op::SCRAM && (status == OK) != (value != 0) {
+            return Err(Corrupt);
+        }
         let error = if status == ERROR {
             (c.u8()?, c.varint()?)
         } else {
@@ -926,7 +955,7 @@ impl Out {
         {
             return Err(Corrupt);
         }
-        let written = if writes(op) || (op == op::SEND_SECRET && status != OK) {
+        let written = if writes(op) || (matches!(op, op::SEND_SECRET | op::SCRAM) && status != OK) {
             c.varint()?
         } else {
             0
@@ -951,14 +980,12 @@ impl Out {
                     return Err(Corrupt);
                 }
             }
-            if op == op::TLS_CONNECT
-                && if status == OK {
-                    !(32..=32 + 255).contains(&b.len())
-                } else {
-                    !b.is_empty()
+            if op == op::TLS_CONNECT {
+                if status == OK {
+                    tls_connect_payload(b)?;
+                } else if !b.is_empty() {
+                    return Err(Corrupt);
                 }
-            {
-                return Err(Corrupt);
             }
             b.to_vec()
         } else {
@@ -1146,6 +1173,14 @@ impl Encoder {
                         out,
                         args.as_deref().expect("an Args grant carries its vector"),
                     );
+                } else if is_stream_grant(*kind) {
+                    let [terminal] = args
+                        .as_deref()
+                        .expect("a stream grant carries its terminal bit")
+                    else {
+                        unreachable!("a stream grant carries one byte")
+                    };
+                    out.push(*terminal);
                 }
             }
             Frame::Repeat { count } => put_repeat(out, *count),
@@ -1307,12 +1342,18 @@ impl Decoder {
                     if kind > SECRET_KIND {
                         return Err(Corrupt);
                     }
-                    let args = (kind == ARGS_KIND).then(|| c.bytes().map(<[u8]>::to_vec));
-                    Frame::Grant {
-                        gap,
-                        kind,
-                        args: args.transpose()?,
-                    }
+                    let args = if kind == ARGS_KIND {
+                        Some(c.bytes()?.to_vec())
+                    } else if is_stream_grant(kind) {
+                        let terminal = c.u8()?;
+                        if terminal > 1 {
+                            return Err(Corrupt);
+                        }
+                        Some(vec![terminal])
+                    } else {
+                        None
+                    };
+                    Frame::Grant { gap, kind, args }
                 }
                 F_DATA => {
                     let chunk = c.bytes()?;

@@ -1104,7 +1104,6 @@ pub mod step_contexts;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;
-pub mod widths;
 
 pub use address::{CodeRow, builtin_address, code_addresses, code_revision, is_versioned_builtin};
 pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};

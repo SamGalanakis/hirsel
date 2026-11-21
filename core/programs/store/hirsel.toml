@@ -1,0 +1,50 @@
+[package]
+name = "store"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"store.hirsel" = "store"
+"main.hirsel" = "main"
+"ingress.hirsel" = "ingress"
+"triggers.hirsel" = "triggers"
+"steps.hirsel" = "steps"
+"signup.hirsel" = "signup"
+"runner.hirsel" = "runner"
+"places.hirsel" = "places"
+"runner_laws.hirsel" = "runner_laws"
+"runner_calls.hirsel" = "runner_calls"
+"wire_client.hirsel" = "wire_client"
+
+[program]
+module = "main"
+
+[tests]
+limit = 67108864
+grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+dirs = ["."]
+
+[tests.sources]
+"assembly_laws.hirsel" = "store"
+"import_read_laws.hirsel" = "store"
+"session-laws.hirsel" = "runner"
+"admission-laws.hirsel" = "runner"
+"runner_wire.hirsel" = "runner_wire"
+
+[tests.runs."store@1/store/frame_size_boundary"]
+limit = 134217728
+
+[tests.runs."store@1/store/disk_pack_bound"]
+limit = 536870912
+
+[tests.runs."store@1/store/journal_frame_size_boundary"]
+limit = 536870912
+
+[tests.runs."store@1/store/journal_frame_oversize"]
+limit = 536870912
+
+[tool.workloads]
+s1 = { module = "main", grants = ["Stdout"] }

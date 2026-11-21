@@ -304,11 +304,15 @@ impl Function<'_, '_, '_> {
                     | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
+                    | HostOp::ScramSha256
+                    | HostOp::ScramFinalLen
+                    | HostOp::ScramVerify
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
                     | HostOp::SecretVerifyHmac
                     | HostOp::StdinRead
+                    | HostOp::StreamTerminal
                     | HostOp::EnvGet
                     | HostOp::EnvLen
                     | HostOp::EnvName
@@ -324,10 +328,13 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideStderr
                     | HostOp::PortNext
                     | HostOp::CallWord
+                    | HostOp::CallSecret
                     | HostOp::CallPayload
                     | HostOp::PortReply
                     | HostOp::ProvideDir
+                    | HostOp::ProvideNet
                     | HostOp::PortFill
+                    | HostOp::NetJoin
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -345,11 +352,15 @@ impl Function<'_, '_, '_> {
                     | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
+                    | HostOp::ScramSha256
+                    | HostOp::ScramFinalLen
+                    | HostOp::ScramVerify
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
                     | HostOp::SecretVerifyHmac
                     | HostOp::StdinRead
+                    | HostOp::StreamTerminal
                     | HostOp::EnvGet
                     | HostOp::EnvLen
                     | HostOp::EnvName
@@ -365,10 +376,13 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideStderr
                     | HostOp::PortNext
                     | HostOp::CallWord
+                    | HostOp::CallSecret
                     | HostOp::CallPayload
                     | HostOp::PortReply
                     | HostOp::ProvideDir
+                    | HostOp::ProvideNet
                     | HostOp::PortFill
+                    | HostOp::NetJoin
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();
@@ -512,6 +526,16 @@ impl Function<'_, '_, '_> {
             RtOp::Sha256Blocks => {
                 self.c_call("hirsel_core_sha256_blocks", &[P, P, U], &[], &args[..3])?;
                 0
+            }
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+                let name = match op {
+                    RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
+                    RtOp::P256Verify => "hirsel_core_p256_verify",
+                    RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
+                    _ => unreachable!(),
+                };
+                outputs[0] = self.c_call(name, &[P, U, P, U, P, U], &[U], &args[..6])?[0];
+                1
             }
             RtOp::CauseNext | RtOp::CauseValue => {
                 let name = if op == RtOp::CauseNext {

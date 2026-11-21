@@ -1,0 +1,22 @@
+[package]
+name = "ffi_laws"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"laws.hirsel" = "laws"
+"native.hirsel" = "native"
+"other.hirsel" = "other"
+"same.hirsel" = "same"
+
+[foreign.native]
+symbols = "hfl_"
+archives = []
+
+[foreign.other]
+symbols = "hfo_"
+archives = []
+
+[foreign.same]
+symbols = "hfs_"
+archives = []

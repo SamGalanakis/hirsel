@@ -78,6 +78,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             };
         }
+        let verifier = match (module, name) {
+            ([m], "verify") if m == "ed25519" => Some(hirsel_core_ir::RtOp::Ed25519Verify),
+            ([m], "verify") if m == "p256" => Some(hirsel_core_ir::RtOp::P256Verify),
+            ([m], "verify_der") if m == "p256" => Some(hirsel_core_ir::RtOp::P256VerifyDer),
+            _ => None,
+        };
+        if let Some(op) = verifier {
+            return Some(self.verify_signature(op, [vals[0]?, vals[1]?, vals[2]?], n));
+        }
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
         }

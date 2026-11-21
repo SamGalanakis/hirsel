@@ -18,10 +18,11 @@ pub struct TlsRequest {
     pub alpn: View,
     pub protocol_out: *mut Buffer,
     pub peer_out: *mut [u8; 32],
+    pub binding_out: *mut Buffer,
     pub(crate) state: *mut std::ffi::c_void,
 }
 
-const _: () = assert!(size_of::<NetworkRequest>() == 168);
+const _: () = assert!(size_of::<NetworkRequest>() == 176);
 
 pub(crate) struct HandshakeState {
     pin: TlsTrust,
@@ -51,6 +52,15 @@ pub(crate) unsafe fn view_bytes(view: &View) -> &[u8] {
 impl TlsRequest {
     pub(crate) unsafe fn pin(&self) -> TlsTrust {
         unsafe { (*self.state.cast::<HandshakeState>()).pin }
+    }
+
+    pub(crate) unsafe fn binding(&self) -> &[u8] {
+        let buffer = unsafe { &*self.binding_out };
+        if buffer.len <= buffer.capacity && matches!(buffer.len, 0 | 32 | 48 | 64) {
+            unsafe { bytes(buffer) }
+        } else {
+            &[]
+        }
     }
 
     pub(crate) unsafe fn offers(&self, protocol: &[u8]) -> bool {
@@ -151,8 +161,10 @@ unsafe fn connect(
                 return error;
             }
         };
+        // A served socket's handshake is its port's, never a tape's carrier.
+        let served = crate::provide::owns(&provider);
         #[cfg(feature = "record")]
-        let tape = (*files).net_tape;
+        let tape = (*files).net_tape.filter(|_| !served);
         #[cfg(feature = "record")]
         let source = match tape {
             Some(tape) => crate::tape::source(&provider, tape.handle(key)).map(|(p, _)| p),
@@ -178,6 +190,12 @@ unsafe fn connect(
             Name::Dns(name) => name.to_string(),
             Name::Ip(ip) => ip.to_string(),
         };
+        let mut binding_bytes = [0; 64];
+        let mut binding_out = Buffer {
+            data: binding_bytes.as_mut_ptr(),
+            len: 0,
+            capacity: binding_bytes.len(),
+        };
         let mut tls = TlsRequest {
             network: NetworkRequest {
                 send_tail: ptr::null(),
@@ -191,6 +209,7 @@ unsafe fn connect(
                 os: &crate::os_net::TLS_OPERATIONS,
                 tls: &raw mut (*files).tls,
                 pending_write: false,
+                max_receive: 0,
             },
             name: View {
                 data: canonical.as_ptr(),
@@ -201,6 +220,7 @@ unsafe fn connect(
             alpn,
             protocol_out,
             peer_out,
+            binding_out: &raw mut binding_out,
             state: (&raw mut state).cast(),
         };
         #[cfg(feature = "record")]
@@ -233,9 +253,11 @@ unsafe fn connect(
                 crate::secret::TlsWrite {
                     name: verified,
                     spent: false,
+                    binding: hirsel_core_net::scram::Binding::from_bytes(tls.binding())
+                        .unwrap_or_default(),
                 },
             );
-        } else if state.consumed {
+        } else if state.consumed && !served {
             let _commit = crate::sequencer::enter();
             (*files).connected.remove(&key);
         } else {
@@ -259,6 +281,14 @@ unsafe fn prepare(
 ) -> Result<(net::Address, Provider, HandshakeState), Outcome> {
     unsafe {
         let (address, provider) = (*files).connected.get(&key).copied().ok_or(DENIED)?;
+        // A served Net's sockets handshake through that Net, and only it:
+        // never another provider's, which could not answer for them.
+        let net_provider = &*hirsel_core_capability_provider(context, n);
+        if (crate::provide::owns(&provider) || crate::provide::owns(net_provider))
+            && provider.state != net_provider.state
+        {
+            return Err(DENIED);
+        }
         let name = tls::verification_name(view_bytes(&name)).ok_or_else(|| tls_failure(1, 0))?;
         if bad_alpn {
             return Err(tls_failure(2, 0));

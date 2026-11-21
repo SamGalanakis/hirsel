@@ -218,8 +218,29 @@ pub struct ReleaseSite {
     pub ordinal: u32,
 }
 
+/// The item whose release sites `item`'s are numbered among. A recipe unit
+/// binds each of its distinct sites to its own item, `unit/<symbol>/<n>`, with
+/// `n` counting every anchored site; its release sites are numbered across the
+/// unit, so a site added or removed before a failing one renames none of the
+/// unit's code. Any other item numbers its own.
+pub fn release_site_owner(item: &DefPath) -> DefPath {
+    let mut owner = item.clone();
+    if let [unit, symbol] = owner.0.modules.as_slice()
+        && unit == "unit"
+    {
+        owner.0.name = symbol.clone();
+        owner.0.modules.truncate(1);
+    }
+    owner
+}
+
+/// The symbol of the site numbered `ordinal` among those of `item`'s owner
+/// ([`release_site_owner`]).
 pub fn release_site_symbol(item: &DefPath, ordinal: u32) -> String {
-    format!("{}_release_{ordinal}", site_symbol(item))
+    format!(
+        "{}_release_{ordinal}",
+        site_symbol(&release_site_owner(item))
+    )
 }
 
 /// SITES.md 6(b): whether a function reads its caller's site. Only a core@1

@@ -54,7 +54,7 @@ impl RulesStorage {
             .iter()
             .map(|row| {
                 // SAFETY: the launcher borrows the pattern bytes through startup.
-                unsafe { row.decode() }
+                unsafe { row.decode() }.filter(|rule| !rule.is_served())
             })
             .collect::<Option<Vec<_>>>()?;
         Some(Self::new(rules))
@@ -135,7 +135,7 @@ impl AddressOutcome {
             port: a.port,
         }
     }
-    fn outcome(self) -> Outcome {
+    pub(crate) fn outcome(self) -> Outcome {
         Outcome {
             value: self.value,
             error: self.error,
@@ -168,6 +168,8 @@ pub(crate) struct NetworkRequest {
     pub os: &'static crate::os_net::Operations,
     pub tls: *mut crate::os_tls::Streams,
     pub pending_write: bool,
+    /// RECV_BOUNDED's bound, which a served Net's call reports.
+    pub max_receive: u64,
 }
 /// A CLI run substitutes all Net grants on one tape. A socket carrier
 /// keeps the tape's object ordinal and the usual two direction bits.
@@ -366,6 +368,7 @@ unsafe fn address_op(
             os: &crate::os_net::OPERATIONS,
             tls: &raw mut (*files).tls,
             pending_write: false,
+            max_receive: 0,
         };
         let mut request = Request {
             operation: op,
@@ -380,11 +383,17 @@ unsafe fn address_op(
         #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut outcome = hirsel_core_host(context, provider, &mut request);
         let _commit = crate::sequencer::enter();
+        // A served Net's keys are its own, never a tape's carriers.
+        let served = crate::provide::owns(&*provider);
         #[cfg(feature = "record")]
-        if let Some(tape) = (*files).net_tape {
+        if let Some(tape) = (*files).net_tape
+            && !served
+        {
             outcome = tape.carrier(outcome);
         }
-        if op == CONNECT && outcome.status == 0 && outcome.error == IoError::OK {
+        let ok = outcome.status == 0 && outcome.error == IoError::OK;
+        if ok && (op == CONNECT || served) {
+            // A served Net's listeners route to it too.
             (*files)
                 .connected
                 .insert(outcome.value, (address, *provider));
@@ -393,7 +402,7 @@ unsafe fn address_op(
     }
 }
 #[allow(clippy::too_many_arguments)]
-unsafe fn owned_op(
+pub(crate) unsafe fn owned_op(
     context: *mut Context,
     op: u8,
     key: u64,
@@ -424,6 +433,7 @@ unsafe fn owned_op(
             os: &crate::os_net::OPERATIONS,
             tls: &raw mut (*files).tls,
             pending_write: false,
+            max_receive,
         };
         let mut buffer = if operand.is_null() {
             empty_buffer()
@@ -443,8 +453,9 @@ unsafe fn owned_op(
             buffer,
             site,
         };
+        let served = served_socket(context, key);
         #[cfg(feature = "record")]
-        let outcome = if let Some(tape) = tape {
+        let outcome = if let Some(tape) = tape.filter(|_| served.is_none()) {
             request.handle = tape.handle(key);
             let outcome = hirsel_core_host(context, &tape.provider, &mut request);
             if op == ACCEPT {
@@ -463,6 +474,16 @@ unsafe fn owned_op(
         };
         if op == RECV_BOUNDED {
             (*operand).len = request.buffer.len;
+        }
+        if let Some(provider) = served
+            && op == ACCEPT
+            && outcome.status == 0
+            && outcome.error == IoError::OK
+        {
+            let _commit = crate::sequencer::enter();
+            (*files)
+                .connected
+                .insert(outcome.value, (network.address, provider));
         }
         AddressOutcome::new(outcome, network.address)
     }
@@ -558,7 +579,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_pair(
         .outcome()
     }
 }
-const RESET: Outcome = Outcome {
+pub(crate) const RESET: Outcome = Outcome {
     error: IoError { tag: 5, code: 0 },
     value: 0,
     written: 0,
@@ -576,7 +597,29 @@ unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
     }
 }
 
-unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
+/// Whether `key` is part of a TLS stream.
+unsafe fn tls_stream(context: *mut Context, key: u64) -> bool {
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        (*(*context).host_files)
+            .tls_writes
+            .contains_key(&(key & !3))
+    }
+}
+
+/// A served Net's socket, half or listener: its port's provider.
+unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Provider> {
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        (*(*context).host_files)
+            .connected
+            .get(&(key & !3))
+            .map(|record| record.1)
+            .filter(crate::provide::owns)
+    }
+}
+
+pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
     let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
@@ -606,8 +649,14 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
+        // A served Net's stream was verified by its server, so it never
+        // satisfies a granted Secret (TLS-5, NOTES 6).
+        let served = served_socket(context, key).is_some();
         let secret = crate::secret::resolve(context, s);
-        {
+        if served && matches!(secret.origin, crate::secret::Origin::Granted(_)) {
+            return DENIED;
+        }
+        let narrowed = {
             let _commit = crate::sequencer::enter();
             let Some(write) = (*files).tls_writes.get(&(key & !3)) else {
                 return DENIED;
@@ -626,11 +675,18 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             {
                 return DENIED;
             }
-        }
-        let bytes = secret
-            .bytes
-            .as_ref()
-            .map_or(&[][..], |bytes| bytes.as_slice());
+            // Its server receives the Secret narrowed to the stream's name,
+            // never its bytes (`provide.secret`).
+            served.then(|| crate::secret::Secret {
+                origin: secret.origin,
+                policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
+                bytes: secret.bytes.clone(),
+            })
+        };
+        let bytes = match (&narrowed, &secret.bytes) {
+            (None, Some(bytes)) => bytes.as_slice(),
+            _ => &[][..],
+        };
         let mut send = crate::secret::SendRequest {
             network: NetworkRequest {
                 send_tail: after,
@@ -644,6 +700,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls,
                 pending_write: false,
+                max_receive: 0,
             },
             secret: Buffer {
                 data: bytes.as_ptr().cast_mut(),
@@ -653,32 +710,52 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             origin: secret.origin,
             patterns: secret.policy.patterns,
             committed: 0,
+            narrowed,
         };
-        #[cfg(feature = "record")]
-        let (provider, handle) = (*files).net_tape.map_or_else(
-            || (socket_provider(context, key), key),
-            |tape| (tape.provider, tape.handle(key)),
-        );
-        #[cfg(not(feature = "record"))]
-        let (provider, handle) = (socket_provider(context, key), key);
-        let mut request = Request {
+        let request = Request {
             operation: SEND_SECRET,
             mode: 0,
-            handle,
+            handle: key,
             path: (&raw mut send).cast(),
             path_len: size_of::<crate::secret::SendRequest>(),
             buffer: *before,
             site,
         };
+        send_sink(context, request)
+    }
+}
+
+/// SEND_SECRET and SCRAM borrow this extension's shared prefix.
+pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> Outcome {
+    unsafe {
+        let files = (*context).host_files;
+        let key = request.handle;
+        let provider = socket_provider(context, key);
+        // A served stream's results are the run's own: never taped (CAP-8).
+        let served = crate::provide::owns(&provider);
+        #[cfg(feature = "record")]
+        let provider = if let Some(tape) = (*files).net_tape.filter(|_| !served) {
+            request.handle = tape.handle(key);
+            tape.provider
+        } else {
+            provider
+        };
         let outcome = hirsel_core_host(context, &provider, &mut request);
+        let committed = (*request.path.cast::<crate::secret::SendRequest>()).committed;
+        // A server reports no committed count: any failure after issue may
+        // follow a partial forward, so it spends a served half (NOTES 33).
         if (outcome.status != 0 || outcome.error != IoError::OK)
-            && (outcome.written != 0 || send.committed != 0)
+            && (served || outcome.written != 0 || committed != 0)
         {
-            let _commit = crate::sequencer::enter();
-            (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true;
+            spend_write(files, key);
         }
         outcome
     }
+}
+
+pub(crate) unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) {
+    let _commit = crate::sequencer::enter();
+    unsafe { (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true };
 }
 
 /// # Safety
@@ -689,8 +766,16 @@ pub unsafe extern "C" fn hirsel_core_net_split(
     key: u64,
     _site: u64,
 ) -> Outcome {
-    let _commit = crate::sequencer::enter();
     unsafe {
+        if let Some(provider) = served_socket(context, key) {
+            crate::provide::split_socket(&provider, key);
+            return Outcome {
+                value: key | 1,
+                written: key | 2,
+                ..Outcome::default()
+            };
+        }
+        let _commit = crate::sequencer::enter();
         let files = (*context).host_files;
         #[cfg(feature = "record")]
         let (read, write) = if let Some(tape) = (*files).net_tape {
@@ -727,6 +812,20 @@ pub(crate) struct CrossedSocket {
 unsafe impl Send for CrossedSocket {}
 
 impl CrossedSocket {
+    pub(crate) fn check(files: &crate::host_file::Files, key: u64) {
+        if key & 3 != 0
+            || files.tls.sessions.contains_key(&key)
+            || files.tls_writes.contains_key(&key)
+            || files
+                .connected
+                .get(&key)
+                .is_some_and(|(_, provider)| crate::provide::owns(provider))
+        {
+            // A port owns its served keys. TLS halves own separate stream state.
+            crate::process::stop(b"UnitSocket");
+        }
+    }
+
     pub(crate) fn detach(files: &mut crate::host_file::Files, key: u64) -> Self {
         #[cfg(feature = "record")]
         if files.net_tape.is_some() {
@@ -804,12 +903,85 @@ impl SocketCrossing {
     }
 }
 
+/// Reunite the halves of one plain client socket in the run's registry.
+/// # Safety
+/// Both keys are live, uniquely owned halves. Failure returns both unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_join(
+    context: *mut Context,
+    read: u64,
+    write: u64,
+    _site: u64,
+) -> Outcome {
+    let refused = || Outcome {
+        value: read,
+        written: write,
+        error: IoError { tag: 1, code: 0 },
+        ..Outcome::default()
+    };
+    unsafe {
+        // A served socket's halves rejoin at its port; a TLS stream's never.
+        if let Some(provider) = served_socket(context, read) {
+            return if read & !3 == write & !3
+                && !tls_stream(context, read)
+                && crate::provide::join_socket(&provider, read)
+            {
+                Outcome {
+                    value: read & !3,
+                    ..Outcome::default()
+                }
+            } else {
+                refused()
+            };
+        }
+    }
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        let files = (*context).host_files;
+        let key = read & !3;
+        if key != write & !3
+            || (*files).tls_writes.contains_key(&key)
+            || !(*files).connected.contains_key(&key)
+        {
+            return refused();
+        }
+        #[cfg(feature = "record")]
+        let source = match (*files).net_tape {
+            Some(tape) => tape.source(key),
+            None => Some(key),
+        };
+        #[cfg(not(feature = "record"))]
+        let source = Some(key);
+        if let Some(source) = source {
+            (*files).sockets.rejoin_client(source);
+        }
+        Outcome {
+            value: key,
+            ..Outcome::default()
+        }
+    }
+}
+
 /// # Safety
 /// Consumes one live socket, directional half or listener carrier exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
-    let _commit = crate::sequencer::enter();
     unsafe {
+        if let Some(provider) = served_socket(context, key) {
+            // The port queues the Released; its server is readied outside
+            // the run's commit section.
+            let gone = crate::provide::release_socket(&provider, key);
+            let _commit = crate::sequencer::enter();
+            let files = (*context).host_files;
+            if key & 3 == 2 {
+                (*files).tls_writes.remove(&(key & !3));
+            }
+            if gone {
+                (*files).connected.remove(&(key & !3));
+            }
+            return;
+        }
+        let _commit = crate::sequencer::enter();
         let files = (*context).host_files;
         if key & 3 == 2 {
             (*files).tls_writes.remove(&(key & !3));
@@ -960,11 +1132,17 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
         let rules = RulesStorage::new(intersections);
         let handle = rules.handle();
         let files = (*context).host_files;
-        (*files).net_grants.lock().unwrap().push(Grant {
-            _rules: rules,
-            payer,
-            charge: charge.unwrap(),
-        });
+        (*files)
+            .registry
+            .run
+            .net_grants
+            .lock()
+            .unwrap()
+            .push(Grant {
+                _rules: rules,
+                payer,
+                charge: charge.unwrap(),
+            });
         #[cfg(feature = "record")]
         let value = if taped {
             let (handle, _group) = crate::tape::narrow_net(&provider, parent, handle);

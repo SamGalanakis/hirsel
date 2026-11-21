@@ -18,6 +18,7 @@ RC1's L31 checks that the disk store never writes the plaintext Hello credential
 import argparse
 import base64
 from contextlib import contextmanager
+import hashlib
 import json
 import shlex
 import os
@@ -346,7 +347,8 @@ def l10_holds(values):
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
-HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index', 'pinned_recording_uses_retained_image')
+HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index', 'pinned_recording_uses_retained_image',
+             'foreign_recording_refused')
 
 
 def host_law(args, root, work, engine, name):
@@ -450,6 +452,65 @@ def host_law(args, root, work, engine, name):
                 host.wait(timeout=15)
 
     index = state / 'activations'
+    if name == 'foreign_recording_refused':
+        def framed_hash(domain, payload):
+            domain = domain.encode()
+            return hashlib.sha256(len(domain).to_bytes(8, 'little') + domain
+                                  + len(payload).to_bytes(8, 'little') + payload).digest()
+
+        def text(value):
+            return bytes([len(value)]) + value.encode()
+
+        entry = 'app@1/main/main'
+        callee = 'ffi_laws@1/native/touch'
+        target = 'x86_64-unknown-linux-gnu'
+        reason = f'FFI-8: a recording build cannot reach foreign code: {entry} reaches {callee}'
+        recipe_prefix = (publish_store / 'recipes' / old_recipe).read_bytes()[:13]
+        # A complete envelope with an archive object absent from both stores.
+        archive = hashlib.sha256(b'abc').digest() + b'\x03'
+        frame = (recipe_prefix + text(entry) + b'\0\0' + bytes(32) + b'\0\0\x01'
+                 + text('ffi_laws@1/native') + text('hfl_') + b'\x01' + text(target) + archive
+                 + b'\x01' + text(callee) + b'\0\0' + text('(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32')
+                 + b'\x01' + archive + bytes([engine == 'llvm']) + text(target) + bytes(18))
+        foreign = framed_hash('hirsel.release-recipe.v2', frame)
+        (publish_store / 'recipes' / foreign.hex()).write_bytes(frame)
+        recordings = work / 'recordings'
+        with running_host('--record', str(recordings)) as (_, old):
+            tapes = list(recordings.glob('*.tape'))
+            assert len(tapes) == 1, 'the first activation did not start a recording'
+            tape = tapes[0]
+            foreign_deploy = deploy.copy()
+            foreign_deploy[2] = foreign.hex()
+            state_products = {directory: set((state / directory).iterdir())
+                              for directory in ('assemblies', 'images')}
+            refused = run_case(f'{name}:deploy', engine, foreign_deploy, capture_output=True, text=True)
+            assert (refused.returncode, refused.stderr.strip()) == (2, f'deploy: refused: {reason}'), refused
+            assert ready()['digest'] == old['digest'], 'the refused deploy changed the active image'
+            for directory, before in state_products.items():
+                assert set((state / directory).iterdir()) == before, f'the refused deploy wrote {directory}'
+        assert not (state / 'code' / 'recipes' / foreign.hex()).exists(), 'the refused recipe was published'
+
+        # Change the recording's pinned assembly outside the host. Keep the same
+        # routing digest but withhold its image to check the order of the refusal.
+        pin = state / 'pins' / tape.stem
+        original = pin.read_bytes()
+        assembly = (state / 'assemblies' / original[-32:].hex()).read_bytes()
+        foreign_assembly = foreign + assembly[32:]
+        key = framed_hash('hirsel.assembly-record.v1', foreign_assembly)
+        (state / 'assemblies' / key.hex()).write_bytes(foreign_assembly)
+        (state / 'code' / 'recipes' / foreign.hex()).write_bytes(frame)
+        pin.unlink()
+        pin.write_bytes(original[:-32] + key)
+        (state / 'images' / assembly[-32:].hex()).unlink()
+        recorded = tape.read_bytes()
+        header_size = 16 + int.from_bytes(recorded[12:16], 'little') + 8
+        assert 24 < header_size <= len(recorded), 'the tape has no routing header'
+        tape.write_bytes(recorded[:header_size] + b'invalid record')
+        replay = [compiler, 'replay', '--state', str(state), '--tape', str(tape)]
+        refused = run_case(f'{name}:replay', engine, replay, capture_output=True, text=True)
+        assert (refused.returncode, refused.stderr.strip()) == (2, f'replay: refused: {reason}'), refused
+        return
+
     if name == 'pinned_recording_uses_retained_image':
         recordings = work / 'recordings'
         with running_host('--record', str(recordings)) as (_, old):

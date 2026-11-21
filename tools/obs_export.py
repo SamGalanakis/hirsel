@@ -98,6 +98,30 @@ def event_metadata(event):
     return operation, outcome
 
 
+SPAN_KINDS = {'Internal': 1, 'Server': 2, 'Client': 3, 'Producer': 4, 'Consumer': 5}
+SPAN_STATUS = {'Unset': 0, 'Success': 1, 'Error': 2}
+
+
+def span_record(name, start, end, span_kind, attrs, trace_id, span_id, parent_span_id=None, links=(), status='Unset'):
+    """One OTLP Span; std.trace's encoder is checked against this shape."""
+    require(span_kind in SPAN_KINDS, 'invalid span kind')
+    record = dict(name=text(name), startTimeUnixNano=start, endTimeUnixNano=end, kind=SPAN_KINDS[span_kind],
+                  attributes=attrs, traceId=identity(trace_id, 16), spanId=identity(span_id, 8))
+    if parent_span_id is not None:
+        record['parentSpanId'] = identity(parent_span_id, 8)
+    require(isinstance(links, (list, tuple)) and len(links) <= 128, 'too many span links')
+    record['links'] = [dict(traceId=identity(link['trace_id'], 16),
+                            spanId=identity(link['span_id'], 8)) for link in links]
+    require(status in SPAN_STATUS, 'span outcome must be explicit')
+    record['status'] = {'code': SPAN_STATUS[status]}
+    return record
+
+
+def request_body(signal, resource, scope, records):
+    root, scope_key, field, _ = SIGNALS[signal]
+    return {root: [dict(resource={'attributes': resource}, **{scope_key: [dict(scope=scope, **{field: records})]})]}
+
+
 def prepare(view, projection=None, correlation=None, *, include_payloads=False):
     """No I/O, clock or network. Typed projection is explicit analysis, never inferred evidence."""
     require(isinstance(view, dict), 'expected observation view object')
@@ -205,19 +229,9 @@ def prepare(view, projection=None, correlation=None, *, include_payloads=False):
             start, end = interval(row)
             ctx = context(row)
             require(bool(ctx), 'span requires trace and span IDs')
-            kinds = {'Internal': 1, 'Server': 2, 'Client': 3, 'Producer': 4, 'Consumer': 5}
-            require(row.get('span_kind') in kinds, 'invalid span kind')
-            record = dict(name=text(row.get('name')), startTimeUnixNano=start,
-                          endTimeUnixNano=end, kind=kinds[row['span_kind']], attributes=attrs, **ctx)
-            if row.get('parent_span_id') is not None:
-                record['parentSpanId'] = identity(row['parent_span_id'], 8)
-            require(isinstance(row.get('links', []), list) and len(row.get('links', [])) <= 128, 'too many span links')
-            record['links'] = [dict(traceId=identity(link['trace_id'], 16),
-                                    spanId=identity(link['span_id'], 8)) for link in row.get('links', [])]
-            status = row.get('status', 'Unset')
-            require(status in ('Unset', 'Success', 'Error'), 'span outcome must be explicit')
-            record['status'] = {'code': {'Unset': 0, 'Success': 1, 'Error': 2}[status]}
-            signals['traces'].append(record)
+            signals['traces'].append(span_record(
+                row.get('name'), start, end, row.get('span_kind'), attrs, ctx['traceId'], ctx['spanId'],
+                row.get('parent_span_id'), row.get('links', []), row.get('status', 'Unset')))
         elif kind in ('counter', 'updowncounter', 'gauge', 'histogram'):
             start, end = interval(row)
             unit = text(row.get('unit'), 63)
@@ -264,9 +278,7 @@ def prepare(view, projection=None, correlation=None, *, include_payloads=False):
     requests = []
     for signal, records in signals.items():
         if records:
-            root, scope, field, _ = SIGNALS[signal]
-            body = {root: [dict(resource={'attributes': resource}, **{scope: [dict(
-                scope={'name': 'hirsel.observation', 'version': '1'}, **{field: records})]})]}
+            body = request_body(signal, resource, {'name': 'hirsel.observation', 'version': '1'}, records)
             require(len(encoded(body)) <= MAX_REQUEST, 'OTLP request exceeds size limit')
             requests.append(dict(signal=signal, body=body))
     return dict(schema='hirsel-otlp-bundle', version=1, mapping=PIN, evidence=evidence,

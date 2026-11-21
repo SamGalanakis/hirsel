@@ -125,13 +125,21 @@ also counts startup and reporting outside that interval; report that residual.
 
 `hirsel build <package-dir> --runtime <libhirsel_core_rt.a> -o program`
 uses the same checked request and collects reachable instances. Development emits
-one object per checked body; LLVM release composes every reached body into one
-unit. Both link the independently built core runtime. `run` builds and
+one object per checked body; LLVM release lowers the program's bodies into one
+unit over the separately lowered release std. Both link the independently built
+core runtime. `run` builds and
 executes it, forwarding arguments after `--` and returning its process status.
 
-LLVM release is whole-program: every reached body, the program's and each core
-or std instance's, whether its package arrived as source or by signature, is an
-internal definition of the one release unit, and no library object is linked.
+Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
+published recipe over the release std: the core and std instances lowered once,
+apart from any program, keyed by their own content, and either prebuilt into the
+image (`release-std`) or held in the user's cache. The std side holds every
+instance it lowered as an export, with its step summary, and lends bodies of at
+most `LEND_LIMIT` instructions `available_externally` for inlining. The release
+unit holds the program's own bodies and the library instances the side does not
+hold, which the program's own type and closure arguments make; it calls every
+export by its symbol, and its widths stay dynamic. A program that reaches no std
+root links the side like any other.
 The unit's key covers every reached module and the sealed and place-blind
 parameter facts its emitter consumed, with the fact schema.
 After the whole-program pipeline, code generation runs per part: one per
@@ -305,7 +313,8 @@ gap to be closed later.
 ## Native compilation units
 
 Development emits one object per reached checked definition. LLVM release
-composes every reached body into one unit and exports only the entry. Units carry complete local
+lowers the program's bodies, over the release std, into one unit that exports only
+the entry. Units carry complete local
 type, static, signature, instance and source-anchor tables. Cranelift receives
 recipes computed from `module.types`; LLVM computes the same recipes internally.
 Both retain finalizer and drop inputs. Release exposes direct bodies for inlining

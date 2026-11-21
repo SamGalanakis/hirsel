@@ -1,3 +1,5 @@
 pub type StdinError = Aborted | TimedOut | Other(u32)
 
 pub fn read(i: Stdin, mut buf: Bytes, until: Until) -> Result[u64, StdinError] waits
+
+pub fn is_terminal(i: Stdin) -> bool

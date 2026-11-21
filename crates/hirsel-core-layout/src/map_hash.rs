@@ -2,6 +2,46 @@
 
 pub const STATE_WORDS: usize = 5;
 
+const INITIAL_LANES: [u64; 4] = [
+    0x736f6d6570736575,
+    0x646f72616e646f6d,
+    0x6c7967656e657261,
+    0x7465646279746573,
+];
+
+/// The initial SipHash lanes derived once from the run's key.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PreparedKey([u64; 4]);
+
+impl PreparedKey {
+    #[inline]
+    pub fn new(key: &[u8; 16]) -> Self {
+        let (low, high) = key.split_at(8);
+        let k0 = u64::from_le_bytes(low.try_into().unwrap());
+        let k1 = u64::from_le_bytes(high.try_into().unwrap());
+        Self([
+            k0 ^ INITIAL_LANES[0],
+            k1 ^ INITIAL_LANES[1],
+            k0 ^ INITIAL_LANES[2],
+            k1 ^ INITIAL_LANES[3],
+        ])
+    }
+
+    pub fn to_bytes(self) -> [u8; 16] {
+        let mut key = [0; 16];
+        key[..8].copy_from_slice(&(self.0[0] ^ INITIAL_LANES[0]).to_le_bytes());
+        key[8..].copy_from_slice(&(self.0[1] ^ INITIAL_LANES[1]).to_le_bytes());
+        key
+    }
+
+    #[inline]
+    pub fn state(self) -> State {
+        let [v0, v1, v2, v3] = self.0;
+        State([v0, v1, v2, v3, 0])
+    }
+}
+
 /// Four SipHash lanes and the length of the structural byte stream.
 /// Every component ends at a word boundary.
 #[repr(transparent)]
@@ -11,16 +51,7 @@ pub struct State(pub [u64; STATE_WORDS]);
 impl State {
     #[inline]
     pub fn new(key: &[u8; 16]) -> Self {
-        let (low, high) = key.split_at(8);
-        let k0 = u64::from_le_bytes(low.try_into().unwrap());
-        let k1 = u64::from_le_bytes(high.try_into().unwrap());
-        Self([
-            k0 ^ 0x736f6d6570736575,
-            k1 ^ 0x646f72616e646f6d,
-            k0 ^ 0x6c7967656e657261,
-            k1 ^ 0x7465646279746573,
-            0,
-        ])
+        PreparedKey::new(key).state()
     }
 
     #[inline(always)]

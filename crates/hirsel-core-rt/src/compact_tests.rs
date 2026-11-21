@@ -342,7 +342,8 @@ fn map_hash_uses_the_siphash_13_vectors() {
             );
         }
     }
-    ctx.map_hash_key = std::array::from_fn(|i| i as u8);
+    ctx.map_hash_key =
+        hirsel_core_layout::map_hash::PreparedKey::new(&std::array::from_fn(|i| i as u8));
     let mut scratch = std::mem::MaybeUninit::uninit();
     let state = scratch.as_mut_ptr();
     // SAFETY: ctx is live and state is aligned exclusive scratch initialized

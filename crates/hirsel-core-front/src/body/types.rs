@@ -407,7 +407,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse_type_arguments(path, args.len(), want, &message);
             return ERROR;
         }
+        if let Some(marker) = crate::foreign::Marker::of(decl)
+            && let [(arg, _)] = args
+        {
+            let module = p.modules[self.at.module as usize].id;
+            if *arg != ERROR && !p.foreign_names().admits(p, &self.t, marker, *arg, module) {
+                self.refuse(marker.rule(), path, marker.message());
+                return ERROR;
+            }
+        }
         for (g, &(t, at)) in decl.generics.iter().zip(args) {
+            if !decl.structural && crate::foreign::holds_raw_handle(&p.decls, &self.t, t) {
+                self.refuse("FFI-6", at, "a raw handle cannot be this type argument");
+                return ERROR;
+            }
             if g.region {
                 if !matches!(self.t.kind(t), TyKind::Region(_)) && t != ERROR {
                     self.refuse("MEM-6", at, "a region parameter takes an `in r` argument");

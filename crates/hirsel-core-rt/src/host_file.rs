@@ -32,11 +32,27 @@ struct Vector {
 // the owning entry between workers leaves the bytes and views in place.
 unsafe impl Send for Vector {}
 
+struct DynamicGrant {
+    provider: Provider,
+    handle: u64,
+    terminal: bool,
+}
+
+// SAFETY: the provider descriptor is immutable and its state is only accessed
+// under the run's provider calling contract.
+unsafe impl Send for DynamicGrant {}
+unsafe impl Sync for DynamicGrant {}
+
 #[derive(Default)]
 struct Entries {
     next: u64,
     live: Option<Resources<File>>,
-    grants: BTreeMap<u64, Arc<File>>,
+}
+
+#[derive(Default)]
+struct Designations {
+    next: u64,
+    grants: BTreeMap<u64, Arc<DynamicGrant>>,
     vectors: BTreeMap<u64, Vector>,
 }
 /// Install cleanup together with the first owned resource. A run that never
@@ -71,40 +87,58 @@ impl<T> Drop for Resources<T> {
     }
 }
 
-impl Entries {
-    fn id(&mut self) -> u64 {
-        self.next += 1;
-        if self.next == DYNAMIC_GRANT {
-            crate::process::stop(b"HostHandles");
-        }
-        self.next
+fn next_id(next: &mut u64) -> u64 {
+    *next += 1;
+    if *next == DYNAMIC_GRANT {
+        crate::process::stop(b"HostHandles");
     }
+    *next
 }
 
 #[derive(Default)]
-pub(crate) struct Registry(Mutex<Entries>);
+pub(crate) struct Registry {
+    owned: Mutex<Entries>,
+    pub(crate) run: Arc<RunGrants>,
+}
 
+/// Copyable designations and their backing storage live through the run.
 #[derive(Default)]
+pub(crate) struct RunGrants {
+    designations: Mutex<Designations>,
+    pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
+    pub(crate) secrets: Mutex<crate::secret::Secrets>,
+    pub(crate) cells: crate::provide::Cells,
+}
+
+// SAFETY: the tables use mutexes and pin the storage behind each designation.
+// Outstanding charges pin their payer slots. Refunds can settle from any unit.
+unsafe impl Send for RunGrants {}
+// SAFETY: table mutation is synchronized. The run retains the storage until
+// every unit has stopped using its designations.
+unsafe impl Sync for RunGrants {}
+
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
     pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
     pub(crate) tls: crate::os_tls::Streams,
-    pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
-    pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     #[cfg(feature = "record")]
     pub(crate) net_tape: Option<crate::net::SocketTape>,
     #[cfg(feature = "record")]
     pub(crate) secret_mac_tape: Option<crate::secret::MacTape>,
     #[cfg(feature = "record")]
     pub(crate) managed_control: (u64, u64),
-    pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
-    // Children inherit these entries without borrowing the scheduler's sockets.
     pub(crate) registry: Registry,
-    /// The run's virtual clock, random and process cells (`provide`).
-    pub(crate) cells: crate::provide::Cells,
 }
 impl Registry {
+    pub(crate) fn for_unit(&self) -> Self {
+        Self {
+            owned: Mutex::default(),
+            run: self.run.clone(),
+        }
+    }
+
     /// Pin a substitute Args vector and return its handle.
     pub(crate) fn vector(&self, bytes: Vec<Vec<u8>>) -> u64 {
         let views = bytes
@@ -115,8 +149,8 @@ impl Registry {
                 capacity: 0,
             })
             .collect();
-        let mut registry = self.0.lock().unwrap();
-        let id = DYNAMIC_GRANT | registry.id();
+        let mut registry = self.run.designations.lock().unwrap();
+        let id = DYNAMIC_GRANT | next_id(&mut registry.next);
         registry.vectors.insert(
             id,
             Vector {
@@ -127,14 +161,14 @@ impl Registry {
         id
     }
     fn views(&self, key: u64) -> &[Buffer] {
-        let views = &raw const self.0.lock().unwrap().vectors[&key].views[..];
+        let views = &raw const self.run.designations.lock().unwrap().vectors[&key].views[..];
         // SAFETY: the slice points into a pinned Vec allocation never mutated
         // or removed while Files is shared.
         unsafe { &*views }
     }
     fn insert(&self, file: File) -> u64 {
-        let mut registry = self.0.lock().unwrap();
-        let id = registry.id();
+        let mut registry = self.owned.lock().unwrap();
+        let id = next_id(&mut registry.next);
         registry
             .live
             .get_or_insert_with(|| Resources::new(close_files))
@@ -143,10 +177,10 @@ impl Registry {
         id
     }
     fn file(&self, key: u64) -> File {
-        self.0.lock().unwrap().live.as_ref().unwrap().values[&key]
+        self.owned.lock().unwrap().live.as_ref().unwrap().values[&key]
     }
     fn take_file(&self, key: u64) -> File {
-        self.0
+        self.owned
             .lock()
             .unwrap()
             .live
@@ -156,27 +190,37 @@ impl Registry {
             .remove(&key)
             .unwrap()
     }
-    fn insert_grant(&self, file: File) -> u64 {
-        let mut registry = self.0.lock().unwrap();
-        let id = DYNAMIC_GRANT | registry.id();
-        registry.grants.insert(id, Arc::new(file));
+    pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
+        self.grant_with_terminal(provider, handle, false)
+    }
+    pub(crate) fn grant_with_terminal(
+        &self,
+        provider: Provider,
+        handle: u64,
+        terminal: bool,
+    ) -> u64 {
+        let mut registry = self.run.designations.lock().unwrap();
+        let id = DYNAMIC_GRANT | next_id(&mut registry.next);
+        registry.grants.insert(
+            id,
+            Arc::new(DynamicGrant {
+                provider,
+                handle,
+                terminal,
+            }),
+        );
         id
     }
-    pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.insert_grant(File {
-            provider,
-            handle,
-            mode: 0,
-            close_op: CLOSE,
-        })
+    pub(crate) fn grant_terminal(&self, handle: u64) -> bool {
+        self.run.designations.lock().unwrap().grants[&handle].terminal
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
-        let file = Arc::as_ptr(&self.0.lock().unwrap().grants[&handle]);
+        let file = Arc::as_ptr(&self.run.designations.lock().unwrap().grants[&handle]);
         // SAFETY: grants stay pinned until teardown.
         unsafe { &raw const (*file).provider }
     }
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
-        self.0.lock().unwrap().grants[&handle].handle
+        self.run.designations.lock().unwrap().grants[&handle].handle
     }
     /// A virtual provider's live resource: a ClockHand or StopTrigger
     /// (CLOSE_CELL, which closes nothing but itself), a `Served` end
@@ -202,19 +246,42 @@ impl Registry {
         (file.provider, file.handle)
     }
 }
+impl Default for Files {
+    fn default() -> Self {
+        Self::with_registry(Registry::default())
+    }
+}
+
 impl Files {
+    pub(crate) fn with_registry(registry: Registry) -> Self {
+        Self {
+            sockets: Default::default(),
+            connected: Default::default(),
+            tls: Default::default(),
+            #[cfg(feature = "record")]
+            net_tape: None,
+            #[cfg(feature = "record")]
+            secret_mac_tape: None,
+            #[cfg(feature = "record")]
+            managed_control: (0, 0),
+            registry,
+        }
+    }
+
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         self.sockets = hirsel_core_net::Sockets::default();
         self.tls.sessions.clear();
         self.connected.clear();
-        self.net_grants.get_mut().unwrap().clear();
-        self.env_grants.get_mut().unwrap().clear();
-        *self.secrets.get_mut().unwrap() = crate::secret::Secrets::default();
-        if let Some(files) = &mut self.registry.0.get_mut().unwrap().live {
+        if let Some(files) = &mut self.registry.owned.get_mut().unwrap().live {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };
         }
-        crate::provide::forget(&mut self.cells);
+        if let Some(run) = Arc::get_mut(&mut self.registry.run) {
+            run.net_grants.get_mut().unwrap().clear();
+            run.env_grants.get_mut().unwrap().clear();
+            *run.secrets.get_mut().unwrap() = crate::secret::Secrets::default();
+            crate::provide::forget(&mut run.cells);
+        }
     }
 }
 
@@ -244,6 +311,10 @@ unsafe fn close(context: *mut Context, file: File) {
     // SAFETY: sole file owner; cleanup cannot observe cancellation, so the
     // driver's C check and W/I cancellation do not apply under the shield.
     unsafe {
+        if file.close_op == crate::scram::CLOSE_SCRAM {
+            crate::scram::drop_state(file.handle);
+            return;
+        }
         (*context).cancel_shield += 1;
         let _ = drive(context, &file.provider, &mut close_request(file, 0), None);
         (*context).cancel_shield -= 1;

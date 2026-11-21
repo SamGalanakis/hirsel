@@ -4,7 +4,12 @@ fn main() {
         PathBuf::from(env::var_os("LLVM_SYS_231_PREFIX").expect("prepare the pinned LLVM tree"));
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let sources = ["core_passes", "checked_copy", "release_pipeline", "pass_cost"];
+    let sources = [
+        "core_passes",
+        "checked_copy",
+        "release_pipeline",
+        "pass_cost",
+    ];
     println!(
         "cargo:rerun-if-changed={}",
         manifest.join("bridge/aggregate_phi.h").display()

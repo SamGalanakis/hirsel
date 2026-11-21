@@ -151,6 +151,7 @@ pub struct Module {
     pub parent: Option<ModuleId>,
     pub name: Symbol,
     pub depth: u32,
+    pub foreign: bool,
     merge: Rows,
 }
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -241,6 +242,7 @@ impl NameIndex {
             parent: None,
             name,
             depth: 0,
+            foreign: false,
             merge: Rows::default(),
         });
         self.packages.push(Package {
@@ -276,6 +278,7 @@ impl NameIndex {
                 parent: Some(parent),
                 name,
                 depth: self.modules[parent.0 as usize].depth + 1,
+                foreign: false,
                 merge: Rows::default(),
             });
             self.children.insert((parent, name), id);

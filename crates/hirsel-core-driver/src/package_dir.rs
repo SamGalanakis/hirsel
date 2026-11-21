@@ -3,7 +3,7 @@
 //! configuration. A directory without a manifest is the directory
 //! convention: package `app`, one module per file, `main` in `main`.
 use crate::NativeOptions;
-use hirsel_core_ids::{DefPath, PackageId};
+use hirsel_core_ids::DefPath;
 use hirsel_core_net::{EnvPatterns, GrantRule, RULE_SYNTAX, SecretGrant};
 use hirsel_core_resolve::{ModuleSource, PackageManifest};
 use std::collections::BTreeMap;
@@ -11,25 +11,20 @@ use std::error::Error;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-const MANIFEST: &str = "manifest.json";
+pub(crate) const MANIFEST: &str = "hirsel.toml";
 
 pub(crate) fn scaffold_manifest(sources: impl Iterator<Item = &'static str>) -> String {
-    use serde_json::json;
-    let sources = sources
-        .map(|file| json!({"file": file, "modules": [file.trim_end_matches(".hirsel")], "signatures": false}))
-        .collect::<Vec<_>>();
-    let manifest = json!({
-        "packages": [{
-            "package": crate::package("app"),
-            "dependencies": [crate::package("core"), crate::package("std")],
-            "sources": sources,
-        }],
-        "tests": {
-            "sources": [{"file": "tests.hirsel", "modules": ["tests"], "signatures": false}],
-            "limit": 64 * 1024 * 1024,
-        },
-    });
-    format!("{manifest:#}\n")
+    use std::fmt::Write;
+    let mut manifest = String::from(
+        "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[dependencies]\nstd = { major = 1 }\n\n[sources]\n",
+    );
+    for file in sources {
+        let module = file.strip_suffix(".hirsel").unwrap();
+        writeln!(manifest, "{file:?} = {module:?}").unwrap();
+    }
+    manifest
+        .push_str("\n[tests]\nlimit = 67108864\n\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n");
+    manifest
 }
 
 /// One run's grants, as `--dir` and `--grant` give them or a package's
@@ -40,13 +35,20 @@ pub(crate) struct Grants {
     pub mask: u64,
     pub net_rules: Vec<GrantRule>,
     pub secrets: Vec<SecretGrant>,
+    pub foreign: std::collections::BTreeSet<String>,
     pub env: Option<EnvPatterns>,
 }
 
 impl Grants {
     /// Add one `--grant` value.
     pub fn grant(&mut self, value: &str) -> Result<(), Box<dyn Error>> {
-        if value == "Secret" || value.starts_with("Secret:") {
+        if let Some(interface) = value.strip_prefix("Foreign=") {
+            DefPath::from_full(interface)
+                .ok_or("expected Foreign=package@major/module/interface")?;
+            if !self.foreign.insert(interface.to_owned()) {
+                return Err("a Foreign interface can be granted only once".into());
+            }
+        } else if value == "Secret" || value.starts_with("Secret:") {
             let grant = SecretGrant::parse(value).ok_or(SecretGrant::SYNTAX)?;
             if self
                 .secrets
@@ -82,7 +84,10 @@ impl Grants {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.directories.is_empty() && self.mask == 0 && self.secrets.is_empty()
+        self.directories.is_empty()
+            && self.mask == 0
+            && self.secrets.is_empty()
+            && self.foreign.is_empty()
     }
 
     pub fn apply(&self, options: &mut NativeOptions) {
@@ -90,6 +95,7 @@ impl Grants {
         options.grant_mask = self.mask;
         options.net_rules.clone_from(&self.net_rules);
         options.secret_grants.clone_from(&self.secrets);
+        options.foreign_grants.clone_from(&self.foreign);
         options.env_patterns.clone_from(&self.env);
     }
 }
@@ -144,30 +150,14 @@ impl TestRuns {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct File {
-    packages: Vec<PackageManifest>,
-    #[serde(default)]
-    entries: Vec<EntryFile>,
-    tests: Option<TestFile>,
-}
-
-/// An entry row: the tool fields beside these (workload, grants) are read
-/// by the measurement tools, not here.
-#[derive(serde::Deserialize)]
-struct EntryFile {
-    package: PackageId,
-    module: String,
-    function: Option<String>,
-}
+type Sources = BTreeMap<String, String>;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TestFile {
+pub(crate) struct TestFile {
     #[serde(default)]
-    sources: Vec<ModuleSource>,
-    limit: Option<u64>,
+    pub(crate) sources: Sources,
+    limit: u64,
     #[serde(default)]
     grants: Vec<String>,
     #[serde(default)]
@@ -184,99 +174,242 @@ struct RunFile {
     dirs: Option<Vec<String>>,
 }
 
+pub(crate) fn package_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+pub(crate) fn module_path(module: &str) -> Option<Vec<String>> {
+    let mut symbols = hirsel_core_syntax::Symbols::default();
+    let names: Vec<_> = module.split('.').collect();
+    names
+        .iter()
+        .all(|name| {
+            let lexed = hirsel_core_syntax::lex(name, &mut symbols);
+            lexed.diagnostics.is_empty()
+                && lexed.tokens.first().is_some_and(|token| {
+                    token.kind == hirsel_core_syntax::TokenKind::Ident
+                        && token.span.start == 0
+                        && token.span.end as usize == name.len()
+                })
+        })
+        .then(|| names.into_iter().map(str::to_owned).collect())
+}
+
+pub(crate) fn path_rule(path: &str, suffix: &str) -> Result<(), String> {
+    if path.len() > 1024 {
+        return Err("path over 1024 bytes".into());
+    }
+    for component in path.split('/') {
+        if component.len() > 255 {
+            return Err("component over 255 bytes".into());
+        }
+        let mut bytes = component.bytes();
+        let first = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        if !bytes.next().is_some_and(first) || !bytes.all(|b| first(b) || b".-".contains(&b)) {
+            return Err(format!("bad component {component:?}"));
+        }
+    }
+    if !path.ends_with(suffix) {
+        return Err(format!("does not end in {suffix}"));
+    }
+    Ok(())
+}
+
+impl TestFile {
+    fn runs(&self, path: &Path) -> io::Result<TestRuns> {
+        let refuse = |message| io::Error::other(format!("{}: {message}", path.display()));
+        let grants = |grants: &[String], dirs: &[String]| {
+            let mut out = Grants {
+                directories: dirs.to_vec(),
+                ..Grants::default()
+            };
+            for grant in grants {
+                out.grant(grant).map_err(|e| refuse(e.to_string()))?;
+            }
+            Ok::<_, io::Error>(out)
+        };
+        let package = Run {
+            limit: self.limit,
+            grants: grants(&self.grants, &self.dirs)?,
+        };
+        let mut named = BTreeMap::new();
+        for (name, run) in &self.runs {
+            let test = DefPath::from_full(name)
+                .ok_or_else(|| refuse(format!("invalid test path {name}")))?;
+            named.insert(
+                test,
+                Run {
+                    limit: run.limit.unwrap_or(package.limit),
+                    grants: grants(
+                        run.grants.as_deref().unwrap_or(&self.grants),
+                        run.dirs.as_deref().unwrap_or(&self.dirs),
+                    )?,
+                },
+            );
+        }
+        Ok(TestRuns { package, named })
+    }
+}
+
 pub(crate) struct PackageDir {
-    /// Its sources' paths joined to the directory, which names them.
-    pub package: PackageManifest,
-    pub entry: DefPath,
-    /// The directory, when a manifest lists its sources.
-    pub manifest: Option<PathBuf>,
-    /// Sources that join the package in its test runs only, and its tests'
-    /// runs, when the manifest declares them.
-    pub tests: Option<(Vec<ModuleSource>, TestRuns)>,
+    pub(crate) package: PackageManifest,
+    pub(crate) dependencies: Vec<PackageManifest>,
+    pub(crate) entry: DefPath,
+    pub(crate) manifest: Option<PathBuf>,
+    pub(crate) tests: Option<TestRuns>,
 }
 
 impl PackageDir {
-    pub fn open(dir: &Path) -> io::Result<Self> {
-        let path = dir.join(MANIFEST);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    package: PackageManifest::directory(dir, crate::package("app"), false)?,
-                    entry: DefPath::from_full("app@1/main/main").unwrap(),
-                    manifest: None,
-                    tests: None,
-                });
-            }
-            Err(e) => return Err(e),
+    pub(crate) fn open(dir: &Path) -> io::Result<Self> {
+        use crate::{
+            package_resolve::Resolution, package_store::PackageStore, package_workspace::Workspace,
         };
-        let refuse = |message: String| io::Error::other(format!("{}: {message}", path.display()));
-        let file: File = serde_json::from_slice(&bytes).map_err(|e| refuse(e.to_string()))?;
-        let [mut package] = <[PackageManifest; 1]>::try_from(file.packages)
-            .map_err(|_| refuse("a package directory's manifest lists one package".into()))?;
-        let join = |sources: &mut Vec<ModuleSource>| {
-            for source in sources {
-                source.file = dir.join(&source.file);
-            }
+        let workspace =
+            Workspace::discover(dir).map_err(|error| io::Error::other(error.to_string()))?;
+        let Some(workspace) = workspace else {
+            return Self::convention(dir);
         };
-        join(&mut package.sources);
-        let mut entries = file.entries.iter().filter(|e| e.package == package.package);
-        let entry = match (entries.next(), entries.next()) {
-            (_, Some(_)) => return Err(refuse("the package names one entry".into())),
-            (Some(e), None) => format!(
-                "{}@{}/{}/{}",
-                package.package.name,
-                package.package.version,
-                e.module,
-                e.function.as_deref().unwrap_or("main")
-            ),
-            (None, None) => format!(
-                "{}@{}/main/main",
-                package.package.name, package.package.version
-            ),
-        };
-        let entry = DefPath::from_full(&entry).ok_or_else(|| refuse(format!("entry {entry}")))?;
-        let tests = file
-            .tests
-            .map(|mut tests| {
-                join(&mut tests.sources);
-                let grants = |grants: &[String], dirs: &[String]| {
-                    let mut out = Grants {
-                        directories: dirs.to_vec(),
-                        ..Grants::default()
-                    };
-                    for grant in grants {
-                        out.grant(grant).map_err(|e| refuse(e.to_string()))?;
-                    }
-                    Ok::<_, io::Error>(out)
-                };
-                let package = Run {
-                    limit: tests
-                        .limit
-                        .ok_or_else(|| refuse("tests declare their root limit".into()))?,
-                    grants: grants(&tests.grants, &tests.dirs)?,
-                };
-                let mut named = BTreeMap::new();
-                for (name, run) in tests.runs {
-                    let test = DefPath::from_full(&name)
-                        .ok_or_else(|| refuse(format!("invalid test path {name}")))?;
-                    let run = Run {
-                        limit: run.limit.unwrap_or(package.limit),
-                        grants: grants(
-                            run.grants.as_deref().unwrap_or(&tests.grants),
-                            run.dirs.as_deref().unwrap_or(&tests.dirs),
-                        )?,
-                    };
-                    named.insert(test, run);
-                }
-                Ok::<_, io::Error>((tests.sources, TestRuns { package, named }))
-            })
-            .transpose()?;
+        let selected = workspace.selected().map_err(io::Error::other)?.clone();
+        let resolution = Resolution::resolve(workspace, PackageStore::new(None), false)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Self::from_resolution(&resolution, &selected, false)
+    }
+
+    pub(crate) fn convention(dir: &Path) -> io::Result<Self> {
+        let mut package = PackageManifest::directory(dir, crate::package("app"), false)?;
+        package
+            .dependencies
+            .extend([crate::package("core"), crate::package("std")]);
         Ok(Self {
             package,
-            entry,
-            manifest: Some(dir.to_owned()),
-            tests,
+            dependencies: Vec::new(),
+            entry: DefPath::from_full("app@1/main/main").unwrap(),
+            manifest: None,
+            tests: None,
         })
+    }
+
+    pub(crate) fn from_resolution(
+        resolution: &crate::package_resolve::Resolution,
+        selected: &crate::package_content::Id,
+        include_tests: bool,
+    ) -> io::Result<Self> {
+        use hirsel_core_resolve::{CapturedSource, PackageNamespace};
+        use std::collections::BTreeSet;
+
+        let make_sources =
+            |name: &crate::package_content::Id,
+             sources: &BTreeMap<String, crate::package_content::Source>,
+             foreign: &BTreeMap<Vec<String>, crate::package_content::ForeignModule>,
+             test: bool| {
+                sources
+                    .iter()
+                    .map(|(file, source)| {
+                        let logical = if name == selected {
+                            file.clone()
+                        } else {
+                            format!("{name}/{file}")
+                        };
+                        ModuleSource {
+                            foreign: foreign.contains_key(&source.module),
+                            file: PathBuf::from(&logical),
+                            modules: source.module.clone(),
+                            signatures: false,
+                            captured: Some(CapturedSource {
+                                bytes: source.bytes.clone(),
+                                name: Some(logical),
+                                test,
+                            }),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+        let this = &resolution.workspace.members[selected];
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![selected.clone()];
+        let mut dependencies = Vec::new();
+        let mut main = None;
+        while let Some(id) = pending.pop() {
+            if id.name == "std" || !seen.insert(id.clone()) {
+                continue;
+            }
+            let (content, edges) = if let Some(member) = resolution.workspace.members.get(&id) {
+                (&member.content, member.edges.keys().collect::<Vec<_>>())
+            } else {
+                let content = &resolution.libraries[&resolution.published[&id]].content;
+                (content, content.bindings.keys().collect())
+            };
+            pending.extend(edges.iter().copied().cloned());
+            let mut sources = make_sources(&id, &content.files, &content.foreign, false);
+            if include_tests && &id == selected {
+                sources.extend(make_sources(&id, &this.tests, &content.foreign, true));
+            }
+            let published_bindings = if let Some(member) = resolution.workspace.members.get(&id) {
+                member
+                    .edges
+                    .iter()
+                    .filter_map(|(id, edge)| match edge {
+                        crate::package_workspace::Edge::Published(root, _) => {
+                            Some((id.compiler_id(), hirsel_core_ids::ContentHash(root.0)))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                content
+                    .bindings
+                    .iter()
+                    .filter_map(|(id, root)| {
+                        root.map(|root| (id.compiler_id(), hirsel_core_ids::ContentHash(root.0)))
+                    })
+                    .collect()
+            };
+            let namespace = PackageNamespace {
+                root: resolution
+                    .published
+                    .get(&id)
+                    .map(|root| hirsel_core_ids::ContentHash(root.0)),
+                foreign: content.foreign_stamp(),
+                foreign_inputs: content.foreign.clone(),
+                published_bindings,
+            };
+            let manifest = PackageManifest {
+                namespace: Some(namespace),
+                package: id.compiler_id(),
+                dependencies: std::iter::once(crate::package("core"))
+                    .chain(edges.into_iter().map(|id| id.compiler_id()))
+                    .collect(),
+                sources,
+            };
+            if &id == selected {
+                main = Some(manifest);
+            } else {
+                dependencies.push(manifest);
+            }
+        }
+        Ok(Self {
+            package: main.unwrap(),
+            dependencies,
+            entry: this.package.entry.clone(),
+            manifest: Some(this.manifest_path.parent().unwrap().to_owned()),
+            tests: if include_tests {
+                this.package
+                    .tests
+                    .as_ref()
+                    .map(|tests| tests.runs(&this.manifest_path))
+                    .transpose()?
+            } else {
+                None
+            },
+        })
+    }
+
+    pub(crate) fn needs_std(&self) -> bool {
+        std::iter::once(&self.package)
+            .chain(&self.dependencies)
+            .any(|package| package.dependencies.contains(&crate::package("std")))
     }
 }

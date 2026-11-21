@@ -28,10 +28,12 @@
 #include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
@@ -335,6 +337,20 @@ void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
     }
 }
 
+// Lists in `p`'s "llvm.dbg.cu" each compile unit its debug records name and
+// it does not list yet, or the bitcode reader's verifier drops the part's
+// debug info: a body moved in without a debug list, or one whose inlined
+// records name another unit's subprogram, names a unit the part never saw.
+void list_compile_units(Module &p) {
+    DebugInfoFinder finder;
+    finder.processModule(p);
+    NamedMDNode *units = p.getOrInsertNamedMetadata("llvm.dbg.cu");
+    SmallPtrSet<const MDNode *, 4> listed;
+    for (const MDNode *node : units->operands()) listed.insert(node);
+    for (DICompileUnit *unit : finder.compile_units())
+        if (listed.insert(unit).second) units->addOperand(unit);
+}
+
 // Lends `use` the part of `f`: `f` alone, with what it references, in a
 // module of its own. The part's definition borrows `f`'s body for the call: its blocks move in,
 // its operands and metadata that name a global name the part's declaration
@@ -435,6 +451,7 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
         SmallVector<ReturnInst *, 8> returns;
         CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
         order_uses_like(f, map);
+        list_compile_units(*p);
         use(*p);
         return;
     }
@@ -479,6 +496,7 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
                     i.setMetadata(kind, MapMetadata(node, map));
                 }
         }
+    list_compile_units(*p);
     use(*p);
     for (auto &[i, kind, node] : retagged) i->setMetadata(kind, node);
     for (auto it = moved.rbegin(); it != moved.rend(); ++it) it->first->set(it->second);

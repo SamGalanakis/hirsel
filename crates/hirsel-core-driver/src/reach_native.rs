@@ -255,19 +255,16 @@ fn release_part_constant_names_its_own_function() {
     assert_eq!(status, Some(10));
 }
 
-/// A compact blob's `W` resolved over the release unit (MEM-9) is a constant
-/// only when every root that can hold the type writes one `W`. `E` (u16) is
-/// streamed alone, a blob of `W` 2, and as the elements of a sequence root, a
-/// blob of `W` 8, so each read of `E`'s fields keeps the header word: reading
-/// `id` skips the span's `W`-wide count. Mutants
-/// caught: lowering to a constant when the roots of `E` write two `W`s reads
-/// one blob at the other's width; a sequence root missing from the roots
-/// makes `W` 2 the constant and misreads the sequence's elements. Exit
-/// hand-derived: alone, id 7, 3 elements, the third 9: 7309 (1); the
-/// sequence's second element, id 8: 8309 (2); 1 + 2 = 3.
+/// A compact blob's `W` (MEM-9) in a release build is the one its blob
+/// records. `E` (u16) is streamed alone, a blob of `W` 2, and as the elements
+/// of a sequence root, a blob of `W` 8, so each read of `E`'s fields takes its
+/// own blob's header word: reading `id` skips the span's `W`-wide count. Bug
+/// caught: taking one root's `W` for every blob of `E` reads the other blob at
+/// the wrong width. Exit hand-derived: alone, id 7, 3 elements, the third 9:
+/// 7309 (1); the sequence's second element, id 8: 8309 (2); 1 + 2 = 3.
 #[test]
 #[ignore = "explicit native integration target"]
-fn release_compact_width_is_constant_only_under_one_root_width() {
+fn release_compact_width_is_each_blobs_own() {
     const APP: &str = "@compact(u16)\ntype E {\n    xs: FixedSpan[u32],\n    id: u16\n}\n\nfn value(e: E) -> u64 {\n    match span.get(e.xs, 2) {\n        Some(k) => {\n            let id: u64 = int.widen(e.id)\n            let x: u64 = int.widen(k)\n            id * 1000 + span.len(e.xs) * 100 + x\n        },\n        None => 0\n    }\n}\n\nfn three() -> List[u32] {\n    let mut xs: List[u32] = list.new()\n    let _ = list.push(mut xs, 4)\n    let _ = list.push(mut xs, 6)\n    let _ = list.push(mut xs, 9)\n    xs\n}\n\nfn alone(r: Region) -> Result[E in r, BuildError] {\n    match build_stream_in(r, bytes 64, fn(take w: Writer[E, in r]) -> Result[Child[E], BuildError] {\n        emit(take w, E(xs: three(), id: 7))\n    }) {\n        Ok(take b) => Ok(finish(take b)),\n        Error(e) => Error(e),\n    }\n}\n\nfn many(r: Region) -> Result[SeqSpan[E] in r, BuildError] {\n    match build_stream_in(r, bytes 256, fn(take w: Writer[SeqSpan[E], in r]) -> Result[Child[SeqSpan[E]], BuildError] {\n        writer.append(mut w, fn(take x: Writer[E, in r]) -> Result[Child[E], BuildError] {\n            emit(take x, E(xs: three(), id: 5))\n        })?\n        writer.append(mut w, fn(take x: Writer[E, in r]) -> Result[Child[E], BuildError] {\n            emit(take x, E(xs: three(), id: 8))\n        })?\n        writer.close(take w)\n    }) {\n        Ok(take b) => Ok(finish(take b)),\n        Error(e) => Error(e),\n    }\n}\n\npub fn main() -> Result[(), Exit] {\n    let got = region r {\n        let a = match alone(r) {\n            Ok(e) => value(e),\n            Error(_) => 1,\n        }\n        let b = match many(r) {\n            Ok(xs) => match seq.index_in(r, xs) {\n                Ok(ix) => match seq.get(ix, 1) {\n                    Some(e) => value(e),\n                    None => 2,\n                },\n                Error(_) => 3,\n            },\n            Error(_) => 4,\n        }\n        let ok_a: u64 = if a == 7309 { 1 } else { 0 }\n        let ok_b: u64 = if b == 8309 { 2 } else { 0 }\n        ok_a + ok_b\n    }\n    Error(Exit(status: int.truncate(got)))\n}\n";
     let dir = tempfile::tempdir().unwrap();
     let mut options = native_options(Backend::Llvm, dir.path());
@@ -578,8 +575,8 @@ fn reach_inode_swap_after_the_check_links_the_checked_object() {
 
 /// R12c: between emission and the link's first open, a valid object of the
 /// same program with `leaf` returning 42 is renamed over the stored object
-/// the build will link (a cached one on a development engine, the program's
-/// one object on release). On every engine and mode the linker reads the
+/// the build will link (a cached one on a development engine, the first
+/// object a release link opens). On every engine and mode the linker reads the
 /// bytes the build checked or wrote, so the executable is a fresh store's,
 /// and so is the next request's: no wrong executable was published under the
 /// right objects. Bug caught (red at f488cd81): LLVM checked a cached object
@@ -602,25 +599,34 @@ fn reach_object_swapped_before_the_link_opens_it_links_the_checked_bytes() {
             output: dir.path().join(format!("{name}-program")),
             ..base()
         };
-        let target = |objects: Vec<ObjectProduct>| {
-            let mut objects = objects.into_iter();
-            if optimize {
-                objects.next().unwrap()
-            } else {
-                objects.find(|o| o.instance.definition == leaf).unwrap()
-            }
-        };
         assert_eq!(reach_build(&record_check(A, &core, dir.path(), "store"), &options).2, Some(41), "{how}: prime");
-        // B forces a link; its target object is stored before the build.
+        // B forces a link; its target object is stored before the build. A
+        // release build's objects are its assembly's, so its target is the
+        // first object its link opens.
         let source = format!("{A}\n");
         let b = record_check(&source, &core, dir.path(), "store");
-        let path = target(b.emit_reachable(&entry, &options).unwrap()).path;
         let donor = record_check(&A.replace("41u8", "42u8"), &core, dir.path(), "donor");
-        let donor = std::fs::read(target(donor.emit_reachable(&entry, &at("donor")).unwrap()).path).unwrap();
+        let (path, donor) = if optimize {
+            let first = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let seen = std::rc::Rc::clone(&first);
+            BEFORE_OPEN.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |paths: &[PathBuf]| {
+                    seen.borrow_mut().get_or_insert_with(|| std::fs::read(&paths[0]).unwrap());
+                }))
+            });
+            assert_eq!(reach_build(&donor, &at("donor")).2, Some(42), "{how}: donor");
+            BEFORE_OPEN.with(|hook| *hook.borrow_mut() = None);
+            (None, first.take().unwrap())
+        } else {
+            let leaf = |objects: Vec<ObjectProduct>| objects.into_iter().find(|o| o.instance.definition == leaf).unwrap().path;
+            let path = leaf(b.emit_reachable(&entry, &options).unwrap());
+            (Some(path), std::fs::read(leaf(donor.emit_reachable(&entry, &at("donor")).unwrap())).unwrap())
+        };
         let swap = dir.path().join("swap");
         let mut once = true;
         BEFORE_OPEN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |paths: &[PathBuf]| {
+                let path = path.clone().unwrap_or_else(|| paths[0].clone());
                 if once && paths.contains(&path) {
                     once = false;
                     std::fs::write(&swap, &donor).unwrap();

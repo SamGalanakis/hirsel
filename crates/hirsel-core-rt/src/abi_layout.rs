@@ -26,10 +26,24 @@ pub const OS_CONFIG_DIRECTORY_OPS: i32 = 104;
 pub const OS_CONFIG_PROCESS_OPS: i32 = 112;
 pub const OS_CONFIG_SOCKET_ACTIVATION: i32 = 120;
 pub const PROCESS_CONFIG_GRANTS: i32 = 24;
+pub const FOREIGN_KIND_BYTES: usize = 16;
+pub const FOREIGN_KIND_RELEASE: u32 = 0;
+pub const FOREIGN_KIND_WAITS: usize = 8;
+pub const FOREIGN_CALL_BYTES: usize = 40;
+pub const FOREIGN_CALL_THUNK: u32 = 0;
+pub const FOREIGN_CALL_KINDS: u32 = 8;
+pub const FOREIGN_CALL_COUNT: usize = 16;
+pub const FOREIGN_CALL_NEW: u32 = 24;
+pub const FOREIGN_CALL_RESULT: usize = 32;
+pub const FOREIGN_CALL_WAITS: usize = 33;
+pub const FOREIGN_CALL_RELEASE: usize = 34;
+pub const FOREIGN_RESULT_F32: u8 = 1;
+pub const FOREIGN_RESULT_F64: u8 = 2;
 pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
+pub const CONTEXT_MAP_HASH_KEY: usize = 32;
 // MEM-30: while a step bound is current the window at CONTEXT_STEPS holds at
 // most one slice; with none current it starts at 2^62. A larger word means no
 // bound is current.

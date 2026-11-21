@@ -4,8 +4,9 @@
 //! event, so an offset landing on a newline is still on its original line.
 pub const TAG: u8 = 0xff;
 pub const POINTS_TAG: u8 = 0xfe;
-pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v2";
-pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v2";
+/// The linked entry checks the native runtime ABI through its source table decoder.
+pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v3";
+pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v3";
 /// Every linked site word is below this bound, so code materialises it as a
 /// sign-extended 32-bit immediate. A word is the file's first site plus a
 /// byte offset or annex position ordinal. Zero means no site.

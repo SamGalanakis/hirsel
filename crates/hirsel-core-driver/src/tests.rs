@@ -12,8 +12,11 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
         inputs: CorpusManifest {
             core: package("core"),
             packages: vec![PackageManifest {
+                namespace: None,
                 package: package("app"),
                 sources: vec![hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
                     file: source_file,
                     modules: vec!["main".into()],
                     signatures: false,
@@ -50,39 +53,29 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
 }
 
 fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Arc<CheckProduct> {
-    #[derive(serde::Deserialize)]
-    struct StoreManifest {
-        packages: Vec<PackageManifest>,
-    }
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request =
         CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
-    let StoreManifest { mut packages } = serde_json::from_slice(
-        &std::fs::read(root.join("core/programs/store/manifest.json")).unwrap(),
-    )
-    .unwrap();
-    for source in packages.iter_mut().flat_map(|package| &mut package.sources) {
-        source.file = root.join("core/programs/store").join(&source.file);
-    }
-    let store = packages
-        .iter_mut()
-        .find(|p| p.package == package("store"))
-        .unwrap();
+    let mut store = package_dir::PackageDir::open(&root.join("core/programs/store"))
+        .unwrap()
+        .package;
     if let Some(path) = runner_override {
-        store
+        let source = store
             .sources
             .iter_mut()
             .find(|source| source.modules == ["runner"])
-            .unwrap()
-            .file = path.to_owned();
+            .unwrap();
+        source.file = path.to_owned();
+        source.captured = None;
     }
     store.sources.push(hirsel_core_resolve::ModuleSource {
+        foreign: false,
+        captured: None,
         file: root.join("crates/hirsel-core-driver/src/testdata/runner_launch.hirsel"),
         modules: vec!["runner_launch".into()],
         signatures: false,
     });
-    request.inputs.packages.extend(packages);
+    request.inputs.packages.push(store);
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();
@@ -361,7 +354,7 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(37u32.to_le_bytes());
+    expected.extend(39u32.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);
@@ -485,7 +478,7 @@ fn damaged_disk_bytes_are_a_miss() {
     let store = Store::new(dir.path()).unwrap();
     let payload = b"published payload";
     let mut record = b"HCORE\0\0\0".to_vec();
-    record.extend(37u32.to_le_bytes());
+    record.extend(39u32.to_le_bytes());
     record.extend(payload);
     record.extend((payload.len() as u64).to_le_bytes());
     let key = ContentHash(sha2::Sha256::digest(&record).into());
@@ -547,6 +540,8 @@ fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     req.inputs.packages[0]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
             file: bad,
             modules: vec!["broken".into()],
             signatures: false,
@@ -765,6 +760,8 @@ fn prog1_prog6_transitive_type_reads_and_discovery_order_have_stable_results() {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: other.clone(),
                 modules: vec!["other".into()],
                 signatures: false,
@@ -1123,7 +1120,8 @@ fn prog7_terminal_sites_count_scalar_columns_and_crlf_lines() {
     // `n`, so it is column 45; a byte count would say 51.
     let dir = tempfile::tempdir().unwrap();
     let source = "// \u{fc}\r\nfn good() -> u64 { 42 }\r\nfn bad() -> u64 { /* \u{e9}\u{2192}\u{1f600} */ let n: u16 = 7; n }\r\n";
-    let req = request(source, dir.path());
+    let mut req = request(source, dir.path());
+    req.capture_sources().unwrap();
     let files = crate::SourceFiles::of(&req);
     let path = req.inputs.packages[0].sources[0].file.clone();
     let result = Driver::default()
@@ -1396,6 +1394,8 @@ fn session_id_changes_reuse_and_rebind_cached_refusals() {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: earlier.clone(),
                 modules: vec!["aaa".into()],
                 signatures: false,
@@ -1578,8 +1578,11 @@ fn reachable_census_retains_a_named_function_without_a_native_body() {
     std::fs::write(&library, "pub fn external() -> u8\n").unwrap();
     req.inputs.packages[0].dependencies.push(package("core"));
     req.inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
             file: library,
             modules: vec!["core".into()],
             signatures: true,
@@ -1822,8 +1825,11 @@ fn lowered_runtime_operation_needs_no_outside_body() {
     std::fs::write(&core, "pub fn check_cancel()\n").unwrap();
     req.inputs.packages[0].dependencies.push(package("core"));
     req.inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
             file: core,
             modules: vec!["task".into()],
             signatures: true,
@@ -1928,9 +1934,12 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
         let file = dir.join(format!("{name}-{module}.hirsel"));
         std::fs::write(&file, body).unwrap();
         PackageManifest {
+            namespace: None,
             package: package(name),
             dependencies: deps,
             sources: vec![hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![module.into()],
                 signatures: name != "app",
@@ -2290,6 +2299,8 @@ fn program_request(kind: &str, dir: &Path, store: &Path) -> CheckRequest {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![name.into()],
                 signatures: false,
@@ -2714,10 +2725,13 @@ fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
     )
     .unwrap();
     let installed = |name: &str, dependencies: Vec<PackageId>| PackageManifest {
+        namespace: None,
         package: package(name),
         sources: corpus_files(&root.join("core").join(name), false)
             .into_iter()
             .map(|s| hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 signatures: true,
                 ..s
             })
@@ -2805,6 +2819,7 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
                 req.inputs.packages.insert(
                     0,
                     PackageManifest {
+                        namespace: None,
                         package: package(owner),
                         sources: vec![],
                         dependencies: vec![],
@@ -2818,6 +2833,8 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
         req.inputs.packages[at]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![module.to_string()],
                 signatures: false,
@@ -2903,6 +2920,125 @@ fn unresolved_bodies_suppress_cascades_without_hiding_independent_body_errors() 
         );
         assert!(product.incomplete.is_empty());
     }
+}
+
+#[test]
+fn body_demand_reports_lang_7_at_the_binding_and_names_the_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "\
+fn peer() -> u64 { 0u64 }
+fn local() -> u64 { let peer = 1u64; peer }
+fn parameter(peer: u64) -> u64 { peer }
+fn prelude() -> u64 { let replace = 2u64; replace }
+fn closure() -> u64 { let f = fn(peer: u64) -> u64 { peer }; f(3u64) }
+fn shadow(x: u64) -> u64 { let x = x + 1; x }
+type Sample { n: u64 }
+fn legal() -> u64 {
+    let sibling = Sample(n: 3u64)
+    let dep = Sample(n: 4u64)
+    sibling.n + dep.n
+}
+";
+    let resource = format!("fn deep() -> u64 {{ {}1 }}", "1 + ".repeat(2000));
+    let core_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let prelude = std::fs::read_to_string(core_dir.join("core.hirsel")).unwrap();
+    let mut req = modules_request(
+        &[
+            ("main", source),
+            (
+                "malformed",
+                "fn malformed() -> u64 { let mut bytes: u64 = 0; 0u64 }",
+            ),
+            ("resource", &resource),
+            ("sibling", "pub fn sibling_value() -> u64 { 0u64 }"),
+            ("dep/api", "pub fn dep_value() -> u64 { 0u64 }"),
+        ],
+        dir.path(),
+        &dir.path().join("store"),
+    );
+    req.inputs
+        .packages
+        .push(PackageManifest::directory(&core_dir, package("core"), true).unwrap());
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    let diagnostics: Vec<_> = product
+        .machine_diagnostics()
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.primary.module == "app@1/main")
+        .collect();
+    assert_eq!(diagnostics.len(), 5, "{:#?}", product.diagnostics);
+    let span = |text: &str, marker: &str, name: &str| {
+        let start = (text.find(marker).unwrap() + marker.find(name).unwrap()) as u32;
+        hirsel_core_syntax::Span {
+            start,
+            end: start + name.len() as u32,
+        }
+    };
+    let peer = span(source, "fn peer()", "peer");
+    let replace = span(&prelude, "pub fn replace[", "replace");
+    let shadowed = span(source, "x: u64", "x: u64");
+    let terminal = |text: &str, at: hirsel_core_syntax::Span| {
+        let before = &text[..at.start as usize];
+        let line = 1 + before.bytes().filter(|&b| b == b'\n').count();
+        let column = 1 + before.rsplit('\n').next().unwrap().chars().count();
+        let end_column = column + (at.end - at.start) as usize;
+        format!("{line}:{column}-{end_column}")
+    };
+    let path = |name: &str| DefPath::from_full(&format!("app@1/{name}")).unwrap();
+    let peer = ("app@1/main", source, peer);
+    let replace = ("core@1/core", prelude.as_str(), replace);
+    let shadowed = ("app@1/main", source, shadowed);
+    for (function, name, marker, (cause_module, cause_source, cause)) in [
+        ("local", "peer", "peer = 1u64", peer),
+        ("parameter", "peer", "parameter(peer:", peer),
+        ("prelude", "replace", "replace = 2u64", replace),
+        ("closure", "peer", "fn(peer:", peer),
+        ("shadow", "x", "x = x + 1", shadowed),
+    ] {
+        let at = span(source, marker, name);
+        let diagnostic = diagnostics.iter().find(|d| d.primary.span == at).unwrap();
+        assert_eq!(diagnostic.rule, "LANG-7");
+        let [causal] = diagnostic.causal.as_slice() else {
+            panic!("{function} must name one conflicting binding");
+        };
+        assert_eq!(causal.module, cause_module);
+        assert_eq!(causal.span, cause);
+
+        let definition = path(&format!("main/{function}"));
+        let root = hirsel_core_ir::Identity::plain(definition.clone());
+        let Err(InstanceStop::Incomplete {
+            definition: stopped,
+            message,
+        }) = product.instances([root], 8)
+        else {
+            panic!("{function} must stop instance demand");
+        };
+        assert_eq!(stopped, definition);
+        assert_eq!(
+            message,
+            format!(
+                "app@1/main:{}: LANG-7 `{name}` shadows a visible name\n  caused by {cause_module}:{}",
+                terminal(source, at),
+                terminal(cause_source, cause)
+            )
+        );
+    }
+    let malformed = hirsel_core_ir::Identity::plain(path("malformed/malformed"));
+    assert!(matches!(
+        product.instances([malformed], 8),
+        Err(InstanceStop::Incomplete { message, .. })
+            if message.starts_with("app@1/malformed:") && message.contains("LANG-2")
+    ));
+    let deep = hirsel_core_ir::Identity::plain(path("resource/deep"));
+    assert!(matches!(
+        product.instances([deep], 8),
+        Err(InstanceStop::Incomplete { message, .. })
+            if message.starts_with("app@1/resource:") && message.contains("resolver resource refusal")
+    ));
+    let legal = hirsel_core_ir::Identity::plain(path("main/legal"));
+    assert!(product.instances([legal], 8).is_ok());
 }
 
 /// Attack 960's resolution counterexamples 1 and 6, and attack 979's H1 both
@@ -3189,6 +3325,8 @@ fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSourc
             let rel = p.strip_prefix(dir).unwrap().with_extension("");
             let modules: Vec<String> = rel.iter().map(|m| m.to_string_lossy().into()).collect();
             (tests || modules[0] != "tests").then_some(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: p,
                 modules,
                 signatures: dir.ends_with("core"),
@@ -3204,16 +3342,19 @@ fn langarena_inputs(root: &Path, core: &Path, langarena: &Path) -> CorpusManifes
         core: package("core"),
         packages: vec![
             PackageManifest {
+                namespace: None,
                 package: package("core"),
                 sources: corpus_files(core, false),
                 dependencies: vec![],
             },
             PackageManifest {
+                namespace: None,
                 package: package("std"),
                 sources: corpus_files(&root.join("core/std"), false),
                 dependencies: vec![package("core")],
             },
             PackageManifest {
+                namespace: None,
                 package: package("langarena"),
                 sources: corpus_files(langarena, true),
                 dependencies: vec![package("core"), package("std")],

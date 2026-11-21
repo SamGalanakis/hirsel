@@ -8,6 +8,7 @@ pub(super) fn emit(
     plan: &Plan<'_>,
     data: &data::Tables,
     entry: FuncId,
+    foreign_waits: bool,
 ) -> Result<()> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I32, I64], Some(I32));
@@ -186,6 +187,13 @@ pub(super) fn emit(
             "hirsel_core_os_run_recording",
             I8,
             &[config, names, sources, entry, identity, revision],
+        )?
+    } else if !plan.foreign.is_empty() {
+        let waits = f.b.ins().iconst(I8, i64::from(foreign_waits));
+        f.value_call(
+            "hirsel_core_os_run_foreign_with_sources",
+            I8,
+            &[config, names, sources, entry, waits],
         )?
     } else {
         let runner = if plan.launch_digest_unused {

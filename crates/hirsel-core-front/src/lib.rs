@@ -17,6 +17,8 @@ mod recursion_decls;
 pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod defaults;
+mod foreign;
+pub use foreign::{AbiParameter, AbiResult, AbiSignature};
 mod identity;
 mod layer;
 pub use layer::Declared;
@@ -144,6 +146,7 @@ pub struct Program<'a> {
     recipe_layouts: std::sync::Mutex<layout::RecipeLayouts>,
     flow_holds: std::sync::OnceLock<Vec<std::sync::OnceLock<(u8, u64)>>>,
     closed_type_facts: std::sync::OnceLock<Vec<body::ClosedTypeFacts>>,
+    foreign_names: std::sync::OnceLock<foreign::Names>,
 }
 
 /// The core types lowering builds, matches or lays out without the program naming
@@ -434,6 +437,7 @@ impl<'a> Program<'a> {
         let mut p = Self::open(index, modules, resolutions, library);
         p.register();
         p.lower_headers();
+        p.check_foreign_signatures();
         p.check_recursive_instances();
         p.register_constants();
         p.summarize();
@@ -543,6 +547,7 @@ impl<'a> Program<'a> {
             recipe_layouts: Default::default(),
             flow_holds: std::sync::OnceLock::new(),
             closed_type_facts: std::sync::OnceLock::new(),
+            foreign_names: std::sync::OnceLock::new(),
         }
     }
 

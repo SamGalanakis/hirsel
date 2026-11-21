@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>hirsel</title>
   <meta name="description" content="Good fences make fast systems. A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.">
   <meta name="theme-color" content="#FBF6EC">
@@ -33,11 +33,17 @@
 <style>
 :root{--ink:#11110F;--cream:#FBF6EC;--red:#CB271F;--mute:#5E5A50;--rule:rgba(17,17,15,.14);
   /* one motion language: a confident deceleration; feedback quick, state changes routine, arrivals slow */
-  --ease:cubic-bezier(.16,1,.3,1);--t-press:110ms;--t-state:260ms;--t-arrive:640ms}
+  --ease:cubic-bezier(.16,1,.3,1);--t-press:110ms;--t-state:260ms;--t-arrive:640ms;
+  /* the notch and the home bar: zero on a desktop, so nothing there moves */
+  --sat:env(safe-area-inset-top,0px);--sar:env(safe-area-inset-right,0px);--sab:env(safe-area-inset-bottom,0px);--sal:env(safe-area-inset-left,0px)}
 ::selection{background:rgba(203,39,31,.16);color:var(--ink)}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--cream);color:var(--ink)}
+/* the page claims sideways drags for walking the hill; vertical scroll and zoom stay the browser's */
+body,.panel{touch-action:pan-y pinch-zoom}
+/* zoomed in, a sideways drag pans the zoomed page again, and walks nothing */
+.zoomed body,.zoomed .panel{touch-action:auto}
 body{font:400 16px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;font-kerning:normal;-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 button:disabled{cursor:default;opacity:.38}
@@ -45,7 +51,7 @@ a{color:inherit}
 canvas#c{position:fixed;inset:0;width:100vw;height:100vh;display:block}
 .wmfont{font-family:"Archivo Black","Arial Black","Inter",system-ui,sans-serif;font-weight:400;font-synthesis:none;letter-spacing:-.035em}
 
-header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:28px;padding:18px 48px;z-index:3}
+header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:28px;padding:calc(18px + var(--sat)) max(48px,var(--sar)) 18px max(48px,var(--sal));z-index:3}
 header .wm{font-size:22px;line-height:1}
 header .idx{flex:1;min-width:0}
 header .strip{position:relative;display:flex;gap:20px;font-size:14px;font-weight:500;white-space:nowrap}
@@ -55,7 +61,6 @@ header .strip button:hover,header .strip button:focus-visible{color:var(--ink)}
 header .strip button:hover::after,header .strip button:focus-visible::after{transform:scaleX(1)}
 header .strip button.on{color:var(--ink)}
 header .strip button.on::after{transform:scaleX(1);opacity:1}
-header .stepper{display:none}
 header .links{margin-left:auto;display:flex;align-items:center}
 header .gh{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;margin-right:-8px;border-radius:50%;color:var(--ink);opacity:.82;transition:opacity var(--t-state) var(--ease),background-color var(--t-state) var(--ease)}
 header .gh:hover,header .gh:focus-visible{opacity:1;background:rgba(17,17,15,.06)}
@@ -63,7 +68,7 @@ header .gh svg{width:20px;height:20px;display:block;transition:transform var(--t
 header .gh:hover svg,header .gh:focus-visible svg{transform:rotate(-8deg) scale(1.06)}
 header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 
-.land{position:fixed;left:48px;bottom:52px;z-index:2;pointer-events:none}
+.land{position:fixed;left:max(48px,var(--sal));bottom:52px;z-index:2;pointer-events:none}
 .land>*{pointer-events:auto}
 .land h1{margin:0;font-size:clamp(76px,12.5vw,176px);line-height:.8}
 .land .head{margin:24px 0 0 4px;font-size:26px;line-height:1.2;font-weight:600;letter-spacing:-.02em;color:var(--ink);text-wrap:balance}
@@ -74,7 +79,7 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 .land .in:hover span,.land .in:focus-visible span{transform:translateX(6px)}
 .land .in:active span{transform:translateX(10px);transition-duration:var(--t-press)}
 
-.panel{position:fixed;left:48px;top:50%;transform:translateY(-50%);width:340px;z-index:2}
+.panel{position:fixed;left:max(48px,var(--sal));top:50%;transform:translateY(-50%);width:340px;z-index:2}
 .panel h2{margin:0;font:400 31px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em;text-wrap:balance}
 .panel .body{margin:20px 0 0;font-size:16px;line-height:1.58;color:#2b2a26;max-width:34ch;text-wrap:pretty}
 .panel .body p{margin:0}
@@ -101,42 +106,100 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
   .panel .body{font-size:15px}
 }
 @media (max-width:920px) and (min-width:701px){
-  header{padding:18px 32px;gap:20px}
+  header{padding:calc(18px + var(--sat)) max(32px,var(--sar)) 18px max(32px,var(--sal));gap:20px}
   header .strip{gap:13px;font-size:13px}
-  .land,.panel{left:32px}
+  .land,.panel{left:max(32px,var(--sal))}
 }
 /* tablets: the scene takes the full width above, the text sits below on a readable measure */
 @media (max-width:900px) and (min-width:701px){
-  .panel{right:32px;top:auto;bottom:24px;transform:none;width:auto;max-width:600px;max-height:46vh;overflow:auto}
+  .panel{right:max(32px,var(--sar));top:auto;bottom:calc(24px + var(--sab));transform:none;width:auto;max-width:600px;max-height:46vh;overflow:auto}
   .panel .body{max-width:62ch}
   .walk{margin-top:16px;padding-top:12px}
 }
 @media (max-width:700px){
-  header{padding:12px 16px 0;gap:12px}
-  header .wm{font-size:19px}
-  header .idx{display:flex;justify-content:center}
-  header .strip{display:none}
-  header .stepper{display:flex;align-items:center;gap:2px;font-size:14px;font-weight:600;white-space:nowrap}
-  header .stepper button{width:32px;height:32px;font-size:20px;line-height:1;color:var(--mute);border-radius:50%;transition:color var(--t-state) var(--ease),background-color var(--t-state) var(--ease),transform var(--t-press) var(--ease)}
-  header .stepper button:not(:disabled):hover{color:var(--ink);background:rgba(17,17,15,.06)}
-  header .stepper button:not(:disabled):active{transform:scale(.9)}
-  header .stepper span{min-width:0;text-align:center;padding:0 2px}
-  .land{left:16px;right:16px;bottom:34px}
+  header{padding:calc(12px + var(--sat)) max(16px,var(--sar)) 0 max(16px,var(--sal));gap:12px}
+  /* phone targets are 44px; the negative margins keep the header the height it was, so the ridge stays put */
+  header .wm{font-size:19px;padding:13px 8px 13px 0;margin:-13px -8px -13px 0}
+  header .idx{display:none}
+  header .gh{width:44px;height:44px;margin:-4px -12px -4px 0}
+  .land{left:max(16px,var(--sal));right:max(16px,var(--sar));bottom:calc(34px + var(--sab))}
   .land h1{font-size:84px}
   .land .head{font-size:21px;margin-top:16px;margin-left:3px}
   .land .tag{font-size:15px;margin-top:8px;margin-left:3px}
-  .land .in{margin-top:20px}
-  .panel{left:16px;right:16px;top:auto;bottom:14px;transform:none;width:auto;max-height:52vh;overflow:auto}
+  .land .in{margin-top:20px;position:relative}
+  .land .in::after{content:"";position:absolute;inset:-10px -12px -8px}
+  .panel{left:max(16px,var(--sal));right:max(16px,var(--sar));top:auto;bottom:calc(var(--bar) + var(--sab) + 12px);transform:none;width:auto;max-height:52vh;overflow:auto;overscroll-behavior:contain}
   .panel h2{font-size:24px}
   .panel .body{margin-top:10px;font-size:15px;line-height:1.5;max-width:none}
   .panel .body .half{margin-top:8px}
   .det{margin-top:8px}
   .walk{display:none}
 }
+/* a phone walks the hill from the bottom, under the thumb: back, where you are (which opens the
+   whole list), on. The same hairline and muted arrows as the walk row it stands in for. */
+:root{--bar:52px}
+.bar{display:none;position:fixed;left:max(16px,var(--sal));right:max(16px,var(--sar));bottom:0;z-index:3;height:calc(var(--bar) + var(--sab));padding-bottom:var(--sab);align-items:center;justify-content:space-between;border-top:1px solid var(--rule)}
+.bar .step{width:48px;height:48px;display:inline-flex;align-items:center;font-size:18px;color:var(--mute);transition:color var(--t-state) var(--ease)}
+.bar .step .ar{display:inline-block;font-style:normal;transition:transform var(--t-press) var(--ease)}
+#bPrev{justify-content:flex-start}
+#bNext{justify-content:flex-end}
+.bar .step:not(:disabled):active{color:var(--ink)}
+#bPrev:not(:disabled):active .ar{transform:translateX(-4px)}
+#bNext:not(:disabled):active .ar{transform:translateX(4px)}
+.bar .now{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-width:0;height:48px;padding:0 14px;border-radius:10px;transition:background-color var(--t-state) var(--ease)}
+.bar .now:active{background:rgba(17,17,15,.05)}
+.bar .name{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:600;line-height:1;white-space:nowrap}
+.bar .name svg{width:10px;height:10px;flex:none;color:var(--mute)}
+/* eight small patches, one per property: the one you stand on is inked */
+.ticks{display:flex;gap:4px}
+.ticks i{width:12px;height:6px;background:#D3C6A9;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);transition:background-color var(--t-state) var(--ease)}
+.ticks i.on{background:var(--ink)}
+header .menu{display:none;align-items:center;justify-content:center;width:44px;height:44px;margin:-4px 4px -4px 0;border-radius:50%;color:var(--ink);opacity:.82}
+header .menu svg{width:20px;height:20px;display:block}
+header .menu:active{background:rgba(17,17,15,.06)}
+/* the whole list: a sheet up from the bottom edge, where the thumb already is */
+.list{position:fixed;inset:auto 0 0;margin:0;width:auto;max-width:none;max-height:min(88dvh,640px);overflow:auto;overscroll-behavior:contain;
+  padding:8px max(12px,var(--sar)) calc(12px + var(--sab)) max(12px,var(--sal));border:0;border-radius:16px 16px 0 0;background:var(--cream);color:var(--ink);
+  box-shadow:0 -10px 32px rgba(17,17,15,.10),0 -1px 0 var(--rule);
+  transition:transform var(--t-arrive) var(--ease),overlay var(--t-arrive) allow-discrete,display var(--t-arrive) allow-discrete}
+.list:not([open]){transform:translateY(100%)}
+@starting-style{.list[open]{transform:translateY(100%)}}
+.list::backdrop{background:rgba(17,17,15,.16);opacity:1;transition:opacity var(--t-state) var(--ease),overlay var(--t-state) allow-discrete,display var(--t-state) allow-discrete}
+.list:not([open])::backdrop{opacity:0}
+@starting-style{.list[open]::backdrop{opacity:0}}
+.list .top{display:flex;align-items:center;justify-content:space-between;padding:0 0 4px 12px}
+.list .top .wmfont{font-size:19px;line-height:1}
+.list .x{width:44px;height:44px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:var(--mute)}
+.list .x svg{width:16px;height:16px}
+.list .x:active{background:rgba(17,17,15,.06)}
+.list ol{list-style:none;margin:0;padding:0}
+.list li+li{border-top:1px solid var(--rule)}
+.list li:first-child{margin-bottom:6px;border-bottom:1px solid var(--rule)}
+.list li:nth-child(2){border-top:0}
+.list ol button{display:flex;align-items:center;gap:14px;width:100%;min-height:48px;padding:0 12px;font-size:16px;font-weight:500;color:var(--mute);text-align:left;border-radius:8px;transition:color var(--t-state) var(--ease),background-color var(--t-state) var(--ease)}
+.list ol button i{width:14px;height:7px;flex:none;background:#DDD2B9;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
+.list ol button:active{background:rgba(17,17,15,.05)}
+.list ol button[aria-current]{color:var(--ink);font-weight:600}
+.list ol button[aria-current] i{background:var(--ink)}
+@media (max-width:700px){header .menu{display:inline-flex}.bar{display:flex}}
+/* a phone on its side: one short row for the bar, and the text scrolls sooner so the scene keeps its ground */
+@media (max-width:700px) and (max-height:480px){
+  :root{--bar:44px}
+  .bar .step,.bar .now{height:44px}
+  .bar .ticks{display:none}
+  .panel{max-height:44vh}
+}
+@media (hover:hover){
+  .bar .step:not(:disabled):hover,.list ol button:hover,.list .x:hover{color:var(--ink)}
+  header .menu:hover{opacity:1;background:rgba(17,17,15,.06)}
+}
 @media (prefers-reduced-motion:reduce){
   /* no travel: state still changes colour and weight, nothing slides or turns */
   header .strip button::after{transition:opacity var(--t-state) var(--ease)}
-  .land .in span,.walk .ar,header .gh svg,.det button svg,header .stepper button{transform:none!important}
+  .land .in span,.walk .ar,header .gh svg,.det button svg,.bar .ar{transform:none!important}
+  .list,.list:not([open]){transform:none;transition:opacity var(--t-state) var(--ease),overlay var(--t-state) allow-discrete,display var(--t-state) allow-discrete}
+  .list:not([open]){opacity:0}
+  @starting-style{.list[open]{opacity:0}}
 }
 </style>
 </head>
@@ -156,14 +219,9 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
       <button data-v="local">Local</button>
       <button data-v="fast">Fast</button>
     </div>
-    <div class="stepper">
-      <button id="sPrev" aria-label="Previous property">&lsaquo;</button>
-      <span id="sName" aria-current="page"></span>
-      <button id="sNext" aria-label="Next property">&rsaquo;</button>
-    </div>
   </nav>
   <nav class="links" aria-label="Site">
-    
+    <button class="menu" id="menuBtn" aria-label="All views" aria-haspopup="dialog" aria-controls="list" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 6.5h13M3.5 13.5h8"/></svg></button>
     <a class="gh" id="gh" href="https://github.com/samgalanakis/hirsel" aria-label="Source on GitHub" title="Source on GitHub">
       <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
     </a>
@@ -189,6 +247,33 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
     <button class="nx" id="nextBtn"><span></span> <i class="ar" aria-hidden="true">&rarr;</i></button>
   </div>
 </section>
+
+<nav class="bar" id="bar" aria-label="Walk the hill" hidden>
+  <button class="step" id="bPrev"><i class="ar" aria-hidden="true">&larr;</i></button>
+  <button class="now" id="bNow" aria-haspopup="dialog" aria-controls="list" aria-expanded="false">
+    <span class="name"><span id="bName"></span><svg viewBox="0 0 10 10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6.5 5 3.5l3 3"/></svg></span>
+    <span class="ticks" id="ticks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+  </button>
+  <button class="step" id="bNext"><i class="ar" aria-hidden="true">&rarr;</i></button>
+</nav>
+
+<dialog class="list" id="list" aria-label="All views">
+  <div class="top">
+    <span class="wmfont" aria-hidden="true">hirsel</span>
+    <button class="x" id="listX" aria-label="Close"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>
+  </div>
+  <ol id="listItems">
+    <li><button data-v="hill"><i aria-hidden="true"></i>The hill</button></li>
+    <li><button data-v="safe"><i aria-hidden="true"></i>Safe</button></li>
+    <li><button data-v="parallel"><i aria-hidden="true"></i>Parallel</button></li>
+    <li><button data-v="memory"><i aria-hidden="true"></i>Memory</button></li>
+    <li><button data-v="bounded"><i aria-hidden="true"></i>Bounded</button></li>
+    <li><button data-v="deterministic"><i aria-hidden="true"></i>Deterministic</button></li>
+    <li><button data-v="authority"><i aria-hidden="true"></i>Explicit authority</button></li>
+    <li><button data-v="local"><i aria-hidden="true"></i>Local</button></li>
+    <li><button data-v="fast"><i aria-hidden="true"></i>Fast</button></li>
+  </ol>
+</dialog>
 
 <script>
 /* ---------- content ---------- */
@@ -403,54 +488,77 @@ function hillLayer() {
 /* ---------- slots: every scene asks for N places; who stands where is decided at the cut ---------- */
 /* how far the ridge flock reaches below the ridge line (rows, jitter and the line's own swell) */
 const RIDGE_B = () => MOB ? 36 : 48;
-function geom(view) {
+function geom(view, pe) {
   const g = { vi: VIEWS.indexOf(view) };
   g.pTo = g.vi * W * .55;
-  if (view === 'hill') { g.rTo = H * (MOB ? .2 : .23); return g; }
+  /* a phone's hill rises to the same height as every other view's, so the sky stays a strip */
+  if (view === 'hill') { g.rTo = MOB ? Math.round(Math.max(88, H * .11, document.querySelector('header').getBoundingClientRect().bottom + 36)) : H * .23; return g; }
   const hd = document.querySelector('header').getBoundingClientRect();
   g.hdB = hd.bottom; g.rTo = hd.bottom + (MOB ? 36 : 64);
-  const pe = document.getElementById('panel'), by = g.rTo + RIDGE_B() + 12;
+  pe = pe || $('panel'); const by = g.rTo + RIDGE_B() + 12;
   pe.style.top = STACK ? '' : Math.round(H / 2) + 'px';
-  const pn = pe.getBoundingClientRect();
+  const pn = pe.getBoundingClientRect(); g.pn = pn;
   if (STACK) { const m = MOB ? 16 : 32; g.box = { x: m, y: by, w: W - 2 * m, h: pn.top - 14 - by }; }
   else { const x0 = pn.right + (W <= 1000 ? 44 : 64); g.box = { x: x0, y: by, w: W - 48 - x0, h: H - 52 - by }; }
   return g;
 }
-/* place a view from what its scene really draws. The text column and the scene share one middle;
-   the ridge stands one gap above that block and the same gap is left below it, and whatever
-   height is over goes to the sky above the ridge, never to open ground between ridge and scene.
-   A scene that cannot fit is drawn smaller about its own centre. Moves are translations of the
-   scene box, so a scene's own proportions never change with the window's height alone. */
-function fit(v, g, sc) {
-  const pe = document.getElementById('panel'), RB = RIDGE_B();
-  for (let it = 0; it < 5; it++) {
-    const [t0, t1] = sc.ext, eh = t1 - t0;
-    let rTo = g.rTo, dy, k = 1;
-    if (STACK) {
-      const bot = pe.getBoundingClientRect().top - 12, free = bot - g.hdB - RB - eh, minSky = 36, minGap = 10;
-      if (free < minSky + 2 * minGap - .5) k = Math.max(.5, (eh - (minSky + 2 * minGap - free)) / eh);
-      else {
-        let gap = Math.min(84, Math.max(minGap, free / 3.1)), sky = free - 2 * gap;
-        if (sky < minSky) { sky = minSky; gap = (free - sky) / 2; }
-        rTo = g.hdB + sky; dy = rTo + RB + gap + eh / 2 - (t0 + t1) / 2;
-      }
-    } else {
-      const ph = pe.getBoundingClientRect().height, Hc = Math.max(eh, ph), free = H - g.hdB - RB - Hc - 20;
-      const minSky = 64, minGap = 36;
-      if (eh > ph && free < minSky + 2 * minGap) k = Math.max(.5, (eh - (minSky + 2 * minGap - free)) / eh);
-      else {
-        let gap = Math.min(150, Math.max(minGap, free / 3.1)), sky = free - 2 * gap;
-        if (sky < minSky) { sky = minSky; gap = Math.max(0, (free - sky) / 2); }
-        rTo = g.hdB + sky; const M = rTo + RB + gap + Hc / 2;
-        dy = M - (t0 + t1) / 2; pe.style.top = Math.round(M) + 'px';
-      }
-    }
-    const b = g.box;
-    if (k < 1) g = { ...g, box: { x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k } };
-    else { g = { ...g, rTo, box: { ...b, y: b.y + dy } }; sc = SC[v](g); sc.g = g; return sc; }
-    sc = SC[v](g); sc.g = g;
+/* the band a view's block (its scene, and beside it its text) has to stand in under the ridge,
+   and the sky, gaps and the block's height measured against it. Stacked, the text is pinned to the
+   bottom and the band ends just above it (a tablet keeps a clear gap over the heading, a phone a
+   tighter one); side by side, the text shares the scene's middle. */
+const BAND = () => STACK ? { minSky: 36, minGap: MOB ? 10 : 22, maxGap: 84 } : { minSky: 64, minGap: 36, maxGap: 150 };
+function band(g, eh) {
+  const RB = RIDGE_B(), Hc = STACK ? eh : Math.max(eh, g.pn.height);
+  return { Hc, top: g.hdB + RB, bot: STACK ? g.pn.top - 12 : H - 20 };
+}
+/* a hidden stand-in for the panel, so any view's text can be measured without touching the live one */
+let ghost = null;
+function ghostOf(v) {
+  if (!ghost) {
+    ghost = $('panel').cloneNode(true); ghost.removeAttribute('id'); ghost.removeAttribute('aria-live');
+    ghost.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+    ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.style.visibility = 'hidden';
+    ghost.querySelectorAll('*').forEach(el => { el.style.opacity = el.style.transform = ''; });
+    document.body.append(ghost);
   }
-  return sc;
+  ghost.hidden = false; fillPanel(ghost, v);
+  return ghost;
+}
+/* the ridge: one height for every view at a given window size, so walking between views never
+   moves it. Each view asks for the sky its own block would leave (its gap above and below a third
+   of the spare ground, up to a cap); the ridge takes the least of those, so the tallest view keeps
+   its balance and every other view stands its block in the middle of the ground below. */
+let SKY = null;
+function skyNow() {
+  if (SKY !== null) return SKY;
+  const B = BAND(); let sky = Infinity;
+  for (const v of VIEWS) {
+    if (v === 'hill') continue;
+    const g = geom(v, ghostOf(v)), sc = SC[v](g), bd = band(g, sc.ext[1] - sc.ext[0]);
+    const free = bd.bot - bd.top - bd.Hc, gap = Math.min(B.maxGap, Math.max(B.minGap, free / 3.1));
+    sky = Math.min(sky, free - 2 * gap);
+  }
+  ghost.hidden = true;
+  return SKY = Math.max(B.minSky, Math.round(sky));
+}
+/* place a view under that ridge: the text column and the scene share one middle, set halfway down
+   the ground between the ridge flock and the foot of the band. A scene that cannot fit is drawn
+   smaller about its own centre. Moves are translations of the scene box, so a scene's own
+   proportions never change with the window's height alone. */
+function fit(v, g, sc) {
+  const pe = $('panel'), B = BAND(), rTo = g.hdB + skyNow();
+  for (let it = 0; ; it++) {
+    const [t0, t1] = sc.ext, eh = t1 - t0, bd = band(g, eh), room = bd.bot - (rTo + RIDGE_B()) - bd.Hc;
+    const b = g.box;
+    if (it < 5 && room < 2 * B.minGap - .5 && (STACK || eh >= g.pn.height)) {
+      const k = Math.max(.5, (eh - (2 * B.minGap - room)) / eh);
+      g = { ...g, box: { x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k } };
+      sc = SC[v](g); sc.g = g; continue;
+    }
+    const M = rTo + RIDGE_B() + Math.max(0, room / 2) + bd.Hc / 2;
+    if (!STACK) pe.style.top = Math.round(M) + 'px';
+    g = { ...g, rTo, box: { ...b, y: b.y + M - (t0 + t1) / 2 } }; sc = SC[v](g); sc.g = g; return sc;
+  }
 }
 /* sheep not in a scene go up to the ridge: the rest of the flock, still hefted, further off.
    On a phone only one thin row shows; the rest are over the brow. */
@@ -477,28 +585,34 @@ const SC = {};
 
 SC.hill = (g) => {
   const land = document.getElementById('land').getBoundingClientRect();
-  const ex = { l: land.left - 30, r: land.right + 40, t: land.top - 34 };
-  /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it */
-  let cw = Math.max(W, H) / 9, cells;
+  const ex = { l: land.left - 30, r: land.right + 40, t: land.top - (MOB ? 30 : 34) };
+  /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it.
+     A big screen sizes the patches so the whole flock grazes the near slope. A phone keeps them
+     big enough to read, takes as many as fit whole above the name, and leaves the rest of the
+     flock up on the ridge, as every other view does. */
+  let cw = MOB ? (W - 24) / 4.4 : Math.max(W, H) / 9, cells;
   for (let it = 0; it < 60; it++) {
-    const ch = cw * .5, cand = [];
+    const ch = cw * .5, cand = [], step = cw * .5;
+    /* on a phone the lattice is centred and every patch lies whole inside the width */
+    const nx = MOB ? Math.floor((W - 2 * (cw * .45 + 6)) / step) + 1 : 0, x0 = MOB ? (W - (nx - 1) * step) / 2 : cw * .5;
     for (let j = 0; ; j++) {
       const y = g.rTo + ch * .9 + j * ch * .5; if (y > H - ch * .6) break;
       for (let i = 0; ; i++) {
-        const x = cw * .5 + i * cw * .5; if (x > W - cw * .4) break;
+        const x = x0 + i * step; if (MOB ? i >= nx : x > W - cw * .4) break;
         if ((i + j) % 2) continue;
         if (y < rY(x, g.pTo, g.rTo) + ch * .9) continue;
-        if (x > ex.l && x < ex.r && y > ex.t) continue;
+        if (x > ex.l && x < ex.r && y > ex.t - (MOB ? ch * .6 : 0)) continue;
         cand.push([x, y]);
       }
     }
     const r = mb(11); for (let i = cand.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]]; }
     cells = [];
-    for (const c of cand) { if (cells.length >= N) break; if (!cells.some(q => Math.abs(q[0] - c[0]) < cw * .6 && Math.abs(q[1] - c[1]) < ch * .6)) cells.push(c); }
-    if (cells.length >= N && cand.length >= N / .3) break; cw *= .95;
+    for (const c of cand) { if (cells.length >= N) break; if (!cells.some(q => Math.abs(q[0] - c[0]) < cw * .6 && Math.abs(q[1] - c[1]) < ch * (MOB ? 1.1 : .6))) cells.push(c); }
+    if (MOB ? cells.length >= 3 || cw < 56 : cells.length >= N && cand.length >= N / .3) break; cw *= .95;
   }
   const ch = cw * .5, s = Math.min(cw * .36, 46), slots = [];
-  for (let i = 0; i < N; i++) { const [x, y] = cells[i]; slots.push({ x, y: y + ch * .12, s, a: 1, rx: cw * .19, ry: ch * .19, cx: x, cy: y }); }
+  if (!cells.length) cells.push([W * .7, Math.min(ex.t - ch * .6, g.rTo + ch * 2)]);
+  for (const [x, y] of cells) slots.push({ x, y: y + ch * .12, s, a: 1, rx: cw * .19, ry: ch * .19, cx: x, cy: y });
   /* walled fields: dykes run along the cell lattice, between patches, every few cells in each
      direction. A run breaks off here and there, and some breaks are gates between two posts. */
   const Y0 = g.rTo + ch * .9, cp = (A, B) => [cw * .5 + (A - B) * cw * .5, Y0 + (A + B) * ch * .5];
@@ -518,7 +632,7 @@ SC.hill = (g) => {
       }
     }
   });
-  const rp = MOB ? [W * .8, g.rTo + (H - g.rTo) * .42] : [W * .36, g.rTo + (H - g.rTo) * .22];
+  const rp = MOB ? [W * .66, g.rTo + (ex.t - g.rTo) * .45] : [W * .36, g.rTo + (H - g.rTo) * .22];
   let redSlot = 0; slots.forEach((l, j) => { if (Math.hypot(l.cx - rp[0], l.cy - rp[1]) < Math.hypot(slots[redSlot].cx - rp[0], slots[redSlot].cy - rp[1])) redSlot = j; });
   return {
     slots, redSlot, ids: [], key: 0,
@@ -846,32 +960,120 @@ SC.authority = (g) => {
   };
 };
 
+/* an agent: a standing figure, feet at (x, y), h tall. Same flat ink as the ram-mark, built from
+   blocks: a round head, a coat squared at the shoulders and wider at the hem, two legs. step
+   swings the legs while it walks; face turns the head a hair toward where it looks. */
+function agent(x, y, h, face, a, step) {
+  if (a <= .01) return;
+  const u = h / 10, sw = (step || 0) * u * .7;
+  ctx.save(); ctx.globalAlpha = a * .09; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x, y + u * .15, u * 2.6, u * .7, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = a; ctx.fillStyle = INK; ctx.beginPath();
+  ctx.roundRect(x - u * 1.55 - sw * .4, y - u * 3.6, u * 1.25, u * 3.6, u * .25);
+  ctx.roundRect(x + u * .3 + sw * .4, y - u * 3.6, u * 1.25, u * 3.6, u * .25);
+  ctx.moveTo(x - u * 1.6, y - u * 7.1); ctx.lineTo(x + u * 1.6, y - u * 7.1); ctx.lineTo(x + u * 2, y - u * 3.2); ctx.lineTo(x - u * 2, y - u * 3.2); ctx.closePath();
+  ctx.moveTo(x + u * .25 * face + u * 1.25, y - u * 8.85); ctx.arc(x + u * .25 * face, y - u * 8.85, u * 1.25, 0, Math.PI * 2);
+  ctx.fill(); ctx.restore();
+}
+/* Local. Agents read the flock: each stands on one patch, sees that patch and the two it names, and
+   nothing else on the hill. Their views never overlap; each moves on to a new patch in turn. */
+const LOCAL_ROTA = {};
 SC.local = (g) => {
-  const b = g.box, ids = [];
-  const cw = Math.min(b.w * .78 / 3.5, b.h * .72 / 1.75), ch = cw * .5, s = Math.min(cw * .34, 40 * VS);
-  const P = isoGrid(b.x + b.w * .5, b.y + b.h * .55, 4, 3, cw);
-  const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .1, s, a: 1, rx: cw * .16, ry: ch * .16, slot: k }));
-  const cairn = [[.06, .14], [.95, .12], [.96, .9], [.05, .92]].map(([u, v]) => [b.x + b.w * u, b.y + b.h * v]);
-  const C = 150, order = [5, 2, 9, 0, 7, 11, 4, 1, 10, 6, 3, 8];
-  const focus = t => order[Math.floor(t / C) % 12];
-  const names = k => { const a = Math.floor(hh(k, 3) * 4); return [a, (a + 1 + Math.floor(hh(k, 6) * 3)) % 4]; };
-  const fa = t => { const u = (t % C) / C; return sm(u / .18) * (1 - sm((u - .82) / .18)); };
+  const b = g.box, ids = [], CO = 4, NP = 12;
+  const cw = Math.min(b.w * (MOB ? .96 / 3.4 : .92 / 3.9), b.h * .8 / 2.3, 210 * VS), ch = cw * .5, s = Math.min(cw * .32, 40 * VS), ah = s * 1.3;
+  const P = isoGrid(b.x + b.w * .5, b.y + b.h * .56, CO, 3, cw);
+  const slots = P.map((p, k) => ({ x: p[0] + cw * .1, y: p[1] + ch * .1, s, a: 1, rx: cw * .06, ry: ch * .1, slot: k }));
+  /* where an agent stands on a patch: its left corner, turned to the sheep */
+  const stand = k => [P[k][0] - cw * .17, P[k][1] + ch * .12];
+  const nA = !MOB && W >= 1500 ? 3 : 2, C = 600, WALK = 80;
+  /* the rota: jobs start in turn, one agent every C / nA ticks. A new job (a patch and the two
+     patches it names) shares no patch with any job running when it starts, nor with that agent's
+     last; of those, it takes one whose sight-lines are short, cross no other agent's, pass by no
+     other agent's patch, and whose own patch keeps a patch's width from where the others stand. */
+  const R = 240, jobs = LOCAL_ROTA[nA] || (LOCAL_ROTA[nA] = rota(nA));
+  /* the rota is the same for every layout, so it is drawn up once for each number of agents */
+  function rota(nA) {
+    const jobs = Array.from({ length: nA }, () => []), rnd = mb(57);
+    const uv = k => [k % CO, Math.floor(k / CO)];
+    const cross = (A, B, C2, D) => { const o = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])); return o(A, B, C2) * o(A, B, D) < 0 && o(C2, D, A) * o(C2, D, B) < 0; };
+    const pass = (A, B, Q) => { const dx = B[0] - A[0], dy = B[1] - A[1], f = cl01(((Q[0] - A[0]) * dx + (Q[1] - A[1]) * dy) / (dx * dx + dy * dy)); return Math.hypot(A[0] + dx * f - Q[0], A[1] + dy * f - Q[1]) < .45; };
+    for (let r = 0; r < R; r++) for (let a = 0; a < nA; a++) {
+      const others = []; for (let o = 0; o < nA; o++) if (o !== a) { const J = o < a ? jobs[o][r] : jobs[o][r - 1]; if (J) others.push(J); }
+      const busy = new Set(r ? jobs[a][r - 1] : []); others.forEach(J => J.forEach(k => busy.add(k)));
+      const free = []; for (let k = 0; k < NP; k++) if (!busy.has(k)) free.push(k);
+      const lines = others.flatMap(J => [[uv(J[0]), uv(J[1])], [uv(J[0]), uv(J[2])]]);
+      let best = null, bs = 1e9;
+      for (const h of free) for (const n1 of free) for (const n2 of free) {
+        if (n1 === h || n2 <= n1 || n2 === h) continue;
+        const H2 = uv(h), mine = [[H2, uv(n1)], [H2, uv(n2)]];
+        let sc = Math.hypot(...uv(n1).map((x, q) => x - H2[q])) + Math.hypot(...uv(n2).map((x, q) => x - H2[q])) + rnd() * 1.6;
+        for (const J of others) { const O = uv(J[0]); if (Math.abs(O[0] - H2[0]) <= 1 && Math.abs(O[1] - H2[1]) <= 1) sc += 4; for (const m of mine) if (pass(m[0], m[1], O)) sc += 5; }
+        for (const m of mine) for (const l of lines) { if (cross(m[0], m[1], l[0], l[1])) sc += 6; if (pass(l[0], l[1], H2)) sc += 5; }
+        if (sc < bs) { bs = sc; best = [h, n1, n2]; }
+      }
+      jobs[a].push(best);
+    }
+    return jobs;
+  }
+  /* agent a at tick t: its job, how far into it, how lit its view is */
+  const st = (a, t) => {
+    const v = t + (nA - a) * C / nA, r = Math.floor(v / C), f = v - r * C, J = jobs[a][r % R], Jp = jobs[a][(r + R - 1) % R];
+    const w = ease(cl01(f / WALK)), from = stand(Jp[0]), to = stand(J[0]);
+    const vis = sm((f - WALK + 10) / 40) * (1 - sm((f - C + 50) / 40));
+    return { J, x: lerp(from[0], to[0], w), y: lerp(from[1], to[1], w), walking: f < WALK, f, vis, face: f < WALK ? (to[0] >= from[0] ? 1 : -1) : 1 };
+  };
+  /* how lit each patch is: its own (an agent stands on it) or named */
+  const lit = t => {
+    const own = new Float32Array(NP), nm = new Float32Array(NP);
+    for (let a = 0; a < nA; a++) { const q = st(a, t); own[q.J[0]] = Math.max(own[q.J[0]], q.vis); nm[q.J[1]] = Math.max(nm[q.J[1]], q.vis); nm[q.J[2]] = Math.max(nm[q.J[2]], q.vis); }
+    return [own, nm];
+  };
   return {
-    slots, redSlot: 5, ids, key: 40,
-    ext: [Math.min(cairn[0][1] - 14, cairn[1][1] - 14, ...slots.map(l => l.y - s - 3)), Math.max(cairn[2][1] + 4, cairn[3][1] + 4, ...P.map(p => p[1] + ch * .44 + 3))],
+    slots, redSlot: 5, ids, key: 135, start: 100,
+    ext: [Math.min(...P.map(p => p[1] + ch * .14 - ah - 30)), Math.max(...P.map(p => p[1] + ch * .44 + 3))],
     pose(i, l, t) {
-      const g2 = graze(i * 7 + 3, gT), f = focus(t) === l.slot ? fa(t) : 0;
-      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: g2[2], a: (i === REDI ? .6 : .32) + (i === REDI ? .4 : .68) * f };
+      const g2 = graze(i * 7 + 3, gT), [own, nm] = lit(t), o = own[l.slot], n = nm[l.slot];
+      const base = i === REDI ? .55 : .22;
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: o > .5 ? -1 : g2[2], a: base + (1 - base) * Math.max(o, n * .55) };
     },
     ground(t, a) {
-      const fk = focus(t), f = fa(t);
-      P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (k === fk ? .6 + .4 * f : .6), k === fk ? GROUND2 : GROUND));
-      const nm = names(fk), r = rend[ids[fk]];
-      nm.forEach(c => dashed([[r.x, r.y - s * .4], cairn[c]], a * f * .5));
-      cairn.forEach((c, k) => {
-        const on = nm.includes(k) ? f : 0; ctx.globalAlpha = a * (.35 + .65 * on); ctx.fillStyle = INK;
-        ctx.fillRect(c[0] - 7, c[1] - 3, 14, 5); ctx.fillRect(c[0] - 5, c[1] - 8, 10, 4.5); ctx.fillRect(c[0] - 3, c[1] - 12.5, 6, 4); ctx.globalAlpha = 1;
-      });
+      const [own, nm] = lit(t);
+      P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (.42 + .58 * Math.max(own[k], nm[k] * .6))));
+      for (let a2 = 0; a2 < nA; a2++) {
+        const q = st(a2, t), p = P[q.J[0]], v = q.vis * a; if (v <= .01) continue;
+        /* its view: the patch it stands on, lit, with a soft fan from its eyes across it */
+        fillDia(p[0], p[1], cw * .44, ch * .44, GROUND2, v);
+        ctx.save(); ctx.globalAlpha = v * .5; ctx.strokeStyle = INK; ctx.lineWidth = 1; dia(p[0], p[1], cw * .44, ch * .44); ctx.stroke(); ctx.restore();
+        const ex = q.x, ey = q.y - ah * .86;
+        const gr = ctx.createLinearGradient(ex, ey, p[0] + cw * .3, p[1]);
+        gr.addColorStop(0, 'rgba(17,17,15,.13)'); gr.addColorStop(1, 'rgba(17,17,15,0)');
+        ctx.save(); ctx.globalAlpha = v; ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(ex, ey);
+        ctx.lineTo(p[0] + cw * .2, p[1] - ch * .42); ctx.lineTo(p[0] + cw * .44, p[1]); ctx.lineTo(p[0] + cw * .2, p[1] + ch * .42); ctx.closePath(); ctx.fill(); ctx.restore();
+        /* the two things it names: an outline on their ground, a dashed sight-line to each */
+        q.J.slice(1).forEach(k => {
+          const n = P[k]; ctx.save(); ctx.globalAlpha = v * .45; ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.setLineDash([3, 4]); dia(n[0], n[1], cw * .4, ch * .4); ctx.stroke(); ctx.restore();
+          dashed([[ex + 3, ey], [n[0], n[1] - ch * .05]], v * .55);
+        });
+      }
+    },
+    over(t, a) {
+      for (let a2 = 0; a2 < nA; a2++) {
+        const q = st(a2, t), step = q.walking ? Math.sin(q.f * .45) * (1 - sm((q.f - WALK + 12) / 12)) : 0;
+        agent(q.x, q.y, ah, q.face, a, step);
+        if (a2 === 0) { const hy = q.y - ah; note('agent', q.x + 6, hy - 20, a * .9, { to: [q.x + 1, hy - 5] }); }
+        if (a2 === 1) {
+          /* on one of its sight-lines, at the point with the most clear ground round it */
+          const ex = q.x + 3, ey = q.y - ah * .86, others = [0, 1, 2].slice(0, nA).map(o => st(o, t));
+          let best = null, bc = -1;
+          for (const k of [q.J[1], q.J[2]]) for (let f = .3; f <= .8; f += .05) for (const sd of [-1, 1]) {
+            const n = P[k], dx = n[0] - ex, dy = n[1] - ey, dl = Math.hypot(dx, dy) || 1, x = lerp(ex, n[0], f) + dy / dl * 12 * sd, y = lerp(ey, n[1], f) - dx / dl * 12 * sd - 2;
+            let c = 1e9;
+            for (const l of slots) c = Math.min(c, Math.hypot((x - l.x) * .55, y - (l.y - s * .5)) - s * .45);
+            for (const o of others) c = Math.min(c, Math.hypot((x - o.x) * .55, y - (o.y - ah * .6)) - ah * .4, Math.hypot((x - o.x) * .55, y - (o.y - ah - 20)) - 8);
+            if (c > bc) { bc = c; best = [x, y]; }
+          }
+          note('names', best[0], best[1], a * .8 * q.vis);
+        }
+      }
     },
   };
 };
@@ -881,8 +1083,10 @@ SC.local = (g) => {
    one that names its signature; the checker visits just those two. Run: rams walk straight lanes. */
 SC.fast = (g) => {
   const b = g.box, ids = [], n = 5;
-  const bh = b.h * .5, cw = Math.min(b.w / 5.7, bh * .9, MOB ? 78 : 118 * VS), ch = cw * .5, s = Math.min(cw * .36, 38 * VS);
-  const stepX = cw * 1.06, x0 = b.x + b.w * .5 - (n - 1) * stepX / 2, y0 = b.y + bh * (MOB ? .5 : .46);
+  /* one composition, sized in patch widths: the track runs under the row it serves, as long as the
+     row plus a little either side, one steady gap below it; its labels share the track's left edge */
+  const ov = MOB ? .25 : .45, cw = Math.min(b.w / (5.24 + 2 * ov + .1), (b.h - 24) / 2.62, MOB ? 78 : 118 * VS), ch = cw * .5, s = Math.min(cw * .36, 38 * VS);
+  const stepX = cw * 1.06, x0 = b.x + b.w * .5 - (n - 1) * stepX / 2, y0 = b.y + cw * .98 + 9;
   const P = []; for (let k = 0; k < n; k++) P.push([x0 + k * stepX, y0 + (k - (n - 1) / 2) * stepX * .16]);
   const CH = 1, NM = 3;                       /* the red definition changes; definition 3 names its signature */
   const FIRST = 40, VIS = 34, F_END = FIRST + n * VIS + 40;
@@ -906,8 +1110,8 @@ SC.fast = (g) => {
   /* run: one straight track from post to post, parallel to the build row; rams walk it in file
      at one steady pace, no turn, no stop */
   const slope = .16, L = 3, RUNP = 300;
-  const tA = [b.x + b.w * (MOB ? .04 : .06), b.y + b.h * (MOB ? .78 : .8) - slope * b.w * .44], tB = [b.x + b.w * (MOB ? .96 : .94), 0];
-  tB[1] = tA[1] + slope * (tB[0] - tA[0]);
+  const TW = (n - 1) * stepX + cw * (1 + 2 * ov), D = cw * 1.1 + 8;
+  const tA = [b.x + b.w * .5 - TW / 2, y0 + D - slope * TW / 2], tB = [b.x + b.w * .5 + TW / 2, y0 + D + slope * TW / 2];
   const runAt = (k, t) => { const d = ((t / RUNP + k / L) % 1 + 1) % 1; return [lerp(tA[0], tB[0], d), lerp(tA[1], tB[1], d), d]; };
   const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .08, s, a: 1, rx: cw * .14, ry: ch * .14, slot: k }));
   for (let k = 0; k < L; k++) { const q = runAt(k, 0); slots.push({ x: q[0], y: q[1], s, a: 1, rx: 0, ry: 0, slot: n + k }); }
@@ -934,8 +1138,8 @@ SC.fast = (g) => {
       ctx.globalAlpha = a * .22; ctx.strokeStyle = PEAT_D; ctx.lineWidth = 1; ctx.beginPath();
       ctx.moveTo(tA[0], tA[1] - hw); ctx.lineTo(tB[0], tB[1] - hw); ctx.moveTo(tA[0], tA[1] + hw); ctx.lineTo(tB[0], tB[1] + hw); ctx.stroke(); ctx.restore();
       post(tA[0], tA[1] + 1, a * .85, MOB ? 1.5 : 1.9); post(tB[0], tB[1] + 1, a * .85, MOB ? 1.5 : 1.9);
-      note('build', b.x, Math.min(...P.map(p => p[1])) - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
-      note('run', b.x, tA[1] - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
+      note('build', tA[0], Math.min(...P.map(p => p[1])) - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
+      note('run', tA[0], tA[1] - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
     },
     over(t, a) { const st = at(t); if (st.tok >= 0 && st.ta > .01) { const q = tokXY(st.tok); token(q[0], q[1], a * st.ta); } },
   };
@@ -1068,8 +1272,10 @@ function bindScene(sc, rof) {
 
 /* ---------- engine: fixed-step ticks, so every run of the page is the same run ---------- */
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let scene = null, prevScene = null, prevT = 0, view = null;
-let gT = 0, sT = 0, tr = 1, arr = -1;
+/* scenes on their way out, each on its own clock, fading from the alpha it had when it was left:
+   a second step taken mid-walk fades what is on screen from where it stood, never re-shows it */
+let scene = null, fading = [], view = null;
+let gT = 0, sT = 0, tr = 1, arr = -1, refit = false;
 const TR = 104;
 const rend = Array.from({ length: N }, () => ({ x: 0, y: 0, s: 0, a: 0, face: 1 }));
 let snap = null, hop = new Float32Array(N);
@@ -1077,7 +1283,7 @@ let snap = null, hop = new Float32Array(N);
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1); W = innerWidth; H = innerHeight; MOB = W <= 700; STACK = W <= 900; VS = Math.max(1, Math.min(1.3, W / 1280, H / 900));
   cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  makeGrain();
+  makeGrain(); SKY = null;
 }
 function build(v) {
   const g = geom(v); let sc = SC[v](g); sc.g = g;
@@ -1142,7 +1348,12 @@ function setView(v, first) {
   renderDom(v);
   const instant = first || reduced;
   try { history.replaceState(null, '', v === 'hill' ? location.pathname : '#' + v); } catch (e) {}
-  prevScene = instant ? null : scene; prevT = sT;
+  if (instant) fading = [];
+  else {
+    const e0 = ease(Math.min(1, tr)), og = 1 - sm(e0 * 1.6), oo = 1 - sm(e0 * 1.5);
+    fading = fading.map(f => ({ ...f, g: f.g * og, o: f.o * oo })).filter(f => f.g > .01 || f.o > .01);
+    if (scene) fading.push({ sc: scene, t: sT, g: sm((e0 - .35) / .65) * (arr >= 0 ? sm(arr / 54) : 1), o: sm((e0 - .5) / .5) * (arr >= 0 ? sm((arr - 40) / 40) : 1) });
+  }
   snap = rend.map(r => ({ ...r }));
   scene = build(v);
   bindScene(scene, assign(scene, first ? null : snap));
@@ -1153,7 +1364,7 @@ function setView(v, first) {
   if (first) {
     const lk = document.querySelector('header .links'), wk = $('panel').querySelector('.walk');
     if (v === 'hill') textIn([...$('land').children, lk], [8, 36, 42, 54, 60]);
-    else textIn([$('wm'), $('idx'), lk, $('pTitle'), $('pBody'), $('det'), wk], [8, 12, 16, 30, 35, 40, 45]);
+    else textIn([$('wm'), $('idx'), lk, $('pTitle'), $('pBody'), $('det'), wk, $('bar')], [8, 12, 16, 30, 35, 40, 45, 45]);
   }
   if (instant) { pan = panB; rb = rbB; }
   if (!instant) plan();
@@ -1193,18 +1404,18 @@ function draw() {
   if (tr < 1) { pan = lerp(panA, panB, e); rb = lerp(rbA, rbB, e); } else { pan = panB; rb = rbB; }
   hillLayer();
   const ga = arr >= 0 ? sm(arr / 54) : 1;
-  if (prevScene && tr < 1) { prevScene.ground && prevScene.ground(prevT, 1 - sm(e * 1.6)); }
+  if (tr < 1) for (const f of fading) f.sc.ground && f.sc.ground(f.t, f.g * (1 - sm(e * 1.6)));
   scene.ground && scene.ground(sT, sm((e - .35) / .65) * ga);
   const order = rend.map((r, i) => i).sort((p, q) => rend[p].y - rend[q].y);
   for (const i of order) { const r = rend[i]; sheep(r.x, r.y, r.s, r.face, i === REDI, r.a); }
-  if (prevScene && tr < 1 && prevScene.over) prevScene.over(prevT, 1 - sm(e * 1.5));
+  if (tr < 1) for (const f of fading) f.sc.over && f.sc.over(f.t, f.o * (1 - sm(e * 1.5)));
   scene.over && scene.over(sT, sm((e - .5) / .5) * (arr >= 0 ? sm((arr - 40) / 40) : 1));
 }
 function tick() {
-  gT++; sT++; if (tr < 1) tr = Math.min(1, tr + 1 / TR);
+  gT++; sT++; if (tr < 1) { tr = Math.min(1, tr + 1 / TR); if (tr >= 1 && refit) { refit = false; rebuild(); } }
   if (arr >= 0 && ++arr > ARR_END) arr = -1;
   if (txt) txt.t++;
-  if (prevScene && tr < 1) prevT++;
+  if (tr < 1) for (const f of fading) f.t++;
 }
 let last = null, acc = 0, lastFrame = 0;
 function advance(now) {
@@ -1221,7 +1432,7 @@ document.addEventListener('visibilitychange', () => { last = null; acc = 0; });
 
 /* ---------- page ---------- */
 const $ = id => document.getElementById(id);
-const strip = $('strip'), idxBtns = [...strip.querySelectorAll('button')];
+const strip = $('strip'), idxBtns = [...strip.querySelectorAll('button')], list = $('list'), listBtns = [...list.querySelectorAll('ol button')], ticks = [...$('ticks').children];
 /* words arrive as the flock settles, on the flock's own tick clock: the old text goes at once and
    the new rises in behind the walk. Only opacity and transform are written, never read back. */
 const EASE = 'cubic-bezier(.16,1,.3,1)';
@@ -1240,28 +1451,39 @@ function paintText() {
   }
   if (done) txt = null;
 }
+/* a view's words into a panel: the live one, or the hidden stand-in that measures them */
+function fillPanel(root, v) {
+  const i = VIEWS.indexOf(v), c = COPY[v], q = sel => root.querySelector(sel);
+  q('h2').textContent = c[1];
+  /* a body is one paragraph, or a lead and labelled halves */
+  const pb = q('.body'); pb.replaceChildren();
+  for (const part of [].concat(Array.isArray(c[2]) ? c[2] : [c[2]])) {
+    if (typeof part === 'string') { const p = document.createElement('p'); p.textContent = part; pb.append(p); continue; }
+    const d = document.createElement('div'), b = document.createElement('b'), p = document.createElement('p');
+    d.className = 'half'; b.textContent = part[0]; p.textContent = part[1]; d.append(b, p); pb.append(d);
+  }
+  const pv = i > 0 ? VIEWS[i - 1] : null, nx = i < VIEWS.length - 1 ? VIEWS[i + 1] : null, wb = q('.walk').children;
+  wb[0].hidden = !pv; wb[0].querySelector('span').textContent = pv ? COPY[pv][0] : '';
+  wb[1].hidden = !nx; wb[1].querySelector('span').textContent = nx ? COPY[nx][0] : '';
+  q('.det').hidden = v !== 'deterministic' || reduced;
+}
 function renderDom(v, quiet) {
   const hill = v === 'hill', i = VIEWS.indexOf(v), c = COPY[v], wasHill = $('panel').hidden;
   $('wm').hidden = hill; $('idx').hidden = hill; $('land').hidden = !hill; $('panel').hidden = hill;
-  idxBtns.forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  $('bar').hidden = hill; $('menuBtn').hidden = !hill;
+  [...idxBtns, ...listBtns].forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   if (!hill) {
-    $('pTitle').textContent = c[1];
-    /* a body is one paragraph, or a lead and labelled halves */
-    const pb = $('pBody'); pb.replaceChildren();
-    for (const part of [].concat(Array.isArray(c[2]) ? c[2] : [c[2]])) {
-      if (typeof part === 'string') { const p = document.createElement('p'); p.textContent = part; pb.append(p); continue; }
-      const d = document.createElement('div'), b = document.createElement('b'), p = document.createElement('p');
-      d.className = 'half'; b.textContent = part[0]; p.textContent = part[1]; d.append(b, p); pb.append(d);
-    }
-    const pv = i > 0 ? VIEWS[i - 1] : null, nx = i < VIEWS.length - 1 ? VIEWS[i + 1] : null;
-    $('prevBtn').hidden = !pv; $('prevBtn').querySelector('span').textContent = pv ? COPY[pv][0] : '';
-    $('nextBtn').hidden = !nx; $('nextBtn').querySelector('span').textContent = nx ? COPY[nx][0] : '';
-    $('sName').textContent = c[0]; $('sPrev').disabled = !pv; $('sNext').disabled = !nx;
+    fillPanel($('panel'), v);
+    const pv = VIEWS[i - 1], nx = VIEWS[i + 1];
+    $('bName').textContent = c[0]; ticks.forEach((t, k) => t.classList.toggle('on', k === i - 1));
+    $('bNow').setAttribute('aria-label', c[0] + ', ' + i + ' of ' + (VIEWS.length - 1) + '. All views');
+    $('bPrev').disabled = !pv; $('bPrev').setAttribute('aria-label', pv ? 'Back to ' + COPY[pv][0] : 'Back');
+    $('bNext').disabled = !nx; $('bNext').setAttribute('aria-label', nx ? 'On to ' + COPY[nx][0] : 'On');
   }
   $('det').hidden = v !== 'deterministic' || reduced;
   if (quiet) return;
   if (hill) textIn([...$('land').children], 26, 5);
-  else textIn([...(wasHill ? [$('wm'), $('idx')] : []), $('pTitle'), $('pBody'), $('det'), $('panel').querySelector('.walk')], view === null || arr >= 0 ? 20 : 30, 5);
+  else textIn([...(wasHill ? [$('wm'), $('idx')] : []), $('pTitle'), $('pBody'), $('det'), $('panel').querySelector('.walk'), ...(wasHill ? [$('bar')] : [])], view === null || arr >= 0 ? 20 : 30, 5);
 }
 function go(d) { setView(VIEWS[Math.max(0, Math.min(VIEWS.length - 1, VIEWS.indexOf(view) + d))]); }
 
@@ -1270,26 +1492,44 @@ const h0 = location.hash.slice(1);
 setView(VIEWS.includes(viewOf(h0)) ? viewOf(h0) : 'hill', true);
 if (!reduced) requestAnimationFrame(frame); else still();
 const rebuild = () => {
-  resize(); const keepT = sT, rof = scene.rof.slice();
+  resize(); if (!MOB && list.open) list.close();
+  const keepT = sT, rof = scene.rof.slice();
   renderDom(view, true);
   scene = build(view);
   /* the red ram keeps the red place, wherever the new layout put it */
   const was = rof.indexOf(REDI); if (was !== scene.rs) { rof[was] = rof[scene.rs]; rof[scene.rs] = REDI; }
   bindScene(scene, rof);
-  panB = pan = scene.g.pTo; rbB = rb = scene.g.rTo; prevScene = null; tr = 1; sT = keepT;
+  panB = pan = scene.g.pTo; rbB = rb = scene.g.rTo; fading = []; tr = 1; sT = keepT;
   if (reduced) still(); else { pose(); draw(); }
 };
 addEventListener('resize', rebuild);
 /* headings reflow when the web fonts arrive; re-measure the panel and landing block then */
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (tr >= 1) rebuild(); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { SKY = null; if (tr >= 1) rebuild(); else refit = true; });
 
 $('wm').addEventListener('click', () => setView('hill'));
 $('walkIn').addEventListener('click', () => go(1));
 $('prevBtn').addEventListener('click', () => go(-1));
 $('nextBtn').addEventListener('click', () => go(1));
 idxBtns.forEach(b => b.addEventListener('click', () => setView(b.dataset.v)));
-$('sPrev').addEventListener('click', () => go(-1));
-$('sNext').addEventListener('click', () => go(1));
+$('bPrev').addEventListener('click', () => go(-1));
+$('bNext').addEventListener('click', () => go(1));
+/* the whole list: opened from where you are, closed by Escape, the cross, a tap outside or a choice */
+let opener = null;
+function openList(from) {
+  opener = from; from.setAttribute('aria-expanded', 'true'); list.showModal();
+  (list.querySelector('ol button[aria-current]') || listBtns[0]).focus();
+}
+list.addEventListener('close', () => {
+  if (!opener) return; opener.setAttribute('aria-expanded', 'false');
+  /* a jump can hide the button that opened the list; then focus goes to the one that shows now */
+  const back = opener.offsetParent ? opener : view === 'hill' ? $('menuBtn') : $('bNow'); opener = null;
+  if (back.offsetParent) back.focus({ preventScroll: true });
+});
+$('bNow').addEventListener('click', e => openList(e.currentTarget));
+$('menuBtn').addEventListener('click', e => openList(e.currentTarget));
+$('listX').addEventListener('click', () => list.close());
+list.addEventListener('click', e => { const r = list.getBoundingClientRect(); if (e.target === list && (e.clientY < r.top || e.clientX < r.left || e.clientX > r.right)) list.close(); });
+listBtns.forEach(b => b.addEventListener('click', () => { const v = b.dataset.v; list.close(); setView(v); }));
 /* replay: wind the run back and play it again over the prints already on the ground */
 $('replayBtn').addEventListener('click', () => {
   if (view !== 'deterministic' || tr < 1) return;
@@ -1297,8 +1537,57 @@ $('replayBtn').addEventListener('click', () => {
   /* the mark turns back once, as the run does */
   const ic = $('replayBtn').querySelector('svg'); if (ic && ic.animate) ic.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(-360deg)' }], { duration: 700, easing: EASE });
 });
-addEventListener('hashchange', () => { const h = viewOf(location.hash.slice(1)); if (VIEWS.includes(h)) setView(h); });
-addEventListener('keydown', e => { if (e.target.closest && e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1); });
+addEventListener('hashchange', () => { const h = viewOf(location.hash.slice(1)); if (list.open) list.close(); if (VIEWS.includes(h)) setView(h); });
+addEventListener('keydown', e => {
+  swiped = false;
+  if (list.open) {
+    /* up and down walk the list; everything else is the dialog's own (Tab, Escape) */
+    const k = listBtns.indexOf(document.activeElement), d = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    if (d) { e.preventDefault(); listBtns[(k + d + listBtns.length) % listBtns.length].focus(); }
+    return;
+  }
+  if (e.target.closest && e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1);
+});
+/* swipe: a sideways stroke walks one view, left on and right back, through the same go() as every
+   other control. A stroke must commit sideways early (otherwise it is the panel's scroll), go far
+   enough or fast enough, and not start in the edge band where a phone's own back gesture lives. */
+const SW = { EDGE: 24, SLOP: 10, FAR: .18, MIN: 56, FLICK: 28, VEL: .35 };
+let sw = null, swiped = false;
+const touching = new Set(), vv = window.visualViewport, zoomed = () => !!vv && vv.scale > 1.01;
+if (vv) vv.addEventListener('resize', () => document.documentElement.classList.toggle('zoomed', zoomed()));
+addEventListener('pointerdown', e => {
+  swiped = false; if (e.pointerType === 'mouse') return;
+  touching.add(e.pointerId);
+  if (touching.size > 1 || list.open || zoomed() || e.clientX < SW.EDGE || e.clientX > innerWidth - SW.EDGE) { sw = null; return; }
+  sw = { id: e.pointerId, x: e.clientX, y: e.clientY, lock: '', pts: [[e.clientX, e.timeStamp]] };
+}, true);
+addEventListener('pointermove', e => {
+  if (!sw || e.pointerId !== sw.id) return;
+  const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+  if (!sw.lock && Math.hypot(dx, dy) > SW.SLOP) sw.lock = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'x' : 'y';
+  if (sw.lock === 'y') { sw = null; return; }
+  sw.pts.push([e.clientX, e.timeStamp]); if (sw.pts.length > 6) sw.pts.shift();
+}, true);
+const endTouch = e => {
+  touching.delete(e.pointerId);
+  if (!sw || e.pointerId !== sw.id) return;
+  const s = sw; sw = null;
+  if (e.type !== 'pointerup' || s.lock !== 'x' || list.open) return;
+  const dx = e.clientX - s.x, dy = e.clientY - s.y;
+  if (Math.abs(dx) < Math.abs(dy) * 1.2) return;
+  /* speed over the last few samples, in the stroke's own direction */
+  const p0 = s.pts.find(p => e.timeStamp - p[1] <= 100) || s.pts[0], v = (e.clientX - p0[0]) / Math.max(1, e.timeStamp - p0[1]);
+  const far = Math.abs(dx) >= Math.max(SW.MIN, innerWidth * SW.FAR), flick = Math.abs(dx) >= SW.FLICK && Math.abs(v) >= SW.VEL && Math.sign(v) === Math.sign(dx);
+  if (!far && !flick) return;
+  if (getSelection && String(getSelection()).length) return;
+  swiped = true; go(dx < 0 ? 1 : -1);
+};
+/* once a stroke is ours, the browser makes no scroll or fling of it, so the next tap is a plain tap */
+addEventListener('touchmove', e => { if (sw && sw.lock === 'x' && e.cancelable) e.preventDefault(); }, { passive: false });
+addEventListener('pointerup', endTouch, true);
+addEventListener('pointercancel', endTouch, true);
+/* the tap a stroke ends on is not also a press */
+addEventListener('click', e => { if (swiped) { swiped = false; e.preventDefault(); e.stopPropagation(); } }, true);
 const nearRed = (x, y) => { const r = rend[REDI]; return Math.hypot(x - r.x, y - (r.y - r.s * .45)) < Math.max(18, r.s * .6); };
 cv.addEventListener('click', e => { if (view === 'hill' && nearRed(e.clientX, e.clientY)) go(1); });
 cv.addEventListener('mousemove', e => { cv.style.cursor = view === 'hill' && nearRed(e.clientX, e.clientY) ? 'pointer' : ''; });

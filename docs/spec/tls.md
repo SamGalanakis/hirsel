@@ -11,8 +11,6 @@ A `Secret` is a credential that program code cannot read. Its bytes are held by 
 outside program memory. The one operation that sends them, `tls.send_secret`, writes them
 on a TLS stream whose verified name the secret permits.
 
-The declarations for later slices use `hirsel unbuilt` fences.
-
 ## Types
 
 Module `tls` declares `connect` and `send_secret`. Module `secret` declares `seal`,
@@ -185,8 +183,8 @@ operations.
 |---|---|---|
 | 22 | `TLS_CONNECT` | C, I, D |
 | 23 | `SEND_SECRET` | C, I, D |
-| next free | `SCRAM` (`secret.scram_sha256`) | C, I, D |
-| next free | `SCRAM_VERIFY` (`secret.scram_verify`) | C, D |
+| 68 | `SCRAM` (`secret.scram_sha256`) | C, I, D |
+| 69 | `SCRAM_VERIFY` (`secret.scram_verify`) | C, D |
 | 27 | `RECV_BOUNDED` on a TLS half | C, I, D, unchanged |
 | 26 | `SEND_PAIR` on a TLS half | C, I, D, unchanged |
 
@@ -350,7 +348,7 @@ sink with another algorithm follows the same rule.
 
 ### TLS-6: SCRAM-SHA-256
 
-```hirsel unbuilt
+```hirsel core
 pub opaque resource type Scram
 pub type ScramError = Denied | Transcript | Iterations | Binding | Net(NetError)
 pub fn scram_sha256(mut w: WriteHalf, s: Secret, client_first: Bytes, server_first: Bytes, before: Bytes, after: Bytes, until: Until) -> Result[Scram, ScramError] waits

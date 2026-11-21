@@ -189,7 +189,7 @@ fn echo_writer(take o: Stdout) -> bool waits {
 // ended, next waits until every task waits and returns None.
 // expect: run echo(tasks) = true
 fn echo(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let mut served = take s
     let child = task.spawn(tasks, bytes 65536, o, echo_writer)
     let first = match provide.next(mut served) {
@@ -238,7 +238,7 @@ fn lone_writer(take o: Stdout) -> bool waits {
 // to its taken call is Withdrawn, and the writer ends Cancelled.
 // expect: run withdrawn(tasks) = true
 fn withdrawn(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let mut served = take s
     let mut child = task.spawn(tasks, bytes 65536, o, lone_writer)
     let refused = match provide.next(mut served) {
@@ -281,7 +281,7 @@ fn seal(take s: Served[StreamOp]) {
 // Call afterwards changes nothing.
 // expect: run sealed(tasks) = true
 fn sealed(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let mut served = take s
     let a = task.spawn(tasks, bytes 65536, o, closed_writer)
     let b = task.spawn(tasks, bytes 65536, o, closed_writer)
@@ -302,8 +302,8 @@ fn sealed(tasks: Tasks) -> bool waits {
 // one: the reply is Withdrawn and its writer sees Closed with nothing written.
 // expect: run foreign_call(tasks) = true
 fn foreign_call(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
-    let (_, t) = provide.stderr(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
+    let (_, t) = provide.stderr(bytes 64, false)
     let mut served = take s
     let mut other = take t
     let child = task.spawn(tasks, bytes 65536, o, closed_writer)
@@ -699,4 +699,643 @@ fn dir_handle_room(tasks: Tasks) -> bool waits {
         Error(_) => false
     }
     closed && short && first
+}
+
+// expect: run provided_terminals() = true
+fn provided_terminals() -> bool waits {
+    let (o, s) = provide.stdout(bytes 64, true)
+    let (e, t) = provide.stderr(bytes 64, false)
+    let mut served_out = take s
+    let mut served_err = take t
+    let before = stdout.is_terminal(o) && !stderr.is_terminal(e)
+    let quiet = match provide.next(mut served_out) {
+        None => true,
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+    } && match provide.next(mut served_err) {
+        None => true,
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+    }
+    seal(take served_out)
+    seal(take served_err)
+    before && quiet && stdout.is_terminal(o) && !stderr.is_terminal(e)
+}
+
+fn net_answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+fn loopback(a: Addr, port: u16) -> bool {
+    a.port == port && match a.ip {
+        V4(x) => x == 2130706433,
+        _ => false
+    }
+}
+
+// Sends "he"+"llo" on the socket's write half and receives at most 4 bytes
+// on its read half, then drops the halves.
+fn exchange(take s: Socket) -> bool waits {
+    let (rh, wh) = net.split(take s)
+    let mut r = take rh
+    let mut w = take wh
+    let sent = match host.send_pair(mut w, string.as_bytes("he"), string.as_bytes("llo"), Never) {
+        Ok(k) => k == 5,
+        _ => false
+    }
+    let mut b: Bytes = list.with_capacity(8)
+    let got = match host.recv_bounded(mut r, mut b, 4, Never) {
+        Ok(k) => k == 4 && list.len(b) == 4 && b[0] == 0x61 && b[3] == 0x64,
+        _ => false
+    }
+    let _ = take r
+    let _ = take w
+    sent && got
+}
+
+// Listens, connects to the bound address, accepts, exchanges on the
+// connected socket, then drops every part and connects once more.
+fn net_client(take n: Net) -> bool waits {
+    let (listener, at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 80), 4))
+    let mut l = take listener
+    let client = result.unwrap(host.connect(n, at, Never))
+    let (accepted, from) = result.unwrap(host.accept(mut l, Never))
+    let exchanged = exchange(take client)
+    let _ = take accepted
+    let _ = take l
+    let again = match host.connect(n, at, Never) {
+        Ok(take s) => {
+            let _ = take s
+            true
+        },
+        Error(_) => false
+    }
+    loopback(at, 8080) && loopback(from, 5000) && exchanged && again
+}
+
+// Take the next call and expect Released(id, part), which Done acknowledges.
+fn net_released(mut s: Served[NetOp], id: u64, part: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Released(id: h, part: p) => h == id && match p {
+                    Whole => part == 0,
+                    Read => part == 1,
+                    Write => part == 2,
+                },
+                _ => false
+            }
+            op && net_answer(mut s, take call, Done)
+        },
+        None => false
+    }
+}
+
+// Take the next call, expect a Connect to 127.0.0.1:port, and issue
+// Socket(id).
+fn net_connect(mut s: Served[NetOp], id: u64, port: u16) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Connect(addr) => loopback(addr, port),
+                _ => false
+            }
+            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: port)))
+        },
+        None => false
+    }
+}
+
+// Served Net ports (core.md, Provide). The server binds the listen to port
+// 8080 as Listener(7), answers the connect with Socket(8) and the accept
+// with Socket(9) from 127.0.0.1:5000; takes the send's prefix and tail as
+// payload fields 1 and 2 and answers Count(5); stages "abcdef" for a receive
+// whose room the max of 4 clamps (fill takes 4) and answers Count(4). Each
+// dropped part reaches it as Released in drop order: the split socket's
+// halves as Read and Write, the unsplit socket and listener as Whole. A room
+// of 100 holds three ids (32 bytes each) and the 4 staged bytes, so
+// Socket(10) fits only once the drops refund the ids.
+// expect: run net_echo(tasks) = true
+fn net_echo(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 100)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, net_client)
+    let listened = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Listen(addr, backlog) => loopback(addr, 80) && backlog == 4,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Listener(7, Addr(ip: V4(2130706433), port: 8080)))
+        },
+        None => false
+    }
+    let connected = net_connect(mut served, 8, 8080)
+    let accepted = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Accept(listener) => listener == 7,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Socket(9, Addr(ip: V4(2130706433), port: 5000)))
+        },
+        None => false
+    }
+    let sent = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Send(socket, prefix, tail) => socket == 8 && prefix == 2 && tail == 3,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(8)
+            provide.payload(call, 1, mut p)
+            provide.payload(call, 2, mut p)
+            let data = list.len(p) == 5 && p[0] == 0x68 && p[2] == 0x6c && p[4] == 0x6f
+            op && data && net_answer(mut served, take call, Count(5))
+        },
+        None => false
+    }
+    let received = match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let op = match provide.net_op(c) {
+                Recv(socket, room, max) => socket == 8 && room == 4 && max == 4,
+                _ => false
+            }
+            let took = provide.fill(mut served, mut c, string.as_bytes("abcdef"))
+            op && took == 4 && net_answer(mut served, take c, Count(4))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let wholes = net_released(mut served, 9, 0) && net_released(mut served, 7, 0)
+    let again = net_connect(mut served, 10, 8080) && net_released(mut served, 10, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    listened && connected && accepted && sent && received && halves && wholes && again && client && quiet
+}
+
+// Consumes a handshake's result: true when it is Error(Denied).
+fn tls_denied(take r: Result[(ReadHalf, WriteHalf, Handshake), NetError]) -> bool {
+    match take r {
+        Ok(take stream) => {
+            let (take rh, take wh, _) = take stream
+            let _ = take rh
+            let _ = take wh
+            false
+        },
+        Error(Denied) => true,
+        Error(_) => false
+    }
+}
+
+// Dials 127.0.0.1:443 twice through the served Net: the first socket is
+// split and rejoined, then its handshake offers h2 and http/1.1 as
+// Alpha.Test; the second offers nothing as beta.test.
+fn tls_client(take n: Net) -> bool waits {
+    let at = Addr(ip: V4(2130706433), port: 443)
+    let dialed = result.unwrap(host.connect(n, at, Never))
+    // Split and rejoined in place, as STARTTLS does: the server sees neither.
+    let (rh, wh) = net.split(take dialed)
+    let first = result.unwrap(net.join(take rh, take wh))
+    let mut alpn: List[String] = list.new()
+    list.push(mut alpn, string.from("h2"))
+    list.push(mut alpn, string.from("http/1.1"))
+    let secured = match tls.connect(n, take first, string.from("Alpha.Test"), System, alpn, Never) {
+        Ok(take stream) => {
+            let (take r, take w, h) = take stream
+            let (p0, p1, p2, p3) = h.peer
+            let chosen = match h.protocol {
+                Some(p) => p == 1,
+                None => false
+            }
+            let _ = take r
+            let _ = take w
+            chosen && p0 == 1 && p1 == 2 && p2 == 3 && p3 == 0xffffffffffffffff
+        },
+        Error(_) => false
+    }
+    let second = result.unwrap(host.connect(n, at, Never))
+    let none: List[String] = list.new()
+    let refused = match tls.connect(n, take second, string.from("beta.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            false
+        },
+        Error(e) => match e {
+            Tls(f) => match f {
+                Alpn => true,
+                _ => false
+            },
+            _ => false
+        }
+    }
+    secured && refused
+}
+
+// A served Net's handshake is a Handshake call (core.md, Provide; NOTES 32):
+// the socket's id, the canonical name's length (payload field 1) and the
+// offer's ALPN wire bytes' length (field 2: each protocol after its length
+// byte), and whether the trust is System. Secured's protocol is the zero-
+// based index into the offer and its peer the digest's words, both as the
+// server gave them. The stream's halves drop as Read and Write; a Failed
+// reply is the client's error, and the socket the handshake consumed comes
+// back as Released Whole.
+// expect: run net_tls(tasks) = true
+fn net_tls(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, tls_client)
+    let dialed = net_connect(mut served, 8, 443)
+    let shaken = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket, name, alpn, system) => socket == 8 && name == 10 && alpn == 12 && system,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(32)
+            provide.payload(call, 1, mut p)
+            provide.payload(call, 2, mut p)
+            let data = list.len(p) == 22 && p[0] == 0x61 && p[9] == 0x74 && p[10] == 2 && p[11] == 0x68 && p[13] == 8 && p[21] == 0x31
+            let digest: (u64, u64, u64, u64) = (1, 2, 3, 0xffffffffffffffff)
+            op && data && net_answer(mut served, take call, Secured(Handshake(protocol: Some(1), peer: digest)))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let redialed = net_connect(mut served, 9, 443)
+    let failed = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket, name, alpn, system) => socket == 9 && name == 9 && alpn == 0 && system,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Failed(Tls(Alpn)))
+        },
+        None => false
+    }
+    let whole = net_released(mut served, 9, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && shaken && halves && redialed && failed && whole && client && quiet
+}
+
+type Crossing: send {
+    model: Net,
+    served: Net
+}
+
+// A model socket handed to the served Net, then a served socket handed to
+// the model Net (whose grant permits *.test): each handshake is Denied.
+fn crossing_client(take c: Crossing) -> bool waits {
+    let (listener, at) = result.unwrap(host.listen(c.model, Addr(ip: V4(2130706433), port: 0), 1))
+    let mut l = take listener
+    let plain = result.unwrap(host.connect(c.model, at, Never))
+    let none: List[String] = list.new()
+    let model_socket = tls_denied(tls.connect(c.served, take plain, string.from("alpha.test"), System, none, Never))
+    let virtual = result.unwrap(host.connect(c.served, Addr(ip: V4(2130706433), port: 8080), Never))
+    let empty: List[String] = list.new()
+    let served_socket = tls_denied(tls.connect(c.model, take virtual, string.from("alpha.test"), System, empty, Never))
+    let _ = take l
+    model_socket && served_socket
+}
+
+// A handshake goes only through the Net whose provider made the socket
+// (NOTES 32): a served Net cannot answer for a model socket, nor a model
+// Net for a served one. Each is Denied before any call, and the served
+// socket it consumed reaches its server only as Released Whole.
+// expect: run tls_crossing(network) = true
+fn tls_crossing(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (v, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, Crossing(model: n, served: v), crossing_client)
+    let dialed = net_connect(mut served, 8, 8080)
+    let whole = net_released(mut served, 8, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && whole && client && quiet
+}
+
+fn bad_secured(take s: Served[NetOp]) -> bool waits {
+    let mut served = take s
+    let dialed = net_connect(mut served, 8, 8080)
+    match provide.next(mut served) {
+        Some(take call) => {
+            let digest: (u64, u64, u64, u64) = (0, 0, 0, 0)
+            dialed && net_answer(mut served, take call, Secured(Handshake(protocol: Some(0), peer: digest)))
+        },
+        None => false
+    }
+}
+
+// core.md, Handles: Secured naming a protocol outside the offer (here an
+// empty one) fails the server with Fail, and the caller sees Reset.
+// expect: run net_tls_fail(tasks) = true
+fn net_tls_fail(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let server = task.spawn(tasks, bytes 65536, take s, bad_secured)
+    let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 8080), Never))
+    let none: List[String] = list.new()
+    let reset = match tls.connect(n, take socket, string.from("alpha.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            false
+        },
+        Error(e) => match e {
+            Reset => true,
+            _ => false
+        }
+    }
+    reset && fail_cause(task.join(take server))
+}
+
+// Take the next call, expect a Handshake on `socket` for alpha.test with no
+// offer, and answer Secured with no protocol.
+fn answer_handshake(mut s: Served[NetOp], socket: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket: h, name, alpn, system) => h == socket && name == 10 && alpn == 0 && system,
+                _ => false
+            }
+            let digest: (u64, u64, u64, u64) = (0, 0, 0, 0)
+            op && net_answer(mut s, take call, Secured(Handshake(protocol: None, peer: digest)))
+        },
+        None => false
+    }
+}
+
+fn sealed_pencil(to: String) -> Secret {
+    let b = string.into_bytes(string.from("pencil"))
+    result.unwrap(secret.seal(take b, to))
+}
+
+// Sends "Auth " ‖ pencil ‖ "\r\n" on a served alpha.test stream; a pencil
+// sealed to beta.test is Denied there for both sinks, and a plain half
+// Denies both for the alpha.test one. The plain socket's halves drop first.
+fn secret_client(take n: Net) -> bool waits {
+    let at = Addr(ip: V4(2130706433), port: 443)
+    let socket = result.unwrap(host.connect(n, at, Never))
+    let none: List[String] = list.new()
+    let alpha = sealed_pencil(string.from("alpha.test"))
+    let beta = sealed_pencil(string.from("beta.test"))
+    let empty: Bytes = list.new()
+    let client_first = string.as_bytes("n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
+    let server_first = string.as_bytes("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+    match tls.connect(n, take socket, string.from("alpha.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let mut wh = take w
+            let sent = match tls.send_secret(mut wh, string.as_bytes("Auth "), alpha, string.as_bytes("\r\n"), Never) {
+                Ok(_) => true,
+                Error(_) => false
+            }
+            let other_name = match tls.send_secret(mut wh, string.as_bytes("Auth "), beta, empty, Never) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let other_scram = match secret.scram_sha256(mut wh, beta, client_first, server_first, empty, empty, Never) {
+                Ok(take c) => {
+                    let _ = take c
+                    false
+                },
+                Error(e) => match e {
+                    Denied => true,
+                    _ => false
+                }
+            }
+            let plain = result.unwrap(host.connect(n, at, Never))
+            let (pr, pw) = net.split(take plain)
+            let mut ph = take pw
+            let plain_send = match tls.send_secret(mut ph, empty, alpha, empty, Never) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let plain_scram = match secret.scram_sha256(mut ph, alpha, client_first, server_first, empty, empty, Never) {
+                Ok(take c) => {
+                    let _ = take c
+                    false
+                },
+                Error(e) => match e {
+                    Denied => true,
+                    _ => false
+                }
+            }
+            let _ = take pr
+            let _ = take ph
+            let _ = take r
+            let _ = take wh
+            sent && other_name && other_scram && plain_send && plain_scram
+        },
+        Error(_) => false
+    }
+}
+
+// Forwards `s` on an onward alpha.test stream as SCRAM's password (RFC 7677's
+// "pencil" vector): true when the server's final message verifies.
+fn forward(onward: Net, s: Secret) -> bool waits {
+    let socket = result.unwrap(host.connect(onward, Addr(ip: V4(2130706433), port: 5432), Never))
+    let none: List[String] = list.new()
+    match tls.connect(onward, take socket, string.from("alpha.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let mut wh = take w
+            let empty: Bytes = list.new()
+            let client_first = string.as_bytes("n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
+            let server_first = string.as_bytes("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+            let verified = match secret.scram_sha256(mut wh, s, client_first, server_first, empty, empty, Never) {
+                Ok(take c) => secret.scram_verify(take c, string.as_bytes("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")),
+                Error(_) => false
+            }
+            let _ = take r
+            let _ = take wh
+            verified
+        },
+        Error(_) => false
+    }
+}
+
+// The onward server: the proof reaches it only as Send calls, from the
+// first byte it has not taken (core.md, Net authority). It takes 100 of the
+// 106 bytes, then the last 6.
+fn proof_server(take s: Served[NetOp]) -> bool waits {
+    let mut served = take s
+    let dialed = net_connect(mut served, 5, 5432)
+    let shaken = answer_handshake(mut served, 5)
+    let first = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Send(socket, prefix, tail) => socket == 5 && prefix == 106 && tail == 0,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(128)
+            provide.payload(call, 1, mut p)
+            let data = match string.from_utf8(take p) {
+                Ok(text) => text == "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=",
+                Error(_) => false
+            }
+            op && data && net_answer(mut served, take call, Count(100))
+        },
+        None => false
+    }
+    let rest = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Send(socket, prefix, tail) => socket == 5 && prefix == 6 && tail == 0,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(8)
+            provide.payload(call, 1, mut p)
+            let data = match string.from_utf8(take p) {
+                Ok(text) => text == "AndVQ=",
+                Error(_) => false
+            }
+            op && data && net_answer(mut served, take call, Count(6))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 5, 1) && net_released(mut served, 5, 2)
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && shaken && first && rest && halves && quiet
+}
+
+// TLS-5, virtual streams (NOTES 6): send_secret on a served stream with a
+// sealed Secret is a SendSecret call (the socket, `before`'s and `after`'s
+// lengths as payload fields 1 and 2), and provide.secret hands the server the
+// Secret narrowed to alpha.test: narrowing it to beta.test is Invalid, and
+// forwarded as an onward stream's SCRAM password its proof and the server's
+// verdict are RFC 7677's for "pencil". A Secret sealed to beta.test, and any
+// plain half, reach no server.
+// expect: run net_secret(tasks) = true
+fn net_secret(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let (onward, s2) = provide.net(bytes 64)
+    let inner = task.spawn(tasks, bytes 65536, take s2, proof_server)
+    let child = task.spawn(tasks, bytes 65536, n, secret_client)
+    let dialed = net_connect(mut served, 8, 443)
+    let shaken = answer_handshake(mut served, 8)
+    let relayed = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                SendSecret(socket, before, after) => socket == 8 && before == 5 && after == 2,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(8)
+            provide.payload(call, 1, mut p)
+            provide.payload(call, 2, mut p)
+            let data = match string.from_utf8(take p) {
+                Ok(text) => text == "Auth \r\n",
+                Error(_) => false
+            }
+            let given = provide.secret(call)
+            let narrowed = match secret.narrow(given, string.from("beta.test")) {
+                Ok(_) => false,
+                Error(_) => true
+            }
+            op && data && narrowed && forward(onward, given) && net_answer(mut served, take call, Done)
+        },
+        None => false
+    }
+    let redialed = net_connect(mut served, 9, 443)
+    let plain = net_released(mut served, 9, 1) && net_released(mut served, 9, 2)
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    let proven = result.unwrap(task.join(take inner))
+    dialed && shaken && relayed && redialed && plain && halves && client && quiet && proven
+}
+
+fn handshake_server(take s: Served[NetOp]) -> bool waits {
+    let mut served = take s
+    let dialed = net_connect(mut served, 8, 443)
+    let shaken = answer_handshake(mut served, 8)
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && shaken && halves && quiet
+}
+
+// TLS-5 and TLS-6, virtual streams: a served Net's stream never satisfies a
+// Secret from an entry grant, here granted to alpha.test. send_secret and
+// SCRAM on it are Denied before issue, so the server sees only the halves'
+// Released.
+// expect: run granted_denied(granted, tasks) = true
+fn granted_denied(token: Secret, tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let server = task.spawn(tasks, bytes 65536, take s, handshake_server)
+    let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 443), Never))
+    let none: List[String] = list.new()
+    let denied = match tls.connect(n, take socket, string.from("alpha.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let mut wh = take w
+            let empty: Bytes = list.new()
+            let sent = match tls.send_secret(mut wh, empty, token, empty, Never) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let scram = match secret.scram_sha256(mut wh, token, string.as_bytes("n,,n=user,r=abc"), string.as_bytes("r=abcd,s=c2FsdA==,i=4096"), empty, empty, Never) {
+                Ok(take c) => {
+                    let _ = take c
+                    false
+                },
+                Error(e) => match e {
+                    Denied => true,
+                    _ => false
+                }
+            }
+            let _ = take r
+            let _ = take wh
+            sent && scram
+        },
+        Error(_) => false
+    }
+    denied && result.unwrap(task.join(take server))
 }

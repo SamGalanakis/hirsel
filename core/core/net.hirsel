@@ -2,3 +2,7 @@
 pub fn narrow(n: Net, r: Rule) -> Result[Net, RuleError]
 
 pub fn split(take s: Socket) -> (ReadHalf, WriteHalf)
+
+pub type Unjoined = Unjoined(ReadHalf, WriteHalf)
+
+pub fn join(take r: ReadHalf, take w: WriteHalf) -> Result[Socket, Unjoined]

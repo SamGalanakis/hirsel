@@ -6,10 +6,11 @@ use crate::normal::{
     encode_identity, uleb,
     wire::{Read, Wire, invalid},
 };
-use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::{ContentHash, DefPath};
 
-const MAGIC: &[u8] = b"HIRRECIP\0\x01\x00";
+const MAGIC: &[u8] = b"HIRRECIP\0\x02\x00";
 const NORMAL_FORM: u16 = crate::normal::VERSION;
+pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectRef {
@@ -21,6 +22,27 @@ pub struct ObjectRef {
 pub struct BodyRef {
     pub body: ObjectRef,
     pub annex: ObjectRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForeignTarget {
+    pub target: String,
+    pub archive: ObjectRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForeignFunction {
+    pub identity: Identity,
+    pub header: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForeignLeaf {
+    /// The module's definition path, ending with its last module component.
+    pub module: DefPath,
+    pub symbols: String,
+    pub targets: Vec<ForeignTarget>,
+    pub functions: Vec<ForeignFunction>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,10 +67,11 @@ pub enum GrantKind {
     Tasks = 9,
     Args = 10,
     Secret = 11,
+    Foreign = 12,
 }
 
 impl GrantKind {
-    const KINDS: [Self; 12] = [
+    const KINDS: [Self; 13] = [
         Self::Dir,
         Self::Net,
         Self::Clock,
@@ -61,6 +84,7 @@ impl GrantKind {
         Self::Tasks,
         Self::Args,
         Self::Secret,
+        Self::Foreign,
     ];
 
     pub fn from_tag(tag: u8) -> Option<Self> {
@@ -73,6 +97,8 @@ pub struct GrantBinding {
     pub ordinal: u32,
     pub kind: GrantKind,
     pub values: Vec<String>,
+    /// For a Foreign binding, its interface's archive for the recipe target.
+    pub archive: Option<ObjectRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +120,10 @@ pub struct Recipe {
     pub groups: Vec<ObjectRef>,
     /// In strictly increasing body hash order.
     pub bodies: Vec<BodyRef>,
+    /// In strictly increasing order of the module identity encoding.
+    pub foreign_modules: Vec<ForeignLeaf>,
+    /// In strictly increasing order of raw SHA-256.
+    pub foreign_archives: Vec<ObjectRef>,
     pub launch: Launch,
 }
 
@@ -111,7 +141,7 @@ impl ObjectRef {
     }
 }
 
-fn text(bytes: &mut Vec<u8>, value: &str) {
+pub(crate) fn text(bytes: &mut Vec<u8>, value: &str) {
     uleb(bytes, value.len() as u64);
     bytes.extend_from_slice(value.as_bytes());
 }
@@ -128,7 +158,106 @@ fn ordered<T: Ord + Copy>(
     Ok(())
 }
 
+impl ForeignLeaf {
+    /// FFI-9 hashes these rows without their count or the selected target.
+    pub fn encode_archive_rows(&self, bytes: &mut Vec<u8>) {
+        for row in &self.targets {
+            text(bytes, &row.target);
+            row.archive.encode(bytes);
+        }
+    }
+
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        text(bytes, &self.module.definition_identity());
+        text(bytes, &self.symbols);
+        uleb(bytes, self.targets.len() as u64);
+        self.encode_archive_rows(bytes);
+        uleb(bytes, self.functions.len() as u64);
+        for function in &self.functions {
+            bytes.extend_from_slice(&encode_identity(&function.identity));
+            text(bytes, &function.header);
+        }
+    }
+
+    fn decode<'a>(input: &mut Read<'a, '_>, prev: &mut Option<&'a [u8]>) -> DecodeResult<Self> {
+        let start = input.remaining();
+        let module: DefPath = Wire::read(input)?;
+        let frame = &start[..start.len() - input.remaining().len()];
+        ordered(prev, frame, "unordered foreign modules")?;
+
+        let symbols: String = Wire::read(input)?;
+        let mut prefix = symbols.bytes();
+        if symbols.len() > 32
+            || !prefix.next().is_some_and(|b| b.is_ascii_alphabetic())
+            || !prefix.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(invalid("invalid foreign symbol prefix"));
+        }
+
+        let mut prev_target = None;
+        let count = input.count()?;
+        let targets = input.read_vec(count, |input| {
+            let start = input.remaining();
+            let target: String = Wire::read(input)?;
+            if target.is_empty()
+                || target.len() > 64
+                || !target
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+            {
+                return Err(invalid("invalid foreign target"));
+            }
+            // Target rows are ordered by the text's bytes, without the length.
+            let text_end = start.len() - input.remaining().len();
+            ordered(
+                &mut prev_target,
+                &start[text_end - target.len()..text_end],
+                "unordered foreign targets",
+            )?;
+            let archive = ObjectRef::decode(input)?;
+            Ok(ForeignTarget { target, archive })
+        })?;
+
+        let mut prev_function = None;
+        let count = input.count()?;
+        let functions = input.read_vec(count, |input| {
+            let start = input.remaining();
+            let identity: Identity = Wire::read(input)?;
+            let frame = &start[..start.len() - input.remaining().len()];
+            ordered(&mut prev_function, frame, "unordered foreign functions")?;
+            let path = &identity.definition.0;
+            if path.package != module.0.package
+                || !path.modules.iter().eq(module
+                    .0
+                    .modules
+                    .iter()
+                    .chain(std::iter::once(&module.0.name)))
+            {
+                return Err(invalid("foreign function outside its module"));
+            }
+            let header = Wire::read(input)?;
+            Ok(ForeignFunction { identity, header })
+        })?;
+        Ok(Self {
+            module,
+            symbols,
+            targets,
+            functions,
+        })
+    }
+}
+
 impl Recipe {
+    pub fn has_foreign(&self) -> bool {
+        !self.foreign_modules.is_empty()
+            || !self.foreign_archives.is_empty()
+            || self
+                .launch
+                .grants
+                .iter()
+                .any(|grant| grant.kind == GrantKind::Foreign)
+    }
+
     /// Encode a producer's recipe. The producer supplies the object and grant
     /// lists in their canonical order.
     pub fn encode(&self) -> Vec<u8> {
@@ -145,6 +274,14 @@ impl Recipe {
             row.body.encode(&mut bytes);
             row.annex.encode(&mut bytes);
         }
+        uleb(&mut bytes, self.foreign_modules.len() as u64);
+        for leaf in &self.foreign_modules {
+            leaf.encode(&mut bytes);
+        }
+        uleb(&mut bytes, self.foreign_archives.len() as u64);
+        for archive in &self.foreign_archives {
+            archive.encode(&mut bytes);
+        }
         let launch = &self.launch;
         bytes.push(launch.backend as u8);
         text(&mut bytes, &launch.target);
@@ -159,12 +296,18 @@ impl Recipe {
             for value in &grant.values {
                 text(&mut bytes, value);
             }
+            if grant.kind == GrantKind::Foreign {
+                grant
+                    .archive
+                    .expect("a Foreign grant selects an archive")
+                    .encode(&mut bytes);
+            }
         }
         bytes
     }
 
     pub fn hash(bytes: &[u8]) -> ContentHash {
-        ContentHash::of_parts("hirsel.release-recipe.v1", [bytes])
+        ContentHash::of_parts(HASH_DOMAIN, [bytes])
     }
 
     /// Decode the whole frame before exposing its ordered object lists.
@@ -207,6 +350,17 @@ impl Recipe {
             let annex = ObjectRef::decode(input)?;
             Ok(BodyRef { body, annex })
         })?;
+        let mut prev = None;
+        let count = input.count()?;
+        let foreign_modules =
+            input.read_vec(count, |input| ForeignLeaf::decode(input, &mut prev))?;
+        let mut prev = None;
+        let count = input.count()?;
+        let foreign_archives = input.read_vec(count, |input| {
+            let object = ObjectRef::decode(input)?;
+            ordered(&mut prev, object.hash, "unordered foreign archives")?;
+            Ok(object)
+        })?;
         let backend = match u8::read(&mut input)? {
             0 => Backend::Cranelift,
             1 => Backend::Llvm,
@@ -223,11 +377,23 @@ impl Recipe {
             ordered(&mut prev, ordinal, "unordered grant ordinals")?;
             let kind = GrantKind::from_tag(u8::read(input)?)
                 .ok_or_else(|| invalid("unknown grant kind tag"))?;
-            let values = Wire::read(input)?;
+            let values: Vec<String> = Wire::read(input)?;
+            let archive = if kind == GrantKind::Foreign {
+                let [interface] = values.as_slice() else {
+                    return Err(invalid("a Foreign grant takes one interface"));
+                };
+                if interface.is_empty() {
+                    return Err(invalid("a Foreign grant takes one interface"));
+                }
+                Some(ObjectRef::decode(input)?)
+            } else {
+                None
+            };
             Ok(GrantBinding {
                 ordinal,
                 kind,
                 values,
+                archive,
             })
         })?;
         input.end()?;
@@ -236,6 +402,8 @@ impl Recipe {
             address,
             groups,
             bodies,
+            foreign_modules,
+            foreign_archives,
             launch: Launch {
                 backend,
                 target,
@@ -285,21 +453,58 @@ mod tests {
                     },
                 },
             ],
+            foreign_modules: vec![ForeignLeaf {
+                module: DefPath::from_full("lib@1/native").unwrap(),
+                symbols: "hfl_".into(),
+                targets: vec![ForeignTarget {
+                    target: "target".into(),
+                    archive: ObjectRef {
+                        hash: ContentHash([7; 32]),
+                        len: 11,
+                    },
+                }],
+                functions: vec![ForeignFunction {
+                    identity: Identity::plain(DefPath::from_full("lib@1/native/open").unwrap()),
+                    header: "fn()".into(),
+                }],
+            }],
+            foreign_archives: vec![
+                ObjectRef {
+                    hash: ContentHash([7; 32]),
+                    len: 11,
+                },
+                ObjectRef {
+                    hash: ContentHash([8; 32]),
+                    len: 12,
+                },
+            ],
             launch: Launch {
                 backend: Backend::Cranelift,
                 target: "target".into(),
                 root_limit: 9,
                 n_place: 10,
                 exit_status: true,
-                grants: vec![GrantBinding {
-                    ordinal: 2,
-                    kind: GrantKind::Dir,
-                    values: vec!["a".into(), "b".into()],
-                }],
+                grants: vec![
+                    GrantBinding {
+                        ordinal: 2,
+                        kind: GrantKind::Dir,
+                        values: vec!["a".into(), "b".into()],
+                        archive: None,
+                    },
+                    GrantBinding {
+                        ordinal: 3,
+                        kind: GrantKind::Foreign,
+                        values: vec!["lib@1/wrapper/Audit".into()],
+                        archive: Some(ObjectRef {
+                            hash: ContentHash([8; 32]),
+                            len: 12,
+                        }),
+                    },
+                ],
             },
         };
         // Independent frame, including two-byte ULEB for the group's length.
-        let mut bytes = b"HIRRECIP\0\x01\0\x02\0\x0fapp@1/main/main\0\0".to_vec();
+        let mut bytes = b"HIRRECIP\0\x02\0\x02\0\x0fapp@1/main/main\0\0".to_vec();
         bytes.extend_from_slice(&[1; 32]);
         bytes.push(1);
         bytes.extend_from_slice(&[2; 32]);
@@ -309,13 +514,36 @@ mod tests {
             bytes.extend_from_slice(&[hash; 32]);
             bytes.push(size);
         }
+        bytes.extend_from_slice(b"\x01\x0clib@1/native\x04hfl_\x01\x06target");
+        bytes.extend_from_slice(&[7; 32]);
+        bytes.extend_from_slice(b"\x0b\x01\x11lib@1/native/open\0\0\x04fn()");
+        bytes.push(2);
+        for (hash, size) in [(7, 11), (8, 12)] {
+            bytes.extend_from_slice(&[hash; 32]);
+            bytes.push(size);
+        }
         bytes.extend_from_slice(b"\0\x06target");
         bytes.extend_from_slice(&9u64.to_le_bytes());
         bytes.extend_from_slice(&10u64.to_le_bytes());
-        bytes.extend_from_slice(b"\x01\x01\x02\0\x02\x01a\x01b");
+        bytes.extend_from_slice(b"\x01\x02\x02\0\x02\x01a\x01b\x03\x0c\x01\x13lib@1/wrapper/Audit");
+        bytes.extend_from_slice(&[8; 32]);
+        bytes.push(12);
         let decode = |bytes: &[u8]| Recipe::decode(bytes, &mut DecodeBudget::unlimited());
         assert_eq!(recipe.encode(), bytes);
         assert_eq!(decode(&bytes), Ok(recipe.clone()));
+
+        let mut version_one = bytes.clone();
+        version_one[9] = 1;
+        assert_eq!(
+            decode(&version_one),
+            Err(DecodeError::Unsupported("code frame version"))
+        );
+        let mut extra_archive = recipe.clone();
+        extra_archive.foreign_archives.swap(0, 1);
+        assert_eq!(
+            decode(&extra_archive.encode()),
+            Err(invalid("unordered foreign archives"))
+        );
 
         let mut redundant = bytes.clone();
         redundant.splice(length..length + 2, [0xac, 0x82, 0x00]);

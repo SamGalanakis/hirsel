@@ -52,8 +52,8 @@ pub struct OsProvider {
     temporary: u64,
     in_flight_syncs: Vec<*mut crate::os_sync::SyncCell>,
     pub(crate) inherited_listener: Mutex<Option<OwnedFd>>,
-    pub stdout: OwnedFd,
-    pub stderr: OwnedFd,
+    stdout: Option<OwnedFd>,
+    stderr: Option<OwnedFd>,
 }
 impl Drop for OsProvider {
     fn drop(&mut self) {
@@ -77,6 +77,10 @@ impl OsProvider {
     }
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
+        Self::from_streams(Some(stdout), Some(stderr))
+    }
+
+    pub(crate) fn from_streams(stdout: Option<OwnedFd>, stderr: Option<OwnedFd>) -> Self {
         Self {
             issue_file: None,
             sync_file: None,
@@ -92,6 +96,10 @@ impl OsProvider {
             stderr,
         }
     }
+    pub(crate) fn stderr_fd(&self) -> i32 {
+        self.stderr.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+    }
+
     /// Only run configuration can acquire a root from an ambient host path.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn grant(&mut self, path: &Path) -> io::Result<u64> {
@@ -599,6 +607,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
                 | SEND_PAIR
                 | TLS_CONNECT
                 | SEND_SECRET
+                | SCRAM
                 | RESOLVE
         )
     } {
@@ -749,8 +758,8 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
     let os = unsafe { &mut *state.cast::<OsProvider>() };
     let request = unsafe { &mut *request };
     match request.operation {
-        STDOUT => write_request(os.stdout.as_raw_fd(), request),
-        STDERR => write_request(os.stderr.as_raw_fd(), request),
+        STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
+        STDERR => write_request(os.stderr_fd(), request),
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL => Outcome::default(),
         RANDOM => {

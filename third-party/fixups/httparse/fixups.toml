@@ -1,0 +1,2 @@
+# The build script only enables optional SIMD paths in the HTTP parser.
+buildscript.run = false

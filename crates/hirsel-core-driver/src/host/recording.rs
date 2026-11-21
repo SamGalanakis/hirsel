@@ -1,5 +1,7 @@
 use super::{Error, Records, attempt};
 use crate::cli::{Invocation, OptionId as Opt};
+use crate::code_store::CodeStore;
+use crate::native::recipe_build::foreign_recording_refusal;
 use hirsel_core_ids::ContentHash;
 use hirsel_tape_format::{Corrupt, Cursor};
 use std::io;
@@ -51,20 +53,31 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
     }
     let tape = tape.ok_or("replay requires --tape TAPE")?.canonicalize()?;
     let (tape_id, launch) = crate::tape_cli::run_route(&tape)?;
-    let records = Records::read_only(&state.ok_or("replay requires --state DIR")?)?;
+    let state = state.ok_or("replay requires --state DIR")?;
+    let records = Records::read_only(&state)?;
     let image = (|| -> io::Result<_> {
         let pin = records.pin(tape_id, unix_seconds()?)?;
         let assembly = records.assembly(pin)?;
+        let recipe = super::read_recipe(
+            &CodeStore::new(state.join("code")),
+            assembly.recipe,
+            usize::MAX,
+        )?;
+        if let Some(reason) = foreign_recording_refusal(&recipe) {
+            eprintln!("replay: refused: {reason}");
+            return Ok(None);
+        }
         if launch_digest(&launch) != Ok(assembly.digest) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "recording image differs from its pin",
             ));
         }
-        records.open_image(assembly.digest)
+        records.open_image(assembly.digest).map(Some)
     })();
     let image = match image {
-        Ok(file) => file,
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(2),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             eprintln!("Unknown(ImageGone)");
             return Ok(3);

@@ -31,6 +31,60 @@ impl FunctionEmitter<'_> {
         )]
     }
 
+    pub(super) fn map_hash_word(&mut self, word: &Value) -> Value {
+        let key = memory_layout::CONTEXT_MAP_HASH_KEY;
+        // CAP-8 prepares the lanes before the task enters generated code.
+        // The lanes stay immutable throughout that task.
+        let memory = Memory {
+            invariant: self.facts,
+            ..Memory::aligned(8)
+        };
+        let mut lanes = [0, 8, 16, 24].map(|offset| {
+            let at = self.field_pointer(&CONTEXT, key + offset);
+            self.load_with(&Type::I64, &at, &memory)
+        });
+        // One eight-byte scalar word, followed by the SipHash length word.
+        for message in [word.clone(), int(8_i128 << 56)] {
+            lanes[3] = self.bin(Binary::Xor, &Type::I64, &lanes[3], &message);
+            self.sip_round(&mut lanes);
+            lanes[0] = self.bin(Binary::Xor, &Type::I64, &lanes[0], &message);
+        }
+        lanes[2] = self.bin(Binary::Xor, &Type::I64, &lanes[2], &int(0xff));
+        for _ in 0..3 {
+            self.sip_round(&mut lanes);
+        }
+        let [v0, v1, v2, v3] = lanes;
+        let left = self.bin(Binary::Xor, &Type::I64, &v0, &v1);
+        let right = self.bin(Binary::Xor, &Type::I64, &v2, &v3);
+        self.bin(Binary::Xor, &Type::I64, &left, &right)
+    }
+
+    fn sip_round(&mut self, [v0, v1, v2, v3]: &mut [Value; 4]) {
+        *v0 = self.bin(Binary::Add, &Type::I64, v0, v1);
+        *v1 = self.sip_rotate_xor(v1, 13, v0);
+        *v0 = self.sip_rotate(v0, 32);
+        *v2 = self.bin(Binary::Add, &Type::I64, v2, v3);
+        *v3 = self.sip_rotate_xor(v3, 16, v2);
+        *v0 = self.bin(Binary::Add, &Type::I64, v0, v3);
+        *v3 = self.sip_rotate_xor(v3, 21, v0);
+        *v2 = self.bin(Binary::Add, &Type::I64, v2, v1);
+        *v1 = self.sip_rotate_xor(v1, 17, v2);
+        *v2 = self.sip_rotate(v2, 32);
+    }
+
+    fn sip_rotate_xor(&mut self, value: &Value, count: u8, other: &Value) -> Value {
+        let rotated = self.sip_rotate(value, count);
+        self.bin(Binary::Xor, &Type::I64, &rotated, other)
+    }
+
+    fn sip_rotate(&mut self, value: &Value, count: u8) -> Value {
+        self.intrinsic(
+            "llvm.fshl.i64",
+            Type::I64,
+            &[word(value.clone()), word(value.clone()), word(int(count))],
+        )
+    }
+
     pub(super) fn compare_bytes(&mut self, arguments: &[Value]) -> Value {
         self.items
             .declare("memcmp", memcmp(), read_only(self.facts));

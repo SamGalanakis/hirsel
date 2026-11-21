@@ -218,6 +218,7 @@ fn materialize(
             "core" => PackageProduct::bundled_manifest(&checkout().join("core/core")),
             "std" => PackageProduct::bundled_std_manifest(&checkout().join("core/std")),
             spec => PackageManifest {
+                    namespace: None,
                 package: package_id(spec),
                 dependencies: vec![],
                 sources: vec![],
@@ -249,6 +250,8 @@ fn materialize(
             now.insert(file.canonicalize().unwrap());
             let modules: Vec<String> = s.modules.split('/').map(str::to_owned).collect();
             let source = hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
                 file,
                 modules,
                 signatures: s.signatures,
@@ -2248,6 +2251,8 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
     for (file, module, text) in &step.files {
         std::fs::write(app.join(file), text).unwrap();
         sources.push(hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
             file: if step.relative.contains(file) {
                 Path::new(step.dir).join("app").join(file)
             } else {
@@ -2262,6 +2267,7 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
         packages: vec![
             PackageProduct::bundled_manifest(&core),
             PackageManifest {
+                    namespace: None,
                 package: package_id("app"),
                 dependencies: vec![package("core")],
                 sources,

@@ -318,11 +318,13 @@ Blocks the entry does not reach are left out, with every call and reference in t
 slots are its bodiless functions in number order.
 
 Every enumeration is written with a tag from a fixed, append-only table, and every count and
-index as unsigned LEB128. The body starts with its normal-form version, which is 1. Each value
-has exactly one encoding: a reader refuses bytes that are not that encoding, such as a LEB128
-number with a redundant byte, an unknown tag, a list out of its required order or with a
-repeat, or bytes left over at the end. Decoding and re-encoding a body gives the same bytes. Its
-**body hash** is `H("hirsel.code-body.v1", body)`. Positions and hints go to the body's
+index as unsigned LEB128. The body starts with the seven ASCII bytes `HIRBODY`, a zero byte
+and its normal-form version as a 16-bit little-endian number. The current version is 2, which
+uses the run-keyed Map hash operations of [SEM-5](semantics.md#sem-5-maps).
+Each value has exactly one encoding: a reader refuses a LEB128 number with a redundant byte,
+an unknown tag, a list out of its required order or with a repeat, or bytes left over at the
+end. Decoding and re-encoding a body gives the same bytes. Its
+**body hash** is `H("hirsel.code-body.v2", body)`. Positions and hints go to the body's
 **annex** instead, in the body's order: each entry names a position of that body, and an annex
 whose entries do not match its body's instructions, terminators and calls in number and kind is
 malformed. The annex is hashed under `hirsel.code-annex.v1` and never enters an address.
@@ -375,7 +377,7 @@ outcomes. A cache of one function's results keys each function argument by its t
 and its captured values, since two function values with equal identity bytes can run different
 code.
 
-The domains `hirsel.code-body.v1`, `hirsel.code-annex.v1`, `hirsel.code-group.v1`,
+The domains `hirsel.code-body.v2`, `hirsel.code-annex.v1`, `hirsel.code-group.v1`,
 `hirsel.code-address.v1`, `hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by
 the 2026-11-21 version of this section. A change to the normal form or to a group's encoding
 takes a new version and a new domain. It never reuses an old one.
@@ -398,6 +400,7 @@ language switches. The one exception is an implementation's resource refusal: a 
 whose checking exceeds the implementation's resources (for example unbounded generic
 instantiation, or instantiation past a depth or count) may be refused with a message that
 names no rule; such a refusal is not a meaning of the program.
-A package's dependencies are fixed by their library roots before the compiler runs
-([packages](packages.md)), so `--locked` and `--frozen` decide only whether a command
+A package's dependencies are fixed before the compiler runs ([packages](packages.md)): a
+published library by its root, a workspace member by its captured files, and a toolchain
+package by the toolchain, so `--locked` and `--frozen` decide only whether a command
 proceeds.

@@ -73,6 +73,7 @@ pub enum AdmissionError {
     Limit(Limit),
     Disconnected,
     Refused(String),
+    RecordingForeign(String),
     Io(io::Error),
 }
 
@@ -94,7 +95,7 @@ impl fmt::Display for AdmissionError {
             Self::Unsupported(reason) => write!(out, "Unsupported({reason})"),
             Self::Limit(limit) => write!(out, "Limit({limit:?})"),
             Self::Disconnected => out.write_str("admission peer disconnected"),
-            Self::Refused(reason) => out.write_str(reason),
+            Self::Refused(reason) | Self::RecordingForeign(reason) => out.write_str(reason),
             Self::Io(error) => error.fmt(out),
         }
     }
@@ -241,6 +242,7 @@ pub struct VerifiedRelease {
     recipe: Recipe,
     groups: Vec<Group>,
     bodies: Vec<Body>,
+    pub(crate) link_archives: crate::foreign_archive::LinkArchives,
 }
 
 pub type VerifiedParts = (ContentHash, Recipe, Vec<Group>, Vec<(DecodedBody, Annex)>);
@@ -356,6 +358,16 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
+        self.admit_for_runtime(connection, limits, semantics, false)
+    }
+
+    pub(crate) fn admit_for_runtime(
+        &self,
+        connection: &mut ControlConnection,
+        limits: &AdmissionLimits,
+        semantics: &impl BackendSemantics,
+        recording: bool,
+    ) -> Result<AdmittedRelease<'_>, AdmissionError> {
         let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
         let (root, recipe_bytes) = exchange.recipe(limits.recipe_bytes)?;
@@ -363,6 +375,11 @@ impl AdmissionStore {
 
         let mut budget = budget(limits, Some(deadline));
         let recipe = Recipe::decode(&recipe_bytes, &mut budget)?;
+        if recording
+            && let Some(reason) = crate::native::recipe_build::foreign_recording_refusal(&recipe)
+        {
+            return Err(AdmissionError::RecordingForeign(reason));
+        }
         let objects = listed_objects(&recipe, limits, &mut budget)?;
         let mut reservation = self.reserve(root, objects, limits.outstanding, &mut budget)?;
         transfer(
@@ -416,7 +433,42 @@ fn verify_release(
         let annex = Annex::decode(&raw, &body.module, budget)?;
         Body::new(body, annex, budget)
     })?;
+    if recipe.has_foreign() {
+        check_foreign_archive_inventory(&recipe, budget)?;
+    }
     closure::check(&recipe, &groups, &bodies, semantics, budget)?;
+    let mut link_archives = crate::foreign_archive::LinkArchives::default();
+    if recipe.has_foreign() {
+        charge_rows::<crate::foreign_archive::ArchiveOrigin<'_>>(
+            budget,
+            recipe.foreign_modules.len(),
+        )?;
+        for leaf in &recipe.foreign_modules {
+            let target = &recipe.launch.target;
+            let row = leaf
+                .targets
+                .binary_search_by(|row| row.target.cmp(target))
+                .expect("the checked archive inventory selects a row for each leaf");
+            let archive = leaf.targets[row].archive;
+            link_archives.admit(
+                archive,
+                leaf,
+                target,
+                &recipe.entry.definition,
+                None,
+                || load(ObjectKind::ForeignArchive, &archive, budget),
+            )?;
+        }
+        link_archives.definitions(budget)?;
+        for archive in &recipe.foreign_archives {
+            if !link_archives.contains(archive.hash) {
+                load(ObjectKind::ForeignArchive, archive, budget)?;
+            }
+        }
+        return Err(AdmissionError::Unsupported(
+            "foreign modules are not enabled yet",
+        ));
+    }
     budget.check()?;
     Ok(VerifiedRelease {
         root,
@@ -424,7 +476,54 @@ fn verify_release(
         recipe,
         groups,
         bodies,
+        link_archives,
     })
+}
+
+fn check_foreign_archive_inventory(
+    recipe: &Recipe,
+    budget: &mut DecodeBudget,
+) -> Result<(), AdmissionError> {
+    charge_rows::<bool>(budget, recipe.foreign_archives.len())?;
+    let mut selected = vec![false; recipe.foreign_archives.len()];
+    let mut visit = |archive: ObjectRef| {
+        budget.check()?;
+        let at = recipe
+            .foreign_archives
+            .binary_search_by_key(&archive.hash, |row| row.hash)
+            .map_err(|_| AdmissionError::Missing(archive.hash))?;
+        if recipe.foreign_archives[at].len != archive.len {
+            return Err(AdmissionError::Binding(
+                "inconsistent lengths for a foreign archive",
+            ));
+        }
+        selected[at] = true;
+        Ok(())
+    };
+    for leaf in &recipe.foreign_modules {
+        let target = &recipe.launch.target;
+        let i = leaf
+            .targets
+            .binary_search_by(|row| row.target.cmp(target))
+            .map_err(|_| {
+                AdmissionError::Refused(format!("Missing(archive of {} for {target})", leaf.module))
+            })?;
+        visit(leaf.targets[i].archive)?;
+    }
+    for grant in &recipe.launch.grants {
+        if let Some(archive) = grant.archive {
+            visit(archive)?;
+        }
+    }
+    match recipe
+        .foreign_archives
+        .iter()
+        .zip(selected)
+        .find(|(_, selected)| !selected)
+    {
+        Some((extra, _)) => Err(AdmissionError::Extra(extra.hash)),
+        None => Ok(()),
+    }
 }
 
 fn deadline(limits: &AdmissionLimits) -> Result<Instant, AdmissionError> {
@@ -454,6 +553,7 @@ fn listed_objects(
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(recipe.groups.len()))
+        .and_then(|n| n.checked_add(recipe.foreign_archives.len()))
         .filter(|&n| n <= limits.closure_objects)
         .ok_or(AdmissionError::Limit(Limit::ClosureObjects))?;
     if recipe.groups.len() > limits.members {
@@ -471,7 +571,13 @@ fn listed_objects(
                 (ObjectKind::Body, &row.body),
                 (ObjectKind::Annex, &row.annex),
             ]
-        }));
+        }))
+        .chain(
+            recipe
+                .foreign_archives
+                .iter()
+                .map(|object| (ObjectKind::ForeignArchive, object)),
+        );
     for (kind, row) in rows {
         budget.check()?;
         let key = ObjectKey {

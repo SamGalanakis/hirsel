@@ -22,6 +22,7 @@ pub(crate) struct ImageFile {
 pub(crate) struct ImageDirectory {
     pub compiler: ContentHash,
     pub inputs: CorpusManifest,
+    pub stamps: BTreeMap<PackageId, PackageStamp>,
     pub index: Arc<NameIndex>,
     pub files: Table<ImageFile>,
     /// Each file's manifest-relative name, if it had one, and its text's row.
@@ -35,6 +36,111 @@ pub(crate) struct ImageDirectory {
     pub incomplete: Table<Incomplete>,
     pub resources: Table<ResourceRefusal>,
 }
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PackageStamp {
+    pub hash: ContentHash,
+    pub namespace: Option<hirsel_core_resolve::PackageNamespace>,
+}
+
+pub(crate) fn stamp(
+    package: &PackageManifest,
+    manifest: Option<&Path>,
+    entry: Option<&DefPath>,
+) -> io::Result<PackageStamp> {
+    let mut files = Vec::with_capacity(package.sources.len());
+    for source in &package.sources {
+        let manifest =
+            manifest.filter(|_| !matches!(package.package.name.as_str(), "core" | "std"));
+        let name = source
+            .name(manifest)?
+            .filter(|_| !matches!(package.package.name.as_str(), "core" | "std"))
+            .unwrap_or_else(|| {
+                format!(
+                    "{}@{}/{}",
+                    package.package.name,
+                    package.package.version,
+                    source.modules.join("/")
+                )
+            });
+        let test = source.captured.as_ref().is_some_and(|source| source.test);
+        files.push((
+            name,
+            &source.modules,
+            source.mode() as u8,
+            test,
+            ContentHash::of_bytes(&source.read()?),
+        ));
+    }
+    files.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let owner = entry.filter(|entry| entry.0.package == package.package);
+    let hash = ContentHash::of_parts(
+        "hirsel.package-image-stamp.v1",
+        [&encode(&(
+            &package.package,
+            &package.dependencies,
+            &package.namespace,
+            files,
+            owner,
+        ))?[..]],
+    );
+    Ok(PackageStamp {
+        hash,
+        namespace: package.namespace.clone(),
+    })
+}
+
+/// The workspace image supplies this member's checked dependency packages.
+pub(crate) fn closure_image(
+    request: &CheckRequest,
+    member: &PackageId,
+    produce: bool,
+    meter: &mut Meter,
+) -> io::Result<Option<Arc<CoreImage>>> {
+    let mut input = request.clone();
+    input
+        .inputs
+        .packages
+        .retain(|package| &package.package != member);
+    if input
+        .inputs
+        .packages
+        .iter()
+        .all(|package| package.namespace.is_none())
+    {
+        return Ok(None);
+    }
+    input.entry = None;
+    input.inputs.normalise(input.manifest.as_deref());
+    let stamps = input
+        .inputs
+        .packages
+        .iter()
+        .map(|package| stamp(package, input.manifest.as_deref(), None).map(|stamp| stamp.hash))
+        .collect::<io::Result<Vec<_>>>()?;
+    let digest = ContentHash::of_parts(
+        "hirsel.workspace-dependency-image.v1",
+        [&encode(&(compiler_identity()?, stamps))?[..]],
+    );
+    input.store = request
+        .store
+        .join("package-images")
+        .join(crate::request::hex(digest));
+    if let Some(image) = CoreImage::open(&input.store)? {
+        return Ok(Some(image));
+    }
+    if produce {
+        return Driver::default()
+            .produce_image(input, meter)
+            .map(|(_, image)| image);
+    }
+    Ok(None)
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ImageRoot {
     pub compiler: ContentHash,
@@ -310,8 +416,17 @@ impl Driver {
             ));
         }
         request.library = LibraryInput::Produce;
+        request.capture_sources()?;
+        request.inputs.normalise(request.manifest.as_deref());
         let mut inputs = request.inputs.clone();
-        inputs.normalise(None);
+        let stamps = inputs
+            .packages
+            .iter()
+            .map(|package| {
+                stamp(package, request.manifest.as_deref(), request.entry.as_ref())
+                    .map(|stamp| (package.package.clone(), stamp))
+            })
+            .collect::<io::Result<BTreeMap<_, _>>>()?;
         let store_path = request.store.clone();
         let product = self.check(request, meter)?;
         let Some(library) = product.library.clone() else {
@@ -366,6 +481,7 @@ impl Driver {
         let directory = ImageDirectory {
             compiler: compiler_identity()?,
             inputs,
+            stamps,
             index: Arc::new(product.index.publish(&mut writer)?),
             files: writer.table(&files.into())?,
             sources: writer.map(&sources)?,

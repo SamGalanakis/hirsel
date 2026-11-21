@@ -148,6 +148,7 @@ mod tests {
             .collect();
         files.sort();
         PackageManifest {
+            namespace: None,
             package: package(name),
             dependencies: if name == "core" {
                 vec![]
@@ -157,6 +158,8 @@ mod tests {
             sources: files
                 .into_iter()
                 .map(|file| ModuleSource {
+                    foreign: false,
+                    captured: None,
                     modules: vec![file.file_stem().unwrap().to_string_lossy().into()],
                     file,
                     signatures: true,
@@ -209,9 +212,12 @@ mod tests {
         )
         .unwrap();
         let lib = PackageManifest {
+            namespace: None,
             package: package("lib"),
             dependencies: vec![package("core"), package("std")],
             sources: vec![ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec!["lib".into()],
                 signatures: false,
@@ -291,14 +297,15 @@ mod tests {
             packages: Vec<PackageManifest>,
         }
         let path = root.join(manifest);
+        if path
+            .file_name()
+            .is_some_and(|file| file == crate::package_dir::MANIFEST)
+        {
+            let directory = crate::package_dir::PackageDir::open(path.parent().unwrap()).unwrap();
+            assert_eq!(directory.package.package.name, name);
+            return vec![directory.package];
+        }
         let all: Manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        // A package directory's manifest (one package, PROG-4) names its
-        // sources from its directory; a corpus manifest from the repository.
-        let base = if all.packages.len() == 1 {
-            path.parent().unwrap().to_owned()
-        } else {
-            root.to_owned()
-        };
         let mut pending = vec![name.to_string()];
         let mut out: Vec<PackageManifest> = vec![];
         while let Some(next) = pending.pop() {
@@ -315,7 +322,7 @@ mod tests {
                 .clone();
             p.sources
                 .iter_mut()
-                .for_each(|s| s.file = base.join(&s.file));
+                .for_each(|s| s.file = root.join(&s.file));
             pending.extend(p.dependencies.iter().map(|d| d.name.clone()));
             out.push(p);
         }

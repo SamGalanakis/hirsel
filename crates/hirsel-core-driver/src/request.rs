@@ -67,8 +67,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     };
     let command = invocation.command.name;
     if matches!(command, "host" | "deploy") {
-        crate::host::run(invocation)?;
-        std::process::exit(0);
+        std::process::exit(crate::host::run(invocation)?);
     }
     if command == "replay"
         && invocation
@@ -109,6 +108,61 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         ))?;
         std::process::exit(0);
     }
+    let mut package_mode = crate::package_lock::Mode::default();
+    let mut package_store = None;
+    let mut pack_out = None;
+    for (option, value) in invocation.options.extract_if(.., |(option, _)| {
+        matches!(
+            option,
+            Opt::Locked | Opt::Frozen | Opt::PackageStore | Opt::PackOut
+        )
+    }) {
+        match option {
+            Opt::Locked if package_mode != crate::package_lock::Mode::Frozen => {
+                package_mode = crate::package_lock::Mode::Locked
+            }
+            Opt::Frozen => package_mode = crate::package_lock::Mode::Frozen,
+            Opt::PackageStore => package_store = value.map(PathBuf::from),
+            Opt::PackOut => pack_out = value.map(PathBuf::from),
+            _ => {}
+        }
+    }
+    let package_store = crate::package_store::PackageStore::new(package_store);
+    let package_command = matches!(command, "lock" | "fetch" | "pack");
+    if package_command {
+        let directory = invocation.positional.as_deref().unwrap_or(".");
+        let workspace = crate::package_workspace::Workspace::discover_for(
+            Path::new(directory),
+            command == "pack",
+        )?
+        .ok_or_else(|| format!("{directory} has no workspace manifest"))?;
+        let selected = (command == "pack")
+            .then(|| workspace.selected().cloned())
+            .transpose()?;
+        let mut resolved = crate::package_resolve::Resolution::resolve(
+            workspace,
+            package_store,
+            package_mode == crate::package_lock::Mode::Frozen,
+        )?;
+        let lock = crate::package_lock::Lock::compare(&resolved, package_mode)?;
+        if let Some(selected) = selected {
+            let out = pack_out.ok_or("pack requires --out FILE")?;
+            let (bytes, archive) = resolved.make_archive(&selected)?;
+            let output = crate::package_lock::PackOutput::stage(&resolved, &archive, &lock, &out)?;
+            lock.commit(&resolved.workspace)?;
+            resolved.store.install(&archive)?;
+            output.write(&bytes)?;
+            println!("{selected} {}", archive.head);
+            for (root, library) in &archive.entries {
+                if *root != archive.head {
+                    println!("{} {root}", library.content.id);
+                }
+            }
+        } else {
+            lock.commit(&resolved.workspace)?;
+        }
+        std::process::exit(0);
+    }
     let replay_command = command == "replay";
     if command == "new" {
         let directory = invocation
@@ -120,6 +174,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .iter()
             .any(|(id, _)| *id == crate::cli::OptionId::Lib);
         crate::cli::scaffold(Path::new(directory), library)?;
+        crate::package_store::atomic_write(
+            &Path::new(directory).join("hirsel.lock"),
+            crate::package_lock::scaffold().as_bytes(),
+        )?;
         println!(
             "Created {} at {directory}",
             if library {
@@ -163,7 +221,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
     let inspect_std = inspection.as_ref().is_some_and(|option| option.std);
-    let dir = invocation.positional.map(PathBuf::from);
+    let inspect_foreign = inspection
+        .as_ref()
+        .and_then(crate::inspect::Inspection::foreign_module);
+    let dir = invocation
+        .positional
+        .map(PathBuf::from)
+        .or_else(|| inspect_foreign.map(|_| PathBuf::from(".")));
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut libraries_explicit = false;
     let mut store = None;
@@ -311,6 +375,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help
             | Opt::Interface
+            | Opt::ForeignHeader
             | Opt::Dependents
             | Opt::Transitive
             | Opt::AffectedTests
@@ -324,6 +389,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::Signatures
             | Opt::ListRules
             | Opt::SdkOut
+            | Opt::PackOut
+            | Opt::PackageStore
+            | Opt::Locked
+            | Opt::Frozen
             | Opt::Url
             | Opt::Control
             | Opt::HostState
@@ -348,6 +417,53 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
     }
+    let app_directory = dir.clone().or_else(|| {
+        (manifest.is_none()
+            && recipe_root.is_none()
+            && matches!(command, "check" | "build" | "publish" | "run" | "test"))
+        .then(|| PathBuf::from("."))
+    });
+    let mut workspace_app = None;
+    let mut foreign_symbols = None;
+    if manifest.is_some() {
+        package_mode.require_workspace("--inputs")?;
+    } else if recipe_root.is_some() {
+        package_mode.require_workspace("--recipe")?;
+    } else if inspect_std {
+        package_mode.require_workspace("--std")?;
+    } else if matches!(
+        command,
+        "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
+    ) {
+        if let Some(directory) = &app_directory {
+            if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
+                let selected = workspace.selected()?.clone();
+                let resolved = crate::package_resolve::Resolution::resolve(
+                    workspace,
+                    package_store,
+                    package_mode == crate::package_lock::Mode::Frozen,
+                )?;
+                if let Some(path) = inspect_foreign {
+                    foreign_symbols = Some(crate::foreign_header::symbol_prefix(&resolved, path)?);
+                }
+                crate::package_lock::Lock::compare(&resolved, package_mode)?
+                    .commit(&resolved.workspace)?;
+                let include_tests = test_command
+                    || inspection
+                        .as_ref()
+                        .is_some_and(|option| option.includes_tests());
+                workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
+                    &resolved,
+                    &selected,
+                    include_tests,
+                )?);
+            } else {
+                package_mode.require_workspace("the directory convention")?;
+            }
+        } else {
+            package_mode.require_workspace("the request")?;
+        }
+    }
     let mut replay_plan = None;
     if replay_command {
         if !grants.is_empty() {
@@ -360,10 +476,6 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .to_str()
                 .ok_or("tape path is not UTF-8")?
                 .to_owned();
-        }
-        let header = crate::tape_cli::header(Path::new(&path))?;
-        if !explicit_limit {
-            root_limit = header.limit;
         }
         if !run_args.is_empty() {
             return Err("replay takes its arguments from the tape".into());
@@ -406,12 +518,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     } else {
         None
     };
-    let dir = dir.or_else(|| {
-        (manifest.is_none()
-            && stored_recipe.is_none()
-            && matches!(command, "check" | "build" | "run" | "test"))
-        .then(|| PathBuf::from("."))
-    });
+    let dir = app_directory;
     let runner = match (emulator, sysroot) {
         (None, None) => crate::Runner::Native,
         (Some(emulator), Some(sysroot)) => crate::Runner::qemu(&emulator, &sysroot, &target)?,
@@ -498,7 +605,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if profile_front {
         meter.profile_image_index();
     }
-    let installed_std = if installed.is_some() && !libraries_explicit && !source_std && !source_core
+    let installed_std = if installed.is_some()
+        && !libraries_explicit
+        && !source_std
+        && !source_core
+        && workspace_app.as_ref().is_none_or(|app| app.needs_std())
     {
         installed.as_ref().unwrap().product("std")?
     } else {
@@ -580,7 +691,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         options.logical_charge_report = logical_charge_report;
         options.recording = needs_recording;
         let recipe = release_manifest.as_ref().map(|_| recipe.clone());
-        let product = publication.assemble(&options, Default::default())?;
+        let prebuilt = installed_std.as_ref().map(|image| {
+            image
+                .store_root()
+                .join(crate::native::std_release::PREBUILT)
+        });
+        let product =
+            publication.assemble_with(&options, Default::default(), None, prebuilt.as_deref())?;
         if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
             crate::release_manifest::write(
                 &path,
@@ -624,10 +741,19 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 if let Some(runtime) = &runtime {
                     let bytes = std::fs::read(runtime)?;
                     crate::installation::check_runtime(runtime, &bytes, false)?;
+                    let recording = recording_runtime
+                        .as_deref()
+                        .map(|path| {
+                            let bytes = std::fs::read(path)?;
+                            crate::installation::check_runtime(path, &bytes, true)?;
+                            std::io::Result::Ok(bytes)
+                        })
+                        .transpose()?;
                     crate::installation::prebuild_release(
                         &package.image,
                         &target,
                         &bytes,
+                        recording.as_deref(),
                         &mut meter,
                     )?;
                 }
@@ -669,16 +795,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     {
         hirsel_llvm_lazy::llvm_library()?;
     }
-    let image = if let Some(path) = image_path {
-        Some(CoreImage::open(&path)?.ok_or("core image cache miss; rebuild the image")?)
-    } else {
-        None
-    };
+    let image = image_path
+        .as_ref()
+        .map(|path| {
+            CoreImage::open(path)?
+                .ok_or_else(|| std::io::Error::other("core image cache miss; rebuild the image"))
+        })
+        .transpose()?;
     if command == "image" && image.is_some() {
         return Err("image production takes sources, not an image".into());
     }
-    let explicit_inputs = manifest.is_some();
-    let package_dir = dir.clone();
+    let mut manifest_runs = None;
+    let mut test_owner = None;
     let mut request = if let Some(manifest) = manifest {
         CheckRequest {
             inputs: serde_json::from_slice::<CorpusManifest>(&std::fs::read(&manifest)?)?,
@@ -687,46 +815,43 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 _ => PathBuf::from("."),
             }),
             store,
-            library: image.map_or(LibraryInput::Sources, LibraryInput::Image),
+            library: image
+                .clone()
+                .map_or(LibraryInput::Sources, LibraryInput::Image),
             entry: None,
         }
     } else if inspect_std {
         CheckRequest::libraries(&libraries, &store)?
     } else if command == "image" {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
-    } else if let Some(image) = image {
-        CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if let Some(image) = installed_std {
-        CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if native_command || installed.is_some() || inspection.is_some() {
-        CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?
     } else {
-        CheckRequest::directory(&dir.ok_or("missing package directory")?, &libraries, &store)?
+        let mut app = match workspace_app {
+            Some(app) => app,
+            None => crate::package_dir::PackageDir::convention(
+                dir.as_deref().ok_or("missing package directory")?,
+            )?,
+        };
+        test_owner = Some(app.package.package.clone());
+        manifest_runs = app.tests.take();
+        CheckRequest::from_app(
+            app,
+            &libraries,
+            &store,
+            native_command || installed.is_some() || inspection.is_some() || image.is_some(),
+        )?
     };
     if entry.is_some() {
         request.entry = entry;
     }
-    let manifest_runs = if (test_command || inspection.as_ref().is_some_and(|i| i.includes_tests()))
-        && !explicit_inputs
-        && let Some(dir) = &package_dir
-        && let crate::package_dir::PackageDir {
-            package,
-            tests: Some((sources, runs)),
-            ..
-        } = crate::package_dir::PackageDir::open(dir)?
-    {
-        request
-            .inputs
-            .packages
-            .iter_mut()
-            .find(|p| p.package == package.package)
-            .ok_or("the package's manifest names no checked package")?
-            .sources
-            .extend(sources);
-        Some(runs)
-    } else {
-        None
-    };
+    if let Some(module) = inspect_foreign {
+        let symbols =
+            foreign_symbols.ok_or("inspect --foreign-header requires a foreign manifest")?;
+        print!(
+            "{}",
+            crate::foreign_header::header(request.inputs, module, &symbols)?
+        );
+        std::process::exit(0);
+    }
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.
     let test_runs = if test_command {
@@ -760,9 +885,46 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         *path = std::path::absolute(&*path)?;
     }
     let selected_entry = request.entry.clone();
+    request.capture_sources()?;
     let sources = crate::SourceFiles::of(&request);
+    if let Some(owner) = &test_owner {
+        if let Some(image) = image {
+            if !request.use_image(image)? {
+                return Err(format!(
+                    "--image {} does not hold exactly this request's packages",
+                    image_path.unwrap().display()
+                )
+                .into());
+            }
+        } else if let Some(image) = installed_std {
+            request.use_image(image)?;
+        } else if request.manifest.is_some()
+            && !source_core
+            && !source_std
+            && let Some(image) =
+                crate::image::closure_image(&request, owner, command == "check", &mut meter)?
+            && request.use_image(image)?
+        {
+            meter.result.image_selection = Some("image used: workspace dependencies".into());
+        }
+    }
+
     let native_store = request.store.join("native");
     let store_root = request.store.clone();
+    let foreign_replay = replay_command
+        && request
+            .inputs
+            .packages
+            .iter()
+            .any(|package| package.sources.iter().any(|source| source.foreign));
+    if let Some(replay) = &replay_plan
+        && !foreign_replay
+    {
+        let header = crate::tape_cli::header(Path::new(&replay.path))?;
+        if !explicit_limit {
+            root_limit = header.limit;
+        }
+    }
     meter.finish("startup/discovery");
     // Native options come before the reach: a Cranelift development build
     // walks its instance records, which its options address. An options
@@ -814,7 +976,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // options or toolchain cannot be read goes on without one and meets
     // that error where it always has.
     let record = match &mut prepared {
-        _ if command == "image" || test_command || recipe_command || inspection.is_some() => None,
+        _ if command == "image"
+            || test_command
+            || recipe_command
+            || inspection.is_some()
+            || foreign_replay =>
+        {
+            None
+        }
         Some(Ok(options)) if options.logical_charge_report.is_none() => {
             crate::request_record::Request::new(
                 command,
@@ -869,6 +1038,26 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             );
         }
     };
+    if foreign_replay {
+        let entry = selected_entry.as_ref().ok_or("replay requires an entry")?;
+        let limit = prepared
+            .as_ref()
+            .and_then(|options| options.as_ref().ok())
+            .map_or(crate::native::DEFAULT_INSTANCE_LIMIT, |options| {
+                options.instance_limit
+            });
+        if let Some(reason) = product.reachable(entry, limit)?.recording_refusal(entry) {
+            eprintln!("replay: refused: {reason}");
+            std::process::exit(2);
+        }
+        if let Some(Ok(options)) = &mut prepared {
+            let header =
+                crate::tape_cli::header(Path::new(&options.replay.as_ref().unwrap().path))?;
+            if !explicit_limit {
+                options.root_limit = header.limit;
+            }
+        }
+    }
     let reach = if native_command && !test_command {
         Some({
             let entry = selected_entry
@@ -908,9 +1097,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         use crate::{Source, TestCache};
 
         let test_runs = test_runs.expect("a test request has its run configuration");
-        test_runs.check_names(&product.tests().collect())?;
-        let tests: Vec<_> = product
-            .tests()
+        let own_tests = || {
+            product.tests().filter(|path| {
+                test_owner
+                    .as_ref()
+                    .is_none_or(|owner| &path.0.package == owner)
+            })
+        };
+        test_runs.check_names(&own_tests().collect())?;
+        let tests: Vec<_> = own_tests()
             .filter(|path| {
                 test_filter
                     .as_ref()
@@ -969,7 +1164,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 Err(error) => {
                     failed = true;
                     if !json {
-                        println!("fail executed {test}: {error} (time unavailable)");
+                        if matches!(error, crate::NativeStop::ForeignRecording(_)) {
+                            println!("fail executed {test}: {error}");
+                        } else {
+                            println!("fail executed {test}: {error} (time unavailable)");
+                        }
                     }
                     serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null})
                 }
@@ -1027,29 +1226,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     let recipe = release_manifest
                         .as_ref()
                         .map(|_| publication.recipe.clone());
-                    // The separate release std (std-reuse-1520 S1) stays
-                    // behind this selector until Guard B passes.
-                    let std = (std::env::var_os("HIRSEL_STD_SEPARATE").is_some()
-                        && options.optimize
-                        && matches!(options.backend, crate::native::Backend::Llvm))
-                    .then(|| {
-                        let runtime = match &options.observed {
-                            Some(observed) => observed.0.runtime,
-                            None => {
-                                crate::tool_inputs::toolchain(
-                                    &options.link,
-                                    &options.target,
-                                    &options.runtime,
-                                )?
-                                .0
-                                .runtime
-                            }
-                        };
-                        product.std_side(options, runtime)
-                    })
-                    .transpose();
-                    let built = std
-                        .and_then(|std| publication.assemble_with(options, reached.counters, std));
+                    let built =
+                        publication.assemble_with(options, reached.counters, Some(&product), None);
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, recipe)
                     {

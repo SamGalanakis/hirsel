@@ -230,7 +230,9 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape**, in tape format 7 (format 7 adds the terminal byte and the SCRAM frames, [TLS-6](spec/tls.md#tls-6-scram-sha-256); until it lands, tapes are format 6), which `crates/hirsel-tape-format` owns.
+A recording file is a **tape** in format 8, which `crates/hirsel-tape-format` owns. Format 7
+added the run's Map hash key to the header. Format 8 adds the terminal byte to stream grants
+and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256).
 The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.

@@ -2,3 +2,5 @@
 pub fn write(out: Stdout, s: String) -> Result[(), WriteError] waits
 
 pub fn write_bytes(out: Stdout, b: Bytes) -> Result[(), WriteError] waits
+
+pub fn is_terminal(o: Stdout) -> bool

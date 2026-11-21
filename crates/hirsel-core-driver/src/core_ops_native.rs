@@ -120,6 +120,7 @@ fn core_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: Default::default(),
             env_patterns: None,
             observed: None,
         };
@@ -208,6 +209,7 @@ fn counted_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: Default::default(),
             env_patterns: None,
             observed: None,
         };
@@ -284,6 +286,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: Default::default(),
             env_patterns: None,
             observed: None,
         };
@@ -368,6 +371,7 @@ fn stream_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: Default::default(),
             env_patterns: None,
             observed: None,
         };
@@ -447,6 +451,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         logical_charge_report: None,
         net_rules: vec![],
         secret_grants: vec![],
+        foreign_grants: Default::default(),
         env_patterns: None,
         observed: None,
     };
@@ -540,6 +545,7 @@ fn host_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            foreign_grants: Default::default(),
             env_patterns: None,
             observed: None,
         };
@@ -649,6 +655,7 @@ pub fn proof_clone_run() -> u64 {
         logical_charge_report: None,
         net_rules: vec![],
         secret_grants: vec![],
+        foreign_grants: Default::default(),
         env_patterns: None,
         observed: None,
     };
@@ -756,6 +763,8 @@ fn bodied_core_operations(backend: Backend) {
     request.inputs.packages[1]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
             file,
             modules: vec!["args".into()],
             signatures: true,

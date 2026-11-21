@@ -36,9 +36,12 @@ pub(crate) fn source_manifest(
         packages.push(std_manifest());
     }
     packages.push(PackageManifest {
+        namespace: None,
         package: package("app"),
         dependencies,
         sources: vec![ModuleSource {
+            foreign: false,
+            captured: None,
             file: path,
             modules: vec![module.into()],
             signatures: false,
@@ -138,6 +141,7 @@ pub(crate) fn checked_inputs(
         let package = packages
             .entry(path.package.clone())
             .or_insert_with(|| PackageManifest {
+                namespace: None,
                 dependencies: if path.package == core {
                     vec![]
                 } else {
@@ -147,6 +151,8 @@ pub(crate) fn checked_inputs(
                 sources: vec![],
             });
         package.sources.push(ModuleSource {
+            foreign: false,
+            captured: None,
             file,
             modules: path.modules,
             signatures: path.package == core,

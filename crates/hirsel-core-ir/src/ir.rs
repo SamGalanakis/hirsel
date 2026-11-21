@@ -738,9 +738,7 @@ pub enum Inst {
         query: LayoutQuery,
     },
     /// The `W` of a compact blob holding an encoding of `ty` (a compact type's
-    /// place row, MEM-9): `word`, the blob's header word the body read. A release
-    /// unit in which every root reaching `ty` writes one `W` replaces it with
-    /// that constant ([`crate::widths::resolve`]); anywhere else it is `word`.
+    /// place row, MEM-9): `word`, the blob's header word the body read.
     CompactWidth {
         result: ValueId,
         word: ValueId,
@@ -1000,6 +998,12 @@ pub enum RtOp {
     Xxh3Stripes,
     /// Take the socket or read the scratch grant designated by the place host.
     LaunchHandle,
+    /// Verify a pure Ed25519 signature over a message.
+    Ed25519Verify,
+    /// Verify a fixed-width P-256 ECDSA signature over a message with SHA-256.
+    P256Verify,
+    /// Verify a DER P-256 ECDSA signature over a message with SHA-256.
+    P256VerifyDer,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1068,10 +1072,17 @@ pub enum HostOp {
     ProvideStderr = hirsel_core_ids::host_op::PROVIDE_STDERR as isize,
     PortNext = hirsel_core_ids::host_op::PORT_NEXT as isize,
     CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
+    CallSecret = hirsel_core_ids::host_op::CALL_SECRET as isize,
     CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
     PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
     ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
+    ProvideNet = hirsel_core_ids::host_op::PROVIDE_NET as isize,
     PortFill = hirsel_core_ids::host_op::PORT_FILL as isize,
+    ScramSha256 = hirsel_core_ids::host_op::SCRAM as isize,
+    ScramVerify = hirsel_core_ids::host_op::SCRAM_VERIFY as isize,
+    StreamTerminal = 96,
+    NetJoin = 97,
+    ScramFinalLen = 98,
 }
 
 impl HostOp {
@@ -1145,10 +1156,17 @@ impl HostOp {
         HostOp::ProvideStderr,
         HostOp::PortNext,
         HostOp::CallWord,
+        HostOp::CallSecret,
         HostOp::CallPayload,
         HostOp::PortReply,
         HostOp::ProvideDir,
         HostOp::PortFill,
+        HostOp::StreamTerminal,
+        HostOp::NetJoin,
+        HostOp::ScramSha256,
+        HostOp::ScramFinalLen,
+        HostOp::ScramVerify,
+        HostOp::ProvideNet,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1199,6 +1217,10 @@ impl HostOp {
             HostOp::SecretHmac => "secret_hmac_sha256",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
             HostOp::NetSplit => "net_split",
+            HostOp::NetJoin => "net_join",
+            HostOp::ScramSha256 => "scram_sha256",
+            HostOp::ScramFinalLen => "scram_final_len",
+            HostOp::ScramVerify => "scram_verify",
             HostOp::Stopped => "host_stopped",
             HostOp::StdinRead => "stdin_read",
             HostOp::EnvGet => "env_get",
@@ -1216,10 +1238,13 @@ impl HostOp {
             HostOp::ProvideStderr => "provide_stderr",
             HostOp::PortNext => "port_next",
             HostOp::CallWord => "call_word",
+            HostOp::CallSecret => "call_secret",
             HostOp::CallPayload => "call_payload",
             HostOp::PortReply => "port_reply",
             HostOp::ProvideDir => "provide_dir",
+            HostOp::ProvideNet => "provide_net",
             HostOp::PortFill => "port_fill",
+            HostOp::StreamTerminal => "stream_is_terminal",
         }
     }
     /// C entry of a host operation that has its own adapter.
@@ -1241,6 +1266,10 @@ impl HostOp {
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
             Self::NetSplit => "hirsel_core_net_split",
+            Self::NetJoin => "hirsel_core_net_join",
+            Self::ScramSha256 => "hirsel_core_scram_sha256",
+            Self::ScramFinalLen => "hirsel_core_scram_final_len",
+            Self::ScramVerify => "hirsel_core_scram_verify",
             Self::StdinRead => "hirsel_core_stdin_read",
             Self::EnvGet => "hirsel_core_env_get",
             Self::EnvLen => "hirsel_core_env_len",
@@ -1257,10 +1286,13 @@ impl HostOp {
             Self::ProvideStderr => "hirsel_core_provide_stderr",
             Self::PortNext => "hirsel_core_port_next",
             Self::CallWord => "hirsel_core_call_word",
+            Self::CallSecret => "hirsel_core_call_secret",
             Self::CallPayload => "hirsel_core_call_payload",
             Self::PortReply => "hirsel_core_port_reply",
             Self::ProvideDir => "hirsel_core_provide_dir",
+            Self::ProvideNet => "hirsel_core_provide_net",
             Self::PortFill => "hirsel_core_port_fill",
+            Self::StreamTerminal => "hirsel_core_stream_is_terminal",
             _ => unreachable!(),
         }
     }
@@ -1279,6 +1311,9 @@ impl HostOp {
                 | HostOp::SecretHmac
                 | HostOp::SecretVerifyHmac
                 | HostOp::NetSplit
+                | HostOp::NetJoin
+                | HostOp::ScramFinalLen
+                | HostOp::ScramVerify
                 | HostOp::EnvGet
                 | HostOp::EnvLen
                 | HostOp::EnvName
@@ -1292,9 +1327,12 @@ impl HostOp {
                 | HostOp::ProvideStdout
                 | HostOp::ProvideStderr
                 | HostOp::CallWord
+                | HostOp::CallSecret
                 | HostOp::PortReply
                 | HostOp::ProvideDir
+                | HostOp::ProvideNet
                 | HostOp::PortFill
+                | HostOp::StreamTerminal
         )
     }
 }
@@ -1345,6 +1383,7 @@ impl RtOp {
     /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
+    /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
@@ -1438,6 +1477,10 @@ impl RtOp {
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
+                vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
+                vec![u64_],
+            ),
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
@@ -1552,6 +1595,22 @@ impl RtOp {
                         vec![V(u64_), V(p), V(u64_), V(p), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
+                    HostOp::ScramSha256 => (
+                        vec![
+                            V(u64_),
+                            V(u64_),
+                            V(p),
+                            V(p),
+                            V(p),
+                            V(p),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
+                        ],
+                        outcome,
+                    ),
+                    HostOp::ScramFinalLen => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::ScramVerify => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
@@ -1572,13 +1631,17 @@ impl RtOp {
                     | HostOp::EnvLen
                     | HostOp::ProvideRandom
                     | HostOp::ClockIdle
+                    | HostOp::CallSecret
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
-                    HostOp::ProvideStdout
-                    | HostOp::ProvideStderr
-                    | HostOp::ProvideDir
-                    | HostOp::PortNext => (vec![V(u64_)], outcome),
-                    HostOp::CallWord => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::ProvideDir | HostOp::ProvideNet | HostOp::PortNext => {
+                        (vec![V(u64_)], outcome)
+                    }
+                    HostOp::ProvideStdout | HostOp::ProvideStderr => {
+                        (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
+                    }
+                    HostOp::StreamTerminal => (vec![V(u64_), V(u8_)], outcome),
+                    HostOp::CallWord | HostOp::NetJoin => (vec![V(u64_), V(u64_)], outcome),
                     HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::PortReply => (vec![V(u64_); 9], outcome),
                     HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),
@@ -1685,6 +1748,9 @@ impl RtOp {
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
             | RtOp::Sha256Blocks
+            | RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
             | RtOp::CauseNext
             | RtOp::CauseValue
             | RtOp::ArgsLen
@@ -1907,7 +1973,7 @@ pub struct Body {
     pub edges: Vec<Edge>,
     pub pools: Pools,
     /// The blobs this body roots (MEM-4): each root's type, as a place row, and
-    /// the `W` its blob records. Only [`crate::widths::resolve`] reads them.
+    /// the `W` its blob records.
     pub compact_roots: Vec<CompactRoot>,
 }
 
@@ -2165,6 +2231,11 @@ pub struct Module {
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,
     pub functions: Vec<Function>,
+    /// A native assembly with foreign grants passes caller sites to bodyless
+    /// functions. Ordinary bodies keep their own sites. This is a link-time
+    /// condition derived from the launch, outside the checked body encoding.
+    #[serde(skip)]
+    pub external_call_sites: bool,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.
@@ -2184,6 +2255,12 @@ pub struct StepFree {
     pub dispatch: bool,
 }
 impl Module {
+    pub fn passes_caller_site(&self, function: FuncId) -> bool {
+        let function = &self.functions[function.index()];
+        crate::source::inherits_site(&self.instances[function.instance.index()])
+            || (self.external_call_sites && function.body.is_none())
+    }
+
     /// The identity of function `function`'s code: a code variant's, or its
     /// instance's [`Identity::digest`].
     pub fn code_identity(&self, function: FuncId) -> ContentHash {

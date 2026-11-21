@@ -88,6 +88,7 @@ fn read_file(path: &str) -> Option<Zeroizing<Vec<u8>>> {
 pub(crate) struct TlsWrite {
     pub(crate) name: Name,
     pub(crate) spent: bool,
+    pub(crate) binding: hirsel_core_net::scram::Binding,
 }
 
 struct Charge(Payer, u64);
@@ -119,13 +120,40 @@ impl Secrets {
 pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
     unsafe {
         if handle & DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).secrets.lock().unwrap().entries
-                [(handle & !DYNAMIC_GRANT) as usize]
+            (*(*context).host_files)
+                .registry
+                .run
+                .secrets
+                .lock()
+                .unwrap()
+                .entries[(handle & !DYNAMIC_GRANT) as usize]
                 .0
                 .clone()
         } else {
             let grant = hirsel_core_capability_handle(context, handle) as *const Granted;
             (*grant).secret.clone()
+        }
+    }
+}
+
+/// A new designation of `secret`, charged as `narrow` charges, to the
+/// current limit; a refusal answers error tag 2 (`provide.secret`).
+pub(crate) unsafe fn designate(context: *mut Context, secret: Secret) -> Outcome {
+    unsafe {
+        let charge = match admit((*context).payer(), &secret.policy.patterns, 0) {
+            Ok(charge) => charge,
+            Err(error) => return error,
+        };
+        let value = (*(*context).host_files)
+            .registry
+            .run
+            .secrets
+            .lock()
+            .unwrap()
+            .push(secret, Some(charge));
+        Outcome {
+            value,
+            ..Outcome::default()
         }
     }
 }
@@ -175,24 +203,23 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             Ok(charge) => charge,
             Err(error) => return error,
         };
-        #[cfg(feature = "record")]
-        let replay = (*(*context).host_files)
-            .secret_mac_tape
-            .is_some_and(|tape| tape.replay);
-        #[cfg(not(feature = "record"))]
-        let replay = false;
-        let owned = (!replay).then(|| Arc::new(Zeroizing::new(bytes.to_vec())));
+        let owned = Arc::new(Zeroizing::new(bytes.to_vec()));
         if (*source).capacity != 0 && (*source).len != 0 {
             std::slice::from_raw_parts_mut((*source).data, (*source).len).zeroize();
         }
-        let mut secrets = (*(*context).host_files).secrets.lock().unwrap();
+        let mut secrets = (*(*context).host_files)
+            .registry
+            .run
+            .secrets
+            .lock()
+            .unwrap();
         let origin = Origin::Sealed(secrets.seals);
         secrets.seals += 1;
         let value = secrets.push(
             Secret {
                 origin,
                 policy,
-                bytes: owned,
+                bytes: Some(owned),
             },
             Some(charge),
         );
@@ -227,6 +254,8 @@ pub unsafe extern "C" fn hirsel_core_secret_narrow(
         };
         secret.policy = policy;
         let value = (*(*context).host_files)
+            .registry
+            .run
             .secrets
             .lock()
             .unwrap()
@@ -245,6 +274,9 @@ pub struct SendRequest {
     pub(crate) origin: Origin,
     pub(crate) patterns: Arc<[Pattern]>,
     pub(crate) committed: usize,
+    /// On a served stream: the Secret its server receives, narrowed to the
+    /// stream's name (`provide.secret`), and `secret` is empty.
+    pub(crate) narrowed: Option<Secret>,
 }
 
 #[cfg(feature = "record")]
@@ -252,7 +284,6 @@ pub struct SendRequest {
 pub(crate) struct MacTape {
     pub(crate) provider: Provider,
     pub(crate) handle: u64,
-    pub(crate) replay: bool,
 }
 
 pub(crate) struct MacRequest<'a> {

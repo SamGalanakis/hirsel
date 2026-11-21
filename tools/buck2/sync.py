@@ -108,11 +108,11 @@ TEST_DATA = {
     "hirsel-core-diag-unittest": ["docs/spec/**", "crates/hirsel-core-syntax/src/**", "crates/hirsel-core-resolve/src/**", "crates/hirsel-core-front/src/**"],
     "hirsel-core-resolve-unittest": ["core/core/**", "core/std/*.hirsel"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
-    "hirsel-core-program-tests-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**", "core/programs/store/*.hirsel", "core/programs/store/manifest.json", "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel", "docs/spec/**"],
+    "hirsel-core-program-tests-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel", "docs/spec/**"],
     "hirsel-core-program-tests-test-cranelift_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-program-tests-test-cranelift_source_aarch64": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
-    "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/store/manifest.json", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
+    "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
     "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
     "hirsel-cranelift-test-core_aarch64": ["core/front/**", "core/core/**"],
 }
@@ -806,7 +806,7 @@ def first_party(meta: dict) -> str:
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_SCRIPTED_ARCHIVE": "//:core-scripted-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/tools/std_native.py", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_library", name="core-store-crash-provider", crate="store_crash_bridge",
                             crate_root="core/tools/store_crash_bridge.rs",
                             srcs=["core/tools/store_crash_bridge.rs", "crates/hirsel-core-rt/src/test_provider.rs"],
@@ -820,7 +820,7 @@ def first_party(meta: dict) -> str:
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-scripted-runtime-pic",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-store-s3", script="core/tools/store_journal_tests.py",
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-store-s3/hirsel",
@@ -829,7 +829,7 @@ def first_party(meta: dict) -> str:
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-scripted-runtime-pic",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"] + ["core/tools/case_progress.py"]')))
     # R1 exercises durable calls, runs-once and store refusal across the evaluator
     # and native engines. R0 includes crash cuts.
     out.append("\n" + call("hirsel_script_test", name="core-runner-r1", script="core/tools/runner_tests.py",
@@ -842,7 +842,7 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_CORE_RT_SCRIPTED_ARCHIVE": "//:core-scripted-runtime-pic",
                                        "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/store_crash_tests.py", "core/tools/runner_crash.c"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/store_crash_tests.py", "core/tools/runner_crash.c"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-runner-r0", script="core/tools/runner_tests.py",
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-r0/hirsel",
@@ -852,7 +852,7 @@ def first_party(meta: dict) -> str:
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/programs/store/frame-vectors.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/runner_mark.c", "core/tools/store_crash_tests.py", "core/tools/store_crash.c", "core/tools/runner_crash.c"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/programs/store/frame-vectors.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/runner_mark.c", "core/tools/store_crash_tests.py", "core/tools/store_crash.c", "core/tools/runner_crash.c"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-runner-wire", script="core/tools/runner_tests.py",
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-wire/hirsel",
@@ -860,26 +860,26 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/wire/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/programs/store/frame-vectors.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/std_socket.c", "tools/tests/wire_build.py", "tools/tests/wire_admission.py", "tools/tests/wire_wsock.py", "tools/tests/wire_process.py"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/wire/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/programs/store/frame-vectors.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/std_socket.c", "tools/tests/wire_build.py", "tools/tests/wire_admission.py", "tools/tests/wire_wsock.py", "tools/tests/wire_process.py"] + ["core/tools/case_progress.py"]')))
     # Trace observers use private copies of the law fixtures.
     out.append("\n" + call("hirsel_script_test", name="core-observe-runner", script="core/tools/observe_tests.py",
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-observe-runner/hirsel", "--evaluator", "buck-out/tmp/cargo-bin-exe/core-observe-runner/hirsel-core-contract-eval"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py", "core/tools/runner_count.c"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/hirsel.toml", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py", "core/tools/runner_count.c"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-observe-drive", script="core/tools/observe_drive_tests.py",
                             host=True,
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/core-observe-drive/hirsel-core-contract-eval"],
                             bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/manifest.json", "core/tools/observe_tests.py", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/hirsel.toml", "core/tools/observe_tests.py", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"] + ["core/tools/case_progress.py"]')))
     for model in ("calls", "store", "subs"):
         target = "core-observe-model-" + model
         out.append("\n" + call("hirsel_script_test", name=target, script="core/tools/observe_model_tests.py",
                                 host=True,
                                 args=["--evaluator", "buck-out/tmp/cargo-bin-exe/" + target + "/hirsel-core-contract-eval", "--model", model],
                                 bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/manifest.json", "core/tools/observe_tests.py", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"] + ["core/tools/case_progress.py"]')))
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/hirsel.toml", "core/tools/observe_tests.py", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"] + ["core/tools/case_progress.py"]')))
     # The native laws run on the invoking host for the Dir laws' openat2.
     for engine in ("cranelift", "llvm"):
         name = "core-native-laws-" + engine

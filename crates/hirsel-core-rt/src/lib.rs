@@ -18,6 +18,7 @@ pub mod entry;
 mod env;
 mod fiber;
 pub mod flow;
+pub mod foreign;
 mod growth;
 pub mod host_file;
 pub mod host_ops;
@@ -43,10 +44,12 @@ mod resolve;
 mod retention;
 #[cfg(any(test, feature = "testing"))]
 pub mod schedule_script;
+mod scram;
 pub mod secret;
 mod sequencer;
 mod sha1;
 mod sha256;
+mod signature;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 mod stdin;
@@ -96,7 +99,7 @@ pub struct Context {
     /// MEM-30 fast-path window, at the frozen offset CONTEXT_STEPS.
     pub steps: i64,
     pub(crate) run: *const crate::process::Config,
-    pub(crate) map_hash_key: [u8; 16],
+    pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) cancel_requested: AtomicBool,
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
@@ -113,7 +116,11 @@ pub struct Context {
     pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
     pub(crate) frame_lists: frame_list::FrameLists,
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
+    pub(crate) foreign: *const foreign::Run,
 }
+
+const _: () =
+    assert!(std::mem::offset_of!(Context, map_hash_key) == abi_layout::CONTEXT_MAP_HASH_KEY);
 
 impl Context {
     /// The task provider admits its task record and primary cell separately.
@@ -133,7 +140,7 @@ impl Context {
             regions: region::RegionCache::default(),
             heap: std::cell::OnceCell::new(),
             run: std::ptr::null(),
-            map_hash_key: [0; 16],
+            map_hash_key: hirsel_core_layout::map_hash::PreparedKey::new(&[0; 16]),
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
             finalizing: 0,
@@ -146,6 +153,7 @@ impl Context {
             isolates: Vec::new(),
             frame_lists: frame_list::FrameLists::default(),
             spare_isolate_cell: None,
+            foreign: std::ptr::null(),
         }
     }
 

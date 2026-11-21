@@ -1,0 +1,2 @@
+fn from_dep(f: Foreign[ffi_laws.wrapper.Laws]) -> u64 { ffi_laws.native.version(f) }
+// expect: refuse FFI-2 at 1:73

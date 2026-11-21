@@ -202,7 +202,7 @@ pub unsafe extern "C" fn hirsel_core_env_narrow(
         let handle = narrowed.handle();
         let provider = *entry::hirsel_core_capability_provider(context, grant);
         let files = &*(*context).host_files;
-        files.env_grants.lock().unwrap().push(Grant {
+        files.registry.run.env_grants.lock().unwrap().push(Grant {
             _env: narrowed,
             payer,
             charge: charge.unwrap(),

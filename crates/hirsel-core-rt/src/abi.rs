@@ -422,16 +422,18 @@ pub unsafe extern "C" fn hirsel_core_map_hash_bytes(
     data: *const u8,
     len: u64,
 ) -> u64 {
-    unsafe {
-        hirsel_core_layout::map_hash::bytes(&(*context).map_hash_key, map_hash_range(data, len))
-    }
+    let mut state = unsafe { (*context).map_hash_key.state() };
+    state.bytes(unsafe { map_hash_range(data, len) });
+    state.finish()
 }
 
 /// # Safety
 /// Context belongs to this task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_map_hash_word(context: *const Context, word: u64) -> u64 {
-    unsafe { hirsel_core_layout::map_hash::word(&(*context).map_hash_key, word) }
+    let mut state = unsafe { (*context).map_hash_key.state() };
+    state.word(word);
+    state.finish()
 }
 
 use hirsel_core_layout::map_hash::State as MapHashState;
@@ -443,7 +445,7 @@ pub unsafe extern "C" fn hirsel_core_map_hash_start(
     context: *const Context,
     state: *mut MapHashState,
 ) {
-    unsafe { state.write(MapHashState::new(&(*context).map_hash_key)) }
+    unsafe { state.write((*context).map_hash_key.state()) }
 }
 
 /// # Safety

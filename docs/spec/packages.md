@@ -138,6 +138,10 @@ limit = 134217728         # replaces limit, grants or dirs for one test
 s1 = { module = "main", grants = ["Stdout"] }
 ```
 
+Every package is a library: any package can be bound as a dependency and packed. There is no
+`[library]` table. A library's content is its `[sources]`, and a program is a library with an
+entry (`[program]`).
+
 **`[package]`.** `name` and `major` give the package its identity `name@major`. `charge`
 states its charge policy (PROG-1), and `charge-v1` is the only value v1 accepts.
 
@@ -157,7 +161,9 @@ the last.
   this name and major.
 - `{ major, root }`, with at most one of `url` or `archive`, binds a published library. `root`
   pins its content. `url` is an `https://` URL of a package archive (section 7). `archive` is a
-  package archive's path relative to this manifest's directory. With neither, the root must
+  package archive's path relative to this manifest's directory. It is never absolute, and
+  resolved against that directory it must lie inside the workspace root, so the lock can name
+  it relative to the root. With neither, the root must
   already be in the package store. The source says where content may come from, and the root
   says what it must be: the root enters the package's own `C` and the source never does.
 - `{ workspace = true }` alone inherits the workspace's declaration of this name (section 4).
@@ -253,10 +259,13 @@ Resolution turns the members' effective manifests into the workspace's **closure
 refusal stops it:
 
 1. **Manifests.** Read and validate every member's manifest and the root's (sections 2 to 4).
-2. **Content.** For each published root reached so far, open its `C` from the package store,
+2. **Member files.** Read every member's `[sources]` and `[tests.sources]` once, under the
+   path and symlink rules of section 1. These bytes are the ones the compiler is handed and
+   the ones a member's root is computed from.
+3. **Content.** For each published root reached so far, open its `C` from the package store,
    or fetch it from its source (section 7). Decode it, and add its bindings to the walk. This
    repeats until no new root appears.
-3. **Binding.** Bind each `name@major` once:
+4. **Binding.** Bind each `name@major` once:
    - toolchain packages bind to the toolchain;
    - a member binds to the member;
    - a published library binds to its root.
@@ -266,7 +275,7 @@ refusal stops it:
    (section 6). A diamond refusal names both paths and both roots (section 9). Different
    majors are different packages and coexist: `json@1` and `json@2` may both be in a closure,
    from two packages.
-4. **Lock.** Derive the lock (section 8) and compare it with `hirsel.lock`.
+5. **Lock.** Derive the lock (section 8) and compare it with `hirsel.lock`.
 
 **Paths in refusals.** A **top member** is a member that no other member binds. The **path**
 to a binding is the shortest chain of bindings from a top member to the package that declares
@@ -345,8 +354,9 @@ bytes and, before keeping or using anything:
 1. decodes the archive and each entry under the decoding rules of section 1;
 2. checks that the head's root is P and that the head's name and major are the binding's;
 3. checks the closure: each entry is reached from the head's bindings, each published
-   binding of each entry names an entry of the archive or a root already in the store, and
-   each such entry's name and major match the binding;
+   binding of each entry names an entry of the archive, and each such entry's name and major
+   match the binding. An archive is complete on its own, and `pack` always writes it so,
+   copying any published package it reaches out of the store;
 4. only then writes each entry to the store.
 
 A failure at any step keeps nothing from the archive, not even under the root it actually
@@ -383,9 +393,12 @@ then by major numerically. `core@1` has no row and appears in no edge list. A ro
   - `via:<id>`;
 - `edges`, the row's bindings as `name@major` texts, sorted as the rows are.
 
-A published row's source is the first declared source of that root, taking declaring packages
-in identity order. With no declared source, the source is `via:<id>`, the first published
-package (in identity order) whose archive brought it in. With neither, it is `store`. A member
+A published row's source comes from the manifests and the `C`s alone, never from what the
+store happened to hold or which archive was opened. It is the first `url` or `archive` among the
+declarations that bind that root, taking declaring packages in identity order; a declaration
+with `root` alone names no source. With no such declaration, it is `via:<id>`, the first
+published package, in identity order, whose `C` binds that root. With neither, it is
+`store`. A member
 row has no root, because a member's bytes change with every edit. The member's files enter
 every key through their content (section 10), and a member's root is computed when it is
 packed. All paths use `/` and are normalised, with no `.` or `..` components and no trailing
@@ -447,7 +460,7 @@ may still fetch pinned content that the store lacks, because a fetch only fills 
 verified bytes the manifests already pin.
 
 **`--frozen`.** This is `--locked`, and it also refuses to fetch. Every published root of the
-closure must already be in the store, undamaged. The refusal comes in resolution step 2,
+closure must already be in the store, undamaged. The refusal comes in resolution step 3,
 before any source is touched, so a `--frozen` command never opens a URL or an archive path.
 
 ## 9. Diagnostics
@@ -480,6 +493,7 @@ Roots are always written in full.
 | member cycle | `hirsel: the members' path bindings form a cycle: a@1 -> b@1 -> a@1`, starting at the smallest identity on the cycle |
 | inherit missing | `hirsel: <manifest>: dependencies.<name>: the workspace declares no <name>` |
 | no source | `hirsel: <id> sha256:<P> is not in the package store and its binding names no source` |
+| archive outside | `hirsel: <manifest>: dependencies.<name>: archive "<path>" is not inside the workspace root` |
 | fetch mismatch | `hirsel: <id>: <source> holds sha256:<Q>, but the binding pins sha256:<P>` |
 | fetched identity | `hirsel: <id>: sha256:<P> is <other>@<m>` |
 | malformed | `hirsel: <id>: <source> is not a package archive: <first decoding failure>` |
@@ -555,7 +569,10 @@ Each law names its fixture in full and its expected value. Each value comes from
 worked by hand or computed by a reference encoder written from section 1, never from the
 implementation. They are cases in the package-directory harness of
 `crates/hirsel-core-driver/src/test_run_native.rs`, which runs the CLI over temporary
-directories.
+directories. Fixture archives are packed with a fixture store F of their own. Every command of
+a law runs with `--package-store` naming that law's own store, empty when the law starts unless
+the law says otherwise, so no law's outcome depends on what an earlier command left in a
+store.
 
 **Known roots.** Two one-file packages, `jx` and `jy`:
 
@@ -652,11 +669,16 @@ lock rewritten, `hirsel check app --locked` against a new empty store S3 fills S
 passes, because `--locked` fetches.
 
 **L4. A symlink escaping the package.** Package `p` lists `"a.hirsel" = "a"`, where `a.hirsel`
-is a symbolic link to `../outside.hirsel`, a regular file beside `p`. `hirsel check p` and
-`hirsel pack p --out p.hpkg` both exit 2 with
-`hirsel: p/hirsel.toml: sources: "a.hirsel" resolves outside the package`, and pack writes no
-archive. In the control case `a.hirsel` links to `real/a.hirsel` inside `p`: the check passes,
-and the printed root equals the root of a copy of `p` in which `a.hirsel` is a regular file
+is a symbolic link to `../outside.hirsel`, a regular file beside `p`, and `p` has no lock.
+Run from `p`'s parent, `hirsel check p` and `hirsel pack p --out p.hpkg` both exit 2, create no
+`hirsel.lock` and no archive, and write exactly this to stderr. The refusal is in resolution step
+2, before the lock is derived:
+
+```text
+hirsel: p/hirsel.toml: sources: "a.hirsel" resolves outside the package
+```
+
+In the control case `a.hirsel` links to `real/a.hirsel` inside `p`: the check passes, and the printed root equals the root of a copy of `p` in which `a.hirsel` is a regular file
 holding the same bytes. The law catches a walker that follows links out of the package, and an
 encoder that hashes the link target's text instead of the file's bytes.
 

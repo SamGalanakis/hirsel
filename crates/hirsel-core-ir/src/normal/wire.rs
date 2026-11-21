@@ -367,7 +367,12 @@ macro_rules! rows {
                 } else if out.abi {
                     let hash = match out.abi_closures {
                         Some(closures) => closures[self.0 as usize].expect("ABI shape hash"),
-                        None => out.module.module.closure(TypeId(self.0)).hash,
+                        None => out
+                            .module
+                            .module
+                            .closure_impl(TypeId(self.0), ClosureKind::Abi, None)
+                            .expect("unmetered ABI closure")
+                            .hash,
                     };
                     hash.write(out);
                 } else {

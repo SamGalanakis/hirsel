@@ -2041,10 +2041,16 @@ impl Closure {
     }
 }
 
+pub(crate) enum ClosureKind {
+    Full,
+    Abi,
+}
+
 impl Module {
     /// The closure of row `root` ([`Closure`]).
     pub fn closure(&self, root: TypeId) -> Closure {
-        self.closure_impl(root, None).expect("unmetered closure")
+        self.closure_impl(root, ClosureKind::Full, None)
+            .expect("unmetered closure")
     }
 
     pub(crate) fn decoded_closure(
@@ -2052,12 +2058,13 @@ impl Module {
         root: TypeId,
         budget: &mut DecodeBudget,
     ) -> DecodeResult<Closure> {
-        self.closure_impl(root, Some(budget))
+        self.closure_impl(root, ClosureKind::Full, Some(budget))
     }
 
-    fn closure_impl(
+    pub(crate) fn closure_impl(
         &self,
         root: TypeId,
+        kind: ClosureKind,
         mut budget: Option<&mut DecodeBudget>,
     ) -> DecodeResult<Closure> {
         use std::collections::hash_map::Entry;
@@ -2170,10 +2177,16 @@ impl Module {
                     signature,
                 }))
             };
+            // A codec maker is selected by the checking context. It is type
+            // metadata and contributes no layout or calling-convention facts.
+            let codec = shape.codec.take();
             let hooks = [
                 hook(shape.finalizer.take())?,
                 hook(shape.clone.take())?,
-                hook(shape.codec.take())?,
+                match kind {
+                    ClosureKind::Full => hook(codec)?,
+                    ClosureKind::Abi => None,
+                },
             ];
             rows[order[&t] as usize] = Some(ClosureRow { shape, hooks });
         }

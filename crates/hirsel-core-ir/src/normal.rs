@@ -52,6 +52,7 @@ pub(crate) fn decoded_closure_hash(
 
 const BODY_MAGIC: &[u8] = b"HIRBODY\0\x01\x00";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
+const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
 pub(crate) mod wire;
 use wire::{Read, Wire, Write};
@@ -63,7 +64,7 @@ pub fn signature(module: &Module, function: FuncId) -> ContentHash {
     let mut out = Write::module(&mut order);
     out.abi = true;
     module.signatures[signature.index()].write(&mut out);
-    ContentHash::of_parts("hirsel.code-signature.v1", [&out.bytes[..]])
+    ContentHash::of_parts(SIGNATURE_DOMAIN, [&out.bytes[..]])
 }
 
 /// The canonical body and the function rows its code reaches outside the unit.
@@ -1077,7 +1078,7 @@ pub struct DecodedBody {
     pub module: Module,
     pub slots: Vec<Slot>,
     closures: Vec<Vec<ContentHash>>,
-    closure_hashes: Vec<Option<ContentHash>>,
+    abi_closures: Vec<Option<ContentHash>>,
     signatures: Vec<Option<ContentHash>>,
 }
 
@@ -1135,17 +1136,23 @@ impl DecodedBody {
             })
             .chain(signature.dest);
         for ty in types {
-            cached_closure_hash(&self.module, ty, &mut self.closure_hashes, budget)?;
+            cached_closure_hash(
+                &self.module,
+                ty,
+                ClosureKind::Abi,
+                &mut self.abi_closures,
+                budget,
+            )?;
         }
         let meter = PlanMeter::new(budget);
         let mut order = ModuleOrder::metered(&self.module, Some(&meter));
         let mut out = Write::module(&mut order);
         out.abi = true;
-        out.abi_closures = Some(&self.closure_hashes);
+        out.abi_closures = Some(&self.abi_closures);
         signature.write(&mut out);
         let bytes = out.bytes;
         meter.finish(budget)?;
-        let hash = ContentHash::of_parts("hirsel.code-signature.v1", [&bytes[..]]);
+        let hash = ContentHash::of_parts(SIGNATURE_DOMAIN, [&bytes[..]]);
         self.signatures[id] = Some(hash);
         Ok(hash)
     }
@@ -1154,6 +1161,7 @@ impl DecodedBody {
 fn cached_closure_hash(
     module: &Module,
     ty: TypeId,
+    kind: ClosureKind,
     cached: &mut Vec<Option<ContentHash>>,
     budget: &mut DecodeBudget,
 ) -> DecodeResult<ContentHash> {
@@ -1166,7 +1174,7 @@ fn cached_closure_hash(
         budget.check()?;
         return Ok(hash);
     }
-    let hash = module.decoded_closure(ty, budget)?.hash;
+    let hash = module.closure_impl(ty, kind, Some(budget))?.hash;
     *slot = Some(hash);
     Ok(hash)
 }
@@ -1267,7 +1275,9 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
     let mut closure_hashes = Vec::new();
     for (key, hashes) in module.instances.iter().zip(&closures) {
         for (&ty, &hash) in key.arguments.iter().zip(hashes) {
-            if cached_closure_hash(&module, ty, &mut closure_hashes, budget)? != hash {
+            if cached_closure_hash(&module, ty, ClosureKind::Full, &mut closure_hashes, budget)?
+                != hash
+            {
                 return Err(malformed());
             }
         }
@@ -1277,7 +1287,7 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
         module,
         slots,
         closures,
-        closure_hashes,
+        abi_closures: Vec::new(),
         signatures: Vec::new(),
     })
 }

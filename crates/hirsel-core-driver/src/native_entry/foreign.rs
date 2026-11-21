@@ -89,8 +89,13 @@ fn descriptor(
     kinds: &BTreeMap<&str, DataId>,
 ) -> Result<DataId> {
     let count = parsed.arguments().count();
+    let mut parameters = vec![0; count.max(1) * abi::FOREIGN_PARAMETER_BYTES];
+    for (index, argument) in parsed.arguments().enumerate() {
+        parameters[index * abi::FOREIGN_PARAMETER_BYTES + abi::FOREIGN_PARAMETER_DIR] =
+            u8::from(matches!(argument, Argument::Dir));
+    }
     let mut data = DataDescription::new();
-    data.define_zeroinit(count.max(1) * 8);
+    data.define(parameters.into_boxed_slice());
     data.set_align(8);
     for (word, argument) in parsed.arguments().enumerate() {
         if let Argument::Handle { kind, .. } = argument {
@@ -98,7 +103,7 @@ fn descriptor(
                 .get(kind)
                 .ok_or_else(|| format!("FFI-5: no reached release for {kind}"))?;
             let global = object.declare_data_in_data(id, &mut data);
-            data.write_data_addr((word * 8) as u32, global, 0);
+            data.write_data_addr((word * abi::FOREIGN_PARAMETER_BYTES) as u32, global, 0);
         }
     }
     let params = define(object, &format!("hirsel.foreign.parameters.{index}"), &data)?;
@@ -118,7 +123,7 @@ fn descriptor(
     let function = object.declare_func_in_data(thunk, &mut data);
     data.write_function_addr(abi::FOREIGN_CALL_THUNK, function);
     let params = object.declare_data_in_data(params, &mut data);
-    data.write_data_addr(abi::FOREIGN_CALL_KINDS, params, 0);
+    data.write_data_addr(abi::FOREIGN_CALL_PARAMETERS, params, 0);
     if let Return::New(kind) = parsed.result {
         let id = *kinds
             .get(kind)
@@ -175,6 +180,15 @@ fn thunk(object: &mut ObjectModule, name: &str, index: usize, parsed: &Abi<'_>) 
                 c_signature.params.push(AbiParam::new(I64));
                 params.push(f.load(I64, words, offset + 8));
             }
+            Argument::Dir => {
+                c_signature
+                    .params
+                    .extend([AbiParam::new(I32), AbiParam::new(I32)]);
+                for at in [offset, offset + 8] {
+                    let value = f.load(I64, words, at);
+                    params.push(f.b.ins().ireduce(I32, value));
+                }
+            }
         }
     }
     c_signature.returns.extend(match parsed.result {
@@ -204,7 +218,7 @@ fn slot(object: &mut ObjectModule, name: &str, parsed: &Abi<'_>, descriptor: Dat
     let params = std::iter::once(Param::Value(Ty::Scalar(Scalar::U64)))
         .chain(parsed.arguments().map(|arg| match arg {
             Argument::Scalar(s) => Param::Value(Ty::Scalar(s)),
-            Argument::Handle { .. } => Param::Value(Ty::Scalar(Scalar::U64)),
+            Argument::Handle { .. } | Argument::Dir => Param::Value(Ty::Scalar(Scalar::U64)),
             Argument::Bytes { mutable } => Param::Address {
                 place: PlaceTy::Value(Ty::Ptr),
                 loan: if mutable { Loan::Mut } else { Loan::View },

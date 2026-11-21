@@ -297,8 +297,8 @@ and owned by the callee when marked `take`. An argument for a `mut` parameter is
 moving type and bare otherwise; an argument for a `bytes` parameter is written `bytes e`;
 every other argument is bare. A constructor's payloads are `take` parameters. An argument
 whose mark does not match its parameter (a missing or an extra `mut`, `take` or `bytes`)
-is refused here, at the argument. `view p` and `copy p` are expressions, not marks, and
-`e in r` is a placement; like any argument they are checked against the parameter's type
+is refused here, at the argument. `view p` and `copy p` are expressions, not marks; like
+any argument they are checked against the parameter's type
 ([LANG-11](language.md#lang-11-typing-is-local)). A bare place argument for
 an unmarked parameter is a view; a copyable value is copied. An unmarked parameter of type
 `T` also takes a `View[T]`, which passes as that same view: a view of a view is the view

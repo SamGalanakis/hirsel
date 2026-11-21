@@ -14,6 +14,7 @@ pub enum AbiParameter {
     Scalar(Scalar),
     Bytes { mutable: bool },
     Handle { kind: DefPath, release: bool },
+    Dir,
 }
 
 pub enum AbiResult {
@@ -155,6 +156,8 @@ impl Program<'_> {
                                 AbiParameter::Bytes {
                                     mutable: p.mode == Mode::Mut,
                                 }
+                            } else if self.foreign_dir(p.ty) {
+                                AbiParameter::Dir
                             } else if let Some(kind) = Marker::Handle.argument(self, p.ty) {
                                 AbiParameter::Handle {
                                     kind: kind_name(kind),
@@ -304,7 +307,11 @@ impl Program<'_> {
                 } else if p.ty != ERROR
                     && (p.bytes
                         || !match p.mode {
-                            Mode::View => self.foreign_scalar(p.ty) || self.foreign_bytes(p.ty),
+                            Mode::View => {
+                                self.foreign_scalar(p.ty)
+                                    || self.foreign_bytes(p.ty)
+                                    || self.foreign_dir(p.ty)
+                            }
                             Mode::Mut => self.foreign_bytes(p.ty),
                             _ => false,
                         })
@@ -373,6 +380,11 @@ impl Program<'_> {
         matches!(self.types.kind(ty), TyKind::Adt(d, args)
             if self.decls[d.index()].role == Some(Role::List)
             && matches!(args.as_slice(), [element] if *element == crate::scalar(Scalar::U8)))
+    }
+
+    fn foreign_dir(&self, ty: TyId) -> bool {
+        matches!(self.types.kind(ty), TyKind::Adt(d, args)
+            if args.is_empty() && is_core_prelude(&self.decls[d.index()].path, &["Dir"]))
     }
 
     fn foreign_result_kind(&self, ty: TyId) -> Option<TyId> {

@@ -415,6 +415,38 @@ impl OsProvider {
     }
 }
 
+/// The host directory's stable descriptor and its effective write permission.
+///
+/// # Safety
+/// The running task owns context and grant is a live Dir. The caller holds
+/// the provider commit token. The OS provider retains directory descriptions
+/// until the run ends, after the foreign call has returned.
+pub(crate) unsafe fn foreign_root(
+    context: *const crate::Context,
+    grant: u64,
+) -> Option<(i32, bool)> {
+    use crate::entry::{hirsel_core_capability_handle, hirsel_core_capability_provider};
+    use hirsel_core_ids::host_op::DIR_READ_ONLY;
+
+    let handle = grant & !DIR_READ_ONLY;
+    // SAFETY: the typed Dir designates immutable entry or dynamic grant metadata.
+    unsafe {
+        let provider = hirsel_core_capability_provider(context, handle).as_ref()?;
+        let os_issue: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
+        if !std::ptr::fn_addr_eq(provider.issue, os_issue)
+            || !std::ptr::fn_addr_eq(provider.wait, WAIT)
+            || !std::ptr::fn_addr_eq(provider.deliver, crate::provider::DELIVER)
+        {
+            return None;
+        }
+        let key = hirsel_core_capability_handle(context, handle);
+        // Only host Dir grants carry these callbacks and an OsProvider state.
+        let os = &*provider.state.cast::<OsProvider>();
+        let directory = os.directories.get(&key)?;
+        Some((directory.as_raw_fd(), grant & DIR_READ_ONLY == 0))
+    }
+}
+
 /// Host CLOCK_MONOTONIC at the OS provider's construction: its mono_ns and its
 /// sleep and network deadlines count from it.
 /// # Safety

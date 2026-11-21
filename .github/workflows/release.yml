@@ -1,0 +1,118 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and qualify the Linux distribution
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          # Bubblewrap needs an unmasked /proc to mount a fresh copy.
+          docker run --rm --cpus 4 --memory 8g --memory-swap 8g \
+            --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+            -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/release:/release" -w /src \
+            -e RELEASE_TAG ubuntu:24.04 bash -euxo pipefail -c '
+              [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -yq --no-install-recommends bubblewrap build-essential ca-certificates curl git libedit2 libffi8 libxml2 libz3-4 pkg-config python3 xz-utils zlib1g zstd
+              git config --global --add safe.directory /src
+              curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs |
+                sh -s -- -y --profile minimal --default-toolchain 1.99.0
+              export PATH="/root/.cargo/bin:$PATH"
+              cargo fetch --locked
+              tools/toolchain-dist/build --local --num-threads 4 --output /tmp/hirsel-prefix
+              tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
+              asset=hirsel-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz
+              tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
+              cp site/install.sh /release/
+              cd /release
+              sha256sum "$asset" > SHA256SUMS
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: ${{ runner.temp }}/release
+          compression-level: 0
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:24.04
+            expect_refusal: 'false'
+          - image: debian:trixie
+            expect_refusal: 'false'
+          - image: ubuntu:22.04
+            expect_refusal: 'true'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+          path: ${{ runner.temp }}/release
+      - name: Exercise the installer on ${{ matrix.image }}
+        env:
+          HIRSEL_VERSION: ${{ github.ref_name }}
+          IMAGE: ${{ matrix.image }}
+          EXPECT_REFUSAL: ${{ matrix.expect_refusal }}
+        run: |
+          # The executable writer uses unshare(CLONE_FILES), which Docker's default filter denies.
+          docker run --rm --cpus 4 --memory 8g --memory-swap 8g \
+            --security-opt seccomp=unconfined \
+            -v "$RUNNER_TEMP/release:/release:ro" -e HIRSEL_VERSION -e EXPECT_REFUSAL \
+            -e HIRSEL_DOWNLOAD_BASE=file:///release "$IMAGE" dash -ec '
+              if [ "$EXPECT_REFUSAL" = true ]; then
+                if dash /release/install.sh > /tmp/install.log 2>&1; then
+                  echo "The installer accepted an unsupported glibc" >&2
+                  exit 1
+                fi
+                host=$(getconf GNU_LIBC_VERSION)
+                floor=$(sed -n "s/^glibc_floor=//p" /release/install.sh)
+                grep -Fx "hirsel installer: Hirsel requires glibc $floor or later (found ${host#glibc })" /tmp/install.log
+                test ! -e "$HOME/.hirsel"
+                exit 0
+              fi
+              apt-get update -qq
+              apt-get install -yq --no-install-recommends libc6-dev libgcc-13-dev libstdc++6 zlib1g
+              dash /release/install.sh
+              . "$HOME/.hirsel/env"
+              test "$(command -v hirsel)" = "$HOME/.hirsel/bin/hirsel"
+              case "$(command -v ld.lld || :)" in
+                "$HOME/.hirsel/"*) exit 1 ;;
+              esac
+              hirsel --version
+              hirsel new demo
+              cd demo
+              hirsel test
+              hirsel run
+              hirsel build
+            '
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+          path: ${{ runner.temp }}/release
+      - name: Publish the tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        working-directory: ${{ runner.temp }}/release
+        run: gh release create "$RELEASE_TAG" --verify-tag --generate-notes -- ./hirsel-*.tar.gz ./SHA256SUMS ./install.sh

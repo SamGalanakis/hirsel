@@ -42,8 +42,10 @@ its pin. A dependency change therefore lands with `notices.py --write`.
 Release packaging writes `notices/manifest.json`, `notices/crates/`,
 `notices/rust/`, `notices/native/`, `notices/adapted-source/` and a copy of
 `NOTICES.md` beside the compiler. Copy or archive the **whole output
-directory**, including `notices/`; there is no user-directory installation
-step. The bare Buck `hirsel-toolchain` target is a build artifact; use
+directory**, including `notices/`. The GitHub release workflow archives that
+directory and publishes it with `SHA256SUMS` and `install.sh`. The installer
+puts Hirsel in `~/.hirsel` and exposes a single `hirsel` symlink on `PATH`.
+The bare Buck `hirsel-toolchain` target is a build artifact; use
 `tools/toolchain-dist/build` for the redistributable output. Packaging recomputes
 the whole inventory, refuses when `NOTICES.md` differs, and refuses a bundle
 `check_bundle` does not cover.
@@ -77,11 +79,13 @@ a project, compile a std-using program with both native backends, and check
 both executables' stdout. It restores the prefix after both runs pass and
 removes the bundle on failure.
 
-Run `tools/toolchain-dist/build --check-fresh PREFIX` on a host with `bwrap`
-and the system link inputs named by the bundle. The test starts two empty Linux
-roots, mounts the prefix read-only at a new path and puts only that prefix on
-`PATH`. The first root checks the missing CRT diagnostic with the loader and
-shared libraries alone. The second adds the host's link inputs and runs
+Run `tools/toolchain-dist/build --check-fresh PREFIX` on a host with `readelf`,
+`bwrap` and the system link inputs named by the bundle. The gate checks the
+bundled ELF files against the glibc floor declared by `site/install.sh`, then
+starts two empty Linux roots. It mounts the prefix read-only at a new path and
+puts only that prefix on `PATH`. The first root checks the missing CRT
+diagnostic with the loader and shared libraries alone. The second adds the
+host's link inputs and runs
 `hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build`, then
 executes `./program` and checks the package.
 

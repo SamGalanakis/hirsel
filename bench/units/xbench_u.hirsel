@@ -11,7 +11,9 @@
 //   x_ring: units
 // Each reports `<mode> n=<n> ns=<elapsed> check=<sum>` on stderr.
 const TASK_BYTES: u64 = 65536
+
 const HELPER_BYTES: u64 = 1048576
+
 const PIPE_DEPTH: u64 = 64
 
 fn kernel(seed: u64, rounds: u64) -> u64 {
@@ -25,7 +27,9 @@ fn kernel(seed: u64, rounds: u64) -> u64 {
 }
 
 fn arg(argv: Args, i: u64) -> u64 {
-    let Some(v) = args.get(argv, i) else { fail("missing argument") }
+    let Some(v) = args.get(argv, i) else {
+        fail("missing argument")
+    }
     result.unwrap(int.parse(v))
 }
 
@@ -100,7 +104,9 @@ fn x_pingpong(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64) waits 
         result.unwrap(conn.send(peer, take buf))
         buf = result.unwrap(conn.receive(answers))
         let got: u8 = buf[0]
-        if got != int.wrapping_add(int.truncate(i), 1u8) { fail("pingpong: bad reply") }
+        if got != int.wrapping_add(int.truncate(i), 1u8) {
+            fail("pingpong: bad reply")
+        }
         check = int.wrapping_add(check, int.widen(got))
     }
     let ns = host.mono_ns(clock) - started
@@ -135,7 +141,9 @@ fn x_pipe(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64) waits {
     for i in 0 .. n {
         let b = result.unwrap(conn.receive(answers))
         let got: u8 = b[0]
-        if got != int.wrapping_add(int.truncate(i), 1u8) { fail("pipe: bad reply") }
+        if got != int.wrapping_add(int.truncate(i), 1u8) {
+            fail("pipe: bad reply")
+        }
         check = int.wrapping_add(check, int.widen(got))
     }
     let ns = host.mono_ns(clock) - started
@@ -219,7 +227,9 @@ fn x_svc(tasks: Tasks, clock: Clock, err: Stderr, n: u64) waits {
         let v = result.unwrap(conn.receive(inbox))
         state = kernel(state ^ v, 3)
         // Count how often the source changes: an arrival-order witness.
-        if i > 0 && (v >> 32) != order { state = int.wrapping_add(state, 1) }
+        if i > 0 && (v >> 32) != order {
+            state = int.wrapping_add(state, 1)
+        }
         order = v >> 32
     }
     let ns = host.mono_ns(clock) - started
@@ -312,7 +322,9 @@ fn c_pingpong(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64) waits 
         result.unwrap(channel.send(tx, take m))
         let b = result.unwrap(channel.receive(back))
         let got: u8 = b[0]
-        if got != int.wrapping_add(int.truncate(i), 1u8) { fail("c_pingpong: bad reply") }
+        if got != int.wrapping_add(int.truncate(i), 1u8) {
+            fail("c_pingpong: bad reply")
+        }
         check = int.wrapping_add(check, int.widen(got))
     }
     result.unwrap(task.join(take h))
@@ -347,7 +359,9 @@ fn c_pipe(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, depth: u64
     for i in 0 .. n {
         let b = result.unwrap(channel.receive(back))
         let got: u8 = b[0]
-        if got != int.wrapping_add(int.truncate(i), 1u8) { fail("c_pipe: bad reply") }
+        if got != int.wrapping_add(int.truncate(i), 1u8) {
+            fail("c_pipe: bad reply")
+        }
         check = int.wrapping_add(check, int.widen(got))
     }
     result.unwrap(task.join(take f))
@@ -375,7 +389,9 @@ fn c_fanin(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, producers
 }
 
 pub fn main(tasks: Tasks, clock: Clock, err: Stderr, argv: Args) -> Result[(), Exit] waits {
-    let Some(mode) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let Some(mode) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
     let n = arg(argv, 1)
     let size = arg(argv, 2)
     if mode == "c_pingpong" {

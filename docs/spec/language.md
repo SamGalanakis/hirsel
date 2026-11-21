@@ -172,7 +172,13 @@ itself and refused by that rule, and a one-variant type named like its variant i
 labelled or all positional. A record is constructed with every field labelled, in
 declaration order, `P(x: 1, y: 2)`, a field with a default
 ([SEM-10](semantics.md#sem-10-codecs)) included; a variant with labels exactly when its payloads are
-labelled; labels appear in no other call. The representation keyword (`resource`,
+labelled; labels appear in no other call. A labelled argument whose expression is a local of
+the same name may be written as that name alone, **punned**: in a call of a record or of a
+labelled variant, a bare name `x` is `x: x`, so with locals `x` and `y`, `Point(x, y)` is
+`Point(x: x, y: y)` and `Point(x, y: 0)` mixes the two. The pun names a field, so the
+declaration-order rule applies to it as written; any other unlabelled argument of a
+labelled constructor, `Point(x + 1, y)`, is refused here, at that argument, and a positional
+payload is never punned. Patterns pun the same way ([LANG-17](#lang-17-match)). The representation keyword (`resource`,
 `scoped`), the `@compact` attribute, or their absence is fixed by the definition
 ([OWN-1](ownership.md#own-1-representation-is-declared-once)). A nominal type's identity is
 its definition path; two definitions with equal fields are different types.
@@ -185,6 +191,14 @@ type Bad = A(x: u64, u64)                                 // refused: LANG-9, mi
 ```
 ```hirsel
 pub type OutOfScope = OutOfScope                          // refused: LANG-9, an alias of itself
+```
+```hirsel unbuilt
+type Point { x: i64, y: i64 }
+fn up(x: i64, y: i64) -> Point { Point(x, y: y + 1) }
+```
+```hirsel unbuilt
+type Point { x: i64, y: i64 }
+fn up(x: i64, y: i64) -> Point { Point(x, y + 1) }      // refused: LANG-9, y + 1 is not a pun
 ```
 
 ### LANG-10: Built-in types
@@ -547,7 +561,10 @@ fn scalars(s: String) -> u64 {
 => e` is a `bool` expression that may not move, assign or lend `mut`, and a guarded arm
 never counts toward exhaustiveness. Patterns are literals, closed ranges `a..=b` of
 integers or `char`, names, `_`, tuples and variants with labelled or positional fields, and
-`..` for remaining fields. A literal pattern matches exactly when `scrutinee == literal` is
+`..` for remaining fields. A labelled field's pattern may be its label alone, punned as in
+construction ([LANG-9](#lang-9-nominal-types)): `Rect(w, h)` is `Rect(w: w, h: h)` and binds
+`w` and `h`, and `Point(x, ..)` binds only `x`. A bare name among labelled fields that is not a
+field's label is refused here, at that name. A literal pattern matches exactly when `scrutinee == literal` is
 true, and is refused here wherever that `==` would be refused
 ([LANG-21](#lang-21-operators)). Floats are not `key`, so a float literal is never a
 pattern. Use `float.total_order` for total ordering, or `float.eq`, `float.lt`, `float.le`,
@@ -559,6 +576,10 @@ refutable patterns. Arms of an owned scrutinee bind by
 ```hirsel
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w: w, h: h) => w * h } }
+```
+```hirsel unbuilt
+type Shape = Circle(f64) | Rect(w: f64, h: f64)
+fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w, h) => w * h } }
 ```
 ```hirsel
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
@@ -613,10 +634,16 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 
 ### LANG-20: Constants
 
-`const N: T = e` declares a plain constant. `e` may use literals, operators, tuple, plain and
-`Inline` array constructions, and other constants; it calls no function. Constants are evaluated once, before any body is checked, in
+`const N: T = e` declares a plain constant or a static string. For a plain `T`, `e` may use
+literals, operators, tuple, plain and `Inline` array constructions, and other constants; it
+calls no function. Constants are evaluated once, before any body is checked, in
 dependency order, by the rules of [semantics](semantics.md); a constant that would fail, or whose
-constants reach itself, is refused. A string literal is not a constant.
+constants reach itself, is refused. A **static string** is a constant of type `String` whose
+`e` is a string literal or another static string, `const NAME: String = "hirsel"`, and
+nothing else: never a concatenation, a call or a byte string. Each use of it is its literal,
+under the literal's contract ([core](core.md)): static, allocating nothing and never
+charged. A `String` appears in no other constant's type, so `(String, u64)` and a record
+with a `String` field are refused here, at the type, and so is every other non-plain type.
 
 ```hirsel
 const WORDS: u64 = 64
@@ -624,6 +651,14 @@ const BYTES: u64 = WORDS * 8
 ```
 ```hirsel
 const BIG: u8 = 200 + 100                                 // refused: LANG-20, Overflow
+```
+```hirsel unbuilt
+const NAME: String = "hirsel"
+const TITLE: String = NAME
+fn title() -> String { TITLE }
+```
+```hirsel unbuilt
+const PAIR: (String, u64) = ("a", 1)                      // refused: LANG-20, String in a tuple
 ```
 
 ### LANG-21: Operators

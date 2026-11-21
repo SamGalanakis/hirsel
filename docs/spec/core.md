@@ -18,7 +18,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 
 | module | file | rules |
 |---|---|---|
-| `core` (the prelude: every core type, `fail`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |
+| `core` (the prelude: every core type, `fail`, `drop`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
@@ -134,6 +134,13 @@ operations it names; nothing else about them may be inferred from an implementat
   takes custody of a message the program already holds and admits nothing, so raising `Fail`
   cannot be refused ([FAIL-10](failure.md#fail-10-cause-chain)); a built message's
   `Capacity` is an ordinary error at its own allocation, before `fail`.
+- **Drop and copied.** `drop[T](take x: T)` ends `x` where it is called, by the implicit drop
+  the end of its scope would perform ([T6.2](ownership.md#own-26-the-transition-table)), a
+  resource's finalizer included ([FAIL-11](failure.md#fail-11-resources)), and returns `()`;
+  a failure of that finalizer is this call's. `option.copied[T: plain](x: Option[View[T]]) -> Option[T]`
+  returns `Some` of a copy of the viewed `T`, or `None`, so `option.copied(list.get(xs, i))`
+  outlives `xs`; it admits nothing. Both are headers of the prelude and of `option`, written
+  once in those files.
 - **Unwrap.** `option.unwrap(take x)` returns the `Some` payload and fails with `Unwrap` on
   `None`. `result.unwrap(take x)` returns the `Ok` payload; on `Error(e)` it fails with
   `Unwrap`, and `e` is cleaned by the failure's cleanup as an ordinary owner.

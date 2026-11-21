@@ -831,6 +831,7 @@ pub(super) fn check_launch_replay() {
                 mode,
                 c"launch-case".as_ptr(),
                 &[7; 32],
+                None,
             )
         };
         assert_eq!(status, 0);

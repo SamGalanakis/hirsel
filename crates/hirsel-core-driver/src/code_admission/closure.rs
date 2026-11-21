@@ -7,7 +7,7 @@ use hirsel_core_ir::decode::DecodeBudget;
 use hirsel_core_ir::normal::{DecodedBody, Slot};
 use hirsel_core_ir::release_recipe::{Backend, ForeignFunction, ObjectRef, Recipe};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Clone, Copy)]
 struct MemberIndex {
@@ -298,16 +298,28 @@ pub(super) fn check(
             ))));
         }
     }
-    let mut grants = BTreeSet::new();
+    let mut grants = BTreeMap::new();
     for grant in &recipe.launch.grants {
         if let Some(archive) = grant.archive {
-            charge_rows::<(&str, ContentHash)>(budget, 1)?;
-            grants.insert((grant.values[0].as_str(), archive.hash));
+            charge_rows::<(&str, ObjectRef)>(budget, 1)?;
+            let interface = grant.values[0].as_str();
+            if let Some(previous) = grants.insert(interface, archive)
+                && previous != archive
+            {
+                return Err(AdmissionError::Binding(
+                    "one foreign interface has different archive grants",
+                ));
+            }
         }
     }
     for row in &foreign.functions {
         budget.check()?;
-        if !grants.contains(&(row.abi.interface, row.archive.hash)) {
+        // A function can be in the closure even when the program has no way
+        // to make its required capability. If it has the capability, the
+        // operator's pin must match the archive whose code will run.
+        if let Some(archive) = grants.get(row.abi.interface)
+            && archive != &row.archive
+        {
             return Err(AdmissionError::Binding(
                 "foreign function has no matching archive grant",
             ));

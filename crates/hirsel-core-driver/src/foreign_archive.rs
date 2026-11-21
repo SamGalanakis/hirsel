@@ -42,7 +42,6 @@ impl LinkArchives {
         object: ObjectRef,
         leaf: &ForeignLeaf,
         target: &str,
-        entry: &DefPath,
         path: Option<&str>,
         bytes: impl FnOnce() -> Result<Vec<u8>, AdmissionError>,
     ) -> Result<(), AdmissionError> {
@@ -55,7 +54,7 @@ impl LinkArchives {
                 path: path.map(str::to_owned),
             }),
         };
-        row.archive.check_headers(object, leaf, target, entry, path)
+        row.archive.check_headers(object, leaf, target, path)
     }
 
     pub(crate) fn pins(&self) -> impl Iterator<Item = ContentHash> + '_ {
@@ -412,11 +411,9 @@ impl SealedArchive {
         archive: ObjectRef,
         leaf: &ForeignLeaf,
         target: &str,
-        entry: &DefPath,
         path: Option<&str>,
     ) -> Result<(), AdmissionError> {
         let context = context(archive, &leaf.module, target, path);
-        let site = entry.definition_identity();
         for function in &leaf.functions {
             let symbol = format!("{}{}", leaf.symbols, function.identity.definition.0.name);
             let defines = self
@@ -424,6 +421,7 @@ impl SealedArchive {
                 .get(symbol.as_bytes())
                 .is_some_and(|row| row.definition_matches == Some(true));
             if !defines {
+                let site = function.identity.definition.definition_identity();
                 return Err(refuse(
                     &context,
                     format!(" does not define {symbol}, declared at {site}"),
@@ -479,6 +477,7 @@ impl SealedArchive {
                 _ => "missing",
             };
             if actual != expected {
+                let site = function.identity.definition.definition_identity();
                 return Err(refuse(
                     &context,
                     format!(

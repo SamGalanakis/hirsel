@@ -1463,7 +1463,6 @@ mod tests {
 
         let target = "x86_64-unknown-linux-gnu";
         let module = DefPath::from_full("ffi_laws@1/native").unwrap();
-        let entry = DefPath::from_full("ffi_laws@1/main/main").unwrap();
         let digest = |text| crate::native::recipe_build::parse_root(text).unwrap();
         let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -1553,12 +1552,12 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         };
         let (valid, valid_object) = build("");
         valid
-            .check_headers(valid_object, &leaf, target, &entry, None)
+            .check_headers(valid_object, &leaf, target, None)
             .unwrap();
         let archive_path = fixture.path().join("laws.a");
         let mut staged = LinkArchives::default();
         staged
-            .admit(valid_object, &leaf, target, &entry, Some("laws.a"), || {
+            .admit(valid_object, &leaf, target, Some("laws.a"), || {
                 Ok(std::fs::read(&archive_path)?)
             })
             .unwrap();
@@ -1601,7 +1600,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
             }],
         };
         second
-            .check_headers(second_object, &other_leaf, target, &entry, None)
+            .check_headers(second_object, &other_leaf, target, None)
             .unwrap();
         let collision = check_distinct_definitions(
             [
@@ -1715,7 +1714,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
         let (invalid, object) =
             build("__attribute__((constructor)) static void initialize(void) { flag = 1; }\n");
         let problem = invalid
-            .check_headers(object, &leaf, target, &entry, None)
+            .check_headers(object, &leaf, target, None)
             .unwrap_err();
         assert_eq!(
             problem.to_string(),
@@ -1730,7 +1729,7 @@ __asm__(".data\n.globl hfl_unique\n.type hfl_unique,@gnu_unique_object\nhfl_uniq
 "#,
         );
         let problem = invalid
-            .check_headers(object, &leaf, target, &entry, None)
+            .check_headers(object, &leaf, target, None)
             .unwrap_err();
         assert_eq!(
             problem.to_string(),
@@ -1755,7 +1754,7 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         ] {
             let (invalid, object) = build(source);
             let error = invalid
-                .check_headers(object, &leaf, target, &entry, None)
+                .check_headers(object, &leaf, target, None)
                 .unwrap_err();
             assert_eq!(
                 error.to_string(),
@@ -1764,7 +1763,7 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         }
         let (invalid, object) = build_source("int hfl_touch(void) { return 0; }");
         let error = invalid
-            .check_headers(object, &leaf, target, &entry, None)
+            .check_headers(object, &leaf, target, None)
             .unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -1794,23 +1793,23 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         };
         let duplicate = open(bytes, object.hash, object.len).unwrap();
         let error = duplicate
-            .check_headers(object, &leaf, target, &entry, None)
+            .check_headers(object, &leaf, target, None)
             .unwrap_err();
         assert_eq!(
             error.to_string(),
             format!(
-                "{} does not define hfl_touch, declared at ffi_laws@1/main/main",
+                "{} does not define hfl_touch, declared at ffi_laws@1/native/touch",
                 prefix(object.hash)
             )
         );
         leaf.functions[0].header = "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->u64".into();
         let problem = valid
-            .check_headers(valid_object, &leaf, target, &entry, None)
+            .check_headers(valid_object, &leaf, target, None)
             .unwrap_err();
         assert_eq!(
             problem.to_string(),
             format!(
-                "{}: the ABI of hfl_touch is hfl_touch stack () -> i32, but its header declares hfl_touch stack () -> u64, declared at ffi_laws@1/main/main",
+                "{}: the ABI of hfl_touch is hfl_touch stack () -> i32, but its header declares hfl_touch stack () -> u64, declared at ffi_laws@1/native/touch",
                 prefix(valid_object.hash)
             )
         );

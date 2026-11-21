@@ -481,14 +481,9 @@ fn verify_release(
                 .binary_search_by(|row| row.target.cmp(target))
                 .expect("the checked archive inventory selects a row for each leaf");
             let archive = leaf.targets[row].archive;
-            link_archives.admit(
-                archive,
-                leaf,
-                target,
-                &recipe.entry.definition,
-                None,
-                || load(ObjectKind::ForeignArchive, &archive, budget),
-            )?;
+            link_archives.admit(archive, leaf, target, None, || {
+                load(ObjectKind::ForeignArchive, &archive, budget)
+            })?;
         }
         link_archives.definitions(budget)?;
         for archive in &recipe.foreign_archives {

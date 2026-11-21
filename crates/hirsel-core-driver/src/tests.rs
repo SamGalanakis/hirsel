@@ -2368,10 +2368,11 @@ fn edit_kinds_publish_the_fresh_build() {
         }
         // Hand-derived fan-out. A signature edit of `helper.config` rechecks
         // config and its four readers. Trivia before an item changes only its
-        // file record; trivia inside or on the end of an item changes its key.
+        // file record, as does trivia after its last token; trivia inside an
+        // item changes its key.
         let (rechecked, files): (&[&str], usize) = match kind {
-            "body" | "import" | "same_line_comment" | "body_blank" => (&["dispatch"], 1),
-            "comment" | "between" | "trailing" | "whitespace" => (&[], 1),
+            "body" | "import" | "body_blank" => (&["dispatch"], 1),
+            "comment" | "between" | "trailing" | "same_line_comment" | "whitespace" => (&[], 1),
             "signature" => (&["config", "dispatch", "main", "more", "other"], 3),
             "add" => (&["extra_item"], 1),
             "insert" => (&["inserted"], 1),
@@ -3300,25 +3301,15 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             )),
             Some(vec!["checksum_str"]),
         ),
+        // A parameter's name is no reader's input: calls are positional.
         (
-            "signature",
+            "parameter_name",
             vec![],
             only(edited(
                 "pub fn checksum_str(s: String) -> u32 {\n    checksum_bytes(string.as_bytes(s))\n",
                 "pub fn checksum_str(t: String) -> u32 {\n    checksum_bytes(string.as_bytes(t))\n",
             )),
-            Some(vec![
-                "checksum_f64",
-                "checksum_str",
-                "dispatch",
-                "dispatch",
-                "dispatch",
-                "dispatch",
-                "dispatch",
-                "helper_laws",
-                "run_regex",
-                "tally",
-            ]),
+            Some(vec!["checksum_str"]),
         ),
         (
             "comment",

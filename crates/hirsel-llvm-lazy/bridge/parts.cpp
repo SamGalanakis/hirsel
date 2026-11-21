@@ -203,6 +203,19 @@ StringMap<std::string> asm_lines(const Module &m) {
     return lines;
 }
 
+// A constant a separate library lent with its bodies (`lent_bodies`):
+// `linkonce_odr` hidden under the name the library's parts define it by. Like
+// a local constant, each part that reaches it carries its own copy, and the
+// link keeps one, so its address stays one address.
+bool lent_constant(const GlobalVariable &g) {
+    return g.hasInitializer() && g.isConstant() && g.hasLinkOnceODRLinkage() && g.hasHiddenVisibility() &&
+           !g.isThreadLocal() && !g.hasSection() && !g.hasComdat();
+}
+
+// Whether a part that reaches `g` carries its initializer whatever it is for:
+// a local constant, or one a library lent.
+bool carried(const GlobalVariable &g) { return g.hasLocalLinkage() || lent_constant(g); }
+
 struct References {
     // Whether a definition with external linkage brings its initializer: a
     // key does, since a load from a constant folds to it.
@@ -215,7 +228,7 @@ struct References {
         if (auto *g = dyn_cast<GlobalValue>(v)) {
             order.push_back(const_cast<GlobalValue *>(g));
             if (auto *var = dyn_cast<GlobalVariable>(g))
-                if (var->hasInitializer() && (initializers || var->hasLocalLinkage())) value(var->getInitializer());
+                if (var->hasInitializer() && (initializers || carried(*var))) value(var->getInitializer());
             return;
         }
         if (auto *c = dyn_cast<Constant>(v)) {
@@ -393,7 +406,7 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
                 var->getThreadLocalMode(), var->getAddressSpace(), var->isExternallyInitialized());
             d->copyAttributesFrom(var);
             d->copyMetadata(var, 0);
-            if (var->hasInitializer() && (refs.initializers || var->hasLocalLinkage())) {
+            if (var->hasInitializer() && (refs.initializers || carried(*var))) {
                 d->setLinkage(GlobalValue::LinkOnceODRLinkage);
                 constants.push_back({var, d});
             }
@@ -520,7 +533,9 @@ std::string unsplittable_content(const Module &m) {
         if (g.hasAppendingLinkage()) return "appending global " + g.getName().str();
         if (g.isDeclaration()) continue;
         // A part copies each constant it reaches as its own weak hidden
-        // definition, so a constant must be local: nothing outside names it.
+        // definition, so a constant must be local, or lent under the name its
+        // library's parts define it by: nothing else outside names it.
+        if (lent_constant(g)) continue;
         if (!g.isConstant() || !g.hasLocalLinkage() || g.isThreadLocal() || g.hasSection() ||
             g.hasComdat())
             return "data " + g.getName().str();

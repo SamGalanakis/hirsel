@@ -21,6 +21,8 @@
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/BlockFrequencyInfo.h>
+#include <llvm/Analysis/BranchProbabilityInfo.h>
+#include <llvm/Analysis/PostDominators.h>
 #include <llvm/Analysis/CycleAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Analysis/LoopInfo.h>
@@ -948,9 +950,18 @@ static void inlineLoopHelpers(Module &M) {
       return Copies >= 8;
     };
     SmallVector<std::pair<CallBase *, int>, 16> Pending;
-    for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
+    // Only calls on a loop's hot path: a block that runs less than once per
+    // eight header visits (failure arms, growth slow paths) keeps its call,
+    // whose inlined body would carry every cold path of its own.
+    PostDominatorTree PDT(F);
+    BranchProbabilityInfo BPI(F, LI, nullptr, &DT, &PDT);
+    BlockFrequencyInfo BFI(F, BPI, LI);
+    for (BasicBlock &BB : F) if (Loop *L = LI.getLoopFor(&BB)) {
+      if (BFI.getBlockFreq(&BB).getFrequency() <
+          BFI.getBlockFreq(L->getHeader()).getFrequency() / 8) continue;
       for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
         if (C->getCalledFunction()) Pending.push_back({C, -1});
+    }
     unsigned Budget = 2048;
     while (!Pending.empty()) {
       auto [Call, Entry] = Pending.pop_back_val();

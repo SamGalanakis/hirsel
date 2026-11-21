@@ -125,9 +125,15 @@ pub struct ProcessOperations {
     pub(crate) install: fn() -> io::Result<StopSignals>,
 }
 
-/// Receives a launcher-owned listener during startup for an OS Net grant.
+/// Starts an OS Net grant and receives a launcher-owned listener.
 pub struct SocketActivation {
     pub(crate) receive: unsafe fn() -> io::Result<Option<OwnedFd>>,
+    pub(crate) rules: unsafe fn(&[hirsel_core_net::RuleView]) -> Option<crate::net::RulesStorage>,
+}
+
+/// Reads the credential source for a Secret grant during startup.
+pub struct SecretOperations {
+    pub(crate) read: fn([&[u8]; 3], u64) -> Option<crate::secret::Granted>,
 }
 
 #[repr(C)]
@@ -157,6 +163,8 @@ pub struct OsConfig {
     pub socket_activation: *const SocketActivation,
     pub secret_grants: *const [View; 3],
     pub secret_grants_len: usize,
+    /// Installed by the native linker for a launch with Secret grants.
+    pub secret_ops: *const SecretOperations,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -164,6 +172,7 @@ impl OsConfig {
             directory_ops: &hirsel_core_os_directory_ops,
             process_ops: &hirsel_core_os_process_ops,
             socket_activation: &hirsel_core_os_socket_activation,
+            secret_ops: &crate::secret::hirsel_core_os_secret_ops,
             ..*self
         }
     }
@@ -176,7 +185,7 @@ pub struct OsProcess {
     _args: Vec<Vec<u8>>,
     _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
-    _net_rules: crate::net::RulesStorage,
+    _net_rules: Option<crate::net::RulesStorage>,
     secrets: Vec<crate::secret::Granted>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
@@ -277,7 +286,8 @@ impl OsProcess {
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let launch = Box::new(launch_metadata(target, n_place, describe_mode));
             // Receive before the first dup/open can reuse a missing activation fd.
-            let inherited = if let Some(activation) = input.socket_activation.as_ref()
+            let net_ops = input.socket_activation.as_ref();
+            let inherited = if let Some(activation) = net_ops
                 && input.grant_mask & (1 << NET) != 0
             {
                 (activation.receive)()?
@@ -321,24 +331,20 @@ impl OsProcess {
                     capacity: 0,
                 })
                 .collect::<Vec<_>>();
-            let net_storage = if describe_mode || prepare_path.is_some() || input.net_rules_len == 0
-            {
-                Vec::new()
-            } else {
-                std::slice::from_raw_parts(input.net_rules, input.net_rules_len)
-                    .iter()
-                    .map(|rule| rule.decode())
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or(StartupError::NetRules)?
-            };
-            if !describe_mode
-                && prepare_path.is_none()
-                && input.grant_mask & (1 << NET) != 0
-                && net_storage.is_empty()
-            {
+            let net_granted = input.grant_mask & (1 << NET) != 0;
+            let net_rules = if describe_mode {
+                None
+            } else if prepare_path.is_some() {
+                net_granted.then(crate::net::RulesStorage::empty)
+            } else if input.net_rules_len != 0 {
+                let load = net_ops.ok_or(StartupError::NetRules)?.rules;
+                let rows = std::slice::from_raw_parts(input.net_rules, input.net_rules_len);
+                Some(load(rows).ok_or(StartupError::NetRules)?)
+            } else if net_granted {
                 return Err(StartupError::NetRules);
-            }
-            let net_rules = crate::net::RulesStorage::new(net_storage);
+            } else {
+                None
+            };
             let provider = Box::new(os.provider_with(directory_ops));
             let provider_pointer = &*provider as *const Provider;
             let requirements = if input.parameters_len == 0 {
@@ -362,18 +368,15 @@ impl OsProcess {
                     let requirement = &*input.parameters.add(i);
                     if requirement.kind == SECRET {
                         let read = || {
+                            let operations = input.secret_ops.as_ref()?;
                             if requirement.index >= input.secret_grants_len {
                                 return None;
                             }
-                            let [name, source, patterns] =
-                                *input.secret_grants.add(requirement.index);
-                            let text = |view| std::str::from_utf8(bytes(view)).ok();
-                            let record = hirsel_core_net::SecretGrant::new(
-                                text(name)?,
-                                text(source)?,
-                                text(patterns)?,
-                            )?;
-                            crate::secret::Granted::read(record, requirement.index as u64)
+                            let views = *input.secret_grants.add(requirement.index);
+                            (operations.read)(
+                                views.map(|view| bytes(view)),
+                                requirement.index as u64,
+                            )
                         };
                         secrets.push(read().ok_or(StartupError::MissingSecret(i))?);
                     }
@@ -414,7 +417,11 @@ impl OsProcess {
                             } else {
                                 provider_pointer
                             },
-                            handle: if kind == NET { net_rules.handle() } else { 0 },
+                            handle: if kind == NET {
+                                net_rules.as_ref().unwrap().handle()
+                            } else {
+                                0
+                            },
                         });
                     }
                 }

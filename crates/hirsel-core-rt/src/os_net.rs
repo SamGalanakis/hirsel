@@ -2,7 +2,7 @@
 //! spurious writable connect events; combined interests live in core-net.
 use crate::{
     entry::SocketActivation,
-    net::{Address, NetworkRequest},
+    net::{Address, NetworkRequest, RulesStorage},
     provider::*,
     tls::{HandshakeState, TlsRequest},
 };
@@ -38,6 +38,7 @@ pub(crate) static TLS_OPERATIONS: Operations = Operations {
 #[unsafe(no_mangle)]
 pub static hirsel_core_os_socket_activation: SocketActivation = SocketActivation {
     receive: receive_listener,
+    rules: RulesStorage::from_views,
 };
 
 pub(crate) const LISTEN_FD: i32 = 3;

@@ -104,6 +104,15 @@ pub(super) fn emit(
     } else {
         f.constant(0)
     };
+    let secret_ops = if plan.tape.is_none() && !plan.secret_grants.is_empty() {
+        let operations = f
+            .object
+            .declare_data("hirsel_core_os_secret_ops", Linkage::Import, false, false)
+            .map_err(error)?;
+        f.address(operations)
+    } else {
+        f.constant(0)
+    };
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -126,6 +135,7 @@ pub(super) fn emit(
             abi::OS_CONFIG_SECRET_GRANTS_LEN,
             f.constant(plan.secret_grants.len() as u64),
         ),
+        (abi::OS_CONFIG_SECRET_OPS, secret_ops),
     ] {
         f.store(value, config, offset);
     }

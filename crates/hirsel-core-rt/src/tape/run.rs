@@ -627,6 +627,7 @@ pub(super) fn check_launch_replay() {
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            secret_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),

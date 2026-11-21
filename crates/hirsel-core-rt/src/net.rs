@@ -30,6 +30,30 @@ pub(crate) struct RulesStorage {
 }
 
 impl RulesStorage {
+    pub(crate) fn empty() -> Self {
+        Self {
+            _rows: Box::default(),
+            _patterns: Vec::new(),
+            view: Box::new(Rules {
+                data: ptr::null(),
+                len: 0,
+            }),
+        }
+    }
+
+    /// # Safety
+    /// Each TLS row pins its pattern bytes for this call.
+    pub(crate) unsafe fn from_views(rows: &[RuleView]) -> Option<Self> {
+        let rules = rows
+            .iter()
+            .map(|row| {
+                // SAFETY: the launcher borrows the pattern bytes through startup.
+                unsafe { row.decode() }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self::new(rules))
+    }
+
     pub(crate) fn new(storage: impl IntoIterator<Item = GrantRule>) -> Self {
         let mut patterns = Vec::new();
         let rows: Box<[_]> = storage

@@ -78,6 +78,7 @@ impl Fixture {
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            secret_ops: std::ptr::null(),
             target: crate::process::View {
                 data: std::ptr::null(),
                 len: 0,

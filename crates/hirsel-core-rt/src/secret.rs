@@ -1,7 +1,7 @@
 //! TLS-5. Secret storage is never a language carrier.
 use crate::{
     Context,
-    entry::hirsel_core_capability_handle,
+    entry::{SecretOperations, hirsel_core_capability_handle},
     host_file::DYNAMIC_GRANT,
     limit::Payer,
     provider::{Buffer, IoError, Outcome},
@@ -26,6 +26,15 @@ pub(crate) struct Secret {
 pub(crate) struct Granted {
     pub(crate) record: SecretGrant,
     pub(crate) secret: Secret,
+}
+
+#[unsafe(no_mangle)]
+pub static hirsel_core_os_secret_ops: SecretOperations = SecretOperations { read: read_grant };
+
+fn read_grant([name, source, patterns]: [&[u8]; 3], index: u64) -> Option<Granted> {
+    let text = |view| std::str::from_utf8(view).ok();
+    let record = SecretGrant::new(text(name)?, text(source)?, text(patterns)?)?;
+    Granted::read(record, index)
 }
 
 impl Granted {

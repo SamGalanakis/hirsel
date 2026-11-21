@@ -156,6 +156,8 @@ typedef struct HirselCoreProcessOperations HirselCoreProcessOperations;
 extern const HirselCoreProcessOperations hirsel_core_os_process_ops;
 typedef struct HirselCoreSocketActivation HirselCoreSocketActivation;
 extern const HirselCoreSocketActivation hirsel_core_os_socket_activation;
+typedef struct HirselCoreSecretOperations HirselCoreSecretOperations;
+extern const HirselCoreSecretOperations hirsel_core_os_secret_ops;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -177,6 +179,8 @@ typedef struct {
     const HirselCoreSocketActivation *socket_activation;
     const HirselCoreView (*secret_grants)[3]; /* parameter, source label, patterns */
     size_t secret_grants_len;
+    /* Set to &hirsel_core_os_secret_ops for a sourced launch with Secrets. */
+    const HirselCoreSecretOperations *secret_ops;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

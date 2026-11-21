@@ -171,6 +171,7 @@ pub fn frame_schema(
                 file,
                 modules: vec![(*module).into()],
                 signatures,
+                foreign: false,
             });
         }
         packages.push(PackageManifest {
@@ -191,6 +192,7 @@ pub fn frame_schema(
             file: source,
             modules: vec!["main".into()],
             signatures: false,
+            foreign: false,
         }],
     });
     let manifest = work.join("schema.json");

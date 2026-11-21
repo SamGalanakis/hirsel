@@ -1,0 +1,4 @@
+fn as_value() -> fn(u64) -> u64 { native.version }
+fn describe() { let _ = code.describe(native.version) }
+// expect: refuse FFI-2 at 1:42
+// expect: refuse FFI-2 at 2:46

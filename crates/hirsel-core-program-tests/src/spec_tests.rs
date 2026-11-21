@@ -206,6 +206,7 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
             file,
             modules: vec![sample.clone()],
             signatures: fence.signatures,
+            foreign: false,
         };
         let pkg = if fence.signatures {
             library.sources.push(source);

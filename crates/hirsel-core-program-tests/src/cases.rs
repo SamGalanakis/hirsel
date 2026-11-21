@@ -1224,6 +1224,7 @@ fn recovered_header_cases() -> Vec<String> {
                 file: path,
                 modules: vec!["ice_places_358_store".into()],
                 signatures: false,
+                foreign: false,
             });
             packages.push(store);
             ("store", "ice_places_358_store", None)
@@ -1235,6 +1236,7 @@ fn recovered_header_cases() -> Vec<String> {
                     file: path,
                     modules: vec!["main".into()],
                     signatures: false,
+                    foreign: false,
                 }],
             });
             ("app", "main", DefPath::from_full("app@1/main/main"))
@@ -1308,6 +1310,7 @@ fn flow_transform_rejects() {
             file: dep.clone(),
             modules: vec!["api".into()],
             signatures: false,
+            foreign: false,
         }],
     });
     let mut driver = Driver::default();
@@ -1378,6 +1381,7 @@ pub fn worker() -> u64 { 0 }
                 file,
                 modules: vec![module.into()],
                 signatures: false,
+                foreign: false,
             }
         })
         .collect();
@@ -1444,10 +1448,14 @@ pub fn worker() -> u64 { 0 }
 
 #[test]
 fn corpus() {
-    let paths = case_source::files(&root().join("cases")).expect("cases dir");
+    let cases = root().join("cases");
+    let paths = case_source::files(&cases).expect("cases dir");
     assert!(!paths.is_empty());
     let mut report = vec![];
-    for path in &paths {
+    for path in paths
+        .iter()
+        .filter(|path| !path.starts_with(cases.join("ffi")))
+    {
         let failures = std::panic::catch_unwind(|| run_case(path)).unwrap_or_else(|fault| {
             vec![
                 fault
@@ -1466,6 +1474,61 @@ fn corpus() {
     }
     report.extend(recovered_header_cases());
     assert!(report.is_empty(), "\n{}", report.join("\n"));
+}
+
+#[test]
+fn foreign_module_headers_and_uses() {
+    let fixture = root().join("cases/ffi/headers");
+    let manifest = std::fs::read(fixture.join("manifest.json")).unwrap();
+    let mut packages: Vec<PackageManifest> = serde_json::from_slice(&manifest).unwrap();
+    let mut sources = HashMap::new();
+    for package in &mut packages {
+        for source in &mut package.sources {
+            source.file = fixture.join(&source.file);
+            let module = format!(
+                "{}@{}/{}",
+                package.package.name,
+                package.package.version,
+                source.modules.join("/")
+            );
+            sources.insert(module, std::fs::read_to_string(&source.file).unwrap());
+        }
+    }
+    packages.push(PackageManifest::directory(&core_dir(), package("core"), true).unwrap());
+    let checked = Checked::check(
+        CorpusManifest {
+            core: package("core"),
+            packages,
+        },
+        tempfile::tempdir().unwrap(),
+        None,
+    );
+    let mut expected = Vec::new();
+    for (module, source) in &sources {
+        for expectation in case_source::expectations(source) {
+            let words: Vec<_> = expectation.split_whitespace().collect();
+            if let Some(DiagnosticExpectation::Refuse { rule, at }) =
+                DiagnosticExpectation::parse(expectation, &words)
+            {
+                expected.push((module.as_str(), rule, at.to_owned()));
+            }
+        }
+    }
+    let diagnostics = checked.product.machine_diagnostics().unwrap();
+    let mut actual: Vec<_> = diagnostics
+        .iter()
+        .map(|d| {
+            let module = d.primary.module.as_str();
+            let before = &sources[module][..d.primary.span.start as usize];
+            let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
+            let column = before.rsplit('\n').next().unwrap().chars().count() + 1;
+            (module, d.rule, format!("{line}:{column}"))
+        })
+        .collect();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
+    assert!(checked.product.resources.is_empty());
 }
 
 #[test]

@@ -17,6 +17,7 @@ fn prebuild_corpus(image: &Arc<CoreImage>, store: &Path) -> (Arc<CheckProduct>, 
         file,
         modules: vec![module.into()],
         signatures: false,
+        foreign: false,
     };
     let libraries = prebuild_libraries(image);
     let packages = vec![

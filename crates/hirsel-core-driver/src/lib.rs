@@ -75,7 +75,7 @@ use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
     Refusal, Resolution, ResolutionScratch, Site, SourceId,
 };
-use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile};
+use hirsel_core_syntax::{Symbols, SyntaxFile};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -640,7 +640,7 @@ impl Driver {
                         package: p.package.clone(),
                         modules: s.modules.clone(),
                     },
-                    s.signatures,
+                    s.mode(),
                     bytes,
                     hash,
                     name,
@@ -723,7 +723,7 @@ impl Driver {
         let mut modules = vec![];
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
-        for (file, (path, signatures, bytes, _, _)) in sources.iter().enumerate() {
+        for (file, (path, mode, bytes, _, _)) in sources.iter().enumerate() {
             let derive = request
                 .inputs
                 .packages
@@ -732,16 +732,8 @@ impl Driver {
                 .and_then(|p| {
                     hirsel_core_resolve::codec_derive(&p.package, &p.dependencies, &path.modules)
                 });
-            let output = hirsel_core_resolve::parse_module(
-                bytes,
-                if *signatures {
-                    ParseMode::Signatures
-                } else {
-                    ParseMode::Source
-                },
-                &mut symbols,
-                derive.as_ref(),
-            );
+            let output =
+                hirsel_core_resolve::parse_module(bytes, *mode, &mut symbols, derive.as_ref());
             syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (file, d)));
             if let Some(r) = output.resource_refusal {
                 syntax_resources.push((file, r.site(), format!("parser resource refusal: {r}")));
@@ -837,7 +829,7 @@ impl Driver {
             image.as_ref().map(|i| i.identity),
             produce,
             reachable_only,
-            sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
+            sources.iter().map(|s| s.1).collect::<Vec<_>>(),
         ))?);
         let layer = layers::Layer::read(&store, publication.shape)?;
         meter.result.layer_class = Some(if layer.selected {

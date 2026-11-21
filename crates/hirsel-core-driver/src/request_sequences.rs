@@ -252,6 +252,7 @@ fn materialize(
                 file,
                 modules,
                 signatures: s.signatures,
+                foreign: false,
             };
             match manifest.sources[..bundled]
                 .iter_mut()
@@ -2255,6 +2256,7 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
             },
             modules: module.split('/').map(str::to_owned).collect(),
             signatures: false,
+            foreign: false,
         });
     }
     let manifest = CorpusManifest {

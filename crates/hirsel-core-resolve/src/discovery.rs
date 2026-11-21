@@ -8,6 +8,20 @@ pub struct ModuleSource {
     pub file: PathBuf,
     pub modules: Vec<String>,
     pub signatures: bool,
+    #[serde(default)]
+    pub foreign: bool,
+}
+
+impl ModuleSource {
+    pub fn mode(&self) -> ParseMode {
+        if self.foreign {
+            ParseMode::Foreign
+        } else if self.signatures {
+            ParseMode::Signatures
+        } else {
+            ParseMode::Source
+        }
+    }
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PackageManifest {
@@ -57,8 +71,10 @@ pub fn parse_module(
 ) -> ParseOutput {
     let output = parse_bytes(bytes, mode, symbols);
     match derive {
-        Some(d) => hirsel_core_syntax::derive(output, mode, symbols, d),
-        None => output,
+        Some(d) if mode != ParseMode::Foreign => {
+            hirsel_core_syntax::derive(output, mode, symbols, d)
+        }
+        _ => output,
     }
 }
 
@@ -107,6 +123,7 @@ impl PackageManifest {
                         file: path,
                         modules,
                         signatures,
+                        foreign: false,
                     });
                 }
             }
@@ -140,11 +157,7 @@ impl PackageManifest {
                     file: s.file.clone(),
                     parsed: parse_module(
                         &bytes,
-                        if s.signatures {
-                            ParseMode::Signatures
-                        } else {
-                            ParseMode::Source
-                        },
+                        s.mode(),
                         symbols,
                         codec_derive(&self.package, &self.dependencies, &s.modules).as_ref(),
                     ),
@@ -210,7 +223,11 @@ impl NameIndex {
             for s in &m.sources {
                 path.clear();
                 path.extend(s.modules.iter().map(|n| self.symbols.find(n).unwrap()));
-                modules.push(self.add_module(p, &path));
+                let module = self.add_module(p, &path);
+                if s.foreign {
+                    self.modules[module.0 as usize].foreign = true;
+                }
+                modules.push(module);
             }
         }
         modules

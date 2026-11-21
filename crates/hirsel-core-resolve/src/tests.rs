@@ -50,6 +50,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
             file: m.into(),
             modules: vec![m.into()],
             signatures: false,
+            foreign: false,
         });
     }
     for m in &mut manifests {
@@ -449,6 +450,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
                 file: "string.hirsel".into(),
                 modules: vec!["string".into()],
                 signatures: false,
+                foreign: false,
             }],
             dependencies: vec![],
         },
@@ -458,6 +460,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
                 file: "main.hirsel".into(),
                 modules: vec!["main".into()],
                 signatures: false,
+                foreign: false,
             }],
             dependencies: vec![package("core")],
         },
@@ -751,6 +754,7 @@ fn clean_measurement_preserves_module_ids_after_removing_a_whole_file() {
             file: file.clone(),
             modules: vec![name.into()],
             signatures: false,
+            foreign: false,
         };
         if pkg == "core" {
             core.sources.push(source);
@@ -1112,6 +1116,7 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
                         file: "positions.hirsel".into(),
                         modules: vec!["m".into()],
                         signatures: false,
+                        foreign: false,
                     }],
                     dependencies: vec![],
                 },

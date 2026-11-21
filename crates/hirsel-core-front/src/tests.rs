@@ -58,6 +58,7 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
             file: PathBuf::from("input.hirsel"),
             modules: vec![module.into()],
             signatures: false,
+            foreign: false,
         }],
         dependencies: vec![package("core")],
     };

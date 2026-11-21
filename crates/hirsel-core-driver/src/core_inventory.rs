@@ -160,6 +160,7 @@ mod tests {
                     modules: vec![file.file_stem().unwrap().to_string_lossy().into()],
                     file,
                     signatures: true,
+                    foreign: false,
                 })
                 .collect(),
         }
@@ -215,6 +216,7 @@ mod tests {
                 file,
                 modules: vec!["lib".into()],
                 signatures: false,
+                foreign: false,
             }],
         };
         let product = check(&root, vec![lib], &dir.path().join("store"));

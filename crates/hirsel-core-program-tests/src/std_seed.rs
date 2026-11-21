@@ -50,6 +50,7 @@ fn sources(dir: &Path, prefix: &[&str], signatures: bool) -> Vec<ModuleSource> {
                 file,
                 modules,
                 signatures,
+                foreign: false,
             }
         })
         .collect()

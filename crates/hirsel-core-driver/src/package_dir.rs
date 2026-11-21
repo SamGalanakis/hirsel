@@ -342,6 +342,7 @@ impl PackageDir {
                     file: dir.join(file),
                     modules,
                     signatures: false,
+                    foreign: false,
                 });
             }
             Ok::<_, io::Error>(out)

@@ -759,6 +759,7 @@ fn bodied_core_operations(backend: Backend) {
             file,
             modules: vec!["args".into()],
             signatures: true,
+            foreign: false,
         });
     let product = Driver::default()
         .check(request, &mut Meter::new(false))

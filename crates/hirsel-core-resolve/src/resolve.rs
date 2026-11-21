@@ -212,6 +212,7 @@ impl ResolutionScratch {
             },
         };
         if Some(package) != index.core
+            && !index.modules[module.0 as usize].foreign
             && item.tree.node(item.root).kind == NodeKind::Function
             && !item
                 .tree
@@ -261,7 +262,7 @@ struct Resolver<'a, 's> {
     scope_id: u32,
     next_scope: u32,
     depth: u32,
-    paths: [Option<((u32, Symbol, bool, bool), Target)>; 8],
+    paths: [Option<((u32, Symbol, bool, bool, bool), Target)>; 8],
 
     out: Resolution,
 }
@@ -659,6 +660,9 @@ impl<'a> Resolver<'a, '_> {
         }
     }
     fn function_head(&mut self, n: NodeId, token: TokenId, id: DefinitionId) -> Target {
+        if self.foreign_use(n, token, Target::Definition(id), false) == Target::Missing {
+            return Target::Missing;
+        }
         let mut diagnostic = Refusal::new(
             "LANG-7",
             self.site(n),
@@ -832,7 +836,34 @@ impl<'a> Resolver<'a, '_> {
                 )
             })
     }
-    fn use_path<const TYPE_CONTEXT: bool, const CONSTRUCT: bool>(&mut self, n: NodeId) {
+    fn foreign_use(&mut self, n: NodeId, name: TokenId, target: Target, callee: bool) -> Target {
+        let Target::Definition(id) = target else {
+            return target;
+        };
+        let declared = self.index.get(id).site;
+        let module = &self.index.modules[declared.module.0 as usize];
+        if !module.foreign {
+            return target;
+        }
+        let message = if module.package != self.package {
+            "a foreign function is private to its package"
+        } else if !callee {
+            "a foreign function is only called"
+        } else {
+            return target;
+        };
+        let mut site = self.site(n);
+        site.span = self.item.token_span(name);
+        let mut refusal = Refusal::new("FFI-2", site, message);
+        refusal.causal.push(declared);
+        self.out.diagnostics.push(refusal);
+        Target::Missing
+    }
+
+    fn use_path<const TYPE_CONTEXT: bool, const CONSTRUCT: bool, const CALLEE: bool>(
+        &mut self,
+        n: NodeId,
+    ) {
         let type_context = TYPE_CONTEXT;
         let construct = CONSTRUCT;
         let node = self.item.tree.node(n);
@@ -846,7 +877,7 @@ impl<'a> Resolver<'a, '_> {
             });
             return;
         }
-        let key = (self.scope_id, name, type_context, construct);
+        let key = (self.scope_id, name, type_context, construct, CALLEE);
         if simple {
             if let Some((old, target)) = self.paths[key.1.0 as usize & 7] {
                 if old == key {
@@ -862,6 +893,7 @@ impl<'a> Resolver<'a, '_> {
         if simple {
             let before = self.out.diagnostics.len();
             let target = self.bare_target::<TYPE_CONTEXT, CONSTRUCT>(n, key.1);
+            let target = self.foreign_use(n, node.token.unwrap(), target, CALLEE);
             if self.out.diagnostics.len() == before && target != Target::Missing {
                 self.paths[key.1.0 as usize & 7] = Some((key, target));
             }
@@ -972,6 +1004,7 @@ impl<'a> Resolver<'a, '_> {
                 self.missing(n)
             }
         };
+        let target = self.foreign_use(n, last.unwrap_or(head_token), target, CALLEE);
         self.out.names.push(ResolvedUse {
             node: n,
             target,
@@ -1010,7 +1043,7 @@ impl<'a> Resolver<'a, '_> {
             NodeKind::ConstructorPattern => {
                 let c = self.children(n);
                 if let Some((&path, fields)) = c.split_first() {
-                    self.use_path::<false, true>(path);
+                    self.use_path::<false, true, false>(path);
                     for &f in fields {
                         self.pattern(f);
                     }
@@ -1110,11 +1143,11 @@ impl<'a> Resolver<'a, '_> {
             match self.item.tree.node(n).kind {
                 NodeKind::Literal => break,
                 NodeKind::Path => {
-                    self.use_path::<false, false>(n);
+                    self.use_path::<false, false, false>(n);
                     break;
                 }
                 NodeKind::TypePath => {
-                    self.use_path::<true, false>(n);
+                    self.use_path::<true, false, false>(n);
                     break;
                 }
                 _ => {}
@@ -1162,8 +1195,8 @@ impl<'a> Resolver<'a, '_> {
                     }
                     self.numeric_parameter = old;
                 }
-                NodeKind::Path => self.use_path::<false, false>(n),
-                NodeKind::TypePath => self.use_path::<true, false>(n),
+                NodeKind::Path => self.use_path::<false, false, false>(n),
+                NodeKind::TypePath => self.use_path::<true, false, false>(n),
                 NodeKind::Let | NodeKind::LetMut => {
                     for &child in &c[1..] {
                         self.visit(child);
@@ -1225,7 +1258,7 @@ impl<'a> Resolver<'a, '_> {
                     if let Some((&callee, args)) = c.split_first() {
                         let before = self.out.names.len();
                         if self.item.tree.node(callee).kind == NodeKind::Path {
-                            self.use_path::<false, true>(callee);
+                            self.use_path::<false, true, true>(callee);
                         } else if self.item.tree.node(callee).kind == NodeKind::Index {
                             self.indexed_callee(callee);
                         } else {

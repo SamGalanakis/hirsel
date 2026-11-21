@@ -326,6 +326,7 @@ fn library_request(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -
             file,
             modules: vec!["api".into()],
             signatures: false,
+            foreign: false,
         }],
         dependencies: vec![package("core")],
     });

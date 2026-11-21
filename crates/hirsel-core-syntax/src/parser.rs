@@ -15,10 +15,11 @@ enum Header {
 /// Maximum simultaneously active recursive parser productions, not a language limit.
 pub const PARSER_NESTING_LIMIT: usize = 128;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ParseMode {
     Source,
     Signatures,
+    Foreign,
 }
 /// Incomplete compiler outcome, never a source-language diagnostic (ARCH front end).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -500,6 +501,14 @@ impl Parser<'_> {
     fn item(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
         let mut c: Nodes = smallvec![];
+        if self.mode == ParseMode::Foreign {
+            if self.at(sym::AT) {
+                return self.fail("FFI-2", "a foreign function has no attribute");
+            }
+            if !self.at(sym::PUB) || self.word(1) != sym::FN {
+                return self.fail("FFI-2", "a foreign module contains only pub fn headers");
+            }
+        }
         while self.eat(sym::AT) {
             let a = self.pos - 1;
             let n = self.name()?;
@@ -538,8 +547,11 @@ impl Parser<'_> {
             let name = self.name()?;
             c.extend(self.header(Header::Function)?);
             if self.at(sym::LBRACE) {
+                if self.mode == ParseMode::Foreign {
+                    return self.fail("FFI-2", "a foreign function has no body");
+                }
                 c.push(self.block()?);
-            } else if self.mode != ParseMode::Signatures {
+            } else if self.mode == ParseMode::Source {
                 let end = self.tokens[self.significant[self.pos - 1]].span.end;
                 self.diagnostics.push(
                     Diagnostic::error(

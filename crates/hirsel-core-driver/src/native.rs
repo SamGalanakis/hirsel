@@ -1804,6 +1804,7 @@ pub(crate) mod tests {
                 file: core,
                 modules: vec!["core".into()],
                 signatures: true,
+                foreign: false,
             }],
             dependencies: vec![],
         });

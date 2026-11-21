@@ -246,6 +246,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => return self.call_value(n, callee, args, want, scratch),
         };
+        let g = &p.fns[f];
+        if p.index.modules[g.site.module.0 as usize].foreign {
+            self.gap(n, "foreign calls");
+            return (ERROR, None);
+        }
         // MEM-4: `emit(take w, x)` writes the literal `x` in place; it is a form.
         if self.is_emit(f) {
             self.builtin_use(f, n);
@@ -255,7 +260,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.builtin_use(f, n);
             return self.put_form(n, f, args, want);
         }
-        let g = &p.fns[f];
         if g.body.is_none()
             && let Some(op) = core_ops::simd_call(p.core_operations[f])
         {

@@ -9,7 +9,7 @@ fn core_request(main: &str, probes: &[(&str, &str)], dir: &Path) -> CheckRequest
     for (name, source) in probes {
         let file = dir.join(format!("{name}.hirsel"));
         std::fs::write(&file, source).unwrap();
-        core.sources.push(hirsel_core_resolve::ModuleSource { file, modules: vec![name.to_string()], signatures: true });
+        core.sources.push(hirsel_core_resolve::ModuleSource { file, modules: vec![name.to_string()], signatures: true, foreign: false, });
     }
     request.inputs.packages[1] = core;
     request

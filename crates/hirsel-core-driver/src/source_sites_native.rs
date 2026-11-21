@@ -291,6 +291,7 @@ fn failure_sites_two_files(backend: Backend) {
                 file: file.clone(),
                 modules: vec!["main".into()],
                 signatures: false,
+                foreign: false,
             })
             .to_vec();
         Driver::default().check(request, &mut Meter::new(false)).unwrap()

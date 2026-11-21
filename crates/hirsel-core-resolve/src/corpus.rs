@@ -63,10 +63,11 @@ impl CorpusManifest {
             p.dependencies.sort();
             p.sources.sort_by(|a, b| {
                 a.modules.cmp(&b.modules).then_with(|| {
-                    (name(&a.file), &a.file, a.signatures).cmp(&(
+                    (name(&a.file), &a.file, a.signatures, a.foreign).cmp(&(
                         name(&b.file),
                         &b.file,
                         b.signatures,
+                        b.foreign,
                     ))
                 })
             });
@@ -84,11 +85,7 @@ impl CorpusManifest {
                     },
                     file: source.file.clone(),
                     text: std::fs::read_to_string(&source.file)?,
-                    mode: if source.signatures {
-                        ParseMode::Signatures
-                    } else {
-                        ParseMode::Source
-                    },
+                    mode: source.mode(),
                 });
             }
         }

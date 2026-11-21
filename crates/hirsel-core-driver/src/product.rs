@@ -39,6 +39,7 @@ impl PackageProduct {
                     file: root.join(format!("{module}.hirsel")),
                     modules: vec![(*module).into()],
                     signatures: true,
+                    foreign: false,
                 })
                 .collect(),
         }
@@ -133,7 +134,7 @@ impl PackageProduct {
                 stamps.push((
                     &package.package,
                     &source.modules,
-                    source.signatures,
+                    source.mode(),
                     ContentHash::of_bytes(&std::fs::read(&source.file)?),
                 ));
             }
@@ -325,7 +326,7 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
     let mut selected = Vec::with_capacity(input.sources.len());
     let mut bytes = Vec::new();
     for source in &input.sources {
-        if !source.signatures || source.modules.len() != 1 {
+        if !source.signatures || source.foreign || source.modules.len() != 1 {
             return None;
         }
         let name = source.modules[0].as_str();
@@ -365,6 +366,7 @@ fn matches_bundle(
         .zip(sources)
         .all(|(source, (module, text))| {
             source.signatures
+                && !source.foreign
                 && source.modules == [*module]
                 && matches_source(&source.file, text, &mut bytes)
         })
@@ -424,6 +426,7 @@ mod tests {
                 file: file.clone(),
                 modules: vec![name.into()],
                 signatures: true,
+                foreign: false,
             }],
         };
         assert!(bundled_std_selection(&manifest).is_some());
@@ -443,6 +446,7 @@ mod tests {
                     file,
                     modules: vec!["core".into()],
                     signatures: true,
+                    foreign: false,
                 }],
             }],
         }
@@ -467,6 +471,7 @@ mod tests {
                     file,
                     modules: vec!["ordering".into()],
                     signatures: false,
+                    foreign: false,
                 });
             }
             CorpusManifest {
@@ -794,6 +799,7 @@ mod tests {
                 file: std_file,
                 modules: vec!["std_only".into()],
                 signatures: true,
+                foreign: false,
             }],
         });
         request.inputs.packages[0].dependencies = vec![package("core"), package("std")];
@@ -936,6 +942,7 @@ mod agreement {
                             file: file.clone(),
                             modules: vec!["case".into()],
                             signatures: false,
+                            foreign: false,
                         }],
                     },
                 ],
@@ -1034,6 +1041,7 @@ mod indexed_tests {
                         file,
                         modules: vec!["core".into()],
                         signatures: true,
+                        foreign: false,
                     }],
                 }],
             };

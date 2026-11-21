@@ -90,7 +90,7 @@ unsafe extern "C" fn p_issue(_: *mut u8, request: *mut Request, token: u64) -> S
     let len = unsafe { (*request).buffer.len };
     log(format!("I{op} len={len}"));
     if script.ready_in_issue {
-        hirsel_core_ready(token);
+        ready(token);
     } else if script.cancel {
         FLAG[1].store(true, Ordering::SeqCst);
     } else {
@@ -423,13 +423,27 @@ pub(super) fn body(_: u32) -> u8 {
     0
 }
 
+/// Held while one of the case's threads is inside `hirsel_core_ready`.
+static READYING: super::seam::AtomicBool = super::seam::AtomicBool::new(false);
+/// `hirsel_core_ready` from either of the case's threads. The runtime holds
+/// its waiter list's mutex across the unit wake, so two readies never
+/// overlap; a thread that meets the other's on that real mutex would block
+/// outside the checker while the holder sits at a scheduling point inside
+/// the wake. This lock is that mutex as the checker sees it: a scheduling
+/// point at each try, so the holder is always runnable.
+fn ready(token: u64) {
+    while READYING.swap(true, Ordering::SeqCst) {}
+    hirsel_core_ready(token);
+    READYING.store(false, Ordering::SeqCst);
+}
+
 /// The provider's outside readiness: ready each pending token after a delay.
 pub(super) fn producer() {
     loop {
         let token = PENDING.swap(0, Ordering::SeqCst);
         if token != 0 {
             sleep_producer(now() + super::draw(0, 2_000));
-            hirsel_core_ready(token);
+            ready(token);
             continue;
         }
         if FLAG[0].load(Ordering::SeqCst) {

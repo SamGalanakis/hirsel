@@ -628,8 +628,11 @@ const CAPTURE_VARIABLES: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
 /// request, and a refused result is never published; `XDG_CACHE_HOME`,
 /// `HOME` and the default C driver's `LLVM_SYS_231_PREFIX` choose a place,
 /// whose bytes key what is read there; `HIRSEL_LLVM_PRINTED_ORACLE` writes a
-/// side report.
-const COMPILER_VARIABLES: [&str; 1] = [hirsel_llvm_lazy::core::NO_FACTS_VARIABLE];
+/// side report, as does `HIRSEL_RETURNABLE_REPORT`.
+const COMPILER_VARIABLES: [&str; 2] = [
+    hirsel_llvm_lazy::core::NO_FACTS_VARIABLE,
+    hirsel_core_ir::returnable::DISABLE,
+];
 
 /// What a capture's child tools observe besides their argv and the files
 /// they read: the listed variables (`PATH` is the request's search path),

@@ -317,6 +317,14 @@ pub(super) fn emit_release_image(
     if contained {
         hirsel_core_ir::step_contexts::specialize_over(&mut joined, entry_function, summaries);
     }
+    // A self-contained program's owned network waits give their task's stack
+    // back where every frame down to them is represented (returnable.rs).
+    if contained && std::env::var_os(hirsel_core_ir::returnable::DISABLE).is_none() {
+        let applied = hirsel_core_ir::returnable::apply(&mut joined);
+        if std::env::var_os("HIRSEL_RETURNABLE_REPORT").is_some() {
+            eprint!("{}", hirsel_core_ir::returnable::report(&joined, &applied));
+        }
+    }
     // The separate result cleanup is considered when selecting the entry plan.
     let launch_digest_unused = contained
         && !joined.functions.iter().enumerate().any(|(f, function)| {

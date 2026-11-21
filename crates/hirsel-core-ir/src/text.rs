@@ -314,6 +314,8 @@ fn rt(op: RtOp) -> String {
         RtOp::Flow(op) => format!("rt.{}", op.name()),
         RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
         RtOp::Host(op) => format!("rt.{}", op.name()),
+        RtOp::FrameRecord => "rt.frame_record".into(),
+        RtOp::Returnable(op) => format!("rt.{}_rec", op.name()),
         RtOp::IsolateEnter => "rt.isolate_enter".into(),
         RtOp::IsolateLeave => "rt.isolate_leave".into(),
         RtOp::IsolateCatch => "rt.isolate_catch".into(),
@@ -1921,6 +1923,13 @@ impl BodyParser {
                     .find(|op| op.name() == name) =>
                 {
                     RtOp::Flow(op)
+                }
+                "frame_record" => RtOp::FrameRecord,
+                name if let Some(op) = name
+                    .strip_suffix("_rec")
+                    .and_then(|n| HostOp::ALL.iter().copied().find(|op| op.name() == n)) =>
+                {
+                    RtOp::Returnable(op)
                 }
                 _ => match HostOp::ALL.iter().copied().find(|op| op.name() == name) {
                     Some(op) => RtOp::Host(op),

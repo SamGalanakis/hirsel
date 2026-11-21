@@ -1096,6 +1096,7 @@ mod ir;
 pub mod native_layout;
 pub mod normal;
 pub mod receive_loops;
+pub mod returnable;
 pub mod release_recipe;
 pub mod roles;
 pub mod source;

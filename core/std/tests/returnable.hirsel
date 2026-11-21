@@ -1,0 +1,110 @@
+// A task that waits at owned network waits, reached directly, through a
+// generic wrapper and in another module (`net.finish`), and alternately at a
+// ready function and a scoped closure that waits. A release build gives the
+// task's stack back at the direct waits and keeps the closure's wait stackful;
+// the other engines keep every wait stackful. The bytes and their order are
+// fixed by the protocol below, so every engine must give the same log.
+
+type Served: send {
+    socket: Socket,
+    clock: Clock,
+}
+
+fn ready_tag(i: u64) -> Bytes {
+    let mut tag: Bytes = list.with_capacity(2)
+    list.push(mut tag, 114)
+    list.push(mut tag, int.truncate(48 + i))
+    tag
+}
+
+fn recv_exact(mut r: ReadHalf, mut buf: Bytes, size: u64) -> bool waits {
+    list.clear(mut buf)
+    while list.len(buf) < size {
+        match host.recv_bounded(mut r, mut buf, size - list.len(buf), Never) {
+            Ok(0) => return false,
+            Ok(_) => {},
+            Error(_) => return false,
+        }
+    }
+    true
+}
+
+fn relay[T](mut r: ReadHalf, mut buf: Bytes, size: u64, take tag: T) -> T waits {
+    if !recv_exact(mut r, mut buf, size) {
+        fail("short relay")
+    }
+    take tag
+}
+
+fn through(mut r: ReadHalf, mut buf: Bytes, read: scoped fn(mut ReadHalf, mut Bytes) -> u64 waits) -> u64 waits {
+    read(mut r, mut buf)
+}
+
+fn send_all(mut w: WriteHalf, b: Bytes) waits {
+    if result.unwrap(host.send_pair(mut w, b, string.as_bytes(""), Never)) != list.len(b) {
+        fail("short send")
+    }
+}
+
+// Four rounds. An even round logs `r<i>` from a ready function, an odd one
+// logs `c` and the one byte a scoped closure waits for. Each round then
+// relays three bytes and acknowledges with `k`. The log goes back to the
+// peer, and `net.finish` drains the peer to EOF.
+fn serve(take job: Served) -> u64 waits {
+    let Served(socket: take socket, clock: clock) = take job
+    let (read, write) = net.split(take socket)
+    let mut r = take read
+    let mut w = take write
+    let mut log: Bytes = list.with_capacity(32)
+    let mut buf: Bytes = list.with_capacity(8)
+    let mut rounds: u64 = 0
+    for i in 0 .. 4 {
+        if i % 2 == 0 {
+            list.append(mut log, ready_tag(i))
+        } else {
+            let got = through(mut r, mut buf, scoped fn(mut rr: ReadHalf, mut b: Bytes) -> u64 waits {
+                list.clear(mut b)
+                result.unwrap(host.recv_bounded(mut rr, mut b, 1, Never))
+            })
+            if got != 1 {
+                fail("closure read")
+            }
+            list.push(mut log, 99)
+            list.append(mut log, buf)
+        }
+        rounds = relay(mut r, mut buf, 3, rounds + 1)
+        list.append(mut log, buf)
+        send_all(mut w, string.as_bytes("k"))
+    }
+    send_all(mut w, log)
+    result.unwrap(net.finish(take w, take r, clock, host.mono_ns(clock) + 10000000000))
+    rounds
+}
+
+// The peer sends each round's bytes in two writes once the previous round is
+// acknowledged, so the task is usually parked when they arrive.
+// expect: run waits_through_wrappers_and_closures(network) = true
+fn waits_through_wrappers_and_closures(n: Net, clock: Clock, tasks: Tasks) -> bool waits {
+    let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let mut listener = take listening
+    let client = result.unwrap(host.connect(n, addr, Never))
+    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let h = task.spawn(tasks, bytes 65536, Served(socket: take socket, clock: clock), serve)
+    let (read, write) = net.split(take client)
+    let mut r = take read
+    let mut w = take write
+    let mut ack: Bytes = list.with_capacity(1)
+    let sends = ["a", "aa", "xb", "bb", "c", "cc", "yd", "dd"]
+    for i in 0 .. 4 {
+        send_all(mut w, string.as_bytes(sends[2 * i]))
+        send_all(mut w, string.as_bytes(sends[2 * i + 1]))
+        if !recv_exact(mut r, mut ack, 1) || ack != string.as_bytes("k") {
+            return false
+        }
+    }
+    let mut log: Bytes = list.with_capacity(32)
+    let whole = recv_exact(mut r, mut log, 20)
+    let _ = take w
+    let rounds = result.unwrap(task.join(take h))
+    whole && rounds == 4 && log == string.as_bytes("r0aaacxbbbr2ccccyddd")
+}

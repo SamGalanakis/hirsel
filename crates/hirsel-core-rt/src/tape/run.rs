@@ -334,7 +334,7 @@ unsafe fn record_header(
             net_rules,
             secret_grants,
             env,
-            map_hash_key: format::MapHashKey((*context).map_hash_key),
+            map_hash_key: format::MapHashKey((*context).map_hash_key.to_bytes()),
         })
     }
 }
@@ -853,7 +853,7 @@ fn check_launch_replay_without_entropy() {
                 target: std::slice::from_raw_parts(target.data, target.len).to_vec(),
                 n_place: word(0, 0),
                 describe: word(5, 0),
-                key: format::MapHashKey((*context).map_hash_key),
+                key: format::MapHashKey((*context).map_hash_key.to_bytes()),
                 emitted: process::hirsel_core_describe_emit(
                     context,
                     &Buffer {

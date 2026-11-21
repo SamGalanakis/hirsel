@@ -268,7 +268,7 @@ pub(crate) unsafe fn run_with_map_hash_key(config: &Config, entry: Entry, key: [
         let _pipe_policy = PipePolicy::enter();
         let mut context = Context::new(config.root_limit);
         context.run = config;
-        context.map_hash_key = key;
+        context.map_hash_key = hirsel_core_layout::map_hash::PreparedKey::new(&key);
         #[cfg(feature = "charge-observation")]
         let _observation = crate::peak::Run::start(&context);
         let mut files = crate::host_file::Files::default();

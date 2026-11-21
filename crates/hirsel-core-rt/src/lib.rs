@@ -89,7 +89,7 @@ pub struct Context {
     /// MEM-30 fast-path window, at the frozen offset CONTEXT_STEPS.
     pub steps: i64,
     pub(crate) run: *const crate::process::Config,
-    pub(crate) map_hash_key: [u8; 16],
+    pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) cancel_requested: AtomicBool,
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
@@ -107,6 +107,9 @@ pub struct Context {
     pub(crate) frame_lists: frame_list::FrameLists,
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
 }
+
+const _: () =
+    assert!(std::mem::offset_of!(Context, map_hash_key) == abi_layout::CONTEXT_MAP_HASH_KEY);
 
 impl Context {
     /// The task provider admits its task record and primary cell separately.
@@ -126,7 +129,7 @@ impl Context {
             regions: region::RegionCache::default(),
             heap: std::cell::OnceCell::new(),
             run: std::ptr::null(),
-            map_hash_key: [0; 16],
+            map_hash_key: hirsel_core_layout::map_hash::PreparedKey::new(&[0; 16]),
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
             finalizing: 0,

@@ -180,7 +180,12 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
     let run_args = invocation.arguments;
-    let mut run_tape = None;
+    let mut recording_build = false;
+    let mut recording_runtime = None;
+    let mut record_path = None;
+    let mut replay_tape = None;
+    let mut test_replay = false;
+    let mut expect_verdict = None;
     let mut diagnose = false;
     let mut directories = Vec::new();
     let mut grant_mask = 0;
@@ -202,18 +207,12 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     return Err("--place-timeout must be positive".into());
                 }
             }
-            Opt::Record => {
-                run_tape = Some(crate::RunTape {
-                    path: value,
-                    mode: crate::RunTapeMode::Record,
-                })
-            }
-            Opt::Tape => {
-                run_tape = Some(crate::RunTape {
-                    path: value,
-                    mode: crate::RunTapeMode::Replay,
-                })
-            }
+            Opt::Recording => recording_build = true,
+            Opt::RecordingRuntime => recording_runtime = Some(PathBuf::from(value)),
+            Opt::Record => record_path = Some(value),
+            Opt::Tape => replay_tape = Some(value),
+            Opt::Replay => test_replay = true,
+            Opt::ExpectVerdict => expect_verdict = Some(value),
             Opt::Diagnose => diagnose = true,
             Opt::Install => install_root = Some(PathBuf::from(value)),
             Opt::SourceCore => source_core = true,
@@ -317,31 +316,39 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             }
         }
     }
+    let _ = &expect_verdict;
+    let mut replay_plan = None;
     if replay_command {
         if !directories.is_empty() || grant_mask != 0 {
             return Err("replay takes no host grants".into());
         }
-        let tape = run_tape.as_mut().ok_or("replay requires --tape TAPE")?;
-        if diagnose {
-            tape.mode = crate::RunTapeMode::Diagnose;
+        let mut path = replay_tape.ok_or("replay requires --tape TAPE")?;
+        if !Path::new(&path).is_absolute() {
+            path = std::env::current_dir()?
+                .join(&path)
+                .to_str()
+                .ok_or("tape path is not UTF-8")?
+                .to_owned();
         }
-        let header = crate::tape_cli::header(Path::new(&tape.path))?;
+        let header = crate::tape_cli::header(Path::new(&path))?;
         if !explicit_limit {
             root_limit = header.limit;
         }
         if !run_args.is_empty() {
             return Err("replay takes its arguments from the tape".into());
         }
+        replay_plan = Some(crate::ReplayPlan { path, diagnose });
     }
-    if let Some(tape) = &mut run_tape {
-        if !Path::new(&tape.path).is_absolute() {
-            tape.path = std::env::current_dir()?
-                .join(&tape.path)
+    if let Some(path) = &mut record_path {
+        if !Path::new(path).is_absolute() {
+            *path = std::env::current_dir()?
+                .join(&*path)
                 .to_str()
                 .ok_or("tape path is not UTF-8")?
                 .to_owned();
         }
     }
+    let needs_recording = recording_build || record_path.is_some() || replay_command || test_replay;
     let stored_recipe = if let Some(root) = recipe_root {
         if dir.is_some()
             || manifest.is_some()
@@ -383,12 +390,19 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     let executable = std::env::current_exe()?;
     let installed = crate::installation::Installed::discover(&executable)?;
+    let env_recording_runtime = installed
+        .as_ref()
+        .and_then(|installed| installed.recording_runtime(&target));
     if let Some(installed) = &installed {
         if core_product.is_none() {
             core_product = Some(installed.cache());
         }
         if runtime.is_none() {
-            runtime = installed.runtime(&target);
+            runtime = if needs_recording {
+                installed.recording_runtime(&target)
+            } else {
+                installed.runtime(&target)
+            };
         }
     }
     if command == "env" {
@@ -399,6 +413,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             &cache,
             &target,
             runtime.as_deref(),
+            env_recording_runtime.as_deref(),
         )?;
         if json {
             println!("{}", serde_json::to_string(&report)?);
@@ -420,6 +435,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     |p| p.display().to_string()
                 )
             );
+            println!(
+                "recording runtime: {}",
+                report.recording_runtime.as_ref().map_or_else(
+                    || "none; select --runtime".to_owned(),
+                    |p| p.display().to_string()
+                )
+            );
         }
         std::process::exit(0);
     }
@@ -428,7 +450,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     if matches!(command, "core-product" | "std-product")
         && install_root.is_none()
-        && (explicit_runtime || explicit_target)
+        && (explicit_runtime || recording_runtime.is_some() || explicit_target)
     {
         return Err("product --runtime/--target require --install".into());
     }
@@ -542,6 +564,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     root,
                     command == "std-product",
                     runtime.as_deref().map(|runtime| (runtime, target.as_str())),
+                    recording_runtime
+                        .as_deref()
+                        .map(|runtime| (runtime, target.as_str())),
                     cc.clone().or_else(pinned).as_deref(),
                     &mut meter,
                 )?
@@ -644,7 +669,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             let archive = if publishing {
                 PathBuf::new()
             } else {
-                runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?
+                let archive =
+                    runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?;
+                if needs_recording
+                    && !archive_defines_symbol(&archive, b"hirsel_core_os_run_recording")?
+                {
+                    return Err(format!(
+                        "recording build requires a recording runtime archive (missing hirsel_core_os_run_recording in {})",
+                        archive.display()
+                    )
+                    .into());
+                }
+                archive
             };
             let mut options = NativeOptions::development(
                 target.clone(),
@@ -665,7 +701,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.net_rules = net_rules;
             options.secret_grants = secret_grants;
             options.logical_charge_report = logical_charge_report;
-            options.tape = run_tape;
+            options.recording = needs_recording;
+            options.replay = replay_plan;
             Ok(options)
         };
         Some(prepare())
@@ -726,6 +763,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 output.as_deref(),
                 &runner,
                 run_args,
+                record_path.as_deref(),
                 &mut meter,
                 metrics,
             );
@@ -956,7 +994,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         meter.finish("request record/publish");
     }
     finish(
-        &output, command, json, &sources, &runner, run_args, &mut meter, metrics,
+        &output,
+        command,
+        json,
+        &sources,
+        &runner,
+        run_args,
+        record_path.as_deref(),
+        &mut meter,
+        metrics,
     )
 }
 /// The output path of a native request's options.
@@ -980,6 +1026,7 @@ fn answer_hit(
     output_path: Option<&Path>,
     runner: &crate::Runner,
     run_args: Vec<String>,
+    record_path: Option<&str>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1029,7 +1076,15 @@ fn answer_hit(
         reachable,
     };
     finish(
-        &output, command, json, sources, runner, run_args, meter, metrics,
+        &output,
+        command,
+        json,
+        sources,
+        runner,
+        run_args,
+        record_path,
+        meter,
+        metrics,
     )
 }
 /// Print `output`, run a `run` request's executable, and exit with the
@@ -1042,6 +1097,7 @@ fn finish(
     sources: &crate::SourceFiles,
     runner: &crate::Runner,
     run_args: Vec<String>,
+    record_path: Option<&str>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1082,11 +1138,15 @@ fn finish(
     let run_exit = if command == "run" || command == "replay" {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
+            let mut cmd = runner.command(&path);
+            cmd.args(run_args);
+            if command == "run"
+                && let Some(record) = record_path
+            {
+                cmd.env("HIRSEL_RECORD", record);
+            }
             Some(
-                runner
-                    .command(&path)
-                    .args(run_args)
-                    .status()
+                cmd.status()
                     .map_err(|e| format!("run execution {runner:?}: {e}"))?
                     .code()
                     .unwrap_or(102),
@@ -1114,6 +1174,48 @@ fn finish(
     // graphs at exit; the reusable library Driver retains ordinary destruction.
     std::process::exit(exit)
 }
+/// Check whether a Unix static archive (`.a`) defines `symbol` in its symbol table.
+fn archive_defines_symbol(path: &Path, symbol: &[u8]) -> std::io::Result<bool> {
+    let bytes = std::fs::read(path)?;
+    if !bytes.starts_with(b"!<arch>\n") {
+        return Ok(false);
+    }
+    let mut at = 8usize;
+    while at + 60 <= bytes.len() {
+        let header = &bytes[at..at + 60];
+        if &header[58..60] != b"`\n" {
+            break;
+        }
+        let name = &header[0..16];
+        let size = std::str::from_utf8(&header[48..58])
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let data_start = at + 60;
+        let data_end = data_start.saturating_add(size).min(bytes.len());
+        let data = &bytes[data_start..data_end];
+        if name.starts_with(b"/ ") && data.len() >= 4 {
+            let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+            let strings_start = 4 + count * 4;
+            if strings_start <= data.len() {
+                return Ok(data[strings_start..]
+                    .split(|&b| b == 0)
+                    .any(|s| s == symbol));
+            }
+        } else if name.starts_with(b"/SYM64/ ") && data.len() >= 8 {
+            let count = u64::from_be_bytes(data[0..8].try_into().unwrap()) as usize;
+            let strings_start = 8 + count * 8;
+            if strings_start <= data.len() {
+                return Ok(data[strings_start..]
+                    .split(|&b| b == 0)
+                    .any(|s| s == symbol));
+            }
+        }
+        at = data_end + (size & 1);
+    }
+    Ok(false)
+}
+
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status. Process setup (allocator guard, signal dispositions,
 /// inherited descriptors) is the caller's.

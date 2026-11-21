@@ -7,8 +7,12 @@ pub enum OptionId {
     Recipe,
     CodeStore,
     ReleaseManifest,
+    Recording,
+    RecordingRuntime,
     Record,
     Tape,
+    Replay,
+    ExpectVerdict,
     IncludeCredentials,
     Diagnose,
     SourceCore,
@@ -150,11 +154,25 @@ static OPTIONS: &[OptionSpec] = &[
         "Connection and call deadline; default 10 seconds."
     ),
     option!(
+        Recording,
+        ["--recording"],
+        None,
+        ["build"],
+        "Build a recording executable that records when started with HIRSEL_RECORD."
+    ),
+    option!(
+        RecordingRuntime,
+        ["--recording-runtime"],
+        Some("ARCHIVE"),
+        ["core-product", "std-product"],
+        "Install this recording runtime archive alongside --runtime."
+    ),
+    option!(
         Record,
         ["--record"],
         Some("TAPE"),
         ["run"],
-        "Record all program grants and scheduling to a new, owner-only tape."
+        "Build the recording build and record all program grants and scheduling to a new, owner-only tape."
     ),
     option!(
         Tape,
@@ -162,6 +180,20 @@ static OPTIONS: &[OptionSpec] = &[
         Some("TAPE"),
         ["replay"],
         "Replay this tape without host grants."
+    ),
+    option!(
+        Replay,
+        ["--replay"],
+        None,
+        ["test"],
+        "Run each selected test in the recording build with recording on, then replay it and require Sealed."
+    ),
+    option!(
+        ExpectVerdict,
+        ["--expect-verdict"],
+        Some("VERDICT"),
+        ["test"],
+        "With --replay, require each selected test's replay to end with VERDICT."
     ),
     option!(
         IncludeCredentials,

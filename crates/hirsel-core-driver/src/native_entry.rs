@@ -50,11 +50,12 @@ pub(crate) struct Plan<'a> {
     secret_grants: Vec<Option<&'a hirsel_core_net::SecretGrant>>,
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
-    tape: Option<&'a crate::native::RunTape>,
+    recording: bool,
+    replay: Option<&'a crate::native::ReplayPlan>,
 }
 /// Every link-plan input the environment does not cover, canonically: the
 /// root limit, grant mask, explicit Net rules, ordered directories, charge-report
-/// path and optional Run tape mode/path. The plan's other fields are the entry's:
+/// path, recording flag and optional replay plan. The plan's other fields are the entry's:
 /// `symbol` is the entry's
 /// identity, `layout`, `exit_offset` and `parameters` are read from the entry
 /// body (its record's address and the declaration part), `cleanup` is the
@@ -69,7 +70,8 @@ pub(crate) fn policy(
     &[hirsel_core_net::SecretGrant],
     &[String],
     Option<&[u8]>,
-    Option<&crate::native::RunTape>,
+    bool,
+    Option<&crate::native::ReplayPlan>,
 ) {
     (
         options.root_limit,
@@ -81,7 +83,8 @@ pub(crate) fn policy(
             .logical_charge_report
             .as_ref()
             .map(|p| p.as_os_str().as_bytes()),
-        options.tape.as_ref(),
+        options.recording,
+        options.replay.as_ref(),
     )
 }
 impl<'a> Plan<'a> {
@@ -141,7 +144,8 @@ impl<'a> Plan<'a> {
             net_rules: &options.net_rules,
             secret_grants,
             directories: &options.directories,
-            tape: options.tape.as_ref(),
+            recording: options.recording,
+            replay: options.replay.as_ref(),
             charge_report: options
                 .logical_charge_report
                 .as_ref()

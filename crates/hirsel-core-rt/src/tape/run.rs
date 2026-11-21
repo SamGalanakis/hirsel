@@ -417,20 +417,80 @@ unsafe extern "C" fn invoke(
     }
 }
 
-/// Typed startup entry used only by a `run --record` or `replay` link plan.
+/// Startup entry for a recording build (`hirsel build --recording` / `hirsel run --record`).
+/// Reads and removes `HIRSEL_RECORD` before any grant snapshot is taken.
+/// Present: record into that path. Absent: run exactly as the release runtime does.
+/// # Safety
+/// The generated config, names, source tables, entry and 32-byte revision stay
+/// pinned for the call. Identity is a NUL-terminated native string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_recording(
+    input: *const OsConfig,
+    names: *const View,
+    sources: *const SourceTable,
+    entry: Entry,
+    identity: *const libc::c_char,
+    revision: *const [u8; 32],
+) -> u8 {
+    // SAFETY: process startup is single-threaded before any task or grant snapshot.
+    unsafe {
+        let path = std::env::var_os("HIRSEL_RECORD");
+        std::env::remove_var("HIRSEL_RECORD");
+        let Some(path) = path else {
+            return entry::hirsel_core_os_run_with_sources(input, names, sources, entry);
+        };
+        run_taped(
+            input,
+            names,
+            sources,
+            entry,
+            path.as_os_str().as_bytes().to_vec(),
+            0,
+            identity,
+            revision,
+        )
+    }
+}
+
+/// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
+/// Replay is never reachable from the program's environment.
 /// # Safety
 /// The generated config, names, source tables, entry and 32-byte revision stay
 /// pinned for the call. Path and identity are NUL-terminated native strings.
-/// Recording with matching socket activation follows the startup and fd
-/// ownership contract of `entry::hirsel_core_os_process_new`.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_os_run_taped(
+pub unsafe extern "C" fn hirsel_core_os_replay(
     input: *const OsConfig,
     names: *const View,
     sources: *const SourceTable,
     entry: Entry,
     path: *const libc::c_char,
+    mode: u64,
+    identity: *const libc::c_char,
+    revision: *const [u8; 32],
+) -> u8 {
+    // SAFETY: every pointer is a borrowed generated startup operand.
+    unsafe {
+        run_taped(
+            input,
+            names,
+            sources,
+            entry,
+            CStr::from_ptr(path).to_bytes().to_vec(),
+            mode,
+            identity,
+            revision,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn run_taped(
+    input: *const OsConfig,
+    names: *const View,
+    sources: *const SourceTable,
+    entry: Entry,
+    path: Vec<u8>,
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
@@ -450,7 +510,7 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
             requirements: input.parameters,
             names,
             requirements_len: input.parameters_len,
-            path: CStr::from_ptr(path).to_bytes().to_vec(),
+            path,
             identity: CStr::from_ptr(identity).to_bytes().to_vec(),
             revision: *revision,
             mode,

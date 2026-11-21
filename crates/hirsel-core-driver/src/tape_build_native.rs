@@ -3,6 +3,13 @@
 // and a Replay open compares (the runtime's
 // open_refuses_a_changed_code_revision_arg_limit_or_policy).
 
+/// The recording runtime archive path from the Buck2 test environment.
+fn env_record_runtime() -> String {
+    std::env::var("HIRSEL_CORE_RT_RECORD_ARCHIVE")
+        .or_else(|_| std::env::var("HIRSEL_CORE_RT_ARCHIVE"))
+        .expect("HIRSEL_CORE_RT_RECORD_ARCHIVE")
+}
+
 /// The symbol's bytes, read from the executable's own symbol table.
 fn code_revision_of(executable: &Path) -> [u8; 32] {
     use object::{Object, ObjectSection, ObjectSymbol};
@@ -423,13 +430,12 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(Backend::Cranelift, dir.path());
+    options.runtime = PathBuf::from(env_record_runtime());
     options.grant_mask = (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
-    options.tape = Some(crate::RunTape {
-        path: tape.to_str().unwrap().into(),
-        mode: crate::RunTapeMode::Record,
-    });
+    options.recording = true;
     let built = product.build(&entry, &options).unwrap();
     let mut child = Command::new(&built.executable)
+        .env("HIRSEL_RECORD", &tape)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -459,7 +465,10 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
 
     options.backend = Backend::Llvm;
     options.grant_mask = 0;
-    options.tape.as_mut().unwrap().mode = crate::RunTapeMode::Replay;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
     let replay = product.build(&entry, &options).unwrap();
     assert_eq!(replay.revision, built.revision);
     let result = Command::new(&replay.executable).output().unwrap();
@@ -966,24 +975,31 @@ fn simd_versions_preserve_run_tape_and_revision() {
     assert!(product.accepted());
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(Backend::Llvm, dir.path());
+    options.runtime = PathBuf::from(env_record_runtime());
     options.optimize = true;
     options.grant_mask = 1 << grant_kind("Stdout").unwrap();
-    let mut run = |mode, cap: &str| {
-        options.tape = Some(crate::RunTape { path: tape.to_str().unwrap().into(), mode });
+    options.recording = true;
+    let mut run = |replay: bool, cap: &str| {
+        options.replay = replay.then(|| crate::ReplayPlan {
+            path: tape.to_str().unwrap().into(),
+            diagnose: false,
+        });
         let built = product.build(&entry, &options).unwrap();
         assert_eq!(built.revision.0, code_revision_of(&built.executable));
-        let output = Command::new(&built.executable)
-            .env("HIRSEL_ISA_CAP", cap)
-            .output()
-            .unwrap();
+        let mut cmd = Command::new(&built.executable);
+        cmd.env("HIRSEL_ISA_CAP", cap);
+        if !replay {
+            cmd.env("HIRSEL_RECORD", &tape);
+        }
+        let output = cmd.output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         (built.revision, output.stdout)
     };
     let levels = hirsel_core_layout::isa::X86_64_LEVELS;
-    let (revision, recorded) = run(crate::RunTapeMode::Record, &levels.last().unwrap().number.to_string());
+    let (revision, recorded) = run(false, &levels.last().unwrap().number.to_string());
     assert_eq!(recorded, b"simd");
     let bytes = std::fs::read(&tape).unwrap();
-    let (replay_revision, replayed) = run(crate::RunTapeMode::Replay, &levels[0].number.to_string());
+    let (replay_revision, replayed) = run(true, &levels[0].number.to_string());
     assert_eq!(revision, replay_revision);
     assert!(replayed.is_empty());
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);

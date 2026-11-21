@@ -61,25 +61,20 @@ impl Link {
         }
     }
 }
-/// The startup behavior of a Run tape, fixed by the link plan.
-#[derive(Clone, Copy, Debug, Serialize)]
-#[repr(u8)]
-pub enum RunTapeMode {
-    Record = 0,
-    Replay = 1,
-    Diagnose = 2,
-}
-
+/// Replay configuration for the launcher-only `hirsel replay` / `test --replay` path.
 #[derive(Clone, Debug, Serialize)]
-pub struct RunTape {
+pub struct ReplayPlan {
     pub path: String,
-    pub mode: RunTapeMode,
+    pub diagnose: bool,
 }
 
 /// Runtime and linker inputs are explicit, independently produced artifacts.
 #[derive(Clone)]
 pub struct NativeOptions {
-    pub tape: Option<RunTape>,
+    /// Link and enter the recording runtime (`hirsel build --recording`, `run --record`, `replay`, `test --replay`).
+    pub recording: bool,
+    /// Launcher-only replay plan (`hirsel replay`, `test --replay` replay phase).
+    pub replay: Option<ReplayPlan>,
     pub backend: Backend,
     pub optimize: bool,
     /// Source-neutral native line rows; failure positions are always enabled.
@@ -137,7 +132,8 @@ impl NativeOptions {
             output,
             root_limit: 64 * 1024 * 1024,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
-            tape: None,
+            recording: false,
+            replay: None,
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
@@ -1849,7 +1845,8 @@ mod tests {
     fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         NativeOptions {
-            tape: None,
+            recording: false,
+            replay: None,
             backend,
             optimize: false,
             debug_lines: false,

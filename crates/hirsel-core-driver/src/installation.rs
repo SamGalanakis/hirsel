@@ -40,6 +40,8 @@ struct Registration {
     version: u32,
     products: BTreeMap<String, PathBuf>,
     runtimes: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    recording_runtimes: BTreeMap<String, PathBuf>,
     /// Each linked target's recipe, relative to the root.
     links: BTreeMap<String, PathBuf>,
 }
@@ -89,6 +91,12 @@ impl Installed {
             .get(target)
             .map(|path| self.root.join(path))
     }
+    pub fn recording_runtime(&self, target: &str) -> Option<PathBuf> {
+        self.registration
+            .recording_runtimes
+            .get(target)
+            .map(|path| self.root.join(path))
+    }
     /// The link recipe this installation captured for `target`. A target
     /// without one links only through an explicit `--cc`.
     pub fn link(&self, target: &str) -> Option<PathBuf> {
@@ -132,6 +140,7 @@ pub fn register(
     name: &str,
     image: &CoreImage,
     runtime: Option<(&[u8], &str)>,
+    recording_runtime: Option<(&[u8], &str)>,
     link: Option<(&str, &Path)>,
 ) -> io::Result<()> {
     let root = crate::product::normalized(root);
@@ -147,7 +156,7 @@ pub fn register(
             .map_err(io::Error::other)?
             .to_owned(),
     );
-    if let Some((bytes, target)) = runtime {
+    let install_runtime = |bytes: &[u8], target: &str| -> io::Result<PathBuf> {
         let hash = hex(ContentHash::of_bytes(bytes));
         let relative = Path::new("runtime")
             .join(target)
@@ -159,7 +168,17 @@ pub fn register(
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
         file.write_all(bytes)?;
         file.persist(path)?;
+        Ok(relative)
+    };
+    if let Some((bytes, target)) = runtime {
+        let relative = install_runtime(bytes, target)?;
         registration.runtimes.insert(target.to_owned(), relative);
+    }
+    if let Some((bytes, target)) = recording_runtime {
+        let relative = install_runtime(bytes, target)?;
+        registration
+            .recording_runtimes
+            .insert(target.to_owned(), relative);
     }
     if let Some((target, recipe)) = link {
         registration
@@ -189,6 +208,7 @@ pub struct Environment {
     pub products: BTreeMap<&'static str, ProductEnvironment>,
     pub target: String,
     pub runtime: Option<PathBuf>,
+    pub recording_runtime: Option<PathBuf>,
 }
 pub fn environment(
     executable: &Path,
@@ -196,6 +216,7 @@ pub fn environment(
     cache: &Path,
     target: &str,
     runtime: Option<&Path>,
+    recording_runtime: Option<&Path>,
 ) -> io::Result<Environment> {
     let mut products = BTreeMap::new();
     for name in ["core", "std"] {
@@ -231,6 +252,7 @@ pub fn environment(
         products,
         target: target.to_owned(),
         runtime: runtime.map(Path::to_owned),
+        recording_runtime: recording_runtime.map(Path::to_owned),
     })
 }
 /// The same producer used by the CLI and the distribution assembler. Every
@@ -244,18 +266,23 @@ pub fn publish(
     root: &Path,
     std: bool,
     runtime: Option<(&Path, &str)>,
+    recording_runtime: Option<(&Path, &str)>,
     cc: Option<&Path>,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
     let root = crate::product::normalized(root);
-    let runtime = runtime
-        .map(|(path, target)| {
-            if !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].contains(&target) {
-                return Err(io::Error::other("unsupported installed runtime target"));
-            }
-            Ok((std::fs::read(path)?, target))
-        })
-        .transpose()?;
+    fn read_runtime<'a>(input: Option<(&Path, &'a str)>) -> io::Result<Option<(Vec<u8>, &'a str)>> {
+        input
+            .map(|(path, target)| {
+                if !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].contains(&target) {
+                    return Err(io::Error::other("unsupported installed runtime target"));
+                }
+                Ok((std::fs::read(path)?, target))
+            })
+            .transpose()
+    }
+    let runtime = read_runtime(runtime)?;
+    let recording_runtime = read_runtime(recording_runtime)?;
     let linked = runtime
         .as_ref()
         .map(|(_, target)| *target)
@@ -297,6 +324,9 @@ pub fn publish(
         if std { "std" } else { "core" },
         &product.image,
         runtime
+            .as_ref()
+            .map(|(bytes, target)| (bytes.as_slice(), *target)),
+        recording_runtime
             .as_ref()
             .map(|(bytes, target)| (bytes.as_slice(), *target)),
         link.as_ref()

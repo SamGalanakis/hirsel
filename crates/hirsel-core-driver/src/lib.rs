@@ -44,8 +44,7 @@ mod tool_inputs;
 pub use core_inventory::{allowlist, core_declarations, core_inventory};
 pub use native::recipe_build::{AssemblyRecord, Publication};
 pub use native::{
-    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, RunTape, RunTapeMode,
-    grant_kind,
+    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, ReplayPlan, grant_kind,
 };
 pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable};

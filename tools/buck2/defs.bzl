@@ -513,19 +513,22 @@ def _toolchain_bundle_impl(ctx):
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
+    recording_runtimes = ctx.attrs.recording_runtimes[DefaultInfo].sub_targets
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
-        'clang="$(cd "$6" && pwd)/bin/hirsel-clang"',
+        'clang="$(cd "$8" && pwd)/bin/hirsel-clang"',
         '"$1" core-product --install "$root" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$4" --target x86_64-unknown-linux-gnu --cc "$clang" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$5" --target aarch64-unknown-linux-gnu > /dev/null',
+        '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --target x86_64-unknown-linux-gnu --cc "$clang" > /dev/null',
+        '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --target aarch64-unknown-linux-gnu > /dev/null',
     ])
     ctx.actions.run(
         cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
                  bundle.as_output(), scratch.as_output(),
                  runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  runtimes["aarch64"][DefaultInfo].default_outputs[0],
+                 recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
+                 recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  ctx.attrs._llvm[DefaultInfo].default_outputs[0],
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
@@ -541,6 +544,7 @@ hirsel_toolchain_bundle = rule(
     attrs = {
         "hirsel": attrs.dep(),
         "runtimes": attrs.dep(),
+        "recording_runtimes": attrs.dep(),
         "_llvm": attrs.dep(default = "root//tools/buck2/native-toolchain:llvm"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
     },

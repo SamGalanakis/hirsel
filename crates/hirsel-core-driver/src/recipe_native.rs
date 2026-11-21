@@ -630,7 +630,8 @@ impl Publication {
                 tools.environment,
                 link.identity,
                 DIRECT_LINK_SUPPORT_LIBS,
-                &options.tape,
+                options.recording,
+                &options.replay,
                 options
                     .logical_charge_report
                     .as_ref()

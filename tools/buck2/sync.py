@@ -741,7 +741,9 @@ def first_party(meta: dict) -> str:
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            runtimes="//:hirsel-core-rt-archives", visibility=["PUBLIC"]))
+                            runtimes="//:hirsel-core-rt-archives",
+                            recording_runtimes="//:hirsel-core-rt-record-archives",
+                            visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present()],
                             data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock", "//third-party:NOTICES.md",

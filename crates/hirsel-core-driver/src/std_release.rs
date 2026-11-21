@@ -36,6 +36,30 @@ const STD_SCHEMA: u32 = 2;
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
 
+/// Entries a program lowers itself, as a composed program does, with every
+/// plain root they reach: each a definition or a module of them. Called over
+/// the unit, each costs a program more than its own lowering saves (Guard B).
+const ALWAYS_IMPORT: &[&str] = &[
+    "std@1/csv",
+    "std@1/json",
+    "std@1/regex",
+    "std@1/float",
+    "core@1/string/push_u64",
+    "std@1/string/push_uint",
+    "std@1/string/next_split",
+    "core@1/string/from",
+    "core@1/string/encode_base64",
+    "core@1/string/append_base64_bytes",
+];
+
+fn always_imported(definition: &DefPath) -> bool {
+    let path = definition.to_string();
+    ALWAYS_IMPORT.iter().any(|entry| {
+        path.strip_prefix(entry)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
 /// The release std's publication record, stored under the std key.
 #[derive(Serialize, Deserialize)]
 struct StdRecord {
@@ -167,7 +191,22 @@ impl CheckProduct {
         key: ContentHash,
         shared: &Store,
     ) -> Result<StdRecord, NativeStop> {
-        let plain = self.std_plain_roots()?;
+        let mut plain = self.std_plain_roots()?;
+        // What an always-imported entry reaches stays the program's to lower.
+        let mut held = BTreeSet::new();
+        for root in plain
+            .iter()
+            .filter(|root| always_imported(&root.definition))
+        {
+            let mut scratch = crate::instances::InstanceSet::default();
+            if let Ok(walked) =
+                self.instances_into([root.clone()], options.instance_limit, &mut scratch)
+            {
+                held.extend(walked);
+            }
+            held.insert(root.clone());
+        }
+        plain.retain(|root| !held.contains(root));
         let mut materialized = crate::instances::InstanceSet::default();
         let mut reached = BTreeSet::new();
         let mut roots = Vec::new();

@@ -25,6 +25,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `check` | [check](../../core/core/check.hirsel) | SEM-8, SEM-11, MEM-30 |
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
+| `ed25519`, `p256` | unbuilt: `verify`, `verify_der` | SEM-8, MEM-30; [Signature verification](#signature-verification) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
@@ -462,6 +463,101 @@ it makes `O(log m)` key comparisons however many keys are equal, and takes the g
 ordinal; rendering visits each key at its first ordinal with that last value. A wider
 document needs `u64` ordinals or a width error. No operation replaces the source alone or
 takes unchecked offsets, and nothing in the document moves.
+
+## Signature verification
+
+The modules `ed25519` and `p256` check signatures. Each provides functions of type
+`(key: Bytes, msg: Bytes, sig: Bytes) -> bool`: `ed25519.verify`, `p256.verify` and
+`p256.verify_der`. Each returns `true` exactly when `sig` is a valid signature of all of
+`msg` under `key` by the rule below, and `false` otherwise. Every input that is not well
+formed gives `false`, including a key or signature of the wrong length, and no input
+makes the call fail. The answer does not say which check failed. That is how ring
+reports it, and a caller checking untrusted bytes needs no failure path for them.
+Signing and key agreement are not provided: they need private-key custody, and the
+`Secret` contract ([TLS-5](tls.md#tls-5-secrets)) does not cover keys.
+
+- **Ed25519.** `ed25519.verify` is pure Ed25519 ([RFC 8032 §5.1.7](https://www.rfc-editor.org/rfc/rfc8032#section-5.1.7)),
+  without context or prehash. `key` is the 32-byte encoding of the point `A`, and `sig` is
+  64 bytes `R || S`. It returns `false` unless all of these hold:
+  - `S`, read as a little-endian integer, is below the group order `L`. It is not reduced.
+  - `key` decodes to a point. `y` is the low 255 bits taken mod `p`, so an encoding of
+    `y ≥ p` is accepted. `x` is the root that the top bit selects, and `false` results when
+    there is none. When `x = 0` the top bit is ignored.
+  - The encoding of `[S]B − [k]A` equals the 32 bytes of `R`, where
+    `k = SHA-512(R || key || msg) mod L` hashes `R` and `key` exactly as given.
+
+  This is the cofactorless equation. `R` is never decoded, so a non-canonical or
+  off-curve `R` never matches. `A`'s order is not checked, so small-order and mixed-order
+  keys are accepted whenever the equation holds. That is ring's `ED25519`, and RFC 8032
+  permits it.
+- **P-256.** `p256.verify` and `p256.verify_der` are ECDSA over NIST P-256 with SHA-256
+  ([FIPS 186-5 §6.4.2](https://csrc.nist.gov/pubs/fips/186-5/final)). The kernel hashes
+  `msg`, and `e` is its SHA-256 digest mod `n`.
+  - `key` is an uncompressed SEC 1 point: 65 bytes `0x04 || X || Y` with `X` and `Y` below
+    `p`, on the curve. A compressed (`0x02`, `0x03`) or hybrid (`0x06`, `0x07`) point, a
+    bare 64-byte `X || Y` and the one-byte point at infinity give `false`. ring parses only
+    the uncompressed form, and JWK and COSE keys carry `X` and `Y` whole.
+  - `p256.verify` takes `sig` as 64 bytes `r || s`, each 32 bytes big-endian. That is the
+    IEEE P1363 form that JWS `ES256` uses ([RFC 7518 §3.4](https://www.rfc-editor.org/rfc/rfc7518#section-3.4)).
+  - `p256.verify_der` takes the DER `ECDSA-Sig-Value`, `SEQUENCE { r INTEGER, s INTEGER }`
+    ([RFC 3279 §2.2.3](https://www.rfc-editor.org/rfc/rfc3279#section-2.2.3)). That is the
+    form X.509, WebAuthn and most package signatures use. Only strict DER is accepted:
+    minimal definite lengths, minimal non-negative integers and no trailing bytes. Any BER
+    variation gives `false`.
+  - Both forms need `1 ≤ r, s < n`. The result is `true` exactly when
+    `u1·G + u2·Q` is not the point at infinity and its `x` is `r` mod `n`, where
+    `w = s⁻¹ mod n`, `u1 = e·w` and `u2 = r·w`. A high `s` (`s > n/2`) is accepted, as
+    FIPS 186-5 accepts it, so `(r, s)` and `(r, n − s)` both verify. A caller that needs one
+    signature per message must enforce that itself.
+
+  Both forms are kernels because the conversion between them is where malleability bugs
+  live: Wycheproof's BER cases test exactly that conversion. ring parses strict DER itself
+  (`ECDSA_P256_SHA256_ASN1`), and its `r || s` path is `ECDSA_P256_SHA256_FIXED`.
+- **Charges.** Each call takes one step ([MEM-30](budgets.md#mem-30-step-bounds)) and admits
+  no bytes, whatever the lengths of its arguments. The charge is 1 step per call plus
+  0 steps per message byte, on every engine, as `sha256.blocks` charges. The work is bounded
+  by the length of `msg`, which a limit bounds. MEM-30's one per-unit exception,
+  `secret.scram_sha256`, covers work that a peer chooses.
+- **Determinism.** The answer is a function of the three byte strings alone. Verification
+  is not a host or provider operation, and nothing about it is recorded: replay computes it
+  again ([recording](../recording.md#what-a-recording-holds)). An engine may use ring's
+  CPU-specific code. Every path gives the same answer, so by
+  [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU. The inputs
+  are public, so the time a call takes may depend on them.
+
+### Laws
+
+Each law names the bug it catches and the oracle its expected value comes from. The
+vectors are copied from their sources byte for byte. The Wycheproof files are `testvectors_v1/`
+at [C2SP/wycheproof](https://github.com/C2SP/wycheproof) commit
+`65ca494727a52944c204441c860b039e6786b99b`, cited by `tcId`. Keys come from the test's
+group: `publicKey.pk` for Ed25519, `publicKey.uncompressed` for ECDSA. NIST records are
+counted from 1 within the `[P-256,SHA-256]` section of `SigVer.rsp` in
+[186-4ecdsatestvectors.zip](https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/186-4ecdsatestvectors.zip),
+with key `0x04 || Qx || Qy` and signature `R || S`.
+
+| law | bug | oracle and setup |
+|---|---|---|
+| **SV1** Ed25519 accepts | the wrong hash input order, a prehash or context variant, or a wrong base point | RFC 8032 §7.1 TEST 1 (empty message), TEST 2 (`72`) and TEST 3 (`af82`), with their public keys and signatures: each gives `true`. |
+| **SV2** message bound | `msg` not hashed, or hashed only in part | TEST 3's key and signature over `af83`, TEST 3's message with the low bit of its last byte flipped, give `false`. The pinned file has no message-change case. By hand: changing `msg` changes `k`, so `[S]B − [k]A` no longer encodes `R`. |
+| **SV3** S below L | `S` reduced mod `L` instead of checked | `ed25519_test.json` tcId 63 (`S + L`) gives `false`. tcId 3, the same signature with the original `S`, gives `true`. |
+| **SV4** small-order key | a key-order check that ring and this rule do not make | `ed25519_test.json` tcId 152 gives `true`. The key is the identity, `R` is the encoding of `B` and `S = 1`, so `[1]B − [k]·identity = B`, whose encoding is `R`. Wycheproof marks this `acceptable`, so the expected value comes from the equation. |
+| **SV5** Ed25519 lengths | a wrong length that fails the call, reads past the carrier, or is accepted | Each of these gives `false` and the call does not fail: TEST 1's key cut to 31 bytes, TEST 1's key with `00` appended, TEST 1's signature cut to 63 bytes, and `ed25519_test.json` tcIds 30 (empty signature) and 33 (signature too long). |
+| **SV6** P-256 SigVer | a wrong curve, a truncated digest, or a message passed where the digest belongs | `p256.verify` gives `true` for NIST record 4 (`Result = P`) and `false` for record 1 (`F (3 - S changed)`). |
+| **SV7** high S | low-S normalisation that rejects a valid signature | `p256.verify` gives `true` for `ecdsa_secp256r1_sha256_p1363_test.json` tcId 64, which is valid with `s > n/2`. `p256.verify_der` gives `true` for `ecdsa_secp256r1_sha256_test.json` tcId 7, the high-S twin of tcId 5. |
+| **SV8** strict DER | a BER-lenient parser, or a sign bit read as magnitude | In `ecdsa_secp256r1_sha256_test.json`, `p256.verify_der` gives `true` for tcId 5. It gives `false` for tcId 8 (the sequence length in long form) and for tcId 6 (`s` without its leading zero, so negative). |
+| **SV9** P-256 forms and lengths | a compressed or bare key decoded on one engine only, or a wrong length that fails the call | Each of these gives `false` and the call does not fail. With NIST record 4's message and signature: the key compressed (`0x02` or `0x03` by `Qy`'s parity, then `Qx`) and the bare 64-byte `Qx \|\| Qy`. With record 4's key and message: the signature cut to 63 bytes. And `ecdsa_secp256r1_sha256_p1363_test.json` tcId 121, a 2-byte signature. |
+| **SV10** charge | a kernel lowered as library code that loops, or a charge per byte or per block | `bound bytes 0 { bound steps 1 { ed25519.verify(k, m, s) } }` gives `Ok(Ok(true))` for TEST 1. The same scope over `p256.verify` gives `Ok(Ok(true))` for NIST record 4, whose message is 128 bytes, and over `p256.verify_der` gives `Ok(Ok(true))` for tcId 5. The arguments are locals bound outside the scopes. The expected value follows by hand from MEM-30: a core call is one step and admits nothing. |
+
+The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel` and
+`core/core/tests/p256.hirsel`, run by the shared walker on the evaluator, Cranelift and LLVM
+([README](../../core/std/tests/README.md)).
+
+### Build slice
+
+| slice | size | depends on | contents | laws |
+|---|---|---|---|---|
+| **SV** signature verification | S | — | `core/core/ed25519.hirsel` and `core/core/p256.hirsel` with the three bodiless headers, and their rows in `core_ops.rs` as `Lane::Value` kernels. One function in `hirsel-core-net` wraps ring 0.17.14's `ED25519`, `ECDSA_P256_SHA256_FIXED` and `ECDSA_P256_SHA256_ASN1`. The `RtOp`s `Ed25519Verify`, `P256Verify` and `P256VerifyDer` take key, message and signature pointer and length pairs and return a `u64` 0 or 1. The C entries `hirsel_core_ed25519_verify`, `hirsel_core_p256_verify` and `hirsel_core_p256_verify_der` in `hirsel-core-rt` call that function, and so does the evaluator's `RtOp` arm, so both engines answer from the same code. Cranelift and LLVM lower these as native calls, as `Sha256Blocks` is lowered. There is no `HostOp`, provider path or recording change. The module row's `unbuilt` mark is removed when the slice lands. | SV1–SV10 |
 
 ## Provide
 

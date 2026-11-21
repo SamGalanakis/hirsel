@@ -1845,7 +1845,9 @@ impl UnitCtx {
         self.held.is_some()
     }
 
-    /// Take the next arrival that has reached the unit and apply it.
+    /// Take the next arrival that has reached the unit and apply it. Inlined
+    /// into the language pump, its hot caller; `release_take` is cold.
+    #[inline(always)]
     pub(crate) fn take(&mut self) -> Option<(Took, TakeInfo)> {
         #[cfg(test)]
         let hooked = self.held.is_some();

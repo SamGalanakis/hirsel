@@ -406,16 +406,17 @@ impl LangUnit {
     /// through its notice; each take wakes what waits on it, as in `pump`.
     fn drop_client(&mut self, client: Client) {
         let took = self.ctx.drop_client(client);
-        self.on_released(took);
+        if !took.is_empty() {
+            self.on_released(took);
+        }
     }
 
     /// Every caller holds a commit. A release that took drained the port and
     /// may have left later arrivals reached but untaken; pump takes them and
     /// rearms the port, so no task parks on work the unit already holds.
+    #[cold]
+    #[inline(never)]
     fn on_released(&mut self, took: Vec<Released>) {
-        if took.is_empty() {
-            return;
-        }
         let wake = self.waits > 0;
         for (t, id, _) in took {
             // SAFETY: a release runs in a commit that owns the unit.
@@ -524,6 +525,7 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
 /// # Safety
 /// The caller owns the unit for this commit; every registered frame and
 /// handle is pinned while registered.
+#[inline(always)]
 unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
     // SAFETY: by the contract.
     unsafe {
@@ -967,7 +969,9 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         // takes through the notice, which refunds the retained charge.
         let (_, took) = u.ctx.clean(&h.inbox);
         drop(h);
-        u.on_released(took);
+        if !took.is_empty() {
+            u.on_released(took);
+        }
         pump(u);
         drop(commit);
         0

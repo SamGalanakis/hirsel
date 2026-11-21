@@ -247,11 +247,13 @@ fn test_wire_session(tasks: Tasks, clock: Clock) -> Result[(), ()] waits {
     if law_serving_budget() && law_subscription_room_refunded() && law_session_records(tasks) && law_pool_holds_writer_bytes(tasks, clock) && law_writer_one_frame() && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
 }
 
+// MEM-24: one WireUnit holds Bytes (24), Option[WireCheck] (32) and write_ack (1).
+// The channel adds its 64-byte header.
+const WIRE_UNIT_CHANNEL_BYTES: u64 = 24u64 + 32u64 + 1u64 + 64u64
+
 pub fn law_writer_one_frame() -> bool {
-    // Two caller-owned candidate frames and one WireUnit handoff record (Bytes 24, an
-    // Option of a u64 and two Latest handles 32, plus 64). A third charged byte cannot
-    // fit; the writer cannot reserve or retain another frame.
-    let checked = bound bytes (2u64 * 262160u64 + 120u64) {
+    // The two caller-owned candidate frames and the handoff channel spend the grant.
+    let checked = bound bytes (2u64 * 262160u64 + WIRE_UNIT_CHANNEL_BYTES) {
         let (tx, rx): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
         let first: Bytes = list.with_capacity(262158u64)
         let second: Bytes = list.with_capacity(262158u64)
@@ -293,11 +295,10 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 }
 
 pub fn law_session_records(tasks: Tasks) -> bool waits {
-    // charge-v1: five WireEvents of 450 plus 64, one WireUnit of 56 plus 64,
-    // a credit channel of zero-sized units plus 64; three test gates of 64;
-    // two unit-returning task records of 288 and the owner record of 328 (it holds a
-    // Result[(), std.wsock.Error], widened by NetError's Tls(TlsFailure) arm).
-    let checked = bound bytes 3594u64 {
+    // Five WireEvents of 450 plus the channel header, the writer handoff channel,
+    // four unit channels of 64, two task records of 288, and the owner record of 328
+    // (288 plus 40 for Result[(), std.wsock.Error]).
+    let checked = bound bytes (5u64 * 450u64 + 64u64 + WIRE_UNIT_CHANNEL_BYTES + 4u64 * 64u64 + 2u64 * 288u64 + 328u64) {
         let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
         let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
         let (credit, read_credit): (Sender[()], Receiver[()]) = channel.new(5u64)

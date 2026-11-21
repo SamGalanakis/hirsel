@@ -9579,11 +9579,38 @@ fn disk_removals(m: DiskManifest, lease: Option[Arc[ExportLease]]) -> Result[Lis
     Ok(take names)
 }
 
-fn disk_prepare(d: Dir, state: DiskState, cut: DiskCut, cap: u64) -> Result[DiskPrepared, Error] waits {
-    let mut graph = capacity(disk_graph_share(state.graph))?
+// What a cut reads from the installed state: a share of its graph and copies of
+// the manifest fields prepare needs. The worker builds it inside isolate, so a
+// refusal leaves the installed state as it was.
+type DiskBase: send {
+    store: StoreId,
+    graph: DiskGraph,
+    packs: List[DiskPack],
+    next_pack: u64,
+    held: List[u64],
+    prev_first: u64
+}
+
+fn disk_base(state: DiskState) -> Result[DiskBase, Capacity] {
+    let graph = disk_graph_share(state.graph)?
+    let packs: List[DiskPack] = clone(state.manifest.packs)
+    let mut held: List[u64] = list.new()
+    for seq in state.manifest.retired {
+        if pack_leased(state.lease, seq) { list.push(mut held, seq) }
+    }
+    let prev_first = match state.lease {
+        Some(old) => if old.first < state.manifest.first_live { old.first } else { state.manifest.first_live },
+        None => state.manifest.first_live,
+    }
+    Ok(DiskBase(store: state.store, graph: take graph, packs: take packs, next_pack: state.manifest.next_pack, held: take held, prev_first: prev_first))
+}
+
+fn disk_prepare(d: Dir, take base: DiskBase, cut: DiskCut, cap: u64) -> Result[DiskPrepared, Error] waits {
+    let DiskBase(store: store, graph: take shared, packs: take installed_packs, next_pack: installed_next, held: take leased, prev_first: prev_first) = take base
+    let mut graph = take shared
     let all = capacity(state_roots(cut.state))?
     let fresh = capacity(disk_track_roots(mut graph, all))?
-    let pack_set = disk_compact(d, state.store, mut graph, state.manifest.packs, state.manifest.next_pack, cap, take fresh)?
+    let pack_set = disk_compact(d, store, mut graph, installed_packs, installed_next, cap, take fresh)?
     let DiskPackSet(packs: take packs, retired: take newly_retired, next: next_pack) = take pack_set
     if let Some(wanted) = cut.target {
         if graph.live > wanted.resident {
@@ -9608,19 +9635,13 @@ fn disk_prepare(d: Dir, state: DiskState, cut: DiskCut, cap: u64) -> Result[Disk
         list.push(mut pins, take kept)
     }
     let mut retired = take newly_retired
-    for seq in state.manifest.retired {
-        if pack_leased(state.lease, seq) { list.push(mut retired, seq) }
-    }
+    for seq in leased { list.push(mut retired, seq) }
     list.sort(mut retired, std.order.compare)
-    let prev_first = match state.lease {
-        Some(old) => if old.first < state.manifest.first_live { old.first } else { state.manifest.first_live },
-        None => state.manifest.first_live,
-    }
     let manifest = DiskManifest(generation: cut.generation, fence: cut.fence, next_node: cut.next_node, next_branch: cut.state.next_branch, next_table: cut.next_table, next_pack: next_pack, first_live: cut.first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins)
     let names = capacity(disk_removals(manifest, cut.lease))?
-    let raw = capacity(disk_manifest_bytes(state.store, manifest))?
+    let raw = capacity(disk_manifest_bytes(store, manifest))?
     let ack = Saved(cut.generation, graph.live)
-    Ok(DiskPrepared(state: DiskState(store: state.store, manifest: take manifest, lease: cut_lease(cut.lease), graph: take graph), raw: take raw, removals: take names, ack: take ack))
+    Ok(DiskPrepared(state: DiskState(store: store, manifest: take manifest, lease: cut_lease(cut.lease), graph: take graph), raw: take raw, removals: take names, ack: take ack))
 }
 
 // Q1: no allocation follows the manifest rename. File names, final metadata
@@ -9638,22 +9659,86 @@ fn disk_commit(d: Dir, take prepared: DiskPrepared) -> Result[(DiskState, DiskCu
 
 type DiskWorker: send {
     d: Dir,
+    tasks: Tasks,
     state: DiskState,
     cap: u64,
     receive: Receiver[DiskCut],
     send: Sender[DiskCutAck]
 }
 
+type DiskCutDone = Result[(DiskState, DiskCutAck), Error]
+
+type DiskCutJob: send {
+    d: Dir,
+    base: DiskBase,
+    cut: DiskCut,
+    cap: u64,
+    done: Sender[DiskCutDone]
+}
+
+// The cut's writes wait, so its fault boundary is a task (FAIL-14). It sends
+// its outcome, so its own result is empty.
+fn disk_cut_job(take job: DiskCutJob) -> () waits {
+    let DiskCutJob(d: d, base: take base, cut: take cut, cap: cap, done: take done) = take job
+    let prepared = disk_prepare(d, take base, cut, cap)
+    let outcome = match take prepared {
+        Ok(take plan) => disk_commit(d, take plan),
+        Error(take e) => Error(take e)
+    }
+    let _ = channel.send(done, take outcome)
+}
+
+fn disk_cut_base(state: DiskState) -> Result[DiskBase, Capacity] {
+    match isolate(fn() -> Result[DiskBase, Capacity] { disk_base(state) }) {
+        Ok(Ok(take base)) => take base,
+        Ok(Error(causes)) => match raised_capacity(causes) {
+            Some(c) => Error(c),
+            None => fail("store: a disk cut's base failed"),
+        },
+        Error(c) => Error(c),
+    }
+}
+
+// R1: a refused admission in a cut raises Capacity. A refused base, task or
+// cut is the cut's Full; nothing was renamed, so MANIFEST and the installed
+// state are as they were and a later cut can retry. Any other fault ends the
+// worker as it did before.
+fn disk_cut_run(d: Dir, tasks: Tasks, state: DiskState, take cut: DiskCut, cap: u64, done: Sender[DiskCutDone], from: Receiver[DiskCutDone]) -> DiskCutDone waits {
+    let base = match disk_cut_base(state) {
+        Ok(take base) => take base,
+        Error(c) => return Error(Full(c)),
+    }
+    let job = DiskCutJob(d: d, base: take base, cut: take cut, cap: cap, done: channel.sender(done))
+    // An empty task result costs 288 B (MEM-24); the cut gets the rest of the
+    // worker's room.
+    let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, disk_cut_job)
+    let running = match take first {
+        Ok(take handle) => take handle,
+        Error((c, take returned)) => {
+            if c.available < 288 { return Error(Full(Capacity(requested: 288, available: c.available))) }
+            match task.try_spawn(tasks, bytes (c.available - 288), take returned, disk_cut_job) {
+                Ok(take handle) => take handle,
+                Error((again, _)) => return Error(Full(again)),
+            }
+        },
+    }
+    match task.join(take running) {
+        Ok(()) => result.unwrap(channel.receive(from)),
+        Error(Failed(causes)) => match raised_capacity(causes) {
+            Some(c) => Error(Full(c)),
+            None => fail("store: a disk cut failed"),
+        },
+        Error(Cancelled(_)) => fail("store: a disk cut was cancelled"),
+    }
+}
+
 fn disk_worker(take input: DiskWorker) -> Result[(), Error] waits {
-    let DiskWorker(d: d, state: take initial, cap: cap, receive: take receive, send: take send) = take input
+    let DiskWorker(d: d, tasks: tasks, state: take initial, cap: cap, receive: take receive, send: take send) = take input
+    let (done, from): (Sender[DiskCutDone], Receiver[DiskCutDone]) = channel.new(1)
     let mut state = take initial
     while let Ok(take cut) = channel.receive(receive) {
         let generation = cut.generation
-        let prepared = disk_prepare(d, state, cut, cap)
-        let outcome = match take prepared {
-            Ok(take plan) => disk_commit(d, take plan),
-            Error(e) => Error(take e)
-        }
+        let outcome = disk_cut_run(d, tasks, state, take cut, cap, done, from)
         match take outcome {
             Ok((take installed, take ack)) => {
                 state = take installed
@@ -9698,7 +9783,7 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     let state = DiskState(store: db.store, manifest: take manifest, lease: None, graph: disk_graph())
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = channel.new(1)
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = channel.new(1)
-    let input = DiskWorker(d: d, state: take state, cap: 512, receive: take receive, send: take acks)
+    let input = DiskWorker(d: d, tasks: tasks, state: take state, cap: 512, receive: take receive, send: take acks)
     let worker = task.spawn(tasks, bytes 131072, take input, disk_worker)
     for k in 0u64 .. 96 {
         if !put_one(mut db, k, k + 1) {
@@ -9971,6 +10056,7 @@ type DiskStartup: send {
 
 type DiskBootstrap: send {
     d: Dir,
+    tasks: Tasks,
     startup: DiskStartup,
     preload: DiskDecoded,
     options: Options,
@@ -10047,7 +10133,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
 }
 
 fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
-    let DiskBootstrap(d: d, startup: take initial, preload: take preload, options: options,
+    let DiskBootstrap(d: d, tasks: tasks, startup: take initial, preload: take preload, options: options,
                       ready: take ready, receive: take receive, send: take send) = take input
     let assembled = disk_finish_load(take preload, 18446744073709551615)
     match take assembled {
@@ -10062,7 +10148,7 @@ fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
             if let Error(_) = channel.send(ready, Ok(take startup)) {
                 return Ok(())
             }
-            let worker = DiskWorker(d: d, state: take state, cap: options.pack_bytes, receive: take receive, send: take send)
+            let worker = DiskWorker(d: d, tasks: tasks, state: take state, cap: options.pack_bytes, receive: take receive, send: take send)
             disk_worker(take worker)
         }
     }
@@ -10098,7 +10184,7 @@ fn disk_session(tasks: Tasks, d: Dir, clock: Clock, r: Random, options: Options)
     let (ready, waiting): (Sender[Result[DiskStartup, Error]], Receiver[Result[DiskStartup, Error]]) = channel.new(1)
     let prepared = disk_start(d, r, options)?
     let (take initial, take preload) = take prepared
-    let input = DiskBootstrap(d: d, startup: take initial, preload: take preload, options: options,
+    let input = DiskBootstrap(d: d, tasks: tasks, startup: take initial, preload: take preload, options: options,
                               ready: take ready, receive: take receive, send: take acks)
     let worker = task.spawn(tasks, bytes options.checkpoint_task_bytes, take input, disk_bootstrap)
     let startup = result.unwrap(channel.receive(waiting))?
@@ -10779,17 +10865,11 @@ fn disk_test_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     }
 }
 
-fn disk_try_publish(d: Dir, state: DiskState, cut: DiskCut) -> Result[(), Error] waits {
-    let prepared = disk_prepare(d, state, cut, 512)?
-    let _ = disk_commit(d, take prepared)?
-    Ok(())
-}
-
 // L28: removal names are part of preparation, even when the named files are
 // already absent. At each bound a refused cut keeps generation1; an accepted
 // one publishes generation2. Moving those allocations past rename can instead
 // return Full after generation2 is durable (alloc_after_publish).
-pub fn disk_law_publish_refusal(d: Dir) -> bool waits {
+pub fn disk_law_publish_refusal(d: Dir, tasks: Tasks) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let roots = Roots(data: std.omap.new(), streams: std.omap.new(), catalog: std.omap.new())
     let mut refused_count: u64 = 0
@@ -10800,11 +10880,12 @@ pub fn disk_law_publish_refusal(d: Dir) -> bool waits {
         result.unwrap(disk_publish_manifest(child, id, manifest))
         let state = DiskState(store: id, manifest: take manifest, lease: None, graph: disk_graph())
         let cut = DiskCut(generation: 2, fence: 0, lease: None, target: None, state: result.unwrap(main_state(share_roots(roots), 0, 0)), next_node: 1, next_table: 1, first_live: 97)
-        let trial: Result[Result[(), Error], Capacity] = bound bytes (step * 512) {
-            disk_try_publish(child, state, cut)
+        let (done, from): (Sender[DiskCutDone], Receiver[DiskCutDone]) = channel.new(1)
+        let trial = bound bytes (step * 512) {
+            disk_cut_run(child, tasks, state, take cut, 512, done, from)
         }
         let saved = match take trial {
-            Ok(Ok(())) => true,
+            Ok(Ok(_)) => true,
             Ok(Error(Full(_))) => false,
             Error(_) => false,
             _ => return false
@@ -10828,8 +10909,8 @@ pub fn disk_law_publish_refusal(d: Dir) -> bool waits {
 }
 
 @test
-fn disk_test_publish_refusal(d: Dir) -> Result[(), ()] waits {
-    if disk_law_publish_refusal(disk_test_directory(d)) {
+fn disk_test_publish_refusal(d: Dir, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_publish_refusal(disk_test_directory(d), tasks) {
         Ok(())
     } else {
         Error(())

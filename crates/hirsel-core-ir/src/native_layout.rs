@@ -1,6 +1,6 @@
 use crate::{Inst, LayoutQuery, Loan, Module, Param, PlaceTy, Signature, TypeId};
 use hirsel_core_layout::{
-    Body, FieldTy, Handle, Layout, Recipe, Repr, Scalar, Shape, Ty, TypeRef, field_size,
+    Body, FieldTy, Handle, Layout, Recipe, Repr, Scalar, Shape, Tag, Ty, TypeRef, field_size,
 };
 use std::borrow::Cow;
 
@@ -84,98 +84,153 @@ impl ScalarRecord {
     }
 }
 
+/// A `core.Result` destination whose `Ok` payload is at most two scalar leaves.
+/// A private CoreIR body returns that payload in registers with an outcome byte
+/// ([`OUTCOME_OK`], [`OUTCOME_RAISED`], [`OUTCOME_OTHER`]) and writes any other case
+/// through a cold pointer instead of its caller's destination. Leaf offsets are
+/// within the whole result; `ok.size` is its size.
+#[derive(Clone, Copy)]
+pub struct OkResult {
+    pub ok: ScalarRecord,
+    pub align: u64,
+    pub tag: Tag,
+    pub case: u32,
+}
+
+/// The `Ok` case is in the returned leaves.
+pub const OUTCOME_OK: u8 = 0;
+/// A raised failure (the status byte's failure value).
+pub const OUTCOME_RAISED: u8 = 1;
+/// Another case is in the cold slot.
+pub const OUTCOME_OTHER: u8 = 2;
+
 /// Classify native call boundaries using the same recipes as field projection.
 pub struct CallLayouts {
     records: Vec<Option<ScalarRecord>>,
+    ok_results: Vec<Option<OkResult>>,
+}
+
+/// The scalar leaves of fields at `(offset, field)`, at most two, or `None` when
+/// one of them is not a scalar.
+fn scalar_leaves<'a>(
+    shapes: &'a [Shape],
+    recipes: &[Recipe],
+    size: u64,
+    fields: impl DoubleEndedIterator<Item = (u64, &'a FieldTy)>,
+) -> Option<ScalarRecord> {
+    let mut record = ScalarRecord {
+        size,
+        fields: [(0, Ty::Ptr); 2],
+        len: 0,
+    };
+    let mut pending: Vec<(u64, &FieldTy)> = fields.rev().collect();
+    while let Some((at, field)) = pending.pop() {
+        let ty = match field {
+            FieldTy::Scalar(s) => Ty::Scalar(*s),
+            FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Fn => Ty::Ptr,
+            FieldTy::Handle(Handle::Sender | Handle::Receiver) => return None,
+            FieldTy::Handle(_) => Ty::Scalar(Scalar::U64),
+            FieldTy::Inline(id) => {
+                let nested = &shapes[id.index()];
+                if nested.repr == Repr::Resource {
+                    Ty::Ptr
+                } else {
+                    let (Body::Record(fields), Layout::Fixed(layout)) =
+                        (&nested.body, &recipes[id.index()].layout)
+                    else {
+                        return None;
+                    };
+                    pending.extend(
+                        fields
+                            .iter()
+                            .zip(&layout.offsets[0])
+                            .rev()
+                            .map(|(field, &offset)| (at + offset, &field.ty)),
+                    );
+                    continue;
+                }
+            }
+            FieldTy::View(inner) => {
+                pending.push((at, inner));
+                continue;
+            }
+            FieldTy::Array(_, 0) => continue,
+            FieldTy::Array(element, len) => {
+                let stride = field_size(shapes, recipes, element).0;
+                if stride == 0 {
+                    continue;
+                }
+                // Each nonempty element needs at least one scalar.
+                if *len > (record.fields.len() - record.len) as u64 {
+                    return None;
+                }
+                pending.extend((0..*len).rev().map(|i| (at + i * stride, &**element)));
+                continue;
+            }
+            _ => return None,
+        };
+        if record.len == record.fields.len() {
+            return None;
+        }
+        record.fields[record.len] = (at, ty);
+        record.len += 1;
+    }
+    Some(record)
 }
 
 impl CallLayouts {
     pub fn new(shapes: &[Shape], recipes: &[Recipe]) -> Self {
         let mut records = vec![None; shapes.len()];
-        let mut pending = Vec::new();
+        let mut ok_results = vec![None; shapes.len()];
         for (i, shape) in shapes.iter().enumerate() {
             if matches!(shape.repr, Repr::Resource | Repr::Region) {
                 continue;
             }
-            let (Body::Record(fields), Layout::Fixed(layout)) = (&shape.body, &recipes[i].layout)
-            else {
+            let Layout::Fixed(layout) = &recipes[i].layout else {
                 continue;
             };
-            if !(1..=16).contains(&layout.size) {
-                continue;
-            }
-            let mut record = ScalarRecord {
-                size: layout.size,
-                fields: [(0, Ty::Ptr); 2],
-                len: 0,
-            };
-            pending.clear();
-            pending.extend(
-                fields
-                    .iter()
-                    .zip(&layout.offsets[0])
-                    .rev()
-                    .map(|(field, &at)| (at, &field.ty)),
-            );
-            let accepted = loop {
-                let Some((at, field)) = pending.pop() else {
-                    break true;
-                };
-                let ty = match field {
-                    FieldTy::Scalar(s) => Ty::Scalar(*s),
-                    FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Fn => Ty::Ptr,
-                    FieldTy::Handle(Handle::Sender | Handle::Receiver) => break false,
-                    FieldTy::Handle(_) => Ty::Scalar(Scalar::U64),
-                    FieldTy::Inline(id) => {
-                        let nested = &shapes[id.index()];
-                        if nested.repr == Repr::Resource {
-                            Ty::Ptr
-                        } else {
-                            let (Body::Record(fields), Layout::Fixed(layout)) =
-                                (&nested.body, &recipes[id.index()].layout)
-                            else {
-                                break false;
-                            };
-                            pending.extend(
-                                fields
-                                    .iter()
-                                    .zip(&layout.offsets[0])
-                                    .rev()
-                                    .map(|(field, &offset)| (at + offset, &field.ty)),
-                            );
-                            continue;
-                        }
-                    }
-                    FieldTy::View(inner) => {
-                        pending.push((at, inner));
+            match &shape.body {
+                Body::Record(fields) => {
+                    if !(1..=16).contains(&layout.size) {
                         continue;
                     }
-                    FieldTy::Array(_, 0) => continue,
-                    FieldTy::Array(element, len) => {
-                        let stride = field_size(shapes, recipes, element).0;
-                        if stride == 0 {
-                            continue;
-                        }
-                        // Each nonempty element needs at least one scalar.
-                        if *len > (record.fields.len() - record.len) as u64 {
-                            break false;
-                        }
-                        pending.extend((0..*len).rev().map(|i| (at + i * stride, &**element)));
-                        continue;
-                    }
-                    _ => break false,
-                };
-                if record.len == record.fields.len() {
-                    break false;
+                    let fields = fields
+                        .iter()
+                        .zip(&layout.offsets[0])
+                        .map(|(field, &at)| (at, &field.ty));
+                    records[i] = scalar_leaves(shapes, recipes, layout.size, fields)
+                        .filter(|record| record.len != 0);
                 }
-                record.fields[record.len] = (at, ty);
-                record.len += 1;
-            };
-            if accepted && record.len != 0 {
-                records[i] = Some(record);
+                Body::Variant(cases) => {
+                    // `pub type Result[T, E] = Ok(T) | Error(E)` (core/core.hirsel).
+                    if !shape.name.starts_with("core@1/core/Result[")
+                        || cases.len() != 2
+                        || cases[0].name != "Ok"
+                    {
+                        continue;
+                    }
+                    let Some(tag) = layout.tag else {
+                        continue;
+                    };
+                    let fields = cases[0]
+                        .fields
+                        .iter()
+                        .zip(&layout.offsets[0])
+                        .map(|(field, &at)| (at, &field.ty));
+                    ok_results[i] =
+                        scalar_leaves(shapes, recipes, layout.size, fields).map(|ok| OkResult {
+                            ok,
+                            align: layout.align,
+                            tag,
+                            case: 0,
+                        });
+                }
             }
         }
-        Self { records }
+        Self {
+            records,
+            ok_results,
+        }
     }
 
     pub fn parameter(&self, param: Param) -> Option<ScalarRecord> {
@@ -200,5 +255,15 @@ impl CallLayouts {
 
     pub fn record(&self, ty: TypeId) -> Option<ScalarRecord> {
         self.records[ty.index()]
+    }
+
+    /// The private register convention of a body's `Result` destination; its
+    /// public symbol, declarations and indirect calls keep the destination.
+    pub fn ok_result(&self, signature: &Signature) -> Option<OkResult> {
+        if signature.results.is_empty() {
+            signature.dest.and_then(|ty| self.ok_results[ty.index()])
+        } else {
+            None
+        }
     }
 }

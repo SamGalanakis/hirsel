@@ -148,6 +148,7 @@ pub(super) fn debug_plan(
     versioned: Option<&[bool]>,
     step_dispatch: &[Option<FuncId>],
     failures: &failure::Failures,
+    call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
     next: &mut usize,
     sink: &mut dyn Sink,
 ) -> DebugPlan {
@@ -224,11 +225,11 @@ pub(super) fn debug_plan(
         } else {
             base.to_owned()
         };
-        let linkage = if failures.may_fail[i] {
-            body_base
-        } else {
-            format!("{body_base}.infallible")
-        };
+        let has_status = failures.may_fail[i];
+        let ok = call_layouts
+            .ok_result(&module.signatures[function.signature.index()])
+            .is_some();
+        let linkage = format!("{body_base}{}", super::abi::private_suffix(has_status, ok));
         let scope = node(subprogram(linkage));
         let fallback = node(Metadata::Location {
             line: 0,
@@ -262,7 +263,7 @@ pub(super) fn debug_plan(
                     })
                 });
         }
-        let wrapper = if failures.may_fail[i] {
+        let wrapper = if has_status && !ok {
             None
         } else {
             let wrapper = node(subprogram(base.to_owned()));

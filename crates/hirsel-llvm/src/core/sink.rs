@@ -82,6 +82,8 @@ pub(super) enum Local {
 impl Local {
     pub const CONTEXT: Self = Self::Named("context");
     pub const DEST: Self = Self::Named("dest");
+    /// A `Result` register body's slot for its other case (abi::Return::ok).
+    pub const COLD: Self = Self::Named("cold");
     pub const CALLER_SITE: Self = Self::Named("caller_site");
     pub const SRET: Self = Self::Named("sret");
     pub const PAYLOAD: Self = Self::Named("payload");

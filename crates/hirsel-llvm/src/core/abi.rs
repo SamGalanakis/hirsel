@@ -3,7 +3,9 @@
 //! aggregates or integer carriers, and otherwise the dedicated sret register.
 //! Only FORM's naturally aligned scalar fields occur.
 use super::*;
-use hirsel_core_ir::native_layout::{CallLayouts, ScalarRecord};
+use hirsel_core_ir::native_layout::{
+    CallLayouts, OUTCOME_OK, OUTCOME_OTHER, OUTCOME_RAISED, OkResult, ScalarRecord,
+};
 
 pub(super) struct Return {
     pub target: hirsel_core_layout::Target,
@@ -18,6 +20,21 @@ pub(super) struct Return {
     pub regs: Vec<Type>,
     pub reg_stride: u64,
     pub record: Option<ScalarRecord>,
+    /// A body's private `Result` convention: the `Ok` leaves and an outcome byte
+    /// in registers, any other case through the cold pointer (`Local::COLD`).
+    pub ok: Option<OkResult>,
+}
+
+/// The private symbol suffix of a body: `.ok` for the `Result` register
+/// convention, `.infallible` for a body without status, none for the public form.
+pub(super) fn private_suffix(has_status: bool, ok: bool) -> &'static str {
+    if ok {
+        ".ok"
+    } else if has_status {
+        ""
+    } else {
+        ".infallible"
+    }
 }
 pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> Extension {
     if target == hirsel_core_layout::Target::Aarch64Linux
@@ -59,6 +76,25 @@ impl Return {
         Self::core_record(target, &sig.results, layouts.result(sig), has_status)
     }
 
+    /// The convention a body's own symbol and its direct callers share: the
+    /// `Result` register form when the body has one, else [`Self::for_signature`].
+    pub fn private(
+        target: Target,
+        sig: &Signature,
+        layouts: &CallLayouts,
+        has_status: bool,
+        body: bool,
+    ) -> Self {
+        match layouts.ok_result(sig).filter(|_| body) {
+            Some(ok) => Self {
+                record: None,
+                ok: Some(ok),
+                ..Self::core_record(target, &[], Some(ok.ok), true)
+            },
+            None => Self::for_signature(target, sig, layouts, has_status || !body),
+        }
+    }
+
     pub fn core_record(
         target: Target,
         fields: &[Ty],
@@ -91,6 +127,7 @@ impl Return {
             regs,
             reg_stride: 0,
             record: Some(record),
+            ok: None,
         }
     }
 
@@ -119,7 +156,11 @@ impl Return {
                 noalias: facts,
                 ..Parameter::plain(Type::Ptr)
             });
-            locals.push(Local::DEST);
+            locals.push(if self.ok.is_some() {
+                Local::COLD
+            } else {
+                Local::DEST
+            });
         }
         for (i, p) in sig.params.iter().enumerate() {
             if let Some(record) = layouts.parameter(*p) {
@@ -236,6 +277,7 @@ impl Return {
             regs,
             reg_stride,
             record: None,
+            ok: None,
         }
     }
 }
@@ -307,6 +349,7 @@ impl FunctionEmitter<'_> {
         layouts: &CallLayouts,
         result: Option<ScalarRecord>,
         forward: bool,
+        cold: Option<Value>,
     ) -> (Vec<CArg>, Option<(Value, Value)>) {
         let sig = &self.module.signatures[site.signature.index()];
         let mut args = vec![ptr(CONTEXT)];
@@ -318,7 +361,9 @@ impl FunctionEmitter<'_> {
             let Arg::Address(dest) = actual[0] else {
                 unreachable!()
             };
-            let place = if forward {
+            let place = if let Some(cold) = cold {
+                cold
+            } else if forward {
                 Local::DEST.into()
             } else {
                 self.address(dest)
@@ -357,7 +402,23 @@ impl FunctionEmitter<'_> {
         }
         (args, carrier_shadow)
     }
-    fn callee(&mut self, callee: Callee, has_status: bool) -> Value {
+    /// How a call reaches its callee: its convention and whether it may raise.
+    /// A direct call to a body uses the body's private symbol; a declaration, an
+    /// indirect call and every export use the public form.
+    fn callee_abi(&self, callee: Callee, sig: &Signature, layouts: &CallLayouts) -> (Return, bool) {
+        let (has_status, body) = match callee {
+            Callee::Direct(f) => (
+                self.failures.may_fail[f.index()],
+                self.module.functions[f.index()].body.is_some(),
+            ),
+            _ => (true, false),
+        };
+        (
+            Return::private(self.abi.target, sig, layouts, has_status, body),
+            has_status,
+        )
+    }
+    fn callee(&mut self, callee: Callee, has_status: bool, ok: bool) -> Value {
         match callee {
             Callee::Direct(f) => {
                 let name = self.items.function_symbol(f);
@@ -366,9 +427,7 @@ impl FunctionEmitter<'_> {
                     _ if self.items.step_dispatch[f.index()].is_some() => step_free::checked(name),
                     _ => name.to_owned(),
                 };
-                if !has_status {
-                    name.push_str(".infallible");
-                }
+                name.push_str(private_suffix(has_status, ok));
                 Value::global(name)
             }
             Callee::Indirect(v) => self.numeric(v),
@@ -381,19 +440,29 @@ impl FunctionEmitter<'_> {
         ending: &super::forward::Ending,
         layouts: &CallLayouts,
     ) -> bool {
-        let has_status = match site.callee {
-            Callee::Direct(f) => self.failures.may_fail[f.index()],
-            Callee::Indirect(_) => true,
-            Callee::Runtime(_) => return false,
-        };
+        if matches!(site.callee, Callee::Runtime(_)) {
+            return false;
+        }
         let sig = &self.module.signatures[site.signature.index()];
-        let abi = Return::for_signature(self.abi.target, sig, layouts, has_status);
+        let (abi, has_status) = self.callee_abi(site.callee, sig, layouts);
         if has_status && !self.has_status {
             return false;
         }
+        // A `Result` register callee forwards only into the same convention: it
+        // returns this body's outcome and writes any other case to its cold slot.
+        // Any other pairing receives the result at an ordinary call.
+        if (abi.ok.is_some() || self.abi.ok.is_some())
+            && !(abi.ok.is_some()
+                && self.abi.ok.is_some()
+                && ending.destination
+                && abi.fields == self.abi.fields)
+        {
+            return false;
+        }
+        let cold = abi.ok.map(|_| Value::Local(Local::COLD));
         let (mut args, carrier_shadow) =
-            self.call_arguments(site, layouts, abi.record, ending.destination);
-        let callee = self.callee(site.callee, has_status);
+            self.call_arguments(site, layouts, abi.record, ending.destination, cold);
+        let callee = self.callee(site.callee, has_status, abi.ok.is_some());
         let site_word = self.call_site_word(site.callee);
         args.push(word(site_word));
         if carrier_shadow.is_some() || abi.fields != self.abi.fields {
@@ -449,9 +518,9 @@ impl FunctionEmitter<'_> {
         let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() == 1 {
             self.ret(&abi_ty, &int(1));
-        } else if self.abi.record.is_some() {
+        } else if self.abi.record.is_some() || self.abi.ok.is_some() {
             let mut values = vec![Value::Zero; self.abi.fields.len() - 1];
-            values.push(int(1));
+            values.push(int(i128::from(OUTCOME_RAISED)));
             self.return_abi_values(&values);
         } else if self.abi.indirect {
             let storage = self.abi.storage.clone();
@@ -501,7 +570,7 @@ impl FunctionEmitter<'_> {
             }
             return;
         }
-        if self.abi.record.is_some() {
+        if self.abi.record.is_some() || self.abi.ok.is_some() {
             let regs = self.abi.regs.clone();
             let mut result = Value::Poison;
             for (i, (t, value)) in regs.iter().zip(values).enumerate() {
@@ -551,19 +620,25 @@ impl FunctionEmitter<'_> {
             return self.runtime_call(op, site, fused_receive);
         }
         let sig = &self.module.signatures[site.signature.index()];
-        let has_status = match site.callee {
-            Callee::Direct(f) => self.failures.may_fail[f.index()],
-            _ => true,
-        };
         let layouts = self.call_layouts.unwrap();
-        let abi = Return::for_signature(self.abi.target, sig, layouts, has_status);
-        let (mut args, carrier_shadow) = self.call_arguments(site, layouts, abi.record, false);
-        let callee = self.callee(site.callee, has_status);
+        let (abi, has_status) = self.callee_abi(site.callee, sig, layouts);
+        let cold = abi.ok.map(|ok| self.cold_slot(ok));
+        let (mut args, carrier_shadow) =
+            self.call_arguments(site, layouts, abi.record, false, cold.clone());
+        let callee = self.callee(site.callee, has_status, abi.ok.is_some());
         let site_word = self.call_site_word(site.callee);
         args.push(word(site_word));
         let mut values = self.invoke(&abi, &callee, args, &site_attrs(site));
         if let Some((original, shadow)) = carrier_shadow {
             self.shadow_copy_back(&original, &shadow);
+        }
+        if let (Some(ok), Some(cold)) = (abi.ok, cold) {
+            let Arg::Address(dest) = site.args.get(&self.body.pools.args).unwrap()[0] else {
+                unreachable!()
+            };
+            let dest = self.address(dest);
+            self.receive_ok(ok, values, &cold, &dest, has_status, site.fail);
+            return Ok(());
         }
         if has_status {
             let status = values.pop().unwrap();
@@ -595,7 +670,8 @@ impl FunctionEmitter<'_> {
         mut args: Vec<CArg>,
         attrs: &CallAttrs,
     ) -> Vec<Value> {
-        let scratch = if abi.fields.len() > 1 && abi.record.is_none() {
+        let registers = abi.record.is_some() || abi.ok.is_some();
+        let scratch = if abi.fields.len() > 1 && !registers {
             Some(self.temp(abi.storage.clone()))
         } else {
             None
@@ -615,7 +691,7 @@ impl FunctionEmitter<'_> {
         let mut values = vec![];
         if abi.fields.len() == 1 {
             values.push(r);
-        } else if abi.record.is_some() {
+        } else if registers {
             values.extend((0..abi.fields.len()).map(|i| self.extract(&abi.ty, &r, i as u32)));
         } else if let Some(p) = scratch {
             if !abi.indirect {
@@ -637,13 +713,99 @@ impl FunctionEmitter<'_> {
         values
     }
 
-    pub(super) fn infallible_wrapper(
+    /// A cold slot for a `Result` register callee's other case, live across the
+    /// call only, so the caller's own destination never escapes.
+    fn cold_slot(&mut self, ok: OkResult) -> Value {
+        let slot = self.fresh();
+        self.sink
+            .alloca(slot, &Type::bytes(ok.ok.size), ok.align as u32);
+        let slot = Value::Local(slot);
+        self.runtime_void("llvm.lifetime.start.p0", &[ptr(slot.clone())]);
+        slot
+    }
+
+    /// Receive a `Result` register call into `dest`: the `Ok` case from its
+    /// leaves, a raised failure on the failure edge, and any other case from the
+    /// cold slot, which then ends.
+    fn receive_ok(
+        &mut self,
+        ok: OkResult,
+        mut values: Vec<Value>,
+        cold: &Value,
+        dest: &Value,
+        has_status: bool,
+        fail: Option<BlockId>,
+    ) {
+        let outcome = values.pop().unwrap();
+        let n = self.counter();
+        let (hot, other, done) = (
+            Label::new("ok_case", n),
+            Label::new("other_case", n),
+            Label::new("case_received", n),
+        );
+        let is_ok = self.cmp(
+            Predicate::Eq,
+            &Type::I8,
+            &outcome,
+            &int(i128::from(OUTCOME_OK)),
+        );
+        self.likely(&is_ok, hot, other);
+        self.block(other);
+        if has_status {
+            let raised = self.cmp(
+                Predicate::Eq,
+                &Type::I8,
+                &outcome,
+                &int(i128::from(OUTCOME_RAISED)),
+            );
+            self.branch_failure(&raised, fail, None);
+        }
+        self.runtime_void(
+            "llvm.memcpy.p0.p0.i64",
+            &memcpy(dest, cold, int(ok.ok.size)),
+        );
+        self.runtime_void("llvm.lifetime.end.p0", &[ptr(cold.clone())]);
+        self.br(done);
+        self.block(hot);
+        self.runtime_void("llvm.lifetime.end.p0", &[ptr(cold.clone())]);
+        self.set_case(&ok.tag, ok.case, dest);
+        self.store_record(ok.ok, dest, &values);
+        self.br(done);
+        self.block(done);
+    }
+
+    /// Return the `Result` at `Local::DEST` in this body's register convention.
+    pub(super) fn return_ok(&mut self, ok: OkResult) {
+        let dest = Value::Local(Local::DEST);
+        let n = self.counter();
+        let (hot, other) = (Label::new("return_ok", n), Label::new("return_other", n));
+        let case = self.case_value(&ok.tag, &dest);
+        let is_ok = self.cmp(Predicate::Eq, &Type::I32, &case, &int(i128::from(ok.case)));
+        self.likely(&is_ok, hot, other);
+        self.block(other);
+        self.runtime_void(
+            "llvm.memcpy.p0.p0.i64",
+            &memcpy(&Local::COLD.into(), &dest, int(ok.ok.size)),
+        );
+        let mut values = vec![Value::Zero; self.abi.fields.len() - 1];
+        values.push(int(i128::from(OUTCOME_OTHER)));
+        self.return_abi_values(&values);
+        self.block(hot);
+        let mut values = self.load_record(ok.ok, &dest);
+        values.push(int(i128::from(OUTCOME_OK)));
+        self.return_abi_values(&values);
+    }
+
+    /// The public symbol of a body with a private convention (`private_suffix`):
+    /// the status ABI, with its destination, that exports and indirect calls use.
+    pub(super) fn public_wrapper(
         &mut self,
         name: &str,
         sig: &Signature,
         layouts: &CallLayouts,
         facts: bool,
         debug: Option<(usize, usize)>,
+        has_status: bool,
     ) {
         self.debug_location = debug.map(|(_, location)| location);
         self.view_invariants.clear();
@@ -671,13 +833,31 @@ impl FunctionEmitter<'_> {
             .skip(usize::from(self.abi.indirect))
             .map(|(param, local)| (Parameter::extended(param.ty, param.extension), local.into()))
             .collect();
-        let values = self.invoke(
-            &Return::for_signature(self.abi.target, sig, layouts, false),
-            &Value::global(format!("{name}.infallible")),
-            args,
-            &CallAttrs::default(),
-        );
-        self.return_values(&values);
+        let private = Return::private(self.abi.target, sig, layouts, has_status, true);
+        let callee = Value::global(format!(
+            "{name}{}",
+            private_suffix(has_status, private.ok.is_some())
+        ));
+        let Some(ok) = private.ok else {
+            let values = self.invoke(&private, &callee, args, &CallAttrs::default());
+            self.return_values(&values);
+            self.sink.end_function();
+            return;
+        };
+        let cold = self.cold_slot(ok);
+        let args = args
+            .into_iter()
+            .map(|(param, value)| {
+                if value == Value::Local(Local::DEST) {
+                    (param, cold.clone())
+                } else {
+                    (param, value)
+                }
+            })
+            .collect();
+        let values = self.invoke(&private, &callee, args, &CallAttrs::default());
+        self.receive_ok(ok, values, &cold, &Local::DEST.into(), has_status, None);
+        self.return_values(&[]);
         self.sink.end_function();
     }
 }

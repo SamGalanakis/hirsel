@@ -66,7 +66,7 @@ extern "C" LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMMo
 namespace {
 
 // An instance symbol (`h` and 64 lowercase hex digits) with its bridge
-// suffixes (`.register`, `.words`, `.infallible`): unique in a program and the
+// suffixes (`.register`, `.words`, `.infallible`, `.ok`): unique in a program and the
 // same in every program.
 bool instance_name(StringRef n) {
     if (n.size() < 65 || n[0] != 'h') return false;

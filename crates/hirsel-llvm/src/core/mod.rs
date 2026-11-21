@@ -187,7 +187,9 @@ pub fn supports_target(triple: &str) -> bool {
 ///
 /// Functions take FORM v1a's hidden task context before the destination.
 /// Exports and function pointers return scalar results followed by failure status.
-/// Proven infallible bodies use a private direct-call ABI without that status.
+/// Proven infallible bodies use a private direct-call ABI without that status,
+/// and a body returning a `Result` with a scalar `Ok` returns that case in
+/// registers with an outcome byte (abi::Return::ok).
 /// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
     emit_ir_with_charge_observation(module, false)
@@ -569,6 +571,7 @@ fn emit_module(
     let failures = failure::Failures::new(module);
     let step_neutral = steps::neutral_functions(module, provided.neutral);
     let neutral_functions = step_neutral.as_slice();
+    let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
     let debug = if source.debug_lines {
         sites::debug_plan(
             module,
@@ -576,6 +579,7 @@ fn emit_module(
             items.versioned.as_deref(),
             &items.step_dispatch,
             &failures,
+            &call_layouts,
             &mut next_scope,
             sink,
         )
@@ -584,13 +588,16 @@ fn emit_module(
     };
     let local_roles =
         (facts && provided.roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
-    let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
     let role_facts = provided.roles.or(local_roles.as_ref()).filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
-        let abi =
-            abi::Return::for_signature(target, sig, &call_layouts, has_status || f.body.is_none());
+        let abi = abi::Return::private(target, sig, &call_layouts, has_status, f.body.is_some());
+        // A body whose convention differs from the public one keeps it under a
+        // suffixed private symbol, behind a public wrapper of the same name.
+        let ok = abi.ok.is_some();
+        let private = ok || !has_status;
+        let suffix = abi::private_suffix(has_status, ok);
         let mut name = items.function_symbols[i].clone();
         let versioned = items.is_versioned(FuncId(i as u32));
         let (mut params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
@@ -625,14 +632,14 @@ fn emit_module(
             continue;
         };
         if versioned && !sig.has_vectors() {
-            if !has_status {
+            if private {
                 versions::stub(
                     sink,
                     &name,
                     &abi.signature(params.clone()),
                     &locals,
                     Linkage::Internal,
-                    true,
+                    suffix,
                 );
             }
             let public = abi::Return::for_signature(target, sig, &call_layouts, true);
@@ -643,7 +650,7 @@ fn emit_module(
                 &public.signature(params),
                 &locals,
                 Linkage::WeakOdr,
-                false,
+                "",
             );
         }
         let definition = module.instances[f.instance.index()].definition.to_string();
@@ -675,7 +682,7 @@ fn emit_module(
                 (abi.take().unwrap(), std::mem::take(&mut params))
             } else {
                 (
-                    abi::Return::for_signature(target, sig, &call_layouts, has_status),
+                    abi::Return::private(target, sig, &call_layouts, has_status, true),
                     params.clone(),
                 )
             };
@@ -750,16 +757,12 @@ fn emit_module(
                 Some(_) => step_free::checked(&name),
                 None => name.clone(),
             };
-            let body_name = if has_status {
-                body_base
-            } else {
-                format!("{body_base}.infallible")
-            };
+            let body_name = format!("{body_base}{suffix}");
             let attrs = FnAttrs {
-            linkage: if has_status {
-                Linkage::WeakOdr
-            } else {
+            linkage: if private {
                 Linkage::Internal
+            } else {
+                Linkage::WeakOdr
             },
             // Inline the reserved ASCII append and share the UTF-8/growth body.
             // A loop-free callable variant exists only to bind its call site's
@@ -895,6 +898,10 @@ fn emit_module(
             }
             if let Some(record) = e.abi.record {
                 e.sink.alloca(Local::DEST, &Type::bytes(record.size), 8);
+            }
+            if let Some(ok) = e.abi.ok {
+                e.sink
+                    .alloca(Local::DEST, &Type::bytes(ok.ok.size), ok.align as u32);
             }
             for (i, v) in body.blocks[0]
                 .params
@@ -1033,7 +1040,6 @@ fn emit_module(
             e.current = None;
             e.step_counter = None;
             if let Some(free) = free_body {
-                let suffix = if has_status { "" } else { ".infallible" };
                 let free = format!("{}{suffix}", e.items.function_symbols[free.index()]);
                 step_free::stub(
                     &mut *e.sink,
@@ -1045,13 +1051,14 @@ fn emit_module(
                     attrs.linkage,
                 );
             }
-            if !has_status {
-                e.infallible_wrapper(
+            if private {
+                e.public_wrapper(
                     &name,
                     sig,
                     &call_layouts,
                     facts,
                     function_debug.and_then(|d| d.wrapper),
+                    has_status,
                 );
             }
         }
@@ -2345,7 +2352,9 @@ impl FunctionEmitter<'_> {
                     .iter()
                     .map(|v| self.numeric(*v))
                     .collect::<Vec<_>>();
-                if let Some(record) = self.abi.record {
+                if let Some(ok) = self.abi.ok {
+                    self.return_ok(ok);
+                } else if let Some(record) = self.abi.record {
                     let fields = self.load_record(record, &Local::DEST.into());
                     self.return_values(&fields);
                 } else {

@@ -65,7 +65,7 @@ impl<'a> Forwarding<'a> {
         forwarding.call_layouts = Some(layouts);
         let values = body.blocks[0].params.get(&body.pools.values).unwrap();
         let skip = usize::from(sig.dest.is_some());
-        if layouts.result(sig).is_some() {
+        if layouts.result(sig).is_some() || layouts.ok_result(sig).is_some() {
             forwarding.materialized[values[0].index()] = true;
         }
         for (&value, &param) in values[skip..].iter().zip(&sig.params) {

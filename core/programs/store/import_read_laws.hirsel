@@ -1,11 +1,25 @@
-// Appended by the S2 driver. The reference uses the original read and admission order.
+// Appended by the S2 driver. The reference uses the original read and admission order,
+// and returns its own refusals as values (try_reserve), each on the side that owns it.
+// disk_fault as it was before R1: a refused copy of the name is Full.
+fn original_disk_fault(file: String, at: u64, why: Why) -> Error {
+    let mut name: Bytes = list.new()
+    if let Error(c) = list.try_reserve(mut name, string.byte_len(file)) {
+        return Full(c)
+    }
+    list.append(mut name, string.as_bytes(file))
+    Corrupt(Fault(file: result.unwrap(string.from_utf8(take name)), offset: at, why: why))
+}
+
 fn original_prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
-    let mut out: Bytes = list.with_capacity(n)
+    let mut out: Bytes = list.new()
+    capacity(list.try_reserve(mut out, n))?
     while list.len(out) < n {
-        let mut chunk: Bytes = list.with_capacity(n - list.len(out))
+        let mut chunk: Bytes = list.new()
+        capacity(list.try_reserve(mut chunk, n - list.len(out)))?
         if disk_io(host.read(mut file, mut chunk))? == 0 {
-            return Error(disk_fault("PREPARED", list.len(out), Truncated))
+            return Error(original_disk_fault("PREPARED", list.len(out), Truncated))
         }
+        capacity(list.try_reserve(mut out, list.len(chunk)))?
         list.append(mut out, chunk)
     }
     Ok(take out)
@@ -54,7 +68,8 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
         return Error(ImportMalformed)
     }
     let ranges: List[ValidatedRange] = list.new()
-    let mut extra: Bytes = list.with_capacity(1)
+    let mut extra: Bytes = list.new()
+    deploy_result(capacity(list.try_reserve(mut extra, 1)))?
     if scratch_result(disk_io(host.read(mut input.file, mut extra)))? != 0 {
         return Error(ImportMalformed)
     }
@@ -101,8 +116,7 @@ fn law_export_read(take job: ExportRead) -> Result[Option[DeployError], Capacity
     }
 }
 
-// A refusal is the same refusal raised or returned: R1 raises an ordinary
-// allocation's refusal, while a bound-entry probe still returns it as Full.
+// A refusal's charge, raised or returned as Full.
 fn read_refusal(r: LawRead[Result[ValidatedImport, DeployError]]) -> Option[Capacity] {
     match r {
         ReadRaised(c) => Some(c),
@@ -112,14 +126,23 @@ fn read_refusal(r: LawRead[Result[ValidatedImport, DeployError]]) -> Option[Capa
     }
 }
 
-// Two returned refusals must name the same side (scratch or store); a raised
-// one names neither.
-fn refusal_scope(r: LawRead[Result[ValidatedImport, DeployError]]) -> u64 {
+// 0 raised, 1 scratch, 2 store.
+fn refusal_side(r: LawRead[Result[ValidatedImport, DeployError]]) -> u64 {
     match r {
         ReadReturned(Error(Scratch(Full(_)))) => 1,
         ReadReturned(Error(Store(Full(_)))) => 2,
         _ => 0,
     }
+}
+
+// The reference returns every refusal it owns, so it raises only in shared
+// code, where production must raise as well. Production allocations raise
+// under R1 and so name no side; any side production does name must be the
+// reference's.
+fn same_side(reference: LawRead[Result[ValidatedImport, DeployError]], production: LawRead[Result[ValidatedImport, DeployError]]) -> bool {
+    let want = refusal_side(reference)
+    let got = refusal_side(production)
+    if want == 0 { got == 0 } else { got == 0 || got == want }
 }
 
 type PreparedRead: send { d: Dir, limit: u64, original: bool }
@@ -142,8 +165,10 @@ fn prepared_read_boundary_sweep(d: Dir, tasks: Tasks) -> bool waits {
             Some(a) => match after {
                 ReadReturned(Ok(_)) => true,
                 _ => match read_refusal(after) {
-                    Some(b) => a.requested == b.requested && a.available == b.available &&
-                        (refusal_scope(before) == 0 || refusal_scope(after) == 0 || refusal_scope(before) == refusal_scope(after)),
+                    // Same refusal, and the same side: a reference raise (shared
+                    // code) must raise in production too; a refusal the reference
+                    // returns on a side must come back on that side, or raised.
+                    Some(b) => a.requested == b.requested && a.available == b.available && same_side(before, after),
                     None => false,
                 },
             },

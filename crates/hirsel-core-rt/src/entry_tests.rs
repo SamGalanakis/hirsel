@@ -28,7 +28,13 @@ fn launch_config(launch: &hirsel_core_ids::launch::Metadata) -> Config {
 #[test]
 fn identity_stable() {
     use std::io::{BufRead, Read, Write};
+    const TEST: &str = "entry_tests::identity_stable";
+    const COPY_TO: &str = "HIRSEL_TEST_IDENTITY_COPY_TO";
     let executable = std::env::current_exe().unwrap();
+    if let Some(destination) = std::env::var_os(COPY_TO) {
+        std::fs::copy(&executable, destination).unwrap();
+        return;
+    }
     if executable.file_name().unwrap() == "launch-child" {
         let launch = hirsel_core_ids::launch::Metadata::native("test-target", 419, false);
         let config = launch_config(&launch);
@@ -50,9 +56,20 @@ fn identity_stable() {
     }
     let directory = tempfile::tempdir().unwrap();
     let child_path = directory.path().join("launch-child");
-    std::fs::copy(&executable, &child_path).unwrap();
-    let mut child = std::process::Command::new(&child_path)
-        .args(["--exact", "entry_tests::identity_stable", "--nocapture"])
+    // A parallel fork can inherit the writable copy descriptor until it
+    // execs. Copy in a separate process and wait for it to close the file.
+    let copy = crate::test_process::command()
+        .args(["--exact", TEST])
+        .env(COPY_TO, &child_path)
+        .output()
+        .unwrap();
+    assert!(
+        copy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&copy.stdout)
+    );
+    let mut child = crate::test_process::command_for(child_path.as_os_str())
+        .args(["--exact", TEST, "--nocapture"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()

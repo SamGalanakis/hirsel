@@ -932,7 +932,7 @@ impl Cells {
     ) -> Result<Provider, Outcome> {
         // SAFETY: a running context has a current payer.
         let payer = unsafe { (*context).payer() };
-        if let Err(capacity) = payer.admit(Some(charge)) {
+        if let Err(capacity) = payer.admit_run_owned(Some(charge)) {
             return Err(Outcome {
                 written: capacity.available,
                 ..Outcome::default()

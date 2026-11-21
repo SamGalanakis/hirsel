@@ -426,6 +426,8 @@ struct Domain {
     owner: Option<usize>,
     remote: Mutex<Remote>,
     reap_inboxes: Cell<Option<NonNull<Inbox>>>,
+    /// Admitted bytes whose backing storage stays until run teardown.
+    run_owned: AtomicU64,
     first: UnsafeCell<Slot>,
 }
 #[derive(Clone, Copy)]
@@ -605,6 +607,19 @@ impl Payer {
             )),
         }
     }
+    pub(crate) fn admit_run_owned(self, bytes: Option<u64>) -> Result<(), Capacity> {
+        self.admit(bytes)?;
+        self.domain()
+            .run_owned
+            .fetch_add(bytes.unwrap(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The helper reads this after all of its tasks have ended.
+    pub(crate) fn run_owned(self) -> u64 {
+        self.domain().run_owned.load(Ordering::Relaxed)
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn injected(self) -> bool {
         let _commit = crate::sequencer::enter();
@@ -847,6 +862,7 @@ impl Funding {
             remote: Mutex::new(remote),
             pending: AtomicBool::new(false),
             reap_inboxes: Cell::new(None),
+            run_owned: AtomicU64::new(0),
             first: UnsafeCell::new(Slot::vacant(NonNull::dangling(), 0)),
         });
         let domain = NonNull::from(Box::leak(domain));

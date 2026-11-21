@@ -416,6 +416,8 @@ pub(crate) struct LangUnit {
     helpers: Map<usize, *mut HelperH>,
     /// Header and unused room of cleaned connections, until the last release.
     retained: Map<usize, Held>,
+    /// Run-owned grants paid from helper reservations, held until this unit ends.
+    run_grants: Vec<Held>,
     /// Tasks waiting on something another unit settles: the scheduler does
     /// not call such a wait a deadlock.
     pub(crate) waits: usize,
@@ -471,6 +473,7 @@ impl LangUnit {
             sends: map(),
             helpers: map(),
             retained: map(),
+            run_grants: Vec::new(),
             waits: 0,
             root: ptr::null_mut(),
             helper,
@@ -1042,6 +1045,7 @@ struct Ended {
     /// The cleaned connections it left behind with clients elsewhere: each
     /// one's key and its retained charge, part of `n`.
     survivors: Vec<(usize, u64)>,
+    run_grants: u64,
 }
 
 /// A tagged task handle names a helper.
@@ -1292,6 +1296,8 @@ fn helper_main(
                 0
             },
             survivors,
+            run_grants: context.payer().run_owned()
+                + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
         };
         let mut ret = Value::empty();
         if failed == 0 {
@@ -1328,9 +1334,9 @@ impl ResultsExt for std::sync::MutexGuard<'_, Option<HashMap<usize, Ended>>> {
 }
 
 /// A helper's end take in its owner: the survivors' charges move into the
-/// owner's retained charges under their connections' keys, `size(R)`, the
-/// result's content and a failure's cells stay for the join, and the rest
-/// comes back now.
+/// owner's retained charges under their connections' keys. Run grants remain
+/// charged through the owner's end. The result size, its content and failure
+/// cells stay for the join, and the rest comes back now.
 /// # Safety
 /// The owner runs the take in a commit; the handle is live.
 unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
@@ -1342,6 +1348,9 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     let held = h.charge.as_mut().unwrap();
     for &(key, bytes) in &ended.survivors {
         u.retained.insert(key, held.split(bytes));
+    }
+    if ended.run_grants != 0 {
+        u.run_grants.push(held.split(ended.run_grants));
     }
     let cells = if ended.failed {
         32 * ended.causes.len() as u64

@@ -173,7 +173,7 @@ pub(crate) const INVALID: Outcome = Outcome {
 
 fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
     let size = SecretGrant::logical_size(policies, len);
-    match payer.admit(size) {
+    match payer.admit_run_owned(size) {
         Ok(()) => Ok(Charge(payer, size.unwrap())),
         Err(c) => Err(Outcome {
             error: IoError { tag: 2, code: 0 },

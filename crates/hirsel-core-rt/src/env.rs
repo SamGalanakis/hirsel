@@ -187,7 +187,7 @@ pub unsafe extern "C" fn hirsel_core_env_narrow(
         let patterns = env.patterns.intersect(&filter);
         let charge = patterns.charge();
         let payer = (*context).payer();
-        if let Err(capacity) = payer.admit(charge) {
+        if let Err(capacity) = payer.admit_run_owned(charge) {
             return Outcome {
                 value: capacity.requested,
                 error: IoError { tag: 2, code: 0 },

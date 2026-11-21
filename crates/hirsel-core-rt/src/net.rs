@@ -1120,7 +1120,7 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
             .and_then(|n| n.checked_add(7))
             .map(|n| n & !7);
         let payer = (*context).payer();
-        if let Err(capacity) = payer.admit(charge) {
+        if let Err(capacity) = payer.admit_run_owned(charge) {
             return Outcome {
                 value: capacity.requested,
                 error: IoError { tag: 2, code: 0 },

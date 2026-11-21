@@ -9,13 +9,13 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="canonical" href="https://hirsel.ai/">
+  <link rel="canonical" href="https://www.hirsel.ai/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="hirsel">
   <meta property="og:title" content="hirsel: Good fences make fast systems.">
   <meta property="og:description" content="A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.">
-  <meta property="og:url" content="https://hirsel.ai/">
-  <meta property="og:image" content="https://hirsel.ai/social-card.png">
+  <meta property="og:url" content="https://www.hirsel.ai/">
+  <meta property="og:image" content="https://www.hirsel.ai/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="The hirsel ram mark and wordmark with the line: Good fences make fast systems.">
@@ -403,54 +403,76 @@ function hillLayer() {
 /* ---------- slots: every scene asks for N places; who stands where is decided at the cut ---------- */
 /* how far the ridge flock reaches below the ridge line (rows, jitter and the line's own swell) */
 const RIDGE_B = () => MOB ? 36 : 48;
-function geom(view) {
+function geom(view, pe) {
   const g = { vi: VIEWS.indexOf(view) };
   g.pTo = g.vi * W * .55;
   if (view === 'hill') { g.rTo = H * (MOB ? .2 : .23); return g; }
   const hd = document.querySelector('header').getBoundingClientRect();
   g.hdB = hd.bottom; g.rTo = hd.bottom + (MOB ? 36 : 64);
-  const pe = document.getElementById('panel'), by = g.rTo + RIDGE_B() + 12;
+  pe = pe || $('panel'); const by = g.rTo + RIDGE_B() + 12;
   pe.style.top = STACK ? '' : Math.round(H / 2) + 'px';
-  const pn = pe.getBoundingClientRect();
+  const pn = pe.getBoundingClientRect(); g.pn = pn;
   if (STACK) { const m = MOB ? 16 : 32; g.box = { x: m, y: by, w: W - 2 * m, h: pn.top - 14 - by }; }
   else { const x0 = pn.right + (W <= 1000 ? 44 : 64); g.box = { x: x0, y: by, w: W - 48 - x0, h: H - 52 - by }; }
   return g;
 }
-/* place a view from what its scene really draws. The text column and the scene share one middle;
-   the ridge stands one gap above that block and the same gap is left below it, and whatever
-   height is over goes to the sky above the ridge, never to open ground between ridge and scene.
-   A scene that cannot fit is drawn smaller about its own centre. Moves are translations of the
-   scene box, so a scene's own proportions never change with the window's height alone. */
-function fit(v, g, sc) {
-  const pe = document.getElementById('panel'), RB = RIDGE_B();
-  for (let it = 0; it < 5; it++) {
-    const [t0, t1] = sc.ext, eh = t1 - t0;
-    let rTo = g.rTo, dy, k = 1;
-    if (STACK) {
-      const bot = pe.getBoundingClientRect().top - 12, free = bot - g.hdB - RB - eh, minSky = 36, minGap = 10;
-      if (free < minSky + 2 * minGap - .5) k = Math.max(.5, (eh - (minSky + 2 * minGap - free)) / eh);
-      else {
-        let gap = Math.min(84, Math.max(minGap, free / 3.1)), sky = free - 2 * gap;
-        if (sky < minSky) { sky = minSky; gap = (free - sky) / 2; }
-        rTo = g.hdB + sky; dy = rTo + RB + gap + eh / 2 - (t0 + t1) / 2;
-      }
-    } else {
-      const ph = pe.getBoundingClientRect().height, Hc = Math.max(eh, ph), free = H - g.hdB - RB - Hc - 20;
-      const minSky = 64, minGap = 36;
-      if (eh > ph && free < minSky + 2 * minGap) k = Math.max(.5, (eh - (minSky + 2 * minGap - free)) / eh);
-      else {
-        let gap = Math.min(150, Math.max(minGap, free / 3.1)), sky = free - 2 * gap;
-        if (sky < minSky) { sky = minSky; gap = Math.max(0, (free - sky) / 2); }
-        rTo = g.hdB + sky; const M = rTo + RB + gap + Hc / 2;
-        dy = M - (t0 + t1) / 2; pe.style.top = Math.round(M) + 'px';
-      }
-    }
-    const b = g.box;
-    if (k < 1) g = { ...g, box: { x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k } };
-    else { g = { ...g, rTo, box: { ...b, y: b.y + dy } }; sc = SC[v](g); sc.g = g; return sc; }
-    sc = SC[v](g); sc.g = g;
+/* the band a view's block (its scene, and beside it its text) has to stand in under the ridge,
+   and the sky, gaps and the block's height measured against it. Stacked, the text is pinned to the
+   bottom and the band ends just above it (a tablet keeps a clear gap over the heading, a phone a
+   tighter one); side by side, the text shares the scene's middle. */
+const BAND = () => STACK ? { minSky: 36, minGap: MOB ? 10 : 22, maxGap: 84 } : { minSky: 64, minGap: 36, maxGap: 150 };
+function band(g, eh) {
+  const RB = RIDGE_B(), Hc = STACK ? eh : Math.max(eh, g.pn.height);
+  return { Hc, top: g.hdB + RB, bot: STACK ? g.pn.top - 12 : H - 20 };
+}
+/* a hidden stand-in for the panel, so any view's text can be measured without touching the live one */
+let ghost = null;
+function ghostOf(v) {
+  if (!ghost) {
+    ghost = $('panel').cloneNode(true); ghost.removeAttribute('id'); ghost.removeAttribute('aria-live');
+    ghost.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+    ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.style.visibility = 'hidden';
+    ghost.querySelectorAll('*').forEach(el => { el.style.opacity = el.style.transform = ''; });
+    document.body.append(ghost);
   }
-  return sc;
+  ghost.hidden = false; fillPanel(ghost, v);
+  return ghost;
+}
+/* the ridge: one height for every view at a given window size, so walking between views never
+   moves it. Each view asks for the sky its own block would leave (its gap above and below a third
+   of the spare ground, up to a cap); the ridge takes the least of those, so the tallest view keeps
+   its balance and every other view stands its block in the middle of the ground below. */
+let SKY = null;
+function skyNow() {
+  if (SKY !== null) return SKY;
+  const B = BAND(); let sky = Infinity;
+  for (const v of VIEWS) {
+    if (v === 'hill') continue;
+    const g = geom(v, ghostOf(v)), sc = SC[v](g), bd = band(g, sc.ext[1] - sc.ext[0]);
+    const free = bd.bot - bd.top - bd.Hc, gap = Math.min(B.maxGap, Math.max(B.minGap, free / 3.1));
+    sky = Math.min(sky, free - 2 * gap);
+  }
+  ghost.hidden = true;
+  return SKY = Math.max(B.minSky, Math.round(sky));
+}
+/* place a view under that ridge: the text column and the scene share one middle, set halfway down
+   the ground between the ridge flock and the foot of the band. A scene that cannot fit is drawn
+   smaller about its own centre. Moves are translations of the scene box, so a scene's own
+   proportions never change with the window's height alone. */
+function fit(v, g, sc) {
+  const pe = $('panel'), B = BAND(), rTo = g.hdB + skyNow();
+  for (let it = 0; ; it++) {
+    const [t0, t1] = sc.ext, eh = t1 - t0, bd = band(g, eh), room = bd.bot - (rTo + RIDGE_B()) - bd.Hc;
+    const b = g.box;
+    if (it < 5 && room < 2 * B.minGap - .5 && (STACK || eh >= g.pn.height)) {
+      const k = Math.max(.5, (eh - (2 * B.minGap - room)) / eh);
+      g = { ...g, box: { x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k } };
+      sc = SC[v](g); sc.g = g; continue;
+    }
+    const M = rTo + RIDGE_B() + Math.max(0, room / 2) + bd.Hc / 2;
+    if (!STACK) pe.style.top = Math.round(M) + 'px';
+    g = { ...g, rTo, box: { ...b, y: b.y + M - (t0 + t1) / 2 } }; sc = SC[v](g); sc.g = g; return sc;
+  }
 }
 /* sheep not in a scene go up to the ridge: the rest of the flock, still hefted, further off.
    On a phone only one thin row shows; the rest are over the brow. */
@@ -866,8 +888,10 @@ SC.local = (g) => {
     ground(t, a) {
       const fk = focus(t), f = fa(t);
       P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (k === fk ? .6 + .4 * f : .6), k === fk ? GROUND2 : GROUND));
-      const nm = names(fk), r = rend[ids[fk]];
-      nm.forEach(c => dashed([[r.x, r.y - s * .4], cairn[c]], a * f * .5));
+      /* the lines run from where the sheep grazes on its own patch, so while the flock walks in or
+         out they stay pinned to the patch, not to a sheep crossing the hill */
+      const nm = names(fk), l = slots[fk], g2 = graze(ids[fk] * 7 + 3, gT), r = [l.x + g2[0] * l.rx, l.y + g2[1] * l.ry - g2[3]];
+      nm.forEach(c => dashed([[r[0], r[1] - s * .4], cairn[c]], a * f * .5));
       cairn.forEach((c, k) => {
         const on = nm.includes(k) ? f : 0; ctx.globalAlpha = a * (.35 + .65 * on); ctx.fillStyle = INK;
         ctx.fillRect(c[0] - 7, c[1] - 3, 14, 5); ctx.fillRect(c[0] - 5, c[1] - 8, 10, 4.5); ctx.fillRect(c[0] - 3, c[1] - 12.5, 6, 4); ctx.globalAlpha = 1;
@@ -881,8 +905,10 @@ SC.local = (g) => {
    one that names its signature; the checker visits just those two. Run: rams walk straight lanes. */
 SC.fast = (g) => {
   const b = g.box, ids = [], n = 5;
-  const bh = b.h * .5, cw = Math.min(b.w / 5.7, bh * .9, MOB ? 78 : 118 * VS), ch = cw * .5, s = Math.min(cw * .36, 38 * VS);
-  const stepX = cw * 1.06, x0 = b.x + b.w * .5 - (n - 1) * stepX / 2, y0 = b.y + bh * (MOB ? .5 : .46);
+  /* one composition, sized in patch widths: the track runs under the row it serves, as long as the
+     row plus a little either side, one steady gap below it; its labels share the track's left edge */
+  const ov = MOB ? .25 : .45, cw = Math.min(b.w / (5.24 + 2 * ov + .1), (b.h - 24) / 2.62, MOB ? 78 : 118 * VS), ch = cw * .5, s = Math.min(cw * .36, 38 * VS);
+  const stepX = cw * 1.06, x0 = b.x + b.w * .5 - (n - 1) * stepX / 2, y0 = b.y + cw * .98 + 9;
   const P = []; for (let k = 0; k < n; k++) P.push([x0 + k * stepX, y0 + (k - (n - 1) / 2) * stepX * .16]);
   const CH = 1, NM = 3;                       /* the red definition changes; definition 3 names its signature */
   const FIRST = 40, VIS = 34, F_END = FIRST + n * VIS + 40;
@@ -906,8 +932,8 @@ SC.fast = (g) => {
   /* run: one straight track from post to post, parallel to the build row; rams walk it in file
      at one steady pace, no turn, no stop */
   const slope = .16, L = 3, RUNP = 300;
-  const tA = [b.x + b.w * (MOB ? .04 : .06), b.y + b.h * (MOB ? .78 : .8) - slope * b.w * .44], tB = [b.x + b.w * (MOB ? .96 : .94), 0];
-  tB[1] = tA[1] + slope * (tB[0] - tA[0]);
+  const TW = (n - 1) * stepX + cw * (1 + 2 * ov), D = cw * 1.1 + 8;
+  const tA = [b.x + b.w * .5 - TW / 2, y0 + D - slope * TW / 2], tB = [b.x + b.w * .5 + TW / 2, y0 + D + slope * TW / 2];
   const runAt = (k, t) => { const d = ((t / RUNP + k / L) % 1 + 1) % 1; return [lerp(tA[0], tB[0], d), lerp(tA[1], tB[1], d), d]; };
   const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .08, s, a: 1, rx: cw * .14, ry: ch * .14, slot: k }));
   for (let k = 0; k < L; k++) { const q = runAt(k, 0); slots.push({ x: q[0], y: q[1], s, a: 1, rx: 0, ry: 0, slot: n + k }); }
@@ -934,8 +960,8 @@ SC.fast = (g) => {
       ctx.globalAlpha = a * .22; ctx.strokeStyle = PEAT_D; ctx.lineWidth = 1; ctx.beginPath();
       ctx.moveTo(tA[0], tA[1] - hw); ctx.lineTo(tB[0], tB[1] - hw); ctx.moveTo(tA[0], tA[1] + hw); ctx.lineTo(tB[0], tB[1] + hw); ctx.stroke(); ctx.restore();
       post(tA[0], tA[1] + 1, a * .85, MOB ? 1.5 : 1.9); post(tB[0], tB[1] + 1, a * .85, MOB ? 1.5 : 1.9);
-      note('build', b.x, Math.min(...P.map(p => p[1])) - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
-      note('run', b.x, tA[1] - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
+      note('build', tA[0], Math.min(...P.map(p => p[1])) - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
+      note('run', tA[0], tA[1] - s * (MOB ? 1.9 : 1.75), a * .85, { align: 'left' });
     },
     over(t, a) { const st = at(t); if (st.tok >= 0 && st.ta > .01) { const q = tokXY(st.tok); token(q[0], q[1], a * st.ta); } },
   };
@@ -1068,8 +1094,10 @@ function bindScene(sc, rof) {
 
 /* ---------- engine: fixed-step ticks, so every run of the page is the same run ---------- */
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let scene = null, prevScene = null, prevT = 0, view = null;
-let gT = 0, sT = 0, tr = 1, arr = -1;
+/* scenes on their way out, each on its own clock, fading from the alpha it had when it was left:
+   a second step taken mid-walk fades what is on screen from where it stood, never re-shows it */
+let scene = null, fading = [], view = null;
+let gT = 0, sT = 0, tr = 1, arr = -1, refit = false;
 const TR = 104;
 const rend = Array.from({ length: N }, () => ({ x: 0, y: 0, s: 0, a: 0, face: 1 }));
 let snap = null, hop = new Float32Array(N);
@@ -1077,7 +1105,7 @@ let snap = null, hop = new Float32Array(N);
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1); W = innerWidth; H = innerHeight; MOB = W <= 700; STACK = W <= 900; VS = Math.max(1, Math.min(1.3, W / 1280, H / 900));
   cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  makeGrain();
+  makeGrain(); SKY = null;
 }
 function build(v) {
   const g = geom(v); let sc = SC[v](g); sc.g = g;
@@ -1142,7 +1170,12 @@ function setView(v, first) {
   renderDom(v);
   const instant = first || reduced;
   try { history.replaceState(null, '', v === 'hill' ? location.pathname : '#' + v); } catch (e) {}
-  prevScene = instant ? null : scene; prevT = sT;
+  if (instant) fading = [];
+  else {
+    const e0 = ease(Math.min(1, tr)), og = 1 - sm(e0 * 1.6), oo = 1 - sm(e0 * 1.5);
+    fading = fading.map(f => ({ ...f, g: f.g * og, o: f.o * oo })).filter(f => f.g > .01 || f.o > .01);
+    if (scene) fading.push({ sc: scene, t: sT, g: sm((e0 - .35) / .65) * (arr >= 0 ? sm(arr / 54) : 1), o: sm((e0 - .5) / .5) * (arr >= 0 ? sm((arr - 40) / 40) : 1) });
+  }
   snap = rend.map(r => ({ ...r }));
   scene = build(v);
   bindScene(scene, assign(scene, first ? null : snap));
@@ -1193,18 +1226,18 @@ function draw() {
   if (tr < 1) { pan = lerp(panA, panB, e); rb = lerp(rbA, rbB, e); } else { pan = panB; rb = rbB; }
   hillLayer();
   const ga = arr >= 0 ? sm(arr / 54) : 1;
-  if (prevScene && tr < 1) { prevScene.ground && prevScene.ground(prevT, 1 - sm(e * 1.6)); }
+  if (tr < 1) for (const f of fading) f.sc.ground && f.sc.ground(f.t, f.g * (1 - sm(e * 1.6)));
   scene.ground && scene.ground(sT, sm((e - .35) / .65) * ga);
   const order = rend.map((r, i) => i).sort((p, q) => rend[p].y - rend[q].y);
   for (const i of order) { const r = rend[i]; sheep(r.x, r.y, r.s, r.face, i === REDI, r.a); }
-  if (prevScene && tr < 1 && prevScene.over) prevScene.over(prevT, 1 - sm(e * 1.5));
+  if (tr < 1) for (const f of fading) f.sc.over && f.sc.over(f.t, f.o * (1 - sm(e * 1.5)));
   scene.over && scene.over(sT, sm((e - .5) / .5) * (arr >= 0 ? sm((arr - 40) / 40) : 1));
 }
 function tick() {
-  gT++; sT++; if (tr < 1) tr = Math.min(1, tr + 1 / TR);
+  gT++; sT++; if (tr < 1) { tr = Math.min(1, tr + 1 / TR); if (tr >= 1 && refit) { refit = false; rebuild(); } }
   if (arr >= 0 && ++arr > ARR_END) arr = -1;
   if (txt) txt.t++;
-  if (prevScene && tr < 1) prevT++;
+  if (tr < 1) for (const f of fading) f.t++;
 }
 let last = null, acc = 0, lastFrame = 0;
 function advance(now) {
@@ -1240,23 +1273,29 @@ function paintText() {
   }
   if (done) txt = null;
 }
+/* a view's words into a panel: the live one, or the hidden stand-in that measures them */
+function fillPanel(root, v) {
+  const i = VIEWS.indexOf(v), c = COPY[v], q = sel => root.querySelector(sel);
+  q('h2').textContent = c[1];
+  /* a body is one paragraph, or a lead and labelled halves */
+  const pb = q('.body'); pb.replaceChildren();
+  for (const part of [].concat(Array.isArray(c[2]) ? c[2] : [c[2]])) {
+    if (typeof part === 'string') { const p = document.createElement('p'); p.textContent = part; pb.append(p); continue; }
+    const d = document.createElement('div'), b = document.createElement('b'), p = document.createElement('p');
+    d.className = 'half'; b.textContent = part[0]; p.textContent = part[1]; d.append(b, p); pb.append(d);
+  }
+  const pv = i > 0 ? VIEWS[i - 1] : null, nx = i < VIEWS.length - 1 ? VIEWS[i + 1] : null, wb = q('.walk').children;
+  wb[0].hidden = !pv; wb[0].querySelector('span').textContent = pv ? COPY[pv][0] : '';
+  wb[1].hidden = !nx; wb[1].querySelector('span').textContent = nx ? COPY[nx][0] : '';
+  q('.det').hidden = v !== 'deterministic' || reduced;
+}
 function renderDom(v, quiet) {
   const hill = v === 'hill', i = VIEWS.indexOf(v), c = COPY[v], wasHill = $('panel').hidden;
   $('wm').hidden = hill; $('idx').hidden = hill; $('land').hidden = !hill; $('panel').hidden = hill;
   idxBtns.forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   if (!hill) {
-    $('pTitle').textContent = c[1];
-    /* a body is one paragraph, or a lead and labelled halves */
-    const pb = $('pBody'); pb.replaceChildren();
-    for (const part of [].concat(Array.isArray(c[2]) ? c[2] : [c[2]])) {
-      if (typeof part === 'string') { const p = document.createElement('p'); p.textContent = part; pb.append(p); continue; }
-      const d = document.createElement('div'), b = document.createElement('b'), p = document.createElement('p');
-      d.className = 'half'; b.textContent = part[0]; p.textContent = part[1]; d.append(b, p); pb.append(d);
-    }
-    const pv = i > 0 ? VIEWS[i - 1] : null, nx = i < VIEWS.length - 1 ? VIEWS[i + 1] : null;
-    $('prevBtn').hidden = !pv; $('prevBtn').querySelector('span').textContent = pv ? COPY[pv][0] : '';
-    $('nextBtn').hidden = !nx; $('nextBtn').querySelector('span').textContent = nx ? COPY[nx][0] : '';
-    $('sName').textContent = c[0]; $('sPrev').disabled = !pv; $('sNext').disabled = !nx;
+    fillPanel($('panel'), v);
+    $('sName').textContent = c[0]; $('sPrev').disabled = i === 0; $('sNext').disabled = i === VIEWS.length - 1;
   }
   $('det').hidden = v !== 'deterministic' || reduced;
   if (quiet) return;
@@ -1276,12 +1315,12 @@ const rebuild = () => {
   /* the red ram keeps the red place, wherever the new layout put it */
   const was = rof.indexOf(REDI); if (was !== scene.rs) { rof[was] = rof[scene.rs]; rof[scene.rs] = REDI; }
   bindScene(scene, rof);
-  panB = pan = scene.g.pTo; rbB = rb = scene.g.rTo; prevScene = null; tr = 1; sT = keepT;
+  panB = pan = scene.g.pTo; rbB = rb = scene.g.rTo; fading = []; tr = 1; sT = keepT;
   if (reduced) still(); else { pose(); draw(); }
 };
 addEventListener('resize', rebuild);
 /* headings reflow when the web fonts arrive; re-measure the panel and landing block then */
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (tr >= 1) rebuild(); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { SKY = null; if (tr >= 1) rebuild(); else refit = true; });
 
 $('wm').addEventListener('click', () => setView('hill'));
 $('walkIn').addEventListener('click', () => go(1));

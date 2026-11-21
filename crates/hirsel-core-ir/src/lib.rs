@@ -442,6 +442,16 @@
 //! (SEM-5), so no hash is observable. Engines map `rt.hash_bytes` to `uint64_t
 //! hirsel_core_hash_bytes(const uint8_t *, uint64_t)`, with no context or status.
 //!
+//! # XXH3
+//!
+//! `rt.xxh3_short(data, len)` returns seed-zero XXH3-64 of at most 240 bytes
+//! with the default secret. `rt.xxh3_stripes(acc, data, secret, count)` adds
+//! whole 64-byte stripes to eight `u64` words at `acc`. A stripe uses a 64-byte
+//! window of the secret, starting eight bytes past the preceding stripe's
+//! window. The front end checks both ranges. The row does no block scrambling.
+//! Each call takes one step and admits no bytes, with identical updates on
+//! the portable and SIMD paths (MEM-30, SEM-8).
+//!
 //! # SHA-1
 //!
 //! `rt.sha1_blocks(state, data, len)` applies RFC 3174 block compression in

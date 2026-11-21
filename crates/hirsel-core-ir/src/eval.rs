@@ -3499,6 +3499,42 @@ impl Machine<'_> {
                 };
                 vec![crate::hash_bytes(&bytes)]
             }
+            RtOp::Xxh3Short => {
+                let data = if a[1] == 0 {
+                    &[]
+                } else {
+                    self.get(a[0], a[1] as usize)
+                };
+                vec![twox_hash::XxHash3_64::oneshot(data)]
+            }
+            RtOp::Xxh3Stripes => {
+                let count = a[3] as usize;
+                if count != 0 {
+                    let mut acc = [0u64; 8];
+                    for (lane, bytes) in acc.iter_mut().zip(self.get(a[0], 64).as_chunks::<8>().0) {
+                        *lane = u64::from_le_bytes(*bytes);
+                    }
+                    let data = self.get(a[1], count * 64);
+                    let secret = self.get(a[2], 64 + (count - 1) * 8);
+                    for (i, stripe) in data.as_chunks::<64>().0.iter().enumerate() {
+                        for (j, bytes) in stripe.as_chunks::<8>().0.iter().enumerate() {
+                            let key_at = (i + j) * 8;
+                            let key =
+                                u64::from_le_bytes(secret[key_at..key_at + 8].try_into().unwrap());
+                            let word = u64::from_le_bytes(*bytes);
+                            let keyed = word ^ key;
+                            acc[j ^ 1] = acc[j ^ 1].wrapping_add(word);
+                            acc[j] = acc[j].wrapping_add((keyed & 0xffff_ffff) * (keyed >> 32));
+                        }
+                    }
+                    let mut encoded = [0; 64];
+                    for (word, bytes) in acc.into_iter().zip(encoded.as_chunks_mut::<8>().0) {
+                        *bytes = word.to_le_bytes();
+                    }
+                    self.put(a[0], &encoded);
+                }
+                vec![]
+            }
             RtOp::Sha1Blocks => {
                 let mut h = [0u32; 5];
                 for (word, bytes) in h.iter_mut().zip(self.get(a[0], 20).as_chunks::<4>().0) {

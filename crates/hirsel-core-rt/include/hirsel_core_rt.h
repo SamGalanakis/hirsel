@@ -82,6 +82,12 @@ void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len)
    eight state words, with the CPU's SHA-256 instructions when it has them; no
    context or status; zero blocks read nothing. */
 void hirsel_core_sha256_blocks(uint32_t *state, const uint8_t *data, uint64_t blocks);
+
+/* XXH3-64 seed zero for a span of at most 240 bytes. */
+uint64_t hirsel_core_xxh3_short(const uint8_t *data, uint64_t len);
+
+/* Add count 64-byte stripes with secret offsets advancing eight bytes. */
+void hirsel_core_xxh3_stripes(uint64_t *acc, const uint8_t *data, const uint8_t *secret, uint64_t count);
 /* rt.compare_bytes: bytewise order (SEM-7), -1, 0 or 1, a proper prefix first; no
    context or failure status; an empty range is never read. */
 int8_t hirsel_core_compare_bytes(const uint8_t *a, uint64_t a_len, const uint8_t *b,

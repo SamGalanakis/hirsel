@@ -275,6 +275,14 @@ impl FunctionEmitter<'_> {
             RtOp::HashBytes => {
                 vec![self.hash_bytes(&args[0], &args[1])]
             }
+            RtOp::Xxh3Short => {
+                self.native_call("hirsel_core_xxh3_short", &[U], &[p(&args[0]), u(&args[1])])
+            }
+            RtOp::Xxh3Stripes => self.native_call(
+                "hirsel_core_xxh3_stripes",
+                &[],
+                &[p(&args[0]), p(&args[1]), p(&args[2]), u(&args[3])],
+            ),
             RtOp::Sha1Blocks => self.native_call(
                 "hirsel_core_sha1_blocks",
                 &[],

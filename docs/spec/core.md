@@ -22,6 +22,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
+| `check` | [check](../../core/core/check.hirsel) | SEM-8, SEM-11, MEM-30 |
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
@@ -201,6 +202,15 @@ operations it names; nothing else about them may be inferred from an implementat
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
   multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
   integer operations.
+- **XXH3 kernels.** `check.xxh3_short(b)` and `check.xxh3_short_inline(b, n)`
+  return seed-zero XXH3-64 with the default secret over the byte span. Lengths
+  above 240 raise `Bounds`. `check.xxh3_stripes(mut acc, b, key, offset)`
+  updates the eight accumulator words from complete 64-byte stripes. Each
+  stripe reads 64 bytes of `key`, starting at `offset` and advancing eight bytes
+  per stripe. An incomplete stripe or a secret window outside the 192-byte key
+  raises `Bounds` before any write. `check.xxh3_stripe` reads one inline stripe.
+  These calls each take one step and admit no bytes. Vector and portable
+  kernels compute the same words ([SEM-8](semantics.md#sem-8-determinism)).
 - **SHA-1 blocks.** `sha1.blocks(mut h, b)` applies RFC 3174 compression to the
   64-byte blocks of `b` and its RFC 3174 padding, updating the five state words
   `h`. This call takes one step and admits no bytes. The engine can use the CPU's

@@ -351,6 +351,8 @@ tags!(RtOp {
     35 => DescribeEmit,
     36 => Flow(part0),
     37 => Sha1Blocks,
+    38 => Xxh3Short,
+    39 => Xxh3Stripes,
 });
 
 tags!(HostOp {

@@ -63,6 +63,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inline_copy_from_slice(types[0], vals[0], vals[1]?, vals[2], vals[3]?, n)?;
             return Some(None);
         }
+        if module == ["check"] {
+            return match name {
+                "xxh3_short" => Some(self.xxh3_short(vals[0]?, None, n)),
+                "xxh3_short_inline" => Some(self.xxh3_short(vals[0]?, Some(vals[1]?), n)),
+                "xxh3_stripes" => {
+                    Some(self.xxh3_stripes(vals[0]?, vals[1]?, vals[2]?, vals[3]?, n))
+                }
+                "xxh3_stripe" => Some(self.xxh3_stripe(vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),
+                _ => None,
+            };
+        }
         if module == ["sha1"] && name == "blocks" {
             return Some(self.sha1_blocks(vals[0]?, vals[1]?, n));
         }

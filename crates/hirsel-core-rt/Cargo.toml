@@ -33,6 +33,8 @@ zeroize = "=1.9.2"
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-tape-format = { path = "../hirsel-tape-format" }
 
+twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "xxhash3_64"] }
+
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }
 bumpalo = "=3.20.3"

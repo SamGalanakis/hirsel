@@ -1225,6 +1225,134 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
+    pub(super) fn xxh3_short(
+        &mut self,
+        input: ValueId,
+        inline_len: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let (data, len) = match inline_len {
+            Some(len) => (input, len),
+            None => (
+                self.read_sequence_word(input, 0, Ty::Ptr, n),
+                self.read_sequence_word(input, 8, u64_, n),
+            ),
+        };
+        let max = self.konst(u64_, 240, n)?;
+        let valid = self.list_compare(CompareOp::Le, len, max, n);
+        self.list_require_element(valid, n);
+        Some(
+            self.runtime_row(
+                hirsel_core_ir::RtOp::Xxh3Short,
+                &[Arg::Value(data), Arg::Value(len)],
+                n,
+            )?[0],
+        )
+    }
+
+    pub(super) fn xxh3_stripes(
+        &mut self,
+        acc: ValueId,
+        header: ValueId,
+        secret: ValueId,
+        offset: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let len = self.read_sequence_word(header, 8, u64_, n);
+        let mask = self.konst(u64_, 63, n)?;
+        let zero = self.konst(u64_, 0, n)?;
+        let tail = self.value(u64_);
+        self.inst(
+            Inst::Binary {
+                result: tail,
+                op: BinaryOp::BitAnd,
+                left: len,
+                right: mask,
+                fail: None,
+            },
+            n,
+        );
+        let whole = self.list_compare(CompareOp::Eq, tail, zero, n);
+        self.list_require_element(whole, n);
+
+        let key_end = self.konst(u64_, 128, n)?;
+        let offset_in_range = self.list_compare(CompareOp::Le, offset, key_end, n);
+        self.list_require_element(offset_in_range, n);
+        let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
+        let stripes = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(nonempty, stripes, done, n);
+        self.start(stripes);
+
+        let one = self.konst(u64_, 1, n)?;
+        let six = self.konst(u64_, 6, n)?;
+        let eight = self.konst(u64_, 8, n)?;
+        let count = self.value(u64_);
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Binary {
+                result: count,
+                op: BinaryOp::Shr,
+                left: len,
+                right: six,
+                fail,
+            },
+            n,
+        );
+        let (last, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, count, one, n);
+        let (advance, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, last, eight, n);
+        self.require_copy_range(offset, advance, key_end, n);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        self.xxh3_stripe_row(acc, data, secret, offset, count, n)?;
+        self.jump(done, &[], n);
+        self.start(done);
+        None
+    }
+
+    pub(super) fn xxh3_stripe(
+        &mut self,
+        acc: ValueId,
+        data: ValueId,
+        secret: ValueId,
+        offset: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let key_end = self.konst(u64_, 128, n)?;
+        let offset_in_range = self.list_compare(CompareOp::Le, offset, key_end, n);
+        self.list_require_element(offset_in_range, n);
+        let one = self.konst(u64_, 1, n)?;
+        self.xxh3_stripe_row(acc, data, secret, offset, one, n)?;
+        None
+    }
+
+    fn xxh3_stripe_row(
+        &mut self,
+        acc: ValueId,
+        data: ValueId,
+        secret: ValueId,
+        offset: ValueId,
+        count: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+        let key = self.address(AddressBase::Value(secret), &[Step::Byte(offset)], byte, n);
+        let key = self.pointer(key, n);
+        self.runtime_row(
+            hirsel_core_ir::RtOp::Xxh3Stripes,
+            &[
+                Arg::Value(acc),
+                Arg::Value(data),
+                Arg::Value(key),
+                Arg::Value(count),
+            ],
+            n,
+        )?;
+        Some(())
+    }
+
     pub(super) fn sha1_blocks(
         &mut self,
         state: ValueId,

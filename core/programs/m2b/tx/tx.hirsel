@@ -63,7 +63,7 @@ fn commit[T, R](mut db: table.Table[T], take writes: Map[u64, T], take r: R) -> 
             },
         }
     }
-    if let Error(c) = table.reserve(mut db, fresh) {
+    if let Error(c) = table.try_reserve(mut db, fresh) {
         return Refused(c)
     }
     for take (k, v) in writes {

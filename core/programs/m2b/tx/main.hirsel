@@ -97,12 +97,15 @@ fn explicit(mut tx: m2b.tx.Tx[m2b.table.Account], arg: i64) -> Result[u64, m2b.t
     fail("tx: explicit")
 }
 
-// Reads 1, then asks for 8 u64s with no room: a refused allocation, an Error, not a failure.
+// Reads 1, then uses try_reserve to observe refusal of room for 8 u64s as an Error.
 fn starved(mut tx: m2b.tx.Tx[m2b.table.Account], arg: u64) -> Result[u64, m2b.tx.Abort] {
     let one = seen(tx, 1)?
     let room: Result[Result[u64, Capacity], Capacity] = bound bytes 0 {
-        let xs: List[u64] = list.with_capacity(arg)
-        Ok(list.len(xs))
+        let mut xs: List[u64] = list.new()
+        match list.try_reserve(mut xs, arg) {
+            Ok(()) => Ok(list.len(xs)),
+            Error(c) => Error(c),
+        }
     }
     match room {
         Ok(Ok(n)) => Ok(n + int.truncate(one)),

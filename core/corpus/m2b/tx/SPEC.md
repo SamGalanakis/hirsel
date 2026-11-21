@@ -30,7 +30,7 @@ returns with zero net bytes admitted.
 | bounds | reads 1, then indexes an empty list at 0 | 3 1 1 1 = 3111 | 0 |
 | unwrap | reads 1 and 9, then `option.unwrap` of the absent 9 | 3 19 1 1 = 31911 | 0 |
 | explicit_fail | reads 1, writes 1 = 17, then `fail` | 3 1 1 1 = 3111 | 0 |
-| refused_alloc | reads 1, then `list.with_capacity(8)` inside `bound bytes 0` | 6 1 1 1 = 6111 | 0 |
+| refused_alloc | reads 1, then `list.try_reserve` for eight u64s inside `bound bytes 0` | 6 1 1 1 = 6111 | 0 |
 
 These catch:
 - a write set installed after a failure (the overflow and explicit_fail writes);
@@ -38,7 +38,7 @@ These catch:
 - a read log that loses the reads made before a failure, or logs only reads that
   hit. The second was confirmed red on a mutant: unwrap gave 3111;
 - an Error abort that commits;
-- a refused allocation treated as a failure: it is an Error (FAIL-2), so it gives
+- a `try_reserve` refusal raised as a failure: it returns an Error (MEM-21), so it gives
   `Aborted(Full)` and keeps no cell.
 
 ## full = 411512072

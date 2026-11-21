@@ -127,10 +127,9 @@ fn digits(n: u64, r: Region) -> FixedSpan[u8] in r {
 }
 ```
 ```hirsel
-fn names(r: Region, s: String) -> FixedSpan[String] in r {  // refused: MEM-12, String is not plain
-  let mut b = span.builder(r)
-  span.push(mut b, s)
-  span.finish(take b)
+fn names(r: Region) -> FixedSpan[String] in r {  // refused: MEM-12, String is not plain
+  let mut b: SpanBuilder[String, in r] = span.builder(r)  // refused: LANG-12, T: plain
+  span.finish(take b)                                     // refused: LANG-12, T: plain
 }
 ```
 

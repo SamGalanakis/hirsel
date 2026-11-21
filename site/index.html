@@ -960,34 +960,120 @@ SC.authority = (g) => {
   };
 };
 
+/* an agent: a standing figure, feet at (x, y), h tall. Same flat ink as the ram-mark, built from
+   blocks: a round head, a coat squared at the shoulders and wider at the hem, two legs. step
+   swings the legs while it walks; face turns the head a hair toward where it looks. */
+function agent(x, y, h, face, a, step) {
+  if (a <= .01) return;
+  const u = h / 10, sw = (step || 0) * u * .7;
+  ctx.save(); ctx.globalAlpha = a * .09; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x, y + u * .15, u * 2.6, u * .7, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = a; ctx.fillStyle = INK; ctx.beginPath();
+  ctx.roundRect(x - u * 1.55 - sw * .4, y - u * 3.6, u * 1.25, u * 3.6, u * .25);
+  ctx.roundRect(x + u * .3 + sw * .4, y - u * 3.6, u * 1.25, u * 3.6, u * .25);
+  ctx.moveTo(x - u * 1.6, y - u * 7.1); ctx.lineTo(x + u * 1.6, y - u * 7.1); ctx.lineTo(x + u * 2, y - u * 3.2); ctx.lineTo(x - u * 2, y - u * 3.2); ctx.closePath();
+  ctx.moveTo(x + u * .25 * face + u * 1.25, y - u * 8.85); ctx.arc(x + u * .25 * face, y - u * 8.85, u * 1.25, 0, Math.PI * 2);
+  ctx.fill(); ctx.restore();
+}
+/* Local. Agents read the flock: each stands on one patch, sees that patch and the two it names, and
+   nothing else on the hill. Their views never overlap; each moves on to a new patch in turn. */
+const LOCAL_ROTA = {};
 SC.local = (g) => {
-  const b = g.box, ids = [];
-  const cw = Math.min(b.w * .78 / 3.5, b.h * .72 / 1.75), ch = cw * .5, s = Math.min(cw * .34, 40 * VS);
-  const P = isoGrid(b.x + b.w * .5, b.y + b.h * .55, 4, 3, cw);
-  const slots = P.map((p, k) => ({ x: p[0], y: p[1] + ch * .1, s, a: 1, rx: cw * .16, ry: ch * .16, slot: k }));
-  const cairn = [[.06, .14], [.95, .12], [.96, .9], [.05, .92]].map(([u, v]) => [b.x + b.w * u, b.y + b.h * v]);
-  const C = 150, order = [5, 2, 9, 0, 7, 11, 4, 1, 10, 6, 3, 8];
-  const focus = t => order[Math.floor(t / C) % 12];
-  const names = k => { const a = Math.floor(hh(k, 3) * 4); return [a, (a + 1 + Math.floor(hh(k, 6) * 3)) % 4]; };
-  const fa = t => { const u = (t % C) / C; return sm(u / .18) * (1 - sm((u - .82) / .18)); };
+  const b = g.box, ids = [], CO = 4, NP = 12;
+  const cw = Math.min(b.w * (MOB ? .96 / 3.4 : .92 / 3.9), b.h * .8 / 2.3, 210 * VS), ch = cw * .5, s = Math.min(cw * .32, 40 * VS), ah = s * 1.3;
+  const P = isoGrid(b.x + b.w * .5, b.y + b.h * .56, CO, 3, cw);
+  const slots = P.map((p, k) => ({ x: p[0] + cw * .1, y: p[1] + ch * .1, s, a: 1, rx: cw * .06, ry: ch * .1, slot: k }));
+  /* where an agent stands on a patch: its left corner, turned to the sheep */
+  const stand = k => [P[k][0] - cw * .17, P[k][1] + ch * .12];
+  const nA = !MOB && W >= 1500 ? 3 : 2, C = 600, WALK = 80;
+  /* the rota: jobs start in turn, one agent every C / nA ticks. A new job (a patch and the two
+     patches it names) shares no patch with any job running when it starts, nor with that agent's
+     last; of those, it takes one whose sight-lines are short, cross no other agent's, pass by no
+     other agent's patch, and whose own patch keeps a patch's width from where the others stand. */
+  const R = 240, jobs = LOCAL_ROTA[nA] || (LOCAL_ROTA[nA] = rota(nA));
+  /* the rota is the same for every layout, so it is drawn up once for each number of agents */
+  function rota(nA) {
+    const jobs = Array.from({ length: nA }, () => []), rnd = mb(57);
+    const uv = k => [k % CO, Math.floor(k / CO)];
+    const cross = (A, B, C2, D) => { const o = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])); return o(A, B, C2) * o(A, B, D) < 0 && o(C2, D, A) * o(C2, D, B) < 0; };
+    const pass = (A, B, Q) => { const dx = B[0] - A[0], dy = B[1] - A[1], f = cl01(((Q[0] - A[0]) * dx + (Q[1] - A[1]) * dy) / (dx * dx + dy * dy)); return Math.hypot(A[0] + dx * f - Q[0], A[1] + dy * f - Q[1]) < .45; };
+    for (let r = 0; r < R; r++) for (let a = 0; a < nA; a++) {
+      const others = []; for (let o = 0; o < nA; o++) if (o !== a) { const J = o < a ? jobs[o][r] : jobs[o][r - 1]; if (J) others.push(J); }
+      const busy = new Set(r ? jobs[a][r - 1] : []); others.forEach(J => J.forEach(k => busy.add(k)));
+      const free = []; for (let k = 0; k < NP; k++) if (!busy.has(k)) free.push(k);
+      const lines = others.flatMap(J => [[uv(J[0]), uv(J[1])], [uv(J[0]), uv(J[2])]]);
+      let best = null, bs = 1e9;
+      for (const h of free) for (const n1 of free) for (const n2 of free) {
+        if (n1 === h || n2 <= n1 || n2 === h) continue;
+        const H2 = uv(h), mine = [[H2, uv(n1)], [H2, uv(n2)]];
+        let sc = Math.hypot(...uv(n1).map((x, q) => x - H2[q])) + Math.hypot(...uv(n2).map((x, q) => x - H2[q])) + rnd() * 1.6;
+        for (const J of others) { const O = uv(J[0]); if (Math.abs(O[0] - H2[0]) <= 1 && Math.abs(O[1] - H2[1]) <= 1) sc += 4; for (const m of mine) if (pass(m[0], m[1], O)) sc += 5; }
+        for (const m of mine) for (const l of lines) { if (cross(m[0], m[1], l[0], l[1])) sc += 6; if (pass(l[0], l[1], H2)) sc += 5; }
+        if (sc < bs) { bs = sc; best = [h, n1, n2]; }
+      }
+      jobs[a].push(best);
+    }
+    return jobs;
+  }
+  /* agent a at tick t: its job, how far into it, how lit its view is */
+  const st = (a, t) => {
+    const v = t + (nA - a) * C / nA, r = Math.floor(v / C), f = v - r * C, J = jobs[a][r % R], Jp = jobs[a][(r + R - 1) % R];
+    const w = ease(cl01(f / WALK)), from = stand(Jp[0]), to = stand(J[0]);
+    const vis = sm((f - WALK + 10) / 40) * (1 - sm((f - C + 50) / 40));
+    return { J, x: lerp(from[0], to[0], w), y: lerp(from[1], to[1], w), walking: f < WALK, f, vis, face: f < WALK ? (to[0] >= from[0] ? 1 : -1) : 1 };
+  };
+  /* how lit each patch is: its own (an agent stands on it) or named */
+  const lit = t => {
+    const own = new Float32Array(NP), nm = new Float32Array(NP);
+    for (let a = 0; a < nA; a++) { const q = st(a, t); own[q.J[0]] = Math.max(own[q.J[0]], q.vis); nm[q.J[1]] = Math.max(nm[q.J[1]], q.vis); nm[q.J[2]] = Math.max(nm[q.J[2]], q.vis); }
+    return [own, nm];
+  };
   return {
-    slots, redSlot: 5, ids, key: 40,
-    ext: [Math.min(cairn[0][1] - 14, cairn[1][1] - 14, ...slots.map(l => l.y - s - 3)), Math.max(cairn[2][1] + 4, cairn[3][1] + 4, ...P.map(p => p[1] + ch * .44 + 3))],
+    slots, redSlot: 5, ids, key: 135, start: 100,
+    ext: [Math.min(...P.map(p => p[1] + ch * .14 - ah - 30)), Math.max(...P.map(p => p[1] + ch * .44 + 3))],
     pose(i, l, t) {
-      const g2 = graze(i * 7 + 3, gT), f = focus(t) === l.slot ? fa(t) : 0;
-      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: g2[2], a: (i === REDI ? .6 : .32) + (i === REDI ? .4 : .68) * f };
+      const g2 = graze(i * 7 + 3, gT), [own, nm] = lit(t), o = own[l.slot], n = nm[l.slot];
+      const base = i === REDI ? .55 : .22;
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: o > .5 ? -1 : g2[2], a: base + (1 - base) * Math.max(o, n * .55) };
     },
     ground(t, a) {
-      const fk = focus(t), f = fa(t);
-      P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (k === fk ? .6 + .4 * f : .6), k === fk ? GROUND2 : GROUND));
-      /* the lines run from where the sheep grazes on its own patch, so while the flock walks in or
-         out they stay pinned to the patch, not to a sheep crossing the hill */
-      const nm = names(fk), l = slots[fk], g2 = graze(ids[fk] * 7 + 3, gT), r = [l.x + g2[0] * l.rx, l.y + g2[1] * l.ry - g2[3]];
-      nm.forEach(c => dashed([[r[0], r[1] - s * .4], cairn[c]], a * f * .5));
-      cairn.forEach((c, k) => {
-        const on = nm.includes(k) ? f : 0; ctx.globalAlpha = a * (.35 + .65 * on); ctx.fillStyle = INK;
-        ctx.fillRect(c[0] - 7, c[1] - 3, 14, 5); ctx.fillRect(c[0] - 5, c[1] - 8, 10, 4.5); ctx.fillRect(c[0] - 3, c[1] - 12.5, 6, 4); ctx.globalAlpha = 1;
-      });
+      const [own, nm] = lit(t);
+      P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (.42 + .58 * Math.max(own[k], nm[k] * .6))));
+      for (let a2 = 0; a2 < nA; a2++) {
+        const q = st(a2, t), p = P[q.J[0]], v = q.vis * a; if (v <= .01) continue;
+        /* its view: the patch it stands on, lit, with a soft fan from its eyes across it */
+        fillDia(p[0], p[1], cw * .44, ch * .44, GROUND2, v);
+        ctx.save(); ctx.globalAlpha = v * .5; ctx.strokeStyle = INK; ctx.lineWidth = 1; dia(p[0], p[1], cw * .44, ch * .44); ctx.stroke(); ctx.restore();
+        const ex = q.x, ey = q.y - ah * .86;
+        const gr = ctx.createLinearGradient(ex, ey, p[0] + cw * .3, p[1]);
+        gr.addColorStop(0, 'rgba(17,17,15,.13)'); gr.addColorStop(1, 'rgba(17,17,15,0)');
+        ctx.save(); ctx.globalAlpha = v; ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(ex, ey);
+        ctx.lineTo(p[0] + cw * .2, p[1] - ch * .42); ctx.lineTo(p[0] + cw * .44, p[1]); ctx.lineTo(p[0] + cw * .2, p[1] + ch * .42); ctx.closePath(); ctx.fill(); ctx.restore();
+        /* the two things it names: an outline on their ground, a dashed sight-line to each */
+        q.J.slice(1).forEach(k => {
+          const n = P[k]; ctx.save(); ctx.globalAlpha = v * .45; ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.setLineDash([3, 4]); dia(n[0], n[1], cw * .4, ch * .4); ctx.stroke(); ctx.restore();
+          dashed([[ex + 3, ey], [n[0], n[1] - ch * .05]], v * .55);
+        });
+      }
+    },
+    over(t, a) {
+      for (let a2 = 0; a2 < nA; a2++) {
+        const q = st(a2, t), step = q.walking ? Math.sin(q.f * .45) * (1 - sm((q.f - WALK + 12) / 12)) : 0;
+        agent(q.x, q.y, ah, q.face, a, step);
+        if (a2 === 0) { const hy = q.y - ah; note('agent', q.x + 6, hy - 20, a * .9, { to: [q.x + 1, hy - 5] }); }
+        if (a2 === 1) {
+          /* on one of its sight-lines, at the point with the most clear ground round it */
+          const ex = q.x + 3, ey = q.y - ah * .86, others = [0, 1, 2].slice(0, nA).map(o => st(o, t));
+          let best = null, bc = -1;
+          for (const k of [q.J[1], q.J[2]]) for (let f = .3; f <= .8; f += .05) for (const sd of [-1, 1]) {
+            const n = P[k], dx = n[0] - ex, dy = n[1] - ey, dl = Math.hypot(dx, dy) || 1, x = lerp(ex, n[0], f) + dy / dl * 12 * sd, y = lerp(ey, n[1], f) - dx / dl * 12 * sd - 2;
+            let c = 1e9;
+            for (const l of slots) c = Math.min(c, Math.hypot((x - l.x) * .55, y - (l.y - s * .5)) - s * .45);
+            for (const o of others) c = Math.min(c, Math.hypot((x - o.x) * .55, y - (o.y - ah * .6)) - ah * .4, Math.hypot((x - o.x) * .55, y - (o.y - ah - 20)) - 8);
+            if (c > bc) { bc = c; best = [x, y]; }
+          }
+          note('names', best[0], best[1], a * .8 * q.vis);
+        }
+      }
     },
   };
 };

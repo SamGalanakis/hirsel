@@ -81,15 +81,15 @@ fn text(mut tx: mutlib.lib.Tx, take a: String, n: u64) -> Result[String, u64] {
 }
 
 pub fn case_cross_number() -> u64 {
-    let mut tx = mutlib.lib.Tx(writes: 1u64, text: result.unwrap(string.from("held")));
+    let mut tx = mutlib.lib.Tx(writes: 1u64, text: string.from("held"));
     let a = 7u64;
     let n = result.unwrap(mutlib.lib.adapt_mtv(code.describe(number), mut tx, take a, 2u64));
     tx.writes * 10u64 + n
 }
 
 pub fn case_cross_text() -> u64 {
-    let mut tx = mutlib.lib.Tx(writes: 1u64, text: result.unwrap(string.from("held")));
-    let a = result.unwrap(string.from("ok"));
+    let mut tx = mutlib.lib.Tx(writes: 1u64, text: string.from("held"));
+    let a = string.from("ok");
     let s = result.unwrap(mutlib.lib.adapt_mtv(code.describe(text), mut tx, take a, 2u64));
     tx.writes * 10u64 + list.len(string.as_bytes(s))
 }

@@ -146,8 +146,15 @@
 
     const url = new URL('/hirsel', location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    const credential = await navigator.locks.request('checkbox-credential', () => {
+      const stored = localStorage.getItem('checkbox-credential');
+      if (stored) return Uint8Array.from(JSON.parse(stored));
+      const created = crypto.getRandomValues(new Uint8Array(16));
+      localStorage.setItem('checkbox-credential', JSON.stringify([...created]));
+      return created;
+    });
     const client = await Client.open({
-      url: url.href, frame: Frame, wants: want, identity, storage: new BrowserStorage(),
+      url: url.href, frame: Frame, wants: want, identity, credential, storage: new BrowserStorage(),
       onDiagnostic: message => console.warn(message),
       onState: state => {
         if (state === 'Backoff' || state === 'Connecting') status.textContent = 'Connecting…';

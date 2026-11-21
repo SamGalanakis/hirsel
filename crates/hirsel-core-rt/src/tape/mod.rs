@@ -15,6 +15,7 @@
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 mod dispatch;
+mod managed;
 pub mod run;
 pub(crate) mod schedule;
 pub(crate) mod writer;
@@ -134,6 +135,7 @@ pub const REFUSED: Outcome = Outcome {
     error: IoError::OK,
     written: 0,
     status: STATUS_REFUSED,
+    kind: 0,
 };
 
 thread_local! {
@@ -175,8 +177,8 @@ unsafe impl Send for Inner {}
 struct Object {
     /// Record: the source. Replay: none, so nothing can reach the host.
     inner: Option<Inner>,
-    /// A HostFile still open: closed by the tape's end, with no frame.
-    open_file: bool,
+    /// A file or listing still owned by its mechanical carrier.
+    open_resource: bool,
 }
 
 /// Where a recorder's closed blocks go: the writer thread for a file of the
@@ -279,8 +281,8 @@ struct Delivery {
 struct State {
     generation: u32,
     live: Option<Live>,
-    /// Record's HostFiles still open when their tape ended, by substitute
-    /// handle: their cleanup closes the inner file with no frame.
+    /// Recorded files and listings still owned at tape end. Their cleanup
+    /// closes the inner resource without writing a frame.
     orphans: BTreeMap<u64, Inner>,
     /// Record's SYNC and SYNC_DIR the inner provider accepted, by request
     /// address. An issued sync cannot be aborted, so its result is consumed
@@ -355,6 +357,7 @@ struct Startup {
     arg: Vec<u8>,
     net_rules: Vec<hirsel_core_net::GrantRule>,
     secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    env: Option<hirsel_core_net::EnvSnapshot>,
 }
 
 fn handle(generation: u32, ordinal: usize) -> u64 {
@@ -717,10 +720,17 @@ fn socket_op(op: u8) -> bool {
 }
 
 fn creates_object(op: u8) -> bool {
-    matches!(op, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT)
+    matches!(
+        op,
+        OPEN | OPEN_DIR | ENTRIES | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT
+    )
 }
 
-fn net_status(error: u8) -> u8 {
+fn waiting_io(op: u8) -> bool {
+    socket_op(op) || op == STDIN_READ
+}
+
+fn waiting_io_status(error: u8) -> u8 {
     match error {
         0 => OK,
         6 => TIMED_OUT,
@@ -828,6 +838,36 @@ unsafe fn canonical(r: &Request) -> Args {
         if socket_op(r.operation) {
             return socket_args(r);
         }
+        if r.operation == STDIN_READ {
+            let read = &*r.path.cast::<crate::stdin::ReadRequest>();
+            let spare = r.buffer.capacity.saturating_sub(r.buffer.len) as u64;
+            let mut args = spare.to_le_bytes().to_vec();
+            if let Some((_, clock, at)) = read.until {
+                put_varint(&mut args, ordinal_of(clock) as u64);
+                args.extend_from_slice(&at.to_le_bytes());
+            } else {
+                args.push(0);
+            }
+            return Args::of(&args);
+        }
+        if r.operation == SECRET_MAC {
+            let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
+            let (kind, ordinal) = match mac.secret.origin {
+                crate::secret::Origin::Granted(ordinal) => (0, ordinal),
+                crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
+            };
+            let policy = mac.secret.policy.text();
+            let mut head = vec![r.mode, kind];
+            put_varint(&mut head, ordinal);
+            put_varint(&mut head, policy.len() as u64);
+            put_varint(&mut head, mac.data.len() as u64);
+            return Args::of_parts(&[
+                &head,
+                policy.as_bytes(),
+                mac.data,
+                mac.tag.unwrap_or_default(),
+            ]);
+        }
         let path = if r.path_len == 0 {
             &[][..]
         } else {
@@ -844,11 +884,16 @@ unsafe fn canonical(r: &Request) -> Args {
                 a.extend_from_slice(path);
                 a
             }
-            READ | RANDOM => ((r.buffer.capacity - r.buffer.len) as u64)
+            READ | RANDOM | NEXT_ENTRIES => (r.buffer.capacity.saturating_sub(r.buffer.len) as u64)
                 .to_le_bytes()
                 .to_vec(),
+            READ_AT => {
+                let spare = (r.buffer.capacity.saturating_sub(r.buffer.len) as u64).to_le_bytes();
+                return Args::of_parts(&[path, &spare]);
+            }
+            WRITE_AT => return Args::of_parts(&[path, bytes]),
             WRITE | STDOUT | STDERR | MKDTEMP => bytes.to_vec(),
-            MKDIR | REMOVE | REMOVE_TREE | RENAME => path.to_vec(),
+            MKDIR | REMOVE | REMOVE_TREE | RENAME | OPEN_DIR | STAT => path.to_vec(),
             SLEEP_UNTIL => bytes.to_vec(),
             _ => vec![],
         })
@@ -862,6 +907,15 @@ fn clock(op: u8) -> bool {
 impl Tape {
     pub(crate) fn group(&self) -> schedule::Group {
         schedule::Group::root(self.cell, self.generation)
+    }
+    fn secret_mac(&self, replay: bool) -> crate::secret::MacTape {
+        crate::secret::MacTape {
+            provider: self.cell.provider,
+            // Object zero is the run-owned MAC sink. The Secret itself is in
+            // the canonical args, including for seals without a grant object.
+            handle: handle(self.generation, 0),
+            replay,
+        }
     }
     /// Open a recording file at `name` in the Dir `dir` (its provider and
     /// handle), as the code whose revision is `revision`: the launcher passes
@@ -964,6 +1018,7 @@ impl Tape {
                         arg: header.arg.clone(),
                         net_rules: vec![],
                         secret_grants: vec![],
+                        env: None,
                     },
                 )
             }
@@ -1026,6 +1081,7 @@ impl Tape {
                         arg: stored.arg,
                         net_rules: stored.net_rules,
                         secret_grants: stored.secret_grants,
+                        env: stored.env,
                     },
                 )
             }
@@ -1156,7 +1212,7 @@ impl Tape {
         };
         live.objects.push(Object {
             inner,
-            open_file: false,
+            open_resource: false,
         });
         let h = handle(generation, live.objects.len());
         Ok((self.cell.provider, h, stored))
@@ -1206,7 +1262,7 @@ fn finish(
         .checked_add(1)
         .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
     for (i, o) in live.objects.iter().enumerate() {
-        if let (true, Some(inner)) = (o.open_file, o.inner) {
+        if let (true, Some(inner)) = (o.open_resource, o.inner) {
             s.orphans.insert(handle(generation, i + 1), inner);
         }
     }
@@ -1336,6 +1392,10 @@ unsafe fn denied(request: &Request) -> bool {
 /// A first non-ready answer opens W explicitly. Subsequent callbacks keep
 /// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
+    // This operation has only immediate frames, in both modes.
+    if unsafe { (*r).operation == SECRET_MAC } {
+        return Wait::default();
+    }
     let cell = cell_of(state);
     // SAFETY: the driver pins this request for the entire operation.
     let h = unsafe { (*r).handle };
@@ -1437,13 +1497,13 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let key = r as *mut Request as usize;
     let mut s = cell.state.lock().unwrap();
     if s.generation != generation_of(h) || s.live.is_none() {
-        let orphan = (r.operation == CLOSE)
+        let orphan = matches!(r.operation, CLOSE | CLOSE_ENTRIES)
             .then(|| s.orphans.remove(&h))
             .flatten();
         drop(s);
         if let Some(inner) = orphan {
             // SAFETY: the inner file is still the run's; nothing records it.
-            let _ = unsafe { sink(inner, request(CLOSE, 0, 0, &[], empty_buffer())) };
+            let _ = unsafe { sink(inner, request(r.operation, 0, 0, &[], empty_buffer())) };
         }
         refuse(Fault::Ended);
         return done(REFUSED);
@@ -1475,7 +1535,14 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             }
         };
     }
-    let inner = live.objects[ordinal - 1].inner.unwrap();
+    let inner = if r.operation == SECRET_MAC {
+        Inner {
+            provider: crate::secret::MAC_PROVIDER,
+            handle: 0,
+        }
+    } else {
+        live.objects[ordinal - 1].inner.unwrap()
+    };
     let before = r.buffer.len;
     drop(s);
     // SAFETY: address operations pin their permission result through delivery.
@@ -1553,8 +1620,8 @@ unsafe fn record_out(
     let ordinal = ordinal_of(r.handle);
     let ok = o.status == 0 && o.error == IoError::OK;
     let mut out = Out {
-        status: if socket_op(r.operation) {
-            net_status(o.error.tag)
+        status: if waiting_io(r.operation) {
+            waiting_io_status(o.error.tag)
         } else if o.error == IoError::OK {
             OK
         } else {
@@ -1573,14 +1640,14 @@ unsafe fn record_out(
                 provider: inner.provider,
                 handle: o.value,
             }),
-            open_file: r.operation == OPEN,
+            open_resource: matches!(r.operation, OPEN | ENTRIES),
         });
         out.value = live.objects.len() as u64;
         answer.value = handle(generation, live.objects.len());
         created = Some(answer.value);
     }
-    if ok && r.operation == CLOSE {
-        live.objects[ordinal - 1].open_file = false;
+    if ok && matches!(r.operation, CLOSE | CLOSE_ENTRIES) {
+        live.objects[ordinal - 1].open_resource = false;
     }
     if clock(r.operation) {
         let prev = live
@@ -1593,6 +1660,9 @@ unsafe fn record_out(
         // SAFETY: the source wrote the address into the pinned network operand.
         let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
         out.payload = address_bytes(network.address).to_vec();
+    } else if ok && matches!(r.operation, STAT | STAT_FILE) {
+        out.payload.push(o.kind);
+        out.payload.extend_from_slice(&o.written.to_le_bytes());
     } else if ok && r.operation == RESOLVE {
         // SAFETY: the resolve provider initialized these Ip elements in spare.
         for i in before..r.buffer.len {
@@ -1626,6 +1696,9 @@ unsafe fn record_out(
             unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
                 .to_vec();
         TAPE_COUNTS[2].fetch_add(out.payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    if r.operation == NEXT_ENTRIES {
+        out.written = out.payload.len() as u64;
     }
     (
         out,
@@ -1680,11 +1753,16 @@ unsafe fn replay(
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
+        if op == SECRET_MAC {
+            return Err(Fault::Corrupt);
+        }
         // Without a scheduler nothing else readies a replayed helper, and
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
         // frame is the divergence `complete` would report.
-        if matches!(op, SYNC | SYNC_DIR | RESOLVE) && !crate::tasks::has_provider_task() {
+        if matches!(op, SYNC | SYNC_DIR | RESOLVE | STDIN_READ)
+            && !crate::tasks::has_provider_task()
+        {
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
                 if *t == task && live.schedule.last.checked_add(*gap) == Some(live.schedule.events))
             {
@@ -1715,12 +1793,13 @@ unsafe fn replay_out(
         },
         written: out.written,
         status: 0,
+        kind: 0,
     };
     match out.status {
         OK => {}
         ERROR if out.error.0 != 0 => {}
         ABORTED | TIMED_OUT => {
-            if socket_op(op) {
+            if waiting_io(op) {
                 o.error.tag = if out.status == ABORTED { 7 } else { 6 };
             }
         }
@@ -1738,7 +1817,7 @@ unsafe fn replay_out(
         }
         live.objects.push(Object {
             inner: None,
-            open_file: false,
+            open_resource: false,
         });
         o.value = handle(generation, live.objects.len());
     }
@@ -1753,6 +1832,19 @@ unsafe fn replay_out(
                 lo: u64::from_le_bytes(bytes.fixed()?),
                 port: u16::from_le_bytes(bytes.fixed()?),
             };
+        }
+    } else if matches!(op, STAT | STAT_FILE) {
+        if ok {
+            let [kind, time @ ..] = out.payload.as_slice() else {
+                return Err(Fault::Corrupt);
+            };
+            if *kind > 3 {
+                return Err(Fault::Corrupt);
+            }
+            o.kind = *kind;
+            o.written = u64::from_le_bytes(time.try_into().map_err(|_| Fault::Corrupt)?);
+        } else if !out.payload.is_empty() {
+            return Err(Fault::Corrupt);
         }
     } else if op == TLS_CONNECT {
         if ok {
@@ -1802,7 +1894,34 @@ unsafe fn replay_out(
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }
+    } else if op == SECRET_MAC {
+        if !ok
+            || if r.mode == 0 {
+                out.value != 0 || out.payload.len() != 32
+            } else {
+                out.value > 1 || !out.payload.is_empty()
+            }
+        {
+            return Err(Fault::Corrupt);
+        }
+        if r.mode == 0 {
+            // SAFETY: the signing adapter pins an inline 32-byte destination.
+            unsafe { ptr::copy_nonoverlapping(out.payload.as_ptr(), r.buffer.data, 32) };
+            r.buffer.len = 32;
+        }
     } else if carries_payload(op) {
+        if op == NEXT_ENTRIES
+            && (!valid_entries(&out.payload, out.value) || (!ok && !out.payload.is_empty()))
+        {
+            return Err(Fault::Corrupt);
+        }
+        if op == NEXT_ENTRIES {
+            // The tape uses the byte extent to join continuation frames.
+            o.written = 0;
+        }
+        if op == READ_AT && !ok && !out.payload.is_empty() {
+            return Err(Fault::Corrupt);
+        }
         let spare = r.buffer.capacity.saturating_sub(r.buffer.len);
         if out.payload.len() > spare {
             return Err(Fault::Corrupt);
@@ -1818,6 +1937,10 @@ unsafe fn replay_out(
             }
             r.buffer.len += out.payload.len();
         }
+    } else if op == WRITE_AT {
+        if out.written > r.buffer.len as u64 || (ok && out.written != r.buffer.len as u64) {
+            return Err(Fault::Corrupt);
+        }
     } else if op == SEND_SECRET {
         if out.value != 0 || (ok && out.written != 0) {
             return Err(Fault::Corrupt);
@@ -1830,6 +1953,26 @@ unsafe fn replay_out(
         }
     }
     Ok(o)
+}
+
+/// Refuse malformed record streams before they reach a caller's Bytes carrier.
+fn valid_entries(mut bytes: &[u8], count: u64) -> bool {
+    let mut records = 0;
+    while let Some(([kind, lo, hi], rest)) = bytes.split_first_chunk::<3>() {
+        let n = u16::from_le_bytes([*lo, *hi]) as usize;
+        if *kind > 3 || !(1..=255).contains(&n) {
+            return false;
+        }
+        let Some((name, tail)) = rest.split_at_checked(n) else {
+            return false;
+        };
+        if matches!(name, b"." | b"..") || name.iter().any(|&b| b == 0 || b == b'/') {
+            return false;
+        }
+        bytes = tail;
+        records += 1;
+    }
+    bytes.is_empty() && records == count
 }
 
 unsafe extern "C" fn resume(state: *mut u8, r: *mut Request, token: u64) -> Step {
@@ -1964,7 +2107,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
         )
     };
     if let Some(why) = why
-        && !socket_op(unsafe { (*r).operation })
+        && !waiting_io(unsafe { (*r).operation })
     {
         out.status = if why == ABORT_CANCEL {
             ABORTED

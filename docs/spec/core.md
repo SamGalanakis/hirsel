@@ -36,6 +36,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
+| `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](#provide) |
 | `args`, `env`, `host`, `stdin`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [env](../../core/core/env.hirsel), [host](../../core/core/host.hirsel), [stdin](../../core/core/stdin.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5, CAP-7 |
 
 A library module may extend a core module by name (LANG-7).
@@ -57,6 +58,11 @@ scoped value is never stored in a field of an own or resource type, a collection
 an environment (OWN-19), so it has no heap size; a scoped type's own fields
 ([OWN-22](ownership.md#own-22-scoped-types)) and a callable's logical width
 ([LANG-13](language.md#lang-13-callables)) are unaffected.
+
+The [standard codec](../../core/std/api/codec.md) raises Capacity on refused
+admission. Its value and schema writers report `EncodeError` for a count beyond
+the format's u32 field. Fixed-width scalar and key writers return unit.
+`decode` and `read` return `Result[T, DecodeError]`.
 
 | type | kind | bounds | size | holds |
 |---|---|---|---|---|
@@ -446,3 +452,108 @@ it makes `O(log m)` key comparisons however many keys are equal, and takes the g
 ordinal; rendering visits each key at its first ordinal with that last value. A wider
 document needs `u64` ordinals or a width error. No operation replaces the source alone or
 takes unchecked offsets, and nothing in the document moves.
+
+## Provide
+
+`provide` makes capabilities of virtual construction
+([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)) and answers their operations in the
+program's own code ([CAP-5](capabilities.md#cap-5-provider-operations)). Callers see nothing
+new: a `Dir`, `Net`, `Stdout`, `Stderr`, `Clock`, `Random` or `Process` from `provide` has its
+ordinary type and every `host`, `net`, `tls`, `stdout` and `stderr` operation takes it.
+
+```hirsel core
+pub opaque resource type Served[Op]
+pub opaque resource type Call[Op]
+pub opaque type Reply[Op]
+pub opaque resource type ClockHand
+pub opaque resource type StopTrigger
+pub type Withdrawn = Withdrawn()
+pub type Part = Whole | Read | Write
+pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64)
+pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64)
+pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part)
+pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake)
+pub type StreamOp = Write(len: u64)
+pub type StreamReply = Done | WriteFailed(WriteError)
+
+pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
+pub fn net(bytes n: u64) -> (Net, Served[NetOp])
+pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
+pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
+pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
+pub fn dir_op(c: Call[DirOp]) -> DirOp
+pub fn net_op(c: Call[NetOp]) -> NetOp
+pub fn stream_op(c: Call[StreamOp]) -> StreamOp
+pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
+pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
+pub fn secret(c: Call[NetOp]) -> Secret
+pub fn reply[Op](mut s: Served[Op], take c: Call[Op], take r: Reply[Op]) -> Result[(), Withdrawn]
+pub fn dir_reply(r: DirReply) -> Reply[DirOp]
+pub fn net_reply(r: NetReply) -> Reply[NetOp]
+pub fn stream_reply(r: StreamReply) -> Reply[StreamOp]
+pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
+pub fn random(seed: u64) -> Random
+pub fn process() -> (Process, StopTrigger)
+pub fn advance_to(mut h: ClockHand, mono_ns: u64)
+pub fn set_wall(mut h: ClockHand, wall_ms: u64)
+pub fn idle(mut h: ClockHand) -> Option[u64] waits
+pub fn trigger(take t: StopTrigger)
+```
+
+`advance_to`, `set_wall` and `idle` are in module `clock`, and `trigger` in module `process`.
+
+- **Served ports.** `provide.dir`, `net`, `stdout` and `stderr` admit the port's room of `n`
+  bytes, with a cell's 32, from the current limit and raise `Capacity` when it is refused;
+  as a cell's, the room is held until the run ends, since the capability is plain and
+  outlives the `Served` end. Each operation on the capability waits after issue as a `Call`
+  queued on the port, in the order the operations were issued. `provide.next` returns the
+  first queued call, and `provide.dir_op`, `net_op` and `stream_op` read its `Op`, which holds
+  only scalars: a path, name or data field is its byte length, which `provide.payload(c,
+  field, mut out)` appends to `out` (fields numbered from 0 in declaration order;
+  `Bounds` when `out`'s spare capacity is short), and `room` is the spare capacity the
+  caller offers for a result. `provide.fill` stages result bytes in the room, at most the
+  call's `room`, and returns how many it took. No caller storage reaches the server, and
+  no server storage reaches the caller until the reply.
+- **Handles.** Ids name the server's own objects: 0 is the capability `provide` returned,
+  and every other id is one the server issued in a reply (`File`, `Dir`, `Entries`,
+  `Socket`, `Listener`). The caller receives a fresh handle of the ordinary type bound to
+  the port, the kind and the id, so it reaches only that port's object of that kind, and a
+  handle of another provider or another port given to an operation is refused before it
+  reaches the server (`Denied`). A reply that issues id 0, an id already live for its kind,
+  or a variant that does not answer the call's operation fails the server with `Fail`, and
+  the call is settled as for a sealed port. `net.split` divides a socket in the caller
+  and asks the server nothing; dropping a half queues `Released(id, Read)` or
+  `Released(id, Write)` (FAIL-13).
+- **Reply.** `provide.reply` is the commit point of the call: it copies the staged bytes into
+  the caller's capacity and completes the operation with the reply's result. If
+  cancellation or the call's deadline settled it first
+  ([CONC-7](tasks.md#conc-7-cancellation-points)), it returns `Error(Withdrawn)`, discards
+  the staged bytes and issues nothing. A `Call` given to the `reply` of another port is
+  consumed as a dropped one and answers `Error(Withdrawn)`. A `Released` call needs no
+  reply. A `Call` dropped without a reply settles its caller as a sealed port does.
+- **Sealing.** Cleaning the `Served` end, or the end of its task, seals the port: every
+  queued and later call completes with `Closed` (`Dir`, `Stdout`, `Stderr`) or `Reset`
+  (`Net`), and drops of its handles still succeed. `provide.next` returns `None` only at
+  quiescence ([FAIL-15](failure.md#fail-15-run-stops)).
+- **Net authority.** A `provide.net` `Net` permits every address, name and TLS name, and
+  `net.narrow` narrows it. Its TLS handshakes are answered by its server, so it never
+  authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)).
+- **Cells.** `host.mono_ns`, `host.wall_ms`, `host.random` and `host.stopped` on a cell's
+  capability answer at issue from the cell, never switch task and never allocate.
+  `provide.clock` starts at the given times. `clock.advance_to(mut h, t)` raises monotonic
+  time to `t` (a smaller `t` changes nothing) and completes every sleep and expires every
+  deadline at or before it, in deadline order and then issue order. `clock.set_wall` sets
+  wall time alone. `clock.idle(mut h)` waits until every other task waits, then returns the
+  earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
+  answers each draw with the next bytes of a SplitMix64 stream from `seed`, eight
+  little-endian bytes per step, so the same seed gives the same bytes on every engine.
+  `provide.process()` gives a `Process` whose `host.stopped` completes once
+  `process.trigger` has run, including a trigger before the call; dropping a `StopTrigger`
+  without triggering never stops. Dropping a `ClockHand` freezes its clock: pending sleeps
+  and deadlines on it never fire.
+- **Replay.** A virtual provider's results are computed by the run, so they are not
+  inputs of [CAP-8](capabilities.md#cap-8-the-replay-point): a replay recomputes them. The
+  host operations a server makes pass the replay point as every provider operation does.
+  A seeded simulation is a test-run configuration over today's task order, not an order
+  promise.
+

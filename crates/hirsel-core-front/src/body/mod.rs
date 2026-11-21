@@ -36,7 +36,7 @@ use hirsel_core_ir::{
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
 };
-use hirsel_core_resolve::{Refusal, Target};
+use hirsel_core_resolve::{NameScope, Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use simd::SimdCall;
@@ -85,6 +85,7 @@ use types::*;
 pub(crate) use types::{
     float_binary_bits, float_negate_bits, float_suffix, int_magnitude, int_suffix, parse_float_bits,
 };
+pub(crate) use values::quoted_bytes;
 
 /// Work one body check did, for the cost measurements (core/MEASURE.md).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -840,11 +841,11 @@ impl Emitter {
     }
 }
 
-/// A clone body's: `(ptr from, ptr to) -> (u64 requested, u64 available)` (MEM-17).
+/// A clone body's: `(ptr from, ptr to)`, failing with `Capacity` (MEM-17).
 fn clone_body_signature() -> Signature {
     Signature {
         params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-        results: vec![Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
+        results: vec![],
         dest: None,
         never: false,
     }
@@ -1044,6 +1045,8 @@ struct Var {
     anchors: anchors::Fact,
     /// A borrowed mut parameter, including an alias captured by a nested callback.
     mut_anchor: bool,
+    /// For a `mut` pattern binding, the scrutinee place it names (OWN-15).
+    lent: Option<Place>,
 }
 
 /// A place and its type.
@@ -1115,6 +1118,8 @@ struct Frame {
     /// Where its exit edges begin in `exits`.
     exits: usize,
     scopes: usize,
+    /// `scope_slots`' length at its start: the slots declared inside it follow.
+    slots: usize,
     /// The owners begun before it.
     owners: usize,
 }
@@ -1209,9 +1214,13 @@ struct Cx<'c, 'a, 'e> {
     /// Freeze and reservation records, and the steps of their places.
     freezes: Vec<Freeze>,
     steps: Vec<PStep>,
-    /// A place already evaluated while testing whether an ascription denotes
-    /// it directly. A conversion reads this place without repeating its indices.
-    ascribed_operand: Option<(NodeId, At)>,
+    /// A place already evaluated for its node: while testing whether an ascription
+    /// denotes it directly, or whether a `copy` operand is plain. The next `place` of
+    /// that node reads it without repeating its indices.
+    resolved_operand: Option<(NodeId, At)>,
+    /// LANG-18: while a `?=>` path mapper is applied, its one argument is the
+    /// error payload already in hand: the mapping node, its type and value.
+    mapped_error: Option<(NodeId, TyId, Option<ValueId>)>,
     /// Block depth, and the slots of the open blocks in declaration order.
     depth: u32,
     /// The type the last expression checked synthesised, before its expected type.
@@ -1219,6 +1228,9 @@ struct Cx<'c, 'a, 'e> {
     /// The synthesised type of the tail of the block being closed; unit without one.
     tail_ty: TyId,
     scope_slots: Vec<u32>,
+    /// MEM-4: the call nodes where a writer call's Result may stand, found on the
+    /// first writer call of the item.
+    writer_sites: Option<HashSet<NodeId>>,
     step_scopes: Vec<(u32, u32)>,
     copies: Vec<CopySize>,
     allocations: Vec<AllocationLayout>,
@@ -1380,11 +1392,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             dead: false,
             freezes: vec![],
             steps: vec![],
-            ascribed_operand: None,
+            resolved_operand: None,
+            mapped_error: None,
             depth: 0,
             synth_ty: UNIT,
             tail_ty: UNIT,
             scope_slots: vec![],
+            writer_sites: None,
             step_scopes: vec![],
             copies: vec![],
             allocations: vec![],
@@ -1690,6 +1704,18 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if t == w.ty {
             return;
         }
+        // MEM-6: a published `T in a` is usable as `T in r` when `a` outlives `r`.
+        match self.region_fit(t, w.ty) {
+            Some(true) => return,
+            Some(false) => {
+                let (a, b) = (self.shown(w.ty), self.shown(t));
+                let message =
+                    format!("expected `{a}`, found `{b}`, whose region does not outlive it");
+                self.refuse_compared("MEM-6", n, b, a, message);
+                return;
+            }
+            None => {}
+        }
         let plain_view = self.plain_view(t, w.ty);
         let viewed = w.view
             && (matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty)
@@ -1731,6 +1757,110 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             let (a, b) = (self.shown(w.ty), self.shown(t));
             let message = format!("expected `{a}`, found `{b}`");
             self.refuse_compared("LANG-11", n, b, a, message);
+        }
+    }
+
+    /// MEM-6: whether `from` differs from `to` only in region roots, in an anchored
+    /// type's root, a type's region arguments, or inside `Option` and tuples; then
+    /// whether each of `from`'s roots there outlives `to`'s. `None` when the types
+    /// differ otherwise, or a differing root is not a region.
+    fn region_fit(&self, from: TyId, to: TyId) -> Option<bool> {
+        if from == to {
+            return Some(true);
+        }
+        match (self.t.kind(from), self.t.kind(to)) {
+            (TyKind::Region(a), TyKind::Region(b)) => {
+                let (a, b) = (*a, *b);
+                Some(
+                    self.region_root(a)?
+                        && self.region_root(b)?
+                        && self.outlives_root(a, b, from, to),
+                )
+            }
+            (TyKind::Anchored(x, a), TyKind::Anchored(y, b)) => {
+                let (x, a, y, b) = (*x, *a, *y, *b);
+                Some(self.region_fit(x, y)? & self.region_fit(a, b)?)
+            }
+            (TyKind::Tuple(xs), TyKind::Tuple(ys)) if xs.len() == ys.len() => {
+                let mut ok = true;
+                for (&x, &y) in xs.iter().zip(ys) {
+                    ok &= self.region_fit(x, y)?;
+                }
+                Some(ok)
+            }
+            (TyKind::Adt(d, xs), TyKind::Adt(e, ys)) if d == e && xs.len() == ys.len() => {
+                let option = is_core_prelude(&self.p.decls[d.index()].path, &["Option"]);
+                let mut ok = true;
+                for (&x, &y) in xs.iter().zip(ys) {
+                    if x == y {
+                        continue;
+                    }
+                    let region = matches!(self.t.kind(x), TyKind::Region(_))
+                        && matches!(self.t.kind(y), TyKind::Region(_));
+                    if !(option || region) {
+                        return None;
+                    }
+                    ok &= self.region_fit(x, y)?;
+                }
+                Some(ok)
+            }
+            _ => None,
+        }
+    }
+    /// Whether `root` names a region: a region generic, a `Region` parameter or a
+    /// local bound to a `Region` (MEM-6). Other roots anchor to places (OWN-20).
+    fn region_root(&self, root: Root) -> Option<bool> {
+        let region = match root {
+            Root::Generic(i) => self.fd.generics.get(i as usize).is_some_and(|g| g.region),
+            Root::Parameter(i) => self
+                .fd
+                .params
+                .get(i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            Root::Local(slot) => self
+                .vars
+                .get(slot as usize)
+                .copied()
+                .flatten()
+                .is_some_and(|v| self.region_handle(v.ty)),
+            Root::Enclosing | Root::CallableParameter { .. } => false,
+        };
+        region.then_some(true)
+    }
+    /// MEM-6 outlives, from the lexical nesting and the signature only: `a` is `b`;
+    /// a signature region outlives every region the body opens; a region opened in
+    /// an enclosing block outlives one opened inside it; `where` edges, transitively.
+    fn outlives_root(&self, a: Root, b: Root, a_ty: TyId, b_ty: TyId) -> bool {
+        if a == b {
+            return true;
+        }
+        let signature = |r: Root| matches!(r, Root::Generic(_) | Root::Parameter(_));
+        match (a, b) {
+            (Root::Local(x), Root::Local(y)) => {
+                let (Some(x), Some(y)) = (self.vars[x as usize], self.vars[y as usize]) else {
+                    return false;
+                };
+                // Both are in scope here, so the shallower one's block encloses the other's.
+                (x.frame_level, x.depth) < (y.frame_level, y.depth)
+            }
+            (a, Root::Local(_)) => signature(a),
+            _ if signature(a) && signature(b) => {
+                let mut seen = vec![a_ty];
+                let mut i = 0;
+                while i < seen.len() {
+                    if seen[i] == b_ty {
+                        return true;
+                    }
+                    for &(p, q) in &self.fd.outlives {
+                        if p == seen[i] && !seen.contains(&q) {
+                            seen.push(q);
+                        }
+                    }
+                    i += 1;
+                }
+                false
+            }
+            _ => false,
         }
     }
 
@@ -1940,6 +2070,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if self.e.needs_drop(id) {
             self.consume(Some(from), n);
         }
+        self.copy_bytes_to(to, from, id, n);
+    }
+
+    /// Copy carrier bytes while leaving their owner in place.
+    fn copy_bytes_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
         if self.pointer_address(from) == Some(to) {
             return;
         }
@@ -2018,76 +2153,17 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let r = PoolRange::push(&mut self.b.pools.values, v);
         self.end(Terminator::Return(r), Some(n));
     }
-    /// A clone body's return (MEM-17): `Ok(copy)` moves the copy to `to` and returns
-    /// `(0, 0)`; `Error(Capacity)` leaves `to` alone and returns its request.
+    /// A clone body's return (MEM-17): the copy moves to `to`. A refusal in the body
+    /// raised `Capacity` and never reaches here.
     fn clone_return(&mut self, to: ValueId, n: NodeId) {
         let Some((dest, rid)) = self.dest else {
             return self.gap(n, "this clone body's result is not built");
         };
-        let Some((_, this, Some(cap))) = self.result_parts(self.fd.result) else {
-            return self.gap(n, "this clone body's result is not built");
-        };
-        let (Ok(Rep::Place(this)), Ok(Rep::Place(cap))) = (self.rep(this), self.rep(cap)) else {
-            return self.gap(n, "this clone body's result is not built");
-        };
-        let whole = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(rid), n);
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: whole,
-            },
-            n,
-        );
-        let error = self.new_block(&[]);
-        self.pattern_compare(
-            Some(tag),
-            Ty::Scalar(Scalar::U32),
-            0,
-            CompareOp::Eq,
-            Some(error),
-            n,
-        );
-        let copy = self.address(
-            AddressBase::Address(whole),
-            &[Step::CaseField { case: 0, field: 0 }],
-            PlaceTy::Declared(this),
-            n,
-        );
+        let copy = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(rid), n);
         let copy = self.pointer(copy, n);
-        let target = self.address(AddressBase::Value(to), &[], PlaceTy::Declared(this), n);
-        self.copy_to(target, copy, this, n);
-        let Some(zero) = self.konst(Ty::Scalar(Scalar::U64), 0, n) else {
-            return;
-        };
-        let r = PoolRange::push(&mut self.b.pools.values, [zero, zero]);
-        self.end(Terminator::Return(r), Some(n));
-        self.start(error);
-        let refused = self.address(
-            AddressBase::Address(whole),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(cap),
-            n,
-        );
-        let mut pair = [zero; 2];
-        for (i, v) in pair.iter_mut().enumerate() {
-            let at = self.address(
-                AddressBase::Address(refused),
-                &[Step::Field(i as u32)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            *v = self.value(Ty::Scalar(Scalar::U64));
-            self.inst(
-                Inst::Read {
-                    result: *v,
-                    address: at,
-                    mode: ReadMode::Bits,
-                },
-                n,
-            );
-        }
-        let r = PoolRange::push(&mut self.b.pools.values, pair);
+        let target = self.address(AddressBase::Value(to), &[], PlaceTy::Declared(rid), n);
+        self.copy_to(target, copy, rid, n);
+        let r = PoolRange::push(&mut self.b.pools.values, []);
         self.end(Terminator::Return(r), Some(n));
     }
 
@@ -2724,6 +2800,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// `n` checked and emitted: the single place an expression's value is produced. A
     /// live expression of a valued type that produced no value marks the body halted.
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        if let Some((node, ty, value)) = self.mapped_error
+            && node == n
+        {
+            // The mapper's argument is the error payload; it is owned here until
+            // the mapper takes it.
+            self.mapped_error = None;
+            self.temp(ty, value);
+            return (ty, value);
+        }
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
         if !self.versioned && t > HOLE && matches!(self.t.kind(t), TyKind::Vector(_)) {

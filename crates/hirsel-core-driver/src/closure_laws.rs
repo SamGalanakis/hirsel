@@ -290,9 +290,8 @@ fn a_generic_finalizer_binds_its_scalar_argument() {
     assert!(keys.contains(&expect), "{keys:?}");
 }
 
-/// Rigid clear. Law: a template's rows at its own parameters (`$i`) are dead once
-/// it is substituted, so no instance a build reaches names one, and their hooks
-/// are gone from the unit. Oracle: the source holds `Guard[T]` only inside `hold`.
+/// PROG-5 and PROG-10. The template `hold[T]` uses `Guard[T]` with a finalizer,
+/// but `root` only calls `hold[u64]`. Reached instances retain concrete rows.
 #[test]
 fn a_hook_at_a_rigid_parameter_is_not_reached() {
     let dir = tempfile::tempdir().unwrap();
@@ -306,25 +305,30 @@ fn root(take g: Guard[u64]) -> u64 { hold(take g) }\n";
         .unwrap();
     assert!(reached.accepted(), "{:?}", reached.instances);
     let hold = DefPath::from_full("app@1/main/hold").unwrap();
-    let mut rigid = 0;
-    for key in reached.instances.as_ref().unwrap() {
+    let template = product.definitions[&hold].ir().unwrap();
+    let rigid = row(template, |name| {
+        name.contains("Guard[") && name.contains('$')
+    });
+    assert!(template.types[rigid.index()].finalizer.is_some());
+
+    let keys = reached.instances.as_ref().unwrap();
+    let hold_instance = keys.iter().find(|key| key.definition == hold).unwrap();
+    for key in keys {
         let body = reached.materialized.get(key);
         let module = body.ir().unwrap();
-        if key.definition == hold {
-            rigid += module.types.iter().filter(|s| s.name.contains('$')).count();
-        }
         let f = &module.functions[body.function.index()];
         let names = module.argument_names(&module.instances[f.instance.index()]);
-        assert!(names.iter().all(|n| !n.contains('$')), "{key:?}: {names:?}");
-        for shape in module.types.iter().filter(|s| s.name.contains('$')) {
-            assert!(
-                shape.finalizer.is_none() && shape.clone.is_none(),
-                "{key:?}: {} keeps a hook",
-                shape.name
-            );
+        if key == hold_instance {
+            assert_eq!(names, ["u64"]);
+            let guard = row(module, |name| name.contains("Guard[u64]"));
+            assert!(module.types[guard.index()].finalizer.is_some());
         }
+        assert!(names.iter().all(|n| !n.contains('$')), "{key:?}: {names:?}");
+        assert!(
+            module.types.iter().all(|shape| !shape.name.contains('$')),
+            "{key:?} retains a rigid type row"
+        );
     }
-    assert!(rigid > 0, "hold's unit holds its template's rigid rows");
 }
 
 const UNIVERSE: &str = "type Inner { a: u64 }\n\

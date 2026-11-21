@@ -1,29 +1,18 @@
 use crate::{abi::*, causes, os::OsProvider, process::*, provider::*};
-use std::{
-    fs::File,
-    os::fd::OwnedFd,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-};
-static NEXT: AtomicU64 = AtomicU64::new(0);
+use std::{fs::File, os::fd::OwnedFd};
 struct Fixture {
-    root: PathBuf,
+    root: tempfile::TempDir,
     os: OsProvider,
     dir: u64,
     context: *mut crate::Context,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "hirsel-provider-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let out: OwnedFd = File::create(root.join("stdout")).unwrap().into();
-        let err: OwnedFd = File::create(root.join("stderr")).unwrap().into();
+        let root = tempfile::tempdir().unwrap();
+        let out: OwnedFd = File::create(root.path().join("stdout")).unwrap().into();
+        let err: OwnedFd = File::create(root.path().join("stderr")).unwrap().into();
         let mut os = OsProvider::new(out, err);
-        let dir = os.grant(&root).unwrap();
+        let dir = os.grant(root.path()).unwrap();
         let context = hirsel_core_context_new(1 << 20);
         // SAFETY: fixture exclusively owns this fresh context.
         unsafe {
@@ -79,7 +68,6 @@ impl Drop for Fixture {
         unsafe {
             hirsel_core_context_free(self.context);
         }
-        std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
 #[test]
@@ -108,17 +96,24 @@ fn files_deliver_committed_prefixes_and_all_open_modes() {
     let h = f.open(b"file", 2);
     f.call(WRITE, h, b"", 0, &mut bytes, 1);
     f.simple(CLOSE, h, b"", 0);
-    assert_eq!(std::fs::read(f.root.join("file")).unwrap(), b"abcdefa");
+    assert_eq!(
+        std::fs::read(f.root.path().join("file")).unwrap(),
+        b"abcdefa"
+    );
     let h = f.open(b"file", 1);
     f.simple(CLOSE, h, b"", 0);
-    assert!(std::fs::read(f.root.join("file")).unwrap().is_empty());
+    assert!(
+        std::fs::read(f.root.path().join("file"))
+            .unwrap()
+            .is_empty()
+    );
     let h = f.open(b"new-append", 2);
     f.simple(CLOSE, h, b"", 0);
     for op in [STDOUT, STDERR] {
         assert_eq!(f.call(op, 0, b"", 0, &mut bytes, 6).0.error, IoError::OK);
     }
     for name in ["stdout", "stderr"] {
-        assert_eq!(std::fs::read(f.root.join(name)).unwrap(), b"abcdef");
+        assert_eq!(std::fs::read(f.root.path().join(name)).unwrap(), b"abcdef");
     }
 }
 /// A sync parks while the helper runs it and delivers the syscall's own
@@ -172,18 +167,20 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     for p in [b"../escape".as_slice(), b"/tmp/escape"] {
         assert_eq!(f.simple(OPEN, f.dir, p, 1).error.tag, 2);
     }
-    symlink("/tmp", f.root.join("outside")).unwrap();
+    symlink("/tmp", f.root.path().join("outside")).unwrap();
     assert_eq!(f.simple(OPEN, f.dir, b"outside/escape", 1).error.tag, 2);
     let h = f.open(b"inside", 1);
     f.simple(CLOSE, h, b"", 0);
-    symlink("inside", f.root.join("link")).unwrap();
+    symlink("inside", f.root.path().join("link")).unwrap();
     let h = f.open(b"link", 0);
     f.simple(CLOSE, h, b"", 0);
-    let nested = f.root.join("nested");
+    let nested = f.root.path().join("nested");
     std::fs::create_dir(&nested).unwrap();
-    let dir = f.os.grant(&nested).unwrap();
+    let dir = f.simple(OPEN_DIR, f.dir, b"nested", 0);
+    assert_eq!(dir.error, IoError::OK);
+    let dir = dir.value;
     let inside_file = nested.join("original");
-    let outside_file = f.root.join("elsewhere");
+    let outside_file = f.root.path().join("elsewhere");
     std::fs::write(&inside_file, b"original").unwrap();
     std::fs::write(&outside_file, b"outside").unwrap();
     symlink("original", nested.join("name")).unwrap();
@@ -193,16 +190,68 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     std::fs::remove_file(nested.join("name")).unwrap();
     symlink("../elsewhere", nested.join("name")).unwrap();
     assert_eq!(f.simple(OPEN, dir, b"name", 1).error.tag, 2);
+    assert_eq!(f.simple(OPEN_DIR, dir, b"name", 0).error.tag, 2);
+    // The final link is itself metadata inside the grant. Following it would
+    // report the external file size or refuse the confined lookup.
+    let link = f.simple(STAT, dir, b"name", 0);
+    assert_eq!(
+        (link.error, link.kind, link.value),
+        (IoError::OK, 2, 12),
+        "stat reports the link itself"
+    );
+    for path in [b"../elsewhere".as_slice(), b"/elsewhere"] {
+        assert_eq!(f.simple(OPEN_DIR, dir, path, 0).error.tag, 2);
+        assert_eq!(f.simple(STAT, dir, path, 0).error.tag, 2);
+    }
+    symlink("..", nested.join("up")).unwrap();
+    assert_eq!(f.simple(OPEN_DIR, dir, b"up/nested", 0).error.tag, 2);
+    assert_eq!(f.simple(STAT, dir, b"up/elsewhere", 0).error.tag, 2);
+    std::fs::create_dir_all(nested.join("inside/child")).unwrap();
+    symlink("inside", nested.join("through")).unwrap();
+    assert_eq!(f.simple(OPEN_DIR, dir, b"through", 0).error.tag, 2);
+    assert_eq!(
+        f.simple(OPEN_DIR, dir, b"through/child", 0).error,
+        IoError::OK
+    );
+    let listing = f.simple(ENTRIES, dir, b"", 0);
+    assert_eq!(listing.error, IoError::OK);
+    let mut records = [0; 258];
+    let (batch, len) = f.call(NEXT_ENTRIES, listing.value, b"", 0, &mut records, 0);
+    assert_eq!((batch.error, batch.value), (IoError::OK, 5));
+    let mut names = Vec::new();
+    let mut tail = &records[..len];
+    while let Some(([kind, lo, hi], bytes)) = tail.split_first_chunk::<3>() {
+        let (name, rest) = bytes.split_at(u16::from_le_bytes([*lo, *hi]) as usize);
+        names.push((name, *kind));
+        tail = rest;
+    }
+    assert!(tail.is_empty());
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            (b"inside".as_slice(), 1),
+            (b"name", 2),
+            (b"original", 0),
+            (b"through", 2),
+            (b"up", 2)
+        ],
+        "listing sees only direct names and does not dereference links"
+    );
+    assert_eq!(
+        f.simple(CLOSE_ENTRIES, listing.value, b"", 0).error,
+        IoError::OK
+    );
     assert_eq!(std::fs::read(inside_file).unwrap(), b"original");
     assert_eq!(std::fs::read(outside_file).unwrap(), b"outside");
     assert_eq!(f.simple(MKDIR, f.dir, b"tree", 0).error, IoError::OK);
     assert_eq!(f.simple(MKDIR, f.dir, b"tree", 0).error.tag, 3);
     assert_eq!(f.simple(MKDIR, f.dir, b"tree/sub", 0).error, IoError::OK);
-    std::fs::write(f.root.join("tree/sub/data"), b"data").unwrap();
-    symlink("../../inside", f.root.join("tree/sub/link")).unwrap();
+    std::fs::write(f.root.path().join("tree/sub/data"), b"data").unwrap();
+    symlink("../../inside", f.root.path().join("tree/sub/link")).unwrap();
     assert_eq!(f.simple(REMOVE_TREE, f.dir, b"tree", 0).error, IoError::OK);
-    assert!(!f.root.join("tree").exists());
-    assert!(f.root.join("inside").exists());
+    assert!(!f.root.path().join("tree").exists());
+    assert!(f.root.path().join("inside").exists());
     assert_eq!(f.simple(REMOVE, f.dir, b"link", 0).error, IoError::OK);
     assert_eq!(f.simple(REMOVE, f.dir, b"absent", 0).error.tag, 1);
     assert_eq!(f.simple(OPEN, f.dir, b"inside/child", 0).error.tag, 5);
@@ -215,6 +264,7 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     assert_eq!(&name[..7], b"prefix:");
     assert!(
         f.root
+            .path()
             .join(std::str::from_utf8(&name[..n]).unwrap())
             .is_dir()
     );
@@ -227,8 +277,8 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
 #[test]
 fn rename_rejects_empty_and_nul_components_before_any_effect() {
     let mut f = Fixture::new();
-    std::fs::write(f.root.join("source"), b"source").unwrap();
-    std::fs::write(f.root.join("victim"), b"victim").unwrap();
+    std::fs::write(f.root.path().join("source"), b"source").unwrap();
+    std::fs::write(f.root.path().join("victim"), b"victim").unwrap();
     for (from, to) in [
         (b"".as_slice(), b"dest".as_slice()),
         (b"source".as_slice(), b"".as_slice()),
@@ -243,10 +293,16 @@ fn rename_rejects_empty_and_nul_components_before_any_effect() {
         joined.push(0);
         joined.extend_from_slice(to);
         assert_eq!(f.simple(RENAME, f.dir, &joined, 0).error.tag, 2);
-        assert_eq!(std::fs::read(f.root.join("source")).unwrap(), b"source");
-        assert_eq!(std::fs::read(f.root.join("victim")).unwrap(), b"victim");
-        assert!(!f.root.join("dest").exists());
-        assert!(!f.root.join("bad").exists());
+        assert_eq!(
+            std::fs::read(f.root.path().join("source")).unwrap(),
+            b"source"
+        );
+        assert_eq!(
+            std::fs::read(f.root.path().join("victim")).unwrap(),
+            b"victim"
+        );
+        assert!(!f.root.path().join("dest").exists());
+        assert!(!f.root.path().join("bad").exists());
     }
 }
 /// Every entry of the fixture's root other than the standard streams: `f<bytes>`
@@ -383,24 +439,24 @@ fn rename_follows_each_sentence_of_core_md() {
     ];
     for (sentence, setup, from, to, tag, want) in cases {
         let mut f = Fixture::new();
-        setup(&f.root);
+        setup(f.root.path());
         let path = [from.as_bytes(), b"\0", to.as_bytes()].concat();
         let got = f.simple(RENAME, f.dir, &path, 0).error.tag;
         let want: Vec<(String, String)> = want
             .iter()
             .map(|(n, v)| (n.to_string(), v.to_string()))
             .collect();
-        assert_eq!((got, entries(&f.root)), (tag, want), "{sentence}");
+        assert_eq!((got, entries(f.root.path())), (tag, want), "{sentence}");
     }
 }
 #[test]
 fn invalid_host_paths_are_denied_before_any_effect() {
-    for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE] {
+    for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE, OPEN_DIR, STAT] {
         let mut f = Fixture::new();
-        std::fs::create_dir(f.root.join("a")).unwrap();
-        std::fs::write(f.root.join("keep"), b"root").unwrap();
-        std::fs::write(f.root.join("a/keep"), b"child").unwrap();
-        let entries = std::fs::read_dir(&f.root).unwrap().count();
+        std::fs::create_dir(f.root.path().join("a")).unwrap();
+        std::fs::write(f.root.path().join("keep"), b"root").unwrap();
+        std::fs::write(f.root.path().join("a/keep"), b"child").unwrap();
+        let entries = std::fs::read_dir(f.root.path()).unwrap().count();
         for path in [
             b"keep\0ignored".as_slice(),
             b".",
@@ -418,10 +474,16 @@ fn invalid_host_paths_are_denied_before_any_effect() {
                 IoError::from_errno(libc::EACCES),
                 "op={operation}, path={path:?}"
             );
-            assert_eq!(std::fs::read(f.root.join("keep")).unwrap(), b"root");
-            assert_eq!(std::fs::read(f.root.join("a/keep")).unwrap(), b"child");
-            assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), entries);
-            assert_eq!(std::fs::read_dir(f.root.join("a")).unwrap().count(), 1);
+            assert_eq!(std::fs::read(f.root.path().join("keep")).unwrap(), b"root");
+            assert_eq!(
+                std::fs::read(f.root.path().join("a/keep")).unwrap(),
+                b"child"
+            );
+            assert_eq!(std::fs::read_dir(f.root.path()).unwrap().count(), entries);
+            assert_eq!(
+                std::fs::read_dir(f.root.path().join("a")).unwrap().count(),
+                1
+            );
         }
     }
 }
@@ -476,25 +538,28 @@ fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_creat
         );
         assert_eq!(f.simple(CLOSE, file.value, b"", 0).error, IoError::OK);
         assert_eq!(
-            std::fs::read(f.root.join(basename).join("x")).unwrap(),
+            std::fs::read(f.root.path().join(basename).join("x")).unwrap(),
             b"1"
         );
         assert_eq!(
             f.simple(REMOVE_TREE, f.dir, &name[..len], 0).error,
             IoError::OK
         );
-        assert!(!f.root.join(basename).exists());
+        assert!(!f.root.path().join(basename).exists());
     }
     for prefix in [b"a/b".as_slice(), b"/", b"nul\0byte"] {
         let mut f = Fixture::new();
         let mut name = vec![0xa5; prefix.len() + 32];
         name[..prefix.len()].copy_from_slice(prefix);
         let before = name.clone();
-        let before_entries = std::fs::read_dir(&f.root).unwrap().count();
+        let before_entries = std::fs::read_dir(f.root.path()).unwrap().count();
         let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, prefix.len());
         assert_eq!(out.error, IoError::from_errno(libc::EACCES));
         assert_eq!((name, len), (before, prefix.len()));
-        assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), before_entries);
+        assert_eq!(
+            std::fs::read_dir(f.root.path()).unwrap().count(),
+            before_entries
+        );
     }
 }
 #[test]
@@ -504,13 +569,13 @@ fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
     // Host fixture occupies the provider's deterministic first candidate. The
     // oracle is freshness/preservation, not which suffix the next attempt uses.
     let occupied = format!("retry-h{:x}x0", std::process::id());
-    std::fs::create_dir(f.root.join(&occupied)).unwrap();
+    std::fs::create_dir(f.root.path().join(&occupied)).unwrap();
     let mut name = [0xa5; 40];
     name[..6].copy_from_slice(b"retry-");
     let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, 6);
     assert_eq!(out.error, IoError::OK);
     assert_ne!(&name[..len], occupied.as_bytes());
-    assert!(f.root.join(&occupied).is_dir());
+    assert!(f.root.path().join(&occupied).is_dir());
     assert_eq!(
         f.simple(REMOVE_TREE, f.dir, &name[..len], 0).error,
         IoError::OK
@@ -520,6 +585,7 @@ fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
     for sequence in 0..crate::os::TEMP_ATTEMPTS {
         std::fs::create_dir(
             f.root
+                .path()
                 .join(format!("retry-h{:x}x{sequence:x}", std::process::id())),
         )
         .unwrap();
@@ -527,11 +593,14 @@ fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
     let mut name = [0xa5; 40];
     name[..6].copy_from_slice(b"retry-");
     let before = name;
-    let before_entries = std::fs::read_dir(&f.root).unwrap().count();
+    let before_entries = std::fs::read_dir(f.root.path()).unwrap().count();
     let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, 6);
     assert_eq!(out.error, IoError::from_errno(libc::EAGAIN));
     assert_eq!((name, len), (before, 6));
-    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), before_entries);
+    assert_eq!(
+        std::fs::read_dir(f.root.path()).unwrap().count(),
+        before_entries
+    );
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
     // SAFETY: test config owns a Vec sink and callback borrows exactly n bytes.
@@ -902,7 +971,7 @@ fn guarded_root_routes_real_os_calls_through_the_separate_host_stack() {
     // SAFETY: config, OS adapter and grants outlive the guarded root.
     assert_eq!(unsafe { hirsel_core_run(&config, main) }, 0);
     assert!(stderr.is_empty());
-    assert!(!fixture.root.join("from-main").exists());
+    assert!(!fixture.root.path().join("from-main").exists());
 }
 #[test]
 fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_site() {

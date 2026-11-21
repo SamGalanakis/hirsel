@@ -556,8 +556,9 @@ pub enum Inst {
     /// sized destination's `n` and a text's length are known only at run time)
     /// aligned to `align`
     /// (MEM-21). On refusal `result` is null and `available` is the room left in the
-    /// limit tried (MEM-22), and nothing is allocated; on success `available` is 0. Under a finalizer's grant a
-    /// refusal is a failure with cause `Capacity` instead (MEM-27).
+    /// limit tried (MEM-22), and nothing is allocated; on success `available` is 0. It
+    /// never fails: the producer raises `Capacity` on a null result where the source
+    /// operation raises (MEM-21).
     Alloc {
         result: ValueId,
         available: ValueId,
@@ -571,7 +572,6 @@ pub enum Inst {
         overflow: Option<ValueId>,
         size: ValueId,
         align: u64,
-        fail: Option<BlockId>,
     },
     /// Free an own, counted or resource block and refund `charge` to the limit its
     /// record leads to (MEM-20, MEM-23). Never fails. A resource's refund leaves out
@@ -598,8 +598,7 @@ pub enum Inst {
     /// `capacity` elements, consuming the old one. It admits `charge` as `alloc ..
     /// like` the old block does, the whole charge before any refund. On refusal
     /// `result` is null, `available` the room left, and the carrier, its block and
-    /// its elements are unchanged; under a finalizer's grant a refusal is the failure
-    /// `Capacity` (MEM-27). On success the first `moved` bytes (the carrier's
+    /// its elements are unchanged; it never fails, as `alloc`. On success the first `moved` bytes (the carrier's
     /// length times its element's stride) are the new block's, the carrier holds the
     /// new data and `capacity`, and then the old block is dead, even at an unchanged
     /// address, and `refund` (its charge) goes back to the limit its record leads to.
@@ -614,7 +613,6 @@ pub enum Inst {
         capacity: ValueId,
         moved: ValueId,
         refund: ValueId,
-        fail: Option<BlockId>,
     },
     // ---- FORM v1b (frozen) ----
     /// The case number (`u32`, declaration order from 0) of the variant value at
@@ -994,6 +992,8 @@ pub enum RtOp {
     Xxh3Short,
     /// Accumulate complete XXH3 stripes in eight words with the given secret.
     Xxh3Stripes,
+    /// Take the socket or read the scratch grant designated by the place host.
+    LaunchHandle,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1035,8 +1035,35 @@ pub enum HostOp {
     SendSecret = 23,
     SecretSeal = 30,
     SecretNarrow = 31,
+    OpenDir = hirsel_core_ids::host_op::OPEN_DIR as isize,
+    Entries = hirsel_core_ids::host_op::ENTRIES as isize,
+    NextEntries = hirsel_core_ids::host_op::NEXT_ENTRIES as isize,
+    Stat = hirsel_core_ids::host_op::STAT as isize,
+    StatFile = hirsel_core_ids::host_op::STAT_FILE as isize,
+    ReadAt = 37,
+    WriteAt = 38,
+    SecretHmac = hirsel_core_ids::host_op::SECRET_MAC as isize,
+    SecretVerifyHmac = 42,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     NetNarrowResolve = 41,
+    StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
+    EnvGet = 33,
+    EnvLen = 34,
+    EnvName = 35,
+    EnvNarrow = 36,
+    ProvideClock = hirsel_core_ids::host_op::PROVIDE_CLOCK as isize,
+    ProvideRandom = hirsel_core_ids::host_op::PROVIDE_RANDOM as isize,
+    ProvideProcess = hirsel_core_ids::host_op::PROVIDE_PROCESS as isize,
+    ClockAdvance = hirsel_core_ids::host_op::CLOCK_ADVANCE as isize,
+    ClockSetWall = hirsel_core_ids::host_op::CLOCK_SET_WALL as isize,
+    ClockIdle = hirsel_core_ids::host_op::CLOCK_IDLE as isize,
+    ProcessTrigger = hirsel_core_ids::host_op::PROCESS_TRIGGER as isize,
+    ProvideStdout = hirsel_core_ids::host_op::PROVIDE_STDOUT as isize,
+    ProvideStderr = hirsel_core_ids::host_op::PROVIDE_STDERR as isize,
+    PortNext = hirsel_core_ids::host_op::PORT_NEXT as isize,
+    CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
+    CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
+    PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
 }
 
 impl HostOp {
@@ -1044,6 +1071,7 @@ impl HostOp {
     pub fn io_symbol(self) -> &'static str {
         match self {
             Self::WallMs | Self::MonoNs => "hirsel_core_host_clock",
+            Self::Stat | Self::StatFile => "hirsel_core_host_stat",
             Self::Random | Self::Stdout | Self::Stderr | Self::Stopped => "hirsel_core_host_io",
             _ => "hirsel_core_host_op",
         }
@@ -1076,14 +1104,41 @@ impl HostOp {
         HostOp::SendSecret,
         HostOp::SecretSeal,
         HostOp::SecretNarrow,
+        HostOp::SecretHmac,
+        HostOp::SecretVerifyHmac,
         HostOp::RecvBounded,
         HostOp::SendPair,
         HostOp::NetNarrow,
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
+        HostOp::OpenDir,
+        HostOp::Entries,
+        HostOp::NextEntries,
+        HostOp::Stat,
+        HostOp::StatFile,
+        HostOp::ReadAt,
+        HostOp::WriteAt,
         HostOp::Resolve,
         HostOp::NetNarrowResolve,
+        HostOp::StdinRead,
+        HostOp::EnvGet,
+        HostOp::EnvLen,
+        HostOp::EnvName,
+        HostOp::EnvNarrow,
+        HostOp::ProvideClock,
+        HostOp::ProvideRandom,
+        HostOp::ProvideProcess,
+        HostOp::ClockAdvance,
+        HostOp::ClockSetWall,
+        HostOp::ClockIdle,
+        HostOp::ProcessTrigger,
+        HostOp::ProvideStdout,
+        HostOp::ProvideStderr,
+        HostOp::PortNext,
+        HostOp::CallWord,
+        HostOp::CallPayload,
+        HostOp::PortReply,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1094,6 +1149,13 @@ impl HostOp {
         match self {
             HostOp::Open => "host_open",
             HostOp::Read => "host_read",
+            HostOp::OpenDir => "host_open_dir",
+            HostOp::Entries => "host_entries",
+            HostOp::NextEntries => "host_next_entries",
+            HostOp::Stat => "host_stat",
+            HostOp::StatFile => "host_stat_file",
+            HostOp::ReadAt => "host_read_at",
+            HostOp::WriteAt => "host_write_at",
             HostOp::Write => "host_write",
             HostOp::Close => "host_close",
             HostOp::TryLock => "host_try_lock",
@@ -1124,12 +1186,32 @@ impl HostOp {
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
             HostOp::SecretNarrow => "secret_narrow",
+            HostOp::SecretHmac => "secret_hmac_sha256",
+            HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
             HostOp::NetSplit => "net_split",
             HostOp::Stopped => "host_stopped",
+            HostOp::StdinRead => "stdin_read",
+            HostOp::EnvGet => "env_get",
+            HostOp::EnvLen => "env_len",
+            HostOp::EnvName => "env_name",
+            HostOp::EnvNarrow => "env_narrow",
+            HostOp::ProvideClock => "provide_clock",
+            HostOp::ProvideRandom => "provide_random",
+            HostOp::ProvideProcess => "provide_process",
+            HostOp::ClockAdvance => "clock_advance_to",
+            HostOp::ClockSetWall => "clock_set_wall",
+            HostOp::ClockIdle => "clock_idle",
+            HostOp::ProcessTrigger => "process_trigger",
+            HostOp::ProvideStdout => "provide_stdout",
+            HostOp::ProvideStderr => "provide_stderr",
+            HostOp::PortNext => "port_next",
+            HostOp::CallWord => "call_word",
+            HostOp::CallPayload => "call_payload",
+            HostOp::PortReply => "port_reply",
         }
     }
-    /// C entry of a socket or Net ownership/authority adapter.
-    pub const fn net_symbol(self) -> &'static str {
+    /// C entry of a host operation that has its own adapter.
+    pub const fn adapter_symbol(self) -> &'static str {
         match self {
             Self::Connect => "hirsel_core_host_connect",
             Self::Resolve => "hirsel_core_host_resolve",
@@ -1144,7 +1226,27 @@ impl HostOp {
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
             Self::SecretNarrow => "hirsel_core_secret_narrow",
+            Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
+            Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
             Self::NetSplit => "hirsel_core_net_split",
+            Self::StdinRead => "hirsel_core_stdin_read",
+            Self::EnvGet => "hirsel_core_env_get",
+            Self::EnvLen => "hirsel_core_env_len",
+            Self::EnvName => "hirsel_core_env_name",
+            Self::EnvNarrow => "hirsel_core_env_narrow",
+            Self::ProvideClock => "hirsel_core_provide_clock",
+            Self::ProvideRandom => "hirsel_core_provide_random",
+            Self::ProvideProcess => "hirsel_core_provide_process",
+            Self::ClockAdvance => "hirsel_core_clock_advance_to",
+            Self::ClockSetWall => "hirsel_core_clock_set_wall",
+            Self::ClockIdle => "hirsel_core_clock_idle",
+            Self::ProcessTrigger => "hirsel_core_process_trigger",
+            Self::ProvideStdout => "hirsel_core_provide_stdout",
+            Self::ProvideStderr => "hirsel_core_provide_stderr",
+            Self::PortNext => "hirsel_core_port_next",
+            Self::CallWord => "hirsel_core_call_word",
+            Self::CallPayload => "hirsel_core_call_payload",
+            Self::PortReply => "hirsel_core_port_reply",
             _ => unreachable!(),
         }
     }
@@ -1160,20 +1262,42 @@ impl HostOp {
                 | HostOp::NetNarrowResolve
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
+                | HostOp::SecretHmac
+                | HostOp::SecretVerifyHmac
                 | HostOp::NetSplit
+                | HostOp::EnvGet
+                | HostOp::EnvLen
+                | HostOp::EnvName
+                | HostOp::EnvNarrow
+                | HostOp::ProvideClock
+                | HostOp::ProvideRandom
+                | HostOp::ProvideProcess
+                | HostOp::ClockAdvance
+                | HostOp::ClockSetWall
+                | HostOp::ProcessTrigger
+                | HostOp::ProvideStdout
+                | HostOp::ProvideStderr
+                | HostOp::CallWord
+                | HostOp::PortReply
         )
     }
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
 /// recorded by the instructions that raise them; Cancelled by the engine operations
-/// that observe it; Capacity by an allocation over a grant.
+/// that observe it.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RaiseCause {
     Unwrap,
     Bounds,
     /// `fail(msg)`: takes the `String` at the address.
     Fail(AddressId),
+    /// A refused admission (MEM-21): `Capacity(c)` with `c`'s two `u64` words, the
+    /// refused charge and the room left in the limit tried (MEM-22).
+    Capacity {
+        requested: ValueId,
+        available: ValueId,
+    },
 }
 
 impl RtOp {
@@ -1292,6 +1416,7 @@ impl RtOp {
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
+            RtOp::LaunchHandle => (vec![V(u64_)], vec![u64_]),
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
@@ -1403,6 +1528,9 @@ impl RtOp {
                     ),
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
+                    HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
+                        (vec![V(u64_), V(p), V(p)], outcome)
+                    }
                     HostOp::NetNarrowTls => (
                         vec![
                             V(u64_),
@@ -1414,11 +1542,46 @@ impl RtOp {
                         ],
                         outcome,
                     ),
-                    HostOp::NetSplit => (vec![V(u64_)], outcome),
+                    HostOp::NetSplit
+                    | HostOp::EnvLen
+                    | HostOp::ProvideRandom
+                    | HostOp::ClockIdle
+                    | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
+                    HostOp::ProvideProcess => (vec![], outcome),
+                    HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::PortNext => {
+                        (vec![V(u64_)], outcome)
+                    }
+                    HostOp::CallWord => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
+                    HostOp::PortReply => (vec![V(u64_); 6], outcome),
+                    HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
+                        (vec![V(u64_), V(u64_)], outcome)
+                    }
+                    HostOp::EnvGet | HostOp::EnvName => {
+                        let input = if op == HostOp::EnvGet { p } else { u64_ };
+                        (
+                            vec![V(u64_), V(input)],
+                            vec![p, u8_, Ty::Scalar(Scalar::U32), u64_],
+                        )
+                    }
+                    HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
+                    HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::Stat | HostOp::StatFile => {
+                        let mut metadata = outcome;
+                        metadata[3] = Ty::Scalar(Scalar::I64);
+                        metadata.push(u8_);
+                        let params = if op == HostOp::Stat {
+                            vec![V(u64_), V(p)]
+                        } else {
+                            vec![V(u64_)]
+                        };
+                        (params, metadata)
+                    }
                     HostOp::Close
+                    | HostOp::Entries
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::Sync
@@ -1494,6 +1657,7 @@ impl RtOp {
             | RtOp::ArgsLen
             | RtOp::ArgsGet
             | RtOp::LaunchWord
+            | RtOp::LaunchHandle
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)
@@ -1528,7 +1692,7 @@ impl Inst {
                 Callee::Runtime(op) => op.fails(),
                 Callee::Direct(_) | Callee::Indirect(_) => true,
             }),
-            Inst::Step { .. } | Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } => true,
+            Inst::Step { .. } | Inst::Drop { .. } => true,
             _ => false,
         }
     }
@@ -1541,8 +1705,6 @@ impl Inst {
             | Inst::Binary { fail, .. }
             | Inst::Simd { fail, .. }
             | Inst::Address { fail, .. }
-            | Inst::Alloc { fail, .. }
-            | Inst::Grow { fail, .. }
             | Inst::Drop { fail, .. } => fail,
             Inst::Call { call } => b.calls.get(call.index()).and_then(|c| c.fail),
             _ => None,

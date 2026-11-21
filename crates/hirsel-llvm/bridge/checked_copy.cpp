@@ -21,6 +21,8 @@
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/BlockFrequencyInfo.h>
+#include <llvm/Analysis/BranchProbabilityInfo.h>
+#include <llvm/Analysis/PostDominators.h>
 #include <llvm/Analysis/CycleAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Analysis/LoopInfo.h>
@@ -244,7 +246,8 @@ extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept 
   runLoopPass(static_cast<TargetMachine *>(Machine), M, "checked-copy", [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
     FunctionPassManager PM;
     PM.addPass(CheckedCopyPass(PB));
-    for (Function &F : M) if (!F.isDeclaration()) PM.run(F, FAM);
+    for (Function &F : M)
+      if (!F.isDeclaration() && !F.hasAvailableExternallyLinkage()) PM.run(F, FAM);
   });
 }
 
@@ -821,6 +824,20 @@ static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
   int64_t Offset = 0;
   return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
 }
+// Any word access at the Step window's address, tagged or not: a body imported
+// from a library and inlined here keeps the untagged window reads and writes
+// its own cold paths and step-free dispatch were given there.
+static bool windowWord(Instruction &I, Value *Context, const DataLayout &DL) {
+  if (stepWord(I, Context, DL)) return true;
+  Value *P = nullptr;
+  Type *T = nullptr;
+  if (auto *L = dyn_cast<LoadInst>(&I); L && L->isSimple()) P = L->getPointerOperand(), T = L->getType();
+  if (auto *S = dyn_cast<StoreInst>(&I); S && S->isSimple())
+    P = S->getPointerOperand(), T = S->getValueOperand()->getType();
+  if (!P || !T->isIntegerTy(64)) return false;
+  int64_t Offset = 0;
+  return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
+}
 // A callee's price for the expansion budgets: its instructions, less the
 // lifetime markers, which generate no code (LLVM's inline cost skips them too).
 static unsigned expansionCost(const Function &F) {
@@ -925,6 +942,22 @@ static void lowerX86IndexStrides(Function &F) {
   }
 }
 
+static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
+  using namespace llvm::PatternMatch;
+  // An indirect-result Hirsel call returns a status byte. Recognize its
+  // status check after instcombine and require the failure to exit the loop.
+  if (!Call.getType()->isIntegerTy(8)) return nullptr;
+  auto *Branch = dyn_cast<CondBrInst>(Call.getParent()->getTerminator());
+  auto *Check = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
+  if (!Check || !Check->isEquality() ||
+      !match(Check->getOperand(0), m_Specific(&Call)) ||
+      !match(Check->getOperand(1), m_Zero())) return nullptr;
+  unsigned Failure = Check->getPredicate() == ICmpInst::ICMP_EQ ? 1 : 0;
+  auto *Unwind = Branch->getSuccessor(Failure);
+  return !L.contains(Unwind) && L.contains(Branch->getSuccessor(1 - Failure))
+             ? Unwind : nullptr;
+}
+
 // Metering expands tiny helpers with checked slow paths before the ordinary
 // inliner prices them. Revisit direct loop calls after O3 has simplified those
 // paths, sharing one finite expansion budget across introduced helper calls.
@@ -935,7 +968,8 @@ static void lowerX86IndexStrides(Function &F) {
 // pass spent its whole budget on 41 copies of one helper.
 static void inlineLoopHelpers(Module &M) {
   for (Function &F : M) {
-    if (F.isDeclaration()) continue;
+    // A lent body is a helper here, never a caller.
+    if (F.isDeclaration() || F.hasAvailableExternallyLinkage()) continue;
     DominatorTree DT(F);
     LoopInfo LI(DT);
     // Each inlined callee with the History index of the copy it was inlined
@@ -947,25 +981,66 @@ static void inlineLoopHelpers(Module &M) {
         Copies += History[Entry].first == Target;
       return Copies >= 8;
     };
-    SmallVector<std::pair<CallBase *, int>, 16> Pending;
-    for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
-      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
-        if (C->getCalledFunction()) Pending.push_back({C, -1});
+    struct Candidate {
+      CallBase *Call;
+      int Entry;
+      size_t UnwindGroup;
+    };
+    SmallVector<Candidate, 16> Pending;
+    DenseMap<BasicBlock *, SmallVector<size_t, 4>> UnwindGroups;
+    // Only calls on a loop's hot path: a block that runs less than once per
+    // eight header visits (failure arms, growth slow paths) keeps its call,
+    // whose inlined body would carry every cold path of its own.
+    PostDominatorTree PDT(F);
+    BranchProbabilityInfo BPI(F, LI, nullptr, &DT, &PDT);
+    BlockFrequencyInfo BFI(F, BPI, LI);
+    for (BasicBlock &BB : F) if (Loop *L = LI.getLoopFor(&BB)) {
+      if (BFI.getBlockFreq(&BB).getFrequency() <
+          BFI.getBlockFreq(L->getHeader()).getFrequency() / 8) continue;
+      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I)) {
+        if (!C->getCalledFunction()) continue;
+        size_t Group = 0;
+        if (auto *Unwind = loopCallUnwind(*C, *L)) {
+          auto &Representatives = UnwindGroups[Unwind];
+          auto Same = find_if(Representatives, [&](size_t Index) {
+            auto *Other = Pending[Index].Call;
+            return Other->getCalledFunction() == C->getCalledFunction() &&
+                   equal(Other->args(), C->args());
+          });
+          if (Same == Representatives.end()) {
+            Group = Pending.size() + 1;
+            Representatives.push_back(Pending.size());
+          } else {
+            Group = *Same + 1;
+          }
+        }
+        Pending.push_back({C, -1, Group});
+      }
+    }
+    DenseSet<size_t> ExpandedUnwinds;
     unsigned Budget = 2048;
     while (!Pending.empty()) {
-      auto [Call, Entry] = Pending.pop_back_val();
+      auto [Call, Entry, Group] = Pending.pop_back_val();
       Function *Target = Call->getCalledFunction();
       if (!Target || Target->isDeclaration() || Target == &F || Deep(Target, Entry) ||
           Target->hasFnAttribute(Attribute::NoInline) ||
-          Call->hasFnAttr(Attribute::NoInline) ||
-          expansionCost(*Target) > Budget) continue;
+          Call->hasFnAttr(Attribute::NoInline)) continue;
       unsigned Cost = expansionCost(*Target);
+      if (Cost > Budget) continue;
+      // A looping helper amortizes its call. Repeating the same expansion
+      // into a shared unwind join extends the cleanup state's live ranges.
+      // Calls with different operands can specialize independently.
+      if (Group && ExpandedUnwinds.contains(Group)) {
+        DominatorTree TargetDT(*Target);
+        if (!LoopInfo(TargetDT).empty()) continue;
+      }
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) {
         Budget -= Cost;
+        if (Group) ExpandedUnwinds.insert(Group);
         History.push_back({Target, Entry});
         for (CallBase *Site : Info.InlinedCallSites)
-          Pending.push_back({Site, int(History.size()) - 1});
+          Pending.push_back({Site, int(History.size()) - 1, 0});
       }
     }
   }
@@ -1000,13 +1075,13 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
   auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
   inlineLoopHelpers(M);
   for (Function &F : M) {
-    if (F.isDeclaration() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
+    if (F.isDeclaration() || F.hasAvailableExternallyLinkage() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
     SmallVector<Instruction *, 16> Accesses;
     SmallVector<CallInst *, 16> Calls;
     SmallVector<ReturnInst *, 8> Returns;
     bool Supported = true;
     for (BasicBlock &BB : F) for (Instruction &I : BB) {
-      if (stepWord(I, F.getArg(0), M.getDataLayout())) Accesses.push_back(&I);
+      if (windowWord(I, F.getArg(0), M.getDataLayout())) Accesses.push_back(&I);
       if (auto *C = dyn_cast<CallBase>(&I)) {
         if (auto *CI = dyn_cast<CallInst>(C)) {
           if (CI->isMustTailCall()) Supported = false;
@@ -1017,7 +1092,9 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
       if (auto *R = dyn_cast<ReturnInst>(&I)) Returns.push_back(R);
     }
     if (Accesses.empty() || !Supported) continue;
-    auto *Tag = Accesses.front()->getMetadata(LLVMContext::MD_tbaa);
+    MDNode *Tag = nullptr;
+    for (Instruction *I : Accesses)
+      if (!Tag) Tag = I->getMetadata(LLVMContext::MD_tbaa);
     IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
     auto *Word = B.getInt64Ty();
     auto *Counter = B.CreateAlloca(Word, nullptr, "step.window");

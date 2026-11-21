@@ -53,13 +53,16 @@ fn frame(name: &str) -> Frame {
         "entry_resolve" | "placed_resolve" => Frame::Placed(Entry::Resolve(7, bytes("cafe"))),
         "entry_gone" | "placed_gone" => Frame::Placed(Entry::Gone),
         "hello_empty" => Frame::Hello(None, vec![]),
-        "hello_token" => Frame::Hello(Some(bytes("aabb")), vec![want()]),
+        "hello_credential" => Frame::Hello(Some(bytes("aabb")), vec![want()]),
         "call" => Frame::Call(N, V, 0x11121314, 0x21222324, bytes("aabb")),
         "subscribe_none" => Frame::Subscribe(N, 7, bytes("aabb"), None),
         "subscribe_some" => Frame::Subscribe(N, 7, bytes("aabb"), Some(bytes("cafe"))),
         "unsubscribe" => Frame::Unsubscribe(N),
         "welcome" => Frame::Welcome(
-            bytes("616e6f6e3a000102030405060708090a0b0c0d0e0f"),
+            codec::Caller {
+                issuer: 2,
+                subject: bytes("000102030405060708090a0b0c0d0e0f"),
+            },
             4,
             1048576,
             (0..32).collect(),

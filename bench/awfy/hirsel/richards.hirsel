@@ -59,13 +59,13 @@ fn append(mut s: Scheduler, p: u64, queue: Option[u64]) -> Option[u64] {
 
 fn create_packet(mut s: Scheduler, link: Option[u64], identity: u64, is_work: bool) -> Result[u64, Capacity] {
     let index = list.len(s.packets)
-    result.capacity_only(list.push(mut s.packets, Packet(link: link, identity: identity, is_work: is_work, datum: 0, data:[0; 4])))?
+    list.push(mut s.packets, Packet(link: link, identity: identity, is_work: is_work, datum: 0, data:[0; 4]))
     Ok(index)
 }
 
 fn create_task(mut s: Scheduler, identity: u64, priority: u64, input: Option[u64], waiting: bool, action: Action) -> Result[(), Capacity] {
     let index = list.len(s.tasks)
-    result.capacity_only(list.push(mut s.tasks, TaskControl(link: s.head, identity: identity, priority: priority, input: input, packet_pending: input != None, waiting: waiting, holding: false, action: action)))?
+    list.push(mut s.tasks, TaskControl(link: s.head, identity: identity, priority: priority, input: input, packet_pending: input != None, waiting: waiting, holding: false, action: action))
     s.head = Some(index)
     s.table[identity] = index
     Ok(())
@@ -229,9 +229,9 @@ fn packet_chain(mut s: Scheduler, count: u64, identity: u64, is_work: bool) -> R
     Ok(head)
 }
 
-pub fn benchmark() -> Result[bool, Capacity] {
+pub fn benchmark(count: u64) -> Result[bool, Capacity] {
     let mut s = Scheduler(packets: list.new(), tasks: list.new(), table:[0; 6], head: None, current: 0, current_identity: 0, queue_count: 0, hold_count: 0)
-    create_task(mut s, IDLE, 0, None, false, Idle(1, 10000))?
+    create_task(mut s, IDLE, 0, None, false, Idle(1, count))?
     let worker = packet_chain(mut s, 2, WORKER, true)?
     create_task(mut s, WORKER, 1000, worker, true, Worker(HANDLER_A, 0))?
     let first = packet_chain(mut s, 3, DEVICE_A, false)?

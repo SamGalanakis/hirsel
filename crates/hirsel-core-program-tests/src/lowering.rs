@@ -480,7 +480,7 @@ fn list_index_iteration_and_failure_cleanup() {
             eval::Outcome::Returned(vec![11]),
         ),
         (
-            "fn f(mut xs:Map[u64,u64])->u64 { result.unwrap(map.insert(mut xs,7,99)); match map.get(xs,7) {Some(v)=>map.len(xs)*1000+v,None=>0} }",
+            "fn f(mut xs:Map[u64,u64])->u64 { map.insert(mut xs,7,99); match map.get(xs,7) {Some(v)=>map.len(xs)*1000+v,None=>0} }",
             false,
             eval::Outcome::Returned(vec![2099]),
         ),

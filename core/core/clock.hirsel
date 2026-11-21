@@ -1,0 +1,6 @@
+// The hand of a `provide.clock` Clock (core.md, Provide).
+pub fn advance_to(mut h: ClockHand, mono_ns: u64)
+
+pub fn set_wall(mut h: ClockHand, wall_ms: u64)
+
+pub fn idle(mut h: ClockHand) -> Option[u64] waits

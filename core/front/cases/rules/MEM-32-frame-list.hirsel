@@ -49,10 +49,11 @@ fn sum(xs: List[u64]) -> u64 {
 fn push_all(mut xs: List[u64], n: u64) -> u64 {
     let mut i = 0u64
     while i < n {
-        match list.push(mut xs, i) {
+        match list.try_reserve(mut xs, 1) {
             Ok(()) => {},
-            Error((e, _)) => return 1000000 + e.requested * 1000 + e.available
+            Error(e) => return 1000000 + e.requested * 1000 + e.available
         }
+        list.push(mut xs, i)
         i += 1
     }
     0
@@ -62,10 +63,11 @@ fn local(n: u64) -> u64 {
     let mut xs: List[u64] = list.new()
     let mut i = 0u64
     while i < n {
-        match list.push(mut xs, i) {
+        match list.try_reserve(mut xs, 1) {
             Ok(()) => {},
-            Error((e, _)) => return 1000000 + e.requested * 1000 + e.available
+            Error(e) => return 1000000 + e.requested * 1000 + e.available
         }
+        list.push(mut xs, i)
         i += 1
     }
     let mut s = 0u64
@@ -77,9 +79,9 @@ fn local(n: u64) -> u64 {
 
 fn room() -> u64 {
     let mut probe: List[u64] = list.new()
-    match list.reserve(mut probe, 1000000) {
+    match list.try_reserve(mut probe, 1000000) {
         Ok(()) => 0,
-        Error(e) => e.available
+        Error(e) => e.available,
     }
 }
 
@@ -141,14 +143,11 @@ fn by_capture(n: u64) -> u64 {
         sum(xs)
     }
     let _ = local(5)
-    match take made {
-        Ok(f) => f(),
-        Error(_) => 0
-    }
+    made()
 }
 
 fn by_send(n: u64) -> u64 {
-    let (tx, rx): (Sender[List[u64]], Receiver[List[u64]]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[List[u64]], Receiver[List[u64]]) = channel.new(1)
     let mut xs: List[u64] = list.new()
     let mut i = 0u64
     while i < n {
@@ -259,15 +258,14 @@ fn escape_lent(n: u64) -> u64 {
 // all eight slots, and the refund for the original four goes to the caller.
 fn grow_under_bound(mut xs: List[u64]) -> bool {
     let refused = bound bytes 0 {
-        list.reserve(mut xs, 4)?
+        list.try_reserve(mut xs, 4)
     }
     match refused {
-        Ok(()) => return false,
-        Error(e) if e.requested == 64 && e.available == 0 => {},
-        Error(_) => return false
+        Ok(Error(e)) if e.requested == 64 && e.available == 0 => {},
+        _ => return false
     }
     let grown = bound bytes 64 {
-        list.reserve(mut xs, 4)?
+        list.reserve(mut xs, 4)
         room()
     }
     match grown {
@@ -281,7 +279,7 @@ fn grow_under_bound(mut xs: List[u64]) -> bool {
 // the live probe sees 744 and the probe after caller drop sees all 1000.
 fn lent_contents() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 100))
+    list.push(mut xs, 100)
     if !grow_under_bound(mut xs) {
         return 3
     }
@@ -326,7 +324,7 @@ fn extract(mut xs: List[u64]) -> List[u64] {
 
 fn replaced() -> List[u64] {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 91))
+    list.push(mut xs, 91)
     extract(mut xs)
 }
 
@@ -353,21 +351,21 @@ fn produce(take tx: Sender[u64]) waits {
 }
 
 fn push_then_receive(mut xs: List[u64], rx: Receiver[u64]) waits {
-    result.unwrap(list.push(mut xs, 100))
+    list.push(mut xs, 100)
     let n = result.unwrap(channel.receive(rx))
-    result.unwrap(list.reserve(mut xs, 17))
-    result.unwrap(list.push(mut xs, n))
+    list.reserve(mut xs, 17)
+    list.push(mut xs, n)
 }
 
 // The first push fills the fourth slot before receive. Reserve after wake asks
 // for 21 slots and growth copies all four values. The caller checks all five.
 fn lent_park(tasks: Tasks) -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, take tx, produce))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, take tx, produce)
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 0))
-    result.unwrap(list.push(mut xs, 1))
-    result.unwrap(list.push(mut xs, 2))
+    list.push(mut xs, 0)
+    list.push(mut xs, 1)
+    list.push(mut xs, 2)
     push_then_receive(mut xs, rx)
     result.unwrap(task.join(take h))
     if list.len(xs) == 5 && xs[0] == 0 && xs[1] == 1 && xs[2] == 2 && xs[3] == 100 && xs[4] == 99 {

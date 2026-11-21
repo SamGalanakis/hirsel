@@ -47,6 +47,7 @@ pub(crate) struct Plan<'a> {
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::GrantRule],
+    env_patterns: Option<String>,
     secret_grants: Vec<Option<&'a hirsel_core_net::SecretGrant>>,
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
@@ -68,6 +69,7 @@ pub(crate) fn policy(
     u64,
     &[hirsel_core_net::GrantRule],
     &[hirsel_core_net::SecretGrant],
+    Option<&hirsel_core_net::EnvPatterns>,
     &[String],
     Option<&[u8]>,
     bool,
@@ -78,6 +80,7 @@ pub(crate) fn policy(
         options.grant_mask,
         &options.net_rules,
         &options.secret_grants,
+        options.env_patterns.as_ref(),
         &options.directories,
         options
             .logical_charge_report
@@ -142,6 +145,10 @@ impl<'a> Plan<'a> {
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,
             net_rules: &options.net_rules,
+            env_patterns: options
+                .env_patterns
+                .as_ref()
+                .map(hirsel_core_net::EnvPatterns::text),
             secret_grants,
             directories: &options.directories,
             recording: options.recording,

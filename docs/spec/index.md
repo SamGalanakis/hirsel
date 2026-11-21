@@ -72,6 +72,9 @@ Every code block is a self-contained program fragment: it declares each type it 
 the core library does not, and a block whose comment says `refused` is refused only where
 the comment says. A block marked `hirsel unbuilt` belongs to its rule but shows what the
 built `hirsel` does not implement yet; the mark is removed when it does.
+`hirsel core` uses the core declaration rules. A `hirsel run` block is a complete
+program. The next fence is `text` with its exact stdout, followed by an `Outcome:`
+line that states success or failure.
 
 The [Net socket declarations and ownership rules](net.md) define the network
 capability and its explicit grant syntax.
@@ -87,6 +90,7 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | term | defined in |
 |---|---|
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
+| ascription | [LANG-5](syntax.md#lang-5-grammar), [LANG-11](language.md#lang-11-typing-is-local) |
 | as if, observables | [SEM-8](semantics.md#sem-8-determinism) |
 | authentication: none in Hirsel or the runner; application code binds the Caller | [HTTP §4](http.md#4-keyed-operations), RUNNER-SPEC rule 13 |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
@@ -105,14 +109,18 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | construction in place, inline bytes | [MEM-31](memory.md#mem-31-construction-in-place) |
 | engine obligations | [MEM-32](memory.md#mem-32-engine-obligations) |
 | identity bytes | [PROG-9](programs.md#prog-9-code-descriptors) |
+| inert | [OWN-4](ownership.md#own-4-bounds) |
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | lane, mask, vector, version | [SEM-11](semantics.md#sem-11-vectors) |
+| mapping propagate | [LANG-18](language.md#lang-18-errors) |
+| model world, simulation | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
 | packed, streamable | [MEM-12](memory.md#mem-12-region-sequences) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
+| punned field | [LANG-9](language.md#lang-9-nominal-types) |
 | recording, recording build | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
 | region data, region value | [MEM-2](memory.md#mem-2-region-data) |
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |

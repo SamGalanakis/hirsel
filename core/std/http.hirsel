@@ -9,7 +9,7 @@ pub type BodyError: key {
 }
 
 fn failure(status: u16) -> BodyError {
-    BodyError(status: status, close: true)
+    BodyError(status, close: true)
 }
 
 type ResponseField: send {
@@ -49,7 +49,7 @@ fn response_with(status: u16, take body: ResponseBody, close: bool) -> Result[Re
     if status < 200 || status > 599 {
         return Error(StatusInvalid)
     }
-    Ok(Response(status: status, fields: list.new(), body: take body, close: close, invalid: false))
+    Ok(Response(status, fields: list.new(), body: take body, close, invalid: false))
 }
 
 fn response_body(r: Response) -> View[Bytes] in r {
@@ -95,37 +95,25 @@ pub type ContentType: key = TextPlain | ApplicationJson
 
 /// Appends a Content-Type whose name and value are valid by construction.
 pub fn content_type(mut r: Response, media: ContentType) -> Result[(), ResponseError] {
-    let name_literal: Result[FrozenBytes, Capacity] = b"Content-Type"
-    let name = match take name_literal {
-        Ok(take data) => take data,
-        Error(c) => return Error(Allocation(c)),
-    }
-    let literal: Result[FrozenBytes, Capacity] = match media {
+    let name: FrozenBytes = b"Content-Type"
+    let value: FrozenBytes = match media {
         TextPlain => b"text/plain",
         ApplicationJson => b"application/json",
-    }
-    let value = match take literal {
-        Ok(take data) => take data,
-        Error(c) => return Error(Allocation(c)),
     }
     push_field(mut r, take name, take value)
 }
 
 fn push_field(mut r: Response, take name: FrozenBytes, take value: FrozenBytes) -> Result[(), ResponseError] {
-    match list.push(mut r.fields, ResponseField(name: take name, value: take value)) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Allocation(c)),
-    }
+    list.push(mut r.fields, ResponseField(name: take name, value: take value))
+    Ok(())
 }
 
 fn append_head(mut out: Bytes, b: Bytes) -> Result[(), ResponseError] {
     if list.len(b) > list.capacity(out) - list.len(out) {
         return Error(HeadTooLarge)
     }
-    match list.append(mut out, b) {
-        Ok(()) => Ok(()),
-        Error(c) => Error(Allocation(c)),
-    }
+    list.append(mut out, b)
+    Ok(())
 }
 
 fn head_text(mut out: Bytes, s: String) -> Result[(), ResponseError] {
@@ -566,7 +554,7 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
     } else {
         path_end + 1
     }
-    let head = RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query_at, end: end), expect_continue: expect, upgrade_requested: h.version == 1 && upgrade_field && connection_upgrade(b, h, connections), close: close || h.version == 0 && !keep_alive)
+    let head = RequestHead(authority: host, path: http1.Span(start, end: path_end), query: http1.Span(start: query_at, end), expect_continue: expect, upgrade_requested: h.version == 1 && upgrade_field && connection_upgrade(b, h, connections), close: close || h.version == 0 && !keep_alive)
     Ok((head, wire_fields))
 }
 
@@ -574,10 +562,10 @@ type TargetError: key = BadTarget | TargetCapacity
 
 fn segment(b: Bytes) -> Result[String, TargetError] {
     let end = list.len(b)
-    let allocated: Result[Bytes, Capacity] = list.with_capacity(end)
-    let mut decoded = match take allocated {
-        Ok(take x) => take x,
-        Error(_) => return Error(TargetCapacity),
+    // A refused target answers 503, so this admission is recovered inline.
+    let mut decoded: Bytes = list.new()
+    if let Error(_) = list.try_reserve(mut decoded, end) {
+        return Error(TargetCapacity)
     }
     let mut at: u64 = 0
     while at < end {
@@ -585,7 +573,7 @@ fn segment(b: Bytes) -> Result[String, TargetError] {
             Ok(value) => value,
             Error(_) => return Error(BadTarget),
         }
-        let _ = list.push(mut decoded, byte)
+        list.push(mut decoded, byte)
         at = next
     }
     if decoded == string.as_bytes(".") || decoded == string.as_bytes("..") {
@@ -615,9 +603,10 @@ fn segments_of(raw_path: Bytes) -> Result[List[String], TargetError] {
             return Error(BadTarget)
         }
         let s = segment(list.slice(raw_path, start, end))?
-        if let Error(_) = list.push(mut decoded_segments, take s) {
+        if let Error(_) = list.try_reserve(mut decoded_segments, 1) {
             return Error(TargetCapacity)
         }
+        list.push(mut decoded_segments, take s)
         if end == n {
             return Ok(take decoded_segments)
         }
@@ -777,10 +766,10 @@ pub fn handover_limits(r: Request) -> (u64, u64) {
 }
 
 /// Copies a borrowed field or body into the current handler's allowance.
-pub fn copy_bytes(b: Bytes) -> Result[Bytes, Capacity] {
-    let mut copied: Bytes = list.with_capacity(list.len(b))?
+pub fn copy_bytes(b: Bytes) -> Bytes {
+    let mut copied: Bytes = list.with_capacity(list.len(b))
     let _ = list.append(mut copied, b)
-    Ok(take copied)
+    take copied
 }
 
 type HeadResult: key = Ready | PeerClosed | Rejected(u16)
@@ -1177,10 +1166,7 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
 }
 
 fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Response, HandlerError] {
-    let methods = match router.allow(routes, decoded, options_star) {
-        Ok(take methods) => take methods,
-        Error(e) => return Error(Allocation(e)),
-    }
+    let methods = router.allow(routes, decoded, options_star)
     let status: u16 = if options_star {
         204
     } else if string.byte_len(methods) == 0 {
@@ -1190,14 +1176,8 @@ fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[S
     }
     let mut reply = response(status, list.new(), false)?
     if status != 404 {
-        let name = match b"Allow" {
-            Ok(take name) => take name,
-            Error(e) => return Error(Allocation(e)),
-        }
-        let allow = match copy_bytes(string.as_bytes(methods)) {
-            Ok(take allow) => take allow,
-            Error(e) => return Error(Allocation(e)),
-        }
+        let name = b"Allow"
+        let allow = copy_bytes(string.as_bytes(methods))
         header(mut reply, take name, take allow)?
     }
     Ok(take reply)
@@ -1229,12 +1209,9 @@ fn encode_upgrade(mut out: Bytes, req: Request, take spec: upgrade.Spec, max_byt
     }
     append_date(mut out, host.wall_ms(c), mut cache)?
     head_text(mut out, "\r\n")?
-    let head = match copy_bytes(out) {
-        Ok(take head) => take head,
-        Error(e) => return Error(Allocation(e)),
-    }
-    let upgrade.Spec(protocol: _, fields: _, argument: take argument, reservation: reserve, run: run) = take spec
-    Ok(UpgradeOffer(head: take head, argument: take argument, bytes_reserved: reserve, run: run, pre_head: req.deadline))
+    let head = copy_bytes(out)
+    let upgrade.Spec(protocol: _, fields: _, argument: take argument, reservation: reserve, run) = take spec
+    Ok(UpgradeOffer(head: take head, argument: take argument, bytes_reserved: reserve, run, pre_head: req.deadline))
 }
 
 fn event_stream(value: Bytes) -> bool {
@@ -1321,7 +1298,7 @@ fn handle[S: shareable + send](input: Bytes, h: View[http1.Head], meta: RequestH
                     b.decoder.state = Finished
                     b.decoder.remaining = 0
                 }
-                let req = Request(input: view input, head: h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, stop: share_signal(b.stop), state_max: cfg.state_max, out_cap: cfg.out_cap)
+                let req = Request(input: view input, head: h, meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, stop: share_signal(b.stop), state_max: cfg.state_max, out_cap: cfg.out_cap)
                 let handler = entry.route.handler
                 let handled = if let Some(limit) = entry.route.steps {
                     let limited = bound steps limit {
@@ -1543,7 +1520,7 @@ resource type Completion: send {
 }
 
 fn upgraded(take job: UpgradeJob) waits {
-    let UpgradeJob(transfer: take transfer, run: run, notice: take notice, completion: take done) = take job
+    let UpgradeJob(transfer: take transfer, run, notice: take notice, completion: take done) = take job
     let mut completion = take done
     completion.armed = true
     run(upgrade.hand_over(take transfer, take notice))
@@ -1563,22 +1540,18 @@ fn decline_handover(take reader: ReadHalf, take write_half: WriteHalf, c: Clock,
 }
 
 fn decline_upgrade(take transfer: upgrade.Transfer, cfg: Config, signal: Option[DrainSignal]) waits {
-    let upgrade.Transfer(reader: take reader, writer: take writer, input: _, tail_at: _, head: _, argument: _, clock: clock, pre_head: _, write_ms: ms) = take transfer
+    let upgrade.Transfer(reader: take reader, writer: take writer, input: _, tail_at: _, head: _, argument: _, clock, pre_head: _, write_ms: ms) = take transfer
     decline_handover(take reader, take writer, clock, ms, cfg.linger_ms, signal)
 }
 
 fn decline_stream(take transfer: stream.Transfer, signal: Option[DrainSignal]) waits {
-    let stream.Transfer(reader: take reader, writer: take writer, offer: _, buffered: _, clock: clock, out_cap: _, pipeline_max: _, write_ms: ms, linger_ms: linger, heartbeat_ms: _, lease_ms: _) = take transfer
+    let stream.Transfer(reader: take reader, writer: take writer, offer: _, buffered: _, clock, out_cap: _, pipeline_max: _, write_ms: ms, linger_ms: linger, heartbeat_ms: _, lease_ms: _) = take transfer
     decline_handover(take reader, take writer, clock, ms, linger, signal)
 }
 
 fn send_upgrade_promotion(inbox: Sender[ConnectionSignal], slot: u64, take transfer: upgrade.Transfer, reserve: u64, run: fn(take upgrade.Taken) waits, cfg: Config, signal: Option[DrainSignal]) waits {
-    let made: Result[(Sender[Option[upgrade.Transfer]], Receiver[Option[upgrade.Transfer]]), Capacity] = channel.new(1)
-    let (tx, rx) = match take made {
-        Ok(take channels) => take channels,
-        Error(_) => return decline_upgrade(take transfer, cfg, signal),
-    }
-    let request = UpgradeRequest(source_slot: slot, transfer: take transfer, reserve: reserve, run: run, reply: take tx)
+    let (tx, rx): (Sender[Option[upgrade.Transfer]], Receiver[Option[upgrade.Transfer]]) = channel.new(1)
+    let request = UpgradeRequest(source_slot: slot, transfer: take transfer, reserve, run, reply: take tx)
     if let Ok(()) = channel.send(inbox, PromoteUpgrade(take request)) {
         if let Ok(Some(take denied)) = channel.receive(rx) {
             decline_upgrade(take denied, cfg, signal)
@@ -1587,11 +1560,7 @@ fn send_upgrade_promotion(inbox: Sender[ConnectionSignal], slot: u64, take trans
 }
 
 fn send_stream_promotion(inbox: Sender[ConnectionSignal], slot: u64, take transfer: stream.Transfer, signal: Option[DrainSignal]) waits {
-    let made: Result[(Sender[Option[stream.Transfer]], Receiver[Option[stream.Transfer]]), Capacity] = channel.new(1)
-    let (tx, rx) = match take made {
-        Ok(take channels) => take channels,
-        Error(_) => return decline_stream(take transfer, signal),
-    }
+    let (tx, rx): (Sender[Option[stream.Transfer]], Receiver[Option[stream.Transfer]]) = channel.new(1)
     let request = StreamRequest(source_slot: slot, transfer: take transfer, reply: take tx)
     if let Ok(()) = channel.send(inbox, PromoteStream(take request)) {
         if let Ok(Some(take denied)) = channel.receive(rx) {
@@ -1615,11 +1584,7 @@ type ConnectionJob[S: shareable + send]: send {
 }
 
 fn commit_phase(inbox: Sender[ConnectionSignal], slot: u64, active: bool) -> bool waits {
-    let allocated: Result[(Sender[bool], Receiver[bool]), Capacity] = channel.new(1)
-    let (tx, rx) = match take allocated {
-        Ok(take pair) => take pair,
-        Error(_) => return false,
-    }
+    let (tx, rx): (Sender[bool], Receiver[bool]) = channel.new(1)
     if let Error(_) = channel.send(inbox, Phase(slot, active, take tx)) {
         return false
     }
@@ -1630,11 +1595,7 @@ fn commit_phase(inbox: Sender[ConnectionSignal], slot: u64, active: bool) -> boo
 }
 
 fn change_source(inbox: Sender[ConnectionSignal], slot: u64, ip: Ip) -> bool waits {
-    let allocated: Result[(Sender[bool], Receiver[bool]), Capacity] = channel.new(1)
-    let (tx, rx) = match take allocated {
-        Ok(take pair) => take pair,
-        Error(_) => return false,
-    }
+    let (tx, rx): (Sender[bool], Receiver[bool]) = channel.new(1)
     if let Error(_) = channel.send(inbox, Source(slot, ip, take tx)) {
         return false
     }
@@ -1645,7 +1606,7 @@ fn change_source(inbox: Sender[ConnectionSignal], slot: u64, ip: Ip) -> bool wai
 }
 
 fn connection[S: shareable + send](take job: ConnectionJob[S]) waits {
-    let ConnectionJob(socket: take socket, c: c, cfg: take cfg, peer: peer, at: accepted, routes: take routes, state: take state, inbox: take inbox, slot: slot, stop: take signal, completion: take notice) = take job
+    let ConnectionJob(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, state: take state, inbox: take inbox, slot, stop: take signal, completion: take notice) = take job
     let mut completion = take notice
     completion.armed = true
     let _ = run_connection(take socket, c, cfg, peer, accepted, routes, state, inbox, slot, signal)
@@ -1655,16 +1616,8 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
     let (r, w) = net.split(take socket)
     let mut reader = take r
     let mut writer = take w
-    let read_alloc: Result[Bytes, Capacity] = list.with_capacity(cfg.head_max + cfg.pipeline_max + cfg.body_inline)
-    let mut input = match take read_alloc {
-        Ok(take b) => take b,
-        Error(_) => return 0
-    }
-    let out_alloc: Result[Bytes, Capacity] = list.with_capacity(cfg.out_cap)
-    let mut out = match take out_alloc {
-        Ok(take b) => take b,
-        Error(_) => return 0
-    }
+    let mut input: Bytes = list.with_capacity(cfg.head_max + cfg.pipeline_max + cfg.body_inline)
+    let mut out: Bytes = list.with_capacity(cfg.out_cap)
     let mut scratch: Bytes = list.new()
     let mut first = true
     let mut start = accepted
@@ -1740,11 +1693,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
             CloseDelimited => true,
         }
         if need_scratch && list.capacity(scratch) == 0 {
-            let scratch_alloc: Result[Bytes, Capacity] = list.with_capacity(8192)
-            scratch = match take scratch_alloc {
-                Ok(take b) => take b,
-                Error(_) => break,
-            }
+            scratch = list.with_capacity(8192)
         }
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at, offer) = {
@@ -1773,7 +1722,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 CloseConnection => (false, None),
                 MoveSocket(take offer) => (false, Some(take offer)),
             }
-            let Body(reader: take next_reader, writer: take next_writer, scratch: take s, input_at: input_at, scratch_at: scratch_at, input: _, decoder: _, head_max: _, fields_max: _, clock: _, stop: _, body_deadline: _, handler_deadline: _, write_ms: _, pipeline_max: _, expect_continue: _, fault: _, output_failed: _) = take body
+            let Body(reader: take next_reader, writer: take next_writer, scratch: take s, input_at, scratch_at, input: _, decoder: _, head_max: _, fields_max: _, clock: _, stop: _, body_deadline: _, handler_deadline: _, write_ms: _, pipeline_max: _, expect_continue: _, fault: _, output_failed: _) = take body
             reader = take next_reader
             writer = take next_writer
             scratch = take s
@@ -1782,7 +1731,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         if let Some(take accepted_offer) = take offer {
             match take accepted_offer {
                 ToUpgrade(take offered) => {
-                    let UpgradeOffer(head: take reply, argument: take argument, bytes_reserved: reserve, run: run, pre_head: deadline) = take offered
+                    let UpgradeOffer(head: take reply, argument: take argument, bytes_reserved: reserve, run, pre_head: deadline) = take offered
                     discard(take scratch)
                     let transfer = upgrade.Transfer(reader: take reader, writer: take writer, input: take input, tail_at: head.end, head: take reply, argument: take argument, clock: c, pre_head: deadline, write_ms: cfg.write_ms)
                     send_upgrade_promotion(inbox, slot, take transfer, reserve, run, cfg, signal)
@@ -1791,7 +1740,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                     let buffered = (list.len(input) - input_at) + (list.len(scratch) - scratch_at)
                     discard(take input)
                     discard(take scratch)
-                    let transfer = stream.Transfer(reader: take reader, writer: take writer, offer: take offered, buffered: buffered, clock: c, out_cap: cfg.out_cap, pipeline_max: cfg.pipeline_max, write_ms: cfg.write_ms, linger_ms: cfg.linger_ms, heartbeat_ms: cfg.heartbeat_ms, lease_ms: cfg.lease_ms)
+                    let transfer = stream.Transfer(reader: take reader, writer: take writer, offer: take offered, buffered, clock: c, out_cap: cfg.out_cap, pipeline_max: cfg.pipeline_max, write_ms: cfg.write_ms, linger_ms: cfg.linger_ms, heartbeat_ms: cfg.heartbeat_ms, lease_ms: cfg.lease_ms)
                     send_stream_promotion(inbox, slot, take transfer, signal)
                 },
             }
@@ -1828,7 +1777,7 @@ type AcceptorJob: send {
 }
 
 fn acceptor(take job: AcceptorJob) waits {
-    let AcceptorJob(listener: take listener, c: c, inbox: take inbox) = take job
+    let AcceptorJob(listener: take listener, c, inbox: take inbox) = take job
     let mut l = take listener
     loop {
         match host.accept(mut l, Never) {
@@ -1860,9 +1809,9 @@ type RefusalWorker: send {
 }
 
 fn refusal_worker(take worker: RefusalWorker) waits {
-    let RefusalWorker(inbox: take inbox, jobs: take jobs, slot: slot, c: c, ms: ms) = take worker
+    let RefusalWorker(inbox: take inbox, jobs: take jobs, slot, c, ms) = take worker
     while let Ok(take job) = channel.receive(jobs) {
-        let RefusalJob(socket: take socket, at: at) = take job
+        let RefusalJob(socket: take socket, at) = take job
         let until = clock.deadline_after_ms(at, ms)
         let (input, output) = net.split(take socket)
         let mut w = take output
@@ -1929,7 +1878,7 @@ resource type ServerTasks {
 fn refuse(mut slots: List[RefusalSlot], take socket: Socket, at: u64) {
     for i in 0u64 .. list.len(slots) {
         if !slots[i].busy {
-            let job = RefusalJob(socket: take socket, at: at)
+            let job = RefusalJob(socket: take socket, at)
             if let Ok(()) = channel.try_send(slots[i].tx, take job) {
                 slots[i].busy = true
             }
@@ -1975,13 +1924,6 @@ fn source_key(ip: Ip) -> (u64, u64, u64) {
     }
 }
 
-fn serve_alloc[T](take r: Result[T, Capacity]) -> Result[T, ServeError] {
-    match take r {
-        Ok(take x) => Ok(take x),
-        Error(e) => Error(Capacity(e)),
-    }
-}
-
 fn promotion_slot(slots: List[Option[PromotedSlot]], start: u64, end: u64) -> u64 {
     for i in start .. end {
         if let None = slots[i] {
@@ -1992,7 +1934,7 @@ fn promotion_slot(slots: List[Option[PromotedSlot]], start: u64, end: u64) -> u6
 }
 
 fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSignal], done: Sender[ChildSlot], end: u64, mut generation: u64, signal: Option[DrainSignal], take request: UpgradeRequest) {
-    let UpgradeRequest(source_slot: slot, transfer: take transfer, reserve: reserve, run: run, reply: take reply) = take request
+    let UpgradeRequest(source_slot: slot, transfer: take transfer, reserve, run, reply: take reply) = take request
     let vacant = promotion_slot(group.promoted, 0, end)
     if vacant == end {
         let _ = channel.try_send(reply, Some(take transfer))
@@ -2005,7 +1947,7 @@ fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSi
             return
         },
     }
-    let mark = EstablishedNotice(inbox: channel.sender(tx), slot: vacant, generation: generation, marked: false, stop: share_signal(signal))
+    let mark = EstablishedNotice(inbox: channel.sender(tx), slot: vacant, generation, marked: false, stop: share_signal(signal))
     let origin = replace(mut group.connections[slot], None)
     let mut source = match take origin {
         Some(take present) => take present,
@@ -2014,10 +1956,10 @@ fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSi
             return
         },
     }
-    let job = UpgradeJob(transfer: take transfer, run: run, notice: take mark, completion: take completion)
-    match task.spawn(tasks, bytes reserve, take job, upgraded) {
+    let job = UpgradeJob(transfer: take transfer, run, notice: take mark, completion: take completion)
+    match task.try_spawn(tasks, bytes reserve, take job, upgraded) {
         Ok(take child) => {
-            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: source.first, ip: source.ip, generation: generation, stop: None))
+            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: source.first, ip: source.ip, generation, stop: None))
             source.first = false
             source.promoted = true
             generation = int.wrapping_add(generation, 1)
@@ -2056,14 +1998,14 @@ fn promote_stream(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSig
     }
     let reserve = stream.reservation(transfer.offer, transfer.out_cap)
     let control: Option[StreamControl] = if let Some(_) = signal {
-        Some(StreamControl(inbox: channel.sender(tx), slot: vacant, generation: generation, stop: share_signal(signal)))
+        Some(StreamControl(inbox: channel.sender(tx), slot: vacant, generation, stop: share_signal(signal)))
     } else {
         None
     }
-    let job = StreamJob(work: stream.Work(transport: take transfer, tasks: tasks, control: take control), completion: take completion)
-    match task.spawn(tasks, bytes reserve, take job, streaming) {
+    let job = StreamJob(work: stream.Work(transport: take transfer, tasks, control: take control), completion: take completion)
+    match task.try_spawn(tasks, bytes reserve, take job, streaming) {
         Ok(take child) => {
-            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: false, ip: source.ip, generation: generation, stop: None))
+            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: false, ip: source.ip, generation, stop: None))
             generation = int.wrapping_add(generation, 1)
             if source.first {
                 in_first_phase -= 1
@@ -2088,10 +2030,10 @@ type StopJob: send {
 }
 
 fn watch_stop(take job: StopJob) waits {
-    let StopJob(incoming: take incoming, inbox: take inbox, c: c) = take job
+    let StopJob(incoming: take incoming, inbox: take inbox, c) = take job
     if let Ok(deadline) = channel.receive(incoming) {
         let requested: Option[u64] = Some(deadline)
-        let at = result.unwrap(arc.new(requested))
+        let at = arc.new(requested)
         if let Ok(()) = channel.send(inbox, Stop(take at)) {
             host.sleep_until(c, deadline)
             let _ = channel.send(inbox, StopExpired)
@@ -2165,18 +2107,17 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
     if list.len(listeners) == 0 {
         return Ok(())
     }
-    let shared = serve_alloc(result.capacity_only(arc.new(take state)))?
-    let routing = serve_alloc(result.capacity_only(arc.new(take routes)))?
-    let settings = serve_alloc(result.capacity_only(arc.new(take cfg)))?
-    let made: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(settings.inbox_cap)
-    let (tx, rx) = serve_alloc(take made)?
+    let shared = arc.new(take state)
+    let routing = arc.new(take routes)
+    let settings = arc.new(take cfg)
+    let (tx, rx): (Sender[ConnectionSignal], Receiver[ConnectionSignal]) = channel.new(settings.inbox_cap)
     let (signal, _watcher): (Option[DrainSignal], Option[Task[()]]) = match take incoming {
         Some(take stop) => {
             let initial: Option[u64] = None
-            let stored = serve_alloc(result.capacity_only(arc.new(initial)))?
-            let root = serve_alloc(result.capacity_only(latest.new(take stored)))?
-            let watch = StopJob(incoming: take stop, inbox: channel.sender(tx), c: c)
-            let observer = serve_alloc(result.capacity_only(task.spawn(tasks, bytes 64, take watch, watch_stop)))?
+            let stored = arc.new(initial)
+            let root = latest.new(take stored)
+            let watch = StopJob(incoming: take stop, inbox: channel.sender(tx), c)
+            let observer = task.spawn(tasks, bytes 64, take watch, watch_stop)
             (Some(DrainSignal(deadline: take root)), Some(take observer))
         },
         None => (None, None),
@@ -2185,44 +2126,33 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
     let upgrade_slots = order.min(settings.upgrades_max, settings.sockets_max)
     let stream_slots = order.min(settings.streams_max, settings.sockets_max)
     let promoted_slots = int.saturating_add(upgrade_slots, stream_slots)
-    let reserved: Result[List[Option[HttpSlot]], Capacity] = list.with_capacity(http_slots)
-    let mut slots = serve_alloc(take reserved)?
-    let promotion_reserve: Result[List[Option[PromotedSlot]], Capacity] = list.with_capacity(promoted_slots)
-    let mut promoted = serve_alloc(take promotion_reserve)?
-    let returns: Result[(Sender[ChildSlot], Receiver[ChildSlot]), Capacity] = channel.new(order.max(int.saturating_add(http_slots, promoted_slots), 1))
-    let (done_tx, done_rx) = serve_alloc(take returns)?
+    let mut slots: List[Option[HttpSlot]] = list.with_capacity(http_slots)
+    let mut promoted: List[Option[PromotedSlot]] = list.with_capacity(promoted_slots)
+    let (done_tx, done_rx): (Sender[ChildSlot], Receiver[ChildSlot]) = channel.new(order.max(int.saturating_add(http_slots, promoted_slots), 1))
     for _ in 0u64 .. http_slots {
         let _ = list.push(mut slots, None)
     }
     for _ in 0u64 .. promoted_slots {
         let _ = list.push(mut promoted, None)
     }
-    let refusal_slots: Result[List[RefusalSlot], Capacity] = list.with_capacity(settings.refuse_max)
-    let refusals = serve_alloc(take refusal_slots)?
-    let acceptor_slots: Result[List[Task[()]], Capacity] = list.with_capacity(list.len(listeners))
-    let acceptors = serve_alloc(take acceptor_slots)?
+    let refusals: List[RefusalSlot] = list.with_capacity(settings.refuse_max)
+    let acceptors: List[Task[()]] = list.with_capacity(list.len(listeners))
     let allocated_group = ServerTasks(connections: take slots, promoted: take promoted, refusals: take refusals, acceptors: take acceptors)
-    let mut group = serve_alloc(result.capacity_only(take allocated_group))?
+    let mut group = match take allocated_group {
+        Ok(take g) => take g,
+        Error((e, _)) => return Error(Capacity(e)),
+    }
     for i in 0u64 .. settings.refuse_max {
-        let allocated: Result[(Sender[RefusalJob], Receiver[RefusalJob]), Capacity] = channel.new(1)
-        let (job_tx, jobs) = serve_alloc(take allocated)?
-        let job = RefusalWorker(inbox: channel.sender(tx), jobs: take jobs, slot: i, c: c, ms: settings.refuse_ms)
-        match task.spawn(tasks, bytes 8256, take job, refusal_worker) {
-            Ok(take child) => {
-                let _ = list.push(mut group.refusals, RefusalSlot(child: take child, tx: take job_tx, busy: false))
-            },
-            Error((e, _)) => return Error(Capacity(e)),
-        }
+        let (job_tx, jobs): (Sender[RefusalJob], Receiver[RefusalJob]) = channel.new(1)
+        let job = RefusalWorker(inbox: channel.sender(tx), jobs: take jobs, slot: i, c, ms: settings.refuse_ms)
+        let child = task.spawn(tasks, bytes 8256, take job, refusal_worker)
+        list.push(mut group.refusals, RefusalSlot(child: take child, tx: take job_tx, busy: false))
     }
     let mut pending = take listeners
     while let Some(take listener) = list.pop(mut pending) {
-        let job = AcceptorJob(listener: take listener, c: c, inbox: channel.sender(tx))
-        match task.spawn(tasks, bytes 64, take job, acceptor) {
-            Ok(take child) => {
-                let _ = list.push(mut group.acceptors, take child)
-            },
-            Error((e, _)) => return Error(Capacity(e)),
-        }
+        let job = AcceptorJob(listener: take listener, c, inbox: channel.sender(tx))
+        let child = task.spawn(tasks, bytes 64, take job, acceptor)
+        list.push(mut group.acceptors, take child)
     }
     let child_bytes = bytes_for_connection(settings)
     let mut in_first_phase: u64 = 0
@@ -2272,10 +2202,10 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
                             continue
                         },
                     }
-                    let job = ConnectionJob(socket: take socket, c: c, cfg: arc.share(settings), peer: peer, at: at, routes: arc.share(routing), state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, stop: share_signal(signal), completion: take completion)
-                    match task.spawn(tasks, bytes child_bytes, take job, connection) {
+                    let job = ConnectionJob(socket: take socket, c, cfg: arc.share(settings), peer, at, routes: arc.share(routing), state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, stop: share_signal(signal), completion: take completion)
+                    match task.try_spawn(tasks, bytes child_bytes, take job, connection) {
                         Ok(take child) => {
-                            group.connections[vacant] = Some(HttpSlot(child: take child, first: true, promoted: false, active: false, ip: ip))
+                            group.connections[vacant] = Some(HttpSlot(child: take child, first: true, promoted: false, active: false, ip))
                             in_first_phase += 1
                         },
                         Error((_, take refused)) => {
@@ -2401,7 +2331,7 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
                 HttpChild(i) => {
                     let ended = replace(mut group.connections[i], None)
                     if let Some(take s) = take ended {
-                        let HttpSlot(child: take child, first: first, promoted: _, active: _, ip: _) = take s
+                        let HttpSlot(child: take child, first, promoted: _, active: _, ip: _) = take s
                         let _ = task.join(take child)
                         if first {
                             in_first_phase -= 1
@@ -2411,7 +2341,7 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
                 PromotedChild(i) => {
                     let ended = replace(mut group.promoted[i], None)
                     if let Some(take s) = take ended {
-                        let PromotedSlot(child: take child, first: first, ip: _, generation: _, stop: _) = take s
+                        let PromotedSlot(child: take child, first, ip: _, generation: _, stop: _) = take s
                         let _ = task.join(take child)
                         if first {
                             in_first_phase -= 1
@@ -2563,7 +2493,7 @@ fn frame_fields(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: 
 }
 
 fn message_framing(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: u64, absent: Framing) -> Result[Framing, BodyError] {
-    let FramingFields(lengths: lengths, encoding_fields: encoding_fields, length: length) = fields
+    let FramingFields(lengths, encoding_fields, length) = fields
     if lengths > 0 && encoding_fields != 0 || lengths > 1 {
         return Error(failure(400))
     }
@@ -2610,7 +2540,7 @@ pub type BodyProgress: key = More | Data(http1.Span) | Done | Failed(BodyError)
 /// only here; trailers can never change it. All errors permanently latch close.
 /// Ex: `let mut d = http.decoder(frame, h, body_max)`.
 pub fn decoder(frame: Framing, h: http1.Head, body_max: u64) -> Decoder {
-    let mut d = Decoder(state: Finished, used: 0, decoded: 0, remaining: 0, body_max: body_max, size: 0, digits: 0, line_bytes: 0, trailer_bytes: h.end, trailer_fields: h.count, error: failure(400))
+    let mut d = Decoder(state: Finished, used: 0, decoded: 0, remaining: 0, body_max, size: 0, digits: 0, line_bytes: 0, trailer_bytes: h.end, trailer_fields: h.count, error: failure(400))
     match frame {
         Empty => {},
         ContentLength(n) => {
@@ -2877,7 +2807,7 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
                     d.state = DataCr
                 }
             }
-            return Data(http1.Span(start: start, end: d.used))
+            return Data(http1.Span(start, end: d.used))
         }
         let c = b[d.used]
         d.used += 1

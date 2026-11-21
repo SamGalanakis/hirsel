@@ -357,6 +357,11 @@ writer's tag, and each field the writer lacks or removed has a default. A schema
 tombstones, so data whose writer removed a variant resolves against a reader that still has
 it.
 
+**Encoding.** A count that exceeds the format's u32 field returns
+`Error(CountOverflow(count))` before writing the count. Refused admission raises
+`Capacity` ([MEM-21](budgets.md#mem-21-admission)). Allocation refusal on append
+leaves the prefix whose writes completed.
+
 **Decoding.** A decode returns `Result[T, DecodeError]`, where
 `DecodeError = Truncated(u64) | Invalid(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) |
 Schema(u64) | Value(u64)`. Each `u64` is a byte offset, into the writer's schema for `Schema` and into

@@ -11,15 +11,15 @@ fn clear[T](mut xs: List[T]) {
 
 fn reuse() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 7u64))
+    list.push(mut xs, 7u64)
     clear(mut xs)
     clear(mut xs)
-    result.unwrap(list.push(mut xs, 9u64))
+    list.push(mut xs, 9u64)
     xs[0] * 100 + list.capacity(xs)
 }
 
 fn static_value() -> u64 {
-    let mut xs = result.unwrap(b"abc")
+    let mut xs = b"abc"
     clear(mut xs)
     list.len(xs) + list.capacity(xs)
 }
@@ -32,8 +32,8 @@ resource type Mark {
 
 fn resources() -> u64 {
     let mut xs: List[Mark] = list.new()
-    result.unwrap(list.push(mut xs, result.unwrap(Mark(id: 7))))
-    result.unwrap(list.push(mut xs, result.unwrap(Mark(id: 11))))
+    list.push(mut xs, result.unwrap(Mark(id: 7)))
+    list.push(mut xs, result.unwrap(Mark(id: 11)))
     clear(mut xs)
     list.len(xs) * 100 + list.capacity(xs)
 }
@@ -48,8 +48,8 @@ resource type Broken {
 
 fn failed_drop() -> u64 {
     let mut xs: List[Broken] = list.new()
-    result.unwrap(list.push(mut xs, result.unwrap(Broken(id: 7))))
-    result.unwrap(list.push(mut xs, result.unwrap(Broken(id: 11))))
+    list.push(mut xs, result.unwrap(Broken(id: 7)))
+    list.push(mut xs, result.unwrap(Broken(id: 11)))
     clear(mut xs)
     999
 }

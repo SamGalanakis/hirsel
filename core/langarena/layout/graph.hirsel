@@ -16,7 +16,7 @@ type ANode: shareable + send {
 }
 
 fn exclusive(n: u64, rounds: u64) -> Result[u64, Capacity] {
-    let mut nodes: List[Node] = list.with_capacity(n)?
+    let mut nodes: List[Node] = list.with_capacity(n)
     for i in 0 .. n {
         let _ = list.push(mut nodes, Node(value: i, edge: int.narrow((i + 1) % n)))
     }
@@ -34,18 +34,11 @@ fn exclusive(n: u64, rounds: u64) -> Result[u64, Capacity] {
     Ok(sum)
 }
 
-fn inserted(take r: Result[std.pool.Id[Node], (Capacity, Node)]) -> Result[std.pool.Id[Node], Capacity] {
-    match take r {
-        Ok(h) => Ok(h),
-        Error((c, take value)) => Error(c)
-    }
-}
-
 fn churn(n: u64, rounds: u64) -> Result[u64, Capacity] {
-    let mut p: std.pool.Pool[Node] = std.pool.with_capacity(n)?
-    let mut ids: List[std.pool.Id[Node]] = list.with_capacity(n)?
+    let mut p: std.pool.Pool[Node] = std.pool.with_capacity(n)
+    let mut ids: List[std.pool.Id[Node]] = list.with_capacity(n)
     for i in 0 .. n {
-        let h = inserted(std.pool.insert(mut p, Node(value: i, edge: int.narrow((i + 1) % n))))?
+        let h = std.pool.insert(mut p, Node(value: i, edge: int.narrow((i + 1) % n)))
         let _ = list.push(mut ids, h)
     }
     let mut stale: u64 = 0
@@ -54,7 +47,7 @@ fn churn(n: u64, rounds: u64) -> Result[u64, Capacity] {
             let old = ids[i]
             let mut node = result.unwrap(std.pool.remove(mut p, old))
             node.value += 1
-            let fresh = inserted(std.pool.insert(mut p, take node))?
+            let fresh = std.pool.insert(mut p, take node)
             if !std.pool.contains(p, old) {
                 stale += 1
             }
@@ -80,7 +73,7 @@ fn copy_rc(node: Rc[RNode], depth: u64) -> Result[Rc[RNode], Capacity] {
             None => None
         }
     }
-    result.capacity_only(rc.new(RNode(value: node.value + 1, tail: take tail)))
+    Ok(rc.new(RNode(value: node.value + 1, tail: take tail)))
 }
 
 fn copy_arc(node: Arc[ANode], depth: u64) -> Result[Arc[ANode], Capacity] {
@@ -95,7 +88,7 @@ fn copy_arc(node: Arc[ANode], depth: u64) -> Result[Arc[ANode], Capacity] {
             None => None
         }
     }
-    result.capacity_only(arc.new(ANode(value: node.value + 1, tail: take tail)))
+    Ok(arc.new(ANode(value: node.value + 1, tail: take tail)))
 }
 
 fn sum_rc(node: Rc[RNode]) -> u64 {
@@ -116,9 +109,9 @@ fn snapshots_rc(n: u64, versions: u64) -> Result[u64, Capacity] {
     let mut root: Option[Rc[RNode]] = None
     for i in 0 .. n {
         let old = replace(mut root, None)
-        root = Some(result.capacity_only(rc.new(RNode(value: i, tail: take old)))?)
+        root = Some(rc.new(RNode(value: i, tail: take old)))
     }
-    let mut held: List[Rc[RNode]] = list.with_capacity(versions)?
+    let mut held: List[Rc[RNode]] = list.with_capacity(versions)
     for _ in 0 .. versions {
         let next = match root {
             Some(t) => copy_rc(t, n / 2)?,
@@ -138,9 +131,9 @@ fn snapshots_arc(n: u64, versions: u64) -> Result[u64, Capacity] {
     let mut root: Option[Arc[ANode]] = None
     for i in 0 .. n {
         let old = replace(mut root, None)
-        root = Some(result.capacity_only(arc.new(ANode(value: i, tail: take old)))?)
+        root = Some(arc.new(ANode(value: i, tail: take old)))
     }
-    let mut held: List[Arc[ANode]] = list.with_capacity(versions)?
+    let mut held: List[Arc[ANode]] = list.with_capacity(versions)
     for _ in 0 .. versions {
         let next = match root {
             Some(t) => copy_arc(t, n / 2)?,
@@ -162,12 +155,8 @@ fn show(out: Stdout, value: Result[u64, Capacity]) -> Result[(), Exit] waits {
         Error(_) => return Error(Exit(status: 2))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, n) {
-        return Error(Exit(status: 2))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 2))
-    }
+    string.push_u64(mut s, n)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 3))
@@ -295,7 +284,7 @@ pub fn exclusive_refusal() -> bool {
             Error(c) => c.requested == 48 && c.available == 47,
             _ => false
         }
-        let xs: List[u64] = result.unwrap(list.with_capacity(5))
+        let xs: List[u64] = list.with_capacity(5)
         denied && list.len(xs) == 0
     })
     exact && short
@@ -336,7 +325,7 @@ pub fn rc_refusal_and_refund() -> bool {
         Ok(Error(c)) => c.requested == 32 && c.available == 31,
         _ => false
     }
-    let root = result.unwrap(rc.new(RNode(value: 2, tail: Some(result.unwrap(rc.new(RNode(value: 1, tail: None)))))))
+    let root = rc.new(RNode(value: 2, tail: Some(rc.new(RNode(value: 1, tail: None)))))
     let prefix = result.unwrap(bound bytes 63 {
         let denied = match copy_rc(root, 1) {
             Error(c) => c.requested == 32 && c.available == 31,
@@ -362,7 +351,7 @@ pub fn arc_refusal_and_refund() -> bool {
         Ok(Error(c)) => c.requested == 32 && c.available == 31,
         _ => false
     }
-    let root = result.unwrap(arc.new(ANode(value: 2, tail: Some(result.unwrap(arc.new(ANode(value: 1, tail: None)))))))
+    let root = arc.new(ANode(value: 2, tail: Some(arc.new(ANode(value: 1, tail: None)))))
     let prefix = result.unwrap(bound bytes 63 {
         let denied = match copy_arc(root, 1) {
             Error(c) => c.requested == 32 && c.available == 31,
@@ -378,7 +367,7 @@ pub fn arc_refusal_and_refund() -> bool {
 pub fn stale_and_foreign_probes() -> bool {
     let mut p: std.pool.Pool[Node] = std.pool.new()
     let other: std.pool.Pool[Node] = std.pool.new()
-    let old = result.unwrap(std.pool.insert(mut p, Node(value: 7, edge: 0)))
+    let old = std.pool.insert(mut p, Node(value: 7, edge: 0))
     let foreign = match std.pool.get(other, old) {
         Error(WrongPool) => true,
         _ => false
@@ -388,7 +377,7 @@ pub fn stale_and_foreign_probes() -> bool {
         Error(Removed) => true,
         _ => false
     }
-    let fresh = result.unwrap(std.pool.insert(mut p, take node))
+    let fresh = std.pool.insert(mut p, take node)
     let stale = !std.pool.contains(p, old) && result.unwrap(std.pool.get(p, fresh)).value == 7
     std.pool.clear(mut p)
     foreign && twice && stale && !std.pool.contains(p, fresh)
@@ -425,8 +414,8 @@ pub fn malformed_graph_input() -> bool {
         _ => false
     }
     let mut nodes: List[Node] = list.new()
-    result.unwrap(list.push(mut nodes, Node(value: 0, edge: 1)))
-    result.unwrap(list.push(mut nodes, Node(value: 1, edge: int.narrow(graph_inputs.MALFORMED_EDGE))))
+    list.push(mut nodes, Node(value: 0, edge: 1))
+    list.push(mut nodes, Node(value: 1, edge: int.narrow(graph_inputs.MALFORMED_EDGE)))
     zero && width && match edges(nodes) {
         Error(1) => true,
         _ => false

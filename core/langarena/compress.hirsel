@@ -1,14 +1,12 @@
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same codecs and checked storage.
 fn push[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
-    match list.push(mut xs, take x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Capacity(c))
-    }
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 fn test_data(n: u64) -> Result[Bytes, helper.Error] {
     let pattern = string.as_bytes("ABRACADABRA")
-    let mut b: Bytes = helper.mem(list.with_capacity(n))?
+    let mut b: Bytes = list.with_capacity(n)
     for i in 0 .. n {
         push(mut b, pattern[i % 11])?
     }
@@ -26,7 +24,7 @@ fn bwt_encode(input: Bytes) -> Result[Bwt, helper.Error] {
         return Ok(Bwt(transformed: list.new(), original: 0))
     }
     let mut sa: List[u64] = list.new()
-    helper.mem(list.fill(mut sa, n, 0u64))?
+    list.fill(mut sa, n, 0u64)
     let mut counts: Inline[u64, 256] =[0; 256]
     for byte in input {
         counts[int.widen(byte)] += 1
@@ -45,7 +43,7 @@ fn bwt_encode(input: Bytes) -> Result[Bwt, helper.Error] {
     }
     if n > 1 {
         let mut rank: List[u64] = list.new()
-        helper.mem(list.fill(mut rank, n, 0u64))?
+        list.fill(mut rank, n, 0u64)
         let mut current: u64 = 0
         let mut previous = input[sa[0]]
         for index in sa {
@@ -57,15 +55,15 @@ fn bwt_encode(input: Bytes) -> Result[Bwt, helper.Error] {
         }
         let mut k: u64 = 1
         while k < n {
-            let mut pairs: List[(u64, u64)] = helper.mem(list.with_capacity(n))?
+            let mut pairs: List[(u64, u64)] = list.with_capacity(n)
             for i in 0 .. n {
                 push(mut pairs, (rank[i], rank[(i + k) % n]))?
             }
-            helper.mem(list.sort_stable(mut sa, fn(a: u64, b: u64) -> Order {
+            list.sort_stable(mut sa, fn(a: u64, b: u64) -> Order {
                 std.order.compare(pairs[a], pairs[b])
-            }))?
+            })
             let mut next_rank: List[u64] = list.new()
-            helper.mem(list.fill(mut next_rank, n, 0u64))?
+            list.fill(mut next_rank, n, 0u64)
             for i in 1 .. n {
                 let prev = sa[i - 1]
                 let curr = sa[i]
@@ -80,7 +78,7 @@ fn bwt_encode(input: Bytes) -> Result[Bwt, helper.Error] {
         }
     }
     let mut transformed: Bytes = list.new()
-    helper.mem(list.fill(mut transformed, n, 0u8))?
+    list.fill(mut transformed, n, 0u8)
     let mut original: i32 = 0
     for i in 0 .. n {
         let suffix = sa[i]
@@ -91,7 +89,7 @@ fn bwt_encode(input: Bytes) -> Result[Bwt, helper.Error] {
             transformed[i] = input[suffix - 1]
         }
     }
-    Ok(Bwt(transformed: take transformed, original: original))
+    Ok(Bwt(transformed: take transformed, original))
 }
 
 fn bwt_decode(encoded: Bwt) -> Result[Bytes, helper.Error] {
@@ -111,7 +109,7 @@ fn bwt_decode(encoded: Bwt) -> Result[Bytes, helper.Error] {
         total += counts[i]
     }
     let mut next: List[u64] = list.new()
-    helper.mem(list.fill(mut next, n, 0u64))?
+    list.fill(mut next, n, 0u64)
     let mut temp: Inline[i32, 256] =[0; 256]
     for i in 0 .. n {
         let byte: u64 = int.widen(b[i])
@@ -120,7 +118,7 @@ fn bwt_decode(encoded: Bwt) -> Result[Bytes, helper.Error] {
         temp[byte] += 1
     }
     let mut output: Bytes = list.new()
-    helper.mem(list.fill(mut output, n, 0u8))?
+    list.fill(mut output, n, 0u8)
     let mut index: u64 = int.narrow(encoded.original)
     for i in 0 .. n {
         index = next[index];
@@ -138,10 +136,10 @@ fn lzw_encode(input: Bytes) -> Result[Bytes, helper.Error] {
     for i in 0u32 .. 256u32 {
         let mut key: Bytes = list.new()
         push(mut key, int.narrow(i))?
-        helper.mem(result.capacity_only(map.insert(mut dict, take key, i)))?
+        map.insert(mut dict, take key, i)
     }
     let mut next_code: u32 = 256
-    let mut output: Bytes = helper.mem(list.with_capacity(n * 2))?
+    let mut output: Bytes = list.with_capacity(n * 2)
     let mut current: Bytes = list.new()
     push(mut current, input[0])?
     for i in 1 .. n {
@@ -156,8 +154,8 @@ fn lzw_encode(input: Bytes) -> Result[Bytes, helper.Error] {
                 }
             }
             let word: u16 = int.truncate(code)
-            helper.mem(list.put_word_be(mut output, word))?
-            helper.mem(result.capacity_only(map.insert(mut dict, take current, next_code)))?
+            list.put_word_be(mut output, word)
+            map.insert(mut dict, take current, next_code)
             next_code += 1
             current = list.new()
             push(mut current, byte)?
@@ -168,7 +166,7 @@ fn lzw_encode(input: Bytes) -> Result[Bytes, helper.Error] {
         None => return Error(Config)
     }
     let word: u16 = int.truncate(code)
-    helper.mem(list.put_word_be(mut output, word))?
+    list.put_word_be(mut output, word)
     Ok(take output)
 }
 
@@ -193,15 +191,15 @@ type Bits {
 fn table(frequencies: List[i32]) -> Result[Table, helper.Error] {
     let mut low: List[i32] = list.new()
     let mut high: List[i32] = list.new()
-    helper.mem(list.fill(mut low, 256, 0i32))?
-    helper.mem(list.fill(mut high, 256, 0i32))?
+    list.fill(mut low, 256, 0i32)
+    list.fill(mut high, 256, 0i32)
     let mut total: i32 = 0
     for i in 0u64 .. 256u64 {
         low[i] = total;
         total += frequencies[i];
         high[i] = total
     }
-    Ok(Table(low: take low, high: take high, total: total))
+    Ok(Table(low: take low, high: take high, total))
 }
 
 fn write_bit(mut out: Bits, bit: u8) -> Result[(), helper.Error] {
@@ -218,7 +216,7 @@ fn write_bit(mut out: Bits, bit: u8) -> Result[(), helper.Error] {
 
 fn arith_encode(input: Bytes) -> Result[Arith, helper.Error] {
     let mut frequencies: List[i32] = list.new()
-    helper.mem(list.fill(mut frequencies, 256, 0i32))?
+    list.fill(mut frequencies, 256, 0i32)
     for byte in input {
         frequencies[int.widen(byte)] += 1
     }
@@ -305,7 +303,7 @@ fn arith_decode(encoded: Arith) -> Result[Bytes, helper.Error] {
     }
     let total: u64 = int.narrow(cum)
     let mut output: Bytes = list.new()
-    helper.mem(list.fill(mut output, total, 0u8))?
+    list.fill(mut output, total, 0u8)
     let mut position: u64 = 0
     let mut value: u64 = 0
     for _ in 0u64 .. 32u64 {
@@ -362,29 +360,29 @@ fn lzw_decode(encoded: Bytes) -> Result[Bytes, helper.Error] {
     if n % 2 != 0 {
         return Error(Config)
     }
-    let mut dict: List[Bytes] = helper.mem(list.with_capacity(4096))?
+    let mut dict: List[Bytes] = list.with_capacity(4096)
     for i in 0u64 .. 256u64 {
-        let mut phrase: Bytes = helper.mem(list.with_capacity(1))?
+        let mut phrase: Bytes = list.with_capacity(1)
         push(mut phrase, int.narrow(i))?
         push(mut dict, take phrase)?
     }
-    let mut output: Bytes = helper.mem(list.with_capacity(n * 2))?
+    let mut output: Bytes = list.with_capacity(n * 2)
     let first: u16 = list.word_be(encoded, 0)
     let mut old_code: u64 = int.widen(first)
-    helper.mem(list.append(mut output, dict[old_code]))?
+    list.append(mut output, dict[old_code])
     let mut i: u64 = 2
     while i < n {
         let word: u16 = list.word_be(encoded, i)
         let code: u64 = int.widen(word)
         let next = list.len(dict)
-        let mut phrase: Bytes = helper.mem(clone(dict[old_code]))?
+        let mut phrase: Bytes = clone(dict[old_code])
         if code < next {
             push(mut phrase, dict[code][0])?
-            helper.mem(list.append(mut output, dict[code]))?
+            list.append(mut output, dict[code])
         } else if code == next {
             let byte = phrase[0]
             push(mut phrase, byte)?
-            helper.mem(list.append(mut output, phrase))?
+            list.append(mut output, phrase)
         } else {
             return Ok(list.new())
         }
@@ -415,10 +413,7 @@ type HuffEncoded {
 }
 
 fn node(frequency: i32, byte: u8, leaf: bool, take left: Option[Box[Huff]], take right: Option[Box[Huff]]) -> Result[Box[Huff], helper.Error] {
-    match box.new(Huff(frequency: frequency, byte: byte, leaf: leaf, left: take left, right: take right)) {
-        Ok(take n) => Ok(take n),
-        Error((c, _)) => Error(Capacity(c)),
-    }
+    Ok(box.new(Huff(frequency, byte, leaf, left: take left, right: take right)))
 }
 
 fn huff_tree(frequencies: List[i32]) -> Result[Option[Box[Huff]], helper.Error] {
@@ -428,9 +423,9 @@ fn huff_tree(frequencies: List[i32]) -> Result[Option[Box[Huff]], helper.Error] 
             push(mut nodes, node(frequencies[i], int.narrow(i), true, None, None)?)?
         }
     }
-    helper.mem(list.sort_stable(mut nodes, fn(a: Box[Huff], b: Box[Huff]) -> Order {
+    list.sort_stable(mut nodes, fn(a: Box[Huff], b: Box[Huff]) -> Order {
         std.order.compare(a.frequency, b.frequency)
-    }))?
+    })
     if list.len(nodes) == 1 {
         let child = list.remove(mut nodes, 0)
         let frequency = child.frequency
@@ -448,10 +443,7 @@ fn huff_tree(frequencies: List[i32]) -> Result[Option[Box[Huff]], helper.Error] 
             Ok(i) => i,
             Error(i) => i
         }
-        match list.insert(mut nodes, pos, take parent) {
-            Ok(()) => {},
-            Error((c, _)) => return Error(Capacity(c))
-        }
+        list.insert(mut nodes, pos, take parent)
     }
     Ok(list.pop(mut nodes))
 }
@@ -475,20 +467,20 @@ fn huff_codes(n: Box[Huff], code: i32, length: i32, mut codes: Codes) {
 
 fn huff_encode(input: Bytes) -> Result[HuffEncoded, helper.Error] {
     let mut frequencies: List[i32] = list.new()
-    helper.mem(list.fill(mut frequencies, 256, 0i32))?
+    list.fill(mut frequencies, 256, 0i32)
     for byte in input {
         frequencies[int.widen(byte)] += 1
     }
     let root = huff_tree(frequencies)?
     let mut lengths: List[i32] = list.new()
     let mut values: List[i32] = list.new()
-    helper.mem(list.fill(mut lengths, 256, 0i32))?
-    helper.mem(list.fill(mut values, 256, 0i32))?
+    list.fill(mut lengths, 256, 0i32)
+    list.fill(mut values, 256, 0i32)
     let mut codes = Codes(lengths: take lengths, codes: take values)
     if let Some(n) = view root {
         huff_codes(n, 0, 0, mut codes)
     }
-    let mut out: Bytes = helper.mem(list.with_capacity(list.len(input) * 2))?
+    let mut out: Bytes = list.with_capacity(list.len(input) * 2)
     let mut current: u8 = 0
     let mut pos: u8 = 0
     let mut bits: i32 = 0
@@ -513,12 +505,12 @@ fn huff_encode(input: Bytes) -> Result[HuffEncoded, helper.Error] {
     if pos > 0 {
         push(mut out, current)?
     }
-    Ok(HuffEncoded(data: take out, bits: bits, frequencies: take frequencies))
+    Ok(HuffEncoded(data: take out, bits, frequencies: take frequencies))
 }
 
 fn huff_read(encoded: HuffEncoded, root: Box[Huff]) -> Result[Bytes, helper.Error] {
     let mut output: Bytes = list.new()
-    helper.mem(list.fill(mut output, int.narrow(encoded.bits), 0u8))?
+    list.fill(mut output, int.narrow(encoded.bits), 0u8)
     let mut size: u64 = 0
     let mut current = view root
     let mut processed: i32 = 0

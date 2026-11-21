@@ -3,7 +3,7 @@
 resource type Marker { out: Stdout } drop(r) { result.unwrap(stdout.write(r.out, "cleanup")) }
 pub fn main(out: Stdout) -> Result[(), Exit] waits {
     let marker = result.unwrap(Marker(out: out))
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     let _ = channel.receive(rx)
     Ok(())
 }

@@ -7,7 +7,7 @@ fn frame_case(raw: Bytes, limit: u64, expected: Result[http.Framing, http.BodyEr
 }
 
 fn refused(status: u16) -> Result[http.Framing, http.BodyError] {
-    Error(http.BodyError(status: status, close: true))
+    Error(http.BodyError(status, close: true))
 }
 
 // WHATWG dispatches at a blank line only when at least one data field was read.
@@ -35,7 +35,7 @@ fn dispatched_events(raw: Bytes) -> u64 {
 // Refused fields, invalid UTF-8 and insufficient room leave the prior event intact.
 // expect: run http_sse_atomic_event() = true
 fn http_sse_atomic_event() -> bool {
-    let mut out = result.unwrap(sse.buffer(80))
+    let mut out = sse.buffer(80)
     let expected = string.as_bytes("event: message\nid: 42\ndata: a\ndata: b\ndata: c\ndata: \n\n")
     let data = string.as_bytes("a\r\nb\rc\n")
     if sse.event(mut out, Some("message"), Some("42"), data) != Ok(()) || sse.as_bytes(out) != expected {
@@ -49,62 +49,62 @@ fn http_sse_atomic_event() -> bool {
     if dispatched_events(sse.as_bytes(out)) != 1 {
         return false
     }
-    let bad_utf8 = result.unwrap(b"\xff")
+    let bad_utf8 = b"\xff"
     if sse.event(mut out, Some("bad\nname"), None, data) != Error(Field) || sse.event(mut out, None, Some("bad\u{0}id"), data) != Error(Field) || sse.event(mut out, None, None, bad_utf8) != Error(Utf8) || sse.event(mut out, Some("a long name that will not fit in the remaining room"), None, data) != Error(TooLarge) || sse.as_bytes(out) != expected {
         return false
     }
-    let mut control = result.unwrap(sse.buffer(32))
+    let mut control = sse.buffer(32)
     sse.comment(mut control, "") == Ok(()) && sse.retry(mut control, 12000) == Ok(()) && sse.as_bytes(control) == string.as_bytes(":\n\nretry: 12000\n\n")
 }
 
 // RFC 9112 section 6.3(7): requests without either field have no body.
 // expect: run no_body() = true
 fn no_body() -> bool {
-    frame_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\n\r\nNEXT"), 0, Ok(Empty)) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\n\r\n"), 0, Ok(Empty))
+    frame_case(b"GET / HTTP/1.1\r\nHost: a\r\n\r\nNEXT", 0, Ok(Empty)) && frame_case(b"POST / HTTP/1.0\r\n\r\n", 0, Ok(Empty))
 }
 
 // RFC 9112 section 6.3(6), HTTP-4(2): one decimal length, OWS trimmed by Head.
 // expect: run content_length() = true
 fn content_length() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\ncOnTeNt-LeNgTh:\t3 \t\r\n\r\nabcNEXT"), 3, Ok(ContentLength(3))) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\nContent-Length: 0\r\n\r\n"), 0, Ok(ContentLength(0))) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 9999999999999999999\r\n\r\n"), 18446744073709551615, Ok(ContentLength(9999999999999999999)))
+    frame_case(b"POST / HTTP/1.1\r\ncOnTeNt-LeNgTh:\t3 \t\r\n\r\nabcNEXT", 3, Ok(ContentLength(3))) && frame_case(b"POST / HTTP/1.0\r\nContent-Length: 0\r\n\r\n", 0, Ok(ContentLength(0))) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: 9999999999999999999\r\n\r\n", 18446744073709551615, Ok(ContentLength(9999999999999999999)))
 }
 
 // RFC 9112 section 6.2's 1*DIGIT; HTTP-4(2) fixes a 19-digit lexical bound.
 // expect: run invalid_lengths() = true
 fn invalid_lengths() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length:\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3x\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 00000000000000000000\r\n\r\n"), 99, refused(400))
+    frame_case(b"POST / HTTP/1.1\r\nContent-Length:\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: 3x\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: 00000000000000000000\r\n\r\n", 99, refused(400))
 }
 
 // HTTP-4(2): valid numeric size above the route bound is 413 and close.
 // expect: run large_length() = true
 fn large_length() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n"), 3, refused(413))
+    frame_case(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n", 3, refused(413))
 }
 
 // RFC 9112 section 6.3(3) permits refusal; HTTP-4(1) requires it even
 // when the length is invalid. Mutant: te_wins_over_cl.
 // expect: run te_and_cl() = true
 fn te_and_cl() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: bad\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(400))
+    frame_case(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: bad\r\nTransfer-Encoding: gzip\r\n\r\n", 99, refused(400))
 }
 
 // HTTP-4(2) takes section 6.3(5)'s refusal option even for equal values.
 // Mutant: accept_equal_dup_cl.
 // expect: run duplicate_lengths() = true
 fn duplicate_lengths() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3, 3\r\n\r\n"), 99, refused(400))
+    frame_case(b"POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.1\r\nContent-Length: 3, 3\r\n\r\n", 99, refused(400))
 }
 
 // HTTP-4(3) permits exactly one chunked coding, case-insensitive.
 // expect: run chunked_framing() = true
 fn chunked_framing() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: ChUnKeD\r\n\r\n"), 99, Ok(Chunked))
+    frame_case(b"POST / HTTP/1.1\r\nTransfer-Encoding: ChUnKeD\r\n\r\n", 99, Ok(Chunked))
 }
 
 // RFC 9112 section 6.1 prohibits TE in HTTP/1.0; HTTP-4(3) answers 400.
 // expect: run te_in_10() = true
 fn te_in_10() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(400))
+    frame_case(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n", 99, refused(400)) && frame_case(b"POST / HTTP/1.0\r\nTransfer-Encoding: gzip\r\n\r\n", 99, refused(400))
 }
 
 // RFC 9112 sections 6.1 and 6.3. Unknown codings give 501 unless an
@@ -208,7 +208,7 @@ fn feed(mut d: http.Decoder, b: Bytes, mut out: Bytes, mut consumed: u64) -> Res
         at += d.used
         consumed += d.used
         match step {
-            Data(span) => result.unwrap(list.append(mut out, list.slice(b, at - d.used + span.start, at - d.used + span.end))),
+            Data(span) => list.append(mut out, list.slice(b, at - d.used + span.start, at - d.used + span.end)),
             More => return Ok(false),
             Done => return Ok(true),
             Failed(e) => return Error(e)
@@ -241,11 +241,11 @@ fn body_split(head: Bytes, wire: Bytes, limit: u64, expected_status: u16, expect
     }
     // A caught handler error cannot restore reuse; even an empty next call
     // and EOF must return the same refusal after the connection is latched.
-    ended == Error(e) && http.decode(mut d, result.unwrap(b"")) == Failed(e)
+    ended == Error(e) && http.decode(mut d, b"") == Failed(e)
 }
 
 fn chunk_case(wire: Bytes, limit: u64, status: u16, body: Bytes, used: u64, eof_only: bool) -> bool {
-    let head = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let head = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
     for split in 0u64 .. list.len(wire) + 1 {
         if !body_split(head, wire, limit, status, body, used, split, eof_only) {
             return false
@@ -289,14 +289,14 @@ fn upstream_chunk_lines() -> bool {
 // RFC 9112 section 7.1.3's decoding example, with a pipelined tail.
 // expect: run chunked_body() = true
 fn chunked_body() -> bool {
-    chunk_case(result.unwrap(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\nNEXT"), 9, 0, result.unwrap(b"Wikipedia"), 24, false)
+    chunk_case(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\nNEXT", 9, 0, b"Wikipedia", 24, false)
 }
 
 // RFC 9112 section 7.1.1: token and quoted-string values, quoted-pairs,
 // BWS before separators, flag extensions, and zero-chunk extensions.
 // expect: run chunk_extensions() = true
 fn chunk_extensions() -> bool {
-    chunk_case(result.unwrap(b"1 ; flag ; x = token; q=\"a\\\"b\\\\c\"\r\na\r\n0;end=\"\"\r\n\r\n"), 1, 0, result.unwrap(b"a"), 50, false)
+    chunk_case(b"1 ; flag ; x = token; q=\"a\\\"b\\\\c\"\r\na\r\n0;end=\"\"\r\n\r\n", 1, 0, b"a", 50, false)
 }
 
 // RFC 9112 section 7.1.2 / HTTP-4(6): discard trailers, even framing names.
@@ -304,14 +304,14 @@ fn chunk_extensions() -> bool {
 // Mutant: trailer_merged.
 // expect: run trailers_discarded() = true
 fn trailers_discarded() -> bool {
-    let wire = result.unwrap(b"1\r\na\r\n0\r\nX: \tvalue\xff \t\r\nContent-Length: 999\r\n\r\nNEXT")
-    chunk_case(wire, 1, 0, result.unwrap(b"a"), list.len(wire) - 4, false)
+    let wire = b"1\r\na\r\n0\r\nX: \tvalue\xff \t\r\nContent-Length: 999\r\n\r\nNEXT"
+    chunk_case(wire, 1, 0, b"a", list.len(wire) - 4, false)
 }
 
 // HTTP-4(5) requires CRLF for chunk lines and data even with an LF-only head.
 // expect: run chunk_line_endings() = true
 fn chunk_line_endings() -> bool {
-    chunk_case(result.unwrap(b"0\n\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0\rX"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"1\r\na\n0\r\n\r\n"), 9, 400, result.unwrap(b"a"), 0, false) && chunk_case(result.unwrap(b"1\r\na\rX"), 9, 400, result.unwrap(b"a"), 0, false)
+    chunk_case(b"0\n\n", 9, 400, b"", 0, false) && chunk_case(b"0\rX", 9, 400, b"", 0, false) && chunk_case(b"1\r\na\n0\r\n\r\n", 9, 400, b"a", 0, false) && chunk_case(b"1\r\na\rX", 9, 400, b"a", 0, false)
 }
 
 // HTTP-4(5), RFC 9112 section 7.1: empty, non-hex, signed or >16 digits
@@ -319,134 +319,134 @@ fn chunk_line_endings() -> bool {
 // Mutant: chunk_size_wraps.
 // expect: run chunk_sizes() = true
 fn chunk_sizes() -> bool {
-    chunk_case(result.unwrap(b"\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"g\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"+1\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"10000000000000000\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"00000000000000000\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"fFfFfFfFfFfFfFfF\r\n"), 9, 413, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0000000000000000\r\n\r\n"), 0, 0, result.unwrap(b""), 20, false)
+    chunk_case(b"\r\n", 9, 400, b"", 0, false) && chunk_case(b"g\r\n", 9, 400, b"", 0, false) && chunk_case(b"+1\r\n", 9, 400, b"", 0, false) && chunk_case(b"10000000000000000\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"00000000000000000\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"fFfFfFfFfFfFfFfF\r\n", 9, 413, b"", 0, false) && chunk_case(b"0000000000000000\r\n\r\n", 0, 0, b"", 20, false)
 }
 
 // The aggregate of chunks, not just each chunk, is bounded. A handler
 // catching this refusal cannot restore connection reuse. HTTP-4(5,7).
 // expect: run chunk_total_limit() = true
 fn chunk_total_limit() -> bool {
-    chunk_case(result.unwrap(b"1\r\na\r\n1\r\nb\r\n0\r\n\r\n"), 1, 413, result.unwrap(b"a"), 0, false)
+    chunk_case(b"1\r\na\r\n1\r\nb\r\n0\r\n\r\n", 1, 413, b"a", 0, false)
 }
 
 // Section 7.1.1 requires an extension name and, after '=', a value.
 // Bare trailing BWS, malformed quotes and control bytes are not extensions.
 // expect: run bad_extensions() = true
 fn bad_extensions() -> bool {
-    chunk_case(result.unwrap(b"0;\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0;x=\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0;x=\"unterminated\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0;x=\"x\"y\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0;x=\"\x01\"\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0 \r\n\r\n"), 9, 400, result.unwrap(b""), 0, false)
+    chunk_case(b"0;\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0;x=\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0;x=\"unterminated\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0;x=\"x\"y\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0;x=\"\x01\"\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0 \r\n\r\n", 9, 400, b"", 0, false)
 }
 
 // HTTP-4(6) reuses strict head-field syntax and requires trailer CRLF.
 // expect: run bad_trailers() = true
 fn bad_trailers() -> bool {
-    chunk_case(result.unwrap(b"0\r\n X: y\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0\r\nX : y\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0\r\nX: \x7f\r\n\r\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0\r\nX: y\n\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0\r\n\n"), 9, 400, result.unwrap(b""), 0, false) && chunk_case(result.unwrap(b"0\r\n\rX"), 9, 400, result.unwrap(b""), 0, false)
+    chunk_case(b"0\r\n X: y\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0\r\nX : y\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0\r\nX: \x7f\r\n\r\n", 9, 400, b"", 0, false) && chunk_case(b"0\r\nX: y\n\n", 9, 400, b"", 0, false) && chunk_case(b"0\r\n\n", 9, 400, b"", 0, false) && chunk_case(b"0\r\n\rX", 9, 400, b"", 0, false)
 }
 
 // EOF in any unfinished size, extension, data, CRLF or trailer is truncation.
 // expect: run chunk_truncation() = true
 fn chunk_truncation() -> bool {
-    chunk_case(result.unwrap(b""), 9, 400, result.unwrap(b""), 0, true) && chunk_case(result.unwrap(b"1\r\n"), 9, 400, result.unwrap(b""), 0, true) && chunk_case(result.unwrap(b"1\r\na"), 9, 400, result.unwrap(b"a"), 0, true) && chunk_case(result.unwrap(b"0\r\nX: y\r"), 9, 400, result.unwrap(b""), 0, true) && chunk_case(result.unwrap(b"0;x=\""), 9, 400, result.unwrap(b""), 0, true)
+    chunk_case(b"", 9, 400, b"", 0, true) && chunk_case(b"1\r\n", 9, 400, b"", 0, true) && chunk_case(b"1\r\na", 9, 400, b"a", 0, true) && chunk_case(b"0\r\nX: y\r", 9, 400, b"", 0, true) && chunk_case(b"0;x=\"", 9, 400, b"", 0, true)
 }
 
 // Section 6.3(6,7): fixed and empty bodies leave the next request untouched;
 // a short fixed body is 400 and close at EOF. No body allocation in the decoder.
 // expect: run fixed_and_empty_bodies() = true
 fn fixed_and_empty_bodies() -> bool {
-    let head = result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n")
-    let wire = result.unwrap(b"abcNEXT")
+    let head = b"POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n"
+    let wire = b"abcNEXT"
     for split in 0u64 .. 8u64 {
-        if !body_split(head, wire, 3, 0, result.unwrap(b"abc"), 3, split, false) {
+        if !body_split(head, wire, 3, 0, b"abc", 3, split, false) {
             return false
         }
     }
-    body_split(head, result.unwrap(b"ab"), 3, 400, result.unwrap(b"ab"), 0, 1, true) && body_split(result.unwrap(b"GET / HTTP/1.1\r\n\r\n"), result.unwrap(b"NEXT"), 0, 0, result.unwrap(b""), 0, 2, false)
+    body_split(head, b"ab", 3, 400, b"ab", 0, 1, true) && body_split(b"GET / HTTP/1.1\r\n\r\n", b"NEXT", 0, 0, b"", 0, 2, false)
 }
 
 // HTTP-4(5): the line's 1024-byte limit includes CRLF. Probe the exact
 // boundary and one over, with a fragment inside the long extension token.
 // expect: run chunk_line_limit() = true
 fn chunk_line_limit() -> bool {
-    let head = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
-    let mut wire = result.unwrap(b"0;x=")
+    let head = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    let mut wire = b"0;x="
     while list.len(wire) < 1022 {
-        result.unwrap(list.push(mut wire, b'a'))
+        list.push(mut wire, b'a')
     }
-    result.unwrap(list.append(mut wire, result.unwrap(b"\r\n\r\n")))
-    if !body_split(head, wire, 0, 0, result.unwrap(b""), 1026, 1000, false) {
+    list.append(mut wire, b"\r\n\r\n")
+    if !body_split(head, wire, 0, 0, b"", 1026, 1000, false) {
         return false
     }
     wire[1022] = b'a'
     wire[1023] = b'a'
-    result.unwrap(list.append(mut wire, result.unwrap(b"\r\n\r\n")))
-    body_split(head, wire, 0, 400, result.unwrap(b""), 0, 1000, false)
+    list.append(mut wire, b"\r\n\r\n")
+    body_split(head, wire, 0, 400, b"", 0, 1000, false)
 }
 
 // HTTP-4(6): head + trailers share the 8192-byte cap, including both
 // terminators. A new head-sized allowance for trailers would accept the excess.
 // expect: run trailer_byte_limit() = true
 fn trailer_byte_limit() -> bool {
-    let head = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
-    let mut wire = result.unwrap(b"0\r\nX:")
+    let head = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    let mut wire = b"0\r\nX:"
     let n = 8192 - list.len(head) + 3
     while list.len(wire) < n - 4 {
-        result.unwrap(list.push(mut wire, b'a'))
+        list.push(mut wire, b'a')
     }
-    result.unwrap(list.append(mut wire, result.unwrap(b"\r\n\r\n")))
-    if !body_split(head, wire, 0, 0, result.unwrap(b""), n, n - 1, false) {
+    list.append(mut wire, b"\r\n\r\n")
+    if !body_split(head, wire, 0, 0, b"", n, n - 1, false) {
         return false
     }
     wire[n - 4] = b'a'
     wire[n - 3] = b'a'
-    result.unwrap(list.append(mut wire, result.unwrap(b"\r\n\r\n")))
-    body_split(head, wire, 0, 431, result.unwrap(b""), 0, n - 1, false)
+    list.append(mut wire, b"\r\n\r\n")
+    body_split(head, wire, 0, 431, b"", 0, n - 1, false)
 }
 
 // HTTP-4(6): the existing TE field consumes one of 64 field slots. Trailers
 // count against the same population; they do not replace existing fields.
 // expect: run trailer_field_limit() = true
 fn trailer_field_limit() -> bool {
-    let mut wire = result.unwrap(b"0\r\n")
+    let mut wire = b"0\r\n"
     for i in 0u64 .. 63u64 {
-        result.unwrap(list.append(mut wire, result.unwrap(b"X:\r\n")))
+        list.append(mut wire, b"X:\r\n")
     }
-    result.unwrap(list.append(mut wire, result.unwrap(b"\r\n")))
-    let head = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
-    if !body_split(head, wire, 0, 0, result.unwrap(b""), list.len(wire), 7, false) {
+    list.append(mut wire, b"\r\n")
+    let head = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    if !body_split(head, wire, 0, 0, b"", list.len(wire), 7, false) {
         return false
     }
     wire[list.len(wire) - 2] = b'X'
-    result.unwrap(list.append(mut wire, result.unwrap(b":\r\n\r\n")))
-    body_split(head, wire, 0, 431, result.unwrap(b""), 0, 7, false)
+    list.append(mut wire, b":\r\n\r\n")
+    body_split(head, wire, 0, 431, b"", 0, 7, false)
 }
 
 // RFC 9112 section 7.1 requires exact 64-bit sizes. A 16-digit MAX is
 // valid with a MAX route cap; adding it after one byte is a total-limit 413.
 // expect: run full_width_size() = true
 fn full_width_size() -> bool {
-    let raw = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let raw = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
     let mut h = http1.head()
     if http1.request(raw, mut h) != Complete {
         return false
     }
     let mut d = http.decoder(Chunked, h, 18446744073709551615)
-    http.decode(mut d, result.unwrap(b"FFFFFFFFFFFFFFFF\r\n")) == More && d.remaining == 18446744073709551615 && chunk_case(result.unwrap(b"1\r\na\r\nFFFFFFFFFFFFFFFF\r\n"), 18446744073709551615, 413, result.unwrap(b"a"), 0, false)
+    http.decode(mut d, b"FFFFFFFFFFFFFFFF\r\n") == More && d.remaining == 18446744073709551615 && chunk_case(b"1\r\na\r\nFFFFFFFFFFFFFFFF\r\n", 18446744073709551615, 413, b"a", 0, false)
 }
 
 // Strict chunk/trailer CRLF is independent of the head's accepted LF spelling.
 // expect: run lf_head_strict_body() = true
 fn lf_head_strict_body() -> bool {
-    let raw = result.unwrap(b"POST / HTTP/1.1\nTransfer-Encoding: chunked\n\n")
-    body_split(raw, result.unwrap(b"0\r\n\r\nNEXT"), 0, 0, result.unwrap(b""), 5, 3, false) && body_split(raw, result.unwrap(b"0\n\n"), 0, 400, result.unwrap(b""), 0, 1, false) && body_split(raw, result.unwrap(b"0\r"), 0, 400, result.unwrap(b""), 0, 1, true)
+    let raw = b"POST / HTTP/1.1\nTransfer-Encoding: chunked\n\n"
+    body_split(raw, b"0\r\n\r\nNEXT", 0, 0, b"", 5, 3, false) && body_split(raw, b"0\n\n", 0, 400, b"", 0, 1, false) && body_split(raw, b"0\r", 0, 400, b"", 0, 1, true)
 }
 
 // At a full metadata cap an incomplete line cannot become valid. Refuse now,
 // including when the fragment ends there, rather than waiting for another byte.
 // expect: run incomplete_metadata_at_limits() = true
 fn incomplete_metadata_at_limits() -> bool {
-    let head = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
-    let mut line = result.unwrap(b"0;x=")
+    let head = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    let mut line = b"0;x="
     while list.len(line) < 1024 {
-        result.unwrap(list.push(mut line, b'a'))
+        list.push(mut line, b'a')
     }
     let mut h = http1.head()
     if http1.request(head, mut h) != Complete {
@@ -456,9 +456,9 @@ fn incomplete_metadata_at_limits() -> bool {
     if http.decode(mut d, line) != Failed(http.BodyError(status: 400, close: true)) {
         return false
     }
-    let mut trailers = result.unwrap(b"0\r\nX:")
+    let mut trailers = b"0\r\nX:"
     while list.len(trailers) < 8192 - list.len(head) + 3 {
-        result.unwrap(list.push(mut trailers, b'a'))
+        list.push(mut trailers, b'a')
     }
     d = http.decoder(Chunked, h, 0)
     http.decode(mut d, trailers) == Failed(http.BodyError(status: 431, close: true))

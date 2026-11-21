@@ -22,17 +22,15 @@ pub fn contains[K: key](s: Set[K], k: K) -> bool {
     map.contains(s.m, k)
 }
 
-/// Adds k; Ok(true) when added, Ok(false) when already present (k is then dropped).
-/// Fails: Error((c, k)) when growth is refused; s unchanged.
-/// Alloc: GROWTH as map.insert. Cost: amortised O(1). Ex: `std.set.insert(mut seen, id)?`
-pub fn insert[K: key](mut s: Set[K], take k: K) -> Result[bool, (Capacity, K)] {
+/// Adds k; true when added, false when already present (k is then dropped).
+/// Fails: a refused growth raises Capacity with s unchanged.
+/// Alloc: GROWTH as map.insert. Cost: amortised O(1). Ex: `std.set.insert(mut seen, id)`
+pub fn insert[K: key](mut s: Set[K], take k: K) -> bool {
     if map.contains(s.m, k) {
-        return Ok(false)
+        return false
     }
-    match map.insert(mut s.m, take k, ()) {
-        Ok(()) => Ok(true),
-        Error((c, (take given, _))) => Error((c, take given)),
-    }
+    map.insert(mut s.m, take k, ())
+    true
 }
 
 /// Removes k; true when it was present. Alloc: nothing. Cost: expected O(1).

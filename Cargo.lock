@@ -459,6 +459,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -573,6 +574,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-native-certs",
+ "tempfile",
  "twox-hash",
  "zeroize",
 ]
@@ -587,6 +589,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "tempfile",
 ]
 
 [[package]]
@@ -602,6 +605,7 @@ dependencies = [
  "hirsel-core-layout",
  "hirsel-guard",
  "hirsel-intern",
+ "tempfile",
 ]
 
 [[package]]
@@ -632,6 +636,7 @@ dependencies = [
  "hirsel-llvm-lazy",
  "llvm-sys",
  "object",
+ "tempfile",
 ]
 
 [[package]]

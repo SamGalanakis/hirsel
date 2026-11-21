@@ -135,15 +135,15 @@ fn zero_sized() -> u64 waits {
 }
 
 fn handled(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
-    let attempt: Result[List[u64], Capacity] = list.with_capacity(1)
-    match attempt {
+    let mut attempt: List[u64] = list.new()
+    match list.try_reserve(mut attempt, 1) {
         Error(_) => ((), Some(17u64)),
-        Ok(_) => ((), Some(99u64))
+        Ok(()) => ((), Some(99u64))
     }
 }
 
 fn unhandled(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
-    let work: List[u64] = result.unwrap(list.with_capacity(1))
+    let work: List[u64] = list.with_capacity(1)
     ((), Some(list.len(work)))
 }
 

@@ -3,10 +3,20 @@
 use super::*;
 use hirsel_core_ir::RtOp;
 
+/// How a name pattern binds (OWN-15): a view or copy, an owner (`take`), or the
+/// matched place itself, lent for the arm (`mut`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    View,
+    Take,
+    Mut,
+    /// A `take` or `mut` binding already refused: it binds an error.
+    Refused,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Head {
     Any,
-    Bind(u32, bool),
+    Bind(u32, Mode),
     Product(Option<u32>),
     Range(i128, i128),
 }
@@ -33,6 +43,10 @@ pub(super) struct Patterns {
     escaping: Vec<Freeze>,
     pub(super) guard: bool,
     rebind: bool,
+    /// A guarded arm's first binding: `mut` names bind as views until the guard holds.
+    guarding: bool,
+    /// The freeze records the current scrutinee's selection made; a loan subsumes them.
+    selection: (usize, usize),
     /// A written anchor set, the value it checks and the written type (the freeze site).
     declared_anchors: Option<(anchors::Fact, NodeId, NodeId)>,
     scopes: Vec<Scope>,
@@ -49,9 +63,7 @@ pub(super) struct SlotReplacement {
 enum ScopeKind {
     Region(Option<ValueId>),
     Restore(SlotReplacement),
-    Bound {
-        failed: usize,
-    },
+    Bound,
     StepBound {
         failed: usize,
         steps: Option<ValueId>,
@@ -72,8 +84,12 @@ struct Subject {
     ty: TyId,
     value: Option<ValueId>,
     place: Option<At>,
+    /// The storage of `place`, for a part reached by a pattern.
+    address: Option<AddressId>,
     owned: bool,
     viewed: bool,
+    /// `place` is a writable place (OWN-12), so a `mut` binding may lend a part of it.
+    writable: bool,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -128,16 +144,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         match self.kind(n) {
             NodeKind::Wildcard => self.pat_push(n, declared, Head::Any, PoolRange::EMPTY),
-            NodeKind::BindPattern | NodeKind::TakePattern if self.binder(n).is_some() => self
-                .pat_push(
+            NodeKind::BindPattern | NodeKind::TakePattern | NodeKind::MutPattern
+                if self.binder(n).is_some() =>
+            {
+                let mode = match self.kind(n) {
+                    NodeKind::TakePattern => Mode::Take,
+                    NodeKind::MutPattern => Mode::Mut,
+                    _ => Mode::View,
+                };
+                self.pat_push(
                     n,
                     declared,
-                    Head::Bind(
-                        self.binder(n).unwrap(),
-                        self.kind(n) == NodeKind::TakePattern,
-                    ),
+                    Head::Bind(self.binder(n).unwrap(), mode),
                     PoolRange::EMPTY,
-                ),
+                )
+            }
             NodeKind::UnitPattern if ty == UNIT || ty == ERROR => {
                 self.pat_push(n, ty, Head::Product(None), PoolRange::EMPTY)
             }
@@ -246,11 +267,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => false,
         };
         if !visible || decl.opaque && decl.site.module != from {
-            self.refuse(
+            let mut refusal = refusal(
                 "LANG-17",
-                n,
+                self.cause(n),
                 "this constructor is not visible for the scrutinee's type",
             );
+            if let Some(Target::ContextualConstructor { name }) = target {
+                refusal = refusal.with_unresolved(
+                    p.index.symbols.text(name),
+                    NameScope::Variant(decl.path.clone()),
+                );
+            }
+            self.push_refusal(refusal);
             return fail(self);
         }
         let name = match target {
@@ -279,21 +307,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let order_start = self.patterns.order.len();
         self.patterns.order.resize(order_start + fs.len(), 0);
         let mut order_len = 0;
-        let mut rest = false;
+        let mut require_all = true;
         let mut positional = 0;
         for &arg in args {
             if self.kind(arg) == NodeKind::RestPattern {
-                rest = true;
+                require_all = false;
                 continue;
             }
+            let child = self.kids(arg)[0];
             let label = self.item.tree.node(arg).token.is_some();
             let i = if labelled {
-                if !label {
+                let name = if label {
+                    self.token_text(arg)
+                } else if self.kind(child) == NodeKind::BindPattern {
+                    self.token_text(child)
+                } else {
                     self.refuse("LANG-17", arg, "this pattern field needs its label");
                     continue;
-                }
-                let Some(i) = fs.iter().position(|f| f.name == self.token_text(arg)) else {
-                    self.refuse("LANG-17", arg, "unknown pattern field");
+                };
+                let Some(i) = fs.iter().position(|f| f.name == name) else {
+                    let mut refusal = refusal("LANG-17", self.cause(arg), "unknown pattern field");
+                    if case.is_none() {
+                        refusal =
+                            refusal.with_unresolved(name, NameScope::Field(decl.path.clone()));
+                    }
+                    self.push_refusal(refusal);
+                    require_all = false;
                     continue;
                 };
                 i
@@ -315,12 +354,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             let t = self.pattern_field_ty(ty, case, i);
-            let child = self.pattern(self.kids(arg)[0], t);
+            let child = self.pattern(child, t);
             self.patterns.fields[index] = child;
             self.patterns.order[order_start + order_len] = i as u32;
             order_len += 1;
         }
-        if !rest && (0..fs.len()).any(|i| self.patterns.fields[fields.start as usize + i] == 0) {
+        if require_all && order_len != fs.len() {
             self.refuse("LANG-17", n, "a pattern names every field, or ends in `..`");
         }
         let id = self.pat_push(n, ty, Head::Product(case), fields);
@@ -472,8 +511,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     ty: ERROR,
                     value: None,
                     place: None,
+                    address: None,
                     owned: false,
                     viewed: false,
+                    writable: false,
                 };
             }
         };
@@ -527,13 +568,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 0
             };
+            let writable = !at.shared
+                && !matches!(self.t.kind(at.ty), TyKind::View(_))
+                && self.type_kind(at.ty) != Kind::Region
+                && self.var(at.place.slot).origin.writable();
             return Subject {
                 anchors,
                 ty,
                 value,
                 place: Some(at),
+                address: None,
                 owned: consume && !viewed,
                 viewed,
+                writable,
             };
         }
         let (ty, value) = self.expr(n, want);
@@ -547,20 +594,84 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ty,
             value,
             place: None,
+            address: None,
             owned: !viewed,
             viewed,
+            writable: false,
         }
     }
     fn pattern_takes(&self, id: u32) -> bool {
         if id == 0 {
             return false;
         }
-        if matches!(self.pat_head(id), Head::Bind(_, true)) {
+        if matches!(self.pat_head(id), Head::Bind(_, Mode::Take)) {
             return true;
         }
         let fields = self.pat_fields(id);
         (0..fields.len)
             .any(|i| self.pattern_takes(self.patterns.fields[(fields.start + i) as usize]))
+    }
+    /// The site of the first `mut` binding of pattern `id` and of its first `take`.
+    fn pattern_marks(&self, id: u32, lend: &mut Option<NodeId>, take: &mut Option<NodeId>) {
+        if id == 0 {
+            return;
+        }
+        match self.pat_head(id) {
+            Head::Bind(_, Mode::Mut) => *lend = lend.or(Some(self.pat(id).site)),
+            Head::Bind(_, Mode::Take) => *take = take.or(Some(self.pat(id).site)),
+            _ => {}
+        }
+        let fields = self.pat_fields(id);
+        for i in 0..fields.len {
+            self.pattern_marks(
+                self.patterns.fields[(fields.start + i) as usize],
+                lend,
+                take,
+            );
+        }
+    }
+    /// LANG-17, OWN-15: a `mut` binding is a part of an arm's pattern, never its
+    /// whole pattern nor in a `let` or `for` pattern, and a chosen pattern does not
+    /// both take and lend. True when the pattern lends.
+    fn check_lends(&mut self, id: u32, arm: bool) -> bool {
+        let (mut lend, mut take) = (None, None);
+        self.pattern_marks(id, &mut lend, &mut take);
+        let Some(site) = lend else {
+            return false;
+        };
+        if !arm {
+            self.refuse(
+                "LANG-17",
+                site,
+                "a `mut` binding is written in a `match` arm, `if let` or `while let`",
+            );
+            self.refuse_marks(id, false);
+            return false;
+        }
+        if matches!(self.pat_head(id), Head::Bind(_, Mode::Mut)) {
+            self.refuse(
+                "LANG-17",
+                site,
+                "a `mut` binding names a part of the scrutinee, not all of it",
+            );
+            self.refuse_marks(id, false);
+            return false;
+        }
+        if let Some(take) = take {
+            let later = if self.span(take).start > self.span(site).start {
+                take
+            } else {
+                site
+            };
+            self.refuse(
+                "OWN-15",
+                later,
+                "a pattern either takes or lends `mut`, not both",
+            );
+            self.refuse_marks(id, true);
+            return false;
+        }
+        true
     }
     fn pattern_at(
         &mut self,
@@ -575,10 +686,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.steps.extend_from_within(
                 at.place.start as usize..(at.place.start + at.place.len) as usize,
             );
-            self.steps.push(if case.is_some() {
-                PStep::Any
-            } else {
-                PStep::Field(field)
+            self.steps.push(match case {
+                Some(case) => PStep::Case(case, field),
+                None => PStep::Field(field),
             });
             at.place.start = start;
             at.place.len += 1;
@@ -586,10 +696,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             at
         });
         let compact = self.compact_adt(subject.ty).is_some();
+        let mut address = None;
         let value = if self.live() && compact {
             // A compact value's field is found in its blob (MEM-9, MEM-11).
             subject.value.and_then(|header| {
                 let (a, _) = self.compact_field(header, subject.ty, case, field, n)?;
+                address = Some(a);
                 match self.rep_at(ty, n)? {
                     Rep::Scalar(t) => Some(self.read_bits(a, t, n)),
                     Rep::Place(_) => Some(self.pointer(a, n)),
@@ -608,6 +720,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 ty,
                                 value: None,
                                 place,
+                                address: None,
                                 ..subject
                             };
                         }
@@ -619,6 +732,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         Rep::Scalar(_) => {
                             let t = r.ty().unwrap();
                             let a = self.address(base, &[step], PlaceTy::Value(t), n);
+                            address = Some(a);
                             let result = self.value(t);
                             self.inst(
                                 Inst::Read {
@@ -632,6 +746,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         Rep::Place(id) => {
                             let a = self.address(base, &[step], PlaceTy::Declared(id), n);
+                            address = Some(a);
                             let p = self.pointer(a, n);
                             // A resource's block is freed when it is taken apart (T3.7),
                             // so its parts are copied out of it.
@@ -664,6 +779,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ty,
             value,
             place,
+            address,
+            // A compact value's blob is region storage, never written (OWN-12).
+            writable: subject.writable && !compact,
             ..subject
         }
     }
@@ -784,9 +902,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if pat.viewed {
             subject.owned = false;
             subject.viewed = true;
+            subject.writable = false;
         }
         match pat.head {
-            Head::Bind(b, take) => {
+            Head::Bind(b, Mode::Mut) if !self.patterns.guarding => {
+                self.lend_binding(b, pat, subject)
+            }
+            Head::Bind(b, Mode::Refused) => self.error_binding(b, pat.site),
+            Head::Bind(b, mode) => {
+                let take = mode == Mode::Take;
                 if take && subject.viewed {
                     if self.vars[b as usize].is_none_or(|v| v.ty != ERROR) {
                         self.refuse("OWN-15", pat.site, "a pattern cannot take through a view");
@@ -911,6 +1035,91 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => {}
         }
     }
+    /// A refused binding declares an error binder, so using it refuses nothing more.
+    fn error_binding(&mut self, b: u32, site: NodeId) {
+        if self.patterns.rebind {
+            let var = self.vars[b as usize].as_mut().expect("guard binding");
+            var.ty = ERROR;
+            var.binding = Binding::Value(None);
+        } else {
+            self.declare(b, ERROR, Binding::Value(None), Origin::LetMut, site);
+            self.scope_slots.push(b);
+        }
+    }
+    /// After a refused lend, the pattern's `mut` bindings (and, when it also takes, its
+    /// `take` bindings) bind errors.
+    fn refuse_marks(&mut self, id: u32, takes: bool) {
+        if id == 0 {
+            return;
+        }
+        let i = id as usize - 1;
+        if let Head::Bind(b, mode) = self.patterns.pats[i].head
+            && (mode == Mode::Mut || takes && mode == Mode::Take)
+        {
+            self.patterns.pats[i].head = Head::Bind(b, Mode::Refused);
+        }
+        let fields = self.pat_fields(id);
+        for k in 0..fields.len {
+            self.refuse_marks(self.patterns.fields[(fields.start + k) as usize], takes);
+        }
+    }
+    /// OWN-15: `mut x` names the place it matched in a writable scrutinee, lent to the
+    /// arm. The scrutinee stays its owner: `x` owns nothing and has no drop flag, and
+    /// the loan is a hold on the matched place, which subsumes the selection's views.
+    fn lend_binding(&mut self, b: u32, pat: Pat, subject: Subject) {
+        let lent = subject
+            .place
+            .filter(|_| subject.writable && !pat.viewed)
+            .filter(|at| self.step_write(at.place.slot, pat.site));
+        let lent = lent.filter(|at| {
+            let (from, to) = self.patterns.selection;
+            self.check_holds_except(at.place, Act::Write, pat.site, from..to)
+        });
+        let Some(at) = lent else {
+            if subject.place.is_none() {
+                self.refuse(
+                    "OWN-15",
+                    pat.site,
+                    "a `mut` binding names a place, and this scrutinee is a temporary",
+                );
+            } else if !subject.writable || pat.viewed {
+                self.refuse(
+                    "OWN-15",
+                    pat.site,
+                    "a `mut` binding needs a writable scrutinee, not a view",
+                );
+            }
+            self.error_binding(b, pat.site);
+            return;
+        };
+        if subject.address.is_none() && self.live() && !matches!(self.rep(pat.ty), Ok(Rep::None)) {
+            self.gap(
+                pat.site,
+                "a `mut` binding of this payload's representation is not built",
+            );
+        }
+        self.freeze(at.place, Hold::Lent(self.depth), pat.site);
+        let binding = Binding::Slot(subject.address);
+        if self.patterns.rebind {
+            let var = self.vars[b as usize].as_mut().expect("guard binding");
+            var.ty = pat.ty;
+            var.binding = binding;
+            var.origin = Origin::MutParam;
+            var.own = None;
+        } else {
+            self.declare(b, pat.ty, binding, Origin::MutParam, pat.site);
+            self.scope_slots.push(b);
+        }
+        self.vars[b as usize].as_mut().unwrap().lent = Some(at.place);
+        if self.anchor_tracked(pat.ty) {
+            let fact = if subject.anchors == 0 {
+                self.anchor_read(at)
+            } else {
+                subject.anchors
+            };
+            self.lend_anchors(b, fact);
+        }
+    }
     /// The payload transfer of an owned destructure (OWN-14, OWN-15, T3.7): the bound
     /// parts are owners now, so the source is consumed whole and the omitted fields
     /// are dropped in declaration order.
@@ -971,6 +1180,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         anchors: anchors::Fact,
     ) {
         let id = self.pattern(pat, ty);
+        self.check_lends(id, false);
         let matrix = self.patterns.matrix.len();
         self.patterns.matrix.push(id);
         if let Some(missing) = self.pattern_missing(matrix, ty) {
@@ -990,8 +1200,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ty,
                 value,
                 place: None,
+                address: None,
                 owned,
                 viewed: !owned,
+                writable: false,
             },
             false,
         );
@@ -1008,6 +1220,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let freezes = self.freezes.len();
         let subject = self.subject(value, true, declared.and_then(expect));
         let id = self.pattern(pat, subject.ty);
+        self.check_lends(id, false);
         if let Some(other) = other {
             self.let_else(pat, subject, id, other);
         } else {
@@ -1067,9 +1280,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         projected.then_some(ty)
     }
-    fn holder_subject(&mut self, mut subject: Subject, expected: TyId, n: NodeId) -> Subject {
+    /// Whether a written pattern has a `mut` binding, before it is typed.
+    fn writes_mut_binding(&self, n: NodeId) -> bool {
+        self.kind(n) == NodeKind::MutPattern
+            || self.kids(n).iter().any(|&k| self.writes_mut_binding(k))
+    }
+    fn holder_subject(
+        &mut self,
+        mut subject: Subject,
+        expected: TyId,
+        n: NodeId,
+        lends: bool,
+    ) -> Subject {
         if let Some(at) = subject.place {
-            if let Some(at) = self.payload_view_at(at, expected) {
+            let payload = if lends && subject.writable {
+                self.payload_mut_at(at, expected)
+            } else {
+                self.payload_view_at(at, expected)
+            };
+            if let Some(at) = payload {
                 self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
                 subject.value = if matches!(self.rep(at.ty), Ok(Rep::Place(_))) {
                     self.place_ptr(at, n)
@@ -1081,6 +1310,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 subject.ty = at.ty;
                 subject.viewed = true;
                 subject.owned = false;
+                subject.writable &= !at.shared;
             }
         } else if let Some((ty, value)) =
             self.payload_view_value(subject.ty, subject.value, expected, n)
@@ -1096,13 +1326,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     pub(super) fn match_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
+        let selection = self.freezes.len();
         let mut subject = self.subject(c[0], false, None);
         if let Some(expected) = c[1..]
             .iter()
             .find_map(|&arm| self.pattern_holder_payload(self.kids(arm)[0], subject.ty))
         {
-            subject = self.holder_subject(subject, expected, c[0]);
+            let lends = c[1..]
+                .iter()
+                .any(|&arm| self.writes_mut_binding(self.kids(arm)[0]));
+            subject = self.holder_subject(subject, expected, c[0], lends);
         }
+        let selection = std::mem::replace(
+            &mut self.patterns.selection,
+            (selection, self.freezes.len()),
+        );
         // A scrutinee temporary lives to the statement's end unless the chosen arm
         // takes it; when only some arms do, its flag says which (OWN-15, OWN-18).
         let temp = subject
@@ -1124,6 +1362,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
             let id = self.pattern(a[0], subject.ty);
+            self.check_lends(id, true);
             let guarded = a.len() == 3;
             let no = (i + 2 < c.len() && self.live()).then(|| self.new_block(&[]));
             self.pattern_tests(id, subject, no);
@@ -1134,6 +1373,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
             let owners = self.owner_mark();
             if guarded {
+                let guarding = std::mem::replace(&mut self.patterns.guarding, true);
                 self.bind_pattern(
                     id,
                     Subject {
@@ -1142,6 +1382,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     },
                     false,
                 );
+                self.patterns.guarding = guarding;
                 let guard = std::mem::replace(&mut self.patterns.guard, true);
                 let (_, cv) = self.expr(a[1], expect(BOOL));
                 self.patterns.guard = guard;
@@ -1209,6 +1450,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         edges.truncate(edge_mark);
         self.patterns.edges = edges;
         self.pattern_escapes(escape_mark);
+        self.patterns.selection = selection;
         self.dead |= was_dead;
         self.patterns.matrix.truncate(matrix);
         (ty.unwrap_or(NEVER), v)
@@ -1455,8 +1697,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         let condition = self.kids(c[0]);
         let cond = self.owner_mark();
+        let selection = self.freezes.len();
         let subject = self.subject(condition[1], false, None);
         let id = self.pattern(condition[0], subject.ty);
+        self.check_lends(id, true);
+        let selection = std::mem::replace(
+            &mut self.patterns.selection,
+            (selection, self.freezes.len()),
+        );
         let mark = self.log.len();
         let was_dead = self.dead;
         let no_block = self.live().then(|| self.new_block(&[]));
@@ -1480,6 +1728,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end_owners(cond, None, true, condition[0]);
         let (yt, yv) = self.result_expr(c[1], if c.len() == 2 { expect(UNIT) } else { want });
         self.pattern_scope_end(scope, holds, cond, c[1], yt, yv);
+        self.patterns.selection = selection;
         self.depth -= 1;
         let yes = self.arm_edge(mark);
         self.goto(join, yt, yv, c[1]);
@@ -1533,8 +1782,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.frames[fi].header = header;
         let freezes = self.freezes.len();
         let cond = self.owner_mark();
+        let selection = self.freezes.len();
         let subject = self.subject(condition[1], false, None);
         let id = self.pattern(condition[0], subject.ty);
+        self.check_lends(id, true);
+        let selection = std::mem::replace(
+            &mut self.patterns.selection,
+            (selection, self.freezes.len()),
+        );
         self.exit_edge(fi);
         let exit = self.frames[fi].exit;
         let out = self.live().then(|| self.new_block(&[]));
@@ -1558,6 +1813,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end_owners(cond, None, true, condition[0]);
         self.loop_body(c[1]);
         self.close_scope(scope, freezes, c[1], UNIT);
+        self.patterns.selection = selection;
         self.end_owners(cond, None, false, c[1]);
         self.depth -= 1;
         self.source_step(n);
@@ -1654,6 +1910,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let outer = self.result_parts(self.fd.result);
         let operand = self.kids(n)[0];
+        let mapper = self.kids(n).get(1).copied();
         // LANG-18: only the payload expectation reaches the operand. Its own
         // expression determines the Result/Option shape and every error type.
         let hint = want.map(|mut w| {
@@ -1687,9 +1944,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         };
-        let bound = error.filter(|&e| matches!(self.t.kind(e), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"])))
-            .and_then(|_| self.patterns.scopes.iter().rposition(|s| matches!(s.kind, ScopeKind::Bound { .. })));
-        if bound.is_none() {
+        // LANG-18: `e ?=> m` maps a Result's error into the enclosing Result's.
+        let mapped = match (mapper, error, outer) {
+            (None, ..) => None,
+            (Some(_), None, _) => {
+                let a = self.shown(subject.ty);
+                let message = "`?=>` maps the error of a Result; an Option propagates with `?`";
+                self.refuse_compared("LANG-18", n, a, "Result", message);
+                return (ERROR, None);
+            }
+            (Some(_), Some(_), Some((od, _, Some(f)))) if od == d => Some(f),
+            (Some(_), Some(_), _) => {
+                let b = self.shown(self.fd.result);
+                let message = "`?=>` needs an enclosing function returning a Result";
+                self.refuse_compared("LANG-18", n, b, "Result", message);
+                return (ERROR, None);
+            }
+        };
+        if mapped.is_none() {
             let Some((od, _, oe)) = outer else {
                 self.refuse(
                     "LANG-18",
@@ -1710,7 +1982,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             })
                     });
                 let message = if capacity_only {
-                    "`?` propagates only the identical error type, or Option to Option; use `result.capacity_only(...)?` to discard the returned value and propagate Capacity"
+                    "`?` propagates only the identical error type, or Option to Option; use `?=> |(c, _)| c` to propagate the Capacity"
                 } else {
                     "`?` propagates only the identical error type, or Option to Option"
                 };
@@ -1752,15 +2024,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             None
         };
-        if let Some(scope) = bound {
-            let context = self.patterns.scopes[scope];
-            let ScopeKind::Bound { failed } = context.kind else {
-                unreachable!()
+        if let (Some(m), Some(e), Some(f)) = (mapper, error, mapped) {
+            // The mapper runs on the error edge before any scope is left.
+            let was_dead = self.dead;
+            let (t, v) = if self.kind(m) == NodeKind::Arm {
+                self.mapper_arm(m, e, error_value, f)
+            } else {
+                self.apply_mapper(n, m, e, error_value, f)
             };
-            let fi = context.frame.unwrap();
-            self.unwind(self.frames[fi].owners, scope, n);
-            self.exit_edge(fi);
-            self.goto(failed, error.unwrap(), error_value, n);
+            self.consume(v, n);
+            if t != ERROR {
+                let value = self.wrap_case(self.fd.result, err_case, f, v, n);
+                self.ret(value, n);
+            } else {
+                self.halt();
+            }
+            self.dead = was_dead;
         } else {
             let value = self.wrap_case(
                 self.fd.result,
@@ -1781,6 +2060,48 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.temp(success, value);
         (success, value)
+    }
+    /// LANG-18's inline arm `|p| v`: `p` binds the error payload as `let p = take x`
+    /// would, and `v` of type `mapped` is code of the enclosing function.
+    fn mapper_arm(
+        &mut self,
+        arm: NodeId,
+        error: TyId,
+        value: Option<ValueId>,
+        mapped: TyId,
+    ) -> (TyId, Option<ValueId>) {
+        let [pat, body] = *self.kids(arm) else {
+            unreachable!("a mapper arm is a pattern and a value");
+        };
+        self.depth += 1;
+        let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
+        let owners = self.owner_mark();
+        self.temp(error, value);
+        let subject = Subject {
+            anchors: 0,
+            ty: error,
+            value,
+            place: None,
+            address: None,
+            owned: true,
+            viewed: false,
+            writable: false,
+        };
+        let id = self.pattern(pat, error);
+        self.check_lends(id, false);
+        let matrix = self.patterns.matrix.len();
+        self.patterns.matrix.push(id);
+        if let Some(missing) = self.pattern_missing(matrix, error) {
+            let message = format!("a `?=>` arm pattern is refutable; missing `{missing}`");
+            self.refuse("LANG-17", pat, message);
+        }
+        self.patterns.matrix.truncate(matrix);
+        let subject = self.chosen_pattern(id, subject, pat);
+        self.bind_pattern(id, subject, false);
+        let (t, v) = self.expr(body, expect(mapped));
+        self.pattern_scope_end(scope, holds, owners, body, t, v);
+        self.depth -= 1;
+        (t, v)
     }
     pub(super) fn pattern_scope_mark(&self) -> usize {
         self.patterns.scopes.len()
@@ -1809,7 +2130,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn pattern_scope_exits_one(&mut self, i: usize, n: NodeId) {
         match self.patterns.scopes[i].kind {
             ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
-            ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
+            ScopeKind::Bound => self.inst(Inst::LimitExit, n),
             ScopeKind::Restore(old) => {
                 let restore = self.new_block(&[]);
                 let done = self.new_block(&[]);
@@ -1855,7 +2176,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             matches!(
                 s.kind,
                 ScopeKind::Region(Some(_))
-                    | ScopeKind::Bound { .. }
+                    | ScopeKind::Bound
                     | ScopeKind::StepBound { .. }
                     | ScopeKind::Restore(_)
             )
@@ -1922,12 +2243,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let body = self.kids(n)[0];
         let (t, v) = self.result_expr(body, want);
-        if !self.contains_region_value(t) {
-            self.region_result_anchors(scope, body, t)
-        }
-        // Region values cannot leave their scope. Rooted stable/scoped values need
-        // the declaration lane's body-root relation before emission is possible.
-        if self.contains_region_value(t) {
+        // MEM-7: neither the region's handle nor a value whose type names the region
+        // (or one opened inside it) leaves the block. The check reads the type alone.
+        let message = if self.contains_region_value(t) {
+            Some("a Region value cannot leave its region scope")
+        } else if self.opened_region_in(t, scope).is_some() {
+            Some("a value whose type names this region cannot leave its block")
+        } else {
+            self.region_result_anchors(scope, body, t);
+            None
+        };
+        if let Some(message) = message {
             // The cause is the region's name, when the scope names one.
             let cause = self
                 .item
@@ -1939,7 +2265,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 "MEM-7",
                 self.span(body),
                 cause.into_iter().collect(),
-                "a Region value cannot leave its region scope",
+                message,
             );
         }
         self.close_scope(scope, holds, body, t);
@@ -1949,6 +2275,43 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.patterns.scopes.truncate(mark);
         self.epoch += 1;
         (t, v)
+    }
+    /// A region declared by a block whose slots start at `from` in `scope_slots`,
+    /// which `ty` names (MEM-7): the block's own `region r` or a local bound to a
+    /// `Region` value, either of which ends with the block. A parameter's or an
+    /// enclosing block's region is still open where the value goes.
+    pub(super) fn opened_region_in(&self, ty: TyId, from: usize) -> Option<u32> {
+        let opened = &self.scope_slots[from.min(self.scope_slots.len())..];
+        if opened.is_empty() {
+            return None;
+        }
+        let region = |slot: u32| {
+            opened.contains(&slot)
+                && self
+                    .vars
+                    .get(slot as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|v| {
+                        matches!(self.t.kind(v.ty), TyKind::Adt(d, _)
+                        if self.p.decls[d.index()].role == Some(Role::Region))
+                    })
+        };
+        fn walk(t: &impl TyRead, ty: TyId, region: &impl Fn(u32) -> bool) -> Option<u32> {
+            match t.kind(ty) {
+                TyKind::Region(Root::Local(slot)) => region(*slot).then_some(*slot),
+                TyKind::Tuple(xs) | TyKind::Adt(_, xs) => {
+                    xs.iter().find_map(|&x| walk(t, x, region))
+                }
+                TyKind::Array(x, _) | TyKind::View(x) => walk(t, *x, region),
+                TyKind::Anchored(x, r) => walk(t, *x, region).or_else(|| walk(t, *r, region)),
+                TyKind::Fn(ps, r, _, _) => {
+                    walk(t, *r, region).or_else(|| ps.iter().find_map(|&(_, x)| walk(t, x, region)))
+                }
+                _ => None,
+            }
+        }
+        walk(&self.t, ty, &region)
     }
     fn contains_region_value(&self, ty: TyId) -> bool {
         match self.t.kind(ty) {
@@ -2028,7 +2391,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let owners = self.owner_mark();
         self.patterns.scopes.push(Scope {
-            kind: ScopeKind::Bound { failed },
+            kind: ScopeKind::Bound,
             frame: Some(fi),
             owners: self.owners.len(),
         });

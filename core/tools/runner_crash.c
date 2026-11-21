@@ -32,7 +32,7 @@ typedef struct { HirselCoreHostOutcome out; uint64_t bytes; uint8_t crash; } Res
 typedef struct { pid_t pid; int fd,finished,status; } Child;
 static int rpc;
 static unsigned port;
-static char saved_token[43]="-";
+static char saved_token[33]="-";
 static int freeze_sync, sync_parked;
 static void transfer(int fd,void *data,size_t len,int writing) {
     uint8_t *p=data;
@@ -146,8 +146,8 @@ static void service(void *state,Child *child,int server,int phase,int stop_case)
             signal_child(child,SIGTERM);
         if(q.len>5 && !memcmp(data,"PORT ",5)) {
             char text[32]={0};if(q.len-5>=sizeof text) abort();memcpy(text,data+5,q.len-5);port=(unsigned)strtoul(text,NULL,10);
-        } else if(q.len==48 && !memcmp(data,"TOKEN ",6)) {
-            memcpy(saved_token,data+6,42);saved_token[42]=0;
+        } else if(q.len==38 && !memcmp(data,"TOKEN ",6)) {
+            memcpy(saved_token,data+6,32);saved_token[32]=0;
         }
     }
     HirselCoreHostOutcome out=store_crash_op(state,q.op,q.mode,q.handle,path,q.path_len,data,q.len,q.capacity);

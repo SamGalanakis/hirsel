@@ -17,7 +17,7 @@ mod debug;
 pub use debug::finish_native_object;
 mod split;
 mod step_free;
-pub use split::split_native_object;
+pub use split::{rename_symbols, split_native_object, strong_definitions};
 mod empty;
 mod expose;
 mod fast;
@@ -187,7 +187,9 @@ pub fn supports_target(triple: &str) -> bool {
 ///
 /// Functions take FORM v1a's hidden task context before the destination.
 /// Exports and function pointers return scalar results followed by failure status.
-/// Proven infallible bodies use a private direct-call ABI without that status.
+/// Proven infallible bodies use a private direct-call ABI without that status,
+/// and a body returning a `Result` with a scalar `Ok` returns that case in
+/// registers with an outcome byte (abi::Return::ok).
 /// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
     emit_ir_with_charge_observation(module, false)
@@ -273,7 +275,7 @@ fn emit_ir_target_with_role_facts(
 }
 
 /// Deferred module items in the order of their LLVM text lines: globals, then
-/// declarations by result type and name, the shared byte order, module asm.
+/// declarations by result type and name, then the shared byte order.
 struct Items {
     function_symbols: Vec<String>,
     versioned: Option<Vec<bool>>,
@@ -292,7 +294,6 @@ enum Item {
     Global(Global),
     Declare(String, FnSig, FnAttrs),
     CompareBytes(bool),
-    Asm(String),
     /// A counted type's out-of-line last release, defined after every body
     /// that may call it (cleanup::release_lasts).
     ReleaseLast(u32, bool),
@@ -356,16 +357,12 @@ impl Items {
         });
         lasts
     }
-    pub fn asm(&mut self, text: String) {
-        self.insert(format!("module asm \"{text}\""), Item::Asm(text));
-    }
     fn emit(self, sink: &mut dyn Sink) -> Vec<source::ReleaseSite> {
         for item in self.pending.into_values() {
             match item {
                 Item::Global(global) => sink.global(&global),
                 Item::Declare(name, sig, attrs) => sink.declare(&name, &sig, &attrs),
                 Item::CompareBytes(facts) => bytes::define_compare_bytes(sink, facts),
-                Item::Asm(text) => sink.module_asm(&text),
                 Item::ReleaseLast(..) => unreachable!("last releases are defined before items"),
             }
         }
@@ -574,6 +571,7 @@ fn emit_module(
     let failures = failure::Failures::new(module);
     let step_neutral = steps::neutral_functions(module, provided.neutral);
     let neutral_functions = step_neutral.as_slice();
+    let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
     let debug = if source.debug_lines {
         sites::debug_plan(
             module,
@@ -581,6 +579,7 @@ fn emit_module(
             items.versioned.as_deref(),
             &items.step_dispatch,
             &failures,
+            &call_layouts,
             &mut next_scope,
             sink,
         )
@@ -589,13 +588,16 @@ fn emit_module(
     };
     let local_roles =
         (facts && provided.roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
-    let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
     let role_facts = provided.roles.or(local_roles.as_ref()).filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
-        let abi =
-            abi::Return::for_signature(target, sig, &call_layouts, has_status || f.body.is_none());
+        let abi = abi::Return::private(target, sig, &call_layouts, has_status, f.body.is_some());
+        // A body whose convention differs from the public one keeps it under a
+        // suffixed private symbol, behind a public wrapper of the same name.
+        let ok = abi.ok.is_some();
+        let private = ok || !has_status;
+        let suffix = abi::private_suffix(has_status, ok);
         let mut name = items.function_symbols[i].clone();
         let versioned = items.is_versioned(FuncId(i as u32));
         let (mut params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
@@ -630,14 +632,14 @@ fn emit_module(
             continue;
         };
         if versioned && !sig.has_vectors() {
-            if !has_status {
+            if private {
                 versions::stub(
                     sink,
                     &name,
                     &abi.signature(params.clone()),
                     &locals,
                     Linkage::Internal,
-                    true,
+                    suffix,
                 );
             }
             let public = abi::Return::for_signature(target, sig, &call_layouts, true);
@@ -648,7 +650,7 @@ fn emit_module(
                 &public.signature(params),
                 &locals,
                 Linkage::WeakOdr,
-                false,
+                "",
             );
         }
         let definition = module.instances[f.instance.index()].definition.to_string();
@@ -680,7 +682,7 @@ fn emit_module(
                 (abi.take().unwrap(), std::mem::take(&mut params))
             } else {
                 (
-                    abi::Return::for_signature(target, sig, &call_layouts, has_status),
+                    abi::Return::private(target, sig, &call_layouts, has_status, true),
                     params.clone(),
                 )
             };
@@ -755,16 +757,12 @@ fn emit_module(
                 Some(_) => step_free::checked(&name),
                 None => name.clone(),
             };
-            let body_name = if has_status {
-                body_base
-            } else {
-                format!("{body_base}.infallible")
-            };
+            let body_name = format!("{body_base}{suffix}");
             let attrs = FnAttrs {
-            linkage: if has_status {
-                Linkage::WeakOdr
-            } else {
+            linkage: if private {
                 Linkage::Internal
+            } else {
+                Linkage::WeakOdr
             },
             // Inline the reserved ASCII append and share the UTF-8/growth body.
             // A loop-free callable variant exists only to bind its call site's
@@ -900,6 +898,10 @@ fn emit_module(
             }
             if let Some(record) = e.abi.record {
                 e.sink.alloca(Local::DEST, &Type::bytes(record.size), 8);
+            }
+            if let Some(ok) = e.abi.ok {
+                e.sink
+                    .alloca(Local::DEST, &Type::bytes(ok.ok.size), ok.align as u32);
             }
             for (i, v) in body.blocks[0]
                 .params
@@ -1038,7 +1040,6 @@ fn emit_module(
             e.current = None;
             e.step_counter = None;
             if let Some(free) = free_body {
-                let suffix = if has_status { "" } else { ".infallible" };
                 let free = format!("{}{suffix}", e.items.function_symbols[free.index()]);
                 step_free::stub(
                     &mut *e.sink,
@@ -1050,13 +1051,14 @@ fn emit_module(
                     attrs.linkage,
                 );
             }
-            if !has_status {
-                e.infallible_wrapper(
+            if private {
+                e.public_wrapper(
                     &name,
                     sig,
                     &call_layouts,
                     facts,
                     function_debug.and_then(|d| d.wrapper),
+                    has_status,
                 );
             }
         }
@@ -1922,7 +1924,8 @@ impl FunctionEmitter<'_> {
         // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
         // AAPCS64 needs an explicit private copy before passing its pointer.
         // Neither convention lets the callee mutate the shared constant.
-        let suffix = if fixed && self.relocatable_sites && site != int(0) {
+        let relocated = fixed && self.relocatable_sites && site != int(0);
+        let suffix = if relocated {
             if let Some(sites) = &self.items.release_sites {
                 let anchor = self.anchor.unwrap();
                 sites.names[&(anchor.item, anchor.start)].clone()
@@ -1939,10 +1942,9 @@ impl FunctionEmitter<'_> {
         let name = format!("hirsel_cause_{kind}_{suffix}");
         let prefix = Type::bytes(memory_layout::CAUSE_KIND as u64);
         let word = memory_layout::cause_kind_word(kind) as i64;
-        // Keep AArch64's relocated site in this object's constant bytes;
-        // folding that field into an external pointer would select the GOT.
-        let initialized =
-            fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux;
+        // A relocated word in a cause needs the same materialization as a
+        // standalone site word.
+        let initialized = relocated && self.keep_site_in_data();
         self.items.global(Global {
             name: name.clone().into(),
             linkage: Linkage::Private,
@@ -2350,7 +2352,9 @@ impl FunctionEmitter<'_> {
                     .iter()
                     .map(|v| self.numeric(*v))
                     .collect::<Vec<_>>();
-                if let Some(record) = self.abi.record {
+                if let Some(ok) = self.abi.ok {
+                    self.return_ok(ok);
+                } else if let Some(record) = self.abi.record {
                     let fields = self.load_record(record, &Local::DEST.into());
                     self.return_values(&fields);
                 } else {
@@ -2385,6 +2389,19 @@ impl FunctionEmitter<'_> {
                                 word(length),
                                 word(capacity),
                             ],
+                        );
+                    }
+                    RaiseCause::Capacity {
+                        requested,
+                        available,
+                    } => {
+                        let (requested, available) =
+                            (self.numeric(requested), self.numeric(available));
+                        let site = self.site_word();
+                        self.intrinsic(
+                            "hirsel_core_raise_capacity",
+                            Type::Void,
+                            &[ptr(CONTEXT), word(site), word(requested), word(available)],
                         );
                     }
                 }

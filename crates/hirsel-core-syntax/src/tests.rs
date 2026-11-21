@@ -10,60 +10,17 @@ fn lex(text: &str) -> LexOutput {
 }
 
 fn formatted(text: &str, mode: ParseMode) -> String {
-    let p = parse(text, mode);
+    let mut symbols = Symbols::default();
+    let p = crate::parse(text, mode, &mut symbols);
     assert!(p.diagnostics.is_empty(), "{text}: {:?}", p.diagnostics);
-    let output = format(&p).unwrap();
-    let q = parse(&output, mode);
-    assert!(q.diagnostics.is_empty(), "{output}: {:?}", q.diagnostics);
-    assert_eq!(format(&q).as_deref(), Some(output.as_str()));
-    let tokens = |text: &str| {
-        lex(text)
-            .tokens
-            .into_iter()
-            .filter_map(|t| {
-                (!matches!(t.kind, TokenKind::Eof)).then(|| {
-                    (
-                        t.kind,
-                        text[t.span.start as usize..t.span.end as usize].to_owned(),
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(tokens(text), tokens(&output));
-    assert_eq!(shape(&p), shape(&q));
+    let output = format_verified(&p, mode, &mut symbols)
+        .unwrap_or_else(|error| panic!("{text}: {error}"))
+        .unwrap();
+    assert_eq!(
+        format(&parse(&output, mode)).as_deref(),
+        Some(output.as_str())
+    );
     output
-}
-
-type NodeShape = (NodeKind, Option<String>, u32);
-type ItemShape = (u32, Vec<u32>, Vec<NodeShape>);
-fn shape(p: &ParseOutput) -> Vec<ItemShape> {
-    p.syntax
-        .items()
-        .map(|i| {
-            (
-                i.root.0 - i.range.nodes.start,
-                i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
-                    .iter()
-                    .flat_map(|n| {
-                        i.tree.edges[n.children.start as usize..n.children.end as usize]
-                            .iter()
-                            .map(|x| x.0 - i.range.nodes.start)
-                    })
-                    .collect::<Vec<_>>(),
-                i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
-                    .iter()
-                    .map(|n| {
-                        (
-                            n.kind,
-                            n.token.map(|t| i.tree.token_text(&i.text, t).to_owned()),
-                            (n.children.end - n.children.start),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>()
 }
 
 #[test]
@@ -142,6 +99,13 @@ fn formatter_preserves_comments_and_literal_bytes() {
     );
     formatted("fn f() { /* only */ }", ParseMode::Source);
     formatted("// only comment  ", ParseMode::Source);
+    assert_eq!(
+        formatted(
+            "/** docs /* nested */ */\r\nfn f(){1}\r\n",
+            ParseMode::Source
+        ),
+        "/** docs /* nested */ */\nfn f() {\n    1\n}\n"
+    );
     formatted(
         "fn f() {}\n// attached\nfn g() {}\n/* tail */",
         ParseMode::Source,
@@ -166,6 +130,13 @@ fn formatter_uses_syntax_roles_for_spacing() {
         "fn f() {\n    -(x)\n}\n"
     );
     formatted("fn f(){ scoped fn(x:u64)->u64{x} }", ParseMode::Source);
+    assert_eq!(
+        formatted(
+            "fn f(){a?=>|(c,_)|Full(c);b ?=>json.wrap}",
+            ParseMode::Source
+        ),
+        "fn f() {\n    a ?=> |(c, _)| Full(c);\n    b ?=> json.wrap\n}\n"
+    );
 }
 
 #[test]
@@ -174,6 +145,40 @@ fn formatter_refuses_invalid_or_incomplete_source() {
     let mut parsed = parse("fn f() {}", ParseMode::Source);
     parsed.resource_refusal = Some(ResourceRefusal::SourceTooLarge { bytes: 1 << 32 });
     assert!(format(&parsed).is_none());
+}
+
+#[test]
+fn formatter_equivalence_refuses_candidate_that_changes_syntax_or_trivia() {
+    let mode = ParseMode::Source;
+    for (original, candidate, reason) in [
+        ("fn f() {}", "fn f() {", "did not parse cleanly"),
+        ("fn f() { 1 }", "fn f() { 2 }", "changed tokens or comments"),
+        (
+            "// written\nfn f() {}",
+            "// rewritten\nfn f() {}",
+            "changed tokens or comments",
+        ),
+        (
+            "fn f() { return\n(x) }",
+            "fn f() { return (x) }",
+            "changed the syntax tree",
+        ),
+        (
+            "fn f() {} /// doc\nfn g() {}",
+            "fn f() {}\n/// doc\nfn g() {}",
+            "changed item comment attachment",
+        ),
+    ] {
+        let original = parse(original, mode);
+        assert!(original.diagnostics.is_empty());
+        let error =
+            crate::format::verify_format(&original, candidate, mode, &mut Symbols::default())
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("internal formatter error: formatted source {reason}")
+        );
+    }
 }
 fn good(text: &str) -> SyntaxFile {
     let p = parse(text, ParseMode::Source);
@@ -257,6 +262,7 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
     }
     for (single, split) in [
         ("fn f() { a.b.c }", "fn f() { a\n .b\n .c }"),
+        ("fn f() { a? ?=> m }", "fn f() { a\n ?\n ?=> m }"),
         (
             "fn f() { a().b.0?.c? }",
             "fn f() { a()\n .b\n .0\n ?\n .c\n ? }",
@@ -310,14 +316,15 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
             expected.diagnostics
         );
         let actual = parse(&split, ParseMode::Source);
-        if !actual.diagnostics.is_empty() || shape(&actual) != shape(&expected) {
+        if !actual.diagnostics.is_empty()
+            || !crate::format::same_ast(&actual.syntax, &expected.syntax)
+        {
             failures.push(format!("{split:?}: {:?}", actual.diagnostics));
             continue;
         }
         let output = formatted(&split, ParseMode::Source);
-        assert_eq!(
-            shape(&parse(&output, ParseMode::Source)),
-            shape(&expected),
+        assert!(
+            crate::format::same_ast(&parse(&output, ParseMode::Source).syntax, &expected.syntax),
             "{split}"
         );
     }
@@ -378,6 +385,8 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
         ("fn f() { a < b\n < c }", "< c", "LANG-5"),
         ("fn f() { match a\n + {} {} }", "{} {}", "LANG-5"),
         ("fn f() { match x { a\n .b => c } }", ".", "LANG-4"),
+        ("fn f() { a ?=> m(b) }", "(b)", "LANG-5"),
+        ("fn f() { a ?=> m?}", "?}", "LANG-5"),
     ] {
         let p = parse(source, ParseMode::Source);
         let at = source.find(site).unwrap() as u32;

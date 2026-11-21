@@ -42,10 +42,10 @@ fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
 // identity ++ fingerprint(A) ++ fingerprint(()), as a client builds a query's key.
 fn k_span() -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, code.identity(code.describe(span))))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    list.append(mut key, code.identity(code.describe(span)))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
     let unit: std.codec.Codec[()] = std.codec.of_unit()
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key)
     key
 }
 
@@ -55,7 +55,7 @@ fn arg(n: u64) -> Bytes {
     a
 }
 
-type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, covered: u64 }
+type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, covered: u64 }
 
 // The initial Batch of `sub`, whole: it names sub complete and carries `rows` rows.
 fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
@@ -72,14 +72,15 @@ fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
 
 fn drive(take d: D) -> () waits {
     let mut keys: List[Bytes] = list.new()
-    result.unwrap(list.push(mut keys, k_span()))
+    list.push(mut keys, k_span())
     let mut config = runner.wire_defaults(131072u64, 65536u64)
     config.q = 0u64
     config.budget = 262144u64
     config.socket.max_frame = 131072u64
     // The session task funds the connection owner's floor and its pool, which at 128 KiB
     // frames is above 2 MiB.
-    let (cn, session) = result.unwrap(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, d.policy,
+    let unbound: Option[runner.Wire[()]] = None
+    let (cn, session) = result.unwrap(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, take unbound,
         d.head, d.post, code.describe(place), keys, None, config, 8388608u64))
     wire_client.send_frame(cn, Subscribe(1u32, 0u32, arg(d.covered), None))
     initial(cn, 1u32, d.covered)
@@ -119,23 +120,15 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) ->
         fill(mut db, h.t, k, next)
         k = next
     }
-    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
-    let (head, inbox) = result.unwrap(take made)
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
-    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, policy: ingress.share(policy), covered: covered)
-    let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
-        Ok(take t) => take t,
-        Error(_) => return Error(Exit(status: 3)),
-    }
+    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, covered: covered)
+    let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)
     match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }
     let driven = task.join(take driving)
-    let mut policy_task = take policy_handle
-    task.cancel(mut policy_task)
-    let _ = task.join(take policy_task)
     match driven {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 6)),

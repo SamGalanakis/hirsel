@@ -2,5 +2,5 @@
 // expect: refuse CONC-2 at 6:61
 // expect: compared CONC-2 at 6:61 | core@1/core/Rc[app@1/main/Node] | send
 type Node: shareable { label: String }
-fn child(take x:()) -> Rc[Node] { result.unwrap(rc.new(Node(label:"a"))) }
+fn child(take x:()) -> Rc[Node] { rc.new(Node(label:"a")) }
 fn parent(tasks:Tasks) { let _=task.spawn(tasks,bytes 64,(),child) }

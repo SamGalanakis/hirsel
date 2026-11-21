@@ -1,5 +1,5 @@
 // NET-7 graceful TCP end, composed from existing ownership and host.recv_bounded.
-pub type FinishError: send = Allocation(Capacity) | Network(NetError)
+pub type FinishError: send = Network(NetError)
 
 fn release_write(take w: WriteHalf) {}
 
@@ -9,11 +9,7 @@ fn release_write(take w: WriteHalf) {}
 /// both halves. No new provider operation. Ex: `net.finish(take w, take r, c, end)?`.
 pub fn finish(take w: WriteHalf, take r: ReadHalf, c: Clock, deadline_ns: u64) -> Result[(), FinishError] waits {
     release_write(take w)
-    let allocation: Result[Bytes, Capacity] = list.with_capacity(8192)
-    let mut scratch = match allocation {
-        Ok(take b) => take b,
-        Error(capacity) => return Error(Allocation(capacity))
-    }
+    let mut scratch: Bytes = list.with_capacity(8192)
     let mut input = take r
     loop {
         if host.mono_ns(c) >= deadline_ns {
@@ -28,16 +24,12 @@ pub fn finish(take w: WriteHalf, take r: ReadHalf, c: Clock, deadline_ns: u64) -
     }
 }
 
-pub type LookupError: send = Allocation(Capacity) | Network(NetError) | NoAddress
+pub type LookupError: send = Network(NetError) | NoAddress
 
 /// Look up at most 16 distinct addresses using a Resolve rule on n.
 /// Alloc: room for 16 addresses, refunded on failure. Waits until lookup or until.
 pub fn lookup(n: Net, name: String, until: Until) -> Result[List[Ip], LookupError] waits {
-    let allocation: Result[List[Ip], Capacity] = list.with_capacity(16)
-    let mut addresses = match allocation {
-        Ok(take value) => take value,
-        Error(capacity) => return Error(Allocation(capacity))
-    }
+    let mut addresses: List[Ip] = list.with_capacity(16)
     match host.resolve(n, name, mut addresses, until) {
         Ok(0) => Error(NoAddress),
         Ok(_) => Ok(take addresses),

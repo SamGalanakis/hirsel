@@ -35,7 +35,7 @@ struct ReachableOutput<'a> {
     census: std::collections::BTreeMap<&'a str, usize>,
     first_stops: &'a [crate::GapStop],
 }
-fn hex(hash: hirsel_core_ids::ContentHash) -> String {
+pub(crate) fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 /// Local loading still parses disk input under CA4's decoder. Size limits
@@ -54,7 +54,7 @@ pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits
     }
 }
 fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
-    let invocation = match crate::cli::parse(args.into_iter())? {
+    let mut invocation = match crate::cli::parse(args.into_iter())? {
         crate::cli::Action::Help(help) => {
             print!("{help}");
             std::process::exit(0);
@@ -62,6 +62,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     let command = invocation.command.name;
+    if matches!(command, "host" | "deploy") {
+        crate::host::run(invocation)?;
+        std::process::exit(0);
+    }
+    if command == "replay"
+        && invocation
+            .options
+            .iter()
+            .any(|(option, _)| *option == Opt::HostState)
+    {
+        std::process::exit(crate::host::replay(invocation)?);
+    }
     if command == "call" {
         std::process::exit(crate::call::run(crate::call::Options::read(invocation)?)?);
     }
@@ -118,15 +130,22 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         use crate::cli::OptionId;
         let has = |option| invocation.options.iter().any(|(id, _)| *id == option);
         if command == "fmt" {
-            let directory = invocation
-                .positional
-                .as_deref()
-                .ok_or("fmt requires a package directory")?;
-            let status = crate::cli_tools::format(
-                Path::new(directory),
-                has(OptionId::FmtCheck),
-                has(OptionId::Signatures),
-            )?;
+            use hirsel_core_syntax::{FormatAction, ParseMode};
+            let action = if has(OptionId::FmtCheck) {
+                FormatAction::Check
+            } else {
+                FormatAction::Write
+            };
+            let mode = if has(OptionId::Signatures) {
+                ParseMode::Signatures
+            } else {
+                ParseMode::Source
+            };
+            let status = match (has(OptionId::FmtStdin), invocation.positional.as_deref()) {
+                (true, None) => crate::cli_tools::format_stdin(action, mode)?,
+                (false, Some(path)) => crate::cli_tools::format(Path::new(path), action, mode)?,
+                _ => return Err("fmt requires one of FILE, DIR, or --stdin".into()),
+            };
             std::process::exit(status);
         }
         crate::cli_tools::explain(
@@ -136,6 +155,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         )?;
         std::process::exit(0);
     }
+    let inspection = (command == "inspect")
+        .then(|| crate::inspect::Inspection::read(&mut invocation))
+        .transpose()?;
+    let inspect_std = inspection.as_ref().is_some_and(|option| option.std);
     let dir = invocation.positional.map(PathBuf::from);
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut libraries_explicit = false;
@@ -146,7 +169,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut image_path = None;
     let mut install_root = None;
     let mut core_product = None;
-    let mut source_core = false;
+    let mut source_core = inspect_std;
     let mut source_std = false;
     let mut product_name = None;
     let mut entry = None;
@@ -159,6 +182,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut n_place = None;
     let mut place_timeout = Duration::from_secs(10);
     let mut test_filter = None;
+    let mut test_jobs = None;
     let mut test_timeout = None;
     let mut explicit_limit = false;
     let mut backend = None;
@@ -185,12 +209,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut record_path = None;
     let mut replay_tape = None;
     let mut test_replay = false;
+    let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
     let mut directories = Vec::new();
     let mut grant_mask = 0;
     let mut net_rules = Vec::new();
     let mut secret_grants = Vec::new();
+    let mut env_patterns: Option<hirsel_core_net::EnvPatterns> = None;
     let mut json = false;
     use crate::cli::OptionId as Opt;
     for (option, value) in invocation.options {
@@ -212,6 +238,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
+            Opt::Rerun => test_rerun = true,
             Opt::ExpectVerdict => expect_verdict = Some(value),
             Opt::Diagnose => diagnose = true,
             Opt::Install => install_root = Some(PathBuf::from(value)),
@@ -250,11 +277,32 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     grant_mask |= 1 << 1;
                     continue;
                 }
+                if value == "Env" {
+                    return Err(hirsel_core_net::EnvPatterns::SYNTAX.into());
+                }
+                if let Some(patterns) = value.strip_prefix("Env=") {
+                    let patterns = hirsel_core_net::EnvPatterns::parse(patterns)
+                        .ok_or(hirsel_core_net::EnvPatterns::SYNTAX)?;
+                    if let Some(granted) = &mut env_patterns {
+                        granted.extend(patterns);
+                    } else {
+                        env_patterns = Some(patterns);
+                    }
+                    grant_mask |= 1 << 7;
+                    continue;
+                }
                 let kind = crate::grant_kind(&value)
                     .filter(|kind| (1..=9).contains(kind)).ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
                 grant_mask |= 1 << kind;
             }
             Opt::Filter => test_filter = Some(value),
+            Opt::TestJobs => {
+                test_jobs = Some(
+                    value
+                        .parse()
+                        .map_err(|_| "-j expects a positive job count")?,
+                );
+            }
             Opt::TestTimeout => {
                 let seconds: u64 = value.parse()?;
                 if seconds == 0 {
@@ -304,13 +352,36 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::ProfileFront => profile_front = true,
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help
+            | Opt::Interface
+            | Opt::Dependents
+            | Opt::Transitive
+            | Opt::AffectedTests
+            | Opt::Unused
+            | Opt::InspectLibrary
+            | Opt::InspectStd
             | Opt::IncludeCredentials
             | Opt::Lib
             | Opt::FmtCheck
+            | Opt::FmtStdin
             | Opt::Signatures
             | Opt::ListRules
             | Opt::SdkOut
             | Opt::Url
+            | Opt::Control
+            | Opt::HostState
+            | Opt::Workdir
+            | Opt::Listen
+            | Opt::Scratch
+            | Opt::GrantAdded
+            | Opt::MaxPause
+            | Opt::MaxRecipeBytes
+            | Opt::MaxClosure
+            | Opt::MaxDecodeBytes
+            | Opt::StagingBytes
+            | Opt::AdmitTimeout
+            | Opt::HostMemory
+            | Opt::StartRetries
+            | Opt::TapeRetention
             | Opt::CallTimeout => {
                 unreachable!("CLI early command option")
             }
@@ -321,7 +392,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     let mut replay_plan = None;
     if replay_command {
-        if !directories.is_empty() || grant_mask != 0 {
+        if !directories.is_empty() || grant_mask != 0 || !secret_grants.is_empty() {
             return Err("replay takes no host grants".into());
         }
         let mut path = replay_tape.ok_or("replay requires --tape TAPE")?;
@@ -645,13 +716,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             library: image.map_or(LibraryInput::Sources, LibraryInput::Image),
             entry: None,
         }
+    } else if inspect_std {
+        CheckRequest::libraries(&libraries, &store)?
     } else if command == "image" {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
     } else if let Some(image) = image {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
     } else if let Some(image) = installed_std {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if native_command || installed.is_some() {
+    } else if native_command || installed.is_some() || inspection.is_some() {
         CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?
     } else {
         CheckRequest::directory(&dir.ok_or("missing package directory")?, &libraries, &store)?
@@ -706,6 +779,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.grant_mask = grant_mask;
             options.net_rules = net_rules;
             options.secret_grants = secret_grants;
+            options.env_patterns = env_patterns;
             options.logical_charge_report = logical_charge_report;
             options.recording = needs_recording;
             options.replay = replay_plan;
@@ -720,7 +794,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // options or toolchain cannot be read goes on without one and meets
     // that error where it always has.
     let record = match &mut prepared {
-        _ if command == "image" || test_command || recipe_command => None,
+        _ if command == "image" || test_command || recipe_command || inspection.is_some() => None,
         Some(Ok(options)) if options.logical_charge_report.is_none() => {
             crate::request_record::Request::new(
                 command,
@@ -794,7 +868,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
-    let mut native_options = if native_command && (test_command || accepted) {
+    if accepted && let Some(inspection) = inspection {
+        inspection.write(&product, json)?;
+        std::process::exit(0);
+    }
+    let native_options = if native_command && (test_command || accepted) {
         let options = prepared.expect("a native command prepares its options")?;
         if options.logical_charge_report.is_some() {
             eprintln!(
@@ -807,8 +885,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         None
     };
     if test_command {
-        let options = native_options.as_mut().unwrap();
-        let output_dir = options.output.clone();
+        use crate::{Source, TestCache};
+
         let tests: Vec<_> = product
             .tests()
             .filter(|path| {
@@ -818,56 +896,63 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             })
             .cloned()
             .collect();
+        let cache = if !test_replay && matches!(runner, crate::Runner::Native) {
+            TestCache::open(&TestCache::default_root())
+        } else {
+            None
+        };
         let mut rows = Vec::new();
         let mut failed = false;
-        for test in &tests {
-            options.output = output_dir.join(hex(hirsel_core_ids::ContentHash::of_bytes(
-                test.to_string().as_bytes(),
-            )));
-            let result = if test_replay {
-                product.run_test_with_replay(
-                    test,
-                    options,
-                    test_timeout,
-                    &runner,
-                    expect_verdict.as_deref(),
-                )
-            } else {
-                product.run_test_with_runner(test, options, test_timeout, &runner)
-            };
+        let batch = crate::test_run::TestBatch {
+            jobs: test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?,
+            timeout: test_timeout,
+            runner: &runner,
+            replay: test_replay,
+            expect_verdict: expect_verdict.as_deref(),
+            cache: cache.as_ref(),
+            rerun: test_rerun,
+        };
+        batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
             let row = match result {
-                Ok(outcome) => {
+                Ok((outcome, source)) => {
                     let passed = outcome.passed();
+                    let wall_ms = (source == Source::Executed)
+                        .then(|| outcome.wall_time.as_secs_f64() * 1000.0);
+                    let source = source.as_str();
                     failed |= !passed;
                     if !json {
-                        if passed {
-                            println!("pass {test}");
-                        } else {
-                            let reason = if outcome.timed_out {
-                                "execution timed out".to_owned()
-                            } else if outcome.output.stderr.is_empty() {
-                                "error".to_owned()
+                        if let Some(wall_ms) = wall_ms {
+                            if passed {
+                                println!("pass {source} {test} ({wall_ms:.3} ms)");
                             } else {
-                                String::from_utf8_lossy(&outcome.output.stderr)
-                                    .lines()
-                                    .collect::<Vec<_>>()
-                                    .join(" | ")
-                            };
-                            println!("fail {test}: {reason}");
+                                let reason = if outcome.timed_out {
+                                    "execution timed out".to_owned()
+                                } else if outcome.output.stderr.is_empty() {
+                                    "error".to_owned()
+                                } else {
+                                    String::from_utf8_lossy(&outcome.output.stderr)
+                                        .lines()
+                                        .collect::<Vec<_>>()
+                                        .join(" | ")
+                                };
+                                println!("fail {source} {test}: {reason} ({wall_ms:.3} ms)");
+                            }
+                        } else {
+                            println!("pass {source} {test}");
                         }
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out})
+                    serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
                 }
                 Err(error) => {
                     failed = true;
                     if !json {
-                        println!("fail {test}: {error}");
+                        println!("fail executed {test}: {error} (time unavailable)");
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":false,"stopped":error.to_string()})
+                    serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null})
                 }
             };
             rows.push(row);
-        }
+        });
         let passed = !tests.is_empty() && !failed;
         if json {
             println!("{}", serde_json::json!({"passed":passed,"tests":rows}));
@@ -919,7 +1004,29 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     let recipe = release_manifest
                         .as_ref()
                         .map(|_| publication.recipe.clone());
-                    let built = publication.assemble(options, reached.counters);
+                    // The separate release std (std-reuse-1520 S1) stays
+                    // behind this selector until Guard B passes.
+                    let std = (std::env::var_os("HIRSEL_STD_SEPARATE").is_some()
+                        && options.optimize
+                        && matches!(options.backend, crate::native::Backend::Llvm))
+                    .then(|| {
+                        let runtime = match &options.observed {
+                            Some(observed) => observed.0.runtime,
+                            None => {
+                                crate::tool_inputs::toolchain(
+                                    &options.link,
+                                    &options.target,
+                                    &options.runtime,
+                                )?
+                                .0
+                                .runtime
+                            }
+                        };
+                        product.std_side(options, runtime)
+                    })
+                    .transpose();
+                    let built = std
+                        .and_then(|std| publication.assemble_with(options, reached.counters, std));
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, recipe)
                     {
@@ -998,15 +1105,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // write after a stored build.
     if let Some(key) = key
         && (output.stopped.is_none() || undelivered.is_some())
-    {
-        let value = crate::request_record::Value::of(crate::request_record::Answer {
+        && let Some(value) = crate::request_record::Value::of(crate::request_record::Answer {
             product: &product,
             diagnostics: &output.diagnostics,
             incomplete: &output.incomplete,
             resources: &output.resources,
             reach: reach.as_ref(),
             native: output.native.as_ref().or(undelivered.as_ref()),
-        });
+        })
+    {
         crate::request_record::publish(&store_root, key, &value)?;
         meter.finish("request record/publish");
     }
@@ -1125,6 +1232,9 @@ fn finish(
             eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
             for site in &d.causal {
                 eprintln!("  caused by {}", sources.render(site));
+            }
+            if let Some(hint) = &d.hint {
+                eprintln!("  {hint}");
             }
         }
         for g in &output.incomplete {

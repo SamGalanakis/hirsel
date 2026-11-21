@@ -120,13 +120,10 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(64u64))
-    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
-    let mut policy_task = take policy_handle
-    let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
     let db = store.memory(c, r, store.defaults())
     let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
-        tasks: tasks, net: n, random: r, policy: ingress.share(policy),
-        token: result.unwrap(clone(ingress.principal(principal))), accepted: None)
+        tasks: tasks, net: n, random: r,
+        token: ingress.credential(r), accepted: None)
     let mut cn = conn(d, 1u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
@@ -136,8 +133,6 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let _ = frame(cn)
     let _ = frame(cn)
     hang(take cn)
-    task.cancel(mut policy_task)
-    let _ = task.join(take policy_task)
     true
 }
 
@@ -150,19 +145,19 @@ fn emit(out: Stdout, e: observe.Obs) -> () waits {
 
 fn record(cn: Conn, take e: observe.Obs) -> () waits {
     emit(cn.out, e)
-    result.unwrap(log.append(cn.log, take e))
+    log.append(cn.log, take e)
 }
 
 // Memoize the pure hash by its complete byte inputs, not the slot or deadline.
 fn send_digest(mut cn: Conn, key: Bytes, arg: Bytes) -> Bytes {
     let mut cache_key: Bytes = list.new()
     result.unwrap(std.codec.put_u64(list.len(key), mut cache_key))
-    result.unwrap(list.append(mut cache_key, key))
+    list.append(mut cache_key, key)
     result.unwrap(std.codec.put_u64(list.len(arg), mut cache_key))
-    result.unwrap(list.append(mut cache_key, arg))
+    list.append(mut cache_key, arg)
     if let Some(d) = map.get(cn.digests, cache_key) { return result.unwrap(clone(d)) }
     let d = observe_fixture.digest(key, arg)
-    result.unwrap(map.insert(mut cn.digests, take cache_key, result.unwrap(clone(d))))
+    map.insert(mut cn.digests, take cache_key, result.unwrap(clone(d)))
     d
 }
 '''
@@ -494,7 +489,7 @@ def trace_source(t, name, observer):
               '    result.unwrap(stdout.write_bytes(out, b))', '    true', '}']
     for data, fn in blobs.items():
         lines += [f'fn {fn}() -> Bytes {{', '    let mut b: Bytes = list.new()']
-        lines += [f'    result.unwrap(list.push(mut b, {x}u8))' for x in data]
+        lines += [f'    list.push(mut b, {x}u8)' for x in data]
         lines += ['    b', '}']
     return '\n'.join(lines) + '\n', clauses
 

@@ -37,27 +37,27 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
 
 fn k_named() -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, code.identity(code.describe(named))))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_string())), mut key))
+    list.append(mut key, code.identity(code.describe(named)))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_string())), mut key)
     let carried: std.codec.Codec[Result[u64, u32]] = std.codec.of()
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key)
     key
 }
 
 fn string_arg(n: u64, trailing: bool) -> Bytes {
     let mut s: Bytes = list.new()
     for _ in 0u64 .. n {
-        result.unwrap(list.push(mut s, 97u8))
+        list.push(mut s, 97u8)
     }
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.put_string(result.unwrap(string.from_utf8(take s)), mut b))
     if trailing {
-        result.unwrap(list.push(mut b, 0u8))
+        list.push(mut b, 0u8)
     }
     b
 }
 
-type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, flood: u64, net: Net, random: Random, policy: ingress.Ingress }
+type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, flood: u64, net: Net, random: Random }
 
 fn answer(cn: wire_client.Conn) -> runner.Outcome waits {
     match wire_client.next(cn) {
@@ -75,11 +75,12 @@ fn answer(cn: wire_client.Conn) -> runner.Outcome waits {
 
 fn drive(take d: D) -> () waits {
     let mut requested: List[Bytes] = list.new()
-    result.unwrap(list.push(mut requested, k_named()))
-    let (cn, session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random, d.policy, d.head, d.post, code.describe(place), requested, None, 1u64, 2097152u64))
+    list.push(mut requested, k_named())
+    let unbound: Option[runner.Wire[()]] = None
+    let (cn, session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post, code.describe(place), requested, None, 1u64, 2097152u64))
     let bad = string_arg(4096u64, true)
     for _ in 0u64 .. d.flood {
-        let a: Bytes = result.unwrap(clone(bad))
+        let a: Bytes = clone(bad)
         let request: runner.Frame = Call(0u32, 0u64, 0u32, 4294967295u32, take a)
         wire_client.send_frame(cn, take request)
         match answer(cn) {
@@ -103,24 +104,14 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) ->
     let mut db = store.memory(clock, random, store.defaults())
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
-    let (head, inbox) = result.unwrap(take made)
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let mut limits = ingress.defaults()
-    limits.call_period_ns = 1u64
-    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, clock, random, limits, 1048576u64))
-    let mut policy_task = take policy_handle
-    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, flood: flood, net: net, random: random, policy: ingress.share(policy))
-    let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
-        Ok(take t) => take t,
-        Error(_) => return Error(Exit(status: 3)),
-    }
+    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, flood: flood, net: net, random: random)
+    let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)
     match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }
-    task.cancel(mut policy_task)
-    let _ = task.join(take policy_task)
     match task.join(take driving) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 6)),

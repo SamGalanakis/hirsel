@@ -1,7 +1,7 @@
 // isolate catching a Fail(String) cause (spec-v1-880 m2b-findings v.hirsel, retry.hirsel).
 // Values and used bytes are derived in core/corpus/m2b/causes/SPEC.md.
 fn boom() -> u64 {
-    fail(result.unwrap(string.from("busy")))
+    fail(string.from("busy"))
 }
 
 fn first_is_fail(cs: Causes) -> bool {
@@ -50,7 +50,7 @@ pub fn case_twice() -> u64 {
 // A retry policy over isolate's Causes: retry while the primary cause is Fail, stop on any other.
 fn attempt(n: u64) -> u64 {
     if n < 2 {
-        fail(result.unwrap(string.from("busy")))
+        fail(string.from("busy"))
     }
     if n == 5 {
         return option.unwrap((None : Option[u64]))
@@ -140,27 +140,23 @@ fn chain_from_child(take unused: u64) -> Causes {
 
 // the child catches and drops its chain; join retires the child with the cell as its primary
 pub fn case_child_drop(tasks: Tasks) -> u64 waits {
-    match task.spawn(tasks, bytes 4096, 0u64, caught_in_child) {
-        Error(_) => 9,
-        Ok(h) => match task.join(take h) {
-            Ok(v) => v,
-            Error(_) => 8
-        },
+    let h = task.spawn(tasks, bytes 4096, 0u64, caught_in_child)
+    match task.join(take h) {
+        Ok(v) => v,
+        Error(_) => 8
     }
 }
 
 // the child returns its chain; the root reads and drops it after join
 pub fn case_child_kept(tasks: Tasks) -> u64 waits {
-    match task.spawn(tasks, bytes 4096, 0u64, chain_from_child) {
-        Error(_) => 9,
-        Ok(h) => match task.join(take h) {
-            Ok(take cs) => if first_is_fail(cs) {
-                1
-            } else {
-                2
-            },
-            Error(_) => 8,
+    let h = task.spawn(tasks, bytes 4096, 0u64, chain_from_child)
+    match task.join(take h) {
+        Ok(take cs) => if first_is_fail(cs) {
+            1
+        } else {
+            2
         },
+        Error(_) => 8,
     }
 }
 
@@ -194,12 +190,8 @@ pub fn main(out: Stdout, argv: Args, tasks: Tasks) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

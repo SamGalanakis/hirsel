@@ -14,7 +14,7 @@ pub type Request: send {
     body: RequestBody
 }
 
-pub type Error: send = InvalidRequest | State | NoSpace | Allocation(Capacity) | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
+pub type Error: send = InvalidRequest | State | NoSpace | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
 
 fn append(mut out: Bytes, data: Bytes) -> Result[(), Error] {
     if list.len(data) > order.min(8192, list.capacity(out)) - list.len(out) {
@@ -163,7 +163,6 @@ pub fn render_error(mut out: Bytes, error: Error, req: Request) -> Result[(), Er
         InvalidRequest => "InvalidRequest",
         State => "State",
         NoSpace => "NoSpace",
-        Allocation(_) => "Allocation",
         Connect(_) => "Connect",
         Write(_) => "Write",
         Receive(_) => "Receive",
@@ -230,11 +229,8 @@ pub opaque type Reader: send {
 pub type BodyRead: key = NeedInput | Data(u64) | End
 
 fn storage(n: u64) -> Result[Bytes, Error] {
-    let allocated: Result[Bytes, Capacity] = list.with_capacity(n)
-    match take allocated {
-        Ok(take b) => Ok(take b),
-        Error(e) => Error(Allocation(e)),
-    }
+    let allocated: Bytes = list.with_capacity(n)
+    Ok(take allocated)
 }
 
 /// Allocates the bounded wire buffer and final-head storage.
@@ -475,13 +471,8 @@ pub fn dial(n: Net, address: Addr, authority: String, clock: Clock, req: Request
 pub fn https(n: Net, address: Addr, authority: String, name: String, trust: Trust, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
     let socket = connect(n, address, clock, deadline_ns)?
     let mut alpn: List[String] = list.new()
-    let protocol = match string.from("http/1.1") {
-        Ok(take s) => take s,
-        Error(e) => return Error(Allocation(e)),
-    }
-    if let Error((e, _)) = list.push(mut alpn, take protocol) {
-        return Error(Allocation(e))
-    }
+    let protocol = string.from("http/1.1")
+    list.push(mut alpn, take protocol)
     let (take input, take output, _) = match tls.connect(n, take socket, name, trust, alpn, At(clock, deadline_ns)) {
         Ok(take stream) => take stream,
         Error(e) => return Error(connect_error(e)),
@@ -499,13 +490,10 @@ fn attach_halves(take input: ReadHalf, take output: WriteHalf, authority: String
     if string.byte_len(authority) > 8192 {
         return Error(TooLarge)
     }
-    let stored = match string.from(authority) {
-        Ok(take s) => take s,
-        Error(e) => return Error(Allocation(e)),
-    }
+    let stored = string.from(authority)
     let wire = reader()?
     let encoding = storage(8192)?
-    let mut c = Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock: clock, deadline: deadline_ns, phase: Idle, upload: Fixed(0), head_request: false, close_after: false)
+    let mut c = Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock, deadline: deadline_ns, phase: Idle, upload: Fixed(0), head_request: false, close_after: false)
     start(mut c, req, deadline_ns)?
     Ok(take c)
 }

@@ -139,15 +139,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(Inst::Store { address: at, value }, n);
         }
     }
-    fn list_count_overflow(
-        &mut self,
-        to: AddressId,
-        cap_id: TypeId,
-        item: TyId,
-        n: NodeId,
-    ) -> Option<()> {
-        // FORM60's declined counter-overflow admission. Under a finalizer grant it
-        // follows the ordinary allocation failure edge; otherwise it is Capacity.
+    fn list_count_overflow(&mut self, item: TyId, refused: BlockId, n: NodeId) -> Option<()> {
+        // FORM60's declined counter-overflow admission: the limit reports its room.
         let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let overflow = self.konst(Ty::Scalar(Scalar::Bool), 1, n)?;
@@ -160,7 +153,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             stride: zero,
         };
         let (_, available) = self.list_allocate(&plan, AllocPlace::Current, n);
-        self.list_refused(to, cap_id, max, available, n);
+        self.jump(refused, &[max, available], n);
         Some(())
     }
 
@@ -287,42 +280,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         header: ValueId,
         word: ValueId,
         input: TyId,
-        result: TyId,
         big_endian: bool,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<()> {
         let word_scalar = self.word_scalar(input, n)?;
         let ty = Ty::Scalar(word_scalar);
         let Some(carrier) = self.list_carrier(scalar(Scalar::U8), n) else {
             self.gap(n, "put_word without the Bytes carrier row is not built");
             return None;
         };
-        let result_id =
-            self.place_row(result, "put_word without a Result place is not built", n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let width = self.konst(Ty::Scalar(Scalar::U64), word_scalar.size(), n)?;
-        let reserved =
-            self.list_reserve(scalar(Scalar::U8), header, width, Ask::Bounded, result, n)?;
-        let at = self.address(
-            AddressBase::Value(reserved),
-            &[],
-            PlaceTy::Declared(result_id),
-            n,
-        );
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: at,
-            },
-            n,
-        );
-        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, zero, n);
-        let store = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        self.list_branch(ok, store, done, n);
-        self.start(store);
+        self.list_reserve(scalar(Scalar::U8), header, width, Ask::Bounded, n)?;
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let at = self.address(
             AddressBase::Value(data),
@@ -340,9 +309,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, width, n);
         self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
-        self.jump(done, &[], n);
-        self.start(done);
-        Some(reserved)
+        Some(())
     }
 
     pub(super) fn list_arith(
@@ -376,7 +343,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let id = match self.rep(result) {
+        let list_id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
                 self.gap(n, what);
@@ -384,18 +351,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => return None,
         };
-        let payload = match self.t.kind(result) {
-            TyKind::Adt(_, args) => args[0],
-            _ => unreachable!(),
-        };
-        let list_id = match self.rep(payload) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
-        let capacity = self.prelude("Capacity", n)?;
-        let capacity = self.t.mk(TyKind::Adt(capacity, vec![]));
-        let capacity_id = self.place_row(capacity, "a capacity without a place is not built", n)?;
-        let to = self.result_slot(PlaceTy::Declared(id), n);
+        let to = self.result_slot(PlaceTy::Declared(list_id), n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let storage = self.list_storage(item, n)?;
@@ -406,16 +362,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.temp(result, Some(value));
             return Some(value);
         }
-        let empty = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: empty,
-                op: CompareOp::Eq,
-                left: count,
-                right: zero,
-            },
-            n,
-        );
+        let empty = self.list_compare(CompareOp::Eq, count, zero, n);
         let empty = if let ListStorage::Dynamic(on) = storage {
             self.list_bool(BinaryOp::BitOr, empty, on, n)
         } else {
@@ -424,16 +371,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let yes = self.new_block(&[]);
         let allocate = self.new_block(&[]);
         let done = self.new_block(&[]);
-        let ye = self.edge(yes, &[]);
-        let ne = self.edge(allocate, &[]);
-        self.end(
-            Terminator::Branch {
-                condition: empty,
-                yes: ye,
-                no: ne,
-            },
-            Some(n),
-        );
+        self.list_branch(empty, yes, allocate, n);
         self.start(yes);
         let cap = if let ListStorage::Dynamic(on) = storage {
             let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
@@ -447,55 +385,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(allocate);
         let plan = self.list_plan(item, count, None, n)?;
         let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
-        let charge = plan.charge;
-        let admitted = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: admitted,
-                op: CompareOp::Ne,
-                left: block,
-                right: null,
-            },
-            n,
-        );
-        let ok = self.new_block(&[]);
-        let error = self.new_block(&[]);
-        let oe = self.edge(ok, &[]);
-        let ee = self.edge(error, &[]);
-        self.end(
-            Terminator::Branch {
-                condition: admitted,
-                yes: oe,
-                no: ee,
-            },
-            Some(n),
-        );
-        self.start(ok);
+        let admitted = self.list_compare(CompareOp::Ne, block, null, n);
+        self.raise_unless(admitted, plan.charge, available, n);
         self.list_allocated(to, list_id, block, count, n);
-        self.jump(done, &[], n);
-        self.start(error);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        let cap = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(capacity_id),
-            n,
-        );
-        for (i, value) in [charge, available].into_iter().enumerate() {
-            let at = self.address(
-                AddressBase::Address(cap),
-                &[Step::Field(i as u32)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            self.inst(Inst::Store { address: at, value }, n);
-        }
         self.jump(done, &[], n);
         self.start(done);
         let value = self.pointer(to, n);
@@ -646,7 +538,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> (ValueId, ValueId) {
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
-        let fail = self.fail_to(n);
         let kind = AllocKind::Own {
             edge: plan.edge.clone(),
         };
@@ -661,28 +552,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: Some(plan.overflow),
                 size: plan.size,
                 align: 8,
-                fail,
             },
             n,
         );
         (block, available)
     }
 
+    /// Room for `additional` more elements; a refusal raises `Capacity` and leaves
+    /// the list unchanged (MEM-21, MEM-24).
     pub(super) fn list_reserve(
         &mut self,
         item: TyId,
         header: ValueId,
         additional: ValueId,
         ask: Ask,
+        n: NodeId,
+    ) -> Option<()> {
+        self.list_room(item, header, additional, ask, None, n)
+    }
+
+    /// `list.try_reserve`: `list_reserve` with the refusal as `Error(c)`.
+    pub(super) fn list_try_reserve(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        additional: ValueId,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let carrier = self.list_carrier(item, n)?;
-        // A stored element has a nonzero size, so len <= isize::MAX; a bounded
-        // `additional` (a small constant or another list's length) is too, and
-        // len + additional cannot wrap: the room test is one compare.
-        let unwrappable =
-            ask == Ask::Bounded && matches!(self.list_storage_static(item), Some(true));
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -695,6 +592,36 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let cap_ty = self.t.mk(TyKind::Adt(cap_ty, vec![]));
         let cap_id = self.place_row(cap_ty, "a capacity without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
+        self.list_room(
+            item,
+            header,
+            additional,
+            Ask::Reserve,
+            Some((to, cap_id)),
+            n,
+        )?;
+        let value = self.pointer(to, n);
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    /// The growth both share. With `to`, a refusal stores `Error(c)` there and
+    /// success `Ok(())`; without, a refusal raises.
+    fn list_room(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        additional: ValueId,
+        ask: Ask,
+        to: Option<(AddressId, TypeId)>,
+        n: NodeId,
+    ) -> Option<()> {
+        let carrier = self.list_carrier(item, n)?;
+        // A stored element has a nonzero size, so len <= isize::MAX; a bounded
+        // `additional` (a small constant or another list's length) is too, and
+        // len + additional cannot wrap: the room test is one compare.
+        let unwrappable =
+            ask == Ask::Bounded && matches!(self.list_storage_static(item), Some(true));
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let old_cap = self.carrier_word(header, carrier, SeqWord::Cap, n);
         let (needed, len_over) =
@@ -708,7 +635,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let growth = self.new_block(&[]);
         let success = self.new_block(&[]);
-        let done = self.new_block(&[]);
+        let u64t = Ty::Scalar(Scalar::U64);
+        let refused = self.new_block(&[u64t, u64t]);
         // Growth is amortized and rare except for fill: that edge is cold.
         let yes = self.edge(growth, &[]);
         self.b.edges[yes.index()].cold = ask != Ask::Fill;
@@ -722,35 +650,68 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(n),
         );
         self.start(growth);
-        match self.list_storage(item, n)? {
+        let storage = self.list_storage(item, n)?;
+        match storage {
             ListStorage::Stored => {}
-            ListStorage::Empty => {
-                self.list_count_overflow(to, cap_id, item, n)?;
-                self.jump(done, &[], n);
-                self.start(success);
-                self.inst(
-                    Inst::SetCase {
-                        address: to,
-                        case: 0,
-                    },
-                    n,
-                );
-                self.jump(done, &[], n);
-                self.start(done);
-                let value = self.pointer(to, n);
-                self.temp(result, Some(value));
-                return Some(value);
-            }
+            ListStorage::Empty => self.list_count_overflow(item, refused, n)?,
             ListStorage::Dynamic(on) => {
                 let zero_sized = self.new_block(&[]);
                 let stored = self.new_block(&[]);
                 self.list_branch(on, zero_sized, stored, n);
                 self.start(zero_sized);
-                self.list_count_overflow(to, cap_id, item, n)?;
-                self.jump(done, &[], n);
+                self.list_count_overflow(item, refused, n)?;
                 self.start(stored);
             }
         }
+        if !matches!(storage, ListStorage::Empty) {
+            self.list_grow(
+                item,
+                header,
+                carrier,
+                [len, old_cap, needed],
+                len_over,
+                [success, refused],
+                n,
+            )?;
+        }
+        self.start(refused);
+        let [requested, available] = self.block_params(refused)[..] else {
+            unreachable!("the refusal block takes the charge and the room")
+        };
+        let Some((to, cap_id)) = to else {
+            self.raise_capacity(requested, available, n);
+            self.start(success);
+            return Some(());
+        };
+        let done = self.new_block(&[]);
+        self.list_refused(to, cap_id, requested, available, n);
+        self.jump(done, &[], n);
+        self.start(success);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(())
+    }
+
+    /// Grow the list's storage for `needed` elements, then jump to `success`, or
+    /// to `refused(charge, available)` with the list unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn list_grow(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        carrier: TypeId,
+        [len, old_cap, needed]: [ValueId; 3],
+        len_over: ValueId,
+        [success, refused]: [BlockId; 2],
+        n: NodeId,
+    ) -> Option<()> {
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let two = self.konst(Ty::Scalar(Scalar::U64), 2, n)?;
         let four = self.konst(Ty::Scalar(Scalar::U64), 4, n)?;
@@ -762,7 +723,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let owned = self.list_compare(CompareOp::Ne, old_cap, zero, n);
         let current = self.new_block(&[]);
         let like = self.new_block(&[]);
-        let error = self.new_block(&[Ty::Scalar(Scalar::U64)]);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let (moved, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, len, plan.stride, n);
         match self.frame_list(header) {
@@ -775,7 +735,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 owned,
                 [like, current],
                 success,
-                error,
+                refused,
                 n,
             )?,
             None => self.list_branch(owned, like, current, n),
@@ -786,10 +746,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
         let ok = self.list_compare(CompareOp::Ne, block, null, n);
         let copy = self.new_block(&[]);
-        let refused = self.new_block(&[]);
-        self.list_branch(ok, copy, refused, n);
-        self.start(refused);
-        self.jump(error, &[available], n);
+        let refused_here = self.new_block(&[]);
+        self.list_branch(ok, copy, refused_here, n);
+        self.start(refused_here);
+        self.jump(refused, &[plan.charge, available], n);
         self.start(copy);
         let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
         let copy_data = self.new_block(&[]);
@@ -852,7 +812,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Grow {
                 result: block,
@@ -865,56 +824,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 capacity: new_cap,
                 moved,
                 refund,
-                fail,
             },
             n,
         );
         let grown = self.list_compare(CompareOp::Ne, block, null, n);
-        let refused = self.new_block(&[]);
-        self.list_branch(grown, success, refused, n);
-        self.start(refused);
-        self.jump(error, &[available], n);
-        self.start(error);
-        let available = self.b.blocks[error.index()]
-            .params
-            .get(&self.b.pools.values)
-            .unwrap()[0];
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        let cap = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(cap_id),
-            n,
-        );
-        for (i, value) in [plan.charge, available].into_iter().enumerate() {
-            let at = self.address(
-                AddressBase::Address(cap),
-                &[Step::Field(i as u32)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            self.inst(Inst::Store { address: at, value }, n);
-        }
-        self.jump(done, &[], n);
-        self.start(success);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(done, &[], n);
-        self.start(done);
-        let value = self.pointer(to, n);
-        self.temp(result, Some(value));
-        Some(value)
+        let refused_here = self.new_block(&[]);
+        self.list_branch(grown, success, refused_here, n);
+        self.start(refused_here);
+        self.jump(refused, &[plan.charge, available], n);
+        Some(())
     }
 
     /// `push`, expanded in place: a full test, a cold call to the source `grow` in
@@ -979,7 +897,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: TyId,
         header: ValueId,
         value: Option<ValueId>,
-        result: TyId,
         n: NodeId,
         destination: Option<(ValueId, bool)>,
     ) -> Option<ValueId> {
@@ -988,39 +905,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         let rep = self.rep_at(item, n)?;
-        let out_id = self.place_row(result, "a push result without a place is not built", n)?;
-        let TyKind::Adt(_, args) = self.t.kind(result) else {
-            self.gap(n, "a push result that is not a Result is not built");
-            return None;
-        };
-        let error_ty = args[1];
-        let error_id = self.place_row(error_ty, "a push error without a place is not built", n)?;
         // `list.grow` is a sibling read of `list.push` (`crate::SIBLING_READS`).
-        let (Some(capacity), Some(result_decl), Some(grow)) = (
-            self.p.core_decl("Capacity"),
-            self.p.core_decl("Result"),
-            self.p.core_fn("list", "grow"),
-        ) else {
-            self.gap(
-                n,
-                "push without core's Capacity, Result and list.grow is not built",
-            );
+        let Some(grow) = self.p.core_fn("list", "grow") else {
+            self.gap(n, "push without core's list.grow is not built");
             return None;
         };
-        let cap_ty = self.t.mk(TyKind::Adt(capacity, vec![]));
-        let grown_ty = self.t.mk(TyKind::Adt(result_decl, vec![UNIT, cap_ty]));
-        let cap_id = self.place_row(cap_ty, "a Capacity without a place is not built", n)?;
-        let grown_id =
-            self.place_row(grown_ty, "a reserve result without a place is not built", n)?;
-        let to = self.result_slot(PlaceTy::Declared(out_id), n);
         let (full, direct) =
             destination.unwrap_or_else(|| (self.full_test(header, carrier, n), false));
-        let (grow_block, store, failed, done) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
+        let (grow_block, store) = (self.new_block(&[]), self.new_block(&[]));
         let publish = if direct { self.new_block(&[]) } else { store };
         let cold = self.is_full_test(Some(full));
         let yes = self.edge(grow_block, &[]);
@@ -1035,65 +927,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(n),
         );
         self.start(grow_block);
-        // A frame list grows here: `grow`'s body would free its frame bytes.
-        let grown = if self.frame_list(header).is_some() {
+        // A frame list grows here: `grow`'s body would free its frame bytes. A
+        // refusal raises with the element still the caller's, so cleanup drops it.
+        if self.frame_list(header).is_some() {
             let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-            self.list_reserve(item, header, one, Ask::Bounded, grown_ty, n)
+            self.list_reserve(item, header, one, Ask::Bounded, n)?;
         } else {
             self.true_arm(cold, |cx| {
-                cx.emit_call(grow, &[item], &[Some(header)], grown_ty, n)
-            })
-        }?;
-        let from = self.address(
-            AddressBase::Value(grown),
-            &[],
-            PlaceTy::Declared(grown_id),
-            n,
-        );
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: from,
-            },
-            n,
-        );
-        let ok_tag = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, ok_tag, n);
-        self.list_branch(ok, store, failed, n);
-        self.start(failed);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        let error = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(error_id),
-            n,
-        );
-        let cap = self.address(
-            AddressBase::Address(error),
-            &[Step::Field(0)],
-            PlaceTy::Declared(cap_id),
-            n,
-        );
-        let old_cap = self.address(
-            AddressBase::Address(from),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(cap_id),
-            n,
-        );
-        let source = self.pointer(old_cap, n);
-        self.copy_to(cap, source, cap_id, n);
-        if let Some(place) = rep.stored() {
-            let at = self.address(AddressBase::Address(error), &[Step::Field(1)], place, n);
-            self.install(at, rep, value, n);
+                cx.emit_call(grow, &[item], &[Some(header)], UNIT, n);
+                Some(())
+            })?;
         }
-        self.jump(done, &[], n);
+        self.jump(store, &[], n);
         self.start(store);
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         if let Some(place) = rep.stored() {
@@ -1112,18 +957,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
         self.set_carrier_word(header, carrier, SeqWord::Len, new_len, n);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(done, &[], n);
-        self.start(done);
-        let value = self.pointer(to, n);
-        self.temp(result, Some(value));
-        Some(value)
+        None
     }
 
     pub(super) fn list_append(
@@ -1131,33 +965,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: TyId,
         header: ValueId,
         source: ValueId,
-        result: TyId,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<()> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let count = self.carrier_word(source, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(item, header, count, Ask::Bounded, result, n)?;
-        let result_id = self.place_row(result, "a list result without a place is not built", n)?;
-        let at = self.address(
-            AddressBase::Value(reserved),
-            &[],
-            PlaceTy::Declared(result_id),
-            n,
-        );
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: at,
-            },
-            n,
-        );
-        let ok_tag = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, ok_tag, n);
+        self.list_reserve(item, header, count, Ask::Bounded, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        let nonempty = self.list_compare(CompareOp::Ne, count, zero, n);
-        let copying = self.list_bool(BinaryOp::BitAnd, ok, nonempty, n);
+        let copying = self.list_compare(CompareOp::Ne, count, zero, n);
         let copy = self.new_block(&[]);
         let done = self.new_block(&[]);
         self.list_branch(copying, copy, done, n);
@@ -1183,7 +998,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
         self.jump(done, &[], n);
         self.start(done);
-        Some(reserved)
+        Some(())
     }
 
     pub(super) fn list_copy_from_slice(
@@ -1467,32 +1282,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         header: ValueId,
         count: ValueId,
         value: Option<ValueId>,
-        result: TyId,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<()> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(item, header, count, Ask::Fill, result, n)?;
-        let result_id = self.place_row(result, "a list result without a place is not built", n)?;
-        let at = self.address(
-            AddressBase::Value(reserved),
-            &[],
-            PlaceTy::Declared(result_id),
-            n,
-        );
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: at,
-            },
-            n,
-        );
-        let ok_tag = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, ok_tag, n);
+        self.list_reserve(item, header, count, Ask::Fill, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        let nonempty = self.list_compare(CompareOp::Ne, count, zero, n);
-        let filling = self.list_bool(BinaryOp::BitAnd, ok, nonempty, n);
+        let filling = self.list_compare(CompareOp::Ne, count, zero, n);
         let fill = self.new_block(&[]);
         let commit = self.new_block(&[]);
         let done = self.new_block(&[]);
@@ -1541,7 +1337,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
         self.jump(done, &[], n);
         self.start(done);
-        Some(reserved)
+        Some(())
     }
 
     /// FORM #61: a range is a new non-owning carrier, copied through the result dest.
@@ -1996,20 +1792,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         capacity: ValueId,
         n: NodeId,
     ) {
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let list = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 0, field: 0 }],
-            PlaceTy::Declared(list_id),
-            n,
-        );
-        let pointer = self.pointer(list, n);
+        let pointer = self.pointer(to, n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
         self.set_carrier_word(pointer, list_id, SeqWord::Data, data, n);
         self.set_carrier_word(pointer, list_id, SeqWord::Len, zero, n);

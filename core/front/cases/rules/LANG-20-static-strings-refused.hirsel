@@ -1,0 +1,19 @@
+// expect: refuse LANG-20 at 10:13
+// expect: refuse LANG-20 at 11:16
+// expect: refuse LANG-20 at 12:17
+// expect: refuse LANG-20 at 13:24
+// expect: refuse LANG-20 at 14:22
+// expect: refuse LANG-20 at 15:23
+// expect: refuse LANG-20 at 17:28
+type Wrapped { text: String }
+
+const PAIR: (String, u64) = ("a", 1)
+const WRAPPED: Wrapped = Wrapped(text: "a")
+const NONPLAIN: List[u64] = list.new()
+const CONCAT: String = "a" + "b"
+const CALL: String = title()
+const BYTES: String = b"a"
+const WORD: u64 = 5
+const NOT_STRING: String = WORD
+
+fn title() -> String { "hirsel" }

@@ -99,6 +99,14 @@ impl AdmissionStore {
         self.collection.lock().expect("code collection lock")
     }
 
+    pub(crate) fn under_collection<R>(
+        &self,
+        action: impl FnOnce(&dyn Fn(ObjectKey) -> bool) -> R,
+    ) -> R {
+        let collection = self.collection();
+        action(&|key| collection.pins.contains_key(&key))
+    }
+
     pub(super) fn reserve(
         &self,
         root: ContentHash,

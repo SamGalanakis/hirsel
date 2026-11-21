@@ -15,14 +15,9 @@ CONTROLS = {
     'gone_refused_at_session': ('runner', 'store@1/runner/law_gone_slot_v5',
         'if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }',
         'if !known { return Error(NoEntry) }'),
-    'no_principal_rate': ('ingress', 'store@1/ingress/law_limits',
-        'if s.mint_count >= c.mint_burst { false } else {',
-        'if false { false } else {'),
     'commit_then_check': ('runner', 'store@1/runner/law_reply_over_done_max',
         'Ok(()) => if list.len(out) > DONE_MAX - 20u64 {',
         'Ok(()) => if false {'),
-    'expiry_resets_active': ('ingress', 'store@1/ingress/law_rates_and_expiry',
-        'if full {', 'if true {'),
     'admit_without_digest': ('store', 'store@1/runner/law_request_mismatch_wire',
         'if at.digest != d {', 'if false {'),
     # Superseded was deleted. Returned models its erroneous claim of completion;
@@ -53,7 +48,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evaluator', required=True, type=Path)
     parser.add_argument('--mutant', action='append', choices=CONTROLS)
-    parser.add_argument('--syntax-control', action='append', choices=['runner', 'ingress', 'store'])
+    parser.add_argument('--syntax-control', action='append', choices=['runner', 'store'])
     parser.add_argument('--report', required=True, type=Path)
     args = parser.parse_args()
     names = args.mutant or []
@@ -67,7 +62,6 @@ def main():
         for module in args.syntax_control or []:
             text = (ROOT / f'core/programs/store/{module}.hirsel').read_text()
             law = {'runner': 'store@1/runner/law_gone_slot_v5',
-                   'ingress': 'store@1/ingress/law_limits',
                    'store': 'store@1/runner/law_request_mismatch_wire'}[module]
             function = {'runner': 'prepare', 'ingress': 'bind', 'store': 'admit'}[module]
             header = re.search(r'\bfn ' + function + r'[^\n]*\{', text).group()

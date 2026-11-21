@@ -1,14 +1,12 @@
 fn run(l: Log[u64]) -> Result[Result[u64, Causes], Capacity] {
     isolate(fn() -> u64 {
-        match log.append(l, 7u64) {
-            Ok(()) => 1u64,
-            Error(_) => 0u64
-        }
+        log.append(l, 7u64)
+        1u64
     })
 }
 
 pub fn case() -> Result[u64, Capacity] {
-    let l: Log[u64] = log.new()?
+    let l: Log[u64] = log.new()
     let o = run(l)?
     let n = list.len(log.finish(take l))
     match o {

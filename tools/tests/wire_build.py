@@ -53,9 +53,13 @@ def main():
                    '--inputs', str(inputs), '--store', str(output/'store'),
                    '--entry', 'wire@1/'+entry, '--backend', args.backend,
                    '--runtime', str(args.runtime.resolve()), '--limit', '1610612736' if args.admission_only else '67108864' if args.session_only else '268435456',
-                   '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
+                   '--grant', 'Clock',
                    '--grant', 'Net=Listen 127.0.0.0/8 18094-18094' if args.session_only or args.admission_only else 'Net=Listen 127.0.0.0/8 18089-18089;Connect 127.0.0.0/8 18090-18091',
                    '--json', '-o', str(output/stem)]
+        if name not in ('client_probe', 'finish'):
+            command.extend(['--grant', 'Tasks'])
+        if name in ('client_probe', 'admission'):
+            command.extend(['--grant', 'Random'])
         if args.backend == 'llvm':
             command.append('--release')
         if args.cc:

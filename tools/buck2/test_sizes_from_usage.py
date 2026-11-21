@@ -6,10 +6,10 @@ Three read-only sources, copied to local files:
 - each worker's `actions.log` (and `actions.log.1`): the action supervisor's
   row per finished action, with its CPU and wall time, tagging a test run with
   its `TEST_TARGET` (`test=run:<shard index>:root//:<target>`) and operation;
-- the scheduler's per-execution usage events (kiln-resource-hints `trace/*.jsonl`
-  on the cache host): each operation's `peak_memory_kb`, the peak of the PSS
+- the scheduler's JSONL trace of per-execution usage events: each operation's
+  `peak_memory_kb`, the peak of the PSS
   sampler that enforces memory;
-- optionally, the workers' `kiln-executor` journal lines for kills
+- optionally, the worker executor's journal lines for memory kills
   ("exceeded its memory reservation ... Uuid(<operation>) ... reserved_kb").
 
   python3 tools/buck2/test_sizes_from_usage.py --usage /tmp/usage-*.log \
@@ -257,7 +257,7 @@ def main():
     parser.add_argument("--until", type=float, default=float("inf"))
     parser.add_argument("--usage", nargs="+", required=True, help="copies of the workers' actions.log")
     parser.add_argument("--pss", nargs="+", required=True, help="copies of the scheduler's usage-event trace files")
-    parser.add_argument("--kills", help="the workers' kiln-executor journal lines for memory kills")
+    parser.add_argument("--kills", help="worker executor journal lines for memory kills")
     parser.add_argument("--only", nargs="+", help="refresh only these measured binaries, retaining other evidence")
     args = parser.parse_args()
     found, operations = runs(args.usage, args.since, args.until)

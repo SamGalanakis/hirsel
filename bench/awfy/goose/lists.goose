@@ -36,9 +36,9 @@ recursive fn tail(x: Element&?, y: Element&?, z: Element&?) -> Element&? {
     return z;
 }
 
-fn list_benchmark() -> bool {
+fn list_benchmark(first: i64) -> bool {
     var pool: Element[>..] = [];
-    let x .= make_list(pool, 15);
+    let x .= make_list(pool, first);
     let y .= make_list(pool, 10);
     let z .= make_list(pool, 6);
     let result .= tail(x, y, z);

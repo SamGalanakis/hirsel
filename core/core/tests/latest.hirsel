@@ -15,9 +15,9 @@ fn read_after_publish() -> bool {
     let r = bound bytes 64 {
         let mut ok = true
         for i in 0u64 .. 40 {
-            let h = result.unwrap(latest.new(result.unwrap(arc.new(i))))
+            let h = latest.new(arc.new(i))
             let old = latest.read(h)
-            latest.publish(h, result.unwrap(arc.new(i + 1000)))
+            latest.publish(h, arc.new(i + 1000))
             let new = latest.read(h)
             let second = latest.read(h)
             ok = ok && number(old) == i && number(new) == i + 1000 && number(second) == i + 1000
@@ -35,14 +35,15 @@ fn read_after_publish() -> bool {
 // expect: run publish_releases_old_root() = true
 fn publish_releases_old_root() -> bool {
     let r = bound bytes 64 {
-        let h = result.unwrap(latest.new(result.unwrap(arc.new(0u64))))
+        let h = latest.new(arc.new(0u64))
         for i in 1u64 .. 50 {
-            latest.publish(h, result.unwrap(arc.new(i)))
+            latest.publish(h, arc.new(i))
         }
-        let spare = result.unwrap(arc.new(7u64))
-        let refused = match arc.new(8u64) {
+        let spare = arc.new(7u64)
+        let mut probe: Bytes = list.new()
+        let refused = match list.try_reserve(mut probe, 16) {
             Error(_) => true,
-            Ok(_) => false
+            Ok(()) => false
         }
         refused && number(spare) == 7 && number(latest.read(h)) == 49
     }
@@ -52,28 +53,26 @@ fn publish_releases_old_root() -> bool {
     }
 }
 
-// `new` under 47 bytes: the Arc takes 16, the root asks CONC-13's 32 of the 31 left and
-// the error hands the same Arc back. The last cleanup refunds everything.
-// expect: run new_refused_hands_back() = true
-fn new_refused_hands_back() -> bool {
-    let r = bound bytes 47 {
-        let mut ok = true
-        for i in 0u64 .. 20 {
-            match latest.new(result.unwrap(arc.new(i))) {
-                Error((c, take a)) => {
-                    ok = ok && c.requested == 32 && c.available == 31 && number(a) == i
-                },
-                Ok(_) => {
-                    ok = false
-                }
+// `new` under 47 bytes: the Arc takes 16 and the root asks CONC-13's 32 of the 31 left.
+// expect: run new_refused_raises() = true
+fn new_refused_raises() -> bool {
+    let mut ok = true
+    for i in 0u64 .. 20 {
+        match refusal(isolate(fn() -> Result[u64, Capacity] {
+            bound bytes 47 {
+                let h = latest.new(arc.new(i))
+                number(latest.read(h))
+            }
+        })) {
+            Some(c) => {
+                ok = ok && c.requested == 32 && c.available == 31
+            },
+            None => {
+                ok = false
             }
         }
-        ok
     }
-    match r {
-        Ok(v) => v,
-        _ => false
-    }
+    ok
 }
 
 // A second handle keeps the root and its Arc charged until the last one drops.
@@ -82,14 +81,17 @@ fn last_handle_refunds() -> bool {
     let r = bound bytes 48 {
         let mut ok = true
         for i in 0u64 .. 20 {
-            let h = result.unwrap(latest.new(result.unwrap(arc.new(i))))
+            let h = latest.new(arc.new(i))
             {
                 let k = latest.handle(h)
                 ok = ok && number(latest.read(k)) == i
             }
-            let full = match arc.new(0u64) {
-                Error(_) => true,
-                Ok(_) => false
+            let full = {
+                let mut probe: Bytes = list.new()
+                match list.try_reserve(mut probe, 16) {
+                    Error(_) => true,
+                    Ok(()) => false
+                }
             }
             ok = ok && full
         }
@@ -112,7 +114,7 @@ fn read_and_drop(take h: Latest[u64]) -> u64 {
 }
 
 fn child_loop(take input: Reader) -> u64 waits {
-    let Reader(handles: handles, done: done) = take input
+    let Reader(handles, done) = take input
     let mut n: u64 = 0
     while let Ok(h) = channel.receive(handles) {
         result.unwrap(channel.send(done, read_and_drop(take h)))
@@ -127,14 +129,17 @@ fn drive(take handles: Sender[Latest[u64]], done: Receiver[u64]) -> bool waits {
     let r = bound bytes 64 {
         let mut ok = true
         for i in 0u64 .. 8 {
-            let h = result.unwrap(latest.new(result.unwrap(arc.new(i))))
-            latest.publish(h, result.unwrap(arc.new(i + 100)))
+            let h = latest.new(arc.new(i))
+            latest.publish(h, arc.new(i + 100))
             result.unwrap(channel.send(handles, latest.handle(h)))
             let seen = result.unwrap(channel.receive(done))
-            let spare = result.unwrap(arc.new(1u64))
-            let full = match arc.new(2u64) {
-                Error(_) => true,
-                Ok(_) => false
+            let spare = arc.new(1u64)
+            let full = {
+                let mut probe: Bytes = list.new()
+                match list.try_reserve(mut probe, 16) {
+                    Error(_) => true,
+                    Ok(()) => false
+                }
             }
             ok = ok && seen == i + 100 && full && number(spare) == 1
         }
@@ -149,10 +154,33 @@ fn drive(take handles: Sender[Latest[u64]], done: Receiver[u64]) -> bool waits {
 // Publish on one task, read on another; the reader's handle is dropped there.
 // expect: run handle_crosses_tasks(tasks) = true
 fn handle_crosses_tasks(tasks: Tasks) -> bool waits {
-    let (htx, hrx): (Sender[Latest[u64]], Receiver[Latest[u64]]) = result.unwrap(channel.new(1))
-    let (dtx, drx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (htx, hrx): (Sender[Latest[u64]], Receiver[Latest[u64]]) = channel.new(1)
+    let (dtx, drx): (Sender[u64], Receiver[u64]) = channel.new(1)
     let input = Reader(handles: take hrx, done: take dtx)
-    let child = result.unwrap(task.spawn(tasks, bytes 65536, take input, child_loop))
+    let child = task.spawn(tasks, bytes 65536, take input, child_loop)
     let ok = drive(take htx, drx)
     ok && result.unwrap(task.join(take child)) == 8
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

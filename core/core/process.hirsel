@@ -1,0 +1,2 @@
+// The trigger of a `provide.process` Process (core.md, Provide).
+pub fn trigger(take t: StopTrigger)

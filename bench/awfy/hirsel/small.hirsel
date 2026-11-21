@@ -38,7 +38,7 @@ fn step(mut ball: Ball) -> bool {
     bounced
 }
 
-pub fn bounce() -> u32 {
+pub fn bounce(steps: u64) -> u32 {
     let mut seed = 74755u32
     let mut balls: Inline[Ball, 100] =[Ball(x: 0, y: 0, vx: 0, vy: 0); 100]
     for i in 0u64 .. 100 {
@@ -49,7 +49,7 @@ pub fn bounce() -> u32 {
         balls[i] = Ball(x: x, y: y, vx: vx - 150, vy: vy - 150)
     }
     let mut count = 0u32
-    for _ in 0u64 .. 50 {
+    for _ in 0 .. steps {
         for j in 0u64 .. 100 {
             if step(mut balls[j]) {
                 count += 1
@@ -85,9 +85,9 @@ fn visit(mut p: Permutation, n: u64) {
     }
 }
 
-pub fn permute() -> u32 {
+pub fn permute(size: u64) -> u32 {
     let mut p = Permutation(values:[0; 6], count: 0)
-    visit(mut p, 6)
+    visit(mut p, size)
     p.count
 }
 
@@ -108,12 +108,12 @@ fn set_available(mut board: Board, r: u64, c: u64, free: bool) {
     board.mins[c + 7 - r] = free
 }
 
-fn place_queen(mut board: Board, column: u64) -> bool {
-    for row in 0u64 .. 8 {
+fn place_queen(mut board: Board, column: u64, size: u64) -> bool {
+    for row in 0u64 .. size {
         if available(board, row, column) {
             board.queen_rows[row] = int.narrow(column)
             set_available(mut board, row, column, false)
-            if column == 7 || place_queen(mut board, column + 1) {
+            if column + 1 == size || place_queen(mut board, column + 1, size) {
                 return true
             }
             set_available(mut board, row, column, true)
@@ -122,27 +122,38 @@ fn place_queen(mut board: Board, column: u64) -> bool {
     false
 }
 
-fn solve_queens() -> bool {
+fn solve_queens(size: u64) -> bool {
     let mut board = Board(rows:[true; 8], maxs:[true; 16], mins:[true; 16], queen_rows:[-1; 8])
-    place_queen(mut board, 0)
+    place_queen(mut board, 0, size)
 }
 
-pub fn queens() -> bool {
-    let mut solved = true
-    for _ in 0u64 .. 10 {
-        solved = solved && solve_queens()
+pub fn queens(inner: u64, sizes: Bytes) -> bool {
+    let count = list.len(sizes)
+    if count == 0 { return false }
+    let mut at = 0u64
+    for _ in 0 .. inner {
+        let mut solved = 0u64
+        for _ in 0u64 .. 10 {
+            let digit = sizes[at]
+            if digit < 52 || digit > 56 { return false }
+            let size: u64 = int.widen(digit - 48)
+            if solve_queens(size) { solved += 1 }
+            at += 1
+            if at == count { at = 0 }
+        }
+        if solved != 10 { return false }
     }
-    solved
+    true
 }
 
-pub fn sieve() -> u32 {
+pub fn sieve(size: u64) -> u32 {
     let mut flags: Inline[bool, 5000] =[true; 5000]
     let mut count = 0u32
-    for i in 2u64 .. 5001 {
+    for i in 2 .. size + 1 {
         if flags[i - 1] {
             count += 1
             let mut multiple = i + i
-            while multiple <= 5000 {
+            while multiple <= size {
                 flags[multiple - 1] = false
                 multiple += i
             }

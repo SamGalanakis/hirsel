@@ -75,6 +75,26 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     assert!(built.linked, "current source belongs in the fresh link product");
     run(&built, 5);
 
+    if matches!(backend, Backend::Cranelift) && !optimize {
+        let code = crate::code_store::CodeStore::new(dir.path().join("recipe-code"));
+        let build_recipe = |source: &str| {
+            let product = check(source);
+            let reached = product.reachable(&entry, options.instance_limit).unwrap();
+            product
+                .publish_release(&entry, &reached, &options, &code, hirsel_core_ids::launch::DEFAULT_N_PLACE)
+                .unwrap()
+                .assemble(&options, reached.counters)
+                .unwrap()
+        };
+        let cold = build_recipe(source);
+        assert!(cold.compiled > 0 && cold.linked);
+        run(&cold, 2);
+        let relocated = build_recipe(&moved);
+        assert_eq!(relocated.compiled, 0, "moved recipe sites must reuse their objects");
+        assert!(relocated.linked);
+        run(&relocated, 5);
+    }
+
     if matches!(backend, Backend::Llvm) && optimize && !debug_lines && options.target == TARGET {
         let shifted = moved.replace("    x + 1", "    let _ = 0u8\n    x + 1");
         let product = check(&shifted);
@@ -147,6 +167,18 @@ fn failure_sites_dynamic_relocation_is_refused() {
 fn failure_sites_relocated(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let list = std::fs::read_to_string(libraries.join("std/list.hirsel")).unwrap();
+    let mut lines = list.lines().enumerate();
+    lines
+        .find(|(_, line)| line.starts_with("fn check_index["))
+        .expect("std/list.hirsel must define check_index");
+    let (line, column) = lines
+        .take_while(|(_, line)| *line != "}")
+        .find_map(|(line_number, line)| {
+            line.split_once("view xs[i]")
+                .map(|(prefix, _)| (line_number + 1, prefix.chars().count() + 1))
+        })
+        .expect("check_index must contain view xs[i]");
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let source = "pub fn main() -> Result[(), Exit] {\n    let mut xs: List[u64] = list.new()\n    let _ = list.remove(mut xs, 3)\n    Ok(())\n}\n";
     let build = |project: &str, cache: &str| {
@@ -170,7 +202,7 @@ fn failure_sites_relocated(backend: Backend) {
         assert!(other == first, "{project} under {cache} is another executable; its report: {report}");
     }
     assert_eq!(output.status.code(), Some(101), "{output:?}");
-    assert_eq!(report, "Bounds at std@1/list.hirsel:290:13\n");
+    assert_eq!(report, format!("Bounds at std@1/list.hirsel:{line}:{column}\n"));
 }
 
 #[test]

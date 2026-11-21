@@ -1,6 +1,6 @@
 //! System name lookup on a helper with no access to the caller's list.
 use crate::{
-    os_net::{Operations, pending_deadline, signal},
+    os_net::{Due, Operations, deadline as due, signal},
     provider::*,
     resolve::{ResolveRequest, append, spare},
     tasks::Outside,
@@ -24,7 +24,6 @@ type Answer = Result<Vec<IpAddr>, i32>;
 
 pub(crate) struct Job {
     completion: Arc<Mutex<Completion>>,
-    deadline: Option<u64>,
 }
 
 struct Completion {
@@ -45,15 +44,12 @@ unsafe fn step(request: *mut Request, token: u64, first: bool) -> Step {
         let resolve = &mut *request.path.cast_mut().cast::<ResolveRequest>();
         (request, resolve)
     };
-    let deadline = if first {
-        // SAFETY: the adapter pins the optional clock for the request.
-        unsafe { pending_deadline(&resolve.network) }
-    } else {
-        resolve.job.as_ref().unwrap().deadline
-    };
-    if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+    // SAFETY: the adapter pins the optional clock for the request.
+    let due = unsafe { due(resolve.network.until, token) };
+    if due == Due::Passed {
         return done(abandon(resolve, ABORT_DEADLINE));
     }
+    let deadline = due.host();
     if first {
         match resolve.name.as_ref().unwrap() {
             Name::Ip(address) => {
@@ -145,10 +141,7 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
             }
             #[cfg(not(test))]
             drop(helper);
-            resolve.job = Some(Job {
-                completion,
-                deadline: submit.deadline,
-            });
+            resolve.job = Some(Job { completion });
             Outcome::default()
         }
         Err(error) => other(error.raw_os_error().unwrap_or(libc::EAGAIN)),

@@ -202,7 +202,7 @@ fn check_growth_shadow_words() {
 fn cancelled_cold_word_call_isolate_refunds_on_both_cranelift_targets() {
     let template = r#"
 fn grow_then_check(mut xs: List[u64]) {
-    for n in 0u64 .. 100 { result.unwrap(list.push(mut xs, n)) }
+    for n in 0u64 .. 100 { list.push(mut xs, n) }
     task.check_cancel()
 }
 fn isolated_body() {
@@ -211,7 +211,7 @@ fn isolated_body() {
 }
 fn child(take x: u64) -> u64 { CALL_BODY; x }
 fn cancelled(tasks: Tasks) -> u64 waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
+    let mut h = task.spawn(tasks, bytes 65536, 41u64, child)
     task.cancel(mut h)
     match task.join(take h) {
         Ok(n) => n,

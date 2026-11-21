@@ -61,7 +61,7 @@ fn wait_cancel_gate(tx: Sender[()]) {
 }
 
 fn batch(id: u64, take rows: List[String], released: Sender[u64]) -> Result[Batch, m1.support.Error] {
-    m1.support.mem(result.capacity_only(Batch(id: id, rows: take rows, released: channel.sender(released))))
+    Ok(Batch(id, rows: take rows, released: channel.sender(released)) ?=> |(c, _)| m1.support.Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c)))
 }
 
 fn publish(tx: Sender[Batch], take b: Batch) -> bool waits {
@@ -85,9 +85,9 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
     let mut sent: u64 = 0
     let mut full = false
     while at < string.byte_len(s.input) && sent < limit {
-        let mut rows: List[String] = m1.support.mem(list.with_capacity(batch_size))?
+        let mut rows: List[String] = list.with_capacity(batch_size)
         while at < string.byte_len(s.input) && list.len(rows) < batch_size {
-            m1.support.push(mut rows, m1.support.mem(string.from(m1.support.line(s.input, mut at)))?)?
+            list.push(mut rows, string.from(m1.support.line(s.input, mut at)))
         }
         let b = batch(sent + 1, take rows, s.released)?
         if s.variant == "normal" && sent == 8 {
@@ -109,12 +109,12 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
         let mut id: u64 = 3
         while id <= 8 {
             let mut rows: List[String] = list.new()
-            m1.support.push(mut rows, "cancel")?
+            list.push(mut rows, "cancel")
             let _ = publish(s.output, batch(id, take rows, s.released)?)
             id += 1
         }
         let mut rows: List[String] = list.new()
-        m1.support.push(mut rows, "cancel")?
+        list.push(mut rows, "cancel")
         let ninth = batch(9, take rows, s.released)?
         let pending = match channel.try_send(s.output, take ninth) {
             Error(Full(take p)) => p,
@@ -128,15 +128,15 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
     if !full {
         let _ = channel.try_send(s.ready, ())
     }
-    Ok(SourceResult(sent: sent, full: full))
+    Ok(SourceResult(sent, full))
 }
 
 fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
-    let mut output: List[String] = m1.support.mem(list.with_capacity(list.len(b.rows)))?
+    let mut output: List[String] = list.with_capacity(list.len(b.rows))
     for row in b.rows {
-        let mut value = m1.support.mem(string.from(row))?
-        m1.support.mem(string.make_ascii_upper(mut value))?
-        m1.support.push(mut output, take value)?
+        let mut value = string.from(row)
+        string.make_ascii_upper(mut value)
+        list.push(mut output, take value)
     }
     let _ = replace(mut b.rows, take output)
     Ok(())
@@ -178,7 +178,7 @@ fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] wai
             // Cancellation wins at the next receive, even when the last sender closed.
         }
     }
-    Ok(TransformResult(completed: completed, error: None, retained: None))
+    Ok(TransformResult(completed, error: None, retained: None))
 }
 
 fn output_charge(rows: List[String]) -> u64 {
@@ -204,15 +204,15 @@ fn sink(take s: Sink) -> Stats waits {
 }
 
 fn spawn_source(tasks: Tasks, take s: Source) -> Result[Task[Result[SourceResult, m1.support.Error]], m1.support.Error] {
-    m1.support.mem(result.capacity_only(task.spawn(tasks, bytes 4194304, take s, source)))
+    Ok(task.spawn(tasks, bytes 4194304, take s, source))
 }
 
 fn spawn_transform(tasks: Tasks, take t: Transform) -> Result[Task[Result[TransformResult, m1.support.Error]], m1.support.Error] {
-    m1.support.mem(result.capacity_only(task.spawn(tasks, bytes 4194304, take t, transform)))
+    Ok(task.spawn(tasks, bytes 4194304, take t, transform))
 }
 
 fn spawn_sink(tasks: Tasks, take s: Sink) -> Result[Task[Stats], m1.support.Error] {
-    m1.support.mem(result.capacity_only(task.spawn(tasks, bytes 4194304, take s, sink)))
+    Ok(task.spawn(tasks, bytes 4194304, take s, sink))
 }
 
 fn joined_source(take h: Task[Result[SourceResult, m1.support.Error]]) -> Result[SourceResult, m1.support.Error] waits {
@@ -222,16 +222,16 @@ fn joined_source(take h: Task[Result[SourceResult, m1.support.Error]]) -> Result
     }
 }
 
-fn ids(mut out: String, xs: List[u64]) -> Result[(), m1.support.Error] {
+fn ids(mut out: String, xs: List[u64]) -> () {
     let mut first = true
     for id in xs {
         if !first {
-            m1.support.add(mut out, ",")?
+            string.push(mut out, ",")
         };
         first = false;
-        m1.support.num(mut out, id)?
+        string.push_u64(mut out, id)
     }
-    m1.support.add(mut out, "\n")
+    string.push(mut out, "\n")
 }
 
 fn program(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.support.Error] waits {
@@ -250,21 +250,21 @@ fn program(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.suppo
     } else {
         (rows + batch_size - 1) / batch_size
     }
-    let (released, releases): (Sender[u64], Receiver[u64]) = m1.support.mem(channel.new(batches))?
-    let (q1, r1): (Sender[Batch], Receiver[Batch]) = m1.support.mem(channel.new(8))?
-    let (q2, r2): (Sender[Batch], Receiver[Batch]) = m1.support.mem(channel.new(8))?
-    let (start, started): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
-    let (sink_start, sink_started): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
-    let (ready, ready_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
-    let (transform_ready, transform_ready_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
-    let (source_cancel, source_cancel_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
-    let (transform_cancel, transform_cancel_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let (released, releases): (Sender[u64], Receiver[u64]) = channel.new(batches)
+    let (q1, r1): (Sender[Batch], Receiver[Batch]) = channel.new(8)
+    let (q2, r2): (Sender[Batch], Receiver[Batch]) = channel.new(8)
+    let (start, started): (Sender[()], Receiver[()]) = channel.new(1)
+    let (sink_start, sink_started): (Sender[()], Receiver[()]) = channel.new(1)
+    let (ready, ready_rx): (Sender[()], Receiver[()]) = channel.new(1)
+    let (transform_ready, transform_ready_rx): (Sender[()], Receiver[()]) = channel.new(1)
+    let (source_cancel, source_cancel_rx): (Sender[()], Receiver[()]) = channel.new(1)
+    let (transform_cancel, transform_cancel_rx): (Sender[()], Receiver[()]) = channel.new(1)
     let _ = channel.try_send(source_cancel, ())
     let _ = channel.try_send(transform_cancel, ())
-    let s = Source(input: take input, variant: m1.support.mem(string.from(variant))?, output: take q1, released: take released, ready: take ready, cancel_gate: take source_cancel)
+    let s = Source(input: take input, variant: string.from(variant), output: take q1, released: take released, ready: take ready, cancel_gate: take source_cancel)
     let mut src = spawn_source(tasks, take s)?
-    let (forwarded, progress): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(batches))?
-    let t = Transform(variant: m1.support.mem(string.from(variant))?, input: take r1, output: take q2, start: take started, ready: take transform_ready, forwarded: take forwarded, cancel_gate: take transform_cancel)
+    let (forwarded, progress): (Sender[()], Receiver[()]) = channel.new(batches)
+    let t = Transform(variant: string.from(variant), input: take r1, output: take q2, start: take started, ready: take transform_ready, forwarded: take forwarded, cancel_gate: take transform_cancel)
     let mut trans = spawn_transform(tasks, take t)?
     let snk = spawn_sink(tasks, Sink(input: take r2, start: take sink_started))?
     let _ = channel.receive(ready_rx)
@@ -338,36 +338,36 @@ fn program(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.suppo
     }
     let mut released_ids: List[u64] = list.new()
     while let Ok(id) = channel.receive(releases) {
-        m1.support.push(mut released_ids, id)?
+        list.push(mut released_ids, id)
     }
     let mut rendered = string.new()
     if failed {
-        m1.support.add(mut rendered, "release-order=")?;
-        ids(mut rendered, released_ids)?
+        string.push(mut rendered, "release-order=");
+        ids(mut rendered, released_ids)
     }
-    m1.support.add(mut rendered, "sent=")?
-    m1.support.num(mut rendered, sent)?
-    m1.support.add(mut rendered, " transformed=")?
-    m1.support.num(mut rendered, completed)?
-    m1.support.add(mut rendered, " sink-batches=")?
-    m1.support.num(mut rendered, stats.batches)?
-    m1.support.add(mut rendered, " rows=")?
-    m1.support.num(mut rendered, stats.rows)?
-    m1.support.add(mut rendered, " bytes=")?
-    m1.support.num(mut rendered, stats.size)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, stats.checksum)?
-    m1.support.add(mut rendered, if full {
+    string.push(mut rendered, "sent=")
+    string.push_u64(mut rendered, sent)
+    string.push(mut rendered, " transformed=")
+    string.push_u64(mut rendered, completed)
+    string.push(mut rendered, " sink-batches=")
+    string.push_u64(mut rendered, stats.batches)
+    string.push(mut rendered, " rows=")
+    string.push_u64(mut rendered, stats.rows)
+    string.push(mut rendered, " bytes=")
+    string.push_u64(mut rendered, stats.size)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, stats.checksum)
+    string.push(mut rendered, if full {
         "\nbackpressure=true\nreleased="
     } else {
         "\nbackpressure=false\nreleased="
-    })?
+    })
     list.sort(mut released_ids, fn(a: u64, b: u64) -> Order {
         std.order.compare(a, b)
     })
-    ids(mut rendered, released_ids)?
+    ids(mut rendered, released_ids)
     m1.support.put(out, rendered)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {
         let closed = tx
     }

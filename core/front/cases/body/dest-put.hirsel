@@ -6,7 +6,7 @@
 // expect: run go(27) = 7
 // expect: run go(20) = 0
 // expect: run go(8) = 98
-// expect: run refused() = 64
+// expect: run refused() = 64 used 32
 // expect: run stray_root() = fail Bounds
 // expect: run stray_link() = fail Bounds
 @compact(u32)
@@ -37,23 +37,22 @@ fn go(n: u64) -> i64 {
         match tree(r, n) {
             Ok(e) => eval(e),
             Error(Overflow) => 98,
-            Error(Capacity(_)) => 97,
         }
     }
 }
 
 fn refused() -> u64 {
-    let got = bound bytes 8 {
-        region r {
-            match tree(r, 64) {
-                Error(Capacity(c)) => c.requested,
-                _ => 0u64
+    let got = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 8 {
+            region r {
+                let _ = tree(r, 64)
             }
+            0u64
         }
-    }
-    match got {
-        Ok(k) => k,
-        Error(_) => 1
+    })
+    match caught(take got) {
+        Some(c) => c.requested,
+        None => 1
     }
 }
 
@@ -125,5 +124,21 @@ fn mixed_width() -> u64 {
             Ok(t) => walk(t.a) * 100 + int.widen(t.b),
             Error(_) => 0,
         }
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

@@ -5,7 +5,7 @@
 // with no slack, so a refund that never comes fails a later iteration.
 // test-env: HIRSEL_UNTIED=4
 fn owned(s: String) -> String {
-    result.unwrap(string.from(s))
+    string.from(s)
 }
 
 type Ask: cross {
@@ -43,8 +43,9 @@ fn new_charges_header_slots_and_room() -> bool {
     }
     let made = bound bytes 88 {
         let pair: (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 8))
-        match arc.new(0u64) {
-            Error((c, _)) => c.requested == 16 && c.available == 0,
+        let probe: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        match probe {
+            Error(c) => c.requested == 72 && c.available == 0,
             Ok(_) => false,
         }
     }
@@ -161,10 +162,10 @@ fn blocked_send(take b: Blocked) waits {
 // expect: run cancel_waiting_send(tasks) = true
 fn cancel_waiting_send(tasks: Tasks) -> bool waits {
     let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
-    let (ready, started): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let (ready, started): (Sender[()], Receiver[()]) = channel.new(1)
     result.unwrap(conn.send(c, 1))
     let b = Blocked(c: conn.client(c), ready: take ready)
-    let mut t = result.unwrap(task.spawn(tasks, bytes 65536, take b, blocked_send))
+    let mut t = task.spawn(tasks, bytes 65536, take b, blocked_send)
     result.unwrap(channel.receive(started))
     task.cancel(mut t)
     let cancelled = match task.join(take t) {
@@ -195,9 +196,9 @@ fn blocked_receive(take w: Waiting) waits {
 // expect: run cancel_waiting_receive(tasks) = true
 fn cancel_waiting_receive(tasks: Tasks) -> bool waits {
     let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
-    let (ready, started): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let (ready, started): (Sender[()], Receiver[()]) = channel.new(1)
     let w = Waiting(i: take i, ready: take ready)
-    let mut t = result.unwrap(task.spawn(tasks, bytes 65536, take w, blocked_receive))
+    let mut t = task.spawn(tasks, bytes 65536, take w, blocked_receive)
     result.unwrap(channel.receive(started))
     task.cancel(mut t)
     let cancelled = match task.join(take t) {
@@ -310,8 +311,9 @@ fn peer_refunds_at_owner_take(tasks: Tasks) -> bool waits {
         let go = result.unwrap(conn.receive(ready_in))
         let _ = take inbox
         result.unwrap(conn.try_send(go, ()))
-        let before = match arc.new(0u64) {
-            Error((c, _)) => c.requested == 16 && c.available == 0,
+        let probe: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        let before = match probe {
+            Error(c) => c.requested == 72 && c.available == 0,
             Ok(_) => false,
         }
         result.unwrap(conn.receive(done_in))
@@ -434,7 +436,7 @@ fn abandoned_helper_returns_its_charge(tasks: Tasks) -> bool {
 // expect: run local_tasks_and_helpers_share_one_account(tasks) = true
 fn local_tasks_and_helpers_share_one_account(tasks: Tasks) -> bool waits {
     let checked = bound bytes 696 {
-        let local = result.unwrap(task.spawn(tasks, bytes 40, 3u64, idle))
+        let local = task.spawn(tasks, bytes 40, 3u64, idle)
         let helper = result.unwrap(task.spawn_unit(tasks, bytes 64, 5u64, idle))
         let before: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
         let empty = match before {

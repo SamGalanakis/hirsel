@@ -16,15 +16,15 @@ pub type Ledger: codec {
     accounts: List[Account]
 }
 
-fn floats_encode(x: List[f64], mut out: Bytes) -> Result[(), Capacity] {
+fn floats_encode(x: List[f64], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     std.codec.put_list(x, std.codec.of_f64(), mut out)
 }
 
-fn floats_decode(b: Bytes, mut at: u64) -> Result[List[f64], std.codec.Stop] {
+fn floats_decode(b: Bytes, mut at: u64) -> Result[List[f64], std.codec.DecodeError] {
     std.codec.take_list(b, mut at, std.codec.of_f64())
 }
 
-fn floats_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[f64]]) -> Result[(), Capacity] {
+fn floats_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[f64]]) -> Result[(), std.codec.EncodeError] {
     std.codec.schema_list(mut s, std.codec.of_f64())
 }
 
@@ -32,15 +32,15 @@ fn floats() -> std.codec.Codec[List[f64]] {
     std.codec.make(floats_encode, floats_decode, floats_schema, 4)
 }
 
-fn strings_encode(x: List[String], mut out: Bytes) -> Result[(), Capacity] {
+fn strings_encode(x: List[String], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     std.codec.put_list(x, std.codec.of_string(), mut out)
 }
 
-fn strings_decode(b: Bytes, mut at: u64) -> Result[List[String], std.codec.Stop] {
+fn strings_decode(b: Bytes, mut at: u64) -> Result[List[String], std.codec.DecodeError] {
     std.codec.take_list(b, mut at, std.codec.of_string())
 }
 
-fn strings_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[String]]) -> Result[(), Capacity] {
+fn strings_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[String]]) -> Result[(), std.codec.EncodeError] {
     std.codec.schema_list(mut s, std.codec.of_string())
 }
 
@@ -50,8 +50,8 @@ fn strings() -> std.codec.Codec[List[String]] {
 
 // Owner k: "owner-" then k's decimal digits, 7 to 11 bytes.
 fn owner_of(k: u64) -> Result[String, Capacity] {
-    let mut s = string.from("owner-")?
-    string.push_u64(mut s, k)?
+    let mut s = string.from("owner-")
+    string.push_u64(mut s, k)
     Ok(take s)
 }
 
@@ -66,7 +66,7 @@ fn run[T](c: std.codec.Codec[T], xs: T, mode: u64, r: u64, check: fn(T) -> u64) 
             std.codec.encode(c, xs, mut out)?
             sum += list.len(out)
         } else if mode == 2 {
-            match std.codec.decode(c, out)? {
+            match std.codec.decode(c, out) {
                 Ok(back) => {
                     sum += check(back)
                 }
@@ -97,15 +97,12 @@ fn check_strings(xs: List[String]) -> u64 {
 
 fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
     if work == 0 || work == 3 {
-        let mut xs: List[Account] = list.with_capacity(n)?
+        let mut xs: List[Account] = list.with_capacity(n)
         let mut k: u64 = 0
         while k < n {
             let wide: i64 = int.truncate(k)
             let a = Account(id: k, owner: owner_of(k)?, balance: wide - 50000)
-            match list.push(mut xs, take a) {
-                Ok(()) => {}
-                Error((f, _)) => return Error(f)
-            }
+            list.push(mut xs, take a)
             k += 1
         }
         if work == 0 {
@@ -116,25 +113,19 @@ fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
             run(c, Ledger(accounts: take xs), mode, r, check_ledger)
         }
     } else if work == 1 {
-        let mut xs: List[f64] = list.with_capacity(n)?
+        let mut xs: List[f64] = list.with_capacity(n)
         let mut k: u64 = 0
         while k < n {
             let x: f64 = float.from_int(k)
-            match list.push(mut xs, x * 0.37 + 1.5) {
-                Ok(()) => {}
-                Error((f, _)) => return Error(f)
-            }
+            list.push(mut xs, x * 0.37 + 1.5)
             k += 1
         }
         run(floats(), xs, mode, r, check_floats)
     } else {
-        let mut xs: List[String] = list.with_capacity(n)?
+        let mut xs: List[String] = list.with_capacity(n)
         let mut k: u64 = 0
         while k < n {
-            match list.push(mut xs, owner_of(k)?) {
-                Ok(()) => {}
-                Error((f, _)) => return Error(f)
-            }
+            list.push(mut xs, owner_of(k)?)
             k += 1
         }
         run(strings(), xs, mode, r, check_strings)
@@ -157,12 +148,8 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
         Error(_) => return Error(Exit(status: 3))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2))

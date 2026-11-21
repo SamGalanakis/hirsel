@@ -411,10 +411,6 @@ impl Sink for NativeSink {
         // SAFETY: a function of this unit.
         unsafe { (self.api.finish_declaration)(f) }
     }
-    fn module_asm(&mut self, text: &str) {
-        // SAFETY: the text is borrowed through the synchronous append.
-        unsafe { (self.api.module_asm)(self.unit, text.as_ptr().cast(), text.len()) }
-    }
     fn metadata(&mut self, id: usize, node: &Metadata) {
         let (api, u) = (self.api, self.unit);
         // SAFETY (this block): nodes of this unit; strings outlive each call.

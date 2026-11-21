@@ -45,14 +45,14 @@ pub fn parse(s: String) -> Result[Uuid, Error] {
     if len != 36 {
         return Error(Invalid(i))
     }
-    Ok(Uuid(hi: hi, lo: lo))
+    Ok(Uuid(hi, lo))
 }
 
 /// Appends the lowercase RFC 9562 section 4 text in 8-4-4-4-12 form.
 /// Fails: Capacity leaves out unchanged. The function reserves all 36 bytes first.
 /// Alloc: growth of out. Cost: O(36). Ex: `std.uuid.push(mut line, id)?`.
-pub fn push(mut out: String, u: Uuid) -> Result[(), Capacity] {
-    string.reserve(mut out, 36)?
+pub fn push(mut out: String, u: Uuid) {
+    string.reserve(mut out, 36)
     let mut hi: Inline[u8, 64] =[b'0'; 64]
     let mut lo: Inline[u8, 64] =[b'0'; 64]
     let _ = int.radix_digits(u.hi, 16, mut hi)
@@ -73,7 +73,6 @@ pub fn push(mut out: String, u: Uuid) -> Result[(), Capacity] {
             digit += 1
         }
     }
-    Ok(())
 }
 
 /// Reads the 16 bytes starting at at, in network order.
@@ -85,9 +84,9 @@ pub fn from_bytes(b: Bytes, at: u64) -> Uuid {
 
 /// Appends the 16 UUID bytes in network order. The function reserves all 16
 /// bytes first. Fails: Capacity leaves out unchanged. Alloc: growth of out.
-pub fn push_bytes(mut out: Bytes, u: Uuid) -> Result[(), Capacity] {
-    list.reserve(mut out, 16)?
-    list.put_word_be(mut out, u.hi)?
+pub fn push_bytes(mut out: Bytes, u: Uuid) {
+    list.reserve(mut out, 16)
+    list.put_word_be(mut out, u.hi)
     list.put_word_be(mut out, u.lo)
 }
 
@@ -117,7 +116,7 @@ fn rfc_variant(lo: u64) -> u64 {
 /// RFC 9562 section 5.4. Reads 16 bytes starting at at and replaces the version
 /// nibble with 4 and the variant prefix with 10. Preserves the other 122 bits.
 /// Fails: Bounds as from_bytes. Alloc: nothing.
-/// Ex: `let mut b: Bytes = list.with_capacity(16)?; host.random(r, mut b); let id = std.uuid.v4(b, 0)`.
+/// Ex: `let mut b: Bytes = list.with_capacity(16); host.random(r, mut b); let id = std.uuid.v4(b, 0)`.
 pub fn v4(b: Bytes, at: u64) -> Uuid {
     let u = from_bytes(b, at)
     Uuid(hi: (u.hi & 0xffffffffffff0fff) | 0x4000, lo: rfc_variant(u.lo))

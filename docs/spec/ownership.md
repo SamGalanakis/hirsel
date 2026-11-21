@@ -238,10 +238,10 @@ fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, int
 fn equals[T: inert + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 fn same[T: codec + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 ```
-```hirsel unbuilt
+```hirsel
 type Tagged: inert { n: u64 }                             // refused: OWN-4, inert is computed
 ```
-```hirsel unbuilt
+```hirsel
 type DoorWire: codec { n: u64 }
 pub opaque type Door: codec via DoorWire (to: wire, from: open) { w: DoorWire, dir: Dir }   // refused: OWN-4, at dir: codec implies inert
 fn wire(d: Door) -> View[DoorWire] in d { view d.w }
@@ -266,7 +266,7 @@ fn f(take s: String) -> String { let t = s; t }
 fn f(take s: String) -> String { let t = s; s }        // refused: OWN-5, s moved at 1:39
 ```
 ```hirsel
-type P { a: u64, b: u64 }
+type P { a: u64, b: String }
 fn f(take p: P) { let q = p; p.a = 1 }                    // refused: OWN-5, at p.a: p moved
 ```
 
@@ -644,42 +644,42 @@ fn f(take o: Option[String]) -> String {
   match o { Some(s) if string.byte_len(s) > 0 => take s, _ => string.new() }  // refused: OWN-15
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn bump(mut src: Source) {
-  match src { Text(mut s) => string.push(mut s, "!"), Count(mut n) => n += 1 }
+  match src { Text(mut s) => string.push(mut s, "!"), Count(mut n) => { n += 1 } }
 }
 fn first_text(mut xs: List[Source]) {
   if let Text(mut s) = xs[0] { s = string.from("first") }
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn long(src: Source) -> bool { match src { Text(s) => string.byte_len(s) > 3, Count(_) => false } }
 fn bump_long(mut src: Source) {
   match src { Text(mut s) if long(src) && string.byte_len(s) > 3 => string.push(mut s, "!"), _ => {} }
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn grew(mut s: String) -> bool { string.push(mut s, "!"); true }
 fn lend_early(mut src: Source) {
   match src { Text(mut s) if grew(mut s) => {}, _ => {} }   // refused: LANG-17, a guard lends mut
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn bump_view(src: Source) {
-  match src { Text(mut s) => string.push(mut s, "!"), Count(_) => {} }   // refused: OWN-5, src is a view
+  match src { Text(mut s) => string.push(mut s, "!"), Count(_) => {} }   // refused: OWN-15, src is a view
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Pair = Both(String, Option[String])
 fn mixed(mut p: Pair) {
   match p { Both(mut a, Some(take b)) => {}, _ => {} }   // refused: OWN-15, takes and lends
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 type Lines { input: Source, buffer: String }
 fn retag(mut l: Lines) {
@@ -689,19 +689,19 @@ fn retag(mut l: Lines) {
   }
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn grow_list(mut xs: List[Source]) {
   match xs[0] { Text(mut s) => list.push(mut xs, Count(0)), Count(_) => {} }   // refused: OWN-9
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn steal(mut src: Source) -> String {
   match src { Text(mut s) => take s, Count(_) => string.new() }   // refused: OWN-11
 }
 ```
-```hirsel unbuilt
+```hirsel
 fn keep(mut o: Option[String]) -> String {
   match o { Some(mut s) => replace(mut s, string.new()), None => string.new() }
 }
@@ -913,7 +913,7 @@ fn last(mut xs: List[String]) -> Option[View[String]] in xs {
   v
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
 fn escape(mut src: Source) -> u64 {
@@ -922,7 +922,7 @@ fn escape(mut src: Source) -> u64 {
   n
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Source = Text(String) | Count(u64)
 fn grow(mut s: String) -> View[String] in s { string.slice(s, 0, 0) }
 fn escape_then_retag(mut src: Source) -> u64 {

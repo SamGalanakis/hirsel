@@ -3,11 +3,11 @@ pub type V {
 }
 
 clone(x: V) {
-    Ok(V(n: x.n + 200u64))
+    V(n: x.n + 200u64)
 }
 
 pub fn clone_v() -> u64 {
     let x = V(n: 2u64)
-    let y: V = result.unwrap(clone(x))
+    let y: V = clone(x)
     y.n
 }

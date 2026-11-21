@@ -15,8 +15,8 @@ fn share(root: Option[Arc[Node]]) -> Option[Arc[Node]] {
 
 fn node(key: u64, value: u64, take left: Option[Arc[Node]], take right: Option[Arc[Node]], mut serial: u64) -> Result[Option[Arc[Node]], m1.support.Error] {
     serial += 1
-    let n = Node(id: serial, key: key, value: value, left: take left, right: take right)
-    Ok(Some(m1.support.mem(result.capacity_only(arc.new(take n)))?))
+    let n = Node(id: serial, key, value, left: take left, right: take right)
+    Ok(Some(arc.new(take n)))
 }
 
 fn build(lo: u64, hi: u64, mut serial: u64) -> Result[Option[Arc[Node]], m1.support.Error] {
@@ -41,7 +41,7 @@ fn draft(root: Option[Arc[Node]], key: u64, value: u64, mut serial: u64, mut cou
         (share(n.left), share(n.right))
     }
     count += 1
-    m1.support.admission(variant, m1.support.name("draft.node", count, "")?, 64)?
+    m1.support.admission(variant, m1.support.name("draft.node", count, ""), 64)?
     node(n.key, if key == n.key {
         value
     } else {
@@ -75,7 +75,7 @@ fn sum(root: Option[Arc[Node]], count: u64) -> u64 {
 fn mark(root: Option[Arc[Node]], mut seen: std.set.Set[u64]) -> Result[(), m1.support.Error] {
     if let Some(n) = root {
         // A node already seen heads a subtree already seen: versions share it.
-        if m1.support.mem(result.capacity_only(std.set.insert(mut seen, n.id)))? {
+        if std.set.insert(mut seen, n.id) {
             mark(n.left, mut seen)?
             mark(n.right, mut seen)?
         }
@@ -118,21 +118,21 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     let mut pin = share(current)
     let mut completed: u64 = 0
     let outcome = updates(input, at, n, m1.support.case_variant(argv), mut current, mut serial, mut completed)
-    let mut rendered = m1.support.name("updates=", completed, " pinned=")?
-    m1.support.num(mut rendered, sum(pin, n))?
-    m1.support.add(mut rendered, " current=")?
-    m1.support.num(mut rendered, sum(current, n))?
-    m1.support.add(mut rendered, " live=")?
-    m1.support.num(mut rendered, live(pin, current)?)?
-    m1.support.add(mut rendered, "\nafter-unpin=")?
+    let mut rendered = m1.support.name("updates=", completed, " pinned=")
+    string.push_u64(mut rendered, sum(pin, n))
+    string.push(mut rendered, " current=")
+    string.push_u64(mut rendered, sum(current, n))
+    string.push(mut rendered, " live=")
+    string.push_u64(mut rendered, live(pin, current)?)
+    string.push(mut rendered, "\nafter-unpin=")
     let _ = replace(mut pin, None)
-    m1.support.num(mut rendered, live(pin, current)?)?
-    m1.support.add(mut rendered, "\nafter-current=")?
+    string.push_u64(mut rendered, live(pin, current)?)
+    string.push(mut rendered, "\nafter-current=")
     let _ = replace(mut current, None)
-    m1.support.num(mut rendered, live(pin, current)?)?
-    m1.support.add(mut rendered, "\n")?
+    string.push_u64(mut rendered, live(pin, current)?)
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {
         let closed = tx
     }

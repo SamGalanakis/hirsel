@@ -27,12 +27,12 @@ pub fn is_boundary(s: String, i: u64) -> bool {
 
 /// Appends n in decimal, with '-' when negative. Fails: Error(c); s then holds a prefix
 /// of the text (core has no `string.reserve` to make the append atomic).
-/// Alloc: GROWTH, at most twice. Ex: `string.push_i64(mut s, -3)?`
-pub fn push_i64(mut s: String, n: i64) -> Result[(), Capacity] {
+/// Alloc: GROWTH, at most twice. Ex: `string.push_i64(mut s, -3)`
+pub fn push_i64(mut s: String, n: i64) {
     // The magnitude in u64: two's complement negation of the same bits, exact for MIN.
     let bits: u64 = int.truncate(n)
     if n < 0 {
-        string.push_char(mut s, '-')?
+        string.push_char(mut s, '-')
         string.push_u64(mut s, int.wrapping_neg(bits))
     } else {
         string.push_u64(mut s, bits)
@@ -42,8 +42,8 @@ pub fn push_i64(mut s: String, n: i64) -> Result[(), Capacity] {
 /// Appends n in `base` (2 to 36, lower-case), left-padded with `pad` to at least `width`
 /// scalars (Go strconv.AppendUint plus padding). Fails: Fail when base is outside
 /// 2..=36; Error(c) when a growth is refused, s then holding a prefix of the text (no
-/// `string.reserve`). Alloc: GROWTH per push_char. Cost: O(digits + width). Ex: `string.push_uint(mut out, 31, 16, 4, '0')?` appends "001f"
-pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Result[(), Capacity] {
+/// `string.reserve`). Alloc: GROWTH per push_char. Cost: O(digits + width). Ex: `string.push_uint(mut out, 31, 16, 4, '0')` appends "001f"
+pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) {
     if base < 2 || base > 36 {
         fail("string.push_uint: base outside 2..=36")
     }
@@ -51,28 +51,27 @@ pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Res
     let start = int.radix_digits(n, base, mut digits)
     let mut padded = 64 - start
     while padded < width {
-        string.push_char(mut s, pad)?
+        string.push_char(mut s, pad)
         padded += 1
     }
     for i in start .. 64 {
         let code: u32 = int.widen(digits[i])
-        string.push_char(mut s, option.unwrap(char.from_u32(code)))?
+        string.push_char(mut s, option.unwrap(char.from_u32(code)))
     }
-    Ok(())
 }
 
 /// s written n times into a new string of exactly byte_len(s) * n bytes (Rust str::repeat).
 /// Fails: Error(c) when that storage or the block is refused; Fail when byte_len(s) * n
 /// overflows u64. Alloc: byte_len(s) * n rounded to 8, plus a block of at most 256 bytes
 /// while it runs, current limit. Cost: O(byte_len(s) * n).
-/// Ex: `let rule = string.repeat("-", 40)?`
-pub fn repeat(s: String, n: u64) -> Result[String, Capacity] {
+/// Ex: `let rule = string.repeat("-", 40)`
+pub fn repeat(s: String, n: u64) -> String {
     let len = string.byte_len(s)
     let total = match int.checked_mul(len, n) {
         Some(t) => t,
         None => fail("string.repeat: length overflows u64"),
     }
-    let mut out = string.with_capacity(total)?
+    let mut out = string.with_capacity(total)
     // Rust doubles inside its buffer; a String cannot append from itself, so a short s
     // is first gathered into a block of at most 256 bytes and the block is appended.
     let per: u64 = if len == 0 {
@@ -82,20 +81,20 @@ pub fn repeat(s: String, n: u64) -> Result[String, Capacity] {
     }
     let mut k: u64 = 0
     if per >= 4 && n >= 2 * per {
-        let mut block = string.with_capacity(per * len)?
+        let mut block = string.with_capacity(per * len)
         for _ in 0 .. per {
-            string.push(mut block, s)?
+            string.push(mut block, s)
         }
         while n - k >= per {
-            string.push(mut out, block)?
+            string.push(mut out, block)
             k += per
         }
     }
     while k < n {
-        string.push(mut out, s)?
+        string.push(mut out, s)
         k += 1
     }
-    Ok(take out)
+    take out
 }
 
 /// Empties s; keeps an owned s's storage, and a static s (a literal) becomes the empty

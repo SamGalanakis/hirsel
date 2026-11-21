@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Own launcher scratch, including shared compile-time CARGO_TARGET_TMPDIR.
 
-HIRSEL_KEEP_TEST_SCRATCH retains both test scratch and private native inputs.
 Directory flock serializes registration/removal without leaving lock files.
 """
 import fcntl
@@ -10,6 +9,10 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
+
+PREFIXES = ('hirsel-action-', 'hirsel-native-inputs-', 'hirsel-report-', 'hirsel-test-')
+STALE_SECONDS = 24 * 60 * 60
 
 
 def start_time(pid):
@@ -34,7 +37,7 @@ def unused(path):
         return not any(live(owner.name) for owner in owners)
     except OSError:
         # Creation can be interrupted before its first marker is installed.
-        for prefix in ('hirsel-native-inputs-', 'hirsel-test-'):
+        for prefix in PREFIXES:
             if path.name.startswith(prefix):
                 fields = path.name[len(prefix):].split('-')
                 if len(fields) == 3 and all(field.isdecimal() for field in fields[:2]):
@@ -43,11 +46,14 @@ def unused(path):
 
 
 def sweep(parent, prefix):
+    cutoff = time.time() - STALE_SECONDS
     try:
         for path in parent.iterdir():
             try:
-                if (path.name.startswith(prefix) and not path.is_symlink()
-                        and path.is_dir() and path.stat().st_uid == os.geteuid() and unused(path)):
+                if not path.name.startswith(prefix) or path.is_symlink() or not path.is_dir():
+                    continue
+                info = path.stat()
+                if info.st_uid == os.geteuid() and info.st_mtime < cutoff and unused(path):
                     shutil.rmtree(path)
             except OSError:
                 pass
@@ -76,8 +82,6 @@ def main():
             try:
                 (path / '.hirsel-owners').mkdir(mode=0o700, exist_ok=True)
                 (path / '.hirsel-owners' / owner).touch()
-                if keep:
-                    (path / '.hirsel-keep').touch()
                 if shared is not None and created:
                     path.rename(shared)
                     path = shared
@@ -87,6 +91,8 @@ def main():
                 raise
             print(path)
         else:
+            if keep:
+                (location / '.hirsel-keep').touch()
             (location / '.hirsel-owners' / owner).unlink(missing_ok=True)
             if unused(location):
                 shutil.rmtree(location)

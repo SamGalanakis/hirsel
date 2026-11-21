@@ -49,14 +49,14 @@ ENTRIES = {
     'gone': (b'retired', 0, 0),
     'unknown': (b'unknown', 0, 0),
 }
-TOKEN = b'anon:' + bytes(16)
+CREDENTIAL = bytes(16)
 TRACE = []
 # The compiler, runtime and linker for the hirsel call laws, set by main.
 CLI = {}
 
 
-def hello(names=(), token=TOKEN):
-    option = u32(0) if token is None else u32(1) + blob(token)
+def hello(names=(), credential=CREDENTIAL):
+    option = u32(0) if credential is None else u32(1) + blob(credential)
     wants = b''.join(blob(ENTRIES[n][0]) + u64(ENTRIES[n][1]) + u64(ENTRIES[n][2]) for n in names)
     return u32(0) + option + u32(len(names)) + wants
 
@@ -112,7 +112,7 @@ class Decode:
     def read(self):
         tag = self.word()
         if tag == 4:
-            out = ('welcome', self.blob(), self.word(), self.word(8), self.blob(), self.blob(), self.word(8))
+            out = ('welcome', (self.word(1), self.blob()), self.word(), self.word(8), self.blob(), self.blob(), self.word(8))
         elif tag == 5:
             entry = self.word()
             out = ('placed', entry) if entry == 2 else ('placed', entry, self.word())
@@ -158,14 +158,14 @@ def upgraded(tail=b''):
     return s
 
 
-def welcomed(names=(), token=TOKEN):
-    s = upgraded(frame(2, hello(names, token)))
+def welcomed(names=(), credential=CREDENTIAL):
+    s = upgraded(frame(2, hello(names, credential)))
     welcome = receive(s)
     assert welcome[:1] == ('welcome',) and welcome[2:4] == (4, 1048576), welcome
-    assert len(welcome[1]) == 21 and welcome[1].startswith(b'anon:')
+    assert welcome[1][0] == 2 and len(welcome[1][1]) == 16
     for slot, name in enumerate(names):
         assert receive(s) == (('placed', 2) if name in ('gone', 'unknown') else ('placed', 0, slot))
-    return s, welcome[1]
+    return s, credential
 
 
 def done(s, expected, version):
@@ -234,53 +234,6 @@ def resume_unknown():
             assert receive(s) == ('reset', 0, [])
         s.sendall(frame(2, u32(2) + u32(3) + u32(0) + blob(u32(0)) + u32(0)))
         assert receive(s) == ('batch', 2, [3], [], [])
-
-
-def session_limit_503():
-    sockets = []
-    try:
-        for _ in range(32):
-            sockets.append(upgraded())
-        with connect(18094) as s:
-            s.sendall(REQUEST)
-            assert head(s).startswith(b'HTTP/1.1 503 ')
-    finally:
-        for s in sockets:
-            s.close()
-
-
-def principal_limit_1013():
-    first = None
-    for _ in range(10):
-        s, principal = welcomed((), None)
-        first = first or principal
-        s.close()
-    with upgraded(frame(2, hello((), None))) as s:
-        assert receive(s)[:2] == ('close', 1013)
-    s, _ = welcomed((), first)
-    s.close()
-    with upgraded(frame(2, hello((), b'bad'))) as s:
-        assert receive(s)[:2] == ('close', 1013)
-
-
-def call_rate_overloaded():
-    # Serialized round trips keep work units available. The principal is shared
-    # across both sockets; neither connection gets its own burst.
-    a, token = welcomed(('big',))
-    b, _ = welcomed(('big',), token)
-    refused = False
-    with a, b:
-        for stream in range(80):
-            s = a if stream % 2 == 0 else b
-            s.sendall(frame(2, call(stream, 0, arg=u32(0))))
-            answer = receive(s)
-            assert answer[0] == 'batch' and len(answer[4]) == 1, answer
-            outcome = answer[4][0][2]
-            if outcome == ('refused', 2):
-                refused = True
-                break
-            assert outcome == ('returned', u32(0)), answer
-    assert refused, '80 serialized calls on one principal exceeded the shared burst/rate'
 
 
 def request_mismatch_wire():
@@ -355,7 +308,7 @@ def reply_over_done_max():
 def welcome_with_small_budget():
     with upgraded(frame(2, hello(('put',)))) as s:
         welcome = receive(s)
-        assert welcome[:4] == ('welcome', TOKEN, 4, 65536), welcome
+        assert welcome[:4] == ('welcome', (2, hashlib.sha256(b'hirsel.example.credential.v1' + CREDENTIAL).digest()[:16]), 4, 65536), welcome
         assert receive(s) == ('placed', 0, 0)
         ping = bytes(range(125))
         s.sendall(frame(9, ping))
@@ -433,12 +386,12 @@ def cli_call_fingerprint_mismatch():
                            if line.lower().startswith(b'sec-websocket-key:'))
                 accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
                 s.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
-                          b'Sec-WebSocket-Accept: ' + accept + b'\r\nSec-WebSocket-Protocol: hirsel.1\r\n\r\n')
+                          b'Sec-WebSocket-Accept: ' + accept + b'\r\nSec-WebSocket-Protocol: hirsel.2\r\n\r\n')
                 op, hello_bytes = read_frame(s, masked=True)
-                # Hello, no token (a fresh anonymous principal), exactly one want.
+                # Hello with no credential, exactly one want.
                 assert op == 2 and Decode(hello_bytes).word() == 0, hello_bytes
                 assert hello_bytes[4:12] == u32(0) + u32(1), hello_bytes
-                welcome = u32(4) + blob(TOKEN) + u32(4) + u64(1048576) + blob(b'') + blob(b'') + u64(0)
+                welcome = u32(4) + bytes([1]) + blob(bytes(16)) + u32(4) + u64(1048576) + blob(b'') + blob(b'') + u64(0)
                 s.sendall(frame(2, welcome, masked=False) + frame(2, u32(5) + u32(2), masked=False))
                 after = []
                 while not after or after[-1][0] != 8:
@@ -455,7 +408,7 @@ def cli_call_fingerprint_mismatch():
 
 
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
-         session_limit_503, principal_limit_1013, call_rate_overloaded, request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
+         request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
          history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget,
          cli_call_exact_value, cli_call_fingerprint_mismatch)}
 

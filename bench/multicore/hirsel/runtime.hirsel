@@ -7,7 +7,7 @@ fn spawn_join(tasks: Tasks, rounds: u64, lane: u64) -> (u64, u64) waits {
     let mut sum: u64 = 0
     let mut completed: u64 = 0
     for i in 0 .. rounds {
-        let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, lane * rounds + i + 1, identity))
+        let h = task.spawn(tasks, bytes TASK_BYTES, lane * rounds + i + 1, identity)
         sum += result.unwrap(task.join(take h))
         completed += 1
     }
@@ -29,8 +29,8 @@ fn spawn_chain(tasks: Tasks, rounds: u64) -> u64 waits {
     let mut jobs: List[Task[u64]] = list.new()
     for lane in 0 .. LANES {
         let job = Chain(tasks: tasks, rounds: rounds, lane: lane)
-        let h = result.unwrap(task.spawn(tasks, bytes 131072, take job, chain))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(tasks, bytes 131072, take job, chain)
+        list.push(mut jobs, take h)
     }
     let mut sum: u64 = 0
     while let Some(take h) = list.pop(mut jobs) {
@@ -53,10 +53,10 @@ fn echo(take job: Echo) -> () waits {
 }
 
 fn ping_pong(tasks: Tasks, rounds: u64, batch: u64) -> (u64, u64) waits {
-    let (take send, take requests): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(batch))
-    let (take replies, take receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(batch))
+    let (take send, take requests): (Sender[u64], Receiver[u64]) = channel.new(batch)
+    let (take replies, take receive): (Sender[u64], Receiver[u64]) = channel.new(batch)
     let job = Echo(requests: take requests, replies: take replies, rounds: rounds)
-    let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, echo))
+    let h = task.spawn(tasks, bytes TASK_BYTES, take job, echo)
     let mut sum: u64 = 0
     let mut completed: u64 = 0
     while completed < rounds {
@@ -79,7 +79,7 @@ type ArcValue: shareable + send {
 }
 
 fn arc_pair(rounds: u64) -> (u64, u64) {
-    let original = result.unwrap(arc.new(ArcValue(value: 1)))
+    let original = arc.new(ArcValue(value: 1))
     let mut sum: u64 = 0
     let mut completed: u64 = 0
     for i in 0 .. rounds {
@@ -103,12 +103,12 @@ fn produce(take job: Producer) -> () waits {
 }
 
 fn fan_in(tasks: Tasks, rounds: u64, capacity: u64) -> u64 waits {
-    let (take send, take receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(capacity))
+    let (take send, take receive): (Sender[u64], Receiver[u64]) = channel.new(capacity)
     let mut jobs: List[Task[()]] = list.new()
     for lane in 0 .. LANES {
         let job = Producer(send: channel.sender(send), rounds: rounds, lane: lane)
-        let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, produce))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(tasks, bytes TASK_BYTES, take job, produce)
+        list.push(mut jobs, take h)
     }
     let mut sum: u64 = 0
     for _ in 0 .. LANES * rounds {
@@ -144,12 +144,12 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mut line = string.new()
     if let Some(mode) = args.get(argv, 2) {
         if mode == "work-receipt" {
-            result.unwrap(string.push_u64(mut line, completed))
-            result.unwrap(string.push(mut line, " "))
+            string.push_u64(mut line, completed)
+            string.push(mut line, " ")
         }
     }
-    result.unwrap(string.push_u64(mut line, sum))
-    result.unwrap(string.push(mut line, "\n"))
+    string.push_u64(mut line, sum)
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
     Ok(())
 }

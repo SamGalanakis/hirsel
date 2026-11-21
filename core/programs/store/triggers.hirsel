@@ -58,15 +58,15 @@ fn rows_name() -> String { "store.triggers.pending" }
 fn outcomes_name() -> String { "store.triggers.outcomes" }
 
 
-fn put_id(id: Id, mut out: Bytes) -> Result[(), Capacity] {
-    std.codec.put_key_u64(id.store_hi, mut out)?
-    std.codec.put_key_u64(id.store_lo, mut out)?
-    std.codec.put_key_u32(id.branch, mut out)?
-    std.codec.put_key_u64(id.version, mut out)?
+fn put_id(id: Id, mut out: Bytes) {
+    std.codec.put_key_u64(id.store_hi, mut out)
+    std.codec.put_key_u64(id.store_lo, mut out)
+    std.codec.put_key_u32(id.branch, mut out)
+    std.codec.put_key_u64(id.version, mut out)
     std.codec.put_key_u64(id.index, mut out)
 }
 
-fn take_id(raw: Bytes, mut at: u64) -> Result[Id, std.codec.Stop] {
+fn take_id(raw: Bytes, mut at: u64) -> Result[Id, std.codec.DecodeError] {
     let hi = std.codec.take_key_u64(raw, mut at)?
     let lo = std.codec.take_key_u64(raw, mut at)?
     let branch = std.codec.take_key_u32(raw, mut at)?
@@ -75,13 +75,14 @@ fn take_id(raw: Bytes, mut at: u64) -> Result[Id, std.codec.Stop] {
     Ok(Id(store_hi: hi, store_lo: lo, branch: branch, version: version, index: index))
 }
 
-fn id_schema(mut s: std.codec.Schema) -> Result[(), Capacity] {
+fn id_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
     std.codec.schema_tuple(mut s, 5u64)?
-    std.codec.schema_u64(mut s)?
-    std.codec.schema_u64(mut s)?
-    std.codec.schema_u32(mut s)?
-    std.codec.schema_u64(mut s)?
     std.codec.schema_u64(mut s)
+    std.codec.schema_u64(mut s)
+    std.codec.schema_u32(mut s)
+    std.codec.schema_u64(mut s)
+    std.codec.schema_u64(mut s)
+    Ok(())
 }
 
 fn id_key() -> std.codec.Key[Id] {
@@ -122,16 +123,8 @@ fn stored[T](take r: Result[T, store.Error]) -> Result[T, Error] {
     }
 }
 
-fn room[T](take r: Result[T, Capacity]) -> Result[T, Error] {
-    match take r {
-        Ok(take x) => Ok(take x),
-        Error(c) => Error(Store(Full(c))),
-    }
-}
-
 fn copy_bytes(b: Bytes) -> Result[Bytes, Error] {
-    let copied: Result[Bytes, Capacity] = clone(b)
-    room(take copied)
+    Ok(clone(b))
 }
 
 fn definition_path(identity: Bytes) -> View[Bytes] in identity {
@@ -141,20 +134,20 @@ fn definition_path(identity: Bytes) -> View[Bytes] in identity {
     list.slice(identity, 1u64, end)
 }
 
-fn path[F](f: StaticFn[F]) -> Result[Bytes, Capacity] {
+fn path[F](f: StaticFn[F]) -> Bytes {
     clone(definition_path(code.identity(f)))
 }
 
-fn entry[F, A: codec](f: StaticFn[F], carries_grants: bool) -> Result[Entry[A], Capacity] {
+fn entry[F, A: codec](f: StaticFn[F], carries_grants: bool) -> Result[Entry[A], std.codec.EncodeError] {
     let codec: std.codec.Codec[A] = std.codec.of()
-    Ok(Entry(ref: EntryRef(path: path(f)?, schema: std.codec.schema(codec)?, granted: carries_grants), codec: codec))
+    Ok(Entry(ref: EntryRef(path: path(f), schema: std.codec.schema(codec)?, granted: carries_grants), codec: codec))
 }
 
-pub fn transact[H, A: codec, R, E](f: StaticFn[fn(mut store.Tx, H, store.Caller, take A) -> Result[R, E]]) -> Result[Entry[A], Capacity] {
+pub fn transact[H, A: codec, R, E](f: StaticFn[fn(mut store.Tx, H, store.Caller, take A) -> Result[R, E]]) -> Result[Entry[A], std.codec.EncodeError] {
     entry(f, false)
 }
 
-pub fn granted[G, A: codec, R](f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits]) -> Result[Entry[A], Capacity] {
+pub fn granted[G, A: codec, R](f: StaticFn[fn(G, store.Caller, take A) -> Result[R, Capacity] waits]) -> Result[Entry[A], std.codec.EncodeError] {
     entry(f, true)
 }
 
@@ -166,9 +159,8 @@ pub fn allow[A](mut entries: Entries, target: Entry[A]) -> Result[(), Error] {
     for ref in entries.listed {
         if ref.path == target.ref.path { return Error(AlreadyTriggerable) }
     }
-    let copied: Result[EntryRef, Capacity] = clone(target.ref)
-    let ref = room(take copied)?
-    room(result.capacity_only(list.push(mut entries.listed, take ref)))
+    let ref: EntryRef = clone(target.ref)
+    Ok(list.push(mut entries.listed, take ref))
 }
 
 fn listed(entries: Entries, path_bytes: Bytes, schema: Bytes, carries_grants: bool) -> bool {
@@ -191,7 +183,7 @@ pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A],
     }
     let due = match when { AfterCommit => info.at, At(at) => at }
     let mut encoded: Bytes = list.new()
-    room(std.codec.encode(target.codec, arg, mut encoded))?
+    std.codec.encode(target.codec, arg, mut encoded) ?=> |_| Store(Limit(Value))
     let row = Row(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due,
         granted: target.ref.granted, attempt: 0u64, revision: list.new(), state: Waiting, cancel: false)
     stored(store.put(mut tx, t.rows, id, row))?
@@ -355,8 +347,8 @@ pub fn fetch_outcome(tx: store.Tx, t: Tables, id: Id) -> Result[Option[Terminal]
 // The journal law harness provides one host directory and a 64 MiB task.
 // Give each law its own directory and the standard small-store fixture.
 pub fn law_directory(d: Dir) -> Dir waits {
-    let mut name = result.unwrap(string.with_capacity(64u64))
-    result.unwrap(string.push(mut name, "trigger-law-"))
+    let mut name = string.with_capacity(64u64)
+    string.push(mut name, "trigger-law-")
     result.unwrap(host.mkdtemp(d, mut name))
 }
 
@@ -370,7 +362,7 @@ pub fn law_options() -> store.Options {
     options
 }
 
-fn sample_granted(g: Clock, take arg: u64) -> Result[u64, Capacity] waits {
+fn sample_granted(g: Clock, caller: store.Caller, take arg: u64) -> Result[u64, Capacity] waits {
     host.sleep_until(g, host.mono_ns(g))
     Ok(arg)
 }

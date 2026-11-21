@@ -45,27 +45,21 @@ pub fn len[T](d: Deque[T]) -> u64 {
     list.len(d.ring.raw)
 }
 
-pub fn push_back[T](mut d: Deque[T], take x: T) -> Result[(), (Capacity, T)] {
+pub fn push_back[T](mut d: Deque[T], take x: T) {
     if list.len(d.ring.raw) == list.capacity(d.ring.raw) {
-        if let Error(c) = grow(mut d) {
-            return Error((c, take x))
-        }
+        grow(mut d)
     }
     // Opaque ring invariants make the masked index arithmetic non-failing.
     let i = int.wrapping_add(d.head, list.len(d.ring.raw)) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
     slots_put(mut d.ring, i, take x)
-    Ok(())
 }
 
-pub fn push_front[T](mut d: Deque[T], take x: T) -> Result[(), (Capacity, T)] {
+pub fn push_front[T](mut d: Deque[T], take x: T) {
     if list.len(d.ring.raw) == list.capacity(d.ring.raw) {
-        if let Error(c) = grow(mut d) {
-            return Error((c, take x))
-        }
+        grow(mut d)
     }
     d.head = int.wrapping_sub(d.head, 1) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
     slots_put(mut d.ring, d.head, take x)
-    Ok(())
 }
 
 fn prepare_push[T](d: Deque[T], i: u64) {
@@ -96,23 +90,24 @@ pub fn pop_back[T](mut d: Deque[T]) -> Option[T] {
     Some(slots_take(mut d.ring, i))
 }
 
-fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
+fn grow[T](mut d: Deque[T]) {
     let cap = list.capacity(d.ring.raw)
     let count = list.len(d.ring.raw)
     if count < cap {
-        return Ok(())
+        return
     }
     // The next power of two does not fit. List's counter-overflow admission
-    // returns Capacity with the current room and cannot move the full ring.
+    // raises Capacity with the current room and cannot move the full ring.
     if cap > 9223372036854775807 {
-        return list.reserve(mut d.ring.raw, cap)
+        list.reserve(mut d.ring.raw, cap)
+        return
     }
     let next: u64 = if cap == 0 {
         1
     } else {
         cap * 2
     }
-    let mut ring: Slots[T] = slots_new(next)?
+    let mut ring: Slots[T] = slots_new(next)
     // The live interval is at most two runs. Relocate each run once, with
     // admission complete before either move and no fallible step between them.
     let head = d.head
@@ -128,7 +123,6 @@ fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
     let old = replace(mut d.ring, take ring)
     slots_free(take old)
     d.head = 0
-    Ok(())
 }
 
 fn reverse[T](mut s: Slots[T], lo: u64, hi: u64) {
@@ -151,7 +145,7 @@ type Slots[T]: shareable + send {
 
 fn slots_empty[T]() -> Slots[T]
 
-fn slots_new[T](n: u64) -> Result[Slots[T], Capacity]
+fn slots_new[T](n: u64) -> Slots[T]
 
 fn slots_unmark_spare[T](s: Slots[T], i: u64)
 
@@ -172,35 +166,24 @@ fn slots_free[T](take s: Slots[T])
 clone[T](d: Deque[T]) {
     let count = list.len(d.ring.raw)
     if count == 0 {
-        return Ok(Deque(ring: slots_empty(), head: 0))
+        return Deque(ring: slots_empty(), head: 0)
     }
     // Least power-of-two capacity not below length, as ruled by the orchestrator.
     let mut capacity: u64 = 1
     while capacity < count {
         capacity *= 2
     }
-    let mut built: Deque[T] = Deque(ring: slots_new(capacity)?, head: 0)
+    // A refusal raises Capacity; cleanup drops the elements built so far.
+    let mut built: Deque[T] = Deque(ring: slots_new(capacity), head: 0)
     let mask = list.capacity(d.ring.raw) - 1
     let mut i: u64 = 0
     while i < count {
         let index = int.wrapping_add(d.head, i) & mask
-        let attempt: Result[T, Capacity] = clone(slots_view(d.ring, index))
-        let x: T = match attempt {
-            Ok(take x) => take x,
-            Error(c) => {
-                // T1.5 is reverse construction order. Ordinary Deque cleanup
-                // is front-to-back, so explicitly drain backwards on refusal.
-                while list.len(built.ring.raw) != 0 {
-                    let back = list.len(built.ring.raw) - 1
-                    let _ = slots_take(mut built.ring, back)
-                }
-                return Error(c)
-            }
-        }
+        let x: T = clone(slots_view(d.ring, index))
         slots_put(mut built.ring, i, take x)
         i += 1
     }
-    Ok(take built)
+    take built
 }
 
 fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s

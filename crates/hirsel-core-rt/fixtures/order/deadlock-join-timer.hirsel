@@ -8,9 +8,9 @@ fn timer(take t: Timer) waits {
     result.unwrap(channel.send(tx, 7u64))
 }
 pub fn main(tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, take rx, child))
-    let t = result.unwrap(task.spawn(tasks, bytes 4096, Timer(tx: take tx, clock: clock), timer))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, take rx, child)
+    let t = task.spawn(tasks, bytes 4096, Timer(tx: take tx, clock: clock), timer)
     result.unwrap(task.join(take h))
     result.unwrap(task.join(take t))
     Ok(())

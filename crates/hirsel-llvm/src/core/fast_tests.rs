@@ -332,8 +332,8 @@ fn arc_initialization_share_release_and_unwrap_preserve_provider_events() {
 /// tests, so this is the wrapped-word case the runtime's own share never sees.
 #[test]
 fn inlined_count_increment_overflow_is_the_runtime_stop() {
-    let dir = std::env::temp_dir().join(format!("hirsel-llvm-count-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let prefix =
         PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
     let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -390,5 +390,4 @@ int main(void) {{
         assert_eq!(run.status.code(), Some(102), "{kind}: {:?}", run.status);
         assert_eq!(run.stderr, b"run stop: CountOverflow\n", "{kind}");
     }
-    fs::remove_dir_all(&dir).unwrap();
 }

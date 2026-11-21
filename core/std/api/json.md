@@ -21,8 +21,9 @@ Record members may arrive in any order. Absent fields use their declared
 defaults, or None for optional fields. The decoder refuses duplicate and
 unknown members. The codec's decoder still enforces `via` validation and
 duplicate map keys. An input refusal gives a byte offset and an RFC 6901
-JSON Pointer. The empty path denotes the root. `Capacity` reports a separate
-resource refusal.
+JSON Pointer. The empty path denotes the root. `Capacity` reports refusal to
+enter the byte bound. A refused allocation inside the bound raises Capacity.
+`LengthOverflow` reports a count that the codec cannot represent.
 
 `encode_typed` writes T's codec bytes into reusable caller-owned scratch.
 It measures the JSON, calls the supplied length callback, then streams the JSON

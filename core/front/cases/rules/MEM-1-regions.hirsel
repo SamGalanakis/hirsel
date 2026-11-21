@@ -7,7 +7,7 @@
 // expect: run measure() = 2
 fn width(s: String) -> Result[u64, Capacity] {
     region r {
-        let t = text.copy_in(r, s)?;
+        let t = text.copy_in(r, s);
         Ok(text.len(t))
     }
 }
@@ -20,7 +20,7 @@ fn three() -> u64 {
 }
 
 fn copy_len(r: Region, s: String) -> Result[u64, Capacity] {
-    let t = text.copy_in(r, s)?
+    let t = text.copy_in(r, s)
     Ok(text.len(t))
 }
 

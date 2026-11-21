@@ -1,17 +1,16 @@
 // Map contracts: insertion-order storage, linear probing, replacement, removal,
-// regrow/index rebuild, String keys, and unchanged Capacity handback.
+// regrow/index rebuild, String keys, and the Capacity a refused growth raises.
 // expect: run get_after_insert() = 70
 // expect: run replace() = 1088
 // expect: run remove_reinsert() = 7131711
 // expect: run growth() = 93680
 // expect: run strings() = 911
-// expect: run handback() = 711
-// expect: run refused_growth() = 4040
+// expect: run refused_growth() = 25855 used 32
 // expect: run unit_entries() = 17
-// expect: run unit_charge() = 6463
+// expect: run unit_charge() = 6463 used 32
 fn get_after_insert() -> u64 {
     let mut m: Map[u64, u64] = map.new()
-    result.unwrap(map.insert(mut m, 7, 70))
+    map.insert(mut m, 7, 70)
     match map.get(m, 7) {
         Some(v) => v,
         None => 0
@@ -20,9 +19,9 @@ fn get_after_insert() -> u64 {
 
 fn replace() -> u64 {
     let mut m: Map[u64, u64] = map.new()
-    result.unwrap(map.insert(mut m, 7, 70))
-    result.unwrap(map.insert(mut m, 7, 99))
-    result.unwrap(map.insert(mut m, 7, 88))
+    map.insert(mut m, 7, 70)
+    map.insert(mut m, 7, 99)
+    map.insert(mut m, 7, 88)
     match map.get(m, 7) {
         Some(v) => map.len(m) * 1000 + v,
         None => 0
@@ -31,16 +30,16 @@ fn replace() -> u64 {
 
 fn remove_reinsert() -> u64 {
     let mut m: Map[u64, u64] = map.new()
-    result.unwrap(map.insert(mut m, 7, 70))
-    result.unwrap(map.insert(mut m, 11, 110))
-    result.unwrap(map.insert(mut m, 13, 130))
-    result.unwrap(map.insert(mut m, 17, 170))
+    map.insert(mut m, 7, 70)
+    map.insert(mut m, 11, 110)
+    map.insert(mut m, 13, 130)
+    map.insert(mut m, 17, 170)
     let removed = option.unwrap(map.remove(mut m, 11))
     let kept: u64 = match map.get(m, 17) {
         Some(v) => v,
         None => 0
     }
-    result.unwrap(map.insert(mut m, 11, 111))
+    map.insert(mut m, 11, 111)
     let again: u64 = match map.get(m, 11) {
         Some(v) => v,
         None => 0
@@ -58,7 +57,7 @@ fn remove_reinsert() -> u64 {
 fn growth() -> u64 {
     let mut m: Map[u64, u64] = map.new()
     for i in 0u64 .. 9u64 {
-        result.unwrap(map.insert(mut m, i, i * 10))
+        map.insert(mut m, i, i * 10)
     }
     let mut sum: u64 = 0
     for (k, v) in m {
@@ -74,10 +73,10 @@ fn growth() -> u64 {
 fn strings() -> u64 {
     let mut m: Map[String, u64] = map.new()
     let mut key: String = string.new()
-    result.unwrap(string.push(mut key, "route"))
-    result.unwrap(map.insert(mut m, take key, 7))
-    result.unwrap(map.insert(mut m, "other", 11))
-    result.unwrap(map.insert(mut m, "route", 9))
+    string.push(mut key, "route")
+    map.insert(mut m, take key, 7)
+    map.insert(mut m, "other", 11)
+    map.insert(mut m, "route", 9)
     let removed = option.unwrap(map.remove(mut m, "route"))
     let other: u64 = match map.get(m, "other") {
         Some(v) => v,
@@ -90,43 +89,27 @@ fn strings() -> u64 {
     }
 }
 
-fn handback() -> u64 {
-    let r: Result[u64, Capacity] = bound bytes 0 {
-        let mut m: Map[u64, u64] = map.new()
-        match map.insert(mut m, 7, 11) {
-            Error((c, (k, v))) => if c.requested == 128 && c.available == 0 {
-                k * 100 + v
-            } else {
-                0
-            },
-            Ok(()) => 0
-        }
-    }
-    result.unwrap(r)
-}
-
 fn refused_growth() -> u64 {
-    let r: Result[u64, Capacity] = bound bytes 383 {
-        let mut m: Map[u64, u64] = map.new()
-        for i in 0u64 .. 4u64 {
-            result.unwrap(map.insert(mut m, i, i * 10))
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 383 {
+            let mut m: Map[u64, u64] = map.new()
+            for i in 0u64 .. 4u64 {
+                map.insert(mut m, i, i * 10)
+            }
+            map.insert(mut m, 4, 40)
+            0
         }
-        match map.insert(mut m, 4, 40) {
-            Error((c, (k, v))) => if c.requested == 256 && c.available == 255 && map.len(m) == 4 {
-                k * 1000 + v
-            } else {
-                0
-            },
-            Ok(()) => 0
-        }
+    })
+    match caught(take r) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 0
     }
-    result.unwrap(r)
 }
 
 fn unit_entries() -> u64 {
     let mut m: Map[(), ()] = map.new()
-    result.unwrap(map.insert(mut m, (), ()))
-    result.unwrap(map.insert(mut m, (), ()))
+    map.insert(mut m, (), ())
+    map.insert(mut m, (), ())
     if map.len(m) != 1 {
         return 0
     }
@@ -138,12 +121,31 @@ fn unit_entries() -> u64 {
 }
 
 fn unit_charge() -> u64 {
-    let r: Result[u64, Capacity] = bound bytes 63 {
-        let mut m: Map[(), ()] = map.new()
-        match map.insert(mut m, (), ()) {
-            Error((c, _)) => c.requested * 100 + c.available,
-            Ok(()) => 0
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 63 {
+            let mut m: Map[(), ()] = map.new()
+            map.insert(mut m, (), ())
+            0
         }
+    })
+    match caught(take r) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 0
     }
-    result.unwrap(r)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

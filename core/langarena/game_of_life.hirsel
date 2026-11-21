@@ -6,11 +6,11 @@ type Cell {
 }
 
 fn make_grid(w: u64, h: u64) -> Result[List[List[Cell]], helper.Error] {
-    let mut cells: List[List[Cell]] = helper.mem(list.with_capacity(h))?
+    let mut cells: List[List[Cell]] = list.with_capacity(h)
     for _ in 0 .. h {
-        let mut row: List[Cell] = helper.mem(list.with_capacity(w))?
+        let mut row: List[Cell] = list.with_capacity(w)
         for _ in 0 .. w {
-            let neighbors: List[(u64, u64)] = helper.mem(list.with_capacity(8))?
+            let neighbors: List[(u64, u64)] = list.with_capacity(8)
             let _ = list.push(mut row, Cell(alive: false, next_state: false, neighbors: take neighbors))
         }
         let _ = list.push(mut cells, take row)

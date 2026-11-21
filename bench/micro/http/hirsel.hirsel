@@ -1,17 +1,16 @@
 // B1 selects this entry in a source view of std.http so it measures the
 // production connection task with exactly one accepted socket.
 fn b1_handler(request: Request, scratch: Region, mut body: Responder, state: ()) -> Result[Outcome, HandlerError] {
-    let literal: Result[FrozenBytes, Capacity] = b"Hello, world"
-    let payload = result.unwrap(take literal)
+    let payload = b"Hello, world"
     let mut reply = response_frozen(200, take payload, false)?
     content_type(mut reply, TextPlain)?
     Ok(Reply(take reply))
 }
 
 fn b1_emit(out: Stdout, prefix: String, value: u64) waits {
-    let mut line = result.unwrap(string.from(prefix))
-    result.unwrap(string.push_u64(mut line, value))
-    result.unwrap(string.push_char(mut line, '\n'))
+    let mut line = string.from(prefix)
+    string.push_u64(mut line, value)
+    string.push_char(mut line, '\n')
     result.unwrap(stdout.write(out, line))
 }
 

@@ -27,4 +27,36 @@ pub const SEND_SECRET: u8 = 23;
 pub const RECV_BOUNDED: u8 = 27;
 pub const SEND_PAIR: u8 = 26;
 pub const STOPPED: u8 = 28;
+pub const STDIN_READ: u8 = 32;
+pub const READ_AT: u8 = 37;
+pub const WRITE_AT: u8 = 38;
+pub const SECRET_MAC: u8 = 39;
 pub const RESOLVE: u8 = 40;
+pub const OPEN_DIR: u8 = 43;
+pub const ENTRIES: u8 = 44;
+pub const NEXT_ENTRIES: u8 = 45;
+pub const STAT: u8 = 46;
+pub const STAT_FILE: u8 = 47;
+pub const CLOSE_ENTRIES: u8 = 48;
+// Virtual providers (core.md, Provide). The constructors and hand operations
+// change run-local state only; CLOSE_CELL is a hand's or trigger's cleanup.
+pub const PROVIDE_CLOCK: u8 = 49;
+pub const PROVIDE_RANDOM: u8 = 50;
+pub const PROVIDE_PROCESS: u8 = 51;
+pub const CLOCK_ADVANCE: u8 = 52;
+pub const CLOCK_SET_WALL: u8 = 53;
+pub const CLOCK_IDLE: u8 = 54;
+pub const PROCESS_TRIGGER: u8 = 55;
+pub const CLOSE_CELL: u8 = 56;
+// Served ports (core.md, Provide). The constructors admit the port's room;
+// PORT_NEXT waits for a call; CALL_WORD and CALL_PAYLOAD read a taken call;
+// PORT_REPLY commits it. CLOSE_SERVED seals a port and CLOSE_CALL settles an
+// unanswered call as sealed.
+pub const PROVIDE_STDOUT: u8 = 57;
+pub const PROVIDE_STDERR: u8 = 58;
+pub const PORT_NEXT: u8 = 59;
+pub const CALL_WORD: u8 = 60;
+pub const CALL_PAYLOAD: u8 = 61;
+pub const PORT_REPLY: u8 = 62;
+pub const CLOSE_SERVED: u8 = 63;
+pub const CLOSE_CALL: u8 = 64;

@@ -4,7 +4,7 @@
 fn clone_empty_admits_nothing() -> bool {
     let d: Deque[u64] = new()
     let r = bound bytes 0 {
-        let copied: Deque[u64] = result.unwrap(clone(d))
+        let copied: Deque[u64] = clone(d)
         copied.head == 0 && list.len(copied.ring.raw) == 0 && list.capacity(copied.ring.raw) == 0
     }
     result.unwrap(r)
@@ -15,18 +15,18 @@ fn clone_empty_admits_nothing() -> bool {
 fn clone_wrapped_header() -> u64 {
     let mut d: Deque[u64] = new()
     for i in 1u64 .. 5 {
-        result.unwrap(push_back(mut d, i))
+        push_back(mut d, i)
     }
     for _ in 0u64 .. 3 {
         let x = option.unwrap(pop_front(mut d))
-        result.unwrap(push_back(mut d, x))
+        push_back(mut d, x)
     }
     let _ = pop_back(mut d)
-    let mut copied: Deque[u64] = result.unwrap(clone(d))
+    let mut copied: Deque[u64] = clone(d)
     if copied.head != 0 || list.capacity(copied.ring.raw) != 4 {
         return 99
     }
-    result.unwrap(push_back(mut copied, 9))
+    push_back(mut copied, 9)
     let mut digits: u64 = 0
     while len(copied) != 0 {
         digits = digits * 10 + option.unwrap(pop_front(mut copied))
@@ -39,65 +39,67 @@ fn clone_wrapped_header() -> u64 {
 fn clone_partial_shrinks() -> bool {
     let mut d: Deque[u64] = new()
     for i in 0u64 .. 8 {
-        result.unwrap(push_back(mut d, i))
+        push_back(mut d, i)
     }
     for _ in 0u64 .. 7 {
         let _ = pop_front(mut d)
     }
-    let mut copied: Deque[u64] = result.unwrap(clone(d))
+    let mut copied: Deque[u64] = clone(d)
     copied.head == 0 && list.capacity(copied.ring.raw) == 1 && option.unwrap(pop_front(mut copied)) == 7
 }
 
 // expect: run clone_full_is_independent() = true
 fn clone_full_is_independent() -> bool {
     let mut d: Deque[String] = new()
-    result.unwrap(push_back(mut d, result.unwrap(string.from("a"))))
-    result.unwrap(push_front(mut d, result.unwrap(string.from("b"))))
-    let mut copied: Deque[String] = result.unwrap(clone(d))
+    push_back(mut d, string.from("a"))
+    push_front(mut d, string.from("b"))
+    let mut copied: Deque[String] = clone(d)
     if copied.head != 0 || list.capacity(copied.ring.raw) != 2 {
         return false
     }
     let mut text = option.unwrap(pop_front(mut copied))
-    result.unwrap(string.push_char(mut text, '!'))
+    string.push_char(mut text, '!')
     text == "b!" && option.unwrap(pop_front(mut d)) == "b" && option.unwrap(pop_back(mut d)) == "a" && option.unwrap(pop_back(mut copied)) == "a"
 }
 
-// Refuse before every element copy.96 bytes pays cap4 of String; each copy
-// needs8. The copied prefix and block must be refunded before the next reserve.
+// Refuse before every element copy. 96 bytes pays cap4 of String; each copy
+// needs 8. The cleanup drops the copied prefix and frees the block.
 // expect: run clone_refusal_refunds_prefix() = true
 fn clone_refusal_refunds_prefix() -> bool {
     let mut d: Deque[String] = new()
     for _ in 0u64 .. 4 {
-        result.unwrap(push_back(mut d, result.unwrap(string.from("abc"))))
+        push_back(mut d, string.from("abc"))
     }
     for _ in 0u64 .. 3 {
         let x = option.unwrap(pop_front(mut d))
-        result.unwrap(push_back(mut d, take x))
+        push_back(mut d, take x)
     }
     let _ = pop_back(mut d)
-    for copied in 0u64 .. 3 {
-        let budget = 96 + copied * 8
-        let r = bound bytes budget {
-            let attempt: Result[Deque[String], Capacity] = clone(d)
-            let refused = match attempt {
-                Error(c) => c.requested == 8 && c.available == 0,
-                _ => false
+    for prefix in 0u64 .. 3 {
+        let budget = 96 + prefix * 8
+        let refused = match refusal(isolate(fn() -> Result[u64, Capacity] {
+            bound bytes budget {
+                let copied: Deque[String] = clone(d)
+                len(copied)
             }
-            let probe: List[u8] = result.unwrap(list.with_capacity(budget))
-            refused && list.capacity(probe) == budget
+        })) {
+            Some(c) => c.requested == 8 && c.available == 0,
+            None => false,
         }
-        if !result.unwrap(r) {
+        if !refused {
             return false
         }
     }
-    let r = bound bytes 0 {
-        let attempt: Result[Deque[String], Capacity] = clone(d)
-        match attempt {
-            Error(c) => c.requested == 96 && c.available == 0,
-            _ => false
+    let refused = match refusal(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let copied: Deque[String] = clone(d)
+            len(copied)
         }
+    })) {
+        Some(c) => c.requested == 96 && c.available == 0,
+        None => false,
     }
-    if !result.unwrap(r) || len(d) != 3 {
+    if !refused || len(d) != 3 {
         return false
     }
     for _ in 0u64 .. 3 {
@@ -106,4 +108,27 @@ fn clone_refusal_refunds_prefix() -> bool {
         }
     }
     true
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

@@ -106,10 +106,10 @@ fn aggregate() -> u64 {
 
 fn captured() -> u64 {
     let code = choose(false)
-    let f: own fn(u64) -> u64 = result.unwrap(fn(x: u64) -> u64 {
+    let f: own fn(u64) -> u64 = fn(x: u64) -> u64 {
         let g: scoped fn(u64) -> u64 = code;
         g(x)
-    })
+    }
     f(7)
 }
 

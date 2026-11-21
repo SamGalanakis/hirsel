@@ -1,0 +1,4 @@
+// MEM-29: a Log's element holds no view or scoped value.
+// expect: refuse MEM-29 at 4:17
+// expect: compared MEM-29 at 4:17 | View[core@1/core/String] | no view or scoped value
+fn names(l: Log[View[String]]) {}

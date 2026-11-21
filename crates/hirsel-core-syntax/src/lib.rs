@@ -13,7 +13,7 @@ mod token;
 pub use derive::{
     Derive, DeriveContext, GeneratedOrigin, codec_context, declaration_of, derive, derived_from,
 };
-pub use format::format;
+pub use format::{format, format_verified};
 pub use lexer::{LexOutput, lex};
 pub use literals::{byte_value, character_value};
 pub use package_format::{FormatAction, FormatRefusal, FormatReport, format_files, format_package};
@@ -155,6 +155,7 @@ pub enum NodeKind {
     Binary,
     BindPattern,
     TakePattern,
+    MutPattern,
     Wildcard,
     TuplePattern,
     UnitPattern,
@@ -263,6 +264,7 @@ impl ResolutionSize {
                 self.binders += 1;
             }
             NodeKind::TakePattern
+            | NodeKind::MutPattern
             | NodeKind::Generic
             | NodeKind::RegionGeneric
             | NodeKind::Parameter

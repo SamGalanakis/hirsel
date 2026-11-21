@@ -121,6 +121,36 @@ impl Foreign {
 }
 
 #[test]
+fn nested_limits_keep_their_charges_through_growth_and_exit() {
+    let mut context = Context::new(4096);
+    let mut blocks = Vec::new();
+    for _ in 0..100 {
+        context.limit_enter(context.available() - 1).unwrap();
+        blocks.push(Block::new(&context, Some(2), 2, 8).unwrap());
+    }
+    for _ in 0..100 {
+        let available = context.available();
+        assert_eq!(
+            context.limit_enter(available + 1),
+            Err(crate::Capacity {
+                requested: available + 1,
+                available,
+            })
+        );
+        context.limit_exit();
+        assert_eq!(context.available(), available + 1);
+    }
+    assert_eq!(context.available(), 3896);
+    let foreign = Foreign(blocks);
+    std::thread::spawn(move || foreign.release())
+        .join()
+        .unwrap();
+    assert_eq!(context.available(), 3896);
+    context.current.drain();
+    assert_eq!(context.available(), 4096);
+}
+
+#[test]
 fn dirty_inbox_aggregates_bytes_and_zero_pins_among_many_clean_records() {
     let context = Context::new(64);
     let clean: Vec<_> = (0..512)
@@ -142,6 +172,41 @@ fn dirty_inbox_aggregates_bytes_and_zero_pins_among_many_clean_records() {
     assert!(!domain.remote.lock().unwrap().pending());
     assert_eq!(context.current.payer.get().forest().zeros, 0);
     drop(clean);
+}
+
+#[test]
+fn many_handed_over_limits_refund_only_at_the_recipient_event() {
+    const CHILDREN: u64 = 96;
+    let root = Funding::root(CHILDREN * 32);
+    let mut children = Vec::new();
+    let mut early = Vec::new();
+    let mut late = Vec::new();
+    for owner in 1..=CHILDREN {
+        let child = root.reserve(32).unwrap();
+        child.task_owner(owner);
+        let context = Context::with_funding(child);
+        early.push(Block::new(&context, Some(8), 8, 8).unwrap());
+        late.push(Block::new(&context, Some(4), 4, 4).unwrap());
+        children.push(context);
+    }
+    let early = Foreign(early);
+    std::thread::spawn(move || early.release()).join().unwrap();
+    root.drain();
+    assert_eq!(root.available(), 0);
+    for (index, child) in children.iter_mut().enumerate() {
+        assert_eq!(child.available(), 20);
+        child.current.handover(index as u64 + 1);
+        // Each handover is an eligible event for prior credits, including
+        // the early refund, but its own credit still has to be delivered.
+        assert_eq!(root.available(), index as u64 * 28);
+    }
+    let late = Foreign(late);
+    std::thread::spawn(move || late.release()).join().unwrap();
+    assert_eq!(root.available(), (CHILDREN - 1) * 28);
+    root.drain();
+    assert_eq!(root.available(), CHILDREN * 32);
+    drop(children);
+    assert_eq!(root.available(), CHILDREN * 32);
 }
 
 #[test]

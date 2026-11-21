@@ -61,15 +61,15 @@ fn sort_audit(out: Stdout) -> SortAudit {
         } else {
             1
         }
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: key))))
+        list.push(mut xs, result.unwrap(SortItem(out, id: i, key)))
     }
-    result.unwrap(SortAudit(out: out, values: take xs))
+    result.unwrap(SortAudit(out, values: take xs))
 }
 
 fn sort_fail_at(out: Stdout, failure: u64) -> u64 {
     let mut audit = sort_audit(out)
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
+    list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -82,7 +82,7 @@ fn sort_fail_at(out: Stdout, failure: u64) -> u64 {
         } else {
             Equal
         }
-    }))
+    })
     let mut ids: u64 = 0
     for x in audit.values {
         ids = ids * 10 + x.id
@@ -144,34 +144,37 @@ fn comparator_fail_8(out: Stdout) -> u64 {
     sort_fail_at(out, 8)
 }
 
-// Admission of five resource holders is exactly 5*8. Capacity runs no comparator
-// and changes no element, length, capacity or source order.
-// expect: stdout "okXXXXX"
-// expect: run scratch_capacity_atomic(out) = true
-fn scratch_capacity_atomic(out: Stdout) -> bool {
-    let mut audit = sort_audit(out)
-    let mut calls: u64 = 0
-    let r = bound bytes 0 {
-        list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
-            calls += 1
-            if a.key < b.key {
-                Less
-            } else if a.key > b.key {
-                Greater
-            } else {
-                Equal
-            }
-        })
-    }
-    let refused = match r {
-        Ok(Error(c)) => c.requested == 40,
-        _ => false
-    }
+// Admission of five resource holders is exactly 5*8. It precedes every comparator
+// call and element move, so the audit's cleanup sees the source order intact.
+resource type SourceOrderAudit {
+    out: Stdout,
+    values: List[SortItem]
+} drop(t) {
     let mut ids: u64 = 0
-    for x in audit.values {
+    for x in t.values {
         ids = ids * 10 + x.id
     }
-    refused && calls == 0 && ids == 1234
+    let _ = stdout.write(t.out, if list.len(t.values) == 5 && ids == 1234 {
+        "ok"
+    } else {
+        "bad"
+    })
+}
+
+// expect: stdout "okXXXXX"
+// expect: run scratch_capacity_atomic(out) = 40
+fn scratch_capacity_atomic(out: Stdout) -> u64 {
+    refused_request(isolate(fn() -> Result[(), Capacity] {
+        let SortAudit(out: o, values: take values) = sort_audit(out)
+        let mut audit = result.unwrap(SourceOrderAudit(out: o, values: take values))
+        bound bytes 0 {
+            list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
+                let called: Option[u64] = None
+                let _ = option.unwrap(called)
+                Equal
+            })
+        }
+    }))
 }
 
 // n=7 keys [3,2,1,0,3,2,1], stable ids [3,2,6,1,5,0,4].
@@ -216,11 +219,11 @@ fn seven_fail_at(out: Stdout, failure: u64) -> u64 {
         } else {
             7 - i
         }
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: key))))
+        list.push(mut xs, result.unwrap(SortItem(out, id: i, key)))
     }
-    let mut audit = result.unwrap(SevenAudit(out: out, values: take xs))
+    let mut audit = result.unwrap(SevenAudit(out, values: take xs))
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
+    list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -233,7 +236,7 @@ fn seven_fail_at(out: Stdout, failure: u64) -> u64 {
         } else {
             Equal
         }
-    }))
+    })
     let mut ids: u64 = 0
     for x in audit.values {
         ids = ids * 10 + x.id
@@ -251,10 +254,10 @@ fn seven_plain_fail_at(failure: u64) -> u64 {
         } else {
             7 - i
         }
-        result.unwrap(list.push(mut xs, key))
+        list.push(mut xs, key)
     }
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -267,7 +270,7 @@ fn seven_plain_fail_at(failure: u64) -> u64 {
         } else {
             Equal
         }
-    }))
+    })
     if list.len(xs) == 7 && xs[0] == 0 && xs[1] == 1 && xs[2] == 1 && xs[3] == 2 && xs[4] == 2 && xs[5] == 3 && xs[6] == 3 {
         1
     } else {
@@ -447,11 +450,11 @@ resource type MergeAudit {
 fn merge_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
     let mut xs: List[SortItem] = list.new()
     for i in 0u64 .. count {
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: merge_key(count, i)))))
+        list.push(mut xs, result.unwrap(SortItem(out, id: i, key: merge_key(count, i))))
     }
-    let mut audit = result.unwrap(MergeAudit(out: out, values: take xs, count: count))
+    let mut audit = result.unwrap(MergeAudit(out, values: take xs, count))
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
+    list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -464,7 +467,7 @@ fn merge_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
         } else {
             Equal
         }
-    }))
+    })
     let mut sorted = true
     for i in 1u64 .. count {
         let (ak, ai) = (audit.values[i - 1].key, audit.values[i - 1].id)
@@ -480,10 +483,10 @@ fn merge_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
 fn merge_plain_fail_at(count: u64, failure: u64) -> bool {
     let mut xs: List[u64] = list.new()
     for i in 0u64 .. count {
-        result.unwrap(list.push(mut xs, merge_key(count, i)))
+        list.push(mut xs, merge_key(count, i))
     }
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -496,7 +499,7 @@ fn merge_plain_fail_at(count: u64, failure: u64) -> bool {
         } else {
             Equal
         }
-    }))
+    })
     let mut sorted = list.len(xs) == count
     for i in 1u64 .. count {
         if xs[i - 1] > xs[i] {
@@ -775,11 +778,11 @@ resource type SweepAudit {
 fn sweep_fail_at(count: u64, failure: u64) -> bool {
     let mut xs: List[SweepItem] = list.new()
     for i in 0u64 .. count {
-        result.unwrap(list.push(mut xs, SweepItem(id: i, key: merge_key(count, i))))
+        list.push(mut xs, SweepItem(id: i, key: merge_key(count, i)))
     }
-    let mut audit = result.unwrap(SweepAudit(values: take xs, count: count))
+    let mut audit = result.unwrap(SweepAudit(values: take xs, count))
     let mut calls: u64 = 0
-    result.unwrap(list.sort_stable(mut audit.values, fn(a: SweepItem, b: SweepItem) -> Order {
+    list.sort_stable(mut audit.values, fn(a: SweepItem, b: SweepItem) -> Order {
         calls += 1
         if calls == failure {
             let none: Option[u64] = None;
@@ -792,7 +795,7 @@ fn sweep_fail_at(count: u64, failure: u64) -> bool {
         } else {
             Equal
         }
-    }))
+    })
     let mut sorted = true
     for i in 1u64 .. count {
         let (ak, ai) = (audit.values[i - 1].key, audit.values[i - 1].id)
@@ -953,4 +956,27 @@ fn small_plain_104_56() -> bool {
 // expect: run small_plain_104_158() = fail Unwrap
 fn small_plain_104_158() -> bool {
     merge_plain_fail_at(104, 158)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

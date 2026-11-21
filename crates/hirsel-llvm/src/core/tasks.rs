@@ -108,10 +108,16 @@ impl FunctionEmitter<'_> {
         let mode = args.get(2).cloned().unwrap_or(int(0));
         let at = self.site_word();
         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
+        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+            results[0] = Ty::Ptr;
+        }
         if matches!(op, HostOp::Listen | HostOp::Accept) {
             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
         } else if op == HostOp::TlsConnect {
             results.extend([U; 4]);
+        } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+            results[3] = Ty::Scalar(Scalar::I64);
+            results.push(K);
         }
         let mut values = match op {
             HostOp::Connect
@@ -127,6 +133,26 @@ impl FunctionEmitter<'_> {
             | HostOp::SendSecret
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
+            | HostOp::SecretHmac
+            | HostOp::SecretVerifyHmac
+            | HostOp::StdinRead
+            | HostOp::EnvGet
+            | HostOp::EnvLen
+            | HostOp::EnvName
+            | HostOp::EnvNarrow
+            | HostOp::ProvideClock
+            | HostOp::ProvideRandom
+            | HostOp::ProvideProcess
+            | HostOp::ClockAdvance
+            | HostOp::ClockSetWall
+            | HostOp::ClockIdle
+            | HostOp::ProcessTrigger
+            | HostOp::ProvideStdout
+            | HostOp::ProvideStderr
+            | HostOp::PortNext
+            | HostOp::CallWord
+            | HostOp::CallPayload
+            | HostOp::PortReply
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
@@ -141,8 +167,20 @@ impl FunctionEmitter<'_> {
                     });
                 }
                 operands.push(word(at));
-                self.native_call(op.net_symbol(), &results, &operands)
+                self.native_call(op.adapter_symbol(), &results, &operands)
             }
+            HostOp::ReadAt | HostOp::WriteAt => self.native_call(
+                "hirsel_core_host_at",
+                &results,
+                &[
+                    ptr(CONTEXT),
+                    zeroext(Type::I8, int(op.code())),
+                    word(args[0].clone()),
+                    word(args[1].clone()),
+                    ptr(args[2].clone()),
+                    word(at),
+                ],
+            ),
             HostOp::Rename => self.native_call(
                 "hirsel_core_host_rename",
                 &results,
@@ -266,6 +304,11 @@ impl FunctionEmitter<'_> {
                 "hirsel_core_launch_target",
                 &[],
                 &[ptr(CONTEXT), p(&args[0])],
+            ),
+            RtOp::LaunchHandle => self.native_call(
+                "hirsel_core_launch_handle",
+                &[U],
+                &[ptr(CONTEXT), u(&args[0])],
             ),
             RtOp::DescribeEmit => self.native_call(
                 "hirsel_core_describe_emit",

@@ -100,21 +100,25 @@ pub unsafe extern "C" fn hirsel_core_host_op(
         let buffer = carrier(operand);
         let mut request = request(op, mode, site, buffer);
         let outcome = match op {
-            READ | WRITE | CLOSE | TRY_LOCK | UNLOCK | SYNC => {
+            READ | WRITE | CLOSE | TRY_LOCK | UNLOCK | SYNC | NEXT_ENTRIES | STAT_FILE => {
                 hirsel_core_host_file(context, handle, &mut request)
             }
-            OPEN | RENAME | MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | SYNC_DIR => {
+            OPEN | RENAME | MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | SYNC_DIR | OPEN_DIR
+            | ENTRIES | STAT => {
                 let provider = hirsel_core_capability_provider(context, handle);
                 request.handle = hirsel_core_capability_handle(context, handle);
-                if matches!(op, OPEN | MKDIR | REMOVE | REMOVE_TREE) {
+                if matches!(op, OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | STAT) {
                     request.path = buffer.data;
                     request.path_len = buffer.len;
                 }
-                if op == OPEN {
+                if matches!(op, OPEN | ENTRIES) {
                     hirsel_core_host_file_open(context, provider, &mut request)
                 } else {
                     let mut result = drive(context, provider, &mut request, None);
-                    if op == MKDTEMP && result.status == 0 && result.error == IoError::OK {
+                    if matches!(op, MKDTEMP | OPEN_DIR)
+                        && result.status == 0
+                        && result.error == IoError::OK
+                    {
                         result.value = (*(*context).host_files)
                             .registry
                             .grant(*provider, result.value);
@@ -130,9 +134,60 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             }
             _ => unreachable!(),
         };
-        if matches!(op, READ | MKDTEMP) && request.buffer.len != buffer.len {
+        let appended = matches!(op, READ | MKDTEMP)
+            || (op == NEXT_ENTRIES && outcome.status == 0 && outcome.error == IoError::OK);
+        if appended && request.buffer.len != buffer.len {
             // Only these rows write the length; spare-capacity checks guarantee
             // owned mutable storage. They never change data or capacity.
+            (*operand).len = request.buffer.len;
+        }
+        outcome
+    }
+}
+
+/// Metadata rows expose the outcome's kind byte as an additional FORM result.
+///
+/// # Safety
+/// The checked row supplies a Dir and path, or a live HostFile and null operand.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_stat(
+    context: *mut Context,
+    op: u8,
+    handle: u64,
+    operand: *mut Buffer,
+    mode: u8,
+    site: u64,
+) -> Outcome {
+    // SAFETY: the two stat rows use the common provider calling convention.
+    unsafe { hirsel_core_host_op(context, op, handle, operand, mode, site) }
+}
+
+/// Positioned I/O carries its offset in the request's eight-byte path operand.
+///
+/// # Safety
+/// The checked operation owns the file key and supplies a live Bytes carrier.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_at(
+    context: *mut Context,
+    op: u8,
+    handle: u64,
+    at: u64,
+    operand: *mut Buffer,
+    site: u64,
+) -> Outcome {
+    let offset = at.to_le_bytes();
+    // SAFETY: the checked row pins the carrier and the offset through delivery.
+    unsafe {
+        let buffer = *operand;
+        let mut request = request(op, 0, site, buffer);
+        request.path = offset.as_ptr();
+        request.path_len = offset.len();
+        let outcome = hirsel_core_host_file(context, handle, &mut request);
+        if op == READ_AT
+            && outcome.status == 0
+            && outcome.error == IoError::OK
+            && request.buffer.len != buffer.len
+        {
             (*operand).len = request.buffer.len;
         }
         outcome

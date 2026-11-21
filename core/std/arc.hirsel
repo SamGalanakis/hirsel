@@ -1,16 +1,14 @@
 // Module `arc`, extended (LANG-7): library members of the core module `arc`.
 /// Runs f once on h's payload in place, first replacing a shared h with a new Arc
-/// holding its clone (MEM-15, MEM-17). On Capacity h is unchanged and f has not run.
-pub fn update[T: shareable + send, R](mut h: Arc[T], f: scoped fn(mut T) -> R) -> Result[R, Capacity] {
+/// holding its clone (MEM-15, MEM-17). A refused clone raises Capacity with h unchanged
+/// and f not run.
+pub fn update[T: shareable + send, R](mut h: Arc[T], f: scoped fn(mut T) -> R) -> R {
     loop {
         match arc.with_unique(mut h, f) {
-            Some(take r) => return Ok(take r),
+            Some(take r) => return take r,
             None => {
-                let copied: T = clone(h)?
-                h = match arc.new(take copied) {
-                    Ok(take fresh) => fresh,
-                    Error((e, _)) => return Error(e)
-                }
+                let copied: T = clone(h)
+                h = arc.new(take copied)
             }
         }
     }

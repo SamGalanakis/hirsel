@@ -5,12 +5,12 @@
 // contract names. Lists are read back as numbers, one decimal digit per element.
 /// [a, b, c, d, e] in capacity reserved first.
 fn five(a: u64, b: u64, c: u64, d: u64, e: u64) -> List[u64] {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
-    result.unwrap(list.push(mut xs, a))
-    result.unwrap(list.push(mut xs, b))
-    result.unwrap(list.push(mut xs, c))
-    result.unwrap(list.push(mut xs, d))
-    result.unwrap(list.push(mut xs, e))
+    let mut xs: List[u64] = list.with_capacity(5)
+    list.push(mut xs, a)
+    list.push(mut xs, b)
+    list.push(mut xs, c)
+    list.push(mut xs, d)
+    list.push(mut xs, e)
     xs
 }
 
@@ -76,7 +76,7 @@ fn remove_past_end() -> u64 {
 // expect: run insert_middle() = 129345
 fn insert_middle() -> u64 {
     let mut xs = five(1, 2, 3, 4, 5)
-    result.unwrap(list.insert(mut xs, 2, 9))
+    list.insert(mut xs, 2, 9)
     digits(xs)
 }
 
@@ -84,21 +84,21 @@ fn insert_middle() -> u64 {
 // expect: run insert_at_len() = 123459
 fn insert_at_len() -> u64 {
     let mut xs = five(1, 2, 3, 4, 5)
-    result.unwrap(list.insert(mut xs, 5, 9))
+    list.insert(mut xs, 5, 9)
     digits(xs)
 }
 
 // expect: run insert_at_front() = 912345
 fn insert_at_front() -> u64 {
     let mut xs = five(1, 2, 3, 4, 5)
-    result.unwrap(list.insert(mut xs, 0, 9))
+    list.insert(mut xs, 0, 9)
     digits(xs)
 }
 
 // expect: run insert_past_len() = fail Bounds
 fn insert_past_len() -> u64 {
     let mut xs = five(1, 2, 3, 4, 5)
-    result.unwrap(list.insert(mut xs, 6, 9))
+    list.insert(mut xs, 6, 9)
     digits(xs)
 }
 
@@ -245,7 +245,7 @@ fn sort_descending() -> u64 {
 fn sort_permutation_of_twenty() -> u64 {
     let mut xs: List[u64] = list.new()
     for i in 0u64 .. 20 {
-        result.unwrap(list.push(mut xs, (7 * i) % 20))
+        list.push(mut xs, (7 * i) % 20)
     }
     list.sort(mut xs, fn(a: u64, b: u64) -> Order {
         order.compare(a, b)
@@ -264,7 +264,7 @@ fn sort_permutation_of_twenty() -> u64 {
 fn sort_many_equal() -> u64 {
     let mut xs: List[u64] = list.new()
     for i in 0u64 .. 30 {
-        result.unwrap(list.push(mut xs, i % 3))
+        list.push(mut xs, i % 3)
     }
     list.sort(mut xs, fn(a: u64, b: u64) -> Order {
         order.compare(a, b)
@@ -305,10 +305,10 @@ fn sort_law_key(i: u64, n: u64, shape: u64) -> u64 {
 }
 
 fn sort_law_input(n: u64, shape: u64) -> List[SortLawItem] {
-    let mut xs: List[SortLawItem] = result.unwrap(list.with_capacity(n))
+    let mut xs: List[SortLawItem] = list.with_capacity(n)
     for i in 0u64 .. n {
-        let payload = result.unwrap(string.from("live"))
-        result.unwrap(list.push(mut xs, SortLawItem(id: i, key: sort_law_key(i, n, shape), payload: take payload)))
+        let payload = string.from("live")
+        list.push(mut xs, SortLawItem(id: i, key: sort_law_key(i, n, shape), payload: take payload))
     }
     take xs
 }
@@ -361,7 +361,7 @@ resource type UnstableSortAudit {
 }
 
 fn sort_law_fail_at(n: u64, shape: u64, k: u64) {
-    let mut audit = result.unwrap(UnstableSortAudit(items: sort_law_input(n, shape), n: n, shape: shape))
+    let mut audit = result.unwrap(UnstableSortAudit(items: sort_law_input(n, shape), n, shape))
     let mut calls: u64 = 0
     list.sort(mut audit.items, scoped fn(a: SortLawItem, b: SortLawItem) -> Order {
         calls += 1
@@ -448,7 +448,7 @@ fn sum_bytes_of_text() -> u64 {
 // expect: run sum_bytes_wide() = 76500
 fn sum_bytes_wide() -> u64 {
     let mut b: Bytes = list.new()
-    result.unwrap(list.fill(mut b, 300, 255))
+    list.fill(mut b, 300, 255)
     list.sum_bytes(b)
 }
 
@@ -457,24 +457,27 @@ fn sum_bytes_wide() -> u64 {
 // expect: run fill_appends() = 1777
 fn fill_appends() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 1))
-    result.unwrap(list.fill(mut xs, 3, 7))
+    list.push(mut xs, 1)
+    list.fill(mut xs, 3, 7)
     if list.capacity(xs) < 4 {
         return 99
     }
     digits(xs)
 }
 
-// Under `bound bytes 0` the growth is refused and xs is unchanged.
+// Under `bound bytes 0` the growth is refused and raises Capacity.
 // expect: run fill_under_bound() = 0
 fn fill_under_bound() -> u64 {
-    let mut xs: List[u64] = list.new()
-    let r = bound bytes 0 {
-        list.fill(mut xs, 3, 7)
-    }
-    match r {
-        Ok(Error(_)) => list.len(xs),
-        _ => 99,
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut xs: List[u64] = list.new()
+            list.fill(mut xs, 3, 7)
+            list.len(xs)
+        }
+    })
+    match caught(take r) {
+        Some(_) => 0,
+        None => 99,
     }
 }
 
@@ -487,8 +490,8 @@ fn sum_empty() -> u64 {
 // expect: run sum_to_max() = 255
 fn sum_to_max() -> u8 {
     let mut xs: List[u8] = list.new()
-    result.unwrap(list.push(mut xs, 250))
-    result.unwrap(list.push(mut xs, 5))
+    list.push(mut xs, 250)
+    list.push(mut xs, 5)
     list.sum(xs)
 }
 
@@ -496,8 +499,8 @@ fn sum_to_max() -> u8 {
 // expect: run sum_overflow() = fail Overflow
 fn sum_overflow() -> u8 {
     let mut xs: List[u8] = list.new()
-    result.unwrap(list.push(mut xs, 250))
-    result.unwrap(list.push(mut xs, 6))
+    list.push(mut xs, 250)
+    list.push(mut xs, 6)
     list.sum(xs)
 }
 
@@ -505,9 +508,9 @@ fn sum_overflow() -> u8 {
 // expect: run sum_signed() = -2
 fn sum_signed() -> i8 {
     let mut xs: List[i8] = list.new()
-    result.unwrap(list.push(mut xs, -128))
-    result.unwrap(list.push(mut xs, 127))
-    result.unwrap(list.push(mut xs, -1))
+    list.push(mut xs, -128)
+    list.push(mut xs, 127)
+    list.push(mut xs, -1)
     list.sum(xs)
 }
 
@@ -550,7 +553,7 @@ fn dedup_runs() -> u64 {
 fn dedup_empty_singleton() -> u64 {
     let mut xs: List[u64] = list.new()
     list.dedup(mut xs)
-    result.unwrap(list.push(mut xs, 7))
+    list.push(mut xs, 7)
     list.dedup(mut xs)
     digits(xs)
 }
@@ -559,7 +562,7 @@ fn dedup_empty_singleton() -> u64 {
 fn extend_copies() -> u64 {
     let mut xs: List[u64] = list.new()
     let ys = five(1, 2, 3, 4, 5)
-    result.unwrap(list.extend(mut xs, ys))
+    list.extend(mut xs, ys)
     if digits(ys) != 12345 {
         return 99
     }
@@ -568,14 +571,17 @@ fn extend_copies() -> u64 {
 
 // expect: run extend_capacity() = 0
 fn extend_capacity() -> u64 {
-    let mut xs: List[u64] = list.new()
     let ys = five(6, 7, 8, 9, 0)
-    let r = bound bytes 0 {
-        list.extend(mut xs, ys)
-    }
-    match r {
-        Ok(Error(_)) => list.len(xs),
-        _ => 99
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut xs: List[u64] = list.new()
+            list.extend(mut xs, ys)
+            list.len(xs)
+        }
+    })
+    match caught(take r) {
+        Some(_) => 0,
+        None => 99,
     }
 }
 
@@ -588,7 +594,7 @@ fn by_tens(a: u64, b: u64) -> Order {
 fn sum_bytes_tails() -> u64 {
     let mut xs: Bytes = list.new()
     for i in 0u8 .. 7 {
-        result.unwrap(list.push(mut xs, i))
+        list.push(mut xs, i)
     }
     list.sum_bytes(list.slice(xs, 0, 4)) + list.sum_bytes(list.slice(xs, 4, 7))
 }
@@ -597,7 +603,7 @@ fn sum_bytes_tails() -> u64 {
 // expect: run sum_bytes_tail_lengths() = true
 fn sum_bytes_tail_lengths() -> bool {
     let mut xs: Bytes = list.new()
-    result.unwrap(list.fill(mut xs, 7, 255))
+    list.fill(mut xs, 7, 255)
     let mut n: u64 = 0
     while n <= 7 {
         if list.sum_bytes(list.slice(xs, 0, n)) != 255 * n {
@@ -629,8 +635,8 @@ fn swap_first_out_of_bounds() -> u64 {
 // expect: run swap_owned_carriers() = true
 fn swap_owned_carriers() -> bool {
     let mut xs: List[String] = list.new()
-    result.unwrap(list.push(mut xs, result.unwrap(string.from("first"))))
-    result.unwrap(list.push(mut xs, result.unwrap(string.from("second"))))
+    list.push(mut xs, string.from("first"))
+    list.push(mut xs, string.from("second"))
     list.swap(mut xs, 0, 1)
     xs[0] == "second" && xs[1] == "first"
 }
@@ -638,23 +644,27 @@ fn swap_owned_carriers() -> bool {
 // expect: run swap_zero_sized() = 2
 fn swap_zero_sized() -> u64 {
     let mut xs: List[()] = list.new()
-    result.unwrap(list.push(mut xs, ()))
-    result.unwrap(list.push(mut xs, ()))
+    list.push(mut xs, ())
+    list.push(mut xs, ())
     list.swap(mut xs, 0, 1)
     list.len(xs)
 }
 
 // A zero-sized element has no storage to bound a length, so appending two lists of
-// 2^63 units overflows the count: Error(Capacity), and xs keeps its length.
-// expect: run append_zero_sized_count_overflows() = 9223372036854775808
-fn append_zero_sized_count_overflows() -> u64 {
-    let mut xs: List[()] = list.new()
-    let mut ys: List[()] = list.new()
-    result.unwrap(list.fill(mut xs, 9223372036854775808, ()))
-    result.unwrap(list.fill(mut ys, 9223372036854775808, ()))
-    match list.append(mut xs, ys) {
-        Ok(()) => 0,
-        Error(_) => list.len(xs)
+// 2^63 units overflows the count and raises Capacity.
+// expect: run append_zero_sized_count_overflows() = true
+fn append_zero_sized_count_overflows() -> bool {
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        let mut xs: List[()] = list.new()
+        let mut ys: List[()] = list.new()
+        list.fill(mut xs, 9223372036854775808, ())
+        list.fill(mut ys, 9223372036854775808, ())
+        list.append(mut xs, ys)
+        Ok(list.len(xs))
+    })
+    match caught(take r) {
+        Some(_) => true,
+        None => false,
     }
 }
 
@@ -719,9 +729,9 @@ fn search_by_capture() -> u64 {
 // expect: run search_by_unordered_record() = 1
 fn search_by_unordered_record() -> u64 {
     let mut xs: List[Box[SearchNode]] = list.new()
-    result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 1, name: true)))))
-    result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 3, name: false)))))
-    result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 3, name: true)))))
+    list.push(mut xs, box.new(SearchNode(frequency: 1, name: true)))
+    list.push(mut xs, box.new(SearchNode(frequency: 3, name: false)))
+    list.push(mut xs, box.new(SearchNode(frequency: 3, name: true)))
     result.unwrap(list.binary_search_by(xs, fn(x: Box[SearchNode]) -> Order {
         order.compare(x.frequency, 3)
     }))
@@ -737,8 +747,8 @@ type SearchNode {
 // expect: run get_or_edges() = 78555
 fn get_or_edges() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 7))
-    result.unwrap(list.push(mut xs, 8))
+    list.push(mut xs, 7)
+    list.push(mut xs, 8)
     let none: List[u64] = list.new()
     let a = list.get_or(xs, 0, 5)
     let b = list.get_or(xs, 1, 5)
@@ -774,8 +784,8 @@ fn find_byte4_ref(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8, d: u8) -
 fn find_byte_order_and_range() -> bool {
     let sizes: Inline[u64, 2] =[75, 360]
     for n in sizes {
-        let mut xs: Bytes = result.unwrap(list.with_capacity(n))
-        result.unwrap(list.fill(mut xs, n, 1))
+        let mut xs: Bytes = list.with_capacity(n)
+        list.fill(mut xs, n, 1)
         for at in 0u64 .. n - 1 {
             xs[at] = 255
             xs[at + 1] = 255
@@ -801,12 +811,12 @@ fn find_byte_order_and_range() -> bool {
 // expect: run find_byte_matches_scalar() = true
 fn find_byte_matches_scalar() -> bool {
     let len: u64 = 389
-    let mut xs: Bytes = result.unwrap(list.with_capacity(len))
+    let mut xs: Bytes = list.with_capacity(len)
     let mut state: u32 = 0x8c11d14b
     for _ in 0u64 .. len {
         state = int.wrapping_add(int.wrapping_mul(state, 1664525), 1013904223)
         let byte: u8 = int.narrow(state >> 24)
-        result.unwrap(list.push(mut xs, byte))
+        list.push(mut xs, byte)
     }
     for start in 0u64 .. 160 {
         state = int.wrapping_add(int.wrapping_mul(state, 1664525), 1013904223)
@@ -818,8 +828,8 @@ fn find_byte_matches_scalar() -> bool {
         }
     }
     // Exercise misses and late hits right around the 160-byte SIMD crossover.
-    let mut flat: Bytes = result.unwrap(list.with_capacity(200))
-    result.unwrap(list.fill(mut flat, 200, b'z'))
+    let mut flat: Bytes = list.with_capacity(200)
+    list.fill(mut flat, 200, b'z')
     for n in 155u64 .. 166 {
         if list.find_byte(flat, 0, n, b'a') != None {
             return false
@@ -838,8 +848,8 @@ fn find_byte_matches_scalar() -> bool {
 // expect: run find_byte4_order_and_range() = true
 fn find_byte4_order_and_range() -> bool {
     let n: u64 = 360
-    let mut xs: Bytes = result.unwrap(list.with_capacity(n))
-    result.unwrap(list.fill(mut xs, n, b'z'))
+    let mut xs: Bytes = list.with_capacity(n)
+    list.fill(mut xs, n, b'z')
     let needles: Inline[u8, 4] =[b'"', b',', 13, 10]
     for at in 0u64 .. n - 1 {
         let first_byte = needles[at % 4]
@@ -875,19 +885,19 @@ fn find_byte4_order_and_range() -> bool {
 
 // expect: run find_byte_reversed_range() = fail Bounds
 fn find_byte_reversed_range() -> Option[u64] {
-    list.find_byte(result.unwrap(b"abc"), 2, 1, b'b')
+    list.find_byte(b"abc", 2, 1, b'b')
 }
 
 // expect: run find_byte4_past_end() = fail Bounds
 fn find_byte4_past_end() -> Option[u64] {
-    list.find_byte4(result.unwrap(b"abc"), 0, 4, b'"', b',', 13, 10)
+    list.find_byte4(b"abc", 0, 4, b'"', b',', 13, 10)
 }
 
 // Under a tight step bound, long scans stop with Steps rather than escaping the bound.
 // expect: run find_byte_step_bound() = true
 fn find_byte_step_bound() -> bool {
-    let mut xs: Bytes = result.unwrap(list.with_capacity(512))
-    result.unwrap(list.fill(mut xs, 512, b'z'))
+    let mut xs: Bytes = list.with_capacity(512)
+    list.fill(mut xs, 512, b'z')
     xs[511] = b'a'
     let tight1 = bound steps 1 {
         list.find_byte(xs, 0, 512, b'a')
@@ -918,4 +928,20 @@ fn find_byte_step_bound() -> bool {
         _ => false,
     }
     ok_t1 && ok_t4 && ok_a1 && ok_a4
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

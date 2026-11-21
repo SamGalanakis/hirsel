@@ -1,9 +1,9 @@
 // test-env: HIRSEL_ISA_CAP=2
 fn vector(raw: Bytes, coded: Bytes) -> bool {
     let mut out: Bytes = list.new()
-    result.unwrap(base64.encode(raw, mut out))
-    let encoded: String = result.unwrap(base64.encode_string(raw))
-    out == coded && string.as_bytes(encoded) == coded && match result.unwrap(base64.decode(coded)) {
+    base64.encode(raw, mut out)
+    let encoded: String = base64.encode_string(raw)
+    out == coded && string.as_bytes(encoded) == coded && match base64.decode(coded) {
         Some(b) => b == raw,
         None => false
     }
@@ -12,24 +12,24 @@ fn vector(raw: Bytes, coded: Bytes) -> bool {
 // RFC 4648 section 10. Mutant: pad_wrong writes A instead of '='.
 // expect: run rfc4648() = true
 fn rfc4648() -> bool {
-    vector(result.unwrap(b""), result.unwrap(b"")) && vector(result.unwrap(b"f"), result.unwrap(b"Zg==")) && vector(result.unwrap(b"fo"), result.unwrap(b"Zm8=")) && vector(result.unwrap(b"foo"), result.unwrap(b"Zm9v")) && vector(result.unwrap(b"foob"), result.unwrap(b"Zm9vYg==")) && vector(result.unwrap(b"fooba"), result.unwrap(b"Zm9vYmE=")) && vector(result.unwrap(b"foobar"), result.unwrap(b"Zm9vYmFy"))
+    vector(b"", b"") && vector(b"f", b"Zg==") && vector(b"fo", b"Zm8=") && vector(b"foo", b"Zm9v") && vector(b"foob", b"Zm9vYg==") && vector(b"fooba", b"Zm9vYmE=") && vector(b"foobar", b"Zm9vYmFy")
 }
 
 // RFC 4648 sections 3.2, 3.3 and 3.5. Mutant: skip pad-bit validation.
 // expect: run canonical() = true
 fn canonical() -> bool {
-    result.unwrap(base64.decode(result.unwrap(b"Zh=="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zm9="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zg"))) == None && result.unwrap(base64.decode(result.unwrap(b"Z g="))) == None && result.unwrap(base64.decode(result.unwrap(b"===="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zg==AAAA"))) == None
+    base64.decode(b"Zh==") == None && base64.decode(b"Zm9=") == None && base64.decode(b"Zg") == None && base64.decode(b"Z g=") == None && base64.decode(b"====") == None && base64.decode(b"Zg==AAAA") == None
 }
 
 // RFC 4648 alphabet on a vector long enough to fill several output words.
 // A wrong carry between the second and third words changes the decoded bytes.
 // expect: run word_boundaries() = true
 fn word_boundaries() -> bool {
-    let raw = result.unwrap(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ>??>>>!")
-    let coded = result.unwrap(b"MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==")
-    let mut out = result.unwrap(b"prefix:")
-    result.unwrap(base64.encode(raw, mut out))
-    out == result.unwrap(b"prefix:MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==") && result.unwrap(base64.decode(coded)) == Some(raw) && result.unwrap(base64.decode(result.unwrap(b"/DEyMzQ@Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ=="))) == None
+    let raw = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ>??>>>!"
+    let coded = b"MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ=="
+    let mut out = b"prefix:"
+    base64.encode(raw, mut out)
+    out == b"prefix:MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==" && base64.decode(coded) == Some(raw) && base64.decode(b"/DEyMzQ@Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==") == None
 }
 
 // RFC 4648's arithmetic alphabet is independent of the vector offset tables.
@@ -68,18 +68,18 @@ fn reference_base64(raw: Bytes) -> Bytes {
             0
         }
         let word = (a << 16) | (b << 8) | c
-        result.unwrap(list.push(mut out, reference_digit(int.truncate(word >> 18))))
-        result.unwrap(list.push(mut out, reference_digit(int.truncate((word >> 12) & 63))))
-        result.unwrap(list.push(mut out, if left > 1 {
+        list.push(mut out, reference_digit(int.truncate(word >> 18)))
+        list.push(mut out, reference_digit(int.truncate((word >> 12) & 63)))
+        list.push(mut out, if left > 1 {
             reference_digit(int.truncate((word >> 6) & 63))
         } else {
             b'='
-        }))
-        result.unwrap(list.push(mut out, if left > 2 {
+        })
+        list.push(mut out, if left > 2 {
             reference_digit(int.truncate(word & 63))
         } else {
             b'='
-        }))
+        })
         at += 3
     }
     take out
@@ -91,12 +91,12 @@ fn reference_base64(raw: Bytes) -> Bytes {
 fn vector_blocks_match_rfc4648() -> bool {
     let mut random: u64 = 0x5281f625bd4c3315
     for n in 0u64 .. 130u64 {
-        let mut raw: Bytes = result.unwrap(list.with_capacity(n))
+        let mut raw: Bytes = list.with_capacity(n)
         for _ in 0u64 .. n {
             random ^= random << 13
             random ^= random >> 7
             random ^= random << 17
-            result.unwrap(list.push(mut raw, int.truncate(random)))
+            list.push(mut raw, int.truncate(random))
         }
         let mut coded = reference_base64(raw)
         if !vector(raw, coded) {
@@ -110,7 +110,7 @@ fn vector_blocks_match_rfc4648() -> bool {
                 b'%'
             }
             let refused = bound bytes 0 {
-                base64.decode(coded)? == None
+                base64.decode(coded) == None
             }
             match refused {
                 Ok(true) => (),
@@ -130,7 +130,7 @@ fn rust_base64_rejects_bad_quanta() -> bool {
     let cases: Inline[String, 6] =["A", "AAAAA", "A===", "ABCDA===", "AAAAAAAAAAAAAAAAAAAAAAAAAAAA====", "AAAAAAAAAAAAAAAAAAAAAAAAAAA=====",]
     for input in cases {
         let refused = bound bytes 0 {
-            base64.decode(string.as_bytes(input))? == None
+            base64.decode(string.as_bytes(input)) == None
         }
         match refused {
             Ok(true) => (),
@@ -140,21 +140,24 @@ fn rust_base64_rejects_bad_quanta() -> bool {
     true
 }
 
-// Capacity refusal leaves an existing output buffer untouched, and a tight step
-// bound stops encoding cleanly on long input.
+// A refused output buffer raises Capacity, and a tight step bound stops encoding
+// cleanly on long input.
 // expect: run encode_capacity_and_steps() = true
 fn encode_capacity_and_steps() -> bool {
-    let mut raw: Bytes = result.unwrap(list.with_capacity(256))
+    let mut raw: Bytes = list.with_capacity(256)
     for i in 0u64 .. 256 {
-        result.unwrap(list.push(mut raw, int.truncate(i * 17 + 3)))
+        list.push(mut raw, int.truncate(i * 17 + 3))
     }
-    let mut out = result.unwrap(b"keep:")
-    let cap_refused = bound bytes 0 {
-        base64.encode(raw, mut out)
-    }
-    let ok_cap = match cap_refused {
-        Ok(Error(_)) => out == result.unwrap(b"keep:"),
-        _ => false,
+    let cap_refused = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut out: Bytes = list.new()
+            base64.encode(raw, mut out)
+            list.len(out)
+        }
+    })
+    let ok_cap = match caught(take cap_refused) {
+        Some(_) => true,
+        None => false,
     }
     let tight = bound steps 1 {
         base64.encode_string(raw)
@@ -164,4 +167,20 @@ fn encode_capacity_and_steps() -> bool {
         Ok(_) => false,
     }
     ok_cap && ok_steps
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

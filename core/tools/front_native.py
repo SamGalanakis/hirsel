@@ -43,7 +43,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
             if name in ('mkdtemp', 'host-wait-cancel'):
                 string = next(s for s in sources if s['modules'] == ['string'])
                 adapted = scratch / 'string.hirsel'
-                adapted.write_text(Path(string['file']).read_text() + '\npub fn proof_temp_name() -> String { let b:Bytes = result.unwrap(list.with_capacity(32)); of_bytes(take b) }\n')
+                adapted.write_text(Path(string['file']).read_text() + '\npub fn proof_temp_name() -> String { let b:Bytes = list.with_capacity(32); of_bytes(take b) }\n')
                 string['file'] = str(adapted)
             inputs = scratch / 'inputs.json'
             inputs.write_text(json.dumps({'core': core, 'packages': [
@@ -52,16 +52,13 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                  'sources': [{'file': str(paths[name]), 'modules': ['main'], 'signatures': False}]}]}))
             limit = {'args-returned-views': 288, 'string-growth': 304,
                      'string-growth-refusal': 288, 'string-shorten': 296}.get(name, 1_048_576)
-            grants = []
-            if name in ('streams', 'args-print', 'stdout-closed', 'stderr-closed', 'stdout-cancel', 'stderr-cancel'):
-                grants = ['Stdout', 'Stderr', 'Tasks']
-            if name == 'args-returned-views':
-                grants = ['Stdout']
-            host = name.startswith('host') or name in ('clocks', 'mkdtemp', 'mkdtemp-bounds', 'sleep-peer')
-            if host:
-                grants = ['Clock', 'Tasks']
-            if name in ('sleep-peer', 'sleep-cancel', 'parent-failure'):
-                grants = ['Clock', 'Stdout', 'Tasks']
+            sleeping = ('sleep-peer', 'sleep-cancel', 'parent-failure')
+            grants = {
+                'Stdout': ('streams', 'args-print', 'args-returned-views', 'stdout-closed', 'stdout-cancel', *sleeping),
+                'Stderr': ('streams', 'stderr-closed', 'stderr-cancel'),
+                'Clock': ('clocks', 'host-rename-sleep', *sleeping),
+                'Tasks': ('stdout-cancel', 'stderr-cancel', 'host-close-cancel', 'host-wait-cancel', *sleeping),
+            }
             binary = scratch / 'program'
             command = [str(compiler), 'build', '--source-core', '--inputs', str(inputs),
                        '--entry', 'app@1/main/main', '--backend', backend,
@@ -69,10 +66,11 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                        '--limit', str(limit), '--json', '-o', str(binary)]
             if optimize:
                 command.append('--release')
-            if host:
+            if name.startswith('host') or name in ('mkdtemp', 'mkdtemp-bounds'):
                 command.extend(['--dir', str(grant)])
-            for capability in grants:
-                command.extend(['--grant', capability])
+            for capability, cases in grants.items():
+                if name in cases:
+                    command.extend(['--grant', capability])
             if target:
                 command.extend(['--target', target])
             if cc:

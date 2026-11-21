@@ -936,7 +936,7 @@ fn float(x: f64, canonical_nan: bool) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// One RFC 6455 client session speaking hirsel.1
+// One RFC 6455 client session speaking hirsel.2
 
 struct Url {
     host: String,
@@ -1008,7 +1008,7 @@ impl Session {
         };
         let key = base64(&random::<16>()?);
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.1\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.2\r\n\r\n",
             url.path, url.host, url.port
         );
         session.stream.write_all(request.as_bytes())?;
@@ -1042,8 +1042,8 @@ impl Session {
         if header("Sec-WebSocket-Accept").as_deref() != Some(accept.as_str()) {
             return Err("server's Sec-WebSocket-Accept does not answer our key".into());
         }
-        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.1") {
-            return Err("server did not select the hirsel.1 subprotocol".into());
+        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.2") {
+            return Err("server did not select the hirsel.2 subprotocol".into());
         }
         Ok(session)
     }
@@ -1164,7 +1164,7 @@ impl Session {
 }
 
 /// Hello for one entry, Welcome, Placed, then one Call on a fresh anonymous
-/// principal (stream 0, position 0). The Call is sent only once the server has
+/// Caller (stream 0, position 0). The Call is sent only once the server has
 /// placed the entry under the Describe fingerprints; it is never resent.
 fn exchange(
     url: &Url,
@@ -1198,6 +1198,13 @@ fn exchange(
         let values = &received["values"];
         match tag {
             "Welcome" if !welcomed => {
+                let subject = values[0]["subject"]
+                    .as_str()
+                    .and_then(from_hex)
+                    .ok_or("Welcome carries an invalid Caller")?;
+                if subject.len() > 64 {
+                    return Err("Welcome Caller subject exceeds 64 bytes".into());
+                }
                 welcomed = true;
                 let digest = from_hex(values[3].as_str().unwrap_or_default()).unwrap_or_default();
                 let target = values[4].as_str().unwrap_or_default();

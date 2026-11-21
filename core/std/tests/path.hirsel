@@ -15,7 +15,7 @@ fn optional_text(actual: Option[View[String]], take expected: Option[String]) ->
 // Kills accepting empty or trailing components and treating "..." as "..".
 // expect: run host_denied(dir) = true
 fn host_denied(d: Dir) -> bool waits {
-    let mut scratch = result.unwrap(string.with_capacity(32))
+    let mut scratch = string.with_capacity(32)
     for (p, parent, grandparent) in[
     // Empty, repeated, and dot components.
     ("", "", ""), ("/", "", ""), ("a/", "", ""), ("/a", "", ""), ("a//b", "", ""), (".", "", ""), ("..", "", ""), ("a/./b", "", ""), ("a/../b", "", ""),
@@ -33,7 +33,7 @@ fn host_denied(d: Dir) -> bool waits {
             return false
         }
     }
-    let long = result.unwrap(string.repeat("x", 255))
+    let long = string.repeat("x", 255)
     host_row(d, mut scratch, long, "", "")
 }
 
@@ -87,8 +87,8 @@ fn one_name() -> bool {
 // Kills writing the separator before checking p. An owned buffer has room for that write.
 // expect: run join_invalid_is_atomic() = true
 fn join_invalid_is_atomic() -> bool {
-    let mut out = result.unwrap(string.with_capacity(4))
-    result.unwrap(string.push(mut out, "x"))
+    let mut out = string.with_capacity(4)
+    string.push(mut out, "x")
     match path.join(mut out, "a/../b") {
         Error(Invalid(at)) => at == 2 && out == "x",
         _ => false,
@@ -100,14 +100,18 @@ fn join_invalid_is_atomic() -> bool {
 // Kills writing the slash into already-owned spare room before growth succeeds.
 // expect: run join_capacity_is_atomic() = true
 fn join_capacity_is_atomic() -> bool {
-    result.unwrap(bound bytes 23 {
-        let mut out = result.unwrap(string.with_capacity(4))
-        result.unwrap(string.push(mut out, "x"))
-        match path.join(mut out, "1234567") {
-            Error(Capacity(c)) => c.requested == 16 && c.available == 15 && out == "x",
-            _ => false,
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 23 {
+            let mut joined = string.with_capacity(4)
+            string.push(mut joined, "x")
+            let _ = path.join(mut joined, "1234567")
+            false
         }
     })
+    match caught(take out) {
+        Some(c) => c.requested == 16 && c.available == 15,
+        None => false,
+    }
 }
 
 // P3. Join contract in core/std/api/path.md and core/std/path.hirsel.
@@ -180,7 +184,7 @@ fn component_strip() -> bool {
 // expect: run go_join_relative_paths() = true
 fn go_join_relative_paths() -> bool {
     for (base, tail, expected) in[("", "a", "a"), ("a", "b", "a/b"), ("", "b", "b"),] {
-        let mut out = result.unwrap(string.from(base))
+        let mut out = string.from(base)
         let Ok(()) = path.join(mut out, tail) else {
             return false
         }
@@ -208,4 +212,20 @@ fn rust_hidden_file_decomposition() -> bool {
         }
     }
     true
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

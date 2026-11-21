@@ -235,6 +235,15 @@ impl Function<'_, '_, '_> {
                 )?;
                 0
             }
+            RtOp::LaunchHandle => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_launch_handle",
+                    &[P, U],
+                    &[U],
+                    &[self.context, args[0]],
+                )?[0];
+                1
+            }
             RtOp::DescribeEmit => {
                 outputs[0] = self.c_call(
                     "hirsel_core_describe_emit",
@@ -261,6 +270,9 @@ impl Function<'_, '_, '_> {
                     HostOp::Open => (args[1], args[2]),
                     HostOp::Read
                     | HostOp::Write
+                    | HostOp::OpenDir
+                    | HostOp::Stat
+                    | HostOp::NextEntries
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp
                     | HostOp::Remove
@@ -269,11 +281,15 @@ impl Function<'_, '_, '_> {
                     | HostOp::Stderr
                     | HostOp::Random => (args[1], no_mode),
                     HostOp::Close
+                    | HostOp::Entries
+                    | HostOp::StatFile
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::WallMs
                     | HostOp::MonoNs
                     | HostOp::Rename
+                    | HostOp::ReadAt
+                    | HostOp::WriteAt
                     | HostOp::SleepUntil
                     | HostOp::Sync
                     | HostOp::SyncDir
@@ -290,6 +306,26 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
+                    | HostOp::StdinRead
+                    | HostOp::EnvGet
+                    | HostOp::EnvLen
+                    | HostOp::EnvName
+                    | HostOp::EnvNarrow
+                    | HostOp::ProvideClock
+                    | HostOp::ProvideRandom
+                    | HostOp::ProvideProcess
+                    | HostOp::ClockAdvance
+                    | HostOp::ClockSetWall
+                    | HostOp::ClockIdle
+                    | HostOp::ProcessTrigger
+                    | HostOp::ProvideStdout
+                    | HostOp::ProvideStderr
+                    | HostOp::PortNext
+                    | HostOp::CallWord
+                    | HostOp::CallPayload
+                    | HostOp::PortReply
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -309,6 +345,26 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
+                    | HostOp::StdinRead
+                    | HostOp::EnvGet
+                    | HostOp::EnvLen
+                    | HostOp::EnvName
+                    | HostOp::EnvNarrow
+                    | HostOp::ProvideClock
+                    | HostOp::ProvideRandom
+                    | HostOp::ProvideProcess
+                    | HostOp::ClockAdvance
+                    | HostOp::ClockSetWall
+                    | HostOp::ClockIdle
+                    | HostOp::ProcessTrigger
+                    | HostOp::ProvideStdout
+                    | HostOp::ProvideStderr
+                    | HostOp::PortNext
+                    | HostOp::CallWord
+                    | HostOp::CallPayload
+                    | HostOp::PortReply
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();
@@ -319,13 +375,22 @@ impl Function<'_, '_, '_> {
                         operands.extend_from_slice(&args[..count]);
                         operands.push(site);
                         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
+                        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+                            results[0] = P;
+                        }
                         if matches!(op, HostOp::Listen | HostOp::Accept) {
                             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
                         } else if op == HostOp::TlsConnect {
                             results.extend([U; 4]);
                         }
-                        self.c_call(op.net_symbol(), &params, &results, &operands)?
+                        self.c_call(op.adapter_symbol(), &params, &results, &operands)?
                     }
+                    HostOp::ReadAt | HostOp::WriteAt => self.c_call(
+                        "hirsel_core_host_at",
+                        &[P, K, U, U, P, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                        &[self.context, code, args[0], args[1], args[2], site],
+                    )?,
                     HostOp::Rename => self.c_call(
                         "hirsel_core_host_rename",
                         &[P, U, P, P, U],
@@ -337,6 +402,12 @@ impl Function<'_, '_, '_> {
                         &[P, U, U, U],
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
                         &[self.context, args[0], args[1], site],
+                    )?,
+                    HostOp::Stat | HostOp::StatFile => self.c_call(
+                        op.io_symbol(),
+                        &[P, K, U, P, K, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::I64), K, K],
+                        &[self.context, code, args[0], operand, mode, site],
                     )?,
                     _ => self.c_call(
                         op.io_symbol(),
@@ -362,6 +433,9 @@ impl Function<'_, '_, '_> {
                         outputs[i] = values[i + 1];
                     }
                     8
+                } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+                    outputs[4] = values[5];
+                    5
                 } else {
                     n
                 }

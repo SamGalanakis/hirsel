@@ -148,24 +148,8 @@ fn execute_target_object_checked(
     memcheck: bool,
 ) -> Vec<NativeReport> {
     let module = input.module();
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "hirsel-core-llvm-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    struct Scratch(PathBuf);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            if std::thread::panicking() {
-                eprintln!("native failure artifacts: {}", self.0.display());
-            } else {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-    }
-    let _scratch = Scratch(dir.clone());
+    let scratch = host_memory::NativeArtifacts::new();
+    let dir = scratch.path();
     let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
     input.verify(target, observing);
     let bytes = object.unwrap_or_else(|| {

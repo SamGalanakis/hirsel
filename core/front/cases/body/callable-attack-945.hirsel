@@ -101,7 +101,6 @@ fn make_stamp(r: Region, n: u64) -> Result[Stamp in r, Capacity] {
         dest.put(mut d, Stamp(n: n))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
     }
 }

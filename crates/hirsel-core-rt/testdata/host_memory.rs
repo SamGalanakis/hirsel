@@ -1,6 +1,36 @@
 //! Shared native FAIL-15 oracle, compiled independently by both emitters.
 use hirsel_core_ir::{FuncId, Module};
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+pub(crate) struct NativeArtifacts(tempfile::TempDir);
+
+impl NativeArtifacts {
+    pub(crate) fn new() -> Self {
+        Self(tempfile::tempdir().unwrap())
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for NativeArtifacts {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && std::env::var_os("HIRSEL_KEEP_TEST_SCRATCH").is_some_and(|keep| !keep.is_empty())
+        {
+            self.0.disable_cleanup(true);
+            eprintln!(
+                "Kept native failure artifacts at {}",
+                self.0.path().display()
+            );
+        }
+    }
+}
 
 #[allow(dead_code)] // Each engine uses one of these ABIs during the site cutover.
 pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, FuncId) -> String) {
@@ -30,26 +60,8 @@ fn check_abi(
 ) {
     let module = hirsel_core_ir::text::parse(include_str!("host_memory.core")).unwrap();
     hirsel_core_ir::wf::module(&module).unwrap();
-    let directory = std::env::temp_dir().join(format!(
-        "hirsel-native-host-memory-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir(&directory).unwrap();
-    struct Scratch(PathBuf);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            if std::thread::panicking() {
-                eprintln!("native host-memory artifacts: {}", self.0.display());
-            } else {
-                fs::remove_dir_all(&self.0).unwrap();
-            }
-        }
-    }
-    let _scratch = Scratch(directory.clone());
+    let scratch = NativeArtifacts::new();
+    let directory = scratch.path();
     for (name, text) in [
         (
             "hirsel_core_rt.h",
@@ -123,7 +135,7 @@ fn check_abi(
     };
     let linked = Command::new(cc)
         .args(["-std=c11", "-O0", "-no-pie", "-I"])
-        .arg(&directory)
+        .arg(directory)
         .arg(directory.join("caller.c"))
         .arg(directory.join("input.o"))
         .arg(archive)

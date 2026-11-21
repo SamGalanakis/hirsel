@@ -55,7 +55,7 @@ pub fn map_string() -> u64 {
 }
 
 pub fn hidden_log() -> u64 {
-    let l: Log[u64] = result.unwrap(log.new())
+    let l: Log[u64] = log.new()
     let n = run(fn() -> u64 {
         let _ = log.append(l, 7u64);
         2
@@ -81,7 +81,7 @@ pub fn region_view() -> u64 {
 // expect: run region_view() = 1
 // FAIL-16 permits the Log's hidden append to survive the caught failure.
 pub fn fail_log() -> u64 {
-    let l: Log[u64] = result.unwrap(log.new())
+    let l: Log[u64] = log.new()
     let n = run(fn() -> u64 {
         let _ = log.append(l, 7u64);
         fail("x")
@@ -95,7 +95,6 @@ fn make_stamp(r: Region, n: u64) -> Result[Stamp in r, Capacity] {
         dest.put(mut d, Stamp(n: n))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
     }
 }

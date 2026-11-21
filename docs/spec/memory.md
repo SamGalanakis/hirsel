@@ -68,7 +68,7 @@ fn width(s: String) -> u64 {
 }
 ```
 ```hirsel
-fn leak(src: String) -> Region { region r { r } }          // refused: MEM-7
+fn leak() -> u64 { let k = region r { r }; 0 }             // refused: MEM-7
 ```
 ```hirsel
 fn swap(mut r: Region, s: Region) { r = s }                // refused: OWN-11, s is not an anchor of r
@@ -127,10 +127,9 @@ fn digits(n: u64, r: Region) -> FixedSpan[u8] in r {
 }
 ```
 ```hirsel
-fn names(r: Region, s: String) -> FixedSpan[String] in r {
-  let mut b = span.builder(r)                                // refused: MEM-3, String is not plain
-  span.push(mut b, s)
-  span.finish(take b)
+fn names(r: Region) -> FixedSpan[String] in r {  // refused: MEM-12, String is not plain
+  let mut b: SpanBuilder[String, in r] = span.builder(r)  // refused: LANG-12, T: plain
+  span.finish(take b)                                     // refused: LANG-12, T: plain
 }
 ```
 
@@ -349,8 +348,9 @@ on types; nothing is traversed.
 fn width(s: String) -> u64 { region r { let t = text.copy_in(r, s); text.len(t) } }
 ```
 ```hirsel
-fn leak(s: String) -> Text {
-  region r { text.copy_in(r, s) }                           // refused: MEM-7
+fn leak(s: String) -> u64 {
+  let t = region r { text.copy_in(r, s) }                   // refused: MEM-7, t names r
+  text.len(t)
 }
 ```
 
@@ -416,7 +416,7 @@ fn eval(e: Expr) -> i64 { match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) 
 ```hirsel
 @compact(u32) type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
 fn keep(e: Expr) -> Link[Expr] { match e { Add(a, _) => a, _ => fail("leaf") } }
-                                              // refused: MEM-10, a link is not a value
+                                              // refused: LANG-11, a link is not a value: a is a view
 ```
 
 ### MEM-11: Active-size variants
@@ -465,8 +465,8 @@ when every such cycle keeps its type arguments; inline it still may not.
 fn count(j: J) -> u64 { match j { Null => 1, Arr(xs) => { let mut n: u64 = 1; for x in xs { n += count(x) }; n } } }
 ```
 ```hirsel
-fn names(xs: FixedSpan[Text]) -> u64 { span.len(xs) }       // refused: MEM-12, Text has no fixed size
-fn units(xs: SeqSpan[()]) -> u64 { seq.len(xs) }            // refused: MEM-12, () is not packed
+fn names(xs: FixedSpan[Text]) -> u64 { 0 }                  // refused: MEM-12, Text has no fixed size
+fn units(xs: SeqSpan[()]) -> u64 { 0 }                      // refused: MEM-12, () is not packed
 ```
 ```hirsel
 fn first(xs: SeqSpan[u64]) -> u64 { xs[0] }                 // refused: LANG-21, use seq.nth
@@ -633,7 +633,7 @@ fn twice(mut a: Arc[Hits]) -> Option[u64] {
 type Leaf: shareable + send { n: u64 }
 type Pair: shareable + send { leaf: Arc[Leaf] }
 fn reach(mut p: Arc[Pair]) -> Option[()] {
-  arc.with_unique(mut p.leaf, scoped fn(mut l: Leaf) { l.n = 1 })   // refused: OWN-11, p.leaf is reached through an Arc
+  arc.with_unique(mut p.leaf, scoped fn(mut l: Leaf) { l.n = 1 })   // refused: OWN-8, p.leaf is reached through an Arc
 }
 ```
 

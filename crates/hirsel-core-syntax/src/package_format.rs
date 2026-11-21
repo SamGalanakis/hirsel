@@ -1,5 +1,5 @@
 //! Package formatting is prepare-then-write: source refusals never leave a partial reformat.
-use crate::{Diagnostic, ParseMode, ResourceRefusal, Symbols, format, parse_bytes};
+use crate::{Diagnostic, ParseMode, ResourceRefusal, Symbols, format_verified, parse_bytes};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -57,8 +57,9 @@ pub fn format_package(
 }
 
 /// Parse and prepare every input before writing any. Check never modifies a file.
-/// A parse/resource refusal returns a report and writes nothing; an I/O failure
-/// returns Err. Write-time I/O errors may leave earlier successfully written files.
+/// A parse/resource refusal returns a report and writes nothing. A read or
+/// equivalence failure returns Err before any write. Write-time I/O errors may
+/// leave earlier successfully written files.
 /// Repeated paths are formatted once; giving two modes for one path is invalid.
 pub fn format_files(
     inputs: &[(PathBuf, ParseMode)],
@@ -81,7 +82,9 @@ pub fn format_files(
     for (path, mode) in inputs {
         let bytes = fs::read(&path)?;
         let parsed = parse_bytes(&bytes, mode, &mut symbols);
-        match format(&parsed) {
+        match format_verified(&parsed, mode, &mut symbols)
+            .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?
+        {
             Some(text) if text.as_bytes() != bytes => {
                 report.differing.push(path.clone());
                 prepared.push((path.clone(), text));
@@ -106,28 +109,17 @@ pub fn format_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    struct Directory(PathBuf);
+    struct Directory(tempfile::TempDir);
     impl Directory {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "hirsel-format-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir_all(root.join("nested")).unwrap();
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join("nested")).unwrap();
             Self(root)
         }
         fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
-            let path = self.0.join(name);
+            let path = self.0.path().join(name);
             fs::write(&path, bytes).unwrap();
             path
-        }
-    }
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
         }
     }
     #[test]
@@ -136,15 +128,15 @@ mod tests {
         let a = dir.write("a.hirsel", b"fn a(){1}");
         let b = dir.write("nested/b.hirsel", b"fn b(){}\n");
         dir.write("ignored.txt", b"not source");
-        let report = format_package(&dir.0, ParseMode::Source, FormatAction::Check).unwrap();
+        let report = format_package(dir.0.path(), ParseMode::Source, FormatAction::Check).unwrap();
         assert_eq!(report.files, [a.clone(), b.clone()]);
         assert_eq!(report.differing, [a.clone(), b.clone()]);
         assert!(report.refused.is_empty());
         assert_eq!(fs::read(&a).unwrap(), b"fn a(){1}");
-        let written = format_package(&dir.0, ParseMode::Source, FormatAction::Write).unwrap();
+        let written = format_package(dir.0.path(), ParseMode::Source, FormatAction::Write).unwrap();
         assert_eq!(written.differing, report.differing);
         assert_eq!(fs::read_to_string(a).unwrap(), "fn a() {\n    1\n}\n");
-        let clean = format_package(&dir.0, ParseMode::Source, FormatAction::Check).unwrap();
+        let clean = format_package(dir.0.path(), ParseMode::Source, FormatAction::Check).unwrap();
         assert!(clean.differing.is_empty());
         assert!(clean.refused.is_empty());
     }
@@ -154,7 +146,8 @@ mod tests {
             let dir = Directory::new();
             let a = dir.write("a.hirsel", b"fn a(){1}");
             let b = dir.write("nested/b.hirsel", bad);
-            let report = format_package(&dir.0, ParseMode::Source, FormatAction::Write).unwrap();
+            let report =
+                format_package(dir.0.path(), ParseMode::Source, FormatAction::Write).unwrap();
             assert_eq!(report.differing, [a.clone()]);
             assert_eq!(report.refused.len(), 1);
             assert_eq!(report.refused[0].path, b);
@@ -168,14 +161,14 @@ mod tests {
         let dir = Directory::new();
         let a = dir.write("a.hirsel", b"pub fn f(x:u64)->u64");
         assert_eq!(
-            format_package(&dir.0, ParseMode::Source, FormatAction::Write)
+            format_package(dir.0.path(), ParseMode::Source, FormatAction::Write)
                 .unwrap()
                 .refused
                 .len(),
             1
         );
         assert!(
-            format_package(&dir.0, ParseMode::Signatures, FormatAction::Write)
+            format_package(dir.0.path(), ParseMode::Signatures, FormatAction::Write)
                 .unwrap()
                 .refused
                 .is_empty()
@@ -193,7 +186,7 @@ mod tests {
             format_files(
                 &[
                     (a.clone(), ParseMode::Source),
-                    (dir.0.join("z.hirsel"), ParseMode::Source)
+                    (dir.0.path().join("z.hirsel"), ParseMode::Source)
                 ],
                 FormatAction::Write
             )
@@ -207,10 +200,10 @@ mod tests {
         use std::os::unix::fs::symlink;
         let dir = Directory::new();
         let file = dir.write("a.hirsel", b"fn a(){1}");
-        symlink(&dir.0, dir.0.join("nested/cycle")).unwrap();
-        let link = dir.0.join("b.hirsel");
+        symlink(dir.0.path(), dir.0.path().join("nested/cycle")).unwrap();
+        let link = dir.0.path().join("b.hirsel");
         symlink(&file, &link).unwrap();
-        let report = format_package(&dir.0, ParseMode::Source, FormatAction::Check).unwrap();
+        let report = format_package(dir.0.path(), ParseMode::Source, FormatAction::Check).unwrap();
         assert_eq!(report.files, [file, link]);
     }
 }

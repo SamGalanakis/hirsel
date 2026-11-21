@@ -239,7 +239,7 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
 }
 
 /// The oracle is the revision the build reports (revision.rs, from the checked
-/// IR, not from the link), which a Call header must also agree with. Wrong
+/// IR, not from the link), which a Run header must also agree with. Wrong
 /// implementations caught: a symbol that is the executable's key, the sources
 /// digest (a comment edit would refuse) or any other hash than the revision.
 #[test]
@@ -259,6 +259,9 @@ fn tape_code_revision_is_the_entry_revision() {
         assert!(product.accepted());
         let mut options = native_options(backend, dir.path());
         options.output = dir.path().join(format!("{backend:?}"));
+        options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+        options.runtime = env_record_runtime();
+        options.recording = true;
         let built = product.build(&entry, &options).unwrap();
         assert_eq!(
             code_revision_of(&built.executable),
@@ -268,8 +271,7 @@ fn tape_code_revision_is_the_entry_revision() {
     }
 }
 
-/// Builds core/front/tape/run.hirsel, with `edit` applied to its text,
-/// into `store`.
+/// Applies a source edit and builds the recording or replay fixture.
 fn tape_run_build(
     backend: Backend,
     dir: &Path,
@@ -278,9 +280,8 @@ fn tape_run_build(
     replay: Option<crate::ReplayPlan>,
 ) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = std::fs::read_to_string(root.join("core/front/tape/run.hirsel"))
-        .unwrap()
-        .replace(edit.0, edit.1);
+    let source =
+        include_str!("../../../core/front/fixtures/recording/run.hirsel").replace(edit.0, edit.1);
     let mut request = source_request(&source, dir);
     request.inputs.packages[1] =
         PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
@@ -326,8 +327,8 @@ fn tape_run(program: &Path, argv: &[&str], record: Option<&Path>) -> (Option<i32
 
 /// External recording and replay end to end: recording runs with HIRSEL_RECORD
 /// set, replays with no grants on either engine, refuses a changed revision
-/// with exit 2 unless `--diagnose` is set, and reports `Diverged(Arg)` with
-/// exit 1 when diagnosed across an edit.
+/// with exit 2 unless `--diagnose` is set, and checks both a changed write argument
+/// and a changed final outcome under diagnose.
 fn tape_run_replays(backend: Backend, other: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let tape = dir.path().join("run.tape");
@@ -344,7 +345,13 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         path: tape.to_str().unwrap().into(),
         diagnose: false,
     };
-    let replay_bin = tape_run_build(backend, dir.path(), "r", ("", ""), Some(replay_plan.clone()));
+    let replay_bin = tape_run_build(
+        backend,
+        dir.path(),
+        "r",
+        ("", ""),
+        Some(replay_plan.clone()),
+    );
     let (code, replayed, err) = tape_run(&replay_bin, &["two"], None);
     assert_eq!(code, Some(0), "replay: {err}");
     assert!(replayed.is_empty(), "replay must not write to live Stdout");
@@ -358,7 +365,13 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         "the other engine: {err}"
     );
 
-    let changed = tape_run_build(backend, dir.path(), "c", ("\"|\"", "\"/\""), Some(replay_plan));
+    let changed = tape_run_build(
+        backend,
+        dir.path(),
+        "c",
+        ("\"|\"", "\"/\""),
+        Some(replay_plan),
+    );
     let (code, printed, err) = tape_run(&changed, &["one"], None);
     assert_eq!((code, printed), (Some(2), String::new()), "refused: {err}");
     assert!(err.contains("replay: refused: revision"), "{err}");
@@ -379,14 +392,36 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         err.contains("replay: revision differs") && err.contains("replay: Diverged(Arg) at "),
         "{err}"
     );
+
+    let diagnose = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: true,
+    });
+    let same = tape_run_build(backend, dir.path(), "same", ("", ""), diagnose.clone());
+    let (code, out, err) = tape_run(&same, &[], None);
+    assert_eq!((code, out), (Some(0), String::new()), "{err}");
+    assert!(!err.contains("revision differs"), "{err}");
+
+    let changed_outcome = tape_run_build(
+        backend,
+        dir.path(),
+        "outcome",
+        ("else { Ok(()) }", "else { Error(Exit(status: 6)) }"),
+        diagnose,
+    );
+    let (code, out, err) = tape_run(&changed_outcome, &[], None);
+    assert_eq!((code, out), (Some(1), String::new()), "{err}");
+    assert!(
+        err.contains("revision differs") && err.contains("Outcome"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&tape).unwrap(), tape_bytes);
 }
 
 #[test]
 #[ignore = "explicit native integration target"]
 fn tape_run_replays_cranelift() {
     tape_run_replays(Backend::Cranelift, Backend::Llvm);
-    tape_schedule_engines();
-    tape_cli_replays();
 }
 
 #[test]
@@ -395,96 +430,244 @@ fn tape_run_replays_llvm() {
     tape_run_replays(Backend::Llvm, Backend::Cranelift);
 }
 
-/// Both emitters record identical scheduling coordinates and portable outcomes.
-fn tape_schedule_engines() {
-    use std::io::Write;
+/// CAP-8. Replay verifies the same stdout writes with no inherited input sources.
+#[test]
+fn run_tape_replays_stdin_and_env_without_host_sources() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
-    let cc = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
-    let source = std::fs::read_to_string(root.join("core/front/tape/schedule.hirsel")).unwrap();
+    let tape = dir.path().join("stdio.tape");
+    let input = dir.path().join("input");
+    std::fs::write(&input, b"nine bytes").unwrap();
+    let source = r#"
+pub fn main(i: Stdin, e: Env, out: Stdout) -> Result[(), Exit] waits {
+    let mut prefix: Bytes = list.with_capacity(3)
+    if result.unwrap(stdin.read(i, mut prefix, Never)) != 3 {
+        return Error(Exit(status: 3))
+    }
+    let value = match env.get(e, "HIRSEL_FIXTURE_VALUE") {
+        Ok(Some(s)) => s,
+        _ => return Error(Exit(status: 4)),
+    }
+    result.unwrap(stdout.write(out, value))
+    result.unwrap(stdout.write_bytes(out, prefix))
+    result.unwrap(stdout.write_bytes(out, result.unwrap(std.io.read_all(i))))
+    Ok(())
+}
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    request.inputs.packages[0].dependencies.push(package("std"));
+    request
+        .inputs
+        .packages
+        .push(CheckRequest::source_std(&root.join("core/std")).unwrap());
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.grant_mask = (1 << grant_kind("Stdin").unwrap())
+        | (1 << grant_kind("Env").unwrap())
+        | (1 << grant_kind("Stdout").unwrap());
+    options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_FIXTURE_VALUE");
+    let recorded = product.build(&entry, &options).unwrap();
+    let output = Command::new(&recorded.executable)
+        .env_clear()
+        .env("HIRSEL_FIXTURE_VALUE", "snapshot:")
+        .env("HIRSEL_RECORD", &tape)
+        .stdin(Stdio::from(std::fs::File::open(input).unwrap()))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"snapshot:nine bytes");
+
+    options.grant_mask = 0;
+    options.env_patterns = None;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let mut command = Command::new(&replay.executable);
+    command.env_clear();
+    // SAFETY: this changes only fd 0 in the newly forked child.
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(libc::STDIN_FILENO);
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "replay must verify the recorded stdout arguments with stdin closed and an empty environment: {:?}",
+        output.stderr
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "replay cannot write to the host stdout"
+    );
+}
+
+/// A fixed clock and chooser drive two child waits. The engines must agree on
+/// task frames and channel results, and must replay each other's recording.
+#[test]
+#[ignore = "explicit native integration target"]
+fn recording_schedule_replays_across_engines() {
+    use hirsel_tape_format::{Blocks, CHOOSER_COMMIT, Decoder, END, Frame};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/fixtures/recording/schedule.hirsel");
     let c = dir.path().join("provider.c");
-    std::fs::write(&c, include_str!("tape_schedule_provider.c")).unwrap();
-    let linker = dir.path().join("cc");
-    let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
-    let mut script = Vec::new();
-    writeln!(
-        script,
-        "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_run",
-        quote(&cc),
-        quote(&c),
-        quote(&root.join("crates/hirsel-core-rt/include"))
+    let object = dir.path().join("provider.o");
+    std::fs::write(&c, include_str!("recording_schedule_provider.c")).unwrap();
+
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    command(
+        Command::new(options.link.driver())
+            .arg("-c")
+            .arg(c)
+            .arg("-I")
+            .arg(root.join("crates/hirsel-core-rt/include"))
+            .arg("-o")
+            .arg(&object),
     )
     .unwrap();
-    crate::executable::write(&linker, &script, 0o755).unwrap();
-    let scripted_record = root.join(
+    options.link = Link::Driver(appending_driver(
+        dir.path(),
+        "clang-record-schedule",
+        &format!("'{}' -Wl,--wrap=hirsel_core_run", object.display()),
+    ));
+    options.runtime = root.join(
         std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE")
             .expect("scripted recording runtime archive"),
     );
-    let mut recorded = None;
-    for backend in [Backend::Cranelift, Backend::Llvm] {
-        let mut request = source_request(&source, dir.path());
-        request.inputs.packages[1] =
-            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-        let product = Driver::default()
-            .check(request, &mut Meter::new(false))
-            .unwrap();
-        assert!(
-            product.accepted(),
-            "{:?} {:?}",
-            product.diagnostics,
-            product.incomplete
+    options.recording = true;
+    options.grant_mask = (1 << grant_kind("Clock").unwrap())
+        | (1 << grant_kind("Tasks").unwrap())
+        | (1 << grant_kind("Stdout").unwrap());
+
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let frames = |mut bytes: &[u8]| {
+        let (mut blocks, header) =
+            Blocks::open(|buffer| std::io::Read::read(&mut bytes, buffer)).unwrap();
+        assert_eq!(
+            header.chooser, CHOOSER_COMMIT,
+            "scripted chooser was installed"
         );
-        let tape = dir.path().join(format!("schedule-{backend:?}.tape"));
-        let mut options = native_options(backend, dir.path());
-        options.output = dir.path().join(format!("schedule-{backend:?}"));
-        options.store = dir.path().join(format!("store-{backend:?}"));
-        options.grant_mask = (1 << 2) | (1 << 9);
-        options.link = Link::Driver(linker.clone());
-        options.runtime = scripted_record.clone();
-        options.recording = true;
-        let built = product
-            .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
+        let mut decoder = Decoder::default();
+        let mut frames = Vec::new();
+        while let Some((flags, payload)) = blocks
+            .next(|buffer| std::io::Read::read(&mut bytes, buffer))
+            .unwrap()
+        {
+            frames.extend(decoder.block(payload, flags & END != 0).unwrap());
+        }
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, Frame::Choose { .. })),
+            "recorded a task choice"
+        );
+        let sleepers = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Issue {
+                    task,
+                    op: hirsel_tape_format::op::SLEEP_UNTIL,
+                    ..
+                } => Some(*task),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(sleepers.len(), 2, "each child issues sleep");
+        for task_id in sleepers {
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::Wait { task, .. } if *task == task_id)),
+                "WAIT for child {task_id}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::Wake { task, .. } if *task == task_id)),
+                "WAKE for child {task_id}"
+            );
+        }
+        frames
+    };
+    let mut recorded = Vec::new();
+    for (backend, replay_backend) in [
+        (Backend::Cranelift, Backend::Llvm),
+        (Backend::Llvm, Backend::Cranelift),
+    ] {
+        let tape = dir.path().join(format!("{backend:?}.tape"));
+        options.backend = backend;
+        let built = product.build(&entry, &options).unwrap();
+        let output = Command::new(&built.executable)
+            .env("HIRSEL_RECORD", &tape)
+            .env("HIRSEL_RECORD_SCHEDULE", "1")
+            .env("HIRSEL_S8_WORKERS", "1")
+            .output()
             .unwrap();
-        let (code, out, err) = tape_run(&built.executable, &[], Some(&tape));
-        assert_eq!(code, Some(0), "{backend:?} record: {out} {err}");
-        let bytes = std::fs::read(&tape).unwrap();
-        options.output = dir.path().join(format!("schedule-replay-{backend:?}"));
-        options.grant_mask = 0;
-        options.replay = Some(crate::ReplayPlan {
+        assert!(output.status.success(), "{backend:?}: {output:?}");
+        assert!(
+            output.stdout == b"12" || output.stdout == b"21",
+            "each child sends one value: {:?}",
+            output.stdout
+        );
+        let sealed = std::fs::read(&tape).unwrap();
+        recorded.push(frames(&sealed));
+
+        let mut replay = options.clone();
+        replay.backend = replay_backend;
+        replay.grant_mask = 0;
+        replay.replay = Some(crate::ReplayPlan {
             path: tape.to_str().unwrap().into(),
             diagnose: false,
         });
-        let replayer = product
-            .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
-            .unwrap();
-        let (code, out, err) = tape_run(&replayer.executable, &[], None);
-        assert_eq!(code, Some(0), "{backend:?} replay: {out} {err}");
-        if let Some((prev_rev, prev_frames)) = &recorded {
-            assert_eq!(&built.revision, prev_rev, "engine entry revisions");
-            // Block 0 carries a per-run random tape_id and launch digest, so compare
-            // the recorded frame payload bytes from block 1 onward (excluding block
-            // checksums which fold in tape_id).
-            let payload_of = |b: &[u8]| {
-                let b0_len = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
-                let b1 = 16 + b0_len + 8;
-                b[b1 + 16..b.len() - 8].to_vec()
-            };
-            assert_eq!(
-                payload_of(&bytes),
-                *prev_frames,
-                "engine recordings must emit identical scheduling frames"
-            );
-        } else {
-            let b0_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-            let b1 = 16 + b0_len + 8;
-            recorded = Some((built.revision, bytes[b1 + 16..bytes.len() - 8].to_vec()));
-        }
+        let built = product.build(&entry, &replay).unwrap();
+        run_clean(&built.executable, 0);
+        assert_eq!(std::fs::read(&tape).unwrap(), sealed);
     }
+    assert_eq!(
+        recorded[0], recorded[1],
+        "engine recordings after the launch header"
+    );
 }
 
 /// S6's JSON/Args/Tasks run replays after its input grant is removed; diagnose
 /// names the first divergent request's rebound source, and show is standalone.
-fn tape_cli_replays() {
+#[test]
+#[ignore = "explicit native integration target"]
+fn recording_cli_replays() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -494,8 +677,8 @@ fn tape_cli_replays() {
     let data = dir.path().join("data");
     std::fs::create_dir(&app).unwrap();
     std::fs::create_dir(&data).unwrap();
-    let source = std::fs::read_to_string(root.join("core/front/tape/cli.hirsel")).unwrap();
-    std::fs::write(app.join("main.hirsel"), &source).unwrap();
+    let source = include_str!("../../../core/front/fixtures/recording/cli.hirsel");
+    std::fs::write(app.join("main.hirsel"), source).unwrap();
     std::fs::write(data.join("input.json"), b"{\"answer\":42}\n").unwrap();
     let tape = dir.path().join("run.tape");
     let runtime = env_record_runtime();
@@ -559,11 +742,15 @@ fn tape_cli_replays() {
     ];
     let (code, out, err) = process::tape_request(&shown, dir.path());
     assert_eq!(code, Some(0), "show: {err}");
-    assert!(out.contains("format 4") && out.contains("GRANT") && out.contains("END"));
+    assert!(
+        out.contains(&format!("format {}", hirsel_tape_format::FORMAT))
+            && out.contains("GRANT")
+            && out.contains("END")
+    );
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.
-    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = result.unwrap(list.with_capacity(70000)); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
+    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = list.with_capacity(70000); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
     std::fs::write(app.join("main.hirsel"), random).unwrap();
     let random_tape = dir.path().join("random.tape");
     let (code, _, err) = invoke(
@@ -634,7 +821,8 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(Backend::Cranelift, dir.path());
     options.runtime = env_record_runtime();
-    options.grant_mask = (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
+    options.grant_mask =
+        (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
     options.recording = true;
     let built = product.build(&entry, &options).unwrap();
     let mut child = Command::new(&built.executable)
@@ -658,7 +846,10 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
         built.executable.file_name().unwrap().to_str().unwrap()
     );
     // SAFETY: this is the still-owned child, which wrote the ready marker.
-    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) }, 0);
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
     line.clear();
     output.read_line(&mut line).unwrap();
     assert_eq!(line, "stopped\n");
@@ -676,7 +867,10 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
     assert_eq!(replay.revision, built.revision);
     let result = Command::new(&replay.executable).output().unwrap();
     assert_eq!(result.status.code(), Some(0), "{:?}", result.stderr);
-    assert!(result.stdout.is_empty(), "replay wrote through the live Stdout");
+    assert!(
+        result.stdout.is_empty(),
+        "replay wrote through the live Stdout"
+    );
     assert_eq!(std::fs::read(tape).unwrap(), sealed);
 }
 
@@ -737,7 +931,7 @@ fn tape_http_replays_both_native_engines() {
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("app");
     std::fs::create_dir(&app).unwrap();
-    let fixture = std::fs::read_to_string(root.join("core/front/tape/http.hirsel")).unwrap();
+    let fixture = include_str!("../../../core/front/fixtures/recording/http.hirsel");
     let main = app.join("main.hirsel");
     let observer_src = dir.path().join("http-observe.c");
     let observer_obj = dir.path().join("http-observe.o");
@@ -763,7 +957,7 @@ fn tape_http_replays_both_native_engines() {
     );
 
     for engine in ["cranelift", "llvm"] {
-        std::fs::write(&main, &fixture).unwrap();
+        std::fs::write(&main, fixture).unwrap();
         let tape = dir.path().join(format!("{engine}.tape"));
         let common = [
             app.display().to_string(),
@@ -954,7 +1148,14 @@ fn cli_tls_replay(with_secret: bool) {
     }
     let token = crate::call::hex(&raw);
     let expected_request = if with_secret {
-        [b"before:", token.as_bytes(), b":after\n", &file_bytes, b":after\nsealed:after\n"].concat()
+        [
+            b"before:",
+            token.as_bytes(),
+            b":after\n",
+            &file_bytes,
+            b":after\nsealed:after\n",
+        ]
+        .concat()
     } else {
         REQUEST.to_vec()
     };
@@ -962,21 +1163,29 @@ fn cli_tls_replay(with_secret: bool) {
     let peer = std::thread::spawn(move || {
         if with_secret {
             let (mut plain, _) = listener.accept().unwrap();
+            plain.write_all(b"!").unwrap();
             let mut refused = Vec::new();
             plain.read_to_end(&mut refused).unwrap();
             assert!(refused.is_empty(), "plaintext reached plain TCP");
             let (socket, _) = listener.accept().unwrap();
             let mut beta = StreamOwned::new(
-                ServerConnection::new(server(BETA, BETA_KEY, false)).unwrap(), socket);
+                ServerConnection::new(server(BETA, BETA_KEY, false)).unwrap(),
+                socket,
+            );
             beta.read_to_end(&mut refused).unwrap();
             assert!(refused.is_empty(), "plaintext reached beta.test");
         }
         let (socket, _) = listener.accept().unwrap();
         let mut stream = StreamOwned::new(
-            ServerConnection::new(server(LEAF, KEY, !with_secret)).unwrap(), socket);
+            ServerConnection::new(server(LEAF, KEY, !with_secret)).unwrap(),
+            socket,
+        );
         let mut request = vec![0; expected_request.len()];
         stream.read_exact(&mut request).unwrap();
-        assert!(request == expected_request, "wrong plaintext reached the permitted peer");
+        assert!(
+            request == expected_request,
+            "wrong plaintext reached the permitted peer"
+        );
         stream.write_all(response.as_bytes()).unwrap();
         stream.conn.send_close_notify();
         stream.flush().unwrap();
@@ -990,9 +1199,9 @@ fn cli_tls_replay(with_secret: bool) {
     let app = dir.path().join("app");
     std::fs::create_dir(&app).unwrap();
     let fixture = if with_secret {
-        include_str!("../../../core/front/tape/tls-secret.hirsel")
+        include_str!("../../../core/front/fixtures/recording/tls-secret.hirsel")
     } else {
-        include_str!("../../../core/front/tape/tls.hirsel")
+        include_str!("../../../core/front/fixtures/recording/tls.hirsel")
     };
     std::fs::write(
         app.join("main.hirsel"),
@@ -1056,15 +1265,22 @@ fn cli_tls_replay(with_secret: bool) {
     let from_file = format!("Secret:local=file:{} to alpha.test", file.display());
     if with_secret {
         std::fs::write(&file, file_bytes).unwrap();
-        grants.extend(["--grant", "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test", "--grant", &from_file]);
+        grants.extend([
+            "--grant",
+            "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test mac",
+            "--grant",
+            &from_file,
+            "--grant",
+            "Secret:verifier=env:HIRSEL_TL10_TOKEN verify",
+        ]);
     }
     let record = invoke("run", &grants)
-    .env("HIRSEL_TL10_TOKEN", &token)
-    .env("SSL_CERT_FILE", &roots)
-    .env_remove("SSL_CERT_DIR")
-    .env_remove("HIRSEL_TL9_REPLAY")
-    .output()
-    .unwrap();
+        .env("HIRSEL_TL10_TOKEN", &token)
+        .env("SSL_CERT_FILE", &roots)
+        .env_remove("SSL_CERT_DIR")
+        .env_remove("HIRSEL_TL9_REPLAY")
+        .output()
+        .unwrap();
     let after = |bytes: &[u8]| {
         String::from_utf8_lossy(bytes)
             .split_once(process::CHILD_MARK)
@@ -1087,7 +1303,7 @@ fn cli_tls_replay(with_secret: bool) {
         .collect::<Vec<_>>()
         .join(" ");
     let expected = if with_secret {
-        format!("[secret][secret]{response}")
+        format!("[secret][secret]{response}mac verified\n")
     } else {
         format!("{RESPONSE}1 {digest_words}\n")
     };
@@ -1101,7 +1317,37 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(!sealed.windows(CA.len()).any(|bytes| bytes == CA));
     assert!(!sealed.windows(LEAF.len()).any(|bytes| bytes == LEAF));
 
+    let assert_secrets_absent = |outputs: &[&[u8]]| {
+        for bytes in [raw.as_slice(), token.as_bytes(), file_bytes.as_slice()] {
+            for form in [
+                bytes,
+                crate::call::hex(bytes).as_bytes(),
+                crate::call::base64(bytes).as_bytes(),
+            ] {
+                for output in outputs {
+                    assert!(
+                        !output.windows(form.len()).any(|word| word == form),
+                        "a Secret representation escaped"
+                    );
+                }
+            }
+        }
+        let mut padded = [0; 64];
+        padded[..token.len()].copy_from_slice(token.as_bytes());
+        for pad in [0x36, 0x5c] {
+            let material = padded.map(|b| b ^ pad);
+            for output in outputs {
+                assert!(
+                    !output
+                        .windows(material.len())
+                        .any(|bytes| bytes == material),
+                    "a padded MAC key escaped"
+                );
+            }
+        }
+    };
     if with_secret {
+        assert_secrets_absent(&[sealed.as_slice(), &record.stdout, &record.stderr]);
         std::fs::remove_file(&file).unwrap();
     }
     std::fs::remove_file(&roots).unwrap();
@@ -1132,23 +1378,24 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(export.contains("op=22"), "{export}");
     if with_secret {
         assert!(export.contains("op=23"));
-        assert!(export.contains("grant `token` [secret] to alpha.test"));
+        assert!(export.contains("grant `token` [secret] to alpha.test mac"));
         assert!(export.contains("grant `local` [secret] to alpha.test"));
-        for bytes in [raw.as_slice(), token.as_bytes(), file_bytes.as_slice()] {
-            for form in [
-                bytes,
-                crate::call::hex(bytes).as_bytes(),
-                crate::call::base64(bytes).as_bytes(),
-            ] {
-                for output in [
-                    sealed.as_slice(), &record.stdout, &record.stderr, &replay.stdout, &replay.stderr,
-                    export.as_bytes(),
-                ] {
-                    assert!(!output.windows(form.len()).any(|word| word == form),
-                        "a Secret representation escaped");
-                }
-            }
-        }
+        assert_secrets_absent(&[&replay.stdout, &replay.stderr, export.as_bytes()]);
+        let mac_op = format!(" op={} ", hirsel_tape_format::op::SECRET_MAC);
+        let mac: Vec<_> = export
+            .lines()
+            .filter(|line| line.contains(&mac_op))
+            .collect();
+        assert_eq!(
+            mac.len(),
+            6,
+            "MAC operations issued without the necessary use"
+        );
+        assert_eq!(
+            mac[0].split_once(" OP ").unwrap().1,
+            mac[1].split_once(" OP ").unwrap().1,
+            "CLI and narrow canonical MAC designations differ"
+        );
     }
 }
 
@@ -1195,7 +1442,11 @@ fn simd_versions_preserve_run_tape_and_revision() {
             cmd.env("HIRSEL_RECORD", &tape);
         }
         let output = cmd.output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         (built.revision, output.stdout)
     };
     let levels = hirsel_core_layout::isa::X86_64_LEVELS;
@@ -1396,11 +1647,22 @@ fn rl1_recording_changes_nothing() {
         (
             "capacity_and_args",
             r#"
-pub fn main(a: Args, out: Stdout) -> Result[(), Exit] {
-    let refused = match (bound bytes 4 { box.new(1u64) }) {
-        Ok(Error(_)) => "cap",
-        _ => "other",
+fn refused_box() -> bool {
+    let attempted = isolate(fn() -> Result[Box[u64], Capacity] {
+        bound bytes 4 { box.new(1u64) }
+    })
+    let Ok(Error(take causes)) = take attempted else { return false }
+    for c in causes {
+        return match c.kind {
+            Capacity(k) => k.requested == 8 && k.available == 4,
+            _ => false,
+        }
     }
+    false
+}
+
+pub fn main(a: Args, out: Stdout) -> Result[(), Exit] {
+    let refused = if refused_box() { "cap" } else { "other" }
     result.unwrap(stdout.write(out, refused))
     match args.get(a, 0) {
         Some(v) => {
@@ -1440,7 +1702,11 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
             let product = Driver::default()
                 .check(request, &mut Meter::new(false))
                 .unwrap();
-            assert!(product.accepted(), "{name} {backend:?}: {:?}", product.diagnostics);
+            assert!(
+                product.accepted(),
+                "{name} {backend:?}: {:?}",
+                product.diagnostics
+            );
             let entry = DefPath::from_full("app@1/main/main").unwrap();
 
             let mut rel_opts = native_options(backend, dir.path());
@@ -1459,12 +1725,20 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
                 .filter_map(|s| s.name().ok().map(str::to_owned))
                 .filter(|n| n.contains("hirsel_core_rt4tape") || n.contains("tape::"))
                 .collect();
-            assert!(tape_syms.is_empty(), "release binary has tape symbols: {tape_syms:?}");
+            assert!(
+                tape_syms.is_empty(),
+                "release binary has tape symbols: {tape_syms:?}"
+            );
 
             // Release executable must ignore HIRSEL_RECORD.
-            let unused_tape = dir.path().join(format!("rl1-{name}-{backend:?}-unused.tape"));
+            let unused_tape = dir
+                .path()
+                .join(format!("rl1-{name}-{backend:?}-unused.tape"));
             let rel_run = tape_run(&rel.executable, argv, Some(&unused_tape));
-            assert!(!unused_tape.exists(), "release binary created a recording file");
+            assert!(
+                !unused_tape.exists(),
+                "release binary created a recording file"
+            );
 
             let mut rec_opts = rel_opts.clone();
             rec_opts.runtime = record_rt.clone();
@@ -1485,8 +1759,14 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
 
             let rec_off = tape_run(&rec.executable, argv, None);
             let rec_on = tape_run(&rec.executable, argv, Some(&rec_tape));
-            assert_eq!(rec_off, rel_run, "{name} {backend:?}: recording-off != release");
-            assert_eq!(rec_on, rel_run, "{name} {backend:?}: recording-on != release");
+            assert_eq!(
+                rec_off, rel_run,
+                "{name} {backend:?}: recording-off != release"
+            );
+            assert_eq!(
+                rec_on, rel_run,
+                "{name} {backend:?}: recording-on != release"
+            );
             if *name == "capacity_and_args" {
                 assert_eq!(rec_on.1, "cap:ok");
             }
@@ -1501,7 +1781,11 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
                 });
                 let rep = product.build(&entry, &rep_opts).unwrap();
                 let (code, out, err) = tape_run(&rep.executable, argv, None);
-                assert_eq!((code, out), (Some(0), String::new()), "{name} {backend:?}: {err}");
+                assert_eq!(
+                    (code, out),
+                    (Some(0), String::new()),
+                    "{name} {backend:?}: {err}"
+                );
             }
         }
     }
@@ -1514,6 +1798,7 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
     )
     .unwrap();
+    let refused_output = dir.path().join("rl1-refuse-out");
     let args = vec![
         "build".to_owned(),
         app.display().to_string(),
@@ -1528,13 +1813,17 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         "--store".into(),
         dir.path().join("rl1-refuse-store").display().to_string(),
         "-o".into(),
-        dir.path().join("rl1-refuse-out").display().to_string(),
+        refused_output.display().to_string(),
     ];
     let (code, _, err) = process::tape_request(&args, dir.path());
     assert_ne!(code, Some(0), "expected refusal with release archive");
     assert!(
-        err.contains("recording build requires a recording runtime archive"),
+        err.contains("requires a recording runtime archive"),
         "{err}"
+    );
+    assert!(
+        !refused_output.exists(),
+        "refused build emitted an executable"
     );
 }
 
@@ -1661,12 +1950,233 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
     assert_eq!(code, Some(0), "test --replay: {out}\n{err}");
 
     let mut sealed = base.clone();
-    sealed.extend(["--expect-verdict".into(), "Sealed".into()]);
+    sealed.extend(["--expect-verdict".into(), "Sealed".into(), "--rerun".into()]);
     let (code, out, err) = process::tape_request(&sealed, dir.path());
-    assert_eq!(code, Some(0), "test --replay --expect-verdict Sealed: {out}\n{err}");
+    assert_eq!(
+        code,
+        Some(0),
+        "test --replay --expect-verdict Sealed --rerun: {out}\n{err}"
+    );
 
     let mut wrong_verdict = base;
     wrong_verdict.extend(["--expect-verdict".into(), "Diverged(Arg)".into()]);
     let (code, _, _) = process::tape_request(&wrong_verdict, dir.path());
     assert_ne!(code, Some(0), "mismatched --expect-verdict must fail");
+
+    test_pass_cache_cli();
+    inspect_cli();
+}
+
+fn inspect_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let file = app.join("main.hirsel");
+    let source = r#"
+pub opaque type Token {
+    private_word: u64,
+}
+pub fn echo[T: plain](x: T, output: Stdout) -> T waits {
+    result.unwrap(stdout.write(output, "echo"))
+    x
+}
+
+fn base() -> u64 { 7u64 }
+fn middle() -> u64 { base() }
+const ANSWER: u64 = 11u64
+fn folded() -> u64 { ANSWER }
+fn orphan() {}
+
+pub fn main() -> Result[(), Exit] { Ok(()) }
+
+@test fn from_base() -> Result[(), ()] {
+    if middle() >= 7u64 { Ok(()) } else { Error(()) }
+}
+@test fn from_constant() -> Result[(), ()] {
+    if folded() >= 11u64 { Ok(()) } else { Error(()) }
+}
+@test fn independent() -> Result[(), ()] { Ok(()) }
+"#;
+    std::fs::write(&file, source).unwrap();
+    let runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap());
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let command = |name: &str, args: &[&str]| {
+        let mut invocation = vec![
+            name.into(),
+            app.display().to_string(),
+            "--libraries".into(),
+            root.join("core").display().to_string(),
+            "--source-core".into(),
+        ];
+        invocation.extend(args.iter().map(|s| (*s).to_owned()));
+        let output = process::tape_request_command(&invocation, dir.path())
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .output()
+            .unwrap();
+        let out = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{invocation:?}\n{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        out.split_once(process::CHILD_MARK).unwrap().1.to_owned()
+    };
+    let inspect = |args| command("inspect", args);
+    let interface: serde_json::Value =
+        serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
+    assert_eq!(interface, serde_json::json!({
+        "version": 1,
+        "package": {"name": "app", "version": "1"},
+        "modules": [{"path": ["main"], "extends_core": false, "items": [
+            {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
+            {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
+            {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
+        ]}],
+    }));
+    assert_eq!(inspect(&["--dependents", "main/base"]), "app@1/main/middle\n");
+    assert_eq!(
+        inspect(&["--dependents", "app@1/main/base", "--transitive"]),
+        "app@1/main/from_base\napp@1/main/middle\n",
+    );
+    assert_eq!(
+        inspect(&["--unused"]),
+        "app@1/main/Token\napp@1/main/echo\napp@1/main/orphan\n",
+    );
+    let library = inspect(&["--unused", "--library"]);
+    assert!(library.lines().any(|line| line == "app@1/main/orphan"));
+    assert!(!library.lines().any(|line| line == "app@1/main/echo"));
+
+    let executed = || {
+        let clang = llvm.join("bin/clang");
+        let output: serde_json::Value = serde_json::from_str(&command("test", &[
+            "--json", "--limit", "1048576", "--runtime", runtime.to_str().unwrap(),
+            "--cc", clang.to_str().unwrap(),
+        ])).unwrap();
+        let tests = output["tests"].as_array().unwrap();
+        assert_eq!(tests.len(), 3);
+        tests.iter()
+            .filter(|row| row["source"] == "executed")
+            .map(|row| row["definition"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(executed(), ["app@1/main/from_base", "app@1/main/from_constant", "app@1/main/independent"]);
+
+    let affected = inspect(&["--affected-tests", "main/base"]);
+    assert_eq!(affected, "app@1/main/from_base\n");
+    let edited = source.replace("7u64 }", "8u64 }");
+    std::fs::write(&file, &edited).unwrap();
+    assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
+
+    let affected = inspect(&["--affected-tests", "main/ANSWER"]);
+    assert_eq!(affected, "app@1/main/from_constant\n");
+    std::fs::write(&file, edited.replace("= 11u64", "= 12u64")).unwrap();
+    assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
+}
+
+fn test_pass_cache_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("test-app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        r#"
+@test
+fn good() -> Result[(), ()] waits { Ok(()) }
+@test
+fn rejected() -> Result[(), ()] { Error(()) }
+"#,
+    )
+    .unwrap();
+    let runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap());
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let base = [
+        "test".into(),
+        app.display().to_string(),
+        "--limit".into(),
+        "1048576".into(),
+        "--runtime".into(),
+        runtime.display().to_string(),
+        "--cc".into(),
+        llvm.join("bin/clang").display().to_string(),
+        "--libraries".into(),
+        root.join("core").display().to_string(),
+        "--source-core".into(),
+        "--store".into(),
+        dir.path().join("store").display().to_string(),
+    ];
+    let run = |args: &[&str], code| {
+        let mut invocation = base.to_vec();
+        invocation.extend(args.iter().map(|s| (*s).to_owned()));
+        let output = process::tape_request_command(&invocation, dir.path())
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .env("HIRSEL_HOST_PID", "invalid")
+            .env("HIRSEL_CONTROL_FD", "4")
+            .env("HIRSEL_SCRATCH", dir.path().join("absent-scratch"))
+            .output()
+            .unwrap();
+        let out = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{out}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let out = out.split_once(process::CHILD_MARK).unwrap().1;
+        if args.contains(&"--json") {
+            return out.to_owned();
+        }
+        out.lines()
+            .map(|line| {
+                if line.starts_with("pass executed ") || line.starts_with("fail executed ") {
+                    let (row, time) = line.rsplit_once(" (").unwrap();
+                    assert!(time.strip_suffix(" ms)").unwrap().parse::<f64>().unwrap() >= 0.0);
+                    row
+                } else {
+                    line
+                }
+            })
+            .flat_map(|line| [line, "\n"])
+            .collect::<String>()
+    };
+
+    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: error\n";
+    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: error\n";
+    assert_eq!(run(&["-j", "1"], 1), executed);
+    assert_eq!(run(&["-j", "2"], 1), cached);
+    assert_eq!(run(&["--rerun"], 1), executed);
+    let mut rows: serde_json::Value = serde_json::from_str(&run(&["--json"], 1)).unwrap();
+    let executed_time = rows["tests"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("wall_ms")
+        .unwrap();
+    assert!(executed_time.as_f64().unwrap() >= 0.0);
+    assert_eq!(
+        rows,
+        serde_json::json!({
+            "passed": false,
+            "tests": [
+                {"definition":"app@1/main/good","passed":true,"source":"cached","status":0,"stdout":"","stderr":"","timed_out":false,"wall_ms":null},
+                {"definition":"app@1/main/rejected","passed":false,"source":"executed","status":1,"stdout":"","stderr":"","timed_out":false}
+            ]
+        })
+    );
+
+    let good = ["--filter", "/good"];
+    assert_eq!(run(&good, 0), "pass cached app@1/main/good\n");
+    assert_eq!(run(&["--filter", "/absent"], 2), "");
+    let with_grant = ["--filter", "/good", "--grant", "Stdout"];
+    assert_eq!(run(&with_grant, 0), "pass cached app@1/main/good\n");
+    let missing = dir.path().join("absent-dir");
+    let with_dir = ["--filter", "/good", "--dir", missing.to_str().unwrap()];
+    assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
+    let mut rerun_with_dir = with_dir.to_vec();
+    rerun_with_dir.push("--rerun");
+    assert_eq!(run(&rerun_with_dir, 0), "pass executed app@1/main/good\n");
+    assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
+    assert!(!missing.exists());
 }

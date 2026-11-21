@@ -1,0 +1,42 @@
+type Work: send {
+    clock: Clock,
+    sender: Sender[u64],
+    n: u64
+}
+
+fn sleeper(take work: Work) -> u64 waits {
+    host.sleep_until(work.clock, 9000u64)
+    result.unwrap(channel.send(work.sender, work.n))
+    work.n
+}
+
+fn number(x: u64) -> u64 { x }
+
+pub fn main(clock: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    if host.mono_ns(clock) != 1000u64 {
+        return Error(Exit(status: 2))
+    }
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(2)
+    let one = task.spawn(tasks, bytes 4096, Work(clock, sender: channel.sender(tx), n: 1), sleeper)
+    let two = task.spawn(tasks, bytes 4096, Work(clock, sender: channel.sender(tx), n: 2), sleeper)
+    let first = result.unwrap(channel.receive(rx))
+    let second = result.unwrap(channel.receive(rx))
+    let _ = task.join(take one)
+    let _ = task.join(take two)
+    {
+        let root = latest.new(arc.new(3u64))
+        let old = latest.read(root)
+        {
+            let shared = arc.share(old)
+            if number(shared) != 3u64 { return Error(Exit(status: 5)) }
+        }
+        latest.publish(root, arc.new(4u64))
+        if result.unwrap(arc.try_unwrap(take old)) != 3u64 { return Error(Exit(status: 6)) }
+        if number(latest.read(root)) != 4u64 { return Error(Exit(status: 7)) }
+    }
+    let mut order = string.new()
+    string.push_u64(mut order, first)
+    string.push_u64(mut order, second)
+    result.unwrap(stdout.write(out, order))
+    Ok(())
+}

@@ -46,8 +46,40 @@ pub struct Refusal {
     pub declared: Option<String>,
     pub required: Option<String>,
     pub message: String,
+    pub unresolved: Option<Box<UnresolvedName>>,
 }
+
+/// A failed lookup, expressed in paths and text so it survives index renumbering.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UnresolvedName {
+    pub written: String,
+    pub scope: NameScope,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum NameScope {
+    ModuleMember {
+        module: ModulePath,
+        namespace: Namespace,
+        constructor: bool,
+    },
+    ModulePrefix {
+        module: ModulePath,
+        children_of: ModulePath,
+        namespace: Namespace,
+    },
+    Field(DefPath),
+    Variant(DefPath),
+}
+
 impl Refusal {
+    pub fn with_unresolved(mut self, written: impl Into<String>, scope: NameScope) -> Self {
+        self.unresolved = Some(Box::new(UnresolvedName {
+            written: written.into(),
+            scope,
+        }));
+        self
+    }
     /// The declared/written fact and the fact required by the cited rule.
     pub fn with_comparison(
         mut self,
@@ -66,6 +98,7 @@ impl Refusal {
             declared: None,
             required: None,
             message: message.into(),
+            unresolved: None,
         }
     }
     pub fn syntax(module: ModuleId, source: SourceId, diagnostic: &Diagnostic) -> Self {
@@ -81,6 +114,7 @@ impl Refusal {
             declared: diagnostic.declared.clone(),
             required: diagnostic.required.clone(),
             message: diagnostic.message.clone(),
+            unresolved: None,
         }
     }
 }
@@ -275,6 +309,23 @@ impl NameIndex {
     pub fn child(&self, parent: ModuleId, name: Symbol) -> Option<ModuleId> {
         self.children.get(&(parent, name)).copied()
     }
+    pub fn module_at(&self, package: &PackageId, modules: &[String]) -> Option<ModuleId> {
+        let key = self.package(
+            self.symbols.find(&package.name)?,
+            self.symbols.find(&package.version)?,
+        )?;
+        let mut module = self.packages[key.0 as usize].root;
+        for name in modules {
+            module = self.child(module, self.symbols.find(name)?)?;
+        }
+        Some(module)
+    }
+    pub fn child_names(&self, module: ModuleId) -> impl Iterator<Item = Symbol> + '_ {
+        self.modules
+            .iter()
+            .filter(move |row| row.parent == Some(module))
+            .map(|row| row.name)
+    }
     /// The naming scope at a package head, whether found as a dependency or
     /// through its root module. Discovery still uses the physical module paths.
     pub(crate) fn path_package(&self, module: ModuleId) -> Option<Package> {
@@ -450,6 +501,16 @@ impl NameIndex {
             constructor,
         )
         .map(|(id, _)| id)
+    }
+    pub fn member_names_in(&self, module: ModuleId) -> impl Iterator<Item = Symbol> + '_ {
+        let merged = self.modules[module.0 as usize]
+            .merge
+            .slice(&self.extensions);
+        self.definitions.iter().filter_map(move |d| {
+            (d.kind != DefinitionKind::Clone
+                && (d.site.module == module || merged.contains(&d.site.module)))
+            .then_some(d.name)
+        })
     }
     pub(crate) fn member_rows_from(
         &self,

@@ -114,7 +114,6 @@ impl Function<'_, '_, '_> {
                 overflow,
                 size,
                 align,
-                fail,
             } => {
                 let ctx = self.context;
                 let native_kind = match kind.cleanup(&self.input.types, self.layouts) {
@@ -251,19 +250,6 @@ impl Function<'_, '_, '_> {
                     self.set(token, self.b.block_params(join)[0]);
                 }
                 let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
-                let check = self.b.create_block();
-                let done = self.b.create_block();
-                self.b.ins().brif(refused, check, &[], done, &[]);
-                self.b.switch_to_block(check);
-                let grant = self.c_call(
-                    "hirsel_core_allocation_status",
-                    &[p, p],
-                    &[boolean],
-                    &[ctx, values[0]],
-                )?[0];
-                self.guard(grant, 6, fail)?;
-                self.b.ins().jump(done, &[]);
-                self.b.switch_to_block(done);
                 if let Some(count) = counted {
                     let init = self.b.create_block();
                     let ready = self.b.create_block();
@@ -497,7 +483,6 @@ impl Function<'_, '_, '_> {
                 capacity,
                 moved,
                 refund,
-                fail,
             } => {
                 let edge =
                     c::sequence_edge(&self.input.types, self.body.addresses[carrier.index()].ty)
@@ -538,7 +523,6 @@ impl Function<'_, '_, '_> {
                     capacity,
                     moved,
                     refund,
-                    fail,
                 )?;
                 self.set(result, values[0]);
                 self.set(available, values[1]);

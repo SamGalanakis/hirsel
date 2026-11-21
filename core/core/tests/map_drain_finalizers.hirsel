@@ -24,7 +24,7 @@ resource type DrainValue {
 fn seed(out: Stdout) -> Map[DrainKey, DrainValue] {
     let mut m: Map[DrainKey, DrainValue] = map.new()
     for i in 0u64 .. 3 {
-        result.unwrap(map.insert(mut m, DrainKey(id: i), result.unwrap(DrainValue(out: out, id: i))))
+        map.insert(mut m, DrainKey(id: i), result.unwrap(DrainValue(out, id: i)))
     }
     m
 }

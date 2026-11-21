@@ -203,6 +203,7 @@ export_file(name = "workspace-metadata.json", mode = "reference", visibility = [
     "merging.py",
     "fmt.py",
     "rust_environment.py",
+    "supply_chain.py",
 ]]
 
 # Production request functions exercised by the launcher tool test.

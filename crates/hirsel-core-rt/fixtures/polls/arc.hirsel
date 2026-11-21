@@ -6,11 +6,11 @@ fn worker(take s:Input)->u64 {
  loop { match arc.try_unwrap(take a) { Ok(n)=>return n, Error(h)=>{a=take h} } }
 }
 pub fn main(tasks:Tasks)->Result[(),Exit] waits {
- let (ready,ready_rx):(Sender[()],Receiver[()])=result.unwrap(channel.new(1))
+ let (ready,ready_rx):(Sender[()],Receiver[()])=channel.new(1)
  let h={
-  let retained=result.unwrap(arc.new(7u64))
+  let retained=arc.new(7u64)
   let value=arc.share(retained)
-  let h=result.unwrap(task.spawn(tasks,bytes 1024,Input(ready:take ready,value:take value),worker))
+  let h=task.spawn(tasks,bytes 1024,Input(ready:take ready,value:take value),worker)
   result.unwrap(channel.receive(ready_rx))
   h
  }

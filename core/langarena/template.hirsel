@@ -1,19 +1,19 @@
 // kostya/LangArena 3c9f84d benchmarks/template.rs:49-216.
 fn numbered(prefix: String, i: u64) -> Result[String, helper.Error] {
-    let mut key = helper.mem(string.from(prefix))?
-    helper.mem(string.push_u64(mut key, i))?
+    let mut key = string.from(prefix)
+    string.push_u64(mut key, i)
     Ok(take key)
 }
 
 fn bind(mut vars: Map[String, String], take key: String, value: String) -> Result[(), helper.Error] {
-    let owned = helper.mem(string.from(value))?
-    helper.mem(result.capacity_only(map.insert(mut vars, take key, take owned)))
+    let owned = string.from(value)
+    Ok(map.insert(mut vars, take key, take owned))
 }
 
 fn render_parse(source: String, vars: Map[String, String]) -> Result[String, helper.Error] {
     let n = string.byte_len(source)
     let b = string.as_bytes(source)
-    let mut out = helper.mem(string.with_capacity(n + n / 2))?
+    let mut out = string.with_capacity(n + n / 2)
     let mut i: u64 = 0
     while i < n {
         if i + 1 < n && b[i] == b'{' && b[i + 1] == b'{' {
@@ -27,14 +27,14 @@ fn render_parse(source: String, vars: Map[String, String]) -> Result[String, hel
             if j + 1 < n && b[j] == b'}' && b[j + 1] == b'}' {
                 let key = string.trim_ascii(string.slice(source, i + 2, j))
                 if let Some(value) = map.get(vars, key) {
-                    helper.mem(string.push(mut out, value))?
+                    string.push(mut out, value)
                 }
                 i = j + 2
                 continue
             }
         }
         // The upstream fixture is ASCII, including the single-brace literals.
-        helper.mem(string.push_char(mut out, option.unwrap(char.from_u32(int.widen(b[i])))))?
+        string.push_char(mut out, option.unwrap(char.from_u32(int.widen(b[i]))))
         i += 1
     }
     Ok(take out)
@@ -42,20 +42,20 @@ fn render_parse(source: String, vars: Map[String, String]) -> Result[String, hel
 
 fn render_regex(source: String, vars: Map[String, String], re: std.regex.Regex, mut cache: std.regex.Cache, mut groups: std.regex.Groups) -> Result[String, helper.Error] {
     let n = string.byte_len(source)
-    let mut out = helper.mem(string.with_capacity(n + n / 2))?
+    let mut out = string.with_capacity(n + n / 2)
     let mut cursor = std.regex.cursor(0)
     let mut start: u64 = 0
     while std.regex.next_captures(re, mut cache, source, mut cursor, mut groups) {
         let whole = option.unwrap(std.regex.group(groups, 0))
         let capture = option.unwrap(std.regex.group(groups, 1))
-        helper.mem(string.push(mut out, string.slice(source, start, whole.start)))?
+        string.push(mut out, string.slice(source, start, whole.start))
         let key = string.trim_ascii(string.slice(source, capture.start, capture.end))
         if let Some(value) = map.get(vars, key) {
-            helper.mem(string.push(mut out, value))?
+            string.push(mut out, value)
         }
         start = whole.end
     }
-    helper.mem(string.push(mut out, string.slice(source, start, n)))?
+    string.push(mut out, string.slice(source, start, n))
     Ok(take out)
 }
 
@@ -63,11 +63,10 @@ fn run_regex(source: String, vars: Map[String, String], runs: u64) -> Result[u32
     let created = std.regex.new("\\{\\{(.*?)\\}\\}")
     let re = match take created {
         Ok(take re) => take re,
-        Error(Capacity(c)) => return Error(Capacity(c)),
         Error(_) => return Error(Config),
     }
-    let mut cache = helper.mem(std.regex.cache(re, 16384))?
-    let mut groups = helper.mem(std.regex.groups(re))?
+    let mut cache = std.regex.cache(re, 16384)
+    let mut groups = std.regex.groups(re)
     let mut rendered = string.new()
     let mut checksum: u32 = 0
     for _ in 0 .. runs {
@@ -89,27 +88,27 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     let last: Inline[String, 8] =["Smith", "Johnson", "Brown", "Taylor", "Wilson", "Davis", "Miller", "Jones"]
     let cities: Inline[String, 6] =["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "San Francisco"]
     let mut vars: Map[String, String] = map.new()
-    bind(mut vars, helper.mem(string.from("TITLE"))?, "Template title")?
-    let mut source = helper.mem(string.from("<html><body><h1>{{TITLE}}</h1><p>Lorem {ipsum} dolor {sit} amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore {et} dolore magna aliqua. </p><table>"))?
+    bind(mut vars, string.from("TITLE"), "Template title")?
+    let mut source = string.from("<html><body><h1>{{TITLE}}</h1><p>Lorem {ipsum} dolor {sit} amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore {et} dolore magna aliqua. </p><table>")
     for row in 0 .. count {
         let i: u64 = int.narrow(row)
         if i % 3 == 0 {
-            helper.mem(string.push(mut source, "<!-- {comment} -->"))?
+            string.push(mut source, "<!-- {comment} -->")
         }
-        helper.mem(string.push(mut source, "<tr><td>{{ FIRST_NAME"))?
-        helper.mem(string.push_u64(mut source, i))?
-        helper.mem(string.push(mut source, " }}</td><td>{{LAST_NAME"))?
-        helper.mem(string.push_u64(mut source, i))?
-        helper.mem(string.push(mut source, "}}</td><td>{{  CITY"))?
-        helper.mem(string.push_u64(mut source, i))?
-        helper.mem(string.push(mut source, "  }}</td><td>{balance: "))?
-        helper.mem(string.push_u64(mut source, i % 100))?
-        helper.mem(string.push(mut source, "}</td></tr>\n"))?
+        string.push(mut source, "<tr><td>{{ FIRST_NAME")
+        string.push_u64(mut source, i)
+        string.push(mut source, " }}</td><td>{{LAST_NAME")
+        string.push_u64(mut source, i)
+        string.push(mut source, "}}</td><td>{{  CITY")
+        string.push_u64(mut source, i)
+        string.push(mut source, "  }}</td><td>{balance: ")
+        string.push_u64(mut source, i % 100)
+        string.push(mut source, "}</td></tr>\n")
         bind(mut vars, numbered("FIRST_NAME", i)?, first[i % 8])?
         bind(mut vars, numbered("LAST_NAME", i)?, last[i % 8])?
         bind(mut vars, numbered("CITY", i)?, cities[i % 6])?
     }
-    helper.mem(string.push(mut source, "</table></body></html>"))?
+    string.push(mut source, "</table></body></html>")
     let runs = warmup + iterations
     if runs == 0 {
         return Ok(helper.checksum_str(""))

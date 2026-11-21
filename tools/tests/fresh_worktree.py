@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""A fresh worktree of this tree has no generated build files: a bare Buck2
-says to run sync.py, and after bootstrap it builds (tools/buck2/generated.py)."""
+"""Bootstrap makes a fresh worktree buildable, and the wrapper refuses missing build inputs."""
 import os
 from pathlib import Path
 import shutil
@@ -56,7 +55,7 @@ class FreshWorktree(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_bootstrap_makes_a_fresh_tree_build_and_a_bare_buck2_without_its_files_names_sync(self):
+    def test_bootstrap_makes_a_fresh_tree_build_and_the_wrapper_refuses_missing_inputs(self):
         self.assertFalse(any((self.tree / path).exists() for path in generated.BUILD_INPUTS))
         # A daemon started before prepare.py writes `.buckconfig.local` (a query
         # run first) must not keep a remote-execution client with no engine.
@@ -64,15 +63,16 @@ class FreshWorktree(unittest.TestCase):
         self.assertEqual(self.buck2('uquery', TARGET).returncode, 0)
         self.script('prepare.py')
         self.assertTrue(generated.current(self.tree))
-        built = self.buck2('build', '--materializations', 'none', TARGET)
+        built = self.buck2('build', '-j4', '--materializations', 'none', TARGET)
         self.assertEqual(built.returncode, 0, built.stderr[-4000:])
         self.assertEqual(subprocess.run(['git', 'status', '--porcelain'], cwd=self.tree, capture_output=True,
                                         text=True, check=True).stdout, '')
         for path in generated.BUILD_INPUTS:
             (self.tree / path).unlink()
-        bare = self.buck2('uquery', TARGET)
-        self.assertNotEqual(bare.returncode, 0)
-        self.assertIn(f'missing: {generated.SYNC_HINT}', bare.stderr)
+        stale = self.buck2('build', '-j4', '--materializations', 'none', TARGET)
+        self.assertEqual(stale.returncode, 1)
+        self.assertEqual(stale.stderr.strip(),
+                         'buck2: generated inputs are stale; run python3 tools/buck2/sync.py --if-stale')
         self.script('sync.py', '--if-stale')
         self.assertEqual(self.buck2('uquery', TARGET).returncode, 0)
 

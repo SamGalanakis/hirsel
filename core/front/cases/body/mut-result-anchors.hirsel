@@ -1,7 +1,7 @@
 // OWN-20: a scoped result may name an exact `mut` parameter.
 // expect: accept
 fn grow(mut s:String)->Result[View[String],Capacity] in s {
-  string.push(mut s,"x")?
+  string.push(mut s,"x")
   Ok(string.slice(s,0,1))
 }
 fn use_it()->Result[u64,Capacity] {

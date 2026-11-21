@@ -2,7 +2,7 @@
 // test-reason: exercise the private uninhabited slot kernel
 // expect: run slots_move_law() = 11
 fn slots_move_law() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 1, 11)
     slots_shift(mut s, 1, 3)
     let got = slots_take(mut s, 3)
@@ -12,31 +12,28 @@ fn slots_move_law() -> u64 {
 
 // expect: run slots_owned_law() = true
 fn slots_owned_law() -> bool {
-    let mut s: Slots[String] = result.unwrap(slots_new(4))
-    slots_put(mut s, 0, result.unwrap(string.from("abc")))
+    let mut s: Slots[String] = slots_new(4)
+    slots_put(mut s, 0, string.from("abc"))
     slots_shift(mut s, 0, 2)
     let text = slots_take(mut s, 2)
     slots_free(take s)
-    let another = result.unwrap(string.from("xyz"))
+    let another = string.from("xyz")
     text == "abc" && another == "xyz"
 }
 
 // expect: run slots_capacity_law() = 32
 fn slots_capacity_law() -> u64 {
-    let r = bound bytes 0 {
-        let s: Result[Slots[u64], Capacity] = slots_new(4)
-        s
-    }
-    match r {
-        Ok(Error(c)) => c.requested,
-        _ => 99
-    }
+    refused_request(isolate(fn() -> Result[Slots[u64], Capacity] {
+        bound bytes 0 {
+            slots_new(4)
+        }
+    }))
 }
 
 // expect: run slots_zero_size_law() = true
 fn slots_zero_size_law() -> bool {
-    let mut a: Slots[()] = result.unwrap(slots_new(4))
-    let mut b: Slots[()] = result.unwrap(slots_new(4))
+    let mut a: Slots[()] = slots_new(4)
+    let mut b: Slots[()] = slots_new(4)
     slots_put(mut a, 0, ())
     slots_put(mut a, 1, ())
     slots_put(mut b, 0, ())
@@ -51,8 +48,8 @@ fn slots_zero_size_law() -> bool {
 
 // expect: run slots_cross_block_law() = 711
 fn slots_cross_block_law() -> u64 {
-    let mut a: Slots[u64] = result.unwrap(slots_new(2))
-    let mut b: Slots[u64] = result.unwrap(slots_new(4))
+    let mut a: Slots[u64] = slots_new(2)
+    let mut b: Slots[u64] = slots_new(4)
     slots_put(mut a, 1, 7)
     slots_put(mut b, 3, 11)
     slots_move(mut a, 1, mut b, 0, 1)
@@ -68,12 +65,12 @@ fn slots_cross_block_law() -> u64 {
 // both blocks free with no slot left live (FORM #90).
 // expect: run slots_run_law() = 31
 fn slots_run_law() -> u64 {
-    let mut a: Slots[String] = result.unwrap(slots_new(4))
-    let mut b: Slots[String] = result.unwrap(slots_new(4))
+    let mut a: Slots[String] = slots_new(4)
+    let mut b: Slots[String] = slots_new(4)
     let mut e: Slots[String] = slots_empty()
-    slots_put(mut a, 1, result.unwrap(string.from("x")))
-    slots_put(mut a, 2, result.unwrap(string.from("yy")))
-    slots_put(mut a, 3, result.unwrap(string.from("zzz")))
+    slots_put(mut a, 1, string.from("x"))
+    slots_put(mut a, 2, string.from("yy"))
+    slots_put(mut a, 3, string.from("zzz"))
     slots_move(mut a, 1, mut b, 0, 3)
     slots_move(mut e, 0, mut b, 3, 0)
     let counts = list.len(a.raw) * 100 + list.len(b.raw) * 10
@@ -92,7 +89,7 @@ fn slots_run_law() -> u64 {
 
 // expect: run slots_forget_ring_law() = true
 fn slots_forget_ring_law() -> bool {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 3, 11)
     slots_put(mut s, 0, 7)
     slots_forget_ring(mut s, 3)
@@ -112,11 +109,11 @@ fn slots_box_value(b: Box[u64]) -> u64 {
 // expect: run slots_list_handoff_law() = 37
 fn slots_list_handoff_law() -> u64 {
     let checked = bound bytes 144 {
-        let mut xs: List[Box[u64]] = result.unwrap(list.with_capacity(4))
+        let mut xs: List[Box[u64]] = list.with_capacity(4)
         for i in 1u64 .. 4 {
-            result.unwrap(list.push(mut xs, result.unwrap(box.new(i))))
+            list.push(mut xs, box.new(i))
         }
-        let scratch: Slots[Box[u64]] = result.unwrap(slots_new(3))
+        let scratch: Slots[Box[u64]] = slots_new(3)
         slots_list_move(view xs, 0, view scratch.raw, 0, 3)
         let mut valid = list.len(xs) == 3 && list.capacity(xs) == 4 && list.len(scratch.raw) == 0
         for i in 0u64 .. 3 {
@@ -132,8 +129,8 @@ fn slots_list_handoff_law() -> u64 {
             let item = option.unwrap(list.pop(mut xs))
             slots_box_value(item)
         }
-        result.unwrap(list.push(mut xs, result.unwrap(box.new(7u64))))
-        result.unwrap(list.reserve(mut xs, 8))
+        list.push(mut xs, box.new(7u64))
+        list.reserve(mut xs, 8)
         let b = {
             let item = option.unwrap(list.pop(mut xs))
             slots_box_value(item)
@@ -141,9 +138,9 @@ fn slots_list_handoff_law() -> u64 {
         list.clear(mut xs)
         // Only the 11-slot backing remains charged. Fill the other 56 bytes,
         // then require the next allocation to be refused.
-        let probe: Bytes = result.unwrap(list.with_capacity(56))
-        let extra: Result[Bytes, Capacity] = list.with_capacity(1)
-        let exact_refund = match extra {
+        let probe: Bytes = list.with_capacity(56)
+        let mut extra: Bytes = list.new()
+        let exact_refund = match list.try_reserve(mut extra, 1) {
             Error(_) => list.capacity(probe) == 56,
             Ok(_) => false,
         }
@@ -154,4 +151,27 @@ fn slots_list_handoff_law() -> u64 {
         }
     }
     result.unwrap(checked)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

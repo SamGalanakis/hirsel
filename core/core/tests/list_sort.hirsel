@@ -9,12 +9,12 @@ fn compare(a: u64, b: u64) -> Order {
 }
 
 fn five(a: u64, b: u64, c: u64, d: u64, e: u64) -> List[u64] {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
-    result.unwrap(list.push(mut xs, a))
-    result.unwrap(list.push(mut xs, b))
-    result.unwrap(list.push(mut xs, c))
-    result.unwrap(list.push(mut xs, d))
-    result.unwrap(list.push(mut xs, e))
+    let mut xs: List[u64] = list.with_capacity(5)
+    list.push(mut xs, a)
+    list.push(mut xs, b)
+    list.push(mut xs, c)
+    list.push(mut xs, d)
+    list.push(mut xs, e)
     xs
 }
 
@@ -32,49 +32,35 @@ fn digits(xs: List[u64]) -> u64 {
 // expect: run stable_equal_keys() = true
 fn stable_equal_keys() -> bool {
     let mut xs = five(21, 11, 22, 12, 23)
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         compare(a / 10, b / 10)
-    }))
+    })
     xs[0] == 11 && xs[1] == 12 && xs[2] == 21 && xs[3] == 22 && xs[4] == 23
 }
 
 // expect: run stable_empty_singleton() = 7
 fn stable_empty_singleton() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         compare(a / 10, b / 10)
-    }))
-    result.unwrap(list.push(mut xs, 7))
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    })
+    list.push(mut xs, 7)
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         compare(a / 10, b / 10)
-    }))
+    })
     digits(xs)
-}
-
-// expect: run stable_capacity_unchanged() = 54321
-fn stable_capacity_unchanged() -> u64 {
-    let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 0 {
-        list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
-            compare(a, b)
-        })
-    }
-    match r {
-        Ok(Error(_)) => digits(xs),
-        _ => 99
-    }
 }
 
 // Owned elements remain a permutation and ties keep their original order.
 // expect: run stable_owned_strings() = true
 fn stable_owned_strings() -> bool {
     let mut xs: List[String] = list.new()
-    result.unwrap(list.push(mut xs, result.unwrap(string.from("bb"))))
-    result.unwrap(list.push(mut xs, result.unwrap(string.from("a"))))
-    result.unwrap(list.push(mut xs, result.unwrap(string.from("cc"))))
-    result.unwrap(list.sort_stable(mut xs, fn(a: String, b: String) -> Order {
+    list.push(mut xs, string.from("bb"))
+    list.push(mut xs, string.from("a"))
+    list.push(mut xs, string.from("cc"))
+    list.sort_stable(mut xs, fn(a: String, b: String) -> Order {
         compare(list.len(string.as_bytes(a)), list.len(string.as_bytes(b)))
-    }))
+    })
     xs[0] == "a" && xs[1] == "bb" && xs[2] == "cc"
 }
 
@@ -88,7 +74,7 @@ fn stable_one_allocation() -> u64 {
         })
     }
     match r {
-        Ok(Ok(())) => digits(xs),
+        Ok(()) => digits(xs),
         _ => 99
     }
 }
@@ -101,13 +87,13 @@ fn model_all_small_sizes() -> bool {
         let mut xs: List[u64] = list.new()
         let mut expected_mask: u64 = 0
         for i in 0u64 .. n {
-            result.unwrap(list.push(mut xs, ((i * 7 + 3) % 5) * 100 + i))
+            list.push(mut xs, ((i * 7 + 3) % 5) * 100 + i)
             expected_mask |= 1u64 << i
         }
         let cap = list.capacity(xs)
-        result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+        list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
             compare(a / 100, b / 100)
-        }))
+        })
         if list.len(xs) != n || list.capacity(xs) != cap {
             return false
         }
@@ -137,9 +123,9 @@ fn model_all_small_sizes() -> bool {
 // expect: run bad_comparator_permutation() = true
 fn bad_comparator_permutation() -> bool {
     let mut xs = five(3, 1, 4, 0, 2)
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         Less
-    }))
+    })
     let mut mask: u64 = 0
     for x in xs {
         if x >= 5 {
@@ -155,15 +141,15 @@ fn bad_comparator_permutation() -> bool {
 // expect: run ordinary_list_after_sort() = 597
 fn ordinary_list_after_sort() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+    list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
         compare(a, b)
-    }))
+    })
     let a = option.unwrap(list.pop(mut xs))
-    result.unwrap(list.push(mut xs, 9))
+    list.push(mut xs, 9)
     let b = option.unwrap(list.pop(mut xs))
-    result.unwrap(list.reserve(mut xs, 10))
+    list.reserve(mut xs, 10)
     list.clear(mut xs)
-    result.unwrap(list.push(mut xs, 7))
+    list.push(mut xs, 7)
     a * 100 + b * 10 + option.unwrap(list.pop(mut xs))
 }
 
@@ -173,14 +159,14 @@ fn zero_size_sort() -> bool {
     let r = bound bytes 0 {
         let mut xs: List[()] = list.new()
         for _ in 0u64 .. 5 {
-            result.unwrap(list.push(mut xs, ()))
+            list.push(mut xs, ())
         }
         let cap = list.capacity(xs)
         let mut compared = false
-        result.unwrap(list.sort_stable(mut xs, fn(a: (), b: ()) -> Order {
+        list.sort_stable(mut xs, fn(a: (), b: ()) -> Order {
             compared = true;
             Equal
-        }))
+        })
         list.len(xs) == 5 && list.capacity(xs) == cap && compared
     }
     result.unwrap(r)
@@ -217,8 +203,8 @@ fn stable_generated_runs() -> bool {
                     (i * 17 + 3) % 13
                 }
                 let entry = key * 128 + i
-                result.unwrap(list.push(mut xs, entry))
-                result.unwrap(list.push(mut expected, entry))
+                list.push(mut xs, entry)
+                list.push(mut expected, entry)
             }
             if n > 1 {
                 reference(mut expected)
@@ -228,7 +214,7 @@ fn stable_generated_runs() -> bool {
                     compare(a / 128, b / 128)
                 })
             }
-            result.unwrap(result.unwrap(sorted))
+            result.unwrap(sorted)
             if xs != expected {
                 return false
             }

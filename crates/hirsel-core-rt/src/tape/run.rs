@@ -36,6 +36,8 @@ struct Run {
     launch: Box<Metadata>,
     describe_output: Option<(DescribeOutput, *mut u8)>,
     describe_tape: (Provider, u64),
+    host: *const entry::HostLaunch,
+    record_id: Option<[u8; 16]>,
 }
 
 unsafe extern "C" fn write_describe(state: *mut u8, request: *mut Request, _: u64) -> Step {
@@ -85,16 +87,16 @@ unsafe extern "C" fn emit_describe(state: *mut u8, bytes: *const u8, len: usize)
     }
 }
 
-fn write_launch(out: &mut Vec<u8>, launch: &Metadata) {
+fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool) {
     for bytes in [launch.digest(), launch.target().as_bytes()] {
         put_varint(out, bytes.len() as u64);
         out.extend_from_slice(bytes);
     }
     out.extend_from_slice(&launch.n_place().to_le_bytes());
-    out.push(u8::from(launch.is_describe()));
+    out.push(u8::from(launch.is_describe()) | (u8::from(managed) << 1));
 }
 
-fn read_launch(arg: &[u8]) -> Result<Metadata, Corrupt> {
+fn read_launch(arg: &[u8]) -> Result<(Metadata, bool), Corrupt> {
     let mut c = Cursor::new(arg);
     for _ in 0..c.varint()? {
         c.bytes()?;
@@ -105,15 +107,14 @@ fn read_launch(arg: &[u8]) -> Result<Metadata, Corrupt> {
     };
     let target = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
     let n_place = u64::from_le_bytes(c.fixed()?);
-    let describe = match c.u8()? {
-        0 => false,
-        1 => true,
-        _ => return Err(Corrupt),
-    };
-    if !c.done() {
+    let flags = c.u8()?;
+    if !c.done() || flags > 2 {
         return Err(Corrupt);
     }
-    Ok(Metadata::embedded(digest, target, n_place, describe))
+    Ok((
+        Metadata::embedded(digest, target, n_place, flags == 1),
+        flags == 2,
+    ))
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, bytes: *const u8, len: usize) {
     // SAFETY: the process pins Run and the caller pins this diagnostic view.
@@ -274,8 +275,8 @@ unsafe extern "C" fn invoke(
             Ok(dir) => dir,
             Err(e) => return stopped(run, e),
         };
-        let mut tape_id = [0; 16];
-        if run.mode == 0 {
+        let mut tape_id = run.record_id.unwrap_or_default();
+        if run.mode == 0 && run.record_id.is_none() {
             let n = libc::getrandom(tape_id.as_mut_ptr().cast(), tape_id.len(), 0);
             if n != tape_id.len() as isize {
                 return stopped(run, std::io::Error::last_os_error());
@@ -296,7 +297,7 @@ unsafe extern "C" fn invoke(
                 arg.extend_from_slice(std::slice::from_raw_parts(b.data, b.len));
             }
         }
-        write_launch(&mut arg, &*(*config).launch);
+        write_launch(&mut arg, &*(*config).launch, !run.host.is_null());
         let mut net_rules = vec![];
         if run.mode == 0 && !(*(*config).launch).is_describe() {
             let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
@@ -321,6 +322,15 @@ unsafe extern "C" fn invoke(
                 }
             }
         }
+        let env = if run.mode == 0 && !(*(*config).launch).is_describe() {
+            let source = entry::hirsel_core_entry_grant(config, entry::ENV, 0);
+            (source != 0).then(|| {
+                let handle = entry::hirsel_core_capability_handle(context, source);
+                crate::env::from_handle(handle).record()
+            })
+        } else {
+            None
+        };
         let header = Header {
             kind: KIND_RUN,
             tape_id,
@@ -333,6 +343,7 @@ unsafe extern "C" fn invoke(
             arg,
             net_rules,
             secret_grants,
+            env,
         };
         let expect = Expect {
             identity: &run.identity,
@@ -365,14 +376,15 @@ unsafe extern "C" fn invoke(
                 diagnose: run.mode == 2,
             });
         }
-        *run.launch = if run.mode == 0 {
-            (*(*config).launch).clone()
+        let (launch, managed) = if run.mode == 0 {
+            ((*(*config).launch).clone(), !run.host.is_null())
         } else {
             match read_launch(&startup.arg) {
                 Ok(launch) => launch,
                 Err(_) => return stopped(run, Fault::Corrupt),
             }
         };
+        *run.launch = launch;
         if run.launch.is_describe() {
             let source = if run.mode == 0 {
                 Provider {
@@ -394,7 +406,9 @@ unsafe extern "C" fn invoke(
         }
         let replay_net_rules = (!startup.net_rules.is_empty())
             .then(|| crate::net::RulesStorage::new(startup.net_rules));
+        let replay_env = startup.env.map(crate::env::Env::new);
         let files = (*context).host_files;
+        (*files).secret_mac_tape = Some(tape.secret_mac(run.mode != 0));
         let mut secret_grants = startup.secret_grants.into_iter();
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
@@ -437,7 +451,7 @@ unsafe extern "C" fn invoke(
                             let mut secret = if run.launch.is_describe() {
                                 crate::secret::Secret {
                                     origin: crate::secret::Origin::Granted(0),
-                                    patterns: std::sync::Arc::from([]),
+                                    policy: hirsel_core_net::SecretPolicy::default(),
                                     bytes: None,
                                 }
                             } else if run.mode == 0 {
@@ -452,16 +466,23 @@ unsafe extern "C" fn invoke(
                                 }
                                 crate::secret::Secret {
                                     origin: crate::secret::Origin::Granted(0),
-                                    patterns: hirsel_core_net::Pattern::parse_list(
-                                        &record.patterns,
-                                    )
-                                    .unwrap()
-                                    .into(),
+                                    policy: hirsel_core_net::SecretPolicy::parse(&record.patterns)
+                                        .unwrap(),
                                     bytes: None,
                                 }
                             };
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
                             (*files).secrets.lock().unwrap().register(secret)
+                        } else if req.kind == entry::ENV {
+                            let handle = if run.launch.is_describe() || run.mode == 0 {
+                                handle
+                            } else {
+                                let Some(env) = &replay_env else {
+                                    return stopped(run, Fault::Corrupt);
+                                };
+                                env.handle()
+                            };
+                            (*files).registry.grant(p, handle)
                         } else {
                             (*files).registry.grant(p, h)
                         }
@@ -473,6 +494,11 @@ unsafe extern "C" fn invoke(
         }
         if secret_grants.next().is_some() {
             return stopped(run, Fault::Corrupt);
+        }
+        if managed
+            && let Err(fault) = super::managed::install(context, config, run.host.as_ref(), &tape)
+        {
+            return stopped(run, fault);
         }
         let mut substituted = *config;
         substituted.grants = run.grants.as_ptr();
@@ -515,22 +541,64 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
 ) -> u8 {
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
+        if let Some((path, mode)) = pinned_replay(&*input) {
+            return run_taped(
+                input, names, sources, entry, path, mode, identity, revision, None,
+            );
+        }
         let path = std::env::var_os("HIRSEL_RECORD");
+        let id = std::env::var_os("HIRSEL_RECORD_ID");
         std::env::remove_var("HIRSEL_RECORD");
+        std::env::remove_var("HIRSEL_RECORD_ID");
         let Some(path) = path else {
             return entry::hirsel_core_os_run_with_sources(input, names, sources, entry);
         };
+        let record_id = match id {
+            None => None,
+            Some(id) => match entry::prepare_hex(id.as_os_str().as_bytes()) {
+                Ok(id) => Some(id),
+                Err(_) => return process::NOT_STARTED,
+            },
+        };
         super::writer::start();
-        let path = path.as_os_str().as_bytes();
         // A recorded run is its root alone: helper units run on their own
         // threads and are not recorded (see units.rs, "A unit recording").
-        let status = run_taped(input, names, sources, entry, path.to_vec(), 0, identity, revision);
+        let status = run_taped(
+            input,
+            names,
+            sources,
+            entry,
+            path.as_os_str().as_bytes().to_vec(),
+            0,
+            identity,
+            revision,
+            record_id,
+        );
         super::writer::flush();
         for (at, err) in super::writer::take_failures() {
             report_truncation((*input).stderr_fd, at, err);
         }
         status
     }
+}
+
+fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64)> {
+    if input.args_len != 3 {
+        return None;
+    }
+    // SAFETY: the native launcher pins exactly args_len View records at entry.
+    let args = unsafe { std::slice::from_raw_parts(input.args, input.args_len) };
+    let command = unsafe { crate::tls::view_bytes(&args[0]) };
+    if command != b"--hirsel-replay-recording" {
+        return None;
+    }
+    let mode = match unsafe { crate::tls::view_bytes(&args[1]) } {
+        b"same" => 1,
+        b"diagnose" => 2,
+        _ => return None,
+    };
+    let path = unsafe { crate::tls::view_bytes(&args[2]) }.to_vec();
+    Some((path, mode))
 }
 
 /// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
@@ -561,6 +629,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
             mode,
             identity,
             revision,
+            None,
         )
     }
 }
@@ -575,6 +644,7 @@ unsafe fn run_taped(
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    record_id: Option<[u8; 16]>,
 ) -> u8 {
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
@@ -609,6 +679,8 @@ unsafe fn run_taped(
             )),
             describe_output: None,
             describe_tape: (NO_HOST, 0),
+            host: ptr::null(),
+            record_id,
         };
         let opened = if mode == 0 {
             match entry::OsProcess::new(
@@ -625,6 +697,9 @@ unsafe fn run_taped(
         } else {
             None
         };
+        if let Some(host) = opened.as_ref().and_then(|process| process.host_launch()) {
+            run.host = host;
+        }
         let no_host = NO_HOST;
         let mut metadata = Vec::new();
         let mut config = match &opened {
@@ -708,15 +783,8 @@ pub(super) fn check_launch_replay() {
         }
         0
     }
-    let root = std::env::temp_dir().join(format!(
-        "hirsel-tape-launch-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     use std::os::fd::AsRawFd;
     let output = std::fs::File::create(root.join("describe")).unwrap();
     let path = std::ffi::CString::new(root.join("run.tape").as_os_str().as_bytes()).unwrap();
@@ -754,7 +822,12 @@ pub(super) fn check_launch_replay() {
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            env_patterns: crate::process::View {
+                data: std::ptr::null(),
+                len: 0,
+            },
             secret_ops: std::ptr::null(),
+            env_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),
@@ -771,6 +844,7 @@ pub(super) fn check_launch_replay() {
                 mode,
                 c"launch-case".as_ptr(),
                 &[7; 32],
+                None,
             )
         };
         assert_eq!(status, 0);
@@ -784,5 +858,4 @@ pub(super) fn check_launch_replay() {
     assert!(seen[0].emitted);
     assert_eq!(seen[1], seen[0]);
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
-    std::fs::remove_dir_all(root).unwrap();
 }

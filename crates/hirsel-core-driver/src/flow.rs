@@ -30,6 +30,7 @@ impl CheckProduct {
                         declared: None,
                         required: None,
                         message: message.clone(),
+                        unresolved: None,
                     });
                 }
             }

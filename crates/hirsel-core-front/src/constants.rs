@@ -29,6 +29,8 @@ pub enum ConstData {
         len: u32,
         case: Option<u32>,
     },
+    /// Index of the decoded literal. Aliases publish the same index.
+    StaticString(u32),
 }
 impl Program<'_> {
     pub(crate) fn register_constants(&mut self) {
@@ -69,11 +71,29 @@ impl Program<'_> {
         if base == len {
             return;
         }
+        let string = self
+            .core_decl("String")
+            .map(|d| self.types.intern(TyKind::Adt(d, vec![])));
         let mut left = vec![0usize; len - base];
         let mut heads = vec![None; len - base];
         let mut reverse = vec![];
         for i in base..len {
-            let at = self.constants[i].at;
+            let c = &self.constants[i];
+            let (at, ty) = (c.at, c.ty);
+            if ty == ERROR {
+                continue;
+            }
+            if Some(ty) != string && self.kind(ty) != Kind::Plain {
+                let item = self.item(at);
+                let kids = item.tree.children(item.root);
+                self.const_refuse(
+                    at,
+                    kids[kids.len() - 2],
+                    "a constant type must be plain or String",
+                );
+                self.constants[i].ty = ERROR;
+                continue;
+            }
             for use_ in &self.items[at.module as usize][at.item as usize]
                 .resolution
                 .names
@@ -98,16 +118,17 @@ impl Program<'_> {
             let (at, expr, ty) = (c.at, c.expr, c.ty);
             let value = if ty == ERROR {
                 None
-            } else if self.kind(ty) != Kind::Plain {
-                self.const_refuse(at, expr, "a constant must have a plain type");
-                None
             } else {
-                ConstCx {
+                let mut cx = ConstCx {
                     p: self,
                     at,
                     ascribing: false,
+                };
+                if Some(ty) == string {
+                    cx.static_string(expr, ty)
+                } else {
+                    cx.expr(expr, Some(ty), true)
                 }
-                .expr(expr, Some(ty), true)
             };
             self.constants[i].value = value;
             done[i - base] = true;
@@ -195,6 +216,22 @@ impl Program<'_> {
             Err("LANG-11")
         }
     }
+    pub(crate) fn constant_field_refusal(
+        &self,
+        rule: &str,
+        site: Site,
+        value: ConstValue,
+        name: &str,
+    ) -> Refusal {
+        let refusal = refusal(rule, site, "constant field is absent or opaque");
+        if rule == "LANG-11"
+            && let TyKind::Adt(d, _) = self.types.kind(value.ty)
+        {
+            let path = self.decls[d.index()].path.clone();
+            return refusal.with_unresolved(name, hirsel_core_resolve::NameScope::Field(path));
+        }
+        refusal
+    }
     fn const_refuse(&mut self, at: ItemRef, n: NodeId, message: &str) {
         self.refusals
             .push(refusal("LANG-20", self.site(at, n), message));
@@ -227,10 +264,11 @@ impl ConstCx<'_, '_> {
         {
             Ok(field) => Some(field),
             Err(rule) => {
-                self.p.refusals.push(refusal(
+                self.p.refusals.push(self.p.constant_field_refusal(
                     rule,
                     self.p.site(self.at, n),
-                    "constant field is absent or opaque",
+                    value,
+                    name,
                 ));
                 None
             }
@@ -241,6 +279,38 @@ impl ConstCx<'_, '_> {
             ty: scalar(s),
             data: ConstData::Bits(bits),
         }
+    }
+    fn static_string(&mut self, n: NodeId, ty: TyId) -> Option<ConstValue> {
+        let item = self.p.item(self.at);
+        let node = item.tree.node(n);
+        match node.kind {
+            NodeKind::Group => return self.static_string(item.tree.children(n)[0], ty),
+            NodeKind::Literal
+                if node
+                    .token
+                    .is_some_and(|t| item.tree.tokens[t.0 as usize].kind == TokenKind::String) =>
+            {
+                return self.literal(n, Some(ty), false);
+            }
+            NodeKind::Path => {
+                let use_ = self.p.resolved(self.at, n)?;
+                if matches!(use_.target, Target::Missing) {
+                    return None;
+                }
+                if let Target::Definition(id) = use_.target
+                    && use_.projections.is_empty()
+                    && let Some(id) = self.p.constant_ids[id.0 as usize]
+                    && self.p.constants[id as usize].ty == ty
+                {
+                    return self.p.constants[id as usize].value;
+                }
+            }
+            _ => {}
+        }
+        self.fail(
+            n,
+            "a static string requires a string literal or another static string",
+        )
     }
     fn expr(&mut self, n: NodeId, want: Option<TyId>, active: bool) -> Option<ConstValue> {
         let item = self.p.item(self.at);
@@ -608,6 +678,19 @@ impl ConstCx<'_, '_> {
             _ => None,
         });
         let (s, bits) = match item.tree.tokens[token.0 as usize].kind {
+            TokenKind::String if !negative => {
+                let Some(d) = self.p.core_decl("String") else {
+                    return self.fail(n, "a string literal needs the core String type");
+                };
+                let ty = self.p.types.intern(TyKind::Adt(d, vec![]));
+                let bytes = crate::body::quoted_bytes(text, false)?;
+                let id = self.p.constant_strings.len() as u32;
+                self.p.constant_strings.push(bytes);
+                return Some(ConstValue {
+                    ty,
+                    data: ConstData::StaticString(id),
+                });
+            }
             TokenKind::KwTrue if !negative => (Scalar::Bool, 1),
             TokenKind::KwFalse if !negative => (Scalar::Bool, 0),
             TokenKind::Byte if !negative => {
@@ -749,7 +832,7 @@ impl ConstCx<'_, '_> {
             {
                 return self.fail(n, "this constant type does not support comparison");
             }
-            let order = order(&self.p.constant_parts, &self.p.types, a, b);
+            let order = order(self.p, a, b);
             let yes = match op {
                 "==" => order.is_eq(),
                 "!=" => !order.is_eq(),
@@ -839,15 +922,10 @@ fn bind(t: &impl TyRead, pattern: TyId, actual: TyId, args: &mut [Option<TyId>])
     }
 }
 /// SEM-7 order of two constants of one type: integers numerically, `false` before
-/// `true`, tuples and records field by field, variants by ordinal then payload.
-fn order(
-    parts: &Rows<ConstValue>,
-    types: &impl TyRead,
-    a: ConstValue,
-    b: ConstValue,
-) -> std::cmp::Ordering {
+/// `true`, strings bytewise, tuples and records field by field, variants by ordinal then payload.
+fn order(p: &Program<'_>, a: ConstValue, b: ConstValue) -> std::cmp::Ordering {
     match (a.data, b.data) {
-        (ConstData::Bits(x), ConstData::Bits(y)) => match types.kind(a.ty) {
+        (ConstData::Bits(x), ConstData::Bits(y)) => match p.types.kind(a.ty) {
             TyKind::Scalar(s) if Ty::Scalar(*s).int().is_some() => {
                 integer(*s, x).cmp(&integer(*s, y))
             }
@@ -865,11 +943,15 @@ fn order(
                 case: d,
             },
         ) => c.cmp(&d).then_with(|| {
+            let parts = &p.constant_parts;
             (0..m.min(k) as usize)
-                .map(|f| order(parts, types, parts[i as usize + f], parts[j as usize + f]))
+                .map(|f| order(p, parts[i as usize + f], parts[j as usize + f]))
                 .find(|o| o.is_ne())
                 .unwrap_or(m.cmp(&k))
         }),
+        (ConstData::StaticString(i), ConstData::StaticString(j)) => {
+            p.constant_strings[i as usize].cmp(&p.constant_strings[j as usize])
+        }
         _ => std::cmp::Ordering::Equal,
     }
 }

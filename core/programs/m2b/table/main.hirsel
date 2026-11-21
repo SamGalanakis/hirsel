@@ -1,7 +1,7 @@
 // M2b slice 1 cases. Each case returns a hand-derived u64 (core/corpus/m2b/table/SPEC.md);
 // main runs the case named by its first argument and prints the value.
 fn account(id: u64, owner: String, balance: i64) -> Result[m2b.table.Account, Capacity] {
-    Ok(m2b.table.Account(id: id, owner: string.from(owner)?, balance: balance))
+    Ok(m2b.table.Account(id, owner: string.from(owner), balance))
 }
 
 fn fill(mut t: m2b.table.Table[m2b.table.Account], take a: m2b.table.Account) -> Result[(), Capacity] {
@@ -26,7 +26,7 @@ pub fn roundtrip() -> Result[u64, Capacity] {
     let mut k: u64 = 1
     while k <= 3 {
         match m2b.table.get(t, k) {
-            Some(a) => m2b.table.encode(t, a, mut out)?,
+            Some(a) => m2b.table.encode(t, a, mut out),
             None => return Ok(1),
         }
         k += 1
@@ -35,7 +35,7 @@ pub fn roundtrip() -> Result[u64, Capacity] {
     let mut matched: u64 = 0
     k = 1
     while k <= 3 {
-        let Some(back) = m2b.table.decode(t, out, mut at)? else {
+        let Some(back) = m2b.table.decode(t, out, mut at) else {
             return Ok(2)
         }
         match m2b.table.get(t, k) {
@@ -52,14 +52,14 @@ pub fn roundtrip() -> Result[u64, Capacity] {
     Ok(matched * 1000 + list.len(out))
 }
 
-fn refused(t: m2b.table.Table[m2b.table.Account], b: Bytes) -> Result[u64, Capacity] {
+fn refused(t: m2b.table.Table[m2b.table.Account], b: Bytes) -> u64 {
     let mut at: u64 = 0
-    match m2b.table.decode(t, b, mut at)? {
-        Some(_) => Ok(0),
+    match m2b.table.decode(t, b, mut at) {
+        Some(_) => 0,
         None => if at == 0 {
-            Ok(1)
+            1
         } else {
-            Ok(0)
+            0
         },
     }
 }
@@ -68,26 +68,26 @@ fn refused(t: m2b.table.Table[m2b.table.Account], b: Bytes) -> Result[u64, Capac
 pub fn malformed() -> Result[u64, Capacity] {
     let t = m2b.table.accounts()
     let mut good: Bytes = list.new()
-    m2b.table.encode(t, account(7, "ann", 10)?, mut good)?
+    m2b.table.encode(t, account(7, "ann", 10)?, mut good)
     let mut n: u64 = 0
     let empty: Bytes = list.new()
-    n += refused(t, empty)?
-    n += refused(t, list.slice(good, 0, 26))?
-    n += refused(t, list.slice(good, 0, 23))?
+    n += refused(t, empty)
+    n += refused(t, list.slice(good, 0, 26))
+    n += refused(t, list.slice(good, 0, 23))
     let mut huge: Bytes = list.new()
-    list.append(mut huge, good)?
+    list.append(mut huge, good)
     let mut i: u64 = 16
     while i < 24 {
         let _ = list.set(mut huge, i, 255u8)
         i += 1
     }
-    n += refused(t, huge)?
+    n += refused(t, huge)
     let mut utf: Bytes = list.new()
-    list.append(mut utf, good)?
+    list.append(mut utf, good)
     let _ = list.set(mut utf, 25, 255u8)
-    n += refused(t, utf)?
+    n += refused(t, utf)
     let mut at: u64 = 0
-    let whole: u64 = match m2b.table.decode(t, good, mut at)? {
+    let whole: u64 = match m2b.table.decode(t, good, mut at) {
         Some(a) => if a.id == 7 && a.owner == "ann" && a.balance == 10 && at == 27 {
             1
         } else {
@@ -106,10 +106,7 @@ pub fn capacity() -> Result[u64, Capacity] {
     let mut rows: List[m2b.table.Account] = list.new()
     let mut k: u64 = 1
     while k <= 4 {
-        match list.push(mut rows, account(k, "o", int.narrow(k * 10))?) {
-            Ok(()) => {},
-            Error((c, _)) => return Error(c),
-        }
+        list.push(mut rows, account(k, "o", int.narrow(k * 10))?)
         k += 1
     }
     let fifth = account(5, "zed", 50)?
@@ -166,7 +163,7 @@ pub fn bench(n: u64) -> Result[u64, Capacity] {
     k = 0
     while k < n {
         match m2b.table.get(t, k) {
-            Some(a) => m2b.table.encode(t, a, mut out)?,
+            Some(a) => m2b.table.encode(t, a, mut out),
             None => return Ok(0),
         }
         k += 1
@@ -174,7 +171,7 @@ pub fn bench(n: u64) -> Result[u64, Capacity] {
     let mut at: u64 = 0
     let mut sum: u64 = 0
     while at < list.len(out) {
-        let Some(a) = m2b.table.decode(t, out, mut at)? else {
+        let Some(a) = m2b.table.decode(t, out, mut at) else {
             return Ok(0)
         }
         sum += a.id + string.byte_len(a.owner)
@@ -225,12 +222,8 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

@@ -3,6 +3,7 @@
 // and prints the sum of their values, then its opens and sleeps. The solo cases run the
 // client role alone against a reply the case pre-fills (dispatch_client/SPEC.md).
 const PERIOD_NS: u64 = 1000000
+
 const BUDGET_MS: u64 = 10000
 
 fn reply_value(take r: Result[m2b.spool.Reply, m2b.spool.Failure]) -> u64 {
@@ -20,17 +21,13 @@ fn reply_value(take r: Result[m2b.spool.Reply, m2b.spool.Failure]) -> u64 {
 
 fn text(s: String) -> Result[Bytes, m2b.spool.Failure] {
     let mut b: Bytes = list.new()
-    match list.append(mut b, string.as_bytes(s)) {
-        Ok(()) => Ok(b),
-        Error(c) => Error(Full(c)),
-    }
+    list.append(mut b, string.as_bytes(s))
+    Ok(b)
 }
 
 fn push(mut b: Bytes, x: u8) -> Result[(), m2b.spool.Failure] {
-    match list.push(mut b, x) {
-        Ok(()) => Ok(()),
-        Error((cap, _)) => Error(Full(cap)),
-    }
+    list.push(mut b, x)
+    Ok(())
 }
 
 // A function the server does not register.
@@ -51,10 +48,7 @@ fn frame(name: String) -> Result[Option[Bytes], m2b.spool.Failure] {
             push(mut arg, 0)?
             i += 1
         }
-        match list.append(mut arg, string.as_bytes("ab")) {
-            Ok(()) => {},
-            Error(c) => return Error(Full(c)),
-        }
+        list.append(mut arg, string.as_bytes("ab"))
         return Ok(Some(m2b.spool.request(code.describe(rpc.handlers.repeat), arg)?))
     }
     if name == "nocode" {
@@ -196,12 +190,8 @@ pub fn case_rename_refusals(d: Dir) -> u64 waits {
 
 fn line(out: Stdout, v: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

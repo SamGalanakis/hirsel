@@ -1,0 +1,27 @@
+// MEM-4: a writer call's Result is the operand of a `?` or the returned tail; a `let`
+// initializer, `let _` and a match scrutinee are refused, the `?` and tail forms are not.
+// expect: refuse MEM-4 at 14:13
+// expect: refuse MEM-4 at 18:11
+// expect: refuse MEM-4 at 22:11
+// expect: refuse MEM-4 at 26:9
+@compact(u32) type J = Null | Arr(SeqSpan[J])
+fn one[in r](take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) }
+fn ok[in r](take w: Writer[SeqSpan[J], in r], b: bool) -> Result[Child[SeqSpan[J]], BuildError] {
+  writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) })?
+  writer.close(take w)
+}
+fn block[in r](mut w: Writer[SeqSpan[J], in r]) -> Result[(), BuildError] {
+  let z = { writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) }) }
+  z
+}
+fn ignored[in r](mut w: Writer[SeqSpan[J], in r]) -> Result[(), BuildError] {
+  let _ = writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) })
+  Ok(())
+}
+fn named[in r](take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+  let c = one(take x)
+  c
+}
+fn scrutinee[in r](take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+  match one(take x) { Ok(c) => Ok(c), Error(e) => Error(e) }
+}

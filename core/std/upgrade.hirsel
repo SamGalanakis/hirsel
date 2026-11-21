@@ -9,19 +9,19 @@ pub type Spec: send {
 pub fn spec[A: codec + send](req: http.Request, protocol: String, reserve: u64, arg: A, run: fn(take Taken) waits) -> Result[Spec, http.HandlerError] {
     let limit = http.upgrade_offer(req, protocol)?
     let coding: codec.Codec[A] = codec.of()
-    let encoded = bound bytes ((limit + 7) / 8 * 8) {
-        let mut out: Bytes = list.with_capacity(limit)?
-        codec.encode(coding, arg, mut out)?
-        take out
+    let encoded: Result[Result[Bytes, codec.EncodeError], Capacity] = bound bytes ((limit + 7) / 8 * 8) {
+        let mut out: Bytes = list.with_capacity(limit)
+        match codec.encode(coding, arg, mut out) {
+            Ok(()) => Ok(take out),
+            Error(e) => Error(e),
+        }
     }
     let argument = match take encoded {
-        Ok(take argument) => take argument,
+        Ok(Ok(take argument)) => take argument,
+        Ok(Error(_)) => return Error(InvalidUpgrade),
         Error(e) => return Error(Allocation(e)),
     }
-    match string.from(protocol) {
-        Ok(take name) => Ok(Spec(protocol: take name, fields: list.new(), argument: take argument, reservation: reserve, run: run)),
-        Error(e) => Error(Allocation(e)),
-    }
+    Ok(Spec(protocol: string.from(protocol), fields: list.new(), argument: take argument, reservation: reserve, run))
 }
 
 pub type Transfer: send {
@@ -60,16 +60,15 @@ pub type Started[A: send]: send {
     clock: Clock
 }
 
-pub type StartError: send = Decode(codec.DecodeError) | Allocation(Capacity) | Network(NetError)
+pub type StartError: send = Decode(codec.DecodeError) | Network(NetError)
 
 pub fn start[A: codec + send](take h: Taken) -> Result[Started[A], StartError] waits {
     let Taken(transfer: take transfer, notice: take notice) = take h
-    let Transfer(reader: take reader, writer: take write_half, input: take input, tail_at: at, head: take head, argument: take wire, clock: clock, pre_head: deadline, write_ms: ms) = take transfer
-    let value: Result[Result[A, codec.DecodeError], Capacity] = codec.decode(codec.of(), wire)
+    let Transfer(reader: take reader, writer: take write_half, input: take input, tail_at: at, head: take head, argument: take wire, clock, pre_head: deadline, write_ms: ms) = take transfer
+    let value: Result[A, codec.DecodeError] = codec.decode(codec.of(), wire)
     let arg = match take value {
-        Ok(Ok(take decoded)) => take decoded,
-        Ok(Error(e)) => return Error(Decode(e)),
-        Error(e) => return Error(Allocation(e)),
+        Ok(take arg) => take arg,
+        Error(e) => return Error(Decode(e)),
     }
     discard(take wire)
     let mut writer = take write_half
@@ -95,7 +94,7 @@ pub fn start[A: codec + send](take h: Taken) -> Result[Started[A], StartError] w
     } else {
         Some(take input)
     }
-    Ok(Started(socket: Socket(reader: take reader, writer: take writer, tail: take tail, at: at, clock: clock, notice: take notice), argument: take arg, clock: clock))
+    Ok(Started(socket: Socket(reader: take reader, writer: take writer, tail: take tail, at, clock, notice: take notice), argument: take arg, clock))
 }
 
 fn discard(take backing: Bytes) {}

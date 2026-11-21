@@ -6,9 +6,9 @@
 // expect: run passed_temporary() = 6
 // expect: run block_temporary() = 11
 fn make(take s: String) -> own fn(u64) -> u64 {
-    result.unwrap(fn(x: u64) -> u64 {
+    fn(x: u64) -> u64 {
         string.byte_len(s) + x
-    })
+    }
 }
 
 fn apply(f: scoped fn(u64) -> u64) -> u64 {
@@ -35,9 +35,9 @@ type Pair {
 }
 
 fn make_pair(n: u64) -> own fn(Pair) -> Pair {
-    result.unwrap(fn(x: Pair) -> Pair {
+    fn(x: Pair) -> Pair {
         Pair(value: x.value + n)
-    })
+    }
 }
 
 fn apply_pair(f: scoped fn(Pair) -> Pair) -> Pair {

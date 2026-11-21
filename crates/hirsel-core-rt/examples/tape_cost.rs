@@ -112,6 +112,7 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
                 arg: vec![],
                 net_rules: vec![],
                 secret_grants: vec![],
+                env: None,
             };
             Some(
                 tape::Tape::open(

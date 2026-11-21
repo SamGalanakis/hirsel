@@ -32,7 +32,7 @@ pub fn stats() -> Stats {
 
 // Each handler runs under `bound bytes limit`; a refusal is the reply Refused.
 pub fn registry(limit: u64) -> Registry {
-    Registry(handlers: map.new(), limit: limit)
+    Registry(handlers: map.new(), limit)
 }
 
 fn full[T](take r: Result[T, Capacity]) -> Result[T, Failure] {
@@ -61,19 +61,15 @@ pub fn register(mut r: Registry, h: StaticFn[Handler]) -> Result[(), Failure] {
 // changes the key and an old request is NoCode. Nothing checks that `via` calls `named`.
 pub fn register_as[F](mut r: Registry, named: StaticFn[F], via: StaticFn[Handler]) -> Result[(), Failure] {
     let id = code.identity(named)
-    let mut key: Bytes = full(list.with_capacity(list.len(id)))?
-    full(list.append(mut key, id))?
-    match map.insert(mut r.handlers, take key, via) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Full(c)),
-    }
+    let mut key: Bytes = list.with_capacity(list.len(id))
+    list.append(mut key, id)
+    map.insert(mut r.handlers, take key, via)
+    Ok(())
 }
 
 fn put_u8(mut out: Bytes, x: u8) -> Result[(), Failure] {
-    match list.push(mut out, x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Full(c)),
-    }
+    list.push(mut out, x)
+    Ok(())
 }
 
 fn put_u64(mut out: Bytes, x: u64) -> Result[(), Failure] {
@@ -109,9 +105,9 @@ pub fn request[F](named: StaticFn[F], arg: Bytes) -> Result[Bytes, Failure] {
     let mut out: Bytes = list.new()
     header(mut out, 81)?
     put_u64(mut out, list.len(id))?
-    full(list.append(mut out, id))?
+    list.append(mut out, id)
     put_u64(mut out, list.len(arg))?
-    full(list.append(mut out, arg))?
+    list.append(mut out, arg)
     Ok(out)
 }
 
@@ -166,7 +162,7 @@ pub fn reply_bytes(r: Reply) -> Result[Bytes, Failure] {
         Done(o) => {
             put_u8(mut out, 0)?
             put_u64(mut out, list.len(o))?
-            full(list.append(mut out, o))?
+            list.append(mut out, o)
         },
         NoCode => put_u8(mut out, 1)?,
         Bad => put_u8(mut out, 2)?,
@@ -188,8 +184,8 @@ pub fn parse_reply(b: Bytes) -> Result[Reply, Failure] {
         let Some((lo, hi)) = field(b, 4) else {
             return Error(Garbled)
         }
-        let mut o: Bytes = full(list.with_capacity(hi - lo))?
-        full(list.append(mut o, list.slice(b, lo, hi)))?
+        let mut o: Bytes = list.with_capacity(hi - lo)
+        list.append(mut o, list.slice(b, lo, hi))
         return Ok(Done(take o))
     }
     if tag == 1 && list.len(b) == 4 {
@@ -200,7 +196,7 @@ pub fn parse_reply(b: Bytes) -> Result[Reply, Failure] {
     }
     if tag == 3 && list.len(b) == 20 {
         match (get_u64(b, 4), get_u64(b, 12)) {
-            (Some(requested), Some(available)) => return Ok(Refused(Capacity(requested: requested, available: available))),
+            (Some(requested), Some(available)) => return Ok(Refused(Capacity(requested, available))),
             _ => return Error(Garbled),
         }
     }
@@ -210,10 +206,10 @@ pub fn parse_reply(b: Bytes) -> Result[Reply, Failure] {
 // "q<seq>" or "r<seq>", with ".tmp" for the name it is written under.
 fn name(kind: String, seq: u64, temporary: bool) -> Result[String, Failure] {
     let mut s = string.new()
-    full(string.push(mut s, kind))?
-    full(string.push_u64(mut s, seq))?
+    string.push(mut s, kind)
+    string.push_u64(mut s, seq)
     if temporary {
-        full(string.push(mut s, ".tmp"))?
+        string.push(mut s, ".tmp")
     }
     Ok(s)
 }

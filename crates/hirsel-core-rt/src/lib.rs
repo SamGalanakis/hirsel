@@ -15,6 +15,7 @@ pub mod channel;
 pub mod counted;
 mod destination;
 pub mod entry;
+mod env;
 mod fiber;
 pub mod flow;
 mod growth;
@@ -35,6 +36,7 @@ mod os_tls;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;
+mod provide;
 pub mod provider;
 pub mod region;
 mod resolve;
@@ -47,6 +49,7 @@ mod sha1;
 mod sha256;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
+mod stdin;
 pub mod steps;
 mod stop_signals;
 #[cfg(feature = "record")]
@@ -97,7 +100,6 @@ pub struct Context {
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
     pub(crate) bound_depth: usize,
-    pub(crate) grant_depth: usize,
     pub(crate) primary: Option<Box<causes::Cell>>,
     pub(crate) causes: causes::Causes,
     pub(crate) task_record: Option<block::Block>,
@@ -134,7 +136,6 @@ impl Context {
             cancel_shield: 0,
             finalizing: 0,
             bound_depth: 0,
-            grant_depth: usize::MAX,
             primary: None,
             causes: causes::Causes::default(),
             task_record: None,
@@ -221,8 +222,9 @@ impl Drop for Context {
         while self.bound_depth != 0 {
             self.limit_exit();
         }
-        if let Some(heap) = self.heap.get() {
-            heap.close();
+        if let Some(heap) = self.heap.take() {
+            // SAFETY: context destruction has exclusive custody and runs once.
+            unsafe { heap.close() };
         }
     }
 }

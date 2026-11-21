@@ -33,7 +33,7 @@ fn parcel(line: View[String]) -> Result[Option[Parcel], Capacity] {
     if string.byte_len(w) == 0 {
         return Ok(None)
     }
-    let name = string.from(w)?
+    let name = string.from(w)
     let Some((xs, at2)) = std.string.next_split(line, at, " ") else {
         return Ok(Some(Parcel(name: take name, at: None)))
     }
@@ -47,17 +47,16 @@ fn parcel(line: View[String]) -> Result[Option[Parcel], Capacity] {
 }
 
 fn show(mut buf: String, p: Parcel) -> Result[(), Capacity] {
-    string.push(mut buf, p.name)?
-    match p.at {
-        Some(l) => {
-            string.push(mut buf, " at ")?
-            std.string.push_i64(mut buf, l.x)?
-            string.push(mut buf, ",")?
-            std.string.push_i64(mut buf, l.y)?
-        },
-        None => string.push(mut buf, " nowhere")?
+    string.push(mut buf, p.name)
+    if let Some(l) = p.at {
+        string.push(mut buf, " at ")
+        std.string.push_i64(mut buf, l.x)
+        string.push(mut buf, ",")
+        std.string.push_i64(mut buf, l.y)
+    } else {
+        string.push(mut buf, " nowhere")
     }
-    string.push(mut buf, "\n")
+    Ok(string.push(mut buf, "\n"))
 }
 
 fn run(out: Stdout, d: Dir, argv: Args) -> Result[(), Fail] waits {
@@ -73,24 +72,23 @@ fn run(out: Stdout, d: Dir, argv: Args) -> Result[(), Fail] waits {
         n += 1
         let got = match parcel(line) { Ok(take g) => g, Error(c) => return Error(Mem(c)) }
         let Some(take p) = got else { return Error(Bad(n)) }
-        match list.push(mut ps, take p) { Ok(()) => {}, Error((c, _)) => return Error(Mem(c)) }
+        list.push(mut ps, take p)
         at = next
     }
     let c: std.codec.Codec[List[Parcel]] = std.codec.of_list()
     let mut bytes: Bytes = list.new()
-    match std.codec.encode(c, ps, mut bytes) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    std.codec.encode(c, ps, mut bytes) ?=> |_| Corrupt
     let back = match std.codec.decode(c, bytes) {
-        Ok(Ok(take xs)) => xs,
-        Ok(Error(_)) => return Error(Corrupt),
-        Error(cap) => return Error(Mem(cap))
+        Ok(take xs) => xs,
+        Error(_) => return Error(Corrupt),
     }
     let mut buf = string.new()
     for p in back {
         match show(mut buf, p) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
     }
-    match string.push(mut buf, "count ") { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
-    match string.push_u64(mut buf, list.len(back)) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
-    match string.push(mut buf, "\n") { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    string.push(mut buf, "count ")
+    string.push_u64(mut buf, list.len(back))
+    string.push(mut buf, "\n")
     match stdout.write(out, buf) { Ok(()) => Ok(()), Error(e) => Error(Write(e)) }
 }
 

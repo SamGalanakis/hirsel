@@ -38,18 +38,20 @@ root="$(pwd)"
 # recording tests select their ancestry-safe /dev/shm TMPDIR.
 native_inputs_tmp="${TMPDIR:-/tmp}"
 scratch_owner="$(realpath "${HIRSEL_SCRATCH_OWNER:-$root/tools/buck2/scratch.py}")"
-# Retain all launcher artifacts for diagnosis only when explicitly requested.
-# HIRSEL_KEEP_TEST_SCRATCH also protects them from subsequent recovery sweeps.
-keep_scratch="${HIRSEL_KEEP_TEST_SCRATCH:-}"
 scratch=""
 action_cache=""
 private_native_inputs=""
 cleanup_scratch() {
-  if [ -z "$keep_scratch" ] && [ -n "$action_cache" ]; then
-    rm -rf -- "$action_cache" || :
+  status=$?
+  keep_scratch=""
+  if [ "$status" -ne 0 ]; then
+    keep_scratch="${HIRSEL_KEEP_TEST_SCRATCH:-}"
   fi
-  for owned in "$private_native_inputs" "$scratch"; do
-    [ -z "$owned" ] || python3 "$scratch_owner" release "$owned" '' "$$" "$keep_scratch" || :
+  for owned in "$private_native_inputs" "$action_cache" "$scratch"; do
+    [ -n "$owned" ] || continue
+    if python3 "$scratch_owner" release "$owned" '' "$$" "$keep_scratch"; then
+      [ -z "$keep_scratch" ] || printf 'Kept failed test scratch at %s\n' "$owned" >&2
+    fi
   done
 }
 trap cleanup_scratch 0
@@ -60,18 +62,19 @@ if [ -n "${HIRSEL_TEST_POOL:-}" ]; then
   # A pool action's work directory is a bind mount of a subdirectory. The
   # action's private /dev tmpfs is mounted at its root: scratch directories
   # and TMPDIR live there.
-  scratch="$(python3 "$scratch_owner" create /dev/shm hirsel-test- "$$" "$keep_scratch")"
-  mkdir -p "$scratch/target-tmpdir" "$scratch/tmp" "$(dirname "$HIRSEL_TEST_TMPDIR")"
+  action_root=/dev/shm
+  scratch="$(python3 "$scratch_owner" create "$action_root" hirsel-test- "$$" '')"
+  mkdir -p "$scratch/target-tmpdir" "$(dirname "$HIRSEL_TEST_TMPDIR")"
   rm -rf "$HIRSEL_TEST_TMPDIR"
   ln -s "$scratch/target-tmpdir" "$HIRSEL_TEST_TMPDIR"
-  export TMPDIR="$scratch/tmp"
 else
   # On this host, scratch lives outside the project: Buck2 watches the project
   # tree and stops at a file name that is not UTF-8, which native launch tests
   # create on purpose. One directory per checkout, linked in atomically, since
   # host tests run concurrently. Leases retain the target until the last
   # launcher exits. Replace a pre-link directory by rename before removing it.
-  scratch="$(python3 "$scratch_owner" create "${TMPDIR:-/tmp}" hirsel-test- "$$" "$keep_scratch" "$(printf %s "$root" | cksum | cut -d' ' -f1)")"
+  action_root="$native_inputs_tmp"
+  scratch="$(python3 "$scratch_owner" create "$action_root" hirsel-test- "$$" '' "$(printf %s "$root" | cksum | cut -d' ' -f1)")"
   mkdir -p "$scratch" "$(dirname "$HIRSEL_TEST_TMPDIR")"
   until [ "$(readlink "$HIRSEL_TEST_TMPDIR" || true)" = "$scratch" ]; do
     if [ -d "$HIRSEL_TEST_TMPDIR" ] && [ ! -L "$HIRSEL_TEST_TMPDIR" ] &&
@@ -82,17 +85,14 @@ else
     mv -T "$HIRSEL_TEST_TMPDIR.$$" "$HIRSEL_TEST_TMPDIR" 2>/dev/null || rm -f "$HIRSEL_TEST_TMPDIR.$$"
   done
 fi
-# Every action owns its writable caches and retained test data, including on a
-# host with a populated home. Share them among its test threads/CLI children,
-# never between actions. The sandbox and its recordings have the same lifetime.
-# mktemp creates a unique mode-0700 directory (Go os.MkdirTemp's ownership
-# pattern); the launcher stays alive so its exit trap also runs on test failure.
-action_cache="$(mktemp -d "$scratch/action-XXXXXXXXXX")"
-action_cache="$(cd "$action_cache" && pwd)"
+# Put even anonymous tempfile directories under an owned action directory.
+# The shared checkout symlink above only serves compile-time CARGO_TARGET_TMPDIR.
+action_cache="$(python3 "$scratch_owner" create "$action_root" hirsel-action- "$$" '')"
 native_input_materializer=""
+export TMPDIR="$action_cache/tmp"
 export XDG_CACHE_HOME="$action_cache/cache"
 export XDG_DATA_HOME="$action_cache/data"
-mkdir -m 700 "$XDG_CACHE_HOME"
+mkdir -m 700 "$TMPDIR" "$XDG_CACHE_HOME"
 if [ -n "${LLVM_SYS_231_PREFIX:-}" ]; then
   LLVM_SYS_231_PREFIX="$(cd "$LLVM_SYS_231_PREFIX" && pwd)"
   export LLVM_SYS_231_PREFIX
@@ -121,7 +121,7 @@ materialize_native_inputs() {
   for argument in "$@"; do
     case "$argument" in --list | --help | -h) return 0 ;; esac
   done
-  private_native_inputs="$(python3 "$scratch_owner" create "$native_inputs_tmp" hirsel-native-inputs- "$$" "$keep_scratch")"
+  private_native_inputs="$(python3 "$scratch_owner" create "$native_inputs_tmp" hirsel-native-inputs- "$$" '')"
   LLVM_SYS_231_PREFIX="$(python3 "$native_input_materializer" "$LLVM_SYS_231_PREFIX" "$private_native_inputs/llvm")"
   export LLVM_SYS_231_PREFIX
   export PATH="$LLVM_SYS_231_PREFIX/bin:$PATH"

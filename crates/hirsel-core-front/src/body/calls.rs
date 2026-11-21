@@ -139,9 +139,53 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- calls
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
-        let result = self.call_inner(n, want, &mut scratch);
+        let c = self.kids(n);
+        if self.writer_call(c[0]) && !self.writer_placed(n) {
+            self.refuse(
+                "MEM-4",
+                n,
+                "a writer call's Result is the operand of a `?` or the returned tail",
+            );
+        }
+        let result = self.call_inner(n, c[0], &c[1..], want, &mut scratch);
         self.call_scratch.push(scratch);
         result
+    }
+
+    /// LANG-18: apply a `?=>` path mapper `m` to the error payload `value` of type
+    /// `error`, as the call `m(take x)` checked against `expect(mapped)`.
+    pub(super) fn apply_mapper(
+        &mut self,
+        n: NodeId,
+        mapper: NodeId,
+        error: TyId,
+        value: Option<ValueId>,
+        mapped: TyId,
+    ) -> (TyId, Option<ValueId>) {
+        let destination = self.destination.take();
+        self.mapped_error = Some((n, error, value));
+        let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        let result = self.call_inner(n, mapper, &[n], expect(mapped), &mut scratch);
+        self.call_scratch.push(scratch);
+        // A refused mapper leaves its argument unread; it is not owned here.
+        self.mapped_error = None;
+        self.destination = destination;
+        result
+    }
+
+    /// LANG-18: a mapper takes its one argument, the error payload, by `take`.
+    pub(super) fn mapper_mode(&mut self, n: NodeId, mode: Option<Mode>) -> bool {
+        if !self.mapped_error.is_some_and(|(node, ..)| node == n) {
+            return true;
+        }
+        if let Some(mode) = mode
+            && mode != Mode::Take
+        {
+            let message = "a `?=>` mapper takes the error payload by `take`";
+            self.refuse_compared("LANG-18", n, mode.keyword(), "take", message);
+            return false;
+        }
+        true
     }
 
     pub(super) fn call_target(&self, callee: NodeId) -> Option<&'c Target> {
@@ -178,12 +222,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn call_inner(
         &mut self,
         n: NodeId,
+        callee: NodeId,
+        args: &[NodeId],
         want: Option<Want>,
         scratch: &mut CallScratch,
     ) -> (TyId, Option<ValueId>) {
         self.out.counts.calls += 1;
-        let c = self.kids(n);
-        let (callee, args) = (c[0], &c[1..]);
         self.out.counts.uses += 1;
         let p: &'c Program<'a> = self.p;
         let f = match self.call_target(callee) {
@@ -309,6 +353,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let k = g.params.len();
             let message = format!("expected {k} arguments");
             self.refuse_arity_at(self.span(args[k]), args.len(), k, message);
+            return (ERROR, None);
+        }
+        if !self.mapper_mode(n, g.params.first().map(|q| q.mode)) {
             return (ERROR, None);
         }
         if g.waits {
@@ -707,7 +754,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             self.builtin_use(f, n);
             let direct = vals[1].and_then(|v| self.pointer_address(v)) == Some(to);
-            self.list_push(tys[0], header, vals[1], result, n, Some((full, direct)))
+            self.list_push(tys[0], header, vals[1], n, Some((full, direct)))
         } else if builtin {
             self.intrinsic(f, tys, vals, n)
         } else {
@@ -1199,47 +1246,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse("LANG-11", n, "inline.copy_from_slice requires Inline[T, N]");
                 return;
             }
-            if missing == 0
-                && matches!(path.0.name.as_str(), "sink" | "stage" | "port")
-                && path.0.modules == ["flow"]
-                && path.package_is("core", "1")
-            {
-                let (holds, parameters) = crate::decls::holds_components(&p.decls, &self.t, t);
-                if holds == 0 && parameters != 0 {
-                    let shown = self.shown(t);
-                    self.refuse(
-                        "CONC-14",
-                        n,
-                        format!(
-                            "the holds set of `{shown}` must be known empty when wiring a flow"
-                        ),
-                    );
-                    return;
-                }
-                if holds != 0 {
-                    let shown = self.shown(t);
-                    let mut message = format!(
-                        "flow values must hold nothing; `{shown}` holds an owned, scoped or authority value"
-                    );
-                    if let TyKind::Adt(d, xs) = self.t.kind(t).clone() {
-                        for field in p.decls[d.index()].all_fields() {
-                            let ty = crate::types::subst(&mut self.t, field.ty, &xs);
-                            let (holds, _) = crate::decls::holds_components(&p.decls, &self.t, ty);
-                            if holds != 0 {
-                                message = format!(
-                                    "flow values must hold nothing; field `{}` of `{shown}` has type `{}`",
-                                    field.name,
-                                    self.shown(ty)
-                                );
-                                break;
-                            }
-                        }
-                    }
-                    self.refuse("CONC-14", n, message);
-                    return;
-                }
-            }
-
             if missing != 0 {
                 let (a, b) = (self.shown(t), crate::decls::bound_names(missing));
                 let path = &p.fns[f].path;

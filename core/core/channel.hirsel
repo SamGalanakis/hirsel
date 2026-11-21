@@ -1,5 +1,5 @@
 // Module `channel` (CONC-4, CONC-5).
-pub fn new[T: send](cap: u64) -> Result[(Sender[T], Receiver[T]), Capacity]
+pub fn new[T: send](cap: u64) -> (Sender[T], Receiver[T])
 
 pub fn sender[T: send](tx: Sender[T]) -> Sender[T]
 

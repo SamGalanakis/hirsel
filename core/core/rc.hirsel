@@ -1,5 +1,5 @@
 // Module `rc` (MEM-14, MEM-16).
-pub fn new[T: shareable](take x: T) -> Result[Rc[T], (Capacity, T)]
+pub fn new[T: shareable](take x: T) -> Rc[T]
 
 pub fn share[T: shareable](h: Rc[T]) -> Rc[T]
 

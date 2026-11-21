@@ -3,14 +3,14 @@
 // test-reason: misuse of trusted core storage is checked by evaluator marks only
 // expect: run slots_double_put() = fault "put over the live slot at +0"
 fn slots_double_put() {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 0, 1)
     slots_put(mut s, 0, 2)
 }
 
 // expect: run slots_double_take() = fault "read of the empty slot at +0: a slot kernel read a slot it took"
 fn slots_double_take() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 0, 1)
     let _ = slots_take(mut s, 0)
     slots_take(mut s, 0)
@@ -18,7 +18,7 @@ fn slots_double_take() -> u64 {
 
 // expect: run slots_empty_view() = fault "read of the empty slot at +8: a slot kernel read a slot it took"
 fn slots_empty_view() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 1, 7)
     let _ = slots_take(mut s, 1)
     let x: u64 = slots_view(s, 1)
@@ -27,14 +27,14 @@ fn slots_empty_view() -> u64 {
 
 // expect: run slots_free_live() = fault "free of a block whose slot at +72 is live: a slot kernel left a value in it"
 fn slots_free_live() {
-    let mut s: Slots[String] = result.unwrap(slots_new(4))
-    slots_put(mut s, 3, result.unwrap(string.from("abc")))
+    let mut s: Slots[String] = slots_new(4)
+    slots_put(mut s, 3, string.from("abc"))
     slots_free(take s)
 }
 
 // expect: run slots_move_over_live() = fault "put over the live slot at +8"
 fn slots_move_over_live() {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 0, 1)
     slots_put(mut s, 1, 2)
     slots_shift(mut s, 0, 1)
@@ -43,8 +43,8 @@ fn slots_move_over_live() {
 // A run's third destination slot is live: every slot of the run is a put.
 // expect: run slots_run_over_live() = fault "put over the live slot at +16"
 fn slots_run_over_live() {
-    let mut a: Slots[u64] = result.unwrap(slots_new(4))
-    let mut b: Slots[u64] = result.unwrap(slots_new(4))
+    let mut a: Slots[u64] = slots_new(4)
+    let mut b: Slots[u64] = slots_new(4)
     slots_put(mut a, 0, 1)
     slots_put(mut a, 1, 2)
     slots_put(mut a, 2, 3)

@@ -4,7 +4,7 @@
 // expect: run owners() = 9 trace 9
 fn counter() -> u64 {
     let mut m: Map[u64, u64] = map.new()
-    result.unwrap(map.insert(mut m, 1u64, 10u64))
+    map.insert(mut m, 1u64, 10u64)
     let mut calls: u64 = 0
     let found = map.update(mut m, 1u64, scoped fn(mut n: u64) -> u64 {
         calls += 1;
@@ -41,7 +41,7 @@ resource type Mark {
 
 fn owners() -> u64 {
     let mut m: Map[u64, Mark] = map.new()
-    result.unwrap(map.insert(mut m, 1u64, result.unwrap(Mark(id: 8))))
+    map.insert(mut m, 1u64, result.unwrap(Mark(id: 8)))
     option.unwrap(map.update(mut m, 1u64, fn(mut value: Mark) -> u64 {
         value.id += 1;
         value.id

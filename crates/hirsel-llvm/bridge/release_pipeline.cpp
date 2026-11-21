@@ -20,8 +20,12 @@
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Linker/Linker.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
+#include <llvm/Transforms/IPO/ElimAvailExtern.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/Inliner.h>
 #include <llvm/Transforms/Scalar/LoopUnrollPass.h>
@@ -59,6 +63,47 @@ void limit_recursive_entry_inlining(Module &module) {
     }
 }
 
+// A library's lent bodies (hirsel_llvm_emit_parts) join the module for its
+// inliner: each body a definition calls, and those they call, comes in
+// `available_externally`. Its own passes do not run over it, the inliner may
+// copy it into a caller, and `elim-avail-extern` then drops it, so each call
+// left reaches the library's part. The release inliner drops them at its end;
+// the specialize inliner takes them again, for itself and the loop helpers
+// after it, until `hirsel_llvm_drop_lent`.
+class LendPass : public PassInfoMixin<LendPass> {
+    StringRef lent;
+    std::string *failure;
+
+public:
+    LendPass(StringRef lent, std::string *failure) : lent(lent), failure(failure) {}
+    PreservedAnalyses run(Module &m, ModuleAnalysisManager &) {
+        auto library = getLazyBitcodeModule(MemoryBufferRef(lent, "hirsel-lent"), m.getContext());
+        if (!library) {
+            *failure = toString(library.takeError());
+            return PreservedAnalyses::all();
+        }
+        if (Linker::linkModules(m, std::move(*library), Linker::LinkOnlyNeeded))
+            *failure = "the lent bodies do not link";
+        limit_recursive_entry_inlining(m);
+        return PreservedAnalyses::none();
+    }
+    static bool isRequired() { return true; }
+};
+
+// Whether a pass is to run over `ir`: never over only lent bodies.
+bool unlent(Any ir) {
+    if (const auto *f = llvm::any_cast<const Function *>(&ir))
+        return !(*f)->hasAvailableExternallyLinkage();
+    if (const auto *scc = llvm::any_cast<const LazyCallGraph::SCC *>(&ir)) {
+        for (const LazyCallGraph::Node &n : **scc)
+            if (!n.getFunction().hasAvailableExternallyLinkage()) return true;
+        return false;
+    }
+    if (const auto *loop = llvm::any_cast<const Loop *>(&ir))
+        return !(*loop)->getHeader()->getParent()->hasAvailableExternallyLinkage();
+    return true;
+}
+
 class ReleasePipeline {
     Module &module;
     PassInstrumentationCallbacks callbacks;
@@ -81,6 +126,11 @@ public:
         builder.registerModuleAnalyses(modules);
         builder.crossRegisterProxies(loops, functions, calls, modules);
         instrumentation.registerCallbacks(callbacks, &modules);
+    }
+
+    // Lent bodies keep the code their library's optimizer made.
+    void skip_lent() {
+        callbacks.registerShouldRunOptionalPassCallback([](StringRef, Any ir) { return unlent(ir); });
     }
 
     void run(ModulePassManager &pipeline, StringRef phase) {
@@ -234,15 +284,17 @@ public:
 };
 
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
-void registerReleasePasses(PassBuilder &builder) {
+using CounterRangeReport = void (*)(void *, const char *, size_t, unsigned);
+
+void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, void *receiver) {
     builder.registerPipelineParsingCallback(
-        [](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+        [report, receiver](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
             if (name == "implied-check-hoist") {
                 passes.addPass(hirsel_llvm::ImpliedCheckHoistPass());
                 return true;
             }
             if (name == "counter-range") {
-                passes.addPass(hirsel_llvm::CounterRangePass());
+                passes.addPass(hirsel_llvm::CounterRangePass(report, receiver));
                 return true;
             }
             if (name == "counted-exit-split") {
@@ -315,11 +367,14 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
 
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
-    LLVMBool prepay_steps) {
+    LLVMBool prepay_steps, CounterRangeReport report, void *receiver, const uint8_t *lent,
+    size_t lent_len) {
     limit_recursive_entry_inlining(*unwrap(raw_module));
     ReleasePipeline release(raw_module, raw_machine);
     PassBuilder &builder = release.builder;
-    registerReleasePasses(builder);
+    registerReleasePasses(builder, report, receiver);
+    std::string lend_failure;
+    if (lent_len) release.skip_lent();
 
     ModulePassManager pipeline;
     // Promote slots before outlining the cold metering path so the inliner
@@ -363,7 +418,9 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         return wrap(std::move(error));
     inliner.addLateModulePass(createModuleToFunctionPassAdaptor(
         InvalidateAnalysisPass<ShouldNotRunFunctionPassesAnalysis>()));
+    if (lent_len) pipeline.addPass(LendPass(StringRef((const char *)lent, lent_len), &lend_failure));
     pipeline.addPass(std::move(inliner));
+    if (lent_len) pipeline.addPass(EliminateAvailableExternallyPass());
 
     if (auto error = builder.parsePassPipeline(pipeline,
         "deadargelim,globalopt,globaldce,rpo-function-attrs,recompute-globalsaa,"
@@ -384,6 +441,8 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         return wrap(std::move(error));
 
     release.run(pipeline, "release");
+    if (!lend_failure.empty())
+        return wrap(make_error<StringError>(lend_failure, inconvertibleErrorCode()));
     return LLVMErrorSuccess;
 }
 
@@ -403,9 +462,30 @@ extern "C" LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module,
     return LLVMErrorSuccess;
 }
 
+// A composed program's specialize inliner and loop helpers
+// (`hirsel_llvm_promote_step_window`) see the library's bodies; a program over
+// a separate library takes its lent bodies (`LendPass`) again for them.
 extern "C" LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module,
-                                                      LLVMTargetMachineRef machine) {
-    return runPasses(module, machine, "specialize", "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)");
+                                                      LLVMTargetMachineRef machine,
+                                                      const uint8_t *lent, size_t lent_len) {
+    ReleasePipeline release(module, machine);
+    std::string lend_failure;
+    ModulePassManager pipeline;
+    if (lent_len) {
+        release.skip_lent();
+        pipeline.addPass(LendPass(StringRef((const char *)lent, lent_len), &lend_failure));
+    }
+    if (auto error = release.builder.parsePassPipeline(pipeline,
+        "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)"))
+        return wrap(std::move(error));
+    release.run(pipeline, "specialize");
+    if (!lend_failure.empty())
+        return wrap(make_error<StringError>(lend_failure, inconvertibleErrorCode()));
+    return LLVMErrorSuccess;
+}
+
+extern "C" LLVMErrorRef hirsel_llvm_drop_lent(LLVMModuleRef module, LLVMTargetMachineRef machine) {
+    return runPasses(module, machine, "specialize", "elim-avail-extern");
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module,

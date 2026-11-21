@@ -2,32 +2,26 @@
 fn matrix(n: u64) -> Result[List[List[f64]], helper.Error] {
     let square: f64 = float.from_int(n * n)
     let scale = 1.0 / square
-    let mut rows: List[List[f64]] = helper.mem(list.with_capacity(n))?
+    let mut rows: List[List[f64]] = list.with_capacity(n)
     for i in 0 .. n {
         let fi: f64 = float.from_int(i)
         let mut row: List[f64] = list.new()
-        helper.mem(list.fill(mut row, n, 0.0))?
+        list.fill(mut row, n, 0.0)
         for j in 0 .. n {
             let fj: f64 = float.from_int(j);
             row[j] = scale * (fi - fj) * (fi + fj)
         }
-        match list.push(mut rows, take row) {
-            Ok(()) => {},
-            Error((c, take unused)) => return Error(Capacity(c))
-        }
+        list.push(mut rows, take row)
     }
     Ok(take rows)
 }
 
 fn zeros(n: u64) -> Result[List[List[f64]], helper.Error] {
-    let mut rows: List[List[f64]] = helper.mem(list.with_capacity(n))?
+    let mut rows: List[List[f64]] = list.with_capacity(n)
     for _ in 0 .. n {
         let mut row: List[f64] = list.new()
-        helper.mem(list.fill(mut row, n, 0.0))?
-        match list.push(mut rows, take row) {
-            Ok(()) => {},
-            Error((c, take unused)) => return Error(Capacity(c))
-        }
+        list.fill(mut row, n, 0.0)
+        list.push(mut rows, take row)
     }
     Ok(take rows)
 }
@@ -92,10 +86,10 @@ type Block: send {
 
 fn worker(take job: Job) -> Result[Block, helper.Error] {
     let n = list.len(job.a.rows)
-    let mut rows: List[List[f64]] = helper.mem(list.with_capacity(job.end - job.start))?
+    let mut rows: List[List[f64]] = list.with_capacity(job.end - job.start)
     for i in job.start .. job.end {
         let mut row: List[f64] = list.new()
-        helper.mem(list.fill(mut row, n, 0.0))?
+        list.fill(mut row, n, 0.0)
         for j in 0 .. n {
             let mut sum: f64 = 0.0
             for k in 0 .. n {
@@ -103,10 +97,7 @@ fn worker(take job: Job) -> Result[Block, helper.Error] {
             }
             row[j] = sum
         }
-        match list.push(mut rows, take row) {
-            Ok(()) => {},
-            Error((c, take unused)) => return Error(Capacity(c))
-        }
+        list.push(mut rows, take row)
     }
     Ok(Block(start: job.start, rows: take rows))
 }
@@ -119,33 +110,21 @@ fn parallel(tasks: Tasks, a: Arc[Matrix], b: List[List[f64]], threads: u64) -> R
             transposed[j][i] = b[i][j]
         }
     }
-    let columns = match arc.new(Matrix(rows: take transposed)) {
-        Ok(take x) => take x,
-        Error((c, take unused)) => return Error(Capacity(c)),
-    }
-    let mut jobs: List[Task[Result[Block, helper.Error]]] = helper.mem(list.with_capacity(threads))?
+    let columns = arc.new(Matrix(rows: take transposed))
+    let mut jobs: List[Task[Result[Block, helper.Error]]] = list.with_capacity(threads)
     for i in 0 .. threads {
         let job = Job(a: arc.share(a), transposed: arc.share(columns), start: i * n / threads, end: (i + 1) * n / threads)
-        let handle = match task.spawn(tasks, bytes 2097152, take job, worker) {
-            Ok(take h) => take h,
-            Error((c, take unused)) => return Error(Capacity(c)),
-        }
-        match list.push(mut jobs, take handle) {
-            Ok(()) => {},
-            Error((c, take unused)) => return Error(Capacity(c))
-        }
+        let handle = task.spawn(tasks, bytes 2097152, take job, worker)
+        list.push(mut jobs, take handle)
     }
-    let mut blocks: List[Block] = helper.mem(list.with_capacity(threads))?
+    let mut blocks: List[Block] = list.with_capacity(threads)
     // Pop in reverse spawn order. Blocks retain their explicit first row.
     while let Some(take handle) = list.pop(mut jobs) {
         let block = match task.join(take handle) {
             Ok(take r) => take r,
             Error(_) => return Error(Config)
         }?
-        match list.push(mut blocks, take block) {
-            Ok(()) => {},
-            Error((c, take unused)) => return Error(Capacity(c))
-        }
+        list.push(mut blocks, take block)
     }
     let center = n / 2
     for block in blocks {
@@ -179,10 +158,7 @@ pub fn dispatch_wait(tasks: Tasks, config: helper.Settings, name: String, warmup
 }
 
 pub fn parallel_work(tasks: Tasks, n: u64, threads: u64, rounds: u64) -> Result[(u32, u64), helper.Error] waits {
-    let a = match arc.new(Matrix(rows: matrix(n)?)) {
-        Ok(take x) => take x,
-        Error((c, take unused)) => return Error(Capacity(c))
-    }
+    let a = arc.new(Matrix(rows: matrix(n)?))
     let b = matrix(n)?
     let mut total: u32 = 0
     let mut completed: u64 = 0

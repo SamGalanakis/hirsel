@@ -18,18 +18,12 @@ impl NativeInput for c::Module {
 use hirsel_core_ir::eval::{self, Outcome};
 use hirsel_core_ir::{self as c, *};
 use hirsel_cranelift::core::*;
-use std::{
-    fmt::Write as _,
-    fs,
-    path::PathBuf,
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-};
-
+use std::{fmt::Write as _, fs, path::PathBuf, process::Command};
 
 #[allow(dead_code)] // The shared fixture also exposes the pre-site ABI for LLVM's cutover.
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
+use host_memory::NativeArtifacts;
 /// The site word of an evaluator anchor under `sites`, 0 for none.
 fn anchor_word(sites: &[u64], anchor: Option<hirsel_core_ir::Anchor>) -> u64 {
     anchor.map_or(0, |a| sites[a.item.index()] + u64::from(a.start))
@@ -233,9 +227,9 @@ fn execute_cases_with_bindings(
                     )
                 })
             });
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
-    fs::write(scratch.0.join("input.o"), input.object(optimize, debug_lines, observing)).unwrap();
+    fs::write(scratch.path().join("input.o"), input.object(optimize, debug_lines, observing)).unwrap();
     let mut source = String::from("#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n");
     source.push_str(bindings);
     source.push_str(include_str!(
@@ -654,12 +648,12 @@ fn end_stop(source: &mut String) {
     source.push_str("_exit(111); } close(stop_pipe[1]); char message[256]; size_t length=0; ssize_t n; while((n=read(stop_pipe[0],message+length,sizeof(message)-length))>0) length+=(size_t)n; close(stop_pipe[0]); int status; if(waitpid(child,&status,0)!=child || !WIFEXITED(status) || WEXITSTATUS(status)!=102 || length<11 || memcmp(message,\"run stop: \",10) || message[length-1]!='\\n') __builtin_abort(); uint64_t tag=2,count=length-11; fwrite(&tag,8,1,stdout); fwrite(&count,8,1,stdout); for(size_t j=10;j+1<length;j++){ uint64_t b=(unsigned char)message[j]; fwrite(&b,8,1,stdout); } }\n");
 }
 
-fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
+fn link_program(scratch: &NativeArtifacts, source: &str) -> PathBuf {
     link_program_checked(scratch, source, false)
 }
-fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> PathBuf {
+fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> PathBuf {
     use cranelift_object::object::Object as _;
-    fs::write(scratch.0.join("caller.c"), source).unwrap();
+    fs::write(scratch.path().join("caller.c"), source).unwrap();
     let archive = PathBuf::from(
         std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE")
             .expect("the core runtime archive is explicit test data"),
@@ -696,7 +690,7 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
             include_str!("../../../hirsel-core-rt/include/hirsel_core_rt_isolate.h"),
         ),
     ] {
-        fs::write(scratch.0.join(name), text).unwrap();
+        fs::write(scratch.path().join(name), text).unwrap();
     }
     let mut compiler = Command::new(c_compiler());
     if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
@@ -711,9 +705,9 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
             .arg(&runtime);
     }
     let link = compiler
-        .current_dir(&scratch.0)
+        .current_dir(scratch.path())
         .args(["-fPIC", "caller.c", "input.o", "-I"])
-        .arg(&scratch.0)
+        .arg(scratch.path())
         .arg(archive)
         .args([
             "-lm",
@@ -733,7 +727,7 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
         "{}",
         String::from_utf8_lossy(&link.stderr)
     );
-    let run = scratch.0.join("run");
+    let run = scratch.path().join("run");
     let image = fs::read(&run).unwrap();
     let image = cranelift_object::object::File::parse(&*image).unwrap();
     assert_eq!(
@@ -744,10 +738,10 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
     run
 }
 
-fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
+fn link_run(scratch: &NativeArtifacts, source: &str) -> Vec<u64> {
     link_run_checked(scratch, source, false)
 }
-fn link_run_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Vec<u64> {
+fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> Vec<u64> {
     let binary = link_program_checked(scratch, source, memcheck);
     let mut command = if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
         let mut command =
@@ -908,29 +902,6 @@ fn c_compiler() -> PathBuf {
         std::env::var_os("HIRSEL_AARCH64_CC").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc"))
     } else {
         PathBuf::from("cc")
-    }
-}
-
-static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Scratch(PathBuf);
-impl Scratch {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "hirsel-core-clif-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            eprintln!("native failure artifacts: {}", self.0.display());
-        } else {
-            fs::remove_dir_all(&self.0).unwrap();
-        }
     }
 }
 

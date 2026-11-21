@@ -1,5 +1,6 @@
 //! Publish the checked program and assemble its recipe with a local toolchain.
 
+use super::std_release::StdSide;
 use super::*;
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
@@ -10,9 +11,10 @@ use hirsel_core_ir::{
     address::{Binding, Group, builtin_semantics_number},
     decode::DecodeBudget,
     normal::{self, Annex, Site, Slot},
-    release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, Recipe},
+    release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, ObjectRef, Recipe},
     source::{ItemSource, SourceFile, SourceMap, anchored_items},
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub struct AssemblyRecord {
@@ -37,11 +39,59 @@ impl AssemblyRecord {
     }
 }
 
-struct Unit {
+pub(super) struct Unit {
     code: BodyRef,
-    module: Module,
+    pub(super) module: Module,
     annex: Annex,
     builtins: Vec<u32>,
+}
+
+impl Unit {
+    /// The owner of the unit's private callable variants: its body.
+    pub(super) fn owner(&self) -> io::Result<ContentHash> {
+        key(
+            "hirsel.recipe-release-body.v1",
+            &(self.code.body.hash, self.code.annex.hash, &self.builtins),
+        )
+    }
+}
+
+/// A reached instance's unit, as a recipe names its body and annex.
+pub(super) fn prepare_unit(
+    original: &Module,
+    function: FuncId,
+    sources: &hirsel_core_ir::source::SourcePositions<'_>,
+) -> Unit {
+    let (body, annex, module) = normal::prepare_assembly(original, function, sources);
+    unit(original, body, annex, module)
+}
+
+fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Module) -> Unit {
+    let builtins = body
+        .slots
+        .iter()
+        .map(|slot| slot.identity(original))
+        .filter_map(|identity| builtin_semantics_number(&identity.definition))
+        .collect();
+    let code = BodyRef {
+        body: ObjectRef {
+            hash: ObjectKind::Body.hash(&body.bytes),
+            len: body.bytes.len() as u64,
+        },
+        annex: {
+            let bytes = annex.encode();
+            ObjectRef {
+                hash: ObjectKind::Annex.hash(&bytes),
+                len: bytes.len() as u64,
+            }
+        },
+    };
+    Unit {
+        code,
+        module,
+        annex,
+        builtins,
+    }
 }
 
 pub struct Publication {
@@ -83,6 +133,7 @@ impl CheckProduct {
             .flatten()
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
+        let sources = sources.positions();
         let mut units = BTreeMap::new();
         for identity in instances {
             let instance = reached.materialized.get(identity);
@@ -210,6 +261,11 @@ fn bindings(decl: &EntryDecl, options: &NativeOptions) -> Result<Vec<GrantBindin
                 .map(|s| (*s).clone())
                 .collect(),
             GrantKind::Net if index == 0 => options.net_rules.iter().map(net_rule).collect(),
+            GrantKind::Env if index == 0 => options
+                .env_patterns
+                .iter()
+                .map(hirsel_core_net::EnvPatterns::text)
+                .collect(),
             GrantKind::Secret => options
                 .secret_grants
                 .iter()
@@ -253,7 +309,7 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     let mut grants = Vec::new();
     for grant in &recipe.launch.grants {
         match grant.kind {
-            GrantKind::Dir | GrantKind::Net => grants.extend(
+            GrantKind::Dir | GrantKind::Net | GrantKind::Env => grants.extend(
                 grant
                     .values
                     .iter()
@@ -284,6 +340,7 @@ fn launch_options(
     options.grant_mask = 0;
     options.net_rules.clear();
     options.secret_grants.clear();
+    options.env_patterns = None;
     if names.len() != recipe.launch.grants.len() {
         return Err(NativeStop::Entry(
             "grant bindings do not match main parameters".into(),
@@ -316,6 +373,15 @@ fn launch_options(
                     .map_err(NativeStop::Entry)?;
                 options.grant_mask |= 1 << kind as u8;
             }
+            GrantKind::Env => match values.as_slice() {
+                [] => {}
+                [patterns] if index == 0 => {
+                    options.env_patterns =
+                        Some(hirsel_core_net::EnvPatterns::parse(patterns).ok_or_else(invalid)?);
+                    options.grant_mask |= 1 << kind as u8;
+                }
+                _ => return Err(invalid()),
+            },
             GrantKind::Secret => match values.as_slice() {
                 [] => {}
                 [source, patterns] => options.secret_grants.push(
@@ -462,8 +528,52 @@ fn site_item(site: &Site) -> DefPath {
     })
 }
 
-fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, NativeStop> {
+/// The anchor of `site` in a unit whose source items are `items`, adding its
+/// item on first sight. Keyed by the borrowed site, so each distinct site
+/// builds its DefPath once.
+fn anchor<'a>(
+    seen: &mut HashMap<(&'a str, u32, u32), ItemId>,
+    items: &mut Vec<DefPath>,
+    bindings: &mut BTreeMap<DefPath, ItemSource>,
+    unit: Option<&str>,
+    site: Option<&'a Site>,
+) -> Option<hirsel_core_ir::Anchor> {
+    let site = site?;
+    let index = *seen
+        .entry((site.file.as_str(), site.line, site.column))
+        .or_insert_with(|| {
+            let index = ItemId(items.len() as u32);
+            let mut item = site_item(site);
+            if let Some(unit) = unit {
+                let binding = bindings[&item];
+                item.0.modules = vec!["unit".into(), unit.into()];
+                item.0.name = index.0.to_string();
+                bindings.insert(item.clone(), binding);
+            }
+            items.push(item);
+            index
+        });
+    Some(hirsel_core_ir::Anchor {
+        item: index,
+        start: 0,
+        end: 0,
+    })
+}
+
+/// Bind each unit's annex sites to source items, and the source map of every
+/// site the units and `extra` (a separately lowered std's sites) name.
+pub(super) fn bind_annexes(
+    units: &mut BTreeMap<Identity, Unit>,
+    extra: &BTreeMap<String, Vec<(u32, u32)>>,
+    relocate: bool,
+) -> Result<SourceMap, NativeStop> {
     let mut points = BTreeMap::<String, BTreeSet<(u32, u32)>>::new();
+    for (file, at) in extra {
+        points
+            .entry(file.clone())
+            .or_default()
+            .extend(at.iter().copied());
+    }
     for unit in units.values() {
         for hints in unit.annex.0.iter().flatten() {
             for site in hints
@@ -472,10 +582,15 @@ fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, Nativ
                 .chain(&hints.terminators)
                 .flatten()
             {
-                points
-                    .entry(site.file.clone())
-                    .or_default()
-                    .insert((site.line, site.column));
+                let at = (site.line, site.column);
+                match points.get_mut(&site.file) {
+                    Some(file) => {
+                        file.insert(at);
+                    }
+                    None => {
+                        points.insert(site.file.clone(), BTreeSet::from([at]));
+                    }
+                }
             }
         }
     }
@@ -506,31 +621,34 @@ fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, Nativ
         });
         sources.points.insert(path, points);
     }
-    for unit in units.values_mut() {
+    for (identity, unit) in units {
+        // Cached objects reference a unit's local site numbers. The final link
+        // binds those symbols to the current recipe's absolute positions.
+        let symbol = relocate.then(|| hirsel_core_ir::symbol(identity.digest()));
+        let symbol = symbol.as_deref();
         let module = &mut unit.module;
-        let mut items = BTreeMap::new();
-        let mut anchor = |site: Option<&Site>| {
-            let item = site_item(site?);
-            let index = *items.entry(item.clone()).or_insert_with(|| {
-                let index = ItemId(module.items.len() as u32);
-                module.items.push(item);
-                index
-            });
-            Some(hirsel_core_ir::Anchor {
-                item: index,
-                start: 0,
-                end: 0,
-            })
-        };
+        let mut items = HashMap::new();
         for (function, hints) in module.functions.iter_mut().zip(&unit.annex.0) {
             let (Some(body), Some(hints)) = (function.body.as_mut(), hints) else {
                 continue;
             };
             for (at, site) in body.inst_anchors.iter_mut().zip(&hints.instructions) {
-                *at = anchor(site.as_ref());
+                *at = anchor(
+                    &mut items,
+                    &mut module.items,
+                    &mut sources.items,
+                    symbol,
+                    site.as_ref(),
+                );
             }
             for (block, site) in body.blocks.iter_mut().zip(&hints.terminators) {
-                block.anchor = anchor(site.as_ref());
+                block.anchor = anchor(
+                    &mut items,
+                    &mut module.items,
+                    &mut sources.items,
+                    symbol,
+                    site.as_ref(),
+                );
             }
             for (call, &cold) in body.calls.iter_mut().zip(&hints.cold_calls) {
                 call.cold = cold;
@@ -583,17 +701,39 @@ fn object(
 
 impl Publication {
     pub fn assemble(
-        mut self,
+        self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
     ) -> Result<BuildProduct, NativeStop> {
-        let sources = bind_annexes(&mut self.units)?;
+        self.assemble_with(options, counters, None)
+    }
+
+    /// [`Self::assemble`], with the program's plain std units taken from
+    /// `std` (a separately lowered release std) when given: the program holds
+    /// none of their bodies and calls each by its exported symbol.
+    pub(crate) fn assemble_with(
+        mut self,
+        options: &NativeOptions,
+        counters: crate::reach::ReachCounters,
+        std: Option<StdSide>,
+    ) -> Result<BuildProduct, NativeStop> {
+        let entry_identity = self.recipe.entry.clone();
+        if let Some(std) = &std {
+            self.units
+                .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
+        }
         let entry = &self.recipe.entry;
-        let root = &self.units[entry];
-        let names = root.annex.1.as_deref().ok_or_else(|| {
+        let names = self.units[entry].annex.1.as_deref().ok_or_else(|| {
             NativeStop::Entry("recipe entry has no startup parameter names".into())
         })?;
         let (options, decl) = launch_options(&self.recipe, names, options)?;
+        let no_points = BTreeMap::new();
+        let sources = bind_annexes(
+            &mut self.units,
+            std.as_ref().map_or(&no_points, |std| &std.points),
+            !matches!(options.backend, Backend::Llvm) || !options.optimize,
+        )?;
+        let root = &self.units[entry];
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
             .map_err(NativeStop::Entry)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)
@@ -625,6 +765,11 @@ impl Publication {
         let fingerprint = key(
             "hirsel.assembly-environment.v1",
             &(
+                std.as_ref().map(|std| std.key),
+                // The bodies the program imports shape its code.
+                std.as_ref().filter(|std| !std.lent.is_empty()).map(|std| {
+                    ContentHash::of_parts("hirsel.core-std-lent.v1", [std.lent.as_slice()])
+                }),
                 emitter,
                 tools.image,
                 tools.runtime,
@@ -652,14 +797,10 @@ impl Publication {
                 let body_keys = crate::callable_variants::prepare_inputs(
                     &mut modules,
                     &reached,
-                    &entry.definition,
+                    crate::callable_variants::Roots::Entry(&entry.definition),
                     options.instance_limit,
                     |identity| {
-                        let unit = &self.units[identity];
-                        let owner = key(
-                            "hirsel.recipe-release-body.v1",
-                            &(unit.code.body.hash, unit.code.annex.hash, &unit.builtins),
-                        )?;
+                        let owner = self.units[identity].owner()?;
                         Ok((
                             FuncId(0),
                             owner,
@@ -677,26 +818,23 @@ impl Publication {
                     tools.runtime,
                     &store,
                     link.uses_hirsel_launcher(),
+                    std.as_ref()
+                        .map(|std| (&std.summaries, std.key, std.lent.as_slice())),
                 )?;
                 release_sites = emitted.release_sites;
-                (
-                    emitted.objects,
-                    emitted.closed_image,
-                    emitted.launch_digest_unused,
-                )
+                let mut objects = emitted.objects;
+                if let Some(std) = std {
+                    objects.extend(std.objects);
+                }
+                (objects, emitted.closed_image, emitted.launch_digest_unused)
             } else {
                 let objects = self
                     .units
                     .iter()
                     .map(|(identity, unit)| {
                         let object_key = key(
-                            "hirsel.recipe-native-object.v1",
-                            &(
-                                emitter,
-                                unit.code.body.hash,
-                                unit.code.annex.hash,
-                                &unit.builtins,
-                            ),
+                            "hirsel.recipe-native-object.v2",
+                            &(emitter, identity, &unit.module, &unit.builtins),
                         )?;
                         object(&store, &options, object_key, identity, &unit.module)
                     })

@@ -49,7 +49,7 @@ fn spawned(tasks: Tasks, mut s: String) {
 // 15: a channel of the result type.
 fn channelled(mut s: String) {
     let v = lend(mut s)
-    let q: Result[(Sender[View[String]], Receiver[View[String]]), Capacity] = channel.new(1)
+    let q: (Sender[View[String]], Receiver[View[String]]) = channel.new(1)
 }
 
 // 29: a provider operation writing into a frozen buffer.
@@ -75,10 +75,10 @@ fn provider(mut f: HostFile, mut b: Bytes) waits {
 // expect: refuse CONC-2 at 44:41
 // expect: compared CONC-2 at 44:41 | View[core@1/core/String] | send
 // 15: a scoped type is no channel element.
-// expect: refuse OWN-19 at 52:27
-// expect: compared OWN-19 at 52:27 | View[core@1/core/String] | not scoped
-// expect: refuse OWN-19 at 52:51
-// expect: compared OWN-19 at 52:51 | View[core@1/core/String] | not scoped
+// expect: refuse OWN-19 at 52:20
+// expect: compared OWN-19 at 52:20 | View[core@1/core/String] | not scoped
+// expect: refuse OWN-19 at 52:44
+// expect: compared OWN-19 at 52:44 | View[core@1/core/String] | not scoped
 // 29: the provider's `mut b` crosses the freeze.
 // expect: refuse OWN-10 at 62:30
 // expect: cause OWN-10 at 62:30 from 61:13

@@ -2,8 +2,8 @@
 // server built from this source refuses a request for the old `repeat` (NoCode).
 pub fn double(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
-    list.append(mut out, b)?
-    list.append(mut out, b)?
+    list.append(mut out, b)
+    list.append(mut out, b)
     Ok(out)
 }
 
@@ -12,7 +12,7 @@ pub fn repeat(b: Bytes, k: u32) -> Result[Bytes, Capacity] {
     let n: u64 = int.widen(k)
     let mut i: u64 = 0
     while i < n {
-        list.append(mut out, b)?
+        list.append(mut out, b)
         i += 1
     }
     Ok(out)

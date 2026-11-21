@@ -6,7 +6,7 @@ fn step(mut context: (), mut work: store.runner.WireWork, take input: store.runn
     match take input {
         WClient(Call(stream, p, _, _, take arg), _) => {
             let mut done: List[store.runner.Done] = list.new()
-            result.unwrap(list.push(mut done, store.runner.Done(stream: stream, p: p, outcome: Returned(take arg))))
+            list.push(mut done, store.runner.Done(stream: stream, p: p, outcome: Returned(take arg)))
             Ok(Some(Batch(0u64, list.new(), list.new(), take done)))
         },
         WClient(Hello(Some(token), _), _) => {

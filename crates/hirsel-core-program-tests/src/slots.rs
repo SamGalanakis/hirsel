@@ -48,7 +48,7 @@ fn private_slot_contracts_and_misuse() {
     laws.push_str(include_str!(
         "../../../core/front/fixtures/slots-needs-drop.hirsel"
     ));
-    laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.clear(mut t.xs) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
+    laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.clear(mut t.xs) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); list.push(mut xs, 1); list.push(mut xs, 2); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
     let (index, modules) = core_inputs(CLONE_PRELUDE, &laws);
     let p = Program::declare(&index, &modules);
     assert!(p.refusals.is_empty(), "{:?}", p.refusals);
@@ -66,6 +66,9 @@ fn private_slot_contracts_and_misuse() {
     for line in laws.lines() {
         if let Some(expect) = line.strip_prefix("// expect: run ") {
             let (call, want) = expect.split_once(" = ").unwrap();
+            let (want, held) = want
+                .split_once(" used ")
+                .map_or((want, 0), |(v, n)| (v, n.parse().unwrap()));
             let name = call.strip_suffix("()").unwrap();
             let f = functions[name];
             eprintln!("running {name}");
@@ -79,7 +82,7 @@ fn private_slot_contracts_and_misuse() {
                 )]),
                 "{name}"
             );
-            assert_eq!(report.used, 0, "{name} leaked its admission");
+            assert_eq!(report.used, held, "{name} leaked its admission");
             passed += 1;
         } else if let Some(fault) = line.strip_prefix("// expect: slot-fault ") {
             pending_fault = Some(fault);

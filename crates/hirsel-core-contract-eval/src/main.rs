@@ -114,6 +114,7 @@ fn run(
         module,
         function,
         &handles,
+        u64::MAX,
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
         setting.instructions,
@@ -146,13 +147,15 @@ fn run(
         eval::Outcome::Failed(causes) => json!({"kind":"failed", "causes":causes}),
         eval::Outcome::Stopped(name) => json!({"kind":"stopped", "name":name}),
     };
+    let positions = std::cell::OnceCell::new();
     let sites = report
         .sites
         .iter()
         .map(|site| {
             let site = (*site)?;
-            let (file, line, column) = sources
-                .as_ref()?
+            let sources = sources.as_ref()?;
+            let (file, line, column) = positions
+                .get_or_init(|| sources.positions())
                 .position(&module.items[site.item.index()], site.start)?;
             Some((&file.path, line, column))
         })

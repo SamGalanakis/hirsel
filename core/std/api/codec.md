@@ -16,15 +16,19 @@ names one. The checker resolves it per instance:
 In a generic body `of[T]()` resolves when T is substituted, so a codec bound needs no
 dictionary. `of` at a type without the codec bound is LANG-12 at the call.
 
-**Whole values.** `encode(c, x, mut out)` appends x's bytes; on Capacity, out holds a
-prefix. `decode(c, b)` and `decode_at(c, b, start)` read exactly the bytes encode writes:
-`Ok(Error(e))` for bytes no value encodes to, `Error(c)` for a refused admission, with
-nothing admitted kept either way. `schema(c)` is the bytes a store keeps beside the data;
-`fingerprint(c)` is its CRC-64-AVRO. `fingerprint_of(b)` folds the bytes through
+**Whole values.** `encode(c, x, mut out) -> Result[(), EncodeError]` appends x's
+bytes. A refused allocation raises Capacity and leaves the completed prefix in
+out. `decode` and `decode_at` return `Result[T, DecodeError]`. A decode error or an
+allocation refusal releases all temporary storage. `schema(c)` returns the
+bytes a store keeps beside the data, and `fingerprint(c)` returns its
+CRC-64-AVRO. Both return `EncodeError` for an unrepresentable count. `fingerprint_of(b)` folds the bytes through
 Avro's 256-entry Rabin table and allocates nothing. `resolve(c, writer)` resolves
 an older writer's schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
-and `read`/`read_at` decode under it. `key_make`, `encode_key` and `decode_key` are the
-order-preserving key format for u8..i64, bool, Bytes, String and tuples of them.
+and `read` and `read_at` decode under it. Resolution and both reads return
+`DecodeError` for data or schema errors. `key_make`, `encode_key` and `decode_key`
+use the order-preserving key format for u8..i64, bool, Bytes, String and tuples
+of them. `encode_key` returns unit and `decode_key` returns
+`Result[T, DecodeError]`.
 
 **Format.** Integers at their width, a float as its IEEE bits and a char as a u32, all
 little-endian; bool one byte; `()` nothing. String, Bytes, List and Map: a u32 count, then the
@@ -37,7 +41,7 @@ counts or lengths, all four bytes little-endian. The root type uses opcodes 0-20
 Opcode 20 is Never, which has no valid encoding. A tag whose payload requires
 a Never fails with Invalid at the start of the tag.
 The full format is in `codec.hirsel`. Counts above u32::MAX return
-`Capacity(requested: count, available: 4294967295)` before writing the count.
+`Error(CountOverflow(count))` before writing the count.
 There is no reader for the earlier widths.
 
 **Schema consumers.** `describe(c)` retains the root, nominal definitions, and
@@ -61,5 +65,8 @@ unchanged. See
 `put_with`/`take_with`, `take_via`, and `define`, `record`, `sum`, `via`, `field`,
 `removed_field`, `variant`, `removed_variant` and `close` for the schema are its protocol.
 `need` checks that bytes remain, `take_count` bounds a count by the bytes left, `room`
-reserves exactly n elements, and `full` turns an admission refusal into a `Stop`.
+returns an empty list with room for exactly n elements. Fixed-width scalar
+writers return unit. The encoder and schema-writer callbacks return
+`Result[(), EncodeError]`, and the decoder callback returns
+`Result[T, DecodeError]`.
 A hand codec is for twins and tests; a type gets its codec by declaring `codec`.

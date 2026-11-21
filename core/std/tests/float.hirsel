@@ -131,23 +131,23 @@ fn far_out_of_range() -> u64 {
 // 65,536 fractional places make the net exponents 589,824 and 1, respectively.
 // expect: run exponent_after_long_fraction() = true
 fn exponent_after_long_fraction() -> bool {
-    let mut s = result.unwrap(string.with_capacity(65600))
-    result.unwrap(string.push(mut s, "0."))
+    let mut s = string.with_capacity(65600)
+    string.push(mut s, "0.")
     let block = "0000000000000000000000000000000000000000000000000000000000000000"
-    result.unwrap(string.push(mut s, result.unwrap(string.repeat(block, 1023))))
-    result.unwrap(string.push(mut s, string.slice(block, 0, 63)))
-    result.unwrap(string.push(mut s, "1e655360"))
+    string.push(mut s, string.repeat(block, 1023))
+    string.push(mut s, string.slice(block, 0, 63))
+    string.push(mut s, "1e655360")
     if error64(float.parse64(s)) != 3 || error32(float.parse32(s)) != 3 {
         return false
     }
     string.truncate(mut s, 65539)
-    result.unwrap(string.push(mut s, "65537"))
+    string.push(mut s, "65537")
     if bits64(float.parse64(s)) != 0x4024000000000000 {
         return false
     }
     // The interval of the first 19 digits straddles the binary64 midpoint.
     string.truncate(mut s, 65537)
-    result.unwrap(string.push(mut s, "100000000000000011102230246251565404236316680908203126e65536"))
+    string.push(mut s, "100000000000000011102230246251565404236316680908203126e65536")
     bits64(float.parse64(s)) == 0x3ff0000000000001
 }
 
@@ -313,13 +313,13 @@ fn nan_not_finite() -> bool {
 // agree with Rust's `{:.N}` and `{}` digits.
 fn fixed(x: f64, n: u64) -> String {
     let mut s = string.new()
-    result.unwrap(float.push_fixed64(mut s, x, n))
+    float.push_fixed64(mut s, x, n)
     s
 }
 
 fn shown(x: f64) -> String {
     let mut s = string.new()
-    result.unwrap(float.push_f64(mut s, x))
+    float.push_f64(mut s, x)
     s
 }
 
@@ -365,7 +365,7 @@ fn fixed_huge() -> bool {
 
 fn shown_json(x: f64) -> String {
     let mut out = string.new()
-    result.unwrap(float.push_json_f64(mut out, x))
+    float.push_json_f64(mut out, x)
     take out
 }
 
@@ -474,7 +474,7 @@ fn nigel_parse_numbers() -> bool {
             Error(_) => false,
         }
         if !pass32 || !pass64 {
-            fail(result.unwrap(string.from(input)))
+            fail(string.from(input))
         }
         at = end + 1
     }
@@ -493,6 +493,220 @@ fn ryu_shortest64() -> bool {
         }
     }
     true
+}
+
+// Expected coefficients and exponents from Ryū 1.0.23.
+// expect: run shortest64_boundaries() = 0
+fn shortest64_boundaries() -> u64 {
+    let cases: Inline[(u64, u64, i64), 19] =[
+    // Smallest subnormals and the transition to normal values.
+    (0x0000000000000001, 5, -324), (0x0000000000000002, 1, -323), (0x0000000000000003, 15, -324), (0x000fffffffffffff, 2225073858507201, -323), (0x0010000000000000, 22250738585072014, -324), (0x0010000000000001, 2225073858507202, -323),
+    // Neighbours of two decimal powers.
+    (0x01a56e1fc2f8f358, 9999999999999999, -316), (0x01a56e1fc2f8f359, 1, -300), (0x01a56e1fc2f8f35a, 10000000000000002, -316), (0x44b52d02c7e14af5, 9999999999999997, 7), (0x44b52d02c7e14af6, 1, 23), (0x44b52d02c7e14af7, 10000000000000001, 7),
+    // An asymmetric interval and the largest finite magnitude.
+    (0x7fdfffffffffffff, 8988465674311579, 292), (0x7fe0000000000000, 898846567431158, 293), (0x7fe0000000000001, 8988465674311582, 292), (0x7fefffffffffffff, 17976931348623157, 292),
+    // Negative values on both sides of a decimal boundary.
+    (0xbeb0c6f7a0b5ed8c, 9999999999999997, -22), (0xbeb0c6f7a0b5ed8d, 1, -6), (0xbeb0c6f7a0b5ed8e, 10000000000000002, -22),]
+    for row in cases {
+        let (bits, coefficient, exponent) = row
+        let x = float.from_bits64(bits)
+        if float.shortest64(x) != (coefficient, exponent) {
+            return bits
+        }
+        let plain = result.unwrap(float.parse64(shown(x)))
+        let json = result.unwrap(float.parse64(shown_json(x)))
+        if float.to_bits64(plain) != bits || float.to_bits64(json) != bits {
+            return bits
+        }
+    }
+    0
+}
+
+// Ryū 1.0.23 supplied the expected spelling. The inputs are adjacent
+// binary32 values bracketing each 10^p, the width endpoints, signed zeros,
+// and exact decimal ties from tests/f2s_test.rs.
+// expect: run ryu_shortest32_boundaries() = 0
+fn ryu_shortest32_boundaries() -> u64 {
+    let cases: Inline[(u32, u64, i64), 180] =[ // 10^-45
+    (0x00000000, 0, 0), (0x00000001, 1, -45),
+    // 10^-44
+    (0x00000007, 1, -44), (0x00000008, 11, -45),
+    // 10^-43
+    (0x00000047, 1, -43), (0x00000048, 101, -45),
+    // 10^-42
+    (0x000002c9, 999, -45), (0x000002ca, 1, -42),
+    // 10^-41
+    (0x00001be0, 1, -41), (0x00001be1, 10001, -45),
+    // 10^-40
+    (0x000116c2, 1, -40), (0x000116c3, 100001, -45),
+    // 10^-39
+    (0x000ae397, 999999, -45), (0x000ae398, 1, -39),
+    // 10^-38
+    (0x006ce3ee, 1, -38), (0x006ce3ef, 10000001, -45),
+    // 10^-37
+    (0x02081cea, 1, -37), (0x02081ceb, 10000001, -44),
+    // 10^-36
+    (0x03aa2424, 99999995, -44), (0x03aa2425, 1, -36),
+    // 10^-35
+    (0x0554ad2d, 99999995, -43), (0x0554ad2e, 1, -35),
+    // 10^-34
+    (0x0704ec3c, 9999999, -41), (0x0704ec3d, 1, -34),
+    // 10^-33
+    (0x08a6274b, 9999999, -40), (0x08a6274c, 1, -33),
+    // 10^-32
+    (0x0a4fb11e, 99999995, -40), (0x0a4fb11f, 1, -32),
+    // 10^-31
+    (0x0c01ceb3, 1, -31), (0x0c01ceb4, 10000001, -38),
+    // 10^-30
+    (0x0da2425f, 9999999, -37), (0x0da24260, 1, -30),
+    // 10^-29
+    (0x0f4ad2f7, 9999999, -36), (0x0f4ad2f8, 1, -29),
+    // 10^-28
+    (0x10fd87b5, 99999994, -36), (0x10fd87b6, 1, -28),
+    // 10^-27
+    (0x129e74d1, 9999999, -34), (0x129e74d2, 1, -27),
+    // 10^-26
+    (0x14461206, 1, -26), (0x14461207, 10000001, -33),
+    // 10^-25
+    (0x15f79687, 99999996, -33), (0x15f79688, 1, -25),
+    // 10^-24
+    (0x179abe14, 9999999, -31), (0x179abe15, 1, -24),
+    // 10^-23
+    (0x19416d9a, 1, -23), (0x19416d9b, 10000001, -30),
+    // 10^-22
+    (0x1af1c900, 99999997, -30), (0x1af1c901, 1, -22),
+    // 10^-21
+    (0x1c971da0, 1, -21), (0x1c971da1, 10000001, -28),
+    // 10^-20
+    (0x1e3ce508, 1, -20), (0x1e3ce509, 100000005, -28),
+    // 10^-19
+    (0x1fec1e4a, 1, -19), (0x1fec1e4b, 100000003, -27),
+    // 10^-18
+    (0x219392ee, 9999999, -25), (0x219392ef, 1, -18),
+    // 10^-17
+    (0x233877aa, 1, -17), (0x233877ab, 10000001, -24),
+    // 10^-16
+    (0x24e69594, 99999995, -24), (0x24e69595, 1, -16),
+    // 10^-15
+    (0x26901d7c, 9999999, -22), (0x26901d7d, 1, -15),
+    // 10^-14
+    (0x283424dc, 1, -14), (0x283424dd, 10000001, -21),
+    // 10^-13
+    (0x29e12e13, 1, -13), (0x29e12e14, 100000005, -21),
+    // 10^-12
+    (0x2b8cbccc, 1, -12), (0x2b8cbccd, 10000001, -19),
+    // 10^-11
+    (0x2d2febff, 1, -11), (0x2d2fec00, 10000001, -18),
+    // 10^-10
+    (0x2edbe6fe, 99999994, -18), (0x2edbe6ff, 1, -10),
+    // 10^-9
+    (0x3089705f, 1, -9), (0x30897060, 10000001, -16),
+    // 10^-8
+    (0x322bcc77, 1, -8), (0x322bcc78, 10000001, -15),
+    // 10^-7
+    (0x33d6bf94, 99999994, -15), (0x33d6bf95, 1, -7),
+    // 10^-6
+    (0x358637bd, 1, -6), (0x358637be, 10000001, -13),
+    // 10^-5
+    (0x3727c5ac, 1, -5), (0x3727c5ad, 10000001, -12),
+    // 10^-4
+    (0x38d1b717, 1, -4), (0x38d1b718, 100000005, -12),
+    // 10^-3
+    (0x3a83126e, 9999999, -10), (0x3a83126f, 1, -3),
+    // 10^-2
+    (0x3c23d70a, 1, -2), (0x3c23d70b, 10000001, -9),
+    // 10^-1
+    (0x3dcccccc, 99999994, -9), (0x3dcccccd, 1, -1),
+    // 10^0
+    (0x3f7fffff, 99999994, -8), (0x3f800001, 10000001, -7),
+    // 10^1
+    (0x411fffff, 9999999, -6), (0x41200001, 10000001, -6),
+    // 10^2
+    (0x42c7ffff, 9999999, -5), (0x42c80001, 10000001, -5),
+    // 10^3
+    (0x4479ffff, 99999994, -5), (0x447a0001, 100000006, -5),
+    // 10^4
+    (0x461c3fff, 9999999, -3), (0x461c4001, 10000001, -3),
+    // 10^5
+    (0x47c34fff, 9999999, -2), (0x47c35001, 10000001, -2),
+    // 10^6
+    (0x497423ff, 99999994, -2), (0x49742401, 100000006, -2),
+    // 10^7
+    (0x4b18967f, 9999999, 0), (0x4b189681, 10000001, 0),
+    // 10^8
+    (0x4cbebc1f, 9999999, 1), (0x4cbebc21, 10000001, 1),
+    // 10^9
+    (0x4e6e6b27, 99999994, 1), (0x4e6e6b29, 100000006, 1),
+    // 10^10
+    (0x501502f8, 9999999, 3), (0x501502fa, 10000001, 3),
+    // 10^11
+    (0x51ba43b7, 1, 11), (0x51ba43b8, 10000001, 4),
+    // 10^12
+    (0x5368d4a5, 1, 12), (0x5368d4a6, 100000006, 4),
+    // 10^13
+    (0x551184e7, 1, 13), (0x551184e8, 10000001, 6),
+    // 10^14
+    (0x56b5e620, 9999999, 7), (0x56b5e621, 1, 14),
+    // 10^15
+    (0x58635fa9, 1, 15), (0x58635faa, 100000005, 7),
+    // 10^16
+    (0x5a0e1bc9, 9999999, 9), (0x5a0e1bca, 1, 16),
+    // 10^17
+    (0x5bb1a2bc, 1, 17), (0x5bb1a2bd, 10000001, 10),
+    // 10^18
+    (0x5d5e0b6b, 1, 18), (0x5d5e0b6c, 100000005, 10),
+    // 10^19
+    (0x5f0ac723, 1, 19), (0x5f0ac724, 10000001, 12),
+    // 10^20
+    (0x60ad78eb, 9999999, 13), (0x60ad78ec, 1, 20),
+    // 10^21
+    (0x6258d726, 99999995, 13), (0x6258d727, 1, 21),
+    // 10^22
+    (0x64078678, 1, 22), (0x64078679, 10000001, 15),
+    // 10^23
+    (0x65a96816, 1, 23), (0x65a96817, 10000001, 16),
+    // 10^24
+    (0x6753c21b, 99999994, 16), (0x6753c21c, 1, 24),
+    // 10^25
+    (0x69045951, 1, 25), (0x69045952, 10000001, 18),
+    // 10^26
+    (0x6aa56fa5, 9999999, 19), (0x6aa56fa6, 1, 26),
+    // 10^27
+    (0x6c4ecb8f, 1, 27), (0x6c4ecb90, 100000006, 19),
+    // 10^28
+    (0x6e013f39, 1, 28), (0x6e013f3a, 10000001, 21),
+    // 10^29
+    (0x6fa18f07, 9999999, 22), (0x6fa18f08, 1, 29),
+    // 10^30
+    (0x7149f2c9, 99999994, 22), (0x7149f2ca, 1, 30),
+    // 10^31
+    (0x72fc6f7c, 1, 31), (0x72fc6f7d, 100000005, 23),
+    // 10^32
+    (0x749dc5ad, 9999999, 25), (0x749dc5ae, 1, 32),
+    // 10^33
+    (0x76453719, 1, 33), (0x7645371a, 10000001, 26),
+    // 10^34
+    (0x77f684df, 1, 34), (0x77f684e0, 100000004, 26),
+    // 10^35
+    (0x799a130b, 9999999, 28), (0x799a130c, 1, 35),
+    // 10^36
+    (0x7b4097ce, 1, 36), (0x7b4097cf, 100000004, 28),
+    // 10^37
+    (0x7cf0bdc2, 1, 37), (0x7cf0bdc3, 100000006, 29),
+    // 10^38
+    (0x7e967699, 1, 38), (0x7e96769a, 10000001, 31),
+    // Signed zeros, the smallest and largest subnormals, and the normal endpoints.
+    (0x00000000, 0, 0), (0x80000000, 0, 0), (0x00000001, 1, -45), (0x007fffff, 11754942, -45), (0x00800000, 11754944, -45), (0x7f7fffff, 34028235, 31),
+    // Decimal halfway cases round to an even last digit.
+    (0x48951f84, 30540412, -2), (0x45fd1840, 80990312, -4), (0x39800000, 24414062, -11), (0x3b200000, 24414062, -10), (0x3b900000, 43945312, -10), (0x3bd00000, 63476562, -10),]
+    for row in cases {
+        let (bits, coefficient, exponent) = row
+        if float.shortest32(float.from_bits32(bits)) != (coefficient, exponent) {
+            let input: u64 = int.widen(bits)
+            return input + 1
+        }
+    }
+    0
 }
 
 // Binary64 results from Rust libm 0.2.16. The inputs exercise signed zero,

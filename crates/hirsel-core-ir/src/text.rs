@@ -304,6 +304,7 @@ fn rt(op: RtOp) -> String {
         RtOp::ArgsLen => "rt.args_len".into(),
         RtOp::ArgsGet => "rt.args_get".into(),
         RtOp::LaunchWord => "rt.launch_word".into(),
+        RtOp::LaunchHandle => "rt.launch_handle".into(),
         RtOp::DescribeEmit => "rt.describe_emit".into(),
         RtOp::Flow(op) => format!("rt.{}", op.name()),
         RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
@@ -686,7 +687,6 @@ impl Printer {
                         overflow,
                         size,
                         align,
-                        fail: f,
                     } => {
                         let kind = match kind {
                             AllocKind::Own { edge } => format!("for {}", field_ty(edge)),
@@ -702,14 +702,13 @@ impl Printer {
                             AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
                         };
                         format!(
-                            "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}{}",
+                            "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}",
                             def(*result),
                             def(*available),
                             region_entry.map_or_else(String::new, |v| format!(", {}", def(v))),
                             v(size),
                             v(charge),
                             overflow.map_or_else(String::new, |v| format!(" overflow v{}", v.0)),
-                            fail(*f)
                         )
                     }
                     Inst::Grow {
@@ -723,9 +722,8 @@ impl Printer {
                         capacity,
                         moved,
                         refund,
-                        fail: f,
                     } => format!(
-                        "{}, {} = grow a{} {} align {align} charge {} capacity {} moved {} refund {}{}{}",
+                        "{}, {} = grow a{} {} align {align} charge {} capacity {} moved {} refund {}{}",
                         def(*result),
                         def(*available),
                         carrier.0,
@@ -735,7 +733,6 @@ impl Printer {
                         v(moved),
                         v(refund),
                         overflow.map_or_else(String::new, |v| format!(" overflow v{}", v.0)),
-                        fail(*f)
                     ),
                     Inst::Free { block, charge } => {
                         format!("free {} charge {}", v(block), v(charge))
@@ -848,6 +845,10 @@ impl Printer {
                         RaiseCause::Unwrap => "unwrap".into(),
                         RaiseCause::Bounds => "bounds".into(),
                         RaiseCause::Fail(a) => format!("fail a{}", a.0),
+                        RaiseCause::Capacity {
+                            requested,
+                            available,
+                        } => format!("capacity v{}, v{}", requested.0, available.0),
                     };
                     let cleanup = cleanup
                         .map(|c| format!(" cleanup b{}", c.0))
@@ -1636,7 +1637,6 @@ impl BodyParser {
                 overflow,
                 size,
                 align,
-                fail: l.fail()?,
             }
         } else if op == "grow" {
             let (result, available) = pair(&defs)?;
@@ -1668,7 +1668,6 @@ impl BodyParser {
                 capacity,
                 moved,
                 refund,
-                fail: l.fail()?,
             }
         } else if op == "limit_enter" {
             let (admitted, available) = pair(&defs)?;
@@ -1897,6 +1896,7 @@ impl BodyParser {
                 "args_len" => RtOp::ArgsLen,
                 "args_get" => RtOp::ArgsGet,
                 "launch_word" => RtOp::LaunchWord,
+                "launch_handle" => RtOp::LaunchHandle,
                 "describe_emit" => RtOp::DescribeEmit,
                 "launch_target" => RtOp::LaunchTarget { view: tys(1)?[0] },
                 "isolate_enter" => RtOp::IsolateEnter,
@@ -1997,6 +1997,14 @@ impl BodyParser {
                     "unwrap" => RaiseCause::Unwrap,
                     "bounds" => RaiseCause::Bounds,
                     "fail" => RaiseCause::Fail(AddressId(l.id('a')?)),
+                    "capacity" => {
+                        let requested = l.value()?;
+                        l.expect(",")?;
+                        RaiseCause::Capacity {
+                            requested,
+                            available: l.value()?,
+                        }
+                    }
                     c => return Err(format!("unknown cause `{c}`")),
                 };
                 let cleanup = if l.eat("cleanup") {

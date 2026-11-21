@@ -1,31 +1,43 @@
-// Captured List custody moves into the result on success or admission refusal.
+// Captured List custody moves into the closure; a refused admission raises and drops it.
 // The empty list's own charge is zero, its carrier capture costs 24.
-// expect: run refused() = 24
+// expect: run refused() = 24 used 32
 // expect: run success() = 0
 fn refused() -> u64 {
-    let xs: List[u64] = list.new()
-    let outer: Result[u64, Capacity] = bound bytes 0 {
-        let result: Result[own[send] fn() -> u64, (Capacity, List[u64])] = fn() -> u64 {
-            list.len(xs)
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let xs: List[u64] = list.new()
+            let cb: own[send] fn() -> u64 = fn() -> u64 {
+                list.len(xs)
+            }
+            cb()
         }
-        match result {
-            Error((c, take back)) => c.requested + list.len(back),
-            Ok(take cb) => cb()
-        }
-    }
-    match outer {
-        Ok(n) => n,
-        Error(_) => 0
+    })
+    match caught(take outer) {
+        Some(c) => c.requested,
+        None => 0
     }
 }
 
 fn success() -> u64 {
     let xs: List[u64] = list.new()
-    let result: Result[own[send] fn() -> u64, (Capacity, List[u64])] = fn() -> u64 {
+    let cb: own[send] fn() -> u64 = fn() -> u64 {
         list.len(xs)
     }
-    match result {
-        Ok(take cb) => cb(),
-        Error(_) => 1
+    cb()
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

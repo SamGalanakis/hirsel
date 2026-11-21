@@ -5,7 +5,9 @@
 Files use core's `HostFile` resource directly. An open file owns its position;
 its finalizer closes it and discards the close error, while `close` exposes it.
 Read, Write, Append, CreateNew and ReadWrite retain the host modes' distinct effects.
-Allocating readers return `file.Error` to include Capacity and NotUtf8.
+`file.Error` has the variants `Io(IoError)` and `NotUtf8`. A refused buffer
+growth raises `Capacity`. Cleanup closes the file and refunds the buffer.
+
 Each operation's `Prefix:` clause names effects that survive error or cancellation.
 `file.stat(mut f)` reports the open file's kind, size and modification time
 ([Dir, Metadata](dir.md#metadata)).

@@ -36,7 +36,7 @@ pub fn parse_prefix(s: String) -> Option[Prefix] {
     if bits > maximum {
         return None
     }
-    Some(Prefix(ip: ip, bits: bits))
+    Some(Prefix(ip, bits))
 }
 
 fn contains(prefix: Prefix, ip: Ip) -> bool {
@@ -223,11 +223,7 @@ pub fn pending(config: Config) -> Result[PendingPool, Error] {
     if !valid(config) {
         return Error(Configuration)
     }
-    let allocation: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(config.pending_max)
-    let (tx, rx) = match allocation {
-        Ok(take pair) => take pair,
-        Error(c) => return Error(Allocation(c))
-    }
+    let (tx, rx): (Sender[()], Receiver[()]) = channel.new(config.pending_max)
     for i in 0u64 .. config.pending_max {
         let _ = channel.try_send(tx, ())
     }
@@ -267,7 +263,7 @@ pub type Due: key + send = Wait | SendPing | SendClose | Expired
 
 /// Absolute Hello and idle deadlines begin at completion of the 101 response.
 pub fn timers(config: Config, now: u64) -> Timers {
-    Timers(config: config, hello: Some(after(now, config.hello_ms)), idle: after(now, config.idle_ms), probing: false, close: None, peer_closed: false, close_sent: false)
+    Timers(config, hello: Some(after(now, config.hello_ms)), idle: after(now, config.idle_ms), probing: false, close: None, peer_closed: false, close_sent: false)
 }
 
 /// Called only after Hello is accepted; unrelated frames never extend Hello.
@@ -392,7 +388,7 @@ pub fn outbound(role: websocket.Role, config: Config, random: Option[Random]) ->
             Some(_) => {}
         }
     }
-    Ok(Outbound(encoder: websocket.encoder(role, config.max_frame), role: role, max: config.max_frame, random: random))
+    Ok(Outbound(encoder: websocket.encoder(role, config.max_frame), role, max: config.max_frame, random))
 }
 
 /// Encodes exactly one frame into capacity payload+14, avoiding geometric
@@ -412,36 +408,27 @@ pub fn encode(mut out: Outbound, fin: bool, opcode: u8, payload: Bytes) -> Resul
         }
     }
     let mut b = buffer(list.len(payload) + 14)?
-    match websocket.encode(mut out.encoder, fin, opcode, payload, mask, mut b) {
-        Ok(Ok(_)) => Ok(take b),
-        Ok(Error(code)) => Error(Protocol(code)),
-        Error(c) => Error(Allocation(c))
-    }
+    websocket.encode(mut out.encoder, fin, opcode, payload, mask, mut b) ?=> Protocol
+    Ok(take b)
 }
 
 /// Encodes x as one whole binary frame, writing its codec bytes straight
 /// behind the header so the payload is built once. n is x's exact encoded
-/// length; a codec that writes any other count fails closed with 1011. Server
-/// role only. Capacity n+14, as encode reserves.
-/// Ex: `wsock.encode_with(out, codec, frame, size)?`.
-pub fn encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -> Result[Bytes, Error] {
+/// length. A length mismatch returns Protocol(1011). Server role only.
+/// Reserves n+14 bytes. Refusal of that reservation returns Allocation.
+/// Ex: `wsock.try_encode_with(out, codec, frame, size)?`.
+pub fn try_encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -> Result[Bytes, Error] {
     if n > out.max {
         return Error(Protocol(1009))
     }
     if out.role == Client {
         return Error(Configuration)
     }
-    let mut b = buffer(n + 14)?
-    match websocket.binary_head(out.encoder, n, mut b) {
-        Ok(Ok(_)) => {},
-        Ok(Error(code)) => return Error(Protocol(code)),
-        Error(c) => return Error(Allocation(c))
-    }
+    let mut b: Bytes = list.new()
+    list.try_reserve(mut b, n + 14) ?=> Allocation
+    websocket.binary_head(out.encoder, n, mut b) ?=> Protocol
     let start = list.len(b)
-    match codec.encode(coding, x, mut b) {
-        Ok(_) => {},
-        Error(c) => return Error(Allocation(c))
-    }
+    codec.encode(coding, x, mut b) ?=> |_| Protocol(1011u16)
     if list.len(b) - start != n {
         return Error(Protocol(1011))
     }
@@ -528,10 +515,7 @@ pub fn prepare(mut w: WriteBuffer, mut out: Outbound) -> Result[bool, Error] {
     match replace(mut w.pong, None) {
         Some(control) => {
             let mut payload = buffer(control.len)?
-            match websocket.control(control, mut payload) {
-                Ok(_) => {},
-                Error(c) => return Error(Allocation(c))
-            }
+            websocket.control(control, mut payload)
             w.pending = encode(mut out, true, 10, payload)?
             Ok(false)
         },
@@ -562,10 +546,7 @@ pub fn decode_buffered(mut r: Reader) -> Result[Option[websocket.Event], Error] 
         return Error(Protocol(1001u16))
     }
     let before = websocket.frame_count(r.decoder)
-    let event = match websocket.next(mut r.decoder, r.input, mut r.cursor) {
-        Ok(take event) => take event,
-        Error(c) => return Error(Allocation(c))
-    }
+    let event = websocket.next(mut r.decoder, r.input, mut r.cursor)
     if websocket.incomplete(r.decoder) {
         if let None = r.message_end {
             r.message_end = Some(int.saturating_add(now, MESSAGE_NS))
@@ -643,11 +624,8 @@ pub type Upgraded: send {
 }
 
 fn buffer(n: u64) -> Result[Bytes, Error] {
-    let allocation: Result[Bytes, Capacity] = list.with_capacity(n)
-    match allocation {
-        Ok(take b) => Ok(take b),
-        Error(c) => Error(Allocation(c))
-    }
+    let allocation: Bytes = list.with_capacity(n)
+    Ok(take allocation)
 }
 
 fn send_response(mut w: WriteHalf, head: Bytes, body: Bytes, deadline: Until) -> Result[(), Error] waits {
@@ -743,7 +721,7 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
             return Error(Network(TimedOut))
         }
         let status: u16 = match http1.resume(input, mut head, mut cursor) {
-            Complete => return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, deadline: deadline)),
+            Complete => return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, deadline)),
             Partial => 0,
             Bad => 400,
             TooLarge => 431,
@@ -772,11 +750,8 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
             Error(c) => return Error(Allocation(c)),
         }
         if let Some((ready, take body)) = take response {
-            let header = match static_head(ready, "application/json", list.len(string.as_bytes(body))) {
-                Ok(take text) => take text,
-                Error(c) => return Error(Allocation(c)),
-            }
-            let Request(writer: take output, deadline: deadline, ..) = take request
+            let header = static_head(ready, "application/json", list.len(string.as_bytes(body)))
+            let Request(writer: take output, deadline, ..) = take request
             let mut writer = take output
             send_response(mut writer, string.as_bytes(header), string.as_bytes(body), deadline)?
             return Ok(None)
@@ -796,7 +771,7 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
     } else {
         None
     }
-    let Request(writer: take output, deadline: deadline, ..) = take request
+    let Request(writer: take output, deadline, ..) = take request
     let mut writer = take output
     let Some(take selected) = take asset else {
         refuse(mut writer, 404, deadline)?
@@ -814,35 +789,29 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
         },
     }
     let built_header = static_head(true, selected.content_type, list.len(body))
-    let header = match take built_header {
-        Ok(take text) => take text,
-        Error(c) => return Error(Allocation(c))
-    }
+    let header = built_header
     send_response(mut writer, string.as_bytes(header), body, deadline)?
     Ok(None)
 }
 
-fn static_head(ready: bool, content_type: String, size: u64) -> Result[String, Capacity] {
+fn static_head(ready: bool, content_type: String, size: u64) -> String {
     let mut head = string.from(if ready {
         "HTTP/1.1 200 OK"
     } else {
         "HTTP/1.1 503 Service Unavailable"
-    })?
-    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")?
-    string.push(mut head, content_type)?
-    string.push(mut head, "\r\nContent-Length: ")?
-    string.push_u64(mut head, size)?
-    string.push(mut head, "\r\n\r\n")?
-    Ok(take head)
+    })
+    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")
+    string.push(mut head, content_type)
+    string.push(mut head, "\r\nContent-Length: ")
+    string.push_u64(mut head, size)
+    string.push(mut head, "\r\n\r\n")
+    take head
 }
 
 fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
-    let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline: deadline) = take request
+    let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline) = take request
     let mut writer = take output
-    let upgraded = match websocket.server_head(input, head) {
-        Ok(take value) => take value,
-        Error(c) => return Error(Allocation(c)),
-    }
+    let upgraded = websocket.server_head(input, head)
     match take upgraded {
         Upgraded(end, take response) => {
             let ip = match source_for_head(input, head, peer, ingress) {
@@ -857,7 +826,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
                 return Error(Http(503))
             }
             send_response(mut writer, response, string.as_bytes(""), deadline)?
-            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame), clock: clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
         Refused(code) => {
             let _ = refuse(mut writer, code, deadline)
@@ -874,7 +843,7 @@ pub type Connected: send {
     timers: Timers
 }
 
-/// Client handshake with a host.random challenge and the exact hirsel.1
+/// Client handshake with a host.random challenge and the exact hirsel.2
 /// selection. A bounded response's tail becomes the first frame input.
 pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Clock, random: Random) -> Result[Connected, Error] waits {
     if !valid(config) {
@@ -886,16 +855,9 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
     let deadline = At(clock, after(host.mono_ns(clock), config.upgrade_ms))
     let mut nonce = buffer(16)?
     host.random(random, mut nonce)
-    let request = match websocket.request(host_name, nonce, true) {
-        Ok(Ok(take b)) => take b,
-        Ok(Error(code)) => return Error(Http(code)),
-        Error(c) => return Error(Allocation(c))
-    }
+    let request = websocket.request(host_name, nonce, true) ?=> Http
     let mut key: Bytes = list.new()
-    match base64.encode(nonce, mut key) {
-        Ok(_) => {},
-        Error(c) => return Error(Allocation(c))
-    }
+    base64.encode(nonce, mut key)
     send_response(mut output_half, request, string.as_bytes(""), deadline)?
     let mut input = buffer(8192)?
     let mut attempted = false
@@ -903,12 +865,8 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
         if attempted && expired(deadline) {
             return Error(Network(TimedOut))
         }
-        let checked = match websocket.client(input, key, true) {
-            Ok(value) => value,
-            Error(c) => return Error(Allocation(c))
-        }
-        match checked {
-            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock: clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
+        match websocket.client(input, key, true) {
+            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
             Ready(_, false) => return Error(Http(400)),
             Failed(code) => return Error(Http(code)),
             Pending => {}
@@ -946,7 +904,6 @@ pub fn finish(take writer: Writer, take reader: Reader, clock: Clock, deadline_n
     let output = write_half(take writer)
     match net.finish(take output, take input, clock, deadline_ns) {
         Ok(_) => Ok(()),
-        Error(Allocation(c)) => Error(Allocation(c)),
         Error(Network(e)) => Error(Network(e))
     }
 }

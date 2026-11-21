@@ -37,18 +37,11 @@ impl Program<'_> {
                 self.types.intern(TyKind::Adt(d, vec![]))
             }
             TokenKind::Bytes => {
-                let (Some(list), Some(result), Some(cap)) = (
-                    self.core_decl("List"),
-                    self.core_decl("Result"),
-                    self.core_decl("Capacity"),
-                ) else {
+                let Some(list) = self.core_decl("List") else {
                     return;
                 };
-                let bytes = self
-                    .types
-                    .intern(TyKind::Adt(list, vec![scalar(Scalar::U8)]));
-                let cap = self.types.intern(TyKind::Adt(cap, vec![]));
-                self.types.intern(TyKind::Adt(result, vec![bytes, cap]))
+                self.types
+                    .intern(TyKind::Adt(list, vec![scalar(Scalar::U8)]))
             }
             TokenKind::Integer | TokenKind::Float => {
                 let (digits, suffix) = if kind == TokenKind::Integer {

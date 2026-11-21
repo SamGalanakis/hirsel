@@ -403,7 +403,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (copy, refused) = (self.new_block(&[]), self.new_block(&[]));
         self.list_branch(ok, copy, refused, n);
         self.start(refused);
-        self.jump(error, &[available], n);
+        self.jump(error, &[plan.charge, available], n);
         self.start(copy);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
@@ -431,7 +431,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (grown, refused) = (self.new_block(&[]), self.new_block(&[]));
         self.list_branch(ok, grown, refused, n);
         self.start(refused);
-        self.jump(error, &[available], n);
+        self.jump(error, &[plan.charge, available], n);
         self.start(grown);
         self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
         self.inst(Inst::FrameRefund { charge: old_charge }, n);
@@ -442,7 +442,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (moved_out, refused) = (self.new_block(&[]), self.new_block(&[]));
         self.list_branch(ok, moved_out, refused, n);
         self.start(refused);
-        self.jump(error, &[available], n);
+        self.jump(error, &[plan.charge, available], n);
         self.start(moved_out);
         self.frame_copy(block, frame, moved, n);
         self.set_carrier_word(header, carrier, SeqWord::Data, block, n);

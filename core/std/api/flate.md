@@ -16,9 +16,9 @@ push calls. Gzip header fields and header CRCs are included in the framing check
 
 ```
 pub type FlateError = Truncated | Corrupt(u64) | Header | Checksum | TooLarge | TrailingData(u64)
-pub type Error = Data(FlateError) | Capacity(Capacity)
+pub type Error = Data(FlateError)
 pub fn flate.decode(format: Format, data: Bytes, max_output: u64) -> Result[Bytes, Error]
-pub fn flate.encode(format: Format, data: Bytes, level: u8) -> Result[Bytes, Capacity]
+pub fn flate.encode(format: Format, data: Bytes, level: u8) -> Bytes
 ```
 
 `decode` reads exactly one stream: one gzip member, one zlib stream, or one raw stream up
@@ -40,9 +40,9 @@ against.
 
 ```
 pub type Step { consumed: u64, produced: u64, ended: bool }
-pub fn flate.decoder(format: Format) -> Result[Decoder, Capacity]
+pub fn flate.decoder(format: Format) -> Decoder
 pub fn flate.decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes) -> Result[Step, FlateError]
-pub fn flate.encoder(format: Format, level: u8) -> Result[Encoder, Capacity]
+pub fn flate.encoder(format: Format, level: u8) -> Encoder
 pub fn flate.encode_step(mut e: Encoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes) -> Step
 pub fn flate.finish_step(mut e: Encoder, mut out: Bytes) -> Step
 ```
@@ -63,7 +63,7 @@ are written. The caller calls it again while `ended` is false.
   operations admit nothing. The whole-buffer operations admit their state and their
   output, which grows by GROWTH, and on failure they clean and refund it (FAIL-5).
   Steps are O(input + output).
-- **Failures.** As above. A decoder that has failed returns the same error on every later
-  call.
+- **Failures.** A refused allocation raises `Capacity`. A decoder that reports a
+  data error returns that error on every later call.
 - **Replay.** These operations pass no replay point. A replay recomputes them from the
   bytes that reached the run.

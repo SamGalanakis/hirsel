@@ -10,7 +10,7 @@ fn make_list(size: u64) -> Result[Option[Box[Element]], Capacity] {
     }
     let rest = make_list(size - 1)?
     let element = Element(value: size, next: take rest)
-    Ok(Some(result.capacity_only(box.new(take element))?))
+    Ok(Some(box.new(take element)))
 }
 
 fn next[in a](element: View[Element] in a) -> Option[View[Element]] in a {
@@ -57,8 +57,8 @@ type Lists {
     z: Option[Box[Element]]
 }
 
-pub fn list_benchmark() -> Result[u64, Capacity] {
-    let inputs = Lists(x: make_list(15)?, y: make_list(10)?, z: make_list(6)?)
+pub fn list_benchmark(first: u64) -> Result[u64, Capacity] {
+    let inputs = Lists(x: make_list(first)?, y: make_list(10)?, z: make_list(6)?)
     match inputs {
         Lists(x: Some(x), y: Some(y), z: Some(z)) => {
             match tail(Some(view x), Some(view y), Some(view z)) {

@@ -1,4 +1,4 @@
-import {CorruptState, RECOVERY_VERSION, type Installation, type Want, type Pending, type StreamRecord} from './client.js';
+import {CorruptState, RECOVERY_VERSION, validCaller, type Installation, type Want, type Pending, type StreamRecord} from './client.js';
 
 export function encodeState(state: Installation): string {
   return JSON.stringify(state, (_, value) => typeof value === 'bigint' ? {$bigint: value.toString()}
@@ -20,7 +20,6 @@ export function decodeState(text: string): Installation {
       return value;
     });
     if (!state || state.version !== RECOVERY_VERSION || typeof state.generation !== 'bigint'
-      || (state.token !== null && !(state.token instanceof Uint8Array))
       || !Array.isArray(state.directory) || !state.directory.every(u32)
       || new Set(state.directory).size !== state.directory.length
       || !Number.isSafeInteger(state.nextStream) || state.nextStream < 0 || state.nextStream > 0x100000000
@@ -43,10 +42,10 @@ function want(w: Want): boolean {
 function pending(p: Pending, state: Installation, stream: number, next: bigint): boolean {
   return p.generation === state.generation && p.stream === stream && p.p === next && want(p.want)
     && p.args instanceof Uint8Array && u32(p.slot) && Number.isSafeInteger(p.attempts) && p.attempts >= 0
-    && typeof p.possiblyAdmitted === 'boolean' && state.token !== null;
+    && typeof p.possiblyAdmitted === 'boolean' && state.streams[stream].caller !== null;
 }
 function validRecord(r: StreamRecord, state: Installation, stream: number): boolean {
-  if (!r || !u64(r.next) || typeof r.retired !== 'boolean' || (r.pending && !pending(r.pending, state, stream, r.next))) return false;
+  if (!r || (r.caller !== null && !validCaller(r.caller)) || !u64(r.next) || typeof r.retired !== 'boolean' || (r.pending && !pending(r.pending, state, stream, r.next))) return false;
   if (r.terminal && (!u64(r.terminal.p) || !r.terminal.outcome || !['Returned', 'Failed', 'Refused'].includes(r.terminal.outcome.tag))) return false;
   return true;
 }

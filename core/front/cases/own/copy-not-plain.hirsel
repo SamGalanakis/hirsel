@@ -1,0 +1,5 @@
+// OWN-6: `copy p` reads `p`. A place that is not plain is refused at each `copy` and is
+// not moved, so the view parameter is not also refused under OWN-7.
+// expect: refuse OWN-6 at 5:30
+// expect: refuse OWN-6 at 5:38
+fn dup[T](x: T) -> (T, T) { (copy x, copy x) }

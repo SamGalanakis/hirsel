@@ -9,6 +9,7 @@ pub(super) struct Tables {
     pub directories: DataId,
     pub net_rules: DataId,
     pub secret_grants: DataId,
+    pub env_patterns: DataId,
     pub sources: DataId,
 }
 
@@ -131,6 +132,16 @@ pub(super) fn write(
             .iter()
             .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.patterns])),
     )?;
+    let env_patterns = bytes(
+        object,
+        None,
+        plan.env_patterns
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes()
+            .to_vec(),
+        1,
+    )?;
     let files = bytes(object, None, source_files(sources)?, 8)?;
     // The versioned symbol binds the source layout to the supplied runtime.
     let decoder = object
@@ -167,6 +178,7 @@ pub(super) fn write(
         directories,
         net_rules,
         secret_grants,
+        env_patterns,
         sources,
     })
 }

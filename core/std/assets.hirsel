@@ -6,9 +6,9 @@ pub opaque type Representation: shareable + send {
     etag: String
 }
 
-pub fn representation(coding: Coding, take body: Bytes, take etag: String) -> Result[Representation, Capacity] {
-    let stored = result.capacity_only(arc.new(take body))?
-    Ok(Representation(coding: coding, body: take stored, etag: take etag))
+pub fn representation(coding: Coding, take body: Bytes, take etag: String) -> Representation {
+    let stored = arc.new(take body)
+    Representation(coding, body: take stored, etag: take etag)
 }
 
 pub type Entry: shareable + send {
@@ -241,10 +241,7 @@ fn unchanged(req: http.Request, etag: String) -> bool {
 }
 
 fn owned(s: String) -> Result[Bytes, http.HandlerError] {
-    match http.copy_bytes(string.as_bytes(s)) {
-        Ok(take b) => Ok(take b),
-        Error(e) => Error(Allocation(e)),
-    }
+    Ok(http.copy_bytes(string.as_bytes(s)))
 }
 
 fn field(mut reply: http.Response, name: String, value: String) -> Result[(), http.HandlerError] {

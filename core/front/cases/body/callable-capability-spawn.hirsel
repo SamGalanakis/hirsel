@@ -7,7 +7,7 @@ fn child(take out: Stdout) -> u64 waits {
 }
 
 pub fn main(out: Stdout, tasks: Tasks) -> Result[(), Exit] {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 0, out, child))
+    let mut h = task.spawn(tasks, bytes 0, out, child)
     task.cancel(mut h)
     match task.join(take h) {
         Error(Cancelled(take causes)) => {

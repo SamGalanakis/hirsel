@@ -14,26 +14,77 @@ pub fn main(d: Dir) -> Result[(), Exit] {
         _ => return Error(Exit(status: 3))
     }
     result.unwrap(host.write(mut f, string.as_bytes("data")))
-    if result.unwrap(host.try_lock(mut f)) == false { return Error(Exit(status: 4)) }
+    if result.unwrap(host.try_lock(mut f)) == false {
+        return Error(Exit(status: 4))
+    }
     let mut other = result.unwrap(host.open(d, "file", Append))
-    if result.unwrap(host.try_lock(mut other)) { return Error(Exit(status: 9)) }
+    if result.unwrap(host.try_lock(mut other)) {
+        return Error(Exit(status: 9))
+    }
     result.unwrap(host.close(take other))
     result.unwrap(host.unlock(mut f))
     result.unwrap(host.close(take f))
     let mut reader = result.unwrap(host.open(d, "file", Read))
     let mut buf: Bytes = list.new()
-    if result.unwrap(host.read(mut reader, mut buf)) != 0u64 { return Error(Exit(status: 5)) }
+    if result.unwrap(host.read(mut reader, mut buf)) != 0u64 {
+        return Error(Exit(status: 5))
+    }
     result.unwrap(host.close(take reader))
     result.unwrap(host.mkdir(d, "directory"))
-    match host.mkdir(d, "directory") { Error(Exists) => {}, _ => return Error(Exit(status: 6)) }
+    match host.mkdir(d, "directory") {
+        Error(Exists) => {},
+        _ => return Error(Exit(status: 6))
+    }
     result.unwrap(host.remove(d, "file"))
-    match host.remove(d, "file") { Error(NotFound) => {}, _ => return Error(Exit(status: 7)) }
+    match host.remove(d, "file") {
+        Error(NotFound) => {},
+        _ => return Error(Exit(status: 7))
+    }
     result.unwrap(host.remove(d, "directory"))
     result.unwrap(host.mkdir(d, "tree"))
     let mut nested = result.unwrap(host.open(d, "tree/file", Write))
     result.unwrap(host.write(mut nested, string.as_bytes("nested")))
     result.unwrap(host.close(take nested))
     result.unwrap(host.remove_tree(d, "tree"))
-    match host.remove_tree(d, "tree") { Error(NotFound) => {}, _ => return Error(Exit(status: 8)) }
+    match host.remove_tree(d, "tree") {
+        Error(NotFound) => {},
+        _ => return Error(Exit(status: 8))
+    }
+    positioned_io(d)
     Ok(())
+}
+
+// file.md, Positioned I/O: the ordinary cursor stays at 2, and extending the
+// file by a positioned write makes the skipped bytes read back as zeros.
+fn positioned_io(d: Dir) waits {
+    let mut f = result.unwrap(host.open(d, "positioned", ReadWrite))
+    result.unwrap(host.write_at(mut f, 4, string.as_bytes("Z")))
+    result.unwrap(host.write(mut f, string.as_bytes("AB")))
+    let mut buf: Bytes = list.with_capacity(8)
+    if result.unwrap(host.read_at(mut f, 3, mut buf)) != 2 || buf[0] != 0 || buf[1] != b'Z' {
+        fail("positioned read did not return the zero gap and written byte")
+    }
+    list.clear(mut buf)
+    if result.unwrap(host.read(mut f, mut buf)) != 3 || buf[0] != 0 || buf[1] != 0 || buf[2] != b'Z' {
+        fail("positioned I/O moved the ordinary cursor")
+    }
+    result.unwrap(host.close(take f))
+    let mut append = result.unwrap(host.open(d, "positioned", Append))
+    match host.write_at(mut append, 0, string.as_bytes("!")) {
+        Error(e) => match e.error {
+            Denied => if e.written != 0 {
+                fail("denied write committed bytes")
+            },
+            _ => fail("positioned write on Append did not return Denied"),
+        },
+        Ok(()) => fail("positioned write on Append succeeded"),
+    }
+    result.unwrap(host.close(take append))
+    let mut reopened = result.unwrap(host.open(d, "positioned", ReadWrite))
+    list.clear(mut buf)
+    if result.unwrap(host.read(mut reopened, mut buf)) != 5 || buf[0] != b'A' || buf[4] != b'Z' {
+        fail("Append denial or ReadWrite reopen changed the file")
+    }
+    result.unwrap(host.close(take reopened))
+    result.unwrap(host.remove(d, "positioned"))
 }

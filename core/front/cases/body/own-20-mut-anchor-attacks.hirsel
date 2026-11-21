@@ -6,14 +6,14 @@ fn lend(mut s: String) -> View[String] in s {
 }
 
 fn step(mut s: String) -> Result[Option[View[String]], Capacity] in s {
-    string.push(mut s, "x")?
+    string.push(mut s, "x")
     Ok(Some(lend(mut s)))
 }
 
 // 1: replace and reallocate before forming the view.
 fn refill(mut s: String) -> Result[View[String], Capacity] in s {
     s = string.new()
-    string.push(mut s, "new")?
+    string.push(mut s, "new")
     Ok(lend(mut s))
 }
 
@@ -71,7 +71,7 @@ fn each(mut s: String) -> Result[(), Capacity] {
 // 19: a view kept across a `?` exit.
 fn across(mut s: String) -> Result[(), Capacity] {
     let line = lend(mut s)
-    let _ = string.from("allocation")?
+    let _ = string.from("allocation")
     let _ = string.byte_len(line)
     Ok(())
 }
@@ -102,7 +102,7 @@ fn copies(mut s: String) -> Result[u64, Capacity] {
     let v = lend(mut s)
     let n = string.byte_len(s)
     let w = view s
-    let mut separate: String = clone(s)?
+    let mut separate: String = clone(s)
     separate = string.new()
     Ok(n + string.byte_len(v) + string.byte_len(w))
 }

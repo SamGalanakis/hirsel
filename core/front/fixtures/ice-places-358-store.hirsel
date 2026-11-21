@@ -1,5 +1,5 @@
 // kv-script over a memory store table (u64 -> u64).
-type Fail = Usage | Unreadable | Bad(u64) | Setup | Mem(Capacity) | Write(WriteError)
+type Fail = Usage | Unreadable | Bad(u64) | Setup | Write(WriteError)
 
 type Op: key = Put(u64, u64) | Del(u64)
 
@@ -16,24 +16,24 @@ fn num(s: String) -> Option[u64] {
 }
 
 // The words of a line separated by single spaces.
-fn words(line: String) -> Result[List[String], Capacity] {
+fn words(line: String) -> List[String] {
     let mut ws: List[String] = list.new()
     let mut at: u64 = 0
     while let Some((w, next)) = std.string.next_split(line, at, " ") {
-        let s = string.from(w)?
-        match list.push(mut ws, take s) { Ok(()) => {}, Error((c, _)) => return Error(c) }
+        let s = string.from(w)
+        list.push(mut ws, take s)
         at = next
     }
-    Ok(take ws)
+    take ws
 }
 
-fn line_text(mut buf: String, s: String) -> Result[(), Capacity] {
-    string.push(mut buf, s)?
+fn line_text(mut buf: String, s: String) {
+    string.push(mut buf, s)
     string.push(mut buf, "\n")
 }
 
-fn line_num(mut buf: String, n: u64) -> Result[(), Capacity] {
-    string.push_u64(mut buf, n)?
+fn line_num(mut buf: String, n: u64) {
+    string.push_u64(mut buf, n)
     string.push(mut buf, "\n")
 }
 
@@ -70,8 +70,8 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
     let mut lines: List[List[String]] = list.new()
     let mut at: u64 = 0
     while let Some((line, next)) = std.string.next_line(text, at) {
-        let ws = match words(line) { Ok(take ws) => ws, Error(cap) => return Error(Mem(cap)) }
-        match list.push(mut lines, take ws) { Ok(()) => {}, Error((cap, _)) => return Error(Mem(cap)) }
+        let ws = words(line)
+        list.push(mut lines, take ws)
         at = next
     }
     let mut i: u64 = 0
@@ -118,16 +118,14 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
             i += 1
         } else if ws[0] == "get" {
             let got = match store.get(store.snapshot(db), store.shape(t), a) { Ok(x) => x, Error(_) => return Error(Setup) }
-            let res = match got { Some(v) => line_num(mut buf, v), None => line_text(mut buf, "none") }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            match got { Some(v) => line_num(mut buf, v), None => line_text(mut buf, "none") }
             i += 1
         } else if ws[0] == "del" {
             let w = store.run(mut db, None, fn(mut tx: store.Tx) -> Result[bool, store.Error] {
                 store.delete(mut tx, t, a)
             })
             let found = match take w { Ok(Committed(done)) => done.value, _ => return Error(Setup) }
-            let res = if found { line_text(mut buf, "deleted") } else { line_text(mut buf, "absent") }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            if found { line_text(mut buf, "deleted") } else { line_text(mut buf, "absent") }
             i += 1
         } else if ws[0] == "sum" {
             let Some(hi) = num(ws[2]) else { return Error(Bad(i + 1)) }
@@ -146,8 +144,7 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
                     Error(_) => return Error(Setup)
                 }
             }
-            let res = if over { line_text(mut buf, "overflow") } else { line_num(mut buf, total) }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            if over { line_text(mut buf, "overflow") } else { line_num(mut buf, total) }
             i += 1
         } else {
             // batch m: the next m lines in one transaction; an absent del aborts it all.
@@ -168,12 +165,11 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
                 }
                 Ok(())
             })
-            let res = match take w {
+            match take w {
                 Ok(Committed(_)) => line_text(mut buf, "committed"),
                 Ok(Aborted(_)) => line_text(mut buf, "aborted"),
                 _ => return Error(Setup)
             }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
             i += m + 1
         } else {
             i += 1
@@ -193,16 +189,14 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
             i += 1
         } else if ws[0] == "get" {
             let got = match store.get(store.snapshot(db), store.shape(t), a) { Ok(x) => x, Error(_) => return Error(Setup) }
-            let res = match got { Some(v) => line_num(mut buf, v), None => line_text(mut buf, "none") }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            match got { Some(v) => line_num(mut buf, v), None => line_text(mut buf, "none") }
             i += 1
         } else if ws[0] == "del" {
             let w = store.run(mut db, None, fn(mut tx: store.Tx) -> Result[bool, store.Error] {
                 store.delete(mut tx, t, a)
             })
             let found = match take w { Ok(Committed(done)) => done.value, _ => return Error(Setup) }
-            let res = if found { line_text(mut buf, "deleted") } else { line_text(mut buf, "absent") }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            if found { line_text(mut buf, "deleted") } else { line_text(mut buf, "absent") }
             i += 1
         } else if ws[0] == "sum" {
             let Some(hi) = num(ws[2]) else { return Error(Bad(i + 1)) }
@@ -221,8 +215,7 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
                     Error(_) => return Error(Setup)
                 }
             }
-            let res = if over { line_text(mut buf, "overflow") } else { line_num(mut buf, total) }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            if over { line_text(mut buf, "overflow") } else { line_num(mut buf, total) }
             i += 1
         } else {
             // batch m: the next m lines in one transaction; an absent del aborts it all.
@@ -244,8 +237,7 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
                 Ok(true)
             })
             let committed = match take w { Ok(Committed(done)) => done.value, _ => return Error(Setup) }
-            let res = if committed { line_text(mut buf, "committed") } else { line_text(mut buf, "aborted") }
-            match res { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+            if committed { line_text(mut buf, "committed") } else { line_text(mut buf, "aborted") }
             i += m + 1
         }
     }

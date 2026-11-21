@@ -61,11 +61,11 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let n: u64 = result.unwrap(int.parse(number))
     if n < 2 || n > 16 { return Error(Exit(status: 2)) }
     let total = factorial(n)
-    let mut jobs: List[Task[Score]] = result.unwrap(list.with_capacity(BLOCKS))
+    let mut jobs: List[Task[Score]] = list.with_capacity(BLOCKS)
     for block in 0 .. BLOCKS {
         let job = Job(n: n, first: total * block / BLOCKS, last: total * (block + 1) / BLOCKS)
-        let h = result.unwrap(task.spawn(tasks, bytes 65536, job, chunk))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(tasks, bytes 65536, job, chunk)
+        list.push(mut jobs, take h)
     }
     let mut score = Score(checksum: 0, flips: 0)
     while let Some(take h) = list.pop(mut jobs) {
@@ -74,12 +74,12 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
         if part.flips > score.flips { score.flips = part.flips }
     }
     let mut line = string.new()
-    result.unwrap(std.string.push_i64(mut line, score.checksum))
-    result.unwrap(string.push(mut line, "\nPfannkuchen("))
-    result.unwrap(string.push_u64(mut line, n))
-    result.unwrap(string.push(mut line, ") = "))
-    result.unwrap(string.push_u64(mut line, score.flips))
-    result.unwrap(string.push(mut line, "\n"))
+    std.string.push_i64(mut line, score.checksum)
+    string.push(mut line, "\nPfannkuchen(")
+    string.push_u64(mut line, n)
+    string.push(mut line, ") = ")
+    string.push_u64(mut line, score.flips)
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
     Ok(())
 }

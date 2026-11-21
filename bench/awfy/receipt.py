@@ -127,6 +127,8 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         digest = sha256(data)
         if digest != provenance.get("rap_sha256"):
             raise ValueError(f"{data}: JSON fixture differs from the build")
+        if len(command) != 5 or hashlib.sha256(command[4].encode("utf-8")).hexdigest() != digest:
+            raise ValueError(f"{data}: JSON argument differs from the fixture")
         fixture = fixture | data_fixture(fixture["fixture_files"] | {str(data): digest})
     image = sha256(binary)
     checked = tools | {field: fixture[field] for field in build.MANIFEST_HASHES} | {"image_sha256": image}
@@ -252,13 +254,15 @@ def sample(args):
     return int(bool(receipt["failures"]))
 
 
-def instruction_rows(path, expected=None, *, allow_incomplete=False):
+def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_baseline=False):
     data = read(path)
+    previous_board = False
     if "instruction_receipt" in data:
         if data["complete"] is not True and not allow_incomplete:
             raise ValueError(f"{path}: incomplete board")
         data = data["instruction_receipt"]
-    if data["version"] != VERSION:
+        previous_board = compare_baseline and data["version"] == 4
+    if data["version"] != VERSION and not previous_board:
         raise ValueError(f"{path}: unsupported instruction receipt")
     declared = data["expected_rows"]
     if (not isinstance(declared, list) or not declared
@@ -275,6 +279,11 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False):
             continue
         if key in rows:
             refusals[key] = f"{path}: duplicate row"
+        if previous_board:
+            try:
+                row = board_v4_row(row)
+            except INVALID_RECEIPT as error:
+                refusals[key] = f"{path}: {error}"
         rows[key] = row
     for key in rows.keys() - keys:
         refusals[key] = f"{path}: unexpected row"
@@ -285,6 +294,22 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False):
     for key, reason in data["failures"].items():
         refusals[key] = f"{path}: failed sample: {reason}"
     return rows, refusals
+
+
+def board_v4_row(row):
+    # Version 4 used the runtime mode to record Step certification. Version 5
+    # records a release build in either case. Compile modes did not change.
+    certified, mode = row["certified"], row["mode"]
+    if type(certified) is not bool:
+        raise ValueError("invalid Step certification")
+    if row["suite"] != "compile":
+        if mode != ("certified" if certified else "bounded"):
+            raise ValueError("runtime mode disagrees with Step certification")
+        mode = "release"
+    record = row.get("build_record")
+    if record is not None and record.get("certified") is not certified:
+        raise ValueError("build record disagrees with Step certification")
+    return {**row, "mode": mode}
 
 
 def validate_row(key, row):
@@ -335,7 +360,7 @@ def match_rows(key, left, right):
 
 
 def compare(before_path, after_path, threshold, *, aa=False, expected=None, blocked=None):
-    before, before_refusals = instruction_rows(before_path, expected)
+    before, before_refusals = instruction_rows(before_path, expected, compare_baseline=True)
     after, after_refusals = instruction_rows(after_path, expected, allow_incomplete=expected is not None)
     refusals = (blocked or {}) | before_refusals | after_refusals
     matched = []

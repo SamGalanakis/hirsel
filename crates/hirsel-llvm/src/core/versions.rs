@@ -26,13 +26,9 @@ pub(super) fn stub(
     signature: &FnSig,
     locals: &[Local],
     linkage: Linkage,
-    infallible: bool,
+    suffix: &str,
 ) {
-    let full_name = if infallible {
-        format!("{name}.infallible")
-    } else {
-        name.to_owned()
-    };
+    let full_name = format!("{name}{suffix}");
     let attrs = FnAttrs {
         linkage,
         inline: Inline::Never,
@@ -71,9 +67,7 @@ pub(super) fn stub(
     for (level, &(_, label)) in X86_64_LEVELS.iter().zip(&choices) {
         sink.block(label);
         let mut callee = symbol(name, *level);
-        if infallible {
-            callee.push_str(".infallible");
-        }
+        callee.push_str(suffix);
         let callee = Value::global(callee);
         let result = Local::Temp(usize::from(level.number));
         let attrs = CallAttrs {

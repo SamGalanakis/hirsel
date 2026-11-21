@@ -1,12 +1,8 @@
-// Contract tests for `set` (core/std/set.hirsel), written to run once an engine runs
-// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
-// gives the result derived by hand from the contract, or `fail Cause` for the failure the
-// contract names.
-fn added(r: Result[bool, (Capacity, u64)]) -> u64 {
-    match r {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Error(_) => 9,
+fn added(r: bool) -> u64 {
+    if r {
+        1
+    } else {
+        0
     }
 }
 
@@ -66,20 +62,19 @@ fn empty_iteration() -> u64 {
     n
 }
 
-// expect: run capacity_returns_key() = 3
-fn capacity_returns_key() -> u64 {
-    let mut s: set.Set[String] = set.new()
-    let k = result.unwrap(string.from("abc"))
-    let r = bound bytes 0 {
-        set.insert(mut s, take k)
-    }
-    match r {
-        Ok(Error((_, take original))) => if original == "abc" {
-            list.len(string.as_bytes(original)) + set.len(s)
-        } else {
-            99
-        },
-        _ => 99
+// A refused insert raises Capacity before the set changes.
+// expect: run capacity_raises() = true
+fn capacity_raises() -> bool {
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        let mut s: set.Set[String] = set.new()
+        bound bytes 0 {
+            let _ = set.insert(mut s, string.from("abc"))
+            set.len(s)
+        }
+    })
+    match caught(take r) {
+        Some(c) => c.requested > 0,
+        None => false,
     }
 }
 
@@ -91,7 +86,23 @@ fn duplicate_under_bound() -> bool {
         set.insert(mut s, 5)
     }
     match r {
-        Ok(Ok(false)) => set.len(s) == 1,
+        Ok(false) => set.len(s) == 1,
         _ => false
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

@@ -24,21 +24,21 @@ pub fn step(mut s: State, e: observe.Obs) {
             if let Some(at) = map.get(s.retired, observe.key(0u64, a.stream, a.p)) {
                 observe.failed(mut s.ah2, observe.key(a.conn, a.stream, a.p), at, s.index)
             }
-            result.unwrap(map.insert(mut s.requests, observe.key(a.conn, a.stream, a.p), observe.own(a.digest)))
+            map.insert(mut s.requests, observe.key(a.conn, a.stream, a.p), observe.own(a.digest))
         },
         Pos(p) => {
             let k = observe.key(0u64, p.stream, p.latest)
-            result.unwrap(map.insert(mut s.store_latest, observe.own(p.stream), p.latest))
+            map.insert(mut s.store_latest, observe.own(p.stream), p.latest)
             if !map.contains(s.bindings, k) {
-                result.unwrap(map.insert(mut s.bindings, take k, observe.own(p.digest)))
+                map.insert(mut s.bindings, take k, observe.own(p.digest))
             }
         },
         Ran(r) => {
             observe.remember(mut s.runs, r)
             let previous: u64 = match map.get(s.store_latest, r.stream) { Some(p) => p, None => 0u64 }
-            result.unwrap(map.insert(mut s.store_latest, observe.own(r.stream), if r.p > previous { r.p } else { previous }))
+            map.insert(mut s.store_latest, observe.own(r.stream), if r.p > previous { r.p } else { previous })
             let k = observe.key(0u64, r.stream, r.p)
-            if !map.contains(s.bindings, k) { result.unwrap(map.insert(mut s.bindings, take k, observe.own(r.digest))) }
+            if !map.contains(s.bindings, k) { map.insert(mut s.bindings, take k, observe.own(r.digest)) }
         },
         Got(a) => {
             let k = observe.key(a.conn, a.stream, a.p)
@@ -48,7 +48,7 @@ pub fn step(mut s: State, e: observe.Obs) {
                 ObsRefused(ObsRequestMismatch) => {
                     s.mismatch.hits += 1u64
                     match map.get(s.requests, k) {
-                        Some(d) => result.unwrap(list.push(mut s.mismatches, observe.Identity(slot: observe.own(slot), key: observe.own(k), digest: observe.own(d), version: a.version, from: s.index, to: s.index))),
+                        Some(d) => list.push(mut s.mismatches, observe.Identity(slot: observe.own(slot), key: observe.own(k), digest: observe.own(d), version: a.version, from: s.index, to: s.index)),
                         None => observe.failed(mut s.mismatch, observe.own(k), s.index, s.index),
                     }
                 },
@@ -57,7 +57,7 @@ pub fn step(mut s: State, e: observe.Obs) {
                     let justified = match map.get(s.store_latest, a.stream) { Some(p) => a.p < p, None => false }
                     if !justified { observe.failed(mut s.history, observe.own(k), s.index, s.index) }
                     s.ah2.hits += 1u64
-                    result.unwrap(map.insert(mut s.retired, observe.key(0u64, a.stream, a.p), s.index))
+                    map.insert(mut s.retired, observe.key(0u64, a.stream, a.p), s.index)
                 },
                 _ => (),
             }
@@ -70,20 +70,20 @@ pub fn step(mut s: State, e: observe.Obs) {
 pub fn finish(s: State, h: observe.Header) -> List[observe.Verdict] {
     let identity = observe.identity(s.identity, s.accepted, s.runs, h)
     let mut vs: List[observe.Verdict] = list.new()
-    result.unwrap(list.push(mut vs, observe.verdict(s.h, h)))
-    result.unwrap(list.push(mut vs, take identity))
-    result.unwrap(list.push(mut vs, observe.mismatches(s.mismatch, s.mismatches, s.bindings, h)))
-    result.unwrap(list.push(mut vs, observe.verdict(s.history, h)))
-    result.unwrap(list.push(mut vs, observe.verdict(s.ah2, h)))
+    list.push(mut vs, observe.verdict(s.h, h))
+    list.push(mut vs, take identity)
+    list.push(mut vs, observe.mismatches(s.mismatch, s.mismatches, s.bindings, h))
+    list.push(mut vs, observe.verdict(s.history, h))
+    list.push(mut vs, observe.verdict(s.ah2, h))
     vs
 }
 
 fn accept(mut s: State, a: observe.Reply) {
     s.identity.hits += 1u64
     match map.get(s.requests, observe.key(a.conn, a.stream, a.p)) {
-        Some(d) => result.unwrap(list.push(mut s.accepted, observe.Identity(slot: observe.key(0u64, a.stream, a.p), key: observe.key(a.conn, a.stream, a.p), digest: observe.own(d), version: a.version, from: s.index, to: s.index))),
+        Some(d) => list.push(mut s.accepted, observe.Identity(slot: observe.key(0u64, a.stream, a.p), key: observe.key(a.conn, a.stream, a.p), digest: observe.own(d), version: a.version, from: s.index, to: s.index)),
         None => observe.failed(mut s.identity, observe.key(a.conn, a.stream, a.p), s.index, s.index),
     }
     let previous: u64 = match map.get(s.latest, a.stream) { Some(p) => p, None => 0u64 }
-    result.unwrap(map.insert(mut s.latest, observe.own(a.stream), if a.p > previous { a.p } else { previous }))
+    map.insert(mut s.latest, observe.own(a.stream), if a.p > previous { a.p } else { previous })
 }

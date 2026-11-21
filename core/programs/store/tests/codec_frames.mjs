@@ -4,9 +4,9 @@ import {laws as clientLaws} from './client.mjs';
 const bytes = hex => Uint8Array.from(Buffer.from(hex.replaceAll(' ',''),'hex'));
 
 export async function vectors(c,frame,entries) {
-  assert.equal(frame.subprotocol,'hirsel.1');
+  assert.equal(frame.subprotocol,'hirsel.2');
   assert.strictEqual(frame.Frame,c.Frame);
-  assert.deepEqual(frame.Raised,{Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8,Tape:9});
+  assert.deepEqual(frame.Raised,{Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});
   assert.deepEqual(frame.BadKind,{Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6});
   assert.deepEqual(entries.identity,{digest:bytes('0102'),target:'t',n_place:16777216n});
   assert.equal(entries.want[0].args_fp,9007199254740993n);
@@ -53,7 +53,7 @@ export async function vectors(c,frame,entries) {
   vector({tag:'Subscribe',values:[1,2,bytes(''),{tag:'None'}]},'02000000 01000000 02000000 00000000 00000000');
   vector({tag:'Subscribe',values:[1,2,bytes(''),{tag:'Some',value:bytes('aa')}]},'02000000 01000000 02000000 00000000 01000000 01000000 aa');
   vector({tag:'Unsubscribe',value:7},'03000000 07000000');
-  vector({tag:'Welcome',values:[bytes('aa'),2,3n,bytes(''),'t',4n]},'04000000 01000000 aa 02000000 0300000000000000 00000000 01000000 74 0400000000000000');
+  vector({tag:'Welcome',values:[{issuer:2,subject:bytes('aa')},2,3n,bytes(''),'t',4n]},'04000000 02 01000000 aa 02000000 0300000000000000 00000000 01000000 74 0400000000000000');
   vector({tag:'Placed',value:{tag:'Ready',value:3}},'05000000 00000000 03000000');
   vector({tag:'Placed',value:{tag:'Resolve',values:[3,bytes('07')]}},'05000000 01000000 03000000 01000000 07');
   vector({tag:'Placed',value:{tag:'Gone'}},'05000000 02000000');
@@ -101,7 +101,7 @@ export function differential(c) {
       case 1: value={tag:'Call',values:[i,p,state%4,123,Uint8Array.of(state&255)]}; break;
       case 2: value={tag:'Subscribe',values:[i,2,bytes('07'),i%2 === 0 ? {tag:'None'} : {tag:'Some',value:bytes('08')}]}; break;
       case 3: value={tag:'Unsubscribe',value:i}; break;
-      case 4: value={tag:'Welcome',values:[bytes('0102'),4,n,bytes('03'),'t',16777216n]}; break;
+      case 4: value={tag:'Welcome',values:[{issuer:2,subject:bytes('0102')},4,n,bytes('03'),'t',16777216n]}; break;
       case 5: value={tag:'Placed',value:state%3 === 0 ? {tag:'Ready',value:i} : state%3 === 1 ? {tag:'Resolve',values:[i,bytes('09')]} : {tag:'Gone'}}; break;
       case 6: value={tag:'Batch',values:[n,state%2 === 0 ? [i] : [],[{sub:1,key:bytes('01'),value:{tag:'Some',value:bytes('03')}}],[{stream:i,p,outcome:{tag:'Returned',value:bytes('04')}}]]}; break;
       case 7: value={tag:'Ended',values:[i,i%2 === 0 ? {tag:'Failed',value:{tag:'Raised',value:state}} : {tag:'Refused',value:{tag:'Deadline'}}]}; break;

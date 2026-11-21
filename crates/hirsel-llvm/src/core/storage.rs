@@ -523,44 +523,6 @@ impl FunctionEmitter<'_> {
         }
         self.allocation(name, &args)
     }
-    #[allow(clippy::too_many_arguments)]
-    fn allocate(
-        &mut self,
-        kind: &AllocKind,
-        place: &Payer,
-        charge: &Value,
-        size: &Value,
-        align: u64,
-        overflow: Option<ValueId>,
-        fail: Option<BlockId>,
-    ) -> (Value, Value) {
-        let (block, room) = self.allocate_raw(kind, place, charge, size, align, overflow);
-        self.allocation_status(&block, fail);
-        (block, room)
-    }
-    pub(super) fn allocation_status(&mut self, block: &Value, fail: Option<BlockId>) {
-        // Only refusal needs the runtime's active-finalizer decision.
-        let present = self.cmp(Predicate::Ne, &Type::Ptr, block, &Value::Null);
-        let n = self.counter();
-        let success = Label::new("allocation_success", n);
-        let status_label = Label::new("allocation_status", n);
-        self.likely(&present, success, status_label);
-        self.block(status_label);
-        let status = self.call_declared(
-            "hirsel_core_allocation_status",
-            Type::I8,
-            &[ptr(CONTEXT), ptr(block.clone())],
-            FnAttrs::default(),
-            &CallAttrs {
-                cold: true,
-                ..CallAttrs::default()
-            },
-        );
-        let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
-        self.branch_failure(&failed, fail, Some(6));
-        self.br(success);
-        self.block(success);
-    }
     pub(super) fn step(&mut self, fail: Option<BlockId>) {
         if self.prepaid_step() {
             return;
@@ -606,7 +568,6 @@ impl FunctionEmitter<'_> {
                 overflow,
                 size,
                 align,
-                fail,
             } => {
                 let payer = match place {
                     AllocPlace::Current
@@ -618,9 +579,7 @@ impl FunctionEmitter<'_> {
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
                 let (block, room) = if let AllocPlace::Frame(frame) = place {
                     let frame = self.numeric(frame);
-                    let admitted = self.frame_admit(&frame, &charge, overflow);
-                    self.allocation_status(&admitted.0, fail);
-                    admitted
+                    self.frame_admit(&frame, &charge, overflow)
                 } else if let AllocPlace::LentFrame(frame) = place {
                     let frame = self.numeric(frame);
                     let overflow = overflow.map_or(FALSE, |v| {
@@ -636,10 +595,9 @@ impl FunctionEmitter<'_> {
                             zeroext(Type::I1, overflow),
                         ],
                     );
-                    self.allocation_status(&admitted.0, fail);
                     admitted
                 } else {
-                    self.allocate(kind, &payer, &charge, &size, align, overflow, fail)
+                    self.allocate_raw(kind, &payer, &charge, &size, align, overflow)
                 };
                 if let Some(token) = region_entry {
                     let Payer::Region(region) = &payer else {
@@ -714,7 +672,6 @@ impl FunctionEmitter<'_> {
                 capacity,
                 moved,
                 refund,
-                fail,
             } => {
                 let edge = hirsel_core_ir::sequence_edge(
                     &self.module.types,
@@ -731,8 +688,7 @@ impl FunctionEmitter<'_> {
                     self.numeric(refund),
                 );
                 let (block, room) = self.grow_buffer(
-                    edge, &at, &old, &charge, &size, align, overflow, fail, &capacity, &moved,
-                    &refund,
+                    edge, &at, &old, &charge, &size, align, overflow, &capacity, &moved, &refund,
                 );
                 self.put(result, &block);
                 self.put(available, &room);

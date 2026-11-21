@@ -32,31 +32,31 @@ resource type Owned grant bytes 1024 {
             failed = true
         }
     }
-    let _ = event(f.tx, "release=", f.name)
+    event(f.tx, "release=", f.name)
     if failed || f.injected {
-        let _ = event(f.tx, "cleanup-error=Io@release-", f.name)
-        let cause = result.unwrap(string.from("Io@release-"))
+        event(f.tx, "cleanup-error=Io@release-", f.name)
+        let cause = string.from("Io@release-")
         let mut label = cause
         let _ = string.push(mut label, f.name)
         let _ = channel.try_send(f.tx, Cleanup(take label))
     }
 }
 
-fn event(tx: Sender[Event], prefix: String, name: String) -> Result[(), m1.support.Error] {
-    let mut line = m1.support.mem(string.from(prefix))?
-    m1.support.add(mut line, name)?
+fn event(tx: Sender[Event], prefix: String, name: String) -> () {
+    let mut line = string.from(prefix)
+    string.push(mut line, name)
     match channel.try_send(tx, Line(take line)) {
-        Ok(()) => Ok(()),
+        Ok(()) => (),
         Error(_) => fail("trace capacity")
     }
 }
 
 fn acquired(take handle: Option[HostFile], take lock: Option[std.file.Lock], name: String, variant: String, tx: Sender[Event]) -> Result[Owned, m1.support.Error] {
-    let mut failure = m1.support.mem(string.from("error-release-"))?
-    m1.support.add(mut failure, name)?
-    let mut line = m1.support.mem(string.from("acquire="))?
-    m1.support.add(mut line, name)?
-    let owner = m1.support.mem(result.capacity_only(Owned(handle: take handle, lock: take lock, name: m1.support.mem(string.from(name))?, injected: variant == failure || variant == "error-cleanup-all", tx: channel.sender(tx))))?
+    let mut failure = string.from("error-release-")
+    string.push(mut failure, name)
+    let mut line = string.from("acquire=")
+    string.push(mut line, name)
+    let owner = Owned(handle: take handle, lock: take lock, name: string.from(name), injected: variant == failure || variant == "error-cleanup-all", tx: channel.sender(tx)) ?=> |(c, _)| m1.support.ambient_capacity(c)
     match channel.try_send(tx, Line(take line)) {
         Ok(()) => {},
         Error(_) => fail("trace capacity")
@@ -67,7 +67,7 @@ fn acquired(take handle: Option[HostFile], take lock: Option[std.file.Lock], nam
 fn io[T](take r: Result[T, IoError], label: String) -> Result[T, m1.support.Error] {
     match take r {
         Ok(take x) => Ok(take x),
-        Error(_) => Error(m1.support.error(m1.support.mem(string.from(label))?))
+        Error(_) => Error(m1.support.error(string.from(label)))
     }
 }
 
@@ -77,7 +77,7 @@ fn lock_capacity(c: Capacity, take returned: HostFile) -> Result[(), m1.support.
     {
         let file_to_close = returned
     }
-    m1.support.mem(Error(c))
+    Error(m1.support.ambient_capacity(c))
 }
 
 fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.support.Error] waits {
@@ -98,7 +98,7 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
     }
     let lock_owner = acquired(None, Some(take locked), "lock", variant, tx)?
     m1.support.admission(variant, "copy.buffer", 4096)?
-    let mut buf: Bytes = m1.support.mem(list.with_capacity(4096))?
+    let mut buf: Bytes = list.with_capacity(4096)
     let mut copied: u64 = 0
     loop {
         list.clear(mut buf)
@@ -127,23 +127,23 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
             return Error(m1.support.error("Io@copy"))
         }
     }
-    event(tx, "copied=", m1.support.name("", copied, "")?)?
+    event(tx, "copied=", m1.support.name("", copied, ""))
     Ok(())
 }
 
 fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender[Event], take rx: Receiver[Event]) -> Result[(), m1.support.Error] waits {
-    let mut name = m1.support.mem(string.with_capacity(32))?
+    let mut name = string.with_capacity(32)
     let directory = io(std.dir.create_temp(parent, mut name), "Io@temp")?
-    let temporary = match Temp(parent: parent, name: take name) {
+    let temporary = match Temp(parent, name: take name) {
         Ok(take t) => t,
         Error((c, (owner, take returned_name))) => {
             let _ = std.dir.remove_all(owner, returned_name)
-            return m1.support.mem(Error(c))
+            return Error(m1.support.ambient_capacity(c))
         },
     }
     io(std.file.write(directory, "source.txt", string.as_bytes(input)), "Io@setup")?
     if variant == "error-second" {
-        let existing: Bytes = m1.support.mem(b"existing")?
+        let existing: Bytes = b"existing"
         io(std.file.write(directory, "destination.txt", existing), "Io@setup")?
     }
     let mut holder: Option[std.file.Lock] = None
@@ -178,16 +178,16 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
                 m1.support.put(out, line)?;
                 m1.support.put(out, "\n")?
             },
-            Cleanup(take label) => m1.support.push(mut cleanups, take label)?,
+            Cleanup(take label) => list.push(mut cleanups, take label),
         }
     }
-    let mut rendered = m1.support.name("destination-bytes=", list.len(data), " sum=")?
-    m1.support.num(mut rendered, list.sum_bytes(data))?
-    m1.support.add(mut rendered, if free {
+    let mut rendered = m1.support.name("destination-bytes=", list.len(data), " sum=")
+    string.push_u64(mut rendered, list.sum_bytes(data))
+    string.push(mut rendered, if free {
         " lock-free=true\n"
     } else {
         " lock-free=false\n"
-    })?
+    })
     m1.support.put(out, rendered)?
     let mut primary = outcome
     if let Ok(()) = primary {
@@ -213,7 +213,7 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
 
 fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
-    let (tx, rx): (Sender[Event], Receiver[Event]) = m1.support.mem(channel.new(16))?
+    let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(16)
     run(out, d, input, m1.support.case_variant(argv), take tx, take rx)
 }
 

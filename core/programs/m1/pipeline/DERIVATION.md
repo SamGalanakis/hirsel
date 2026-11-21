@@ -46,7 +46,7 @@ from the payload charges above. These are hand derivations, not executed Hirsel
 results.
 
 Resource literals use the returned-field contract of 77ad169e: a refused Batch
-hands its rows or packed data, offsets and sender back; capacity_only cleans
+hands its rows or packed data, offsets and sender back. The error arm drops
 those inputs. A refused construction never acquires a Batch release obligation.
 The batch2.output fixture acts on an already acquired batch, so its release
 order remains 2,1.

@@ -1,30 +1,30 @@
 // Public persistent-map laws against a sorted-list model.
 fn put(mut ids: u64, m: omap.OMap[u64, u64], k: u64, v: u64) -> omap.OMap[u64, u64] {
     {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, k, v))
+        let (take next_map, _) = omap.insert(mut ids, m, k, v)
         take next_map
     }
 }
 
 fn model(old: List[(u64, u64)], key: u64, value: u64, deleting: bool) -> List[(u64, u64)] {
-    let mut out: List[(u64, u64)] = result.unwrap(list.with_capacity(list.len(old) + 1))
+    let mut out: List[(u64, u64)] = list.with_capacity(list.len(old) + 1)
     let mut installed = deleting
     for pair in old {
         if !installed && key < pair.0 {
-            result.unwrap(list.push(mut out, (key, value)))
+            list.push(mut out, (key, value))
             installed = true
         }
         if pair.0 == key {
             if !deleting {
-                result.unwrap(list.push(mut out, (key, value)))
+                list.push(mut out, (key, value))
             }
             installed = true
         } else {
-            result.unwrap(list.push(mut out, pair))
+            list.push(mut out, pair)
         }
     }
     if !installed {
-        result.unwrap(list.push(mut out, (key, value)))
+        list.push(mut out, (key, value))
     }
     out
 }
@@ -33,9 +33,9 @@ fn equal(m: omap.OMap[u64, u64], xs: List[(u64, u64)]) -> bool {
     if omap.len(m) != list.len(xs) {
         return false
     }
-    let mut rows = result.unwrap(omap.range(m, Unbounded, Unbounded))
+    let mut rows = omap.range(m, Unbounded, Unbounded)
     for pair in xs {
-        match result.unwrap(omap.next(mut rows)) {
+        match omap.next(mut rows) {
             Some((k, v)) => if k != pair.0 || v != pair.1 {
                 return false
             },
@@ -48,7 +48,7 @@ fn equal(m: omap.OMap[u64, u64], xs: List[(u64, u64)]) -> bool {
             None => return false,
         }
     }
-    if let Some(_) = result.unwrap(omap.next(mut rows)) {
+    if let Some(_) = omap.next(mut rows) {
         return false
     }
     if list.len(xs) == 0 {
@@ -128,24 +128,24 @@ fn held_version_sequences() -> bool {
         let mut ids: u64 = 0
         let mut m: omap.OMap[u64, u64] = omap.new()
         let mut xs: List[(u64, u64)] = list.new()
-        let mut versions: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(97))
-        let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(97))
-        result.unwrap(list.push(mut versions, omap.snapshot(m)))
-        result.unwrap(list.push(mut models, list.new()))
+        let mut versions: List[omap.OMap[u64, u64]] = list.with_capacity(97)
+        let mut models: List[List[(u64, u64)]] = list.with_capacity(97)
+        list.push(mut versions, omap.snapshot(m))
+        list.push(mut models, list.new())
         let mut state = seed + 1
         for step in 0u64 .. 96 {
             state = int.wrapping_add(int.wrapping_mul(state, 6364136223846793005u64), 1442695040888963407u64)
             let key = (state / 65536) % 70
             let deleting = (state / 256) % 3 == 0
             m = if deleting {
-                result.unwrap(omap.remove(mut ids, m, key))
+                omap.remove(mut ids, m, key)
             } else {
                 put(mut ids, m, key, step + 1)
             }
             xs = model(xs, key, step + 1, deleting)
-            result.unwrap(list.push(mut versions, omap.snapshot(m)))
-            let copied: Result[List[(u64, u64)], Capacity] = clone(xs)
-            result.unwrap(list.push(mut models, result.unwrap(take copied)))
+            list.push(mut versions, omap.snapshot(m))
+            let copied: List[(u64, u64)] = clone(xs)
+            list.push(mut models, take copied)
             for i in 0 .. list.len(versions) {
                 if !equal(versions[i], models[i]) {
                     return false
@@ -186,7 +186,7 @@ fn split_merge_collapse() -> bool {
             } else {
                 1099 - i
             }
-            m = result.unwrap(omap.remove(mut ids, m, k))
+            m = omap.remove(mut ids, m, k)
             if omap.len(m) != 1099 - i {
                 return false
             }
@@ -233,12 +233,12 @@ fn range_endpoints() -> bool {
             } else {
                 Excluded(130)
             }
-            let mut c = result.unwrap(omap.range(m, take lower, take upper))
+            let mut c = omap.range(m, take lower, take upper)
             for i in 0u64 .. 160 {
                 let k = i * 2
                 let wanted = (lo == 0 || (lo == 1 && k >= 64) || (lo == 2 && k > 64)) && (hi == 0 || (hi == 1 && k <= 130) || (hi == 2 && k < 130))
                 if wanted {
-                    match result.unwrap(omap.next(mut c)) {
+                    match omap.next(mut c) {
                         Some((a, b)) => if a != k || b != i + 1 {
                             return false
                         },
@@ -246,56 +246,62 @@ fn range_endpoints() -> bool {
                     }
                 }
             }
-            if let Some(_) = result.unwrap(omap.next(mut c)) {
+            if let Some(_) = omap.next(mut c) {
                 return false
             }
         }
     }
-    let mut empty = result.unwrap(omap.range(m, Included(100), Excluded(90)))
-    if let Some(_) = result.unwrap(omap.next(mut empty)) {
+    let mut empty = omap.range(m, Included(100), Excluded(90))
+    if let Some(_) = omap.next(mut empty) {
         return false
     }
-    let mut absent = result.unwrap(omap.range(m, Included(65), Excluded(67)))
-    match result.unwrap(omap.next(mut absent)) {
+    let mut absent = omap.range(m, Included(65), Excluded(67))
+    match omap.next(mut absent) {
         Some((k, v)) => k == 66 && v == 34,
         None => false
     }
 }
 
-// Payloads need ordered/shareable/send, never plain. No Arc payload copying on
-// snapshots, and copying a returned value under Capacity does not consume it.
+// A zero-byte bound admits snapshots and cursor steps that allocate nothing; a
+// refused payload copy or insert raises Capacity and leaves m and its snapshot intact.
 // expect: run owned_payload_and_capacity() = true
 fn owned_payload_and_capacity() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[String, List[String]] = omap.new()
     let mut v: List[String] = list.new()
-    result.unwrap(list.push(mut v, result.unwrap(string.from("row"))))
+    list.push(mut v, string.from("row"))
     m = {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, result.unwrap(string.from("key")), take v))
+        let (take next_map, _) = omap.insert(mut ids, m, string.from("key"), take v)
         take next_map
     }
     let pinned = result.unwrap(bound bytes 0 {
         omap.snapshot(m)
     })
-    let mut c = result.unwrap(omap.range(m, Included(result.unwrap(string.from("key"))), Unbounded))
-    let attempt = result.unwrap(bound bytes 0 {
-        omap.next(mut c)
-    })
-    if let Ok(_) = attempt {
+    let copy_refused = caught(isolate(fn() -> Result[Option[(String, List[String])], Capacity] {
+        let mut c = omap.range(m, Included(string.from("key")), Unbounded)
+        bound bytes 0 {
+            omap.next(mut c)
+        }
+    }))
+    if let None = copy_refused {
         return false
     }
-    let pair = option.unwrap(result.unwrap(omap.next(mut c)))
+    let mut c = omap.range(m, Included(string.from("key")), Unbounded)
+    let pair = option.unwrap(omap.next(mut c))
     if pair.0 != "key" || pair.1[0] != "row" || omap.len(pinned) != 1 {
         return false
     }
-    let key = result.unwrap(string.from("kept"))
-    let value: List[String] = list.new()
-    let denied = result.unwrap(bound bytes 0 {
-        omap.insert(mut ids, m, take key, take value)
-    })
+    let denied = caught(isolate(fn() -> Result[(omap.OMap[String, List[String]], Option[omap.Replaced[String, List[String]]]), Capacity] {
+        let mut local = ids
+        let key = string.from("kept")
+        let value: List[String] = list.new()
+        bound bytes 0 {
+            omap.insert(mut local, m, take key, take value)
+        }
+    }))
     match denied {
-        Error((_, (take k, take returned))) => k == "kept" && list.len(returned) == 0 && omap.len(m) == 1,
-        _ => false
+        Some(_) => omap.len(m) == 1 && omap.len(pinned) == 1,
+        None => false
     }
 }
 
@@ -306,17 +312,17 @@ fn reload(n: Arc[omap.Node[u64, u64]]) -> Arc[omap.Node[u64, u64]] {
     let mut values: List[u64] = list.new()
     let mut children: List[Arc[omap.Node[u64, u64]]] = list.new()
     for i in 0 .. omap.node_count(n) {
-        result.unwrap(list.push(mut keys, key_at(n, i)))
+        list.push(mut keys, key_at(n, i))
         if omap.node_level(n) == 0 {
-            result.unwrap(list.push(mut values, value_at(n, i)))
+            list.push(mut values, value_at(n, i))
         } else {
-            result.unwrap(list.push(mut children, reload(option.unwrap(omap.node_child(n, i)))))
+            list.push(mut children, reload(option.unwrap(omap.node_child(n, i))))
         }
     }
     if omap.node_level(n) == 0 {
-        result.unwrap(omap.leaf(omap.node_id(n), take keys, take values))
+        omap.leaf(omap.node_id(n), take keys, take values)
     } else {
-        result.unwrap(omap.branch(omap.node_id(n), take keys, take children))
+        omap.branch(omap.node_id(n), take keys, take children)
     }
 }
 
@@ -343,11 +349,11 @@ fn checkpoint_rebuild_and_ids() -> bool {
     let rebuilt = omap.from_root(Some(reload(after)))
     let mut expected: List[(u64, u64)] = list.new()
     for i in 0u64 .. 1100 {
-        result.unwrap(list.push(mut expected, (i, if i == 0 {
+        list.push(mut expected, (i, if i == 0 {
             999u64
         } else {
             i + 7
-        })))
+        }))
     }
     equal(rebuilt, expected) && nodes(option.unwrap(omap.root(rebuilt)), true)
 }
@@ -363,7 +369,7 @@ fn read_child(take input: ReadInput) -> u64 waits {
     let _ = result.unwrap(channel.receive(ready_gate))
     let mut rows = held_rows
     let mut sum: u64 = 0
-    while let Some((k, v)) = result.unwrap(omap.next(mut rows)) {
+    while let Some((k, v)) = omap.next(mut rows) {
         sum += k + v
     }
     let present = option.unwrap(omap.get(held_map, 0))
@@ -387,15 +393,15 @@ fn task_version(tasks: Tasks, consuming: bool) -> bool waits {
     for i in 0u64 .. 100 {
         m = put(mut ids, m, i, i + 1)
     }
-    let rows = result.unwrap(omap.range(m, Included(20), Excluded(40)))
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let rows = omap.range(m, Included(20), Excluded(40))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     let input = ReadInput(map: omap.snapshot(m), rows: take rows, gate: take rx)
-    let h = result.unwrap(task.spawn(tasks, bytes 1048576, take input, read_child))
+    let h = task.spawn(tasks, bytes 1048576, take input, read_child)
     for i in 0u64 .. 100 {
         if consuming {
             let previous = take m
             let changed = {
-                let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, i, 999))
+                let (take next_map, _) = omap.insert_owned(mut ids, take previous, i, 999)
                 take next_map
             }
             m = take changed
@@ -415,9 +421,9 @@ fn thousand_snapshots() -> bool {
     for i in 0u64 .. 64 {
         m = put(mut ids, m, i, i)
     }
-    let mut held: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(1000))
+    let mut held: List[omap.OMap[u64, u64]] = list.with_capacity(1000)
     for i in 0u64 .. 1000 {
-        result.unwrap(list.push(mut held, omap.snapshot(m)))
+        list.push(mut held, omap.snapshot(m))
         m = put(mut ids, m, i % 64, 1000 + i)
     }
     for version in 0u64 .. 1000 {
@@ -441,33 +447,33 @@ fn byte_rows() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[Bytes, Bytes] = omap.new()
     m = {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, result.unwrap(b"\x01\x00"), result.unwrap(b"two")))
+        let (take next_map, _) = omap.insert(mut ids, m, b"\x01\x00", b"two")
         take next_map
     }
     m = {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, result.unwrap(b"\xff"), result.unwrap(b"three")))
+        let (take next_map, _) = omap.insert(mut ids, m, b"\xff", b"three")
         take next_map
     }
     m = {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, result.unwrap(b"\x01"), result.unwrap(b"one")))
+        let (take next_map, _) = omap.insert(mut ids, m, b"\x01", b"one")
         take next_map
     }
-    let mut rows = result.unwrap(omap.range(m, Unbounded, Unbounded))
-    let a = option.unwrap(result.unwrap(omap.next(mut rows)))
-    let b = option.unwrap(result.unwrap(omap.next(mut rows)))
-    let c = option.unwrap(result.unwrap(omap.next(mut rows)))
+    let mut rows = omap.range(m, Unbounded, Unbounded)
+    let a = option.unwrap(omap.next(mut rows))
+    let b = option.unwrap(omap.next(mut rows))
+    let c = option.unwrap(omap.next(mut rows))
     list.len(a.0) == 1 && a.0[0] == 1 && list.len(b.0) == 2 && b.0[1] == 0 && c.0[0] == 255 && a.1[0] == 111 && b.1[0] == 116 && c.1[0] == 116
 }
 
 // Refuse at successive allocations throughout one multi-level path. Every
-// failure returns both owned inputs and keeps old contents and node ids intact.
+// refusal keeps the held version's contents and node ids intact.
 // expect: run partial_capacity_rollback() = true
 fn partial_capacity_rollback() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[u64, String] = omap.new()
     for i in 0u64 .. 80 {
         m = {
-            let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, i, "old"))
+            let (take next_map, _) = omap.insert(mut ids, m, i, "old")
             take next_map
         }
     }
@@ -476,21 +482,24 @@ fn partial_capacity_rollback() -> bool {
     let mut succeeded: u64 = 0
     for i in 0u64 .. 48 {
         let budget = i * 64
-        let answer = result.unwrap(bound bytes budget {
-            omap.insert(mut ids, m, 81, "new")
+        let answer = isolate(fn() -> Result[(omap.OMap[u64, String], Option[omap.Replaced[u64, String]]), Capacity] {
+            let mut local = ids
+            bound bytes budget {
+                omap.insert(mut local, m, 81, "new")
+            }
         })
-        match answer {
-            Error((_, (k, take v))) => {
-                if k != 81 || v != "new" {
-                    return false
-                }
-                refused += 1
-            },
-            Ok((take changed, _)) => {
+        match take answer {
+            Ok(Ok(Ok((take changed, _)))) => {
                 if omap.len(changed) != 81 {
                     return false
                 }
                 succeeded += 1
+            },
+            other => {
+                if let None = caught(take other) {
+                    return false
+                }
+                refused += 1
             },
         }
         if omap.len(m) != 80 || omap.node_id(option.unwrap(omap.root(m))) != old_id {
@@ -498,6 +507,11 @@ fn partial_capacity_rollback() -> bool {
         }
         if let Some(_) = omap.get(m, 81) {
             return false
+        }
+        for j in 0u64 .. 80 {
+            if option.unwrap(omap.get(m, j)) != "old" {
+                return false
+            }
         }
     }
     refused > 0 && succeeded > 0
@@ -522,16 +536,16 @@ fn sorted_build() -> bool {
         } else {
             1100u64
         }
-        let mut keys: List[u64] = result.unwrap(list.with_capacity(n))
-        let mut values: List[u64] = result.unwrap(list.with_capacity(n))
-        let mut expected: List[(u64, u64)] = result.unwrap(list.with_capacity(n))
+        let mut keys: List[u64] = list.with_capacity(n)
+        let mut values: List[u64] = list.with_capacity(n)
+        let mut expected: List[(u64, u64)] = list.with_capacity(n)
         for i in 0 .. n {
-            result.unwrap(list.push(mut keys, i * 2))
-            result.unwrap(list.push(mut values, i + 7))
-            result.unwrap(list.push(mut expected, (i * 2, i + 7)))
+            list.push(mut keys, i * 2)
+            list.push(mut values, i + 7)
+            list.push(mut expected, (i * 2, i + 7))
         }
         let mut ids: u64 = 0
-        let map = result.unwrap(omap.from_sorted(mut ids, keys, values))
+        let map = omap.from_sorted(mut ids, keys, values)
         if !equal(map, expected) {
             return false
         }
@@ -550,18 +564,18 @@ fn owned_versions() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[u64, u64] = omap.new()
     let mut xs: List[(u64, u64)] = list.new()
-    let mut held: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(17))
-    let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(17))
+    let mut held: List[omap.OMap[u64, u64]] = list.with_capacity(17)
+    let mut models: List[List[(u64, u64)]] = list.with_capacity(17)
     for step in 0u64 .. 128 {
         if step % 8 == 0 {
-            result.unwrap(list.push(mut held, omap.snapshot(m)))
-            let copied_model: Result[List[(u64, u64)], Capacity] = clone(xs)
-            result.unwrap(list.push(mut models, result.unwrap(take copied_model)))
+            list.push(mut held, omap.snapshot(m))
+            let copied_model: List[(u64, u64)] = clone(xs)
+            list.push(mut models, take copied_model)
         }
         let k = (step * 79) % 151
         let previous = take m
         let changed = {
-            let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, k, step + 7))
+            let (take next_map, _) = omap.insert_owned(mut ids, take previous, k, step + 7)
             take next_map
         }
         m = take changed
@@ -581,29 +595,29 @@ fn owned_versions() -> bool {
     true
 }
 
-// A refused consuming update can discard its draft; the rollback root is held.
+// A refused consuming update discards its draft; the rollback root is held.
 // expect: run owned_capacity() = true
 fn owned_capacity() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[u64, String] = omap.new()
     for i in 0u64 .. 80 {
         m = {
-            let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, i, "old"))
+            let (take next_map, _) = omap.insert(mut ids, m, i, "old")
             take next_map
         }
     }
     let held = omap.snapshot(m)
     let old_id = omap.node_id(option.unwrap(omap.root(held)))
-    m = {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, 80, "draft"))
-        take next_map
-    }
-    let refused = result.unwrap(bound bytes 0 {
-        omap.insert_owned(mut ids, take m, 81, "new")
-    })
-    match take refused {
-        Error((_, (k, take v))) => k == 81 && v == "new" && omap.len(held) == 80 && omap.node_id(option.unwrap(omap.root(held))) == old_id && option.unwrap(omap.get(held, 0)) == "old",
-        Ok(take changed) => false
+    let refused = caught(isolate(fn() -> Result[(omap.OMap[u64, String], Option[omap.Replaced[u64, String]]), Capacity] {
+        let mut local = ids
+        let (take draft, _) = omap.insert(mut local, held, 80, "draft")
+        bound bytes 0 {
+            omap.insert_owned(mut local, take draft, 81, "new")
+        }
+    }))
+    match refused {
+        Some(_) => omap.len(held) == 80 && omap.node_id(option.unwrap(omap.root(held))) == old_id && option.unwrap(omap.get(held, 0)) == "old",
+        None => false
     }
 }
 
@@ -615,7 +629,7 @@ fn owned_splits() -> bool {
     for i in 0u64 .. 1100 {
         let previous = take m
         let changed = {
-            let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 5))
+            let (take next_map, _) = omap.insert_owned(mut ids, take previous, i, i + 5)
             take next_map
         }
         m = take changed
@@ -626,17 +640,17 @@ fn owned_splits() -> bool {
         let k = 2199 - i
         let previous = take m
         let changed = {
-            let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, k, k + 5))
+            let (take next_map, _) = omap.insert_owned(mut ids, take previous, k, k + 5)
             take next_map
         }
         m = take changed
     }
-    let mut expected: List[(u64, u64)] = result.unwrap(list.with_capacity(2200))
-    let mut old: List[(u64, u64)] = result.unwrap(list.with_capacity(1100))
+    let mut expected: List[(u64, u64)] = list.with_capacity(2200)
+    let mut old: List[(u64, u64)] = list.with_capacity(1100)
     for i in 0u64 .. 2200 {
-        result.unwrap(list.push(mut expected, (i, i + 5)))
+        list.push(mut expected, (i, i + 5))
         if i < 1100 {
-            result.unwrap(list.push(mut old, (i, i + 5)))
+            list.push(mut old, (i, i + 5))
         }
     }
     equal(m, expected) && equal(held, old) && omap.node_id(option.unwrap(omap.root(held))) == held_id && nodes(option.unwrap(omap.root(m)), true) && nodes(option.unwrap(omap.root(held)), true)
@@ -650,10 +664,10 @@ fn split_boundary_entries() -> bool {
     for at in 0u64 .. 33 {
         let mut ids: u64 = 0
         let mut m: omap.OMap[u64, u64] = omap.new()
-        let mut xs: List[(u64, u64)] = result.unwrap(list.with_capacity(32))
+        let mut xs: List[(u64, u64)] = list.with_capacity(32)
         for i in 0u64 .. 32 {
             m = put(mut ids, m, i * 2 + 1, i + 100)
-            result.unwrap(list.push(mut xs, (i * 2 + 1, i + 100)))
+            list.push(mut xs, (i * 2 + 1, i + 100))
         }
         let held = omap.snapshot(m)
         m = put(mut ids, m, at * 2, 777)
@@ -666,8 +680,8 @@ fn split_boundary_entries() -> bool {
 }
 
 fn byte_key(i: u64) -> Bytes {
-    let mut out: Bytes = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut out, int.narrow(i)))
+    let mut out: Bytes = list.with_capacity(1)
+    list.push(mut out, int.narrow(i))
     out
 }
 
@@ -675,9 +689,9 @@ fn byte_equal(m: omap.OMap[Bytes, Bytes], xs: List[(u64, u64)]) -> bool {
     if omap.len(m) != list.len(xs) {
         return false
     }
-    let mut rows = result.unwrap(omap.range(m, Unbounded, Unbounded))
+    let mut rows = omap.range(m, Unbounded, Unbounded)
     for pair in xs {
-        let (k, v) = option.unwrap(result.unwrap(omap.next(mut rows)))
+        let (k, v) = option.unwrap(omap.next(mut rows))
         if list.len(k) != 1 || list.len(v) != 1 || k[0] != int.narrow(pair.0) || v[0] != int.narrow(pair.1) {
             return false
         }
@@ -686,33 +700,33 @@ fn byte_equal(m: omap.OMap[Bytes, Bytes], xs: List[(u64, u64)]) -> bool {
             return false
         }
     }
-    if let Some(_) = result.unwrap(omap.next(mut rows)) {
+    if let Some(_) = omap.next(mut rows) {
         return false
     }
     true
 }
 
 fn reload_bytes(n: Arc[omap.Node[Bytes, Bytes]]) -> Arc[omap.Node[Bytes, Bytes]] {
-    let mut ks: List[Bytes] = result.unwrap(list.with_capacity(omap.node_count(n)))
-    let mut vs: List[Bytes] = result.unwrap(list.with_capacity(omap.node_count(n)))
-    let mut children: List[Arc[omap.Node[Bytes, Bytes]]] = result.unwrap(list.with_capacity(omap.node_count(n)))
+    let mut ks: List[Bytes] = list.with_capacity(omap.node_count(n))
+    let mut vs: List[Bytes] = list.with_capacity(omap.node_count(n))
+    let mut children: List[Arc[omap.Node[Bytes, Bytes]]] = list.with_capacity(omap.node_count(n))
     for i in 0u64 .. omap.node_count(n) {
-        let key: Result[Bytes, Capacity] = clone(option.unwrap(omap.node_key(n, i)))
-        result.unwrap(list.push(mut ks, result.unwrap(take key)))
+        let key: Bytes = clone(option.unwrap(omap.node_key(n, i)))
+        list.push(mut ks, take key)
         if omap.node_level(n) == 0 {
-            let value: Result[Bytes, Capacity] = clone(option.unwrap(omap.node_value(n, i)))
-            result.unwrap(list.push(mut vs, result.unwrap(take value)))
+            let value: Bytes = clone(option.unwrap(omap.node_value(n, i)))
+            list.push(mut vs, take value)
         } else {
             if let Some(_) = omap.node_value(n, i) {
                 fail("branch exposes a value")
             }
-            result.unwrap(list.push(mut children, reload_bytes(option.unwrap(omap.node_child(n, i)))))
+            list.push(mut children, reload_bytes(option.unwrap(omap.node_child(n, i))))
         }
     }
     if omap.node_level(n) == 0 {
-        result.unwrap(omap.leaf(omap.node_id(n), take ks, take vs))
+        omap.leaf(omap.node_id(n), take ks, take vs)
     } else {
-        result.unwrap(omap.branch(omap.node_id(n), take ks, take children))
+        omap.branch(omap.node_id(n), take ks, take children)
     }
 }
 
@@ -723,28 +737,28 @@ fn shared_byte_versions() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[Bytes, Bytes] = omap.new()
     let mut xs: List[(u64, u64)] = list.new()
-    let mut held: List[omap.OMap[Bytes, Bytes]] = result.unwrap(list.with_capacity(9))
-    let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(9))
+    let mut held: List[omap.OMap[Bytes, Bytes]] = list.with_capacity(9)
+    let mut models: List[List[(u64, u64)]] = list.with_capacity(9)
     for i in 0u64 .. 80 {
         m = {
-            let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, byte_key(i), byte_key(i)))
+            let (take next_map, _) = omap.insert(mut ids, m, byte_key(i), byte_key(i))
             take next_map
         }
         xs = model(xs, i, i, false)
     }
     for step in 0u64 .. 64 {
         if step % 8 == 0 {
-            result.unwrap(list.push(mut held, omap.snapshot(m)))
-            let copied_model: Result[List[(u64, u64)], Capacity] = clone(xs)
-            result.unwrap(list.push(mut models, result.unwrap(take copied_model)))
+            list.push(mut held, omap.snapshot(m))
+            let copied_model: List[(u64, u64)] = clone(xs)
+            list.push(mut models, take copied_model)
         }
         let k = (step * 47) % 96
         let deleting = step % 3 == 0
         m = if deleting {
-            result.unwrap(omap.remove(mut ids, m, byte_key(k)))
+            omap.remove(mut ids, m, byte_key(k))
         } else {
             {
-                let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, byte_key(k), byte_key(step + 100)))
+                let (take next_map, _) = omap.insert(mut ids, m, byte_key(k), byte_key(step + 100))
                 take next_map
             }
         }
@@ -763,103 +777,16 @@ fn shared_byte_versions() -> bool {
     byte_equal(restored, xs) && omap.node_id(option.unwrap(omap.root(restored))) == omap.node_id(h)
 }
 
-// Refusal returns the same complete map, even without a rollback snapshot.
-// Exercise both unique and shared roots across successive allocation budgets.
-// expect: run recover_capacity() = true
-fn recover_capacity() -> bool {
-    let mut refused: u64 = 0
-    let mut succeeded: u64 = 0
-    for shared in 0u64 .. 2 {
-        for budget_step in 0u64 .. 48 {
-            let mut ids: u64 = 0
-            let mut m: omap.OMap[u64, String] = omap.new()
-            for i in 0u64 .. 80 {
-                let previous = take m
-                m = {
-                    let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, i, "old"))
-                    take next_map
-                }
-            }
-            let old_id = omap.node_id(option.unwrap(omap.root(m)))
-            let held = if shared == 1 {
-                omap.snapshot(m)
-            } else {
-                omap.new()
-            }
-            let answer = result.unwrap(bound bytes budget_step * 64 {
-                omap.insert_recover(mut ids, take m, 81, "new")
-            })
-            match take answer {
-                Error((_, (take recovered, (k, take v)))) => {
-                    if k != 81 || v != "new" || omap.len(recovered) != 80 || omap.node_id(option.unwrap(omap.root(recovered))) != old_id {
-                        return false
-                    }
-                    for i in 0u64 .. 80 {
-                        if option.unwrap(omap.get(recovered, i)) != "old" {
-                            return false
-                        }
-                    }
-                    if let Some(_) = omap.get(recovered, 81) {
-                        return false
-                    }
-                    refused += 1
-                },
-                Ok((take changed, _)) => {
-                    if omap.len(changed) != 81 || option.unwrap(omap.get(changed, 81)) != "new" {
-                        return false
-                    }
-                    succeeded += 1
-                }
-            }
-            if shared == 1 && (omap.len(held) != 80 || omap.node_id(option.unwrap(omap.root(held))) != old_id) {
-                return false
-            }
-        }
-    }
-    refused > 0 && succeeded > 0
-}
-
-// Success through the recovering API keeps all earlier versions.
-// expect: run recover_versions() = true
-fn recover_versions() -> bool {
-    let mut ids: u64 = 0
-    let mut m: omap.OMap[u64, u64] = omap.new()
-    let mut xs: List[(u64, u64)] = list.new()
-    let mut held: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(97))
-    let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(97))
-    for step in 0u64 .. 96 {
-        result.unwrap(list.push(mut held, omap.snapshot(m)))
-        let copied_model: Result[List[(u64, u64)], Capacity] = clone(xs)
-        result.unwrap(list.push(mut models, result.unwrap(take copied_model)))
-        let k = (step * 47) % 71
-        let previous = take m
-        m = {
-            let (take next_map, _) = result.unwrap(omap.insert_recover(mut ids, take previous, k, step + 1))
-            take next_map
-        }
-        xs = model(xs, k, step + 1, false)
-        if !equal(m, xs) {
-            return false
-        }
-        for i in 0u64 .. list.len(held) {
-            if !equal(held[i], models[i]) {
-                return false
-            }
-        }
-    }
-    true
-}
-
 // All insert forms return the stored old value from the same descent. A held
 // result outlives its original map, and snapshots keep their previous values.
 // expect: run replaced_entry() = true
 fn replaced_entry() -> bool {
-    for form in 0u64 .. 3 {
+    for form in 0u64 .. 2 {
         for shared in 0u64 .. 2 {
             let mut ids: u64 = 0
             let mut m: omap.OMap[u64, Bytes] = omap.new()
             for i in 0u64 .. 80 {
-                let (take next, take old) = result.unwrap(omap.insert_owned(mut ids, take m, i, byte_key(i)))
+                let (take next, take old) = omap.insert_owned(mut ids, take m, i, byte_key(i))
                 if let Some(_) = old {
                     return false
                 }
@@ -870,13 +797,11 @@ fn replaced_entry() -> bool {
             } else {
                 omap.new()
             }
-            let prior: Bytes = result.unwrap(clone(option.unwrap(omap.get(m, 31))))
+            let prior: Bytes = clone(option.unwrap(omap.get(m, 31)))
             let (take changed, take old) = if form == 0 {
-                result.unwrap(omap.insert(mut ids, m, 31, byte_key(200)))
-            } else if form == 1 {
-                result.unwrap(omap.insert_owned(mut ids, take m, 31, byte_key(200)))
+                omap.insert(mut ids, m, 31, byte_key(200))
             } else {
-                result.unwrap(omap.insert_recover(mut ids, take m, 31, byte_key(200)))
+                omap.insert_owned(mut ids, take m, 31, byte_key(200))
             }
             let replaced = option.unwrap(take old)
             if omap.replaced_value(replaced) != prior || option.unwrap(omap.get(changed, 31)) != byte_key(200) || omap.len(changed) != 80 {
@@ -886,7 +811,7 @@ fn replaced_entry() -> bool {
                 return false
             }
             // Drop the new map too; only the result need retain the old bytes.
-            let _ = take changed
+            drop(take changed)
             if omap.replaced_value(replaced) != prior {
                 return false
             }
@@ -895,52 +820,12 @@ fn replaced_entry() -> bool {
     true
 }
 
-// A failed replacement returns the original root and inputs, with no result
-// entry. Try allocation failures before and after copying part of the path.
-// expect: run replaced_capacity() = true
-fn replaced_capacity() -> bool {
-    let mut refused: u64 = 0
-    let mut succeeded: u64 = 0
-    for budget in 0u64 .. 48 {
-        let mut ids: u64 = 0
-        let mut m: omap.OMap[u64, String] = omap.new()
-        for i in 0u64 .. 80 {
-            let (take next, _) = result.unwrap(omap.insert_owned(mut ids, take m, i, "stored"))
-            m = take next
-        }
-        let id = omap.node_id(option.unwrap(omap.root(m)))
-        let answer = result.unwrap(bound bytes budget * 64 {
-            omap.insert_recover(mut ids, take m, 31, "updated")
-        })
-        match take answer {
-            Error((_, (take original, (k, take v)))) => {
-                if k != 31 || v != "updated" || omap.node_id(option.unwrap(omap.root(original))) != id || omap.len(original) != 80 {
-                    return false
-                }
-                for i in 0u64 .. 80 {
-                    if option.unwrap(omap.get(original, i)) != "stored" {
-                        return false
-                    }
-                }
-                refused += 1
-            },
-            Ok((take changed, take old)) => {
-                if omap.replaced_value(option.unwrap(take old)) != "stored" || option.unwrap(omap.get(changed, 31)) != "updated" {
-                    return false
-                }
-                succeeded += 1
-            }
-        }
-    }
-    refused > 0 && succeeded > 0
-}
-
 fn separator_key(i: u64) -> Bytes {
-    let mut out: Bytes = result.unwrap(list.with_capacity(128))
-    result.unwrap(list.push(mut out, int.narrow(i / 256)))
-    result.unwrap(list.push(mut out, int.narrow(i % 256)))
+    let mut out: Bytes = list.with_capacity(128)
+    list.push(mut out, int.narrow(i / 256))
+    list.push(mut out, int.narrow(i % 256))
     for _ in 0u64 .. 126 {
-        result.unwrap(list.push(mut out, 0u8))
+        list.push(mut out, 0u8)
     }
     out
 }
@@ -950,17 +835,17 @@ fn separator_key(i: u64) -> Bytes {
 // expect: run separator_payload_budget() = true
 fn separator_payload_budget() -> bool {
     let mut ids: u64 = 0
-    let mut keys: List[Bytes] = result.unwrap(list.with_capacity(1100))
-    let mut values: List[u64] = result.unwrap(list.with_capacity(1100))
+    let mut keys: List[Bytes] = list.with_capacity(1100)
+    let mut values: List[u64] = list.with_capacity(1100)
     for i in 0u64 .. 1100 {
-        result.unwrap(list.push(mut keys, separator_key(i)))
-        result.unwrap(list.push(mut values, i))
+        list.push(mut keys, separator_key(i))
+        list.push(mut values, i)
     }
-    let m = result.unwrap(omap.from_sorted(mut ids, keys, values))
+    let m = omap.from_sorted(mut ids, keys, values)
     let k = separator_key(500)
-    let answer = result.unwrap(bound bytes 7500 {
+    let answer = bound bytes 7500 {
         omap.insert(mut ids, m, take k, 9000)
-    })
+    }
     match take answer {
         Error(_) => false,
         Ok((take changed, take old)) => {
@@ -977,13 +862,13 @@ fn owned_unique_reuses_nodes() -> bool {
     let mut m: omap.OMap[u64, u64] = omap.new()
     for i in 0u64 .. 80 {
         let previous = take m
-        let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 5))
+        let (take next_map, _) = omap.insert_owned(mut ids, take previous, i, i + 5)
         m = take next_map
     }
     let previous = take m
-    let changed = result.unwrap(bound bytes 0 {
+    let changed = bound bytes 0 {
         omap.insert_owned(mut ids, take previous, 40, 999)
-    })
+    }
     match take changed {
         Ok((take next_map, take old)) => omap.len(next_map) == 80 && option.unwrap(omap.get(next_map, 40)) == 999 && option.unwrap(omap.get(next_map, 39)) == 44 && option.unwrap(omap.get(next_map, 41)) == 46 && match take old {
             Some(take replaced) => omap.replaced_value(replaced) == 45,
@@ -1002,7 +887,7 @@ fn owned_replaced_checksums() -> bool {
     let mut m: omap.OMap[u64, u64] = omap.new()
     for i in 0u64 .. 1100 {
         let previous = take m
-        let (take changed, take old) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 1))
+        let (take changed, take old) = omap.insert_owned(mut ids, take previous, i, i + 1)
         if let Some(_) = old {
             return false
         }
@@ -1011,7 +896,7 @@ fn owned_replaced_checksums() -> bool {
     let mut first_sum: u64 = 0
     for i in 0u64 .. 1100 {
         let previous = take m
-        let (take changed, take old) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 2))
+        let (take changed, take old) = omap.insert_owned(mut ids, take previous, i, i + 2)
         let replaced = option.unwrap(take old)
         first_sum += omap.replaced_value(replaced)
         m = take changed
@@ -1020,7 +905,7 @@ fn owned_replaced_checksums() -> bool {
     let mut second_sum: u64 = 0
     for i in 0u64 .. 1100 {
         let previous = take m
-        let (take changed, take old) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 3))
+        let (take changed, take old) = omap.insert_owned(mut ids, take previous, i, i + 3)
         let replaced = option.unwrap(take old)
         second_sum += omap.replaced_value(replaced)
         m = take changed
@@ -1046,9 +931,9 @@ fn owned_replaced_checksums() -> bool {
 }
 
 fn large_byte_row(i: u64) -> Bytes {
-    let mut out: Bytes = result.unwrap(list.with_capacity(1024))
+    let mut out: Bytes = list.with_capacity(1024)
     for _ in 0u64 .. 1024 {
-        result.unwrap(list.push(mut out, int.narrow(i)))
+        list.push(mut out, int.narrow(i))
     }
     take out
 }
@@ -1060,15 +945,15 @@ fn shared_payload_copy_budget() -> bool {
     let mut ids: u64 = 0
     let mut m: omap.OMap[Bytes, Bytes] = omap.new()
     for i in 0u64 .. 32 {
-        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, large_byte_row(i), large_byte_row(i)))
+        let (take next_map, _) = omap.insert(mut ids, m, large_byte_row(i), large_byte_row(i))
         m = take next_map
     }
     let held = omap.snapshot(m)
     let key = large_byte_row(16)
     let value = large_byte_row(99)
-    let answer = result.unwrap(bound bytes 8192 {
+    let answer = bound bytes 8192 {
         omap.insert_owned(mut ids, take m, take key, take value)
-    })
+    }
     match take answer {
         Error(_) => false,
         Ok((take next_map, take old)) => {
@@ -1085,25 +970,15 @@ fn shared_payload_copy_budget() -> bool {
 // inside the bound, including for an empty consuming map's reserved leaf.
 // expect: run insert_moves_payloads() = true
 fn insert_moves_payloads() -> bool {
-    for mode in 0u64 .. 3 {
+    for mode in 0u64 .. 2 {
         let mut ids: u64 = 0
         let m: omap.OMap[Bytes, Bytes] = omap.new()
         let key = large_byte_row(7)
         let value = large_byte_row(9)
         if mode == 0 {
-            let answer = result.unwrap(bound bytes 1024 {
+            let answer = bound bytes 1024 {
                 omap.insert(mut ids, m, take key, take value)
-            })
-            match take answer {
-                Ok((take changed, _)) => if omap.len(changed) != 1 || option.unwrap(omap.get(changed, large_byte_row(7)))[1023] != 9 {
-                    return false
-                },
-                Error(_) => return false
             }
-        } else if mode == 1 {
-            let answer = result.unwrap(bound bytes 1024 {
-                omap.insert_owned(mut ids, take m, take key, take value)
-            })
             match take answer {
                 Ok((take changed, _)) => if omap.len(changed) != 1 || option.unwrap(omap.get(changed, large_byte_row(7)))[1023] != 9 {
                     return false
@@ -1111,9 +986,9 @@ fn insert_moves_payloads() -> bool {
                 Error(_) => return false
             }
         } else {
-            let answer = result.unwrap(bound bytes 1024 {
-                omap.insert_recover(mut ids, take m, take key, take value)
-            })
+            let answer = bound bytes 1024 {
+                omap.insert_owned(mut ids, take m, take key, take value)
+            }
             match take answer {
                 Ok((take changed, _)) => if omap.len(changed) != 1 || option.unwrap(omap.get(changed, large_byte_row(7)))[1023] != 9 {
                     return false
@@ -1125,56 +1000,18 @@ fn insert_moves_payloads() -> bool {
     true
 }
 
-// Refuse before row allocation and after partial path construction. Recovered
-// dynamic payloads must survive intact after every temporary holder is freed.
-// expect: run moved_capacity_payloads() = true
-fn moved_capacity_payloads() -> bool {
-    let mut ids: u64 = 0
-    let mut m: omap.OMap[Bytes, Bytes] = omap.new()
-    for i in 0u64 .. 80 {
-        let (take changed, _) = result.unwrap(omap.insert(mut ids, m, byte_key(i), byte_key(i)))
-        m = take changed
-    }
-    let old_id = omap.node_id(option.unwrap(omap.root(m)))
-    let mut refused: u64 = 0
-    let mut completed: u64 = 0
-    for i in 0u64 .. 32 {
-        let key = large_byte_row(81)
-        let value = large_byte_row(99)
-        let held = omap.snapshot(m)
-        let answer = result.unwrap(bound bytes i * 64 {
-            omap.insert_recover(mut ids, take held, take key, take value)
-        })
-        match take answer {
-            Error((_, (take returned_map, (take returned_key, take returned_value)))) => {
-                refused += 1
-                if omap.len(returned_map) != 80 || omap.node_id(option.unwrap(omap.root(returned_map))) != old_id || list.len(returned_key) != 1024 || returned_key[0] != 81 || returned_key[1023] != 81 || list.len(returned_value) != 1024 || returned_value[0] != 99 || returned_value[1023] != 99 {
-                    return false
-                }
-            },
-            Ok((take changed, _)) => {
-                completed += 1
-                if omap.len(changed) != 81 {
-                    return false
-                }
-            }
-        }
-    }
-    refused > 1 && completed > 0 && omap.len(m) == 80
-}
-
 // A full 32-child root and full leaves force one borrowed branch split.
 // The retained version keeps all 1024 original values and its root identity.
 // expect: run borrowed_branch_split_keeps_snapshot() = true
 fn borrowed_branch_split_keeps_snapshot() -> bool {
     let mut ids: u64 = 0
-    let mut keys: List[u64] = result.unwrap(list.with_capacity(1024))
-    let mut values: List[u64] = result.unwrap(list.with_capacity(1024))
+    let mut keys: List[u64] = list.with_capacity(1024)
+    let mut values: List[u64] = list.with_capacity(1024)
     for i in 0u64 .. 1024 {
-        result.unwrap(list.push(mut keys, i))
-        result.unwrap(list.push(mut values, i + 1))
+        list.push(mut keys, i)
+        list.push(mut values, i + 1)
     }
-    let old = result.unwrap(omap.from_sorted(mut ids, take keys, take values))
+    let old = omap.from_sorted(mut ids, take keys, take values)
     let old_id = omap.node_id(option.unwrap(omap.root(old)))
     let changed = put(mut ids, old, 1024, 1025)
     if omap.len(old) != 1024 || omap.len(changed) != 1025 || omap.node_id(option.unwrap(omap.root(old))) != old_id {
@@ -1191,33 +1028,44 @@ fn borrowed_branch_split_keeps_snapshot() -> bool {
     option.unwrap(omap.get(changed, 1024)) == 1025 && nodes(option.unwrap(omap.root(old)), true) && nodes(option.unwrap(omap.root(changed)), true)
 }
 
-// An 8-byte key clone fits, then the 16-byte value clone is refused.
-// The temporary key must release its charge and the retry must see that row.
+// An 8-byte key clone fits, then the 16-byte value clone is refused; the
+// retry on a fresh cursor still sees that row.
 // expect: run next_value_clone_refusal_retries() = true
 fn next_value_clone_refusal_retries() -> bool {
     let mut ids: u64 = 0
     let m: omap.OMap[String, String] = omap.new()
-    let key = result.unwrap(string.from("key"))
-    let value = result.unwrap(string.from("long value"))
-    let (take inserted, _) = result.unwrap(omap.insert(mut ids, m, take key, take value))
-    let mut c = result.unwrap(omap.range(inserted, Unbounded, Unbounded))
-    let checked = result.unwrap(bound bytes 8 {
-        let refusal = match omap.next(mut c) {
-            Error(e) => e.requested == 16 && e.available == 0,
-            _ => false
+    let key = string.from("key")
+    let value = string.from("long value")
+    let (take inserted, _) = omap.insert(mut ids, m, take key, take value)
+    let refused = caught(isolate(fn() -> Result[Option[(String, String)], Capacity] {
+        let mut c = omap.range(inserted, Unbounded, Unbounded)
+        bound bytes 8 {
+            omap.next(mut c)
         }
-        let reservation: Result[List[u8], Capacity] = list.with_capacity(8)
-        let refunded = match reservation {
-            Ok(probe) => list.capacity(probe) == 8,
-            Error(_) => false
-        }
-        refusal && refunded
-    })
-    if !checked {
-        return false
-    }
-    match result.unwrap(omap.next(mut c)) {
+    }))
+    let mut c = omap.range(inserted, Unbounded, Unbounded)
+    let retried = match omap.next(mut c) {
         Some((k, v)) => k == "key" && v == "long value",
         None => false
+    }
+    match refused {
+        Some(e) => e.requested == 16 && e.available == 0 && retried,
+        None => false
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

@@ -5,7 +5,7 @@ fn child(take f: HostFile) -> u64 waits {
 }
 pub fn main(d: Dir, tasks: Tasks) -> Result[(), Exit] {
     let f = result.unwrap(host.open(d, "input", Read))
-    let mut h = result.unwrap(task.spawn(tasks, bytes 0, take f, child))
+    let mut h = task.spawn(tasks, bytes 0, take f, child)
     task.cancel(mut h)
     match task.join(take h) {
         Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) },

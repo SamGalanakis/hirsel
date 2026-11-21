@@ -27,10 +27,10 @@ impl FunctionEmitter<'_> {
                 int(0)
             };
         };
-        if self.relocatable_sites && self.abi.target == Target::Aarch64Linux {
-            // AArch64 selects a GOT reference for an external pointer even
-            // with !absolute_symbol. Code addresses only this object's pool.
-            // externally_initialized keeps O3 from folding back to the GOT.
+        if self.keep_site_in_data() {
+            // AArch64 selects a GOT reference even with !absolute_symbol.
+            // X86 can fold item site words into PC-relative LEAs.
+            // externally_initialized keeps LLVM from folding the load.
             let anchor = self.anchor.unwrap();
             let symbol =
                 hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
@@ -49,6 +49,11 @@ impl FunctionEmitter<'_> {
         } else {
             word
         }
+    }
+
+    pub(super) fn keep_site_in_data(&self) -> bool {
+        self.relocatable_sites
+            && (self.abi.target == Target::Aarch64Linux || self.items.release_sites.is_none())
     }
 
     fn absolute_symbol(&mut self, name: String) {
@@ -95,27 +100,14 @@ impl FunctionEmitter<'_> {
             self.absolute_symbol(name.clone());
             return Some(Value::PtrToInt(name.into()));
         }
+        // Module-assembly aliases would leave undefined site symbols behind
+        // even if LLVM emits no relocation against them.
         let symbol = hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
-        Some(match self.abi.target {
-            Target::X86_64Linux => {
-                // A nonzero IR addend lets X86ISel fold this into a PC-relative
-                // LEA, even with !absolute_symbol. Resolve the addend in asm;
-                // this temporary name disappears and ELF references only the
-                // canonical symbol with its original addend.
-                let alias = format!(".L{symbol}_{}", anchor.start);
-                self.items
-                    .asm(format!(".set {alias}, {symbol}+{}", anchor.start));
-                self.absolute_symbol(alias.clone());
-                Value::PtrToInt(alias.into())
-            }
-            Target::Aarch64Linux => {
-                self.absolute_symbol(symbol.clone());
-                Value::Add(
-                    Box::new(Value::PtrToInt(symbol.into())),
-                    i64::from(anchor.start),
-                )
-            }
-        })
+        self.absolute_symbol(symbol.clone());
+        Some(Value::Add(
+            Box::new(Value::PtrToInt(symbol.into())),
+            i64::from(anchor.start),
+        ))
     }
 }
 
@@ -156,6 +148,7 @@ pub(super) fn debug_plan(
     versioned: Option<&[bool]>,
     step_dispatch: &[Option<FuncId>],
     failures: &failure::Failures,
+    call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
     next: &mut usize,
     sink: &mut dyn Sink,
 ) -> DebugPlan {
@@ -232,11 +225,11 @@ pub(super) fn debug_plan(
         } else {
             base.to_owned()
         };
-        let linkage = if failures.may_fail[i] {
-            body_base
-        } else {
-            format!("{body_base}.infallible")
-        };
+        let has_status = failures.may_fail[i];
+        let ok = call_layouts
+            .ok_result(&module.signatures[function.signature.index()])
+            .is_some();
+        let linkage = format!("{body_base}{}", super::abi::private_suffix(has_status, ok));
         let scope = node(subprogram(linkage));
         let fallback = node(Metadata::Location {
             line: 0,
@@ -270,7 +263,7 @@ pub(super) fn debug_plan(
                     })
                 });
         }
-        let wrapper = if failures.may_fail[i] {
+        let wrapper = if has_status && !ok {
             None
         } else {
             let wrapper = node(subprogram(base.to_owned()));

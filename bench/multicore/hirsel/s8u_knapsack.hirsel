@@ -108,13 +108,13 @@ fn stage(take cursor: Cursor, key: u64, incumbent: u64) -> (Cursor, Option[Reply
 pub fn main(tasks: Tasks, out: Stdout, clock: Clock) -> Result[(), Exit] waits {
     let start = host.mono_ns(clock)
     let mut f = flow.new()
-    let mut lanes: List[(Port[u64], Sink[Reply])] = result.unwrap(list.with_capacity(LANES))
+    let mut lanes: List[(Port[u64], Sink[Reply])] = list.with_capacity(LANES)
     for i in 0 .. LANES {
         // Lane 0 visits the all-include prefix, which supplies a good incumbent first.
         let (sink, into): (Sink[Reply], Into[Reply]) = result.unwrap(flow.sink(mut f))
         let input = result.unwrap(flow.stage(mut f, into, 1, bytes 0, steps 2000000, root(LANES - 1 - i), code.describe(stage)))
         let port = result.unwrap(flow.port(mut f, input, 1))
-        result.unwrap(list.push(mut lanes, (port, sink)))
+        list.push(mut lanes, (port, sink))
     }
     let mut active: Inline[bool, 32] = [true; 32]
     let mut remaining = LANES
@@ -172,10 +172,10 @@ pub fn main(tasks: Tasks, out: Stdout, clock: Clock) -> Result[(), Exit] waits {
         int.saturating_sub(last_start, winning_end), drained - winning_start, key
     ]
     for field in fields {
-        result.unwrap(string.push_u64(mut line, field))
-        result.unwrap(string.push(mut line, " "))
+        string.push_u64(mut line, field)
+        string.push(mut line, " ")
     }
-    result.unwrap(string.push(mut line, "\n"))
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
     Ok(())
 }

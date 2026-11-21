@@ -10,8 +10,9 @@ const source = new URL('../../../../sdk/client/', import.meta.url);
 const bytes = (...values) => Uint8Array.of(...values);
 const want = {identity: bytes(1), args_fp: 1n, result_fp: 2n};
 const other = {identity: bytes(2), args_fp: 3n, result_fp: 4n};
-const token = bytes(97,110,111,110,58,...Array(16).fill(1));
-const initial = () => ({version:2,generation:1n,token,directory:[],nextStream:0,streams:{}});
+const credential = bytes(...Array(16).fill(1));
+const caller = {issuer:2,subject:bytes(...Array(16).fill(7))};
+const initial = () => ({version:3,generation:1n,directory:[],nextStream:0,streams:{}});
 const returned = n => ({tag:'Returned',value:bytes(n)});
 const refused = tag => ({tag:'Refused',value:{tag}});
 const call = (stream,p,arg,slot=0,deadline=30000) => ({tag:'Call',values:[stream,p,slot,deadline,bytes(arg)]});
@@ -49,16 +50,16 @@ class Memory {
   }
 }
 class Server {
-  sockets=[];calls=[];sent=[];errors=[];onCall;onHello;placed=true;principals=1;
+  sockets=[];calls=[];sent=[];errors=[];onCall;onHello;placed=true;anonymous=1;
   constructor(codec,storage){this.codec=codec;this.storage=storage;}
   socket=()=>{
     const s={onopen:null,onmessage:null,onclose:null,onerror:null,binaryType:'',closed:false,
       send:data=>{
         const f=this.codec.decode(data);this.sent.push(f);
         if(f.tag==='Hello') {
-          const principal=f.values[0].tag==='Some'?f.values[0].value:bytes(97,110,111,110,58,...Array(16).fill(++this.principals));
-          this.emit(s,{tag:'Welcome',values:[principal,4,262144n,bytes(3),'test',1024n]});
-          s.principal=principal;this.onHello?.(s,f);
+          const identity=f.values[0].tag==='Some'?caller:{issuer:1,subject:bytes(...Array(16).fill(++this.anonymous))};
+          this.emit(s,{tag:'Welcome',values:[identity,4,262144n,bytes(3),'test',1024n]});
+          s.principal=identity.subject;this.onHello?.(s,f);
           if(this.placed)for(const _ of f.values[1])this.emit(s,{tag:'Placed',value:{tag:'Ready',value:0}});
         } else if(f.tag==='Call') {
           this.calls.push({frame:f,socket:s});
@@ -100,17 +101,22 @@ class Ledger {
 
 export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
-  await writeFile(join(dir,'package.json'),'{"type":"module"}');
-  for(const name of ['client','persistence','browser','node']) {
-    let text=await readFile(new URL(name+'.ts',source),'utf8');
-    if(mutant)text=mutant(name,text);
-    await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
+  try {
+    await writeFile(join(dir,'package.json'),'{"type":"module"}');
+    for(const name of ['client','persistence','browser','node']) {
+      let text=await readFile(new URL(name+'.ts',source),'utf8');
+      if(mutant)text=mutant(name,text);
+      await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
+    }
+    const client=await import(pathToFileURL(join(dir,'client.js')).href);
+    const node=await import(pathToFileURL(join(dir,'node.js')).href);
+    const persistence=await import(pathToFileURL(join(dir,'persistence.js')).href);
+    const browser=await import(pathToFileURL(join(dir,'browser.js')).href);
+    return {...client,...node,...persistence,...browser,dir,dispose:()=>rm(dir,{recursive:true,force:true})};
+  }catch(error){
+    await rm(dir,{recursive:true,force:true});
+    throw error;
   }
-  const client=await import(pathToFileURL(join(dir,'client.js')).href);
-  const node=await import(pathToFileURL(join(dir,'node.js')).href);
-  const persistence=await import(pathToFileURL(join(dir,'persistence.js')).href);
-  const browser=await import(pathToFileURL(join(dir,'browser.js')).href);
-  return {...client,...node,...persistence,...browser,dir,dispose:()=>rm(dir,{recursive:true,force:true})};
 }
 
 export async function laws(codec, only, mutant) {
@@ -119,7 +125,7 @@ export async function laws(codec, only, mutant) {
   async function setup(storage=new Memory(),options={}) {
     const time=new Time(),server=new Server(codec,storage),events=[],diagnostics=[];
     const opts={url:'ws://scripted',storage,frame:codec,wants:[want],socket:server.socket,clock:time,
-      onRecovered:o=>events.push(o),onDiagnostic:d=>diagnostics.push(d),...options};
+      credential,onRecovered:o=>events.push(o),onDiagnostic:d=>diagnostics.push(d),...options};
     options.prepare?.(server);
     const client=await runtime.Client.open(opts);clients.push(client);await settle();
     return {client,server,storage,time,events,diagnostics,opts};
@@ -132,7 +138,6 @@ export async function laws(codec, only, mutant) {
     delete h.storage.raw.streams[0];
     const fresh=await setup(h.storage);await ready(fresh);
     assert.notEqual(fresh.client.generation,h.client.generation);
-    assert.notDeepEqual(h.storage.raw.token,token);
     assert.equal(fresh.server.calls.length,0,'lost bytes must not replay under the new principal');
     h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
     assert.equal(h.client.state,'Fenced');assert.equal((await answer).tag,'LocallyUnknown');
@@ -228,7 +233,7 @@ export async function laws(codec, only, mutant) {
     // record to exercise AH1 against the first writer's real committed digest.
     const locked=storage.lock.bind(storage);
     storage.lock=async(name,wait)=>name.startsWith('stream-')?{lost:new Promise(()=>{}),release:async()=>{}}:locked(name,wait);
-    storage.raw.streams[0]={next:0n,retired:false};
+    storage.raw.streams[0]={caller,next:0n,retired:false};
     const b=await setup(storage,{prepare:configure});await ready(b);assert.equal(b.client.stream,0);
     const rejected=b.client.call(want,bytes(8),x=>x);await settle();
     await b.time.advance(100);assert.equal(b.server.calls.length,1,'mismatched bytes must never be resent');
@@ -237,6 +242,19 @@ export async function laws(codec, only, mutant) {
     await b.time.advance(120000);assert.equal(b.server.calls.length,1);
     assert.deepEqual(storage.raw.directory,[]);
     const c=await setup(storage);await ready(c);assert.equal(c.server.calls.length,0);b.server.check();h.server.check();
+  };
+  tests.anonymous_reconnect_does_not_replay=async()=>{
+    const h=await setup(undefined,{credential:undefined});await ready(h);
+    const original=h.storage.raw.streams[0].caller;
+    const pending=h.client.call(want,bytes(7),x=>x);await settle();
+    h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
+    assert.deepEqual(await pending,{tag:'LocallyUnknown'});
+    assert.notDeepEqual(h.storage.raw.streams[0].caller,original);
+    assert.equal(h.server.calls.length,1);
+    const fresh=h.client.call(want,bytes(8),x=>x);await settle();
+    assert.deepEqual(h.server.calls[1].frame,call(0,0n,8));
+    h.server.answer(h.server.sockets[1],0,0n,returned(8));await settle();
+    assert.deepEqual(await fresh,returned(8));h.server.check();
   };
   tests.retry_and_reconnect_order=async()=>{
     const h=await setup();await ready(h);const caches=[];
@@ -395,7 +413,7 @@ export async function laws(codec, only, mutant) {
     if(!cases)throw new Error('zero client laws selected');
     return {cases};
   }finally{
-    for(const client of clients)await client.close();
-    await runtime.dispose();
+    try{for(const client of clients)await client.close();}
+    finally{await runtime.dispose();}
   }
 }

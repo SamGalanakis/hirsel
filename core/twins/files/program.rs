@@ -63,9 +63,9 @@ pub fn run() {
     let admission = Admission::new(&variant);
     let trace = Trace::default();
     let causes = Rc::new(RefCell::new(Vec::<String>::new()));
-    let dir =
-        Directory(std::env::temp_dir().join(format!("hirsel-core-files-{}", std::process::id())));
-    std::fs::create_dir(&dir.0).unwrap();
+    let path = std::env::temp_dir().join(format!("hirsel-core-files-{}", std::process::id()));
+    std::fs::create_dir(&path).unwrap();
+    let dir = Directory(path);
     let source = dir.0.join("source");
     let destination = dir.0.join("destination");
     let lock_path = dir.0.join("lock");

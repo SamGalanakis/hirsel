@@ -118,42 +118,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     fn byte_string(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let p = self.p;
-        let (Some(bytes), Some(result), Some(list), Some(cap)) = (
-            quoted_bytes(self.token_text(n), true),
-            p.core_decl("Result"),
-            p.core_decl("List"),
-            p.core_decl("Capacity"),
-        ) else {
+        let (Some(bytes), Some(list)) =
+            (quoted_bytes(self.token_text(n), true), p.core_decl("List"))
+        else {
             return self.gap_ty(n, "byte string literal form is not built");
         };
-        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
         let frozen = want
             .filter(|w| w.payload == 0)
             .and_then(|w| match self.t.kind(w.ty) {
-                TyKind::Adt(r, args)
-                    if *r == result
-                        && args[1] == cap
-                        && matches!(self.t.kind(args[0]), TyKind::Adt(d, _)
-                            if self.p.decls[d.index()].role == Some(Role::FrozenBytes)) =>
-                {
-                    Some(args[0])
+                TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::FrozenBytes) => {
+                    Some(w.ty)
                 }
                 _ => None,
             });
-        let list = frozen.unwrap_or_else(|| self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)])));
+        let ty = frozen.unwrap_or_else(|| self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)])));
         let frozen = frozen.is_some();
-        let ty = self.t.mk(TyKind::Adt(result, vec![list, cap]));
-        let (id, list_id, cap_id) = match (self.rep(ty), self.rep(list), self.rep(cap)) {
-            (Ok(Rep::Place(a)), Ok(Rep::Place(b)), Ok(Rep::Place(c))) => (a, b, c),
-            (Err(what), _, _) | (_, Err(what), _) | (_, _, Err(what)) => {
-                return self.gap_ty(n, what);
-            }
+        let list_id = match self.rep(ty) {
+            Ok(Rep::Place(a)) => a,
+            Err(what) => return self.gap_ty(n, what),
             _ => return (ty, None),
         };
         if !self.live() {
             return (ty, None);
         }
-        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let to = self.new_slot(PlaceTy::Declared(list_id), n);
         let u64t = Ty::Scalar(Scalar::U64);
         let len = bytes.len() as u64;
         let (Some(length), Some(null)) = (self.konst(u64t, len, n), self.konst(Ty::Ptr, 0, n))
@@ -162,19 +150,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         // Both carriers have the same capacity and occupy three words.
         let ok = |cx: &mut Self, data: ValueId, payer: Option<ValueId>| {
-            cx.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: 0,
-                },
-                n,
-            );
-            let carrier = cx.address(
-                AddressBase::Address(to),
-                &[Step::CaseField { case: 0, field: 0 }],
-                PlaceTy::Declared(list_id),
-                n,
-            );
+            let carrier = to;
             let fields = [
                 (data, Ty::Ptr),
                 payer.map_or((length, u64t), |payer| (payer, Ty::Ptr)),
@@ -227,7 +203,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     overflow: None,
                     size,
                     align: 8,
-                    fail: None,
                 },
                 n,
             );
@@ -241,21 +216,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
-            let (yes, no, join) = (
-                self.new_block(&[]),
-                self.new_block(&[]),
-                self.new_block(&[]),
-            );
-            let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
-            self.end(
-                Terminator::Branch {
-                    condition: admitted,
-                    yes: ye,
-                    no: ne,
-                },
-                Some(n),
-            );
-            self.start(yes);
+            self.raise_unless(admitted, charge, available, n);
             if frozen {
                 let data = self.e.static_bytes(&bytes);
                 let value = self.value(Ty::Ptr);
@@ -289,33 +250,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 ok(self, block, None);
             }
-            self.jump(join, &[], n);
-            // Error: `Capacity { requested, available }`.
-            self.start(no);
-            self.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: 1,
-                },
-                n,
-            );
-            let err = self.address(
-                AddressBase::Address(to),
-                &[Step::CaseField { case: 1, field: 0 }],
-                PlaceTy::Declared(cap_id),
-                n,
-            );
-            for (k, value) in [charge, available].into_iter().enumerate() {
-                let at = self.address(
-                    AddressBase::Address(err),
-                    &[Step::Field(k as u32)],
-                    PlaceTy::Value(u64t),
-                    n,
-                );
-                self.inst(Inst::Store { address: at, value }, n);
-            }
-            self.jump(join, &[], n);
-            self.start(join);
         }
         let v = self.pointer(to, n);
         self.temp(ty, Some(v));
@@ -336,13 +270,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.gap_ty(n, "string literal form is not built");
         };
         let ty = self.t.mk(TyKind::Adt(decl, vec![]));
+        self.static_string_value(&data, ty, n, want)
+    }
+
+    fn static_string_value(
+        &mut self,
+        data: &[u8],
+        ty: TyId,
+        n: NodeId,
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
         let viewed = want.is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::View(x) if *x == ty));
         let shown = if viewed {
             self.t.mk(TyKind::View(ty))
         } else {
             ty
         };
-        let v = self.static_string(&data, ty, n);
+        let v = self.static_string(data, ty, n);
         if !viewed {
             self.temp(ty, v);
         }
@@ -642,8 +586,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (ERROR, None)
             }
             &Target::Definition(id) if self.p.constant_ids[id.0 as usize].is_some() => {
-                let constant = self.p.constant_ids[id.0 as usize].unwrap();
-                let Some(value) = self.p.constants[constant as usize].value else {
+                let p = self.p;
+                let constant = p.constant_ids[id.0 as usize].unwrap();
+                let Some(value) = p.constants[constant as usize].value else {
                     self.halt();
                     return (ERROR, None);
                 };
@@ -652,19 +597,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     &self.item.tree.tokens[u.projections.start as usize..u.projections.end as usize]
                 {
                     if token.kind == TokenKind::Ident {
-                        let field = match self.p.constant_field(
-                            self.p.modules[self.at.module as usize].id,
+                        let name = p.index.symbols.text(token.symbol);
+                        let field = match p.constant_field(
+                            p.modules[self.at.module as usize].id,
                             value,
-                            self.p.index.symbols.text(token.symbol),
+                            name,
                         ) {
                             Ok(field) => field,
                             Err(rule) => {
-                                self.refuse(rule, n, "constant field is absent or opaque");
+                                self.push_refusal(p.constant_field_refusal(
+                                    rule,
+                                    self.cause(n),
+                                    value,
+                                    name,
+                                ));
                                 return (ERROR, None);
                             }
                         };
                         value = field;
                     }
+                }
+                if let crate::ConstData::StaticString(id) = value.data {
+                    return self.static_string_value(
+                        &p.constant_strings[id as usize],
+                        value.ty,
+                        n,
+                        want,
+                    );
                 }
                 let emitted = self.constant_value(value, n);
                 (value.ty, emitted)
@@ -888,13 +847,75 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             DeclBody::Record(fs) if visible && decl.path.0.name == text => Some((None, fs, true)),
             _ => None,
         };
+        // FAIL-11, T1.2: a resource literal is itself the `Result`, so under an expected
+        // `Result` its name is the resource type's, as with no expected type.
+        if found.is_none() && is_core_prelude(&decl.path, &["Result"]) {
+            let resource = p.index.constructor_candidates(from, name).find_map(|id| {
+                let Some(Def::Type(r)) = p.by_definition[id.0 as usize] else {
+                    return None;
+                };
+                let rd = &p.decls[r.index()];
+                match &rd.body {
+                    DeclBody::Record(fs) if matches!(rd.repr, Repr::Resource) => Some((r, fs)),
+                    _ => None,
+                }
+            });
+            if let Some((r, fields)) = resource {
+                return self.construct(n, r, None, fields, true, args, want);
+            }
+        }
         let Some((case, fields, labelled)) = found else {
             let a = self.shown(want.map_or(ERROR, |w| w.ty));
             let message = format!("expected `{a}`, found variant `{text}`");
-            self.refuse_compared("LANG-11", n, text, a, message);
+            self.push_refusal(
+                refusal("LANG-11", self.cause(n), message)
+                    .with_comparison(text, a)
+                    .with_unresolved(text, NameScope::Variant(decl.path.clone())),
+            );
             return (ERROR, None);
         };
         self.construct(n, d, case, fields, labelled, args, want)
+    }
+    /// Resolve the label against the field and return the ordinary operand.
+    pub(super) fn constructor_argument(
+        &mut self,
+        arg: NodeId,
+        field: &crate::decls::FieldDecl,
+        labelled: bool,
+    ) -> Option<NodeId> {
+        let kind = self.kind(arg);
+        if !labelled {
+            if kind == NodeKind::LabelledArgument {
+                self.refuse_label(arg, None, "this payload is not labelled".to_owned());
+                return None;
+            }
+            return Some(arg);
+        }
+        let name = &field.name;
+        if kind == NodeKind::LabelledArgument {
+            if self.token_text(arg) == name {
+                return Some(self.kids(arg)[0]);
+            }
+            self.refuse_label(arg, Some(name), format!("expected the field `{name}` here"));
+        } else if kind == NodeKind::Path
+            && self.item.tree.node(arg).origin.tokens.len() == 1
+            && matches!(self.p.target(self.at, arg), Some(Target::Binder(_)))
+        {
+            let written = self.token_text(arg);
+            if written == name {
+                return Some(arg);
+            }
+            self.refuse_compared(
+                "LANG-9",
+                arg,
+                format!("{written}:"),
+                format!("{name}:"),
+                format!("expected the field `{name}` here"),
+            );
+        } else {
+            self.refuse_label(arg, Some(name), format!("the field `{name}` is labelled"));
+        }
+        None
     }
     /// Check and build a value of declaration `d` (case `case` of a variant) from
     /// `args`, one per field in declaration order, labelled exactly when `labelled`
@@ -975,41 +996,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut field_places = Vec::new();
         let can_place_fields = self.expression_destination(n).is_none() || !self.may_return(n);
         for (i, (&a, f)) in args.iter().zip(fields).enumerate() {
-            let e = match (self.kind(a), labelled) {
-                (NodeKind::LabelledArgument, true) if self.token_text(a) == f.name => {
-                    self.kids(a)[0]
-                }
-                (NodeKind::LabelledArgument, true) => {
-                    let name = &f.name;
-                    self.refuse_label(a, Some(name), format!("expected the field `{name}` here"));
-                    return (ERROR, None);
-                }
-                (NodeKind::LabelledArgument, false) => {
-                    self.refuse_label(a, None, "this payload is not labelled".to_owned());
-                    return (ERROR, None);
-                }
-                (NodeKind::StepsArgument, _) => {
+            let Some(e) = self.constructor_argument(a, f, labelled) else {
+                return (ERROR, None);
+            };
+            let e = match self.kind(e) {
+                NodeKind::StepsArgument if !labelled => {
                     self.refuse_compared(
                         "OWN-7",
-                        a,
+                        e,
                         "steps",
                         "take",
                         "a payload takes no `steps` mark",
                     );
-                    self.kids(a)[0]
+                    self.kids(e)[0]
                 }
-                // A payload is a `take` parameter, never a `bytes` one (OWN-7).
-                (NodeKind::BytesArgument, _) => {
-                    let message = "a payload takes no `bytes` mark";
-                    self.refuse_compared("OWN-7", a, "bytes", "take", message);
-                    self.kids(a)[0]
+                NodeKind::BytesArgument if !labelled => {
+                    self.refuse_compared(
+                        "OWN-7",
+                        e,
+                        "bytes",
+                        "take",
+                        "a payload takes no `bytes` mark",
+                    );
+                    self.kids(e)[0]
                 }
-                (_, true) => {
-                    let name = &f.name;
-                    self.refuse_label(a, Some(name), format!("the field `{name}` is labelled"));
-                    return (ERROR, None);
-                }
-                (_, false) => a,
+                _ => e,
             };
             if !self.synthesises(e) {
                 later.push((i, e));
@@ -1173,7 +1184,7 @@ fn field_step(case: Option<u32>, field: usize) -> Step {
 /// `b".."`, `br#".."#`. Escapes are `\n \t \r \0 \\ \" \'` and `\xNN` (any byte in
 /// byte strings), and in strings `\u{..}` as UTF-8; a raw body is its source bytes. The
 /// lexer has refused every malformed spelling; None marks one anyway.
-fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
+pub(crate) fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
     let spelling = if bytes {
         spelling.strip_prefix('b')?
     } else {

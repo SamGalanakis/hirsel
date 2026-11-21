@@ -31,19 +31,19 @@ fn core_operations(backend: Backend) {
         ),
         (
             "spawn scalar ABI",
-            "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 64,41u64,child)); if result.unwrap(task.join(take h))==42u64 { Ok(()) } else { Error(Exit(status:1)) } }",
+            "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 64,41u64,child); if result.unwrap(task.join(take h))==42u64 { Ok(()) } else { Error(Exit(status:1)) } }",
             1_048_576,
             0,
         ),
         (
             "spawn unit ABI",
-            "fn child(take x:()) {}\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 0,(),child)); result.unwrap(task.join(take h)); Ok(()) }",
+            "fn child(take x:()) {}\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 0,(),child); result.unwrap(task.join(take h)); Ok(()) }",
             1_048_576,
             0,
         ),
         (
             "spawn aggregate ABI",
-            "type Pair: send { a:u64,b:u64 }\nfn child(take x:Pair) -> Pair { Pair(a:x.b,b:x.a) }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 64,Pair(a:7u64,b:11u64),child)); let p = result.unwrap(task.join(take h)); if p.a==11u64 && p.b==7u64 { Ok(()) } else { Error(Exit(status:1)) } }",
+            "type Pair: send { a:u64,b:u64 }\nfn child(take x:Pair) -> Pair { Pair(a:x.b,b:x.a) }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 64,Pair(a:7u64,b:11u64),child); let p = result.unwrap(task.join(take h)); if p.a==11u64 && p.b==7u64 { Ok(()) } else { Error(Exit(status:1)) } }",
             1_048_576,
             0,
         ),
@@ -56,13 +56,13 @@ fn core_operations(backend: Backend) {
         ),
         (
             "join Failed owns causes",
-            "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 64,18446744073709551615u64,child)); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Failed(take causes)) => { let _ = take causes; Ok(()) }, Error(Cancelled(_)) => Error(Exit(status:2)) } }",
+            "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 64,18446744073709551615u64,child); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Failed(take causes)) => { let _ = take causes; Ok(()) }, Error(Cancelled(_)) => Error(Exit(status:2)) } }",
             1_048_576,
             0,
         ),
         (
             "cancel observed at explicit check",
-            "fn child(take x:u64) -> u64 { task.check_cancel(); x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let mut h = result.unwrap(task.spawn(tasks,bytes 64,41u64,child)); task.cancel(mut h); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) }, Error(Failed(_)) => Error(Exit(status:2)) } }",
+            "fn child(take x:u64) -> u64 { task.check_cancel(); x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let mut h = task.spawn(tasks,bytes 64,41u64,child); task.cancel(mut h); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) }, Error(Failed(_)) => Error(Exit(status:2)) } }",
             1_048_576,
             0,
         ),
@@ -82,7 +82,7 @@ fn core_operations(backend: Backend) {
         let polls = "task.check_cancel(); ".repeat(64);
         cases.push((
             name,
-            format!("fn child(take x:u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\npub fn main(tasks:Tasks) -> Result[(), Exit] {{ let a = result.unwrap(arc.new(7u64)); let h = result.unwrap(task.spawn(tasks,bytes 64,41u64,child)); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); if second - first == {expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),
+            format!("fn child(take x:u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\npub fn main(tasks:Tasks) -> Result[(), Exit] {{ let a = arc.new(7u64); let h = task.spawn(tasks,bytes 64,41u64,child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); if second - first == {expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),
             1_048_576,
             0,
         ));
@@ -120,6 +120,7 @@ fn core_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -160,8 +161,8 @@ fn core_operations_llvm() {
 fn counted_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut vectors = vec![
-        ("fn run() -> u64 { box.unbox(result.unwrap(box.new(7u64))) }".to_owned(), 8, 7),
-        ("fn run() -> u64 { box.unbox(result.unwrap(box.new(()))); 7u64 }".to_owned(), 0, 7),
+        ("fn run() -> u64 { box.unbox(box.new(7u64)) }".to_owned(), 8, 7),
+        ("fn run() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(), 0, 7),
         ("fn run() -> u64 { let r = box.new(7u64); match take r { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }".to_owned(), 7, 22),
         ("fn run() -> u64 { let r = bound bytes 0 { box.new(7u64) }; match take r { Ok(Error((e,x))) => e.requested+x, _ => 0u64 } }".to_owned(), 1000, 15),
         ("resource type R:send { a:u64,b:u64 }\nfn run() -> u64 { let c:Result[(Sender[R],Receiver[R]),Capacity] = channel.new(1); match take c { Ok(_) => 0u64, Error(e) => e.requested+e.available } }".to_owned(), 71, 143),
@@ -169,8 +170,8 @@ fn counted_operations(backend: Backend) {
     ];
     for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
         vectors.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn run() -> u64 {{ let h = result.unwrap({module}.new(7u64)); let other = {module}.share(h); let last = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take last)) }}"),16,7));
-        vectors.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn run() -> u64 {{ let b = result.unwrap(box.new(41u64)); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,242341));
-        vectors.push((format!("fn run() -> u64 {{ let b = result.unwrap(box.new(41u64)); let h = result.unwrap({module}.new(take b)); let b = result.unwrap({module}.try_unwrap(take h)); box.unbox(take b) }}").replacen("let b = result.unwrap", "let first = result.unwrap", 1).replacen("new(take b)", "new(take first)", 1),24,41));
+        vectors.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn run() -> u64 {{ let b = box.new(41u64); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,242341));
+        vectors.push((format!("fn run() -> u64 {{ let b = box.new(41u64); let h = result.unwrap({module}.new(take b)); let b = result.unwrap({module}.try_unwrap(take h)); box.unbox(take b) }}").replacen("let b = result.unwrap", "let first = result.unwrap", 1).replacen("new(take b)", "new(take first)", 1),24,41));
     }
     let mut failures = vec![];
     for (source, room, expected) in vectors {
@@ -207,6 +208,7 @@ fn counted_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -282,6 +284,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -365,6 +368,7 @@ fn stream_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -443,6 +447,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         logical_charge_report: None,
         net_rules: vec![],
         secret_grants: vec![],
+        env_patterns: None,
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -505,7 +510,7 @@ fn host_operations(backend: Backend) {
                 .find(|s| s.modules == ["string"])
                 .unwrap();
             let mut text = std::fs::read_to_string(&module.file).unwrap();
-            text.push_str("\npub fn proof_temp_name() -> String { let b:Bytes = result.unwrap(list.with_capacity(32)); of_bytes(take b) }\n");
+            text.push_str("\npub fn proof_temp_name() -> String { let b:Bytes = list.with_capacity(32); of_bytes(take b) }\n");
             module.file = dir.path().join("string.hirsel");
             std::fs::write(&module.file, text).unwrap();
         }
@@ -535,6 +540,7 @@ fn host_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -604,15 +610,14 @@ fn clone_body_operations(backend: Backend) {
     text.push_str(
         r#"
 pub type ProofCopy[T] { xs: List[T], n: u64 }
-clone[T](p: ProofCopy[T]) { Ok(ProofCopy(xs: clone(p.xs)?, n: p.n + 1)) }
+clone[T](p: ProofCopy[T]) { ProofCopy(xs: clone(p.xs), n: p.n + 1) }
 pub fn proof_clone_run() -> u64 {
-    let made: Result[List[u64], Capacity] = with_capacity(2)
-    let mut xs: List[u64] = match take made { Ok(take l) => take l, Error(_) => return 0 }
-    match push(mut xs, 7) { Ok(()) => {}, Error(_) => return 0 }
-    match push(mut xs, 9) { Ok(()) => {}, Error(_) => return 0 }
+    let mut xs: List[u64] = with_capacity(2)
+    push(mut xs, 7)
+    push(mut xs, 9)
     let p = ProofCopy(xs: take xs, n: 4)
-    let c: Result[ProofCopy[u64], Capacity] = clone(p)
-    match take c { Ok(take q) => q.n * 100 + len(q.xs) * 10 + len(p.xs), Error(_) => 1 }
+    let q: ProofCopy[u64] = clone(p)
+    q.n * 100 + len(q.xs) * 10 + len(p.xs)
 }
 "#,
     );
@@ -644,6 +649,7 @@ pub fn proof_clone_run() -> u64 {
         logical_charge_report: None,
         net_rules: vec![],
         secret_grants: vec![],
+        env_patterns: None,
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -680,7 +686,7 @@ pub fn main() -> Result[(),Exit] {
         let bs = string.as_bytes(borrowed)
         if list.len(bs)!=3u64 || bs[1]!=b'b' { return Error(Exit(status:3)) }
         if string.proof_moves()!=4u64 { return Error(Exit(status:4)) }
-        let buffer:Bytes = result.unwrap(list.with_capacity(4))
+        let buffer:Bytes = list.with_capacity(4)
         let holder = forwarded(buffer)
         if list.capacity(holder.value)!=4u64 || list.len(holder.value)!=0u64 { return Error(Exit(status:6)) }
         let a = unique.new()
@@ -702,7 +708,7 @@ pub fn main() -> Result[(),Exit] {
         r#"
 pub fn proof_view(b:Bytes) -> View[String] in b { view_string(b) }
 pub fn proof_moves() -> u64 {
-    let b:Bytes = result.unwrap(list.with_capacity(4))
+    let b:Bytes = list.with_capacity(4)
     let s = of_bytes(take b)
     if string.byte_len(s)!=0u64 { return 0u64 }
     let back = to_bytes(take s)
@@ -1054,7 +1060,7 @@ fn generic_counted_operations(backend: Backend) {
             "fn new_owner[T:{bounds}](take x:T)->Result[{ty}[T],(Capacity,T)] {{{module}.new(take x)}}\nfn share_owner[T:{bounds}](x:{ty}[T])->{ty}[T] {{{module}.share(x)}}\nfn unwrap_owner[T:{bounds}](take x:{ty}[T])->Result[T,{ty}[T]] {{{module}.try_unwrap(take x)}}\nfn end[T:{bounds}](take x:{ty}[T]) {{}}"
         );
         vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ let h=result.unwrap(new_owner(P(a:7u8,b:11u32,c:13u8)));let other=share_owner(h);let h2=match unwrap_owner(take h) {{Ok(_) => return 0u64,Error(take back) => back}};end(take other);let p=result.unwrap(unwrap_owner(take h2));let va:u64=int.widen(p.a);let vb:u64=int.widen(p.b);let vc:u64=int.widen(p.c);va+vb+vc }}"),16,31));
-        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:Box[u64]}}\nfn run()->u64 {{ let b=result.unwrap(box.new(41u64));let c=new_owner(P(a:7u8,b:take b));match take c {{Ok(_) => 0u64,Error((e,take back)) => {{let P(a:_,b:take b2)=take back;e.requested*10000u64+e.available*100u64+box.unbox(take b2)}}}} }}"),31,242341));
+        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:Box[u64]}}\nfn run()->u64 {{ let b=box.new(41u64);let c=new_owner(P(a:7u8,b:take b));match take c {{Ok(_) => 0u64,Error((e,take back)) => {{let P(a:_,b:take b2)=take back;e.requested*10000u64+e.available*100u64+box.unbox(take b2)}}}} }}"),31,242341));
     }
     let mut failures = vec![];
     for (body, room, expected) in vectors {
@@ -1281,7 +1287,7 @@ fn generic_view_payload(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let source = r#"fn grown(src: String, lo: u64, hi: u64) -> String {
   let mut out = string.new()
-  result.unwrap(string.push(mut out, string.slice(src, lo, hi)))
+  string.push(mut out, string.slice(src, lo, hi))
   out
 }
 fn probe(path: String, doc: String) -> u64 {
@@ -1292,8 +1298,8 @@ fn probe(path: String, doc: String) -> u64 {
   match map.get(m, key) { Some(v) => v, None => 99 }
 }
 pub fn main() -> Result[(), Exit] {
-  let p = result.unwrap(string.from("/items/1/name"))
-  let d = result.unwrap(string.from("{\"items\":\"n\"}"))
+  let p = string.from("/items/1/name")
+  let d = string.from("{\"items\":\"n\"}")
   if probe(p, d) == 5 { Ok(()) } else { Error(Exit(status: 3)) }
 }
 "#;
@@ -1337,7 +1343,7 @@ fn region_recursive_instance(backend: Backend) {
     }
 }
 pub fn main() -> Result[(), Exit] {
-    let s = result.unwrap(string.from("[null, [true]]"))
+    let s = string.from("[null, [true]]")
     region doc {
         if arr(doc, s) { Ok(()) } else { Error(Exit(status: 3)) }
     }
@@ -1375,7 +1381,7 @@ fn map_update_value(backend: Backend) {
 resource type Trace {out:Stdout,id:u64} drop(t) {let _=stdout.write(t.out,"D")}
 fn clean_once(out:Stdout)->u64 {
  let mut m:Map[u64,Trace]=map.new()
- result.unwrap(map.insert(mut m,1u64,result.unwrap(Trace(out:out,id:8))))
+ map.insert(mut m,1u64,result.unwrap(Trace(out:out,id:8)))
  option.unwrap(map.update(mut m,1u64,fn(mut value:Trace)->u64 {value.id+=1;value.id}))
 }
 pub fn main(out:Stdout)->Result[(),Exit] waits {
@@ -1528,8 +1534,9 @@ fn run_lines_native(backend: Backend, case: &str) {
     });
     for (i, line) in runs.enumerate() {
         let (call, want) = line.split_once(" = ").expect("a run line");
-        // A finalizer trace is the evaluator's to observe; natively the value is checked.
+        // The evaluator checks the trace and held bytes. The native entry compares the value.
         let want = want.split_once(" trace ").map_or(want, |(v, _)| v);
+        let want = want.split_once(" used ").map_or(want, |(v, _)| v);
         if let Some(cause) = want.strip_prefix("fail ") {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let dir = tempfile::tempdir().unwrap();
@@ -2305,4 +2312,95 @@ fn wire_net_source_cranelift() {
 #[test]
 fn wire_net_source_llvm() {
     wire_net_source(Backend::Llvm);
+}
+
+/// CAP-1 and CAP-7. A wildcard grants only its own names, narrowing preserves
+/// the intersection, and a Secret's source cannot also become public input.
+#[test]
+fn env_authority_bounds_the_snapshot_and_refuses_secret_overlap() {
+    use hirsel_core_net::{EnvPatterns, EnvSnapshot, SecretGrant};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+pub fn access(e: Env) -> u8 {
+    match env.get(e, "PRIVATE_VALUE") {
+        Error(Denied) => {},
+        _ => return 11,
+    }
+    let n = result.unwrap(env.narrow(e, "APP_A,PRIVATE_VALUE"))
+    match (env.get(n, "PRIVATE_VALUE"), env.get(n, "APP_B")) {
+        (Error(Denied), Error(Denied)) => {},
+        _ => return 12,
+    }
+    match (env.name(n, 0), env.get(n, "APP_A")) {
+        (Some(name), Ok(Some(value))) if env.len(n) == 1 && name == "APP_A" && value == "a" => {},
+        _ => return 13,
+    }
+    0
+}
+
+pub fn main(e: Env, secret: Secret) -> Result[(), Exit] {
+    let status = access(e)
+    if status == 0 { Ok(()) } else { Error(Exit(status: status)) }
+}
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let access = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/access").unwrap());
+    let checked = product.units([access.clone()], 65536).unwrap();
+    let modules = checked.modules().unwrap();
+    let (module, function) = hirsel_core_materialize::join(&modules, &access).unwrap();
+    let env = EnvSnapshot {
+        patterns: EnvPatterns::parse("APP_*").unwrap(),
+        entries: vec![
+            ("APP_A".into(), b"a".to_vec()),
+            ("APP_B".into(), b"b".to_vec()),
+        ],
+    };
+    assert_eq!(
+        hirsel_core_ir::eval::run_stdio(&module, function, &[0], 1 << 20, &[], Some(env)).outcome,
+        hirsel_core_ir::eval::Outcome::Returned(vec![0]),
+        "11 means an ungranted value escaped, 12 means narrowing widened or failed to remove a name, 13 means the intersection lost a covered value",
+    );
+
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Env").unwrap();
+    options
+        .secret_grants
+        .push(SecretGrant::new("secret", "env:PRIVATE_VALUE", "test.example").unwrap());
+    let launch = |patterns| {
+        let mut options = options.clone();
+        options.env_patterns = EnvPatterns::parse(patterns);
+        let built = product.build(&entry, &options).unwrap();
+        Command::new(&built.executable)
+            .env_clear()
+            .env("APP_A", "a")
+            .env("APP_B", "b")
+            .env("PRIVATE_VALUE", "fixture")
+            .output()
+            .unwrap()
+    };
+    let accepted = launch("APP_*");
+    assert_eq!(
+        accepted.status.code(),
+        Some(0),
+        "11 means an ungranted value escaped, 12 means narrowing widened or failed to remove a name, 13 means the intersection lost a covered value: {:?}",
+        accepted.stderr
+    );
+    assert_not_started(
+        &launch("APP_*,PRIVATE_*"),
+        "not started: Env grant covers Secret source variable \"PRIVATE_VALUE\"\n",
+    );
 }

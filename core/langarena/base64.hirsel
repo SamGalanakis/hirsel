@@ -1,10 +1,10 @@
 // kostya/LangArena 3c9f84d benchmarks/base64_{encode,decode}.rs.
 fn encode(s: String) -> Result[String, helper.Error] {
-    helper.mem(std.base64.encode_string(string.as_bytes(s)))
+    Ok(std.base64.encode_string(string.as_bytes(s)))
 }
 
 fn decode(s: String) -> Result[Bytes, helper.Error] {
-    match helper.mem(std.base64.decode(string.as_bytes(s)))? {
+    match std.base64.decode(string.as_bytes(s)) {
         Some(take decoded) => Ok(take decoded),
         None => Error(Config),
     }
@@ -12,10 +12,10 @@ fn decode(s: String) -> Result[Bytes, helper.Error] {
 
 fn prefix(mut message: String, s: String) -> Result[(), helper.Error] {
     if string.byte_len(s) > 4 {
-        helper.mem(string.push(mut message, string.slice(s, 0, 4)))?
-        helper.mem(string.push(mut message, "..."))?
+        string.push(mut message, string.slice(s, 0, 4))
+        string.push(mut message, "...")
     } else {
-        helper.mem(string.push(mut message, s))?
+        string.push(mut message, s)
     }
     Ok(())
 }
@@ -29,7 +29,7 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     if size < 0 {
         return Error(Config)
     }
-    let data = helper.mem(std.string.repeat("a", int.narrow(size)))?
+    let data = std.string.repeat("a", int.narrow(size))
     let mut encoded = encode(data)?
     let mut decoded = if decoding {
         decode(encoded)?
@@ -46,30 +46,30 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
             total = int.wrapping_add(total, int.truncate(string.byte_len(encoded)))
         }
     }
-    let mut message = helper.mem(string.from(if decoding {
+    let mut message = string.from(if decoding {
         "decode "
     } else {
         "encode "
-    }))?
+    })
     if decoding {
         prefix(mut message, encoded)?
     } else {
         prefix(mut message, data)?
     }
-    helper.mem(string.push(mut message, " to "))?
+    string.push(mut message, " to ")
     if decoding {
         if list.len(decoded) < 4 {
             return Error(Config)
         }
         for at in 0u64 .. 4u64 {
-            helper.mem(string.push_char(mut message, option.unwrap(char.from_u32(int.widen(decoded[at])))))?
+            string.push_char(mut message, option.unwrap(char.from_u32(int.widen(decoded[at]))))
         }
-        helper.mem(string.push(mut message, "..."))?
+        string.push(mut message, "...")
     } else {
         prefix(mut message, encoded)?
     }
-    helper.mem(string.push(mut message, ": "))?
-    helper.mem(string.push_u64(mut message, int.widen(total)))?
+    string.push(mut message, ": ")
+    string.push_u64(mut message, int.widen(total))
     Ok(helper.checksum_str(message))
 }
 

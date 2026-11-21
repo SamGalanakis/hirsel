@@ -128,14 +128,7 @@ pub(crate) fn allocate_admitted(
     align: usize,
     kind: u8,
 ) -> NonNull<u8> {
-    task_heap::Heap::allocate(
-        context.heap.get_or_init(std::sync::Arc::default),
-        payer,
-        bytes,
-        align,
-        kind,
-        false,
-    )
+    task_heap::Heap::allocate(context, payer, bytes, align, kind, false)
 }
 /// # Safety
 /// A live block pins its original payer until its logical refund.
@@ -166,7 +159,7 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
                 payer.settle(charge);
             }
         }
-        task_heap::release_page(page, payload);
+        task_heap::release_page(page, payload, context);
     }
 }
 /// # Safety
@@ -262,7 +255,7 @@ impl Block {
             let page = task_heap::page_of(pointer);
             let payer = *task_heap::Page::funding(page);
             payer.settle_at_unit(charge);
-            task_heap::release_page(page, pointer);
+            task_heap::release_page(page, pointer, None);
         }
     }
 

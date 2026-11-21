@@ -5,11 +5,11 @@ fn finalizer_entry(backend: Backend, carrier: &str) {
         let dir = tempfile::Builder::new().prefix(&format!("finalizer-{backend:?}-{carrier}-{divisor}-")).tempdir().unwrap();
         let keep = match carrier {
             "plain" => "let r = result.unwrap(R(d: DIVISOR));".to_owned(),
-            "list" => "let r = result.unwrap(R(d: DIVISOR)); let mut xs: List[R] = result.unwrap(list.with_capacity(1)); result.unwrap(list.push(mut xs, take r));".to_owned(),
+            "list" => "let r = result.unwrap(R(d: DIVISOR)); let mut xs: List[R] = list.with_capacity(1); list.push(mut xs, take r);".to_owned(),
             "record" => "let r = result.unwrap(R(d: DIVISOR)); let owner = Record(r: take r);".to_owned(),
             "variant" => "let r = result.unwrap(R(d: DIVISOR)); let owner: Variant = Keep(take r);".to_owned(),
             "option" => "let r = result.unwrap(R(d: DIVISOR)); let owner: Option[R] = Some(take r);".to_owned(),
-            "box" => "let r = result.unwrap(R(d: DIVISOR)); let owner = result.unwrap(box.new(take r));".to_owned(),
+            "box" => "let r = result.unwrap(R(d: DIVISOR)); let owner = box.new(take r);".to_owned(),
             "generic_resource" => "let r: Generic[u64] = result.unwrap(Generic(d: DIVISOR, value: 11u64));".to_owned(),
             "generic" => "let r = result.unwrap(R(d: DIVISOR)); dispose(take r);".to_owned(),
             _ => unreachable!(),

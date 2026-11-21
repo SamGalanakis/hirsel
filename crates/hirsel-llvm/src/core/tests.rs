@@ -189,6 +189,55 @@ fn exposed_helpers_keep_imported_carrier_facts() {
 }
 
 #[test]
+fn exposure_bounds_a_branching_recursion_by_its_growth_not_the_budget() {
+    // f0 recurses three times. Depth alone allows 3^7 copies, which the 2048
+    // budget would cut off. The copies f0 makes inside its own copies share
+    // one 450-instruction limit in the caller. The caller's terminal call
+    // keeps its forwarding boundary, so one entry is exposed.
+    let module = text::parse(
+        "core v1
+sig g0 = (u64) -> ()
+inst n0 = tests@0/expose/fan [] []
+inst n1 = tests@0/expose/entry [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+ v1: u64 = const 0
+ v2: bool = eq v0, v1
+ branch v2, b1, b2
+b1:
+ return
+b2:
+ v3: u64 = const 1
+ v4: u64 = wrapping_sub v0, v3
+ call f0 g0 (v4)
+ call f0 g0 (v4)
+ call f0 g0 (v4)
+ return
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+ call f0 g0 (v0)
+ call f0 g0 (v0)
+ return
+}
+",
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let size = |m: &Module, f: usize| m.functions[f].body.as_ref().unwrap().insts.len();
+    let exposed = expose::module(&module, false).unwrap();
+    let copies = (size(&exposed, 1) - size(&module, 1)) / size(&module, 0);
+    assert!(
+        copies > 1,
+        "the entry copy and some recursive copies are exposed"
+    );
+    assert!(
+        copies <= 1 + 450 / size(&module, 0),
+        "{copies} copies of the recursion"
+    );
+}
+
+#[test]
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
     wf::module(&module).unwrap();
@@ -1981,11 +2030,8 @@ b3:
     let object =
         emit_object_for_target(&module, target, Optimization::None, false, &module.sites())
             .unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "hirsel-core-llvm-isolate-cancel-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     fs::write(dir.join("input.o"), object).unwrap();
     let body = symbol(&module, FuncId(2));
     let c = format!(
@@ -2070,7 +2116,6 @@ int main(void) {{
         }
     };
     output(&mut executable);
-    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -2292,22 +2337,42 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::SendSecret => &["u64", "ptr", "u64", "ptr", "u8", "u64", "u64"],
             HostOp::SecretSeal => &["ptr", "ptr"],
             HostOp::SecretNarrow => &["u64", "ptr"],
-            HostOp::NetSplit | HostOp::Stopped => &["u64"],
+            HostOp::NetSplit
+            | HostOp::Stopped
+            | HostOp::EnvLen
+            | HostOp::ProvideRandom
+            | HostOp::ClockIdle
+            | HostOp::ProcessTrigger => &["u64"],
+            HostOp::ProvideProcess => &[],
+            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::PortNext => &["u64"],
+            HostOp::CallWord => &["u64", "u64"],
+            HostOp::CallPayload => &["u64", "u64", "ptr"],
+            HostOp::PortReply => &["u64", "u64", "u64", "u64", "u64", "u64"],
+            HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => &["u64", "u64"],
+            HostOp::StdinRead => &["u64", "ptr", "u8", "u64", "u64"],
+            HostOp::EnvName => &["u64", "u64"],
             HostOp::Open => &["u64", "ptr", "u8"],
             HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
                 &["u64"]
             }
-            HostOp::Rename => &["u64", "ptr", "ptr"],
+            HostOp::Rename | HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
+                &["u64", "ptr", "ptr"]
+            }
+            HostOp::ReadAt | HostOp::WriteAt => &["u64", "u64", "ptr"],
             HostOp::SleepUntil => &["u64", "u64"],
-            HostOp::Sync | HostOp::SyncDir => &["u64"],
+            HostOp::Sync | HostOp::SyncDir | HostOp::Entries | HostOp::StatFile => &["u64"],
             _ => &["u64", "ptr"],
         };
-        let results: &[&str] = if matches!(op, HostOp::Random | HostOp::Stopped) {
+        let results: &[&str] = if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+            &["ptr", "u8", "u32", "u64"]
+        } else if matches!(op, HostOp::Random | HostOp::Stopped) {
             &[]
         } else if matches!(op, HostOp::Listen | HostOp::Accept) {
             &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
         } else if op == HostOp::TlsConnect {
             &["u64", "u8", "u32", "u64", "u64", "u64", "u64", "u64"]
+        } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+            &["u64", "u8", "u32", "i64", "u8"]
         } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             &["u64", "u8", "u32", "u64"]
         } else {

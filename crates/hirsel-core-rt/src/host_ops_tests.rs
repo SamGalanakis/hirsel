@@ -8,13 +8,11 @@ use crate::{
 };
 use std::{
     fs::File,
-    path::PathBuf,
     ptr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Instant,
 };
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy)]
 enum Scenario {
     Exercise,
@@ -31,7 +29,6 @@ enum Scenario {
 struct State {
     os: Option<Box<crate::os::OsProvider>>,
     directory: u64,
-    root: PathBuf,
     scenario: Scenario,
     issued: Vec<u8>,
     delivered: Vec<u8>,
@@ -474,17 +471,13 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
     }
 }
 fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State>) {
-    let root = std::env::temp_dir().join(format!(
-        "hirsel-hostops-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&root).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     let mut os = Box::new(crate::os::OsProvider::new(
         File::create(root.join("stdout")).unwrap().into(),
         File::create(root.join("stderr")).unwrap().into(),
     ));
-    let directory = os.grant(&root).unwrap();
+    let directory = os.grant(root).unwrap();
     // A real EACCES, independent of path confinement.
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(root.join("denied"), b"secret").unwrap();
@@ -492,7 +485,6 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
     let mut state = Box::new(State {
         os: (!scripted).then_some(os),
         directory: if scripted { 7 } else { directory },
-        root,
         scenario,
         issued: vec![],
         delivered: vec![],
@@ -562,10 +554,9 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
     let status = unsafe { hirsel_core_run(&config, entry) };
     assert_eq!(state.issued, state.delivered, "issue/delivery order");
     if !scripted {
-        state.stdout = std::fs::read(state.root.join("stdout")).unwrap();
-        state.stderr = std::fs::read(state.root.join("stderr")).unwrap();
+        state.stdout = std::fs::read(root.join("stdout")).unwrap();
+        state.stderr = std::fs::read(root.join("stderr")).unwrap();
     }
-    std::fs::remove_dir_all(&state.root).unwrap();
     (status, state)
 }
 #[test]

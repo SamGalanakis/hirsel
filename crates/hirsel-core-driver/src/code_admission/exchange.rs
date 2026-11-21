@@ -13,20 +13,52 @@ use std::time::Instant;
 /// A connection accepted on the host's filesystem-authorized control listener.
 /// The host must restrict access to the listener to principals that can attest a
 /// complete release recipe, including its grant bindings and annexes.
-pub struct ControlConnection(UnixStream);
+pub struct ControlConnection {
+    stream: UnixStream,
+    need_sent: bool,
+}
 
 impl ControlConnection {
+    pub(crate) fn local(peer: UnixStream) -> Self {
+        Self {
+            stream: peer,
+            need_sent: false,
+        }
+    }
+
+    pub(crate) fn deploy_permission(&mut self, timeout: std::time::Duration) -> io::Result<bool> {
+        self.stream.set_read_timeout(Some(timeout))?;
+        let mut flag = [0];
+        self.stream.read_exact(&mut flag)?;
+        match flag {
+            [0] => Ok(false),
+            [1] => Ok(true),
+            _ => Err(io::ErrorKind::InvalidData.into()),
+        }
+    }
+
+    pub(crate) fn refuse_before_need(&mut self, reason: &str) -> io::Result<()> {
+        if self.need_sent {
+            return Ok(());
+        }
+        self.stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
+        self.stream.write_all(&u64::MAX.to_le_bytes())?;
+        let length = u32::try_from(reason.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        self.stream.write_all(&length.to_le_bytes())?;
+        self.stream.write_all(reason.as_bytes())
+    }
     /// Accept on the host's control listener. The filesystem permissions of
     /// that listener are the authority check for a raw recipe request.
     pub fn accept(control: &UnixListener) -> io::Result<Self> {
-        control.accept().map(|(stream, _)| Self(stream))
+        control.accept().map(|(stream, _)| Self::local(stream))
     }
 
     /// Recover the stream for the host's result or deploy preview.
     pub fn into_stream(self) -> io::Result<UnixStream> {
-        self.0.set_read_timeout(None)?;
-        self.0.set_write_timeout(None)?;
-        Ok(self.0)
+        self.stream.set_read_timeout(None)?;
+        self.stream.set_write_timeout(None)?;
+        Ok(self.stream)
     }
 }
 
@@ -37,11 +69,15 @@ pub(super) struct Exchange<'a> {
     stream: &'a mut UnixStream,
     deadline: Instant,
     received: u64,
+    need_sent: Option<&'a mut bool>,
 }
 
 impl<'a> Exchange<'a> {
     pub(super) fn new(connection: &'a mut ControlConnection, deadline: Instant) -> Self {
-        Self::on(&mut connection.0, deadline)
+        Self {
+            need_sent: Some(&mut connection.need_sent),
+            ..Self::on(&mut connection.stream, deadline)
+        }
     }
 
     fn on(stream: &'a mut UnixStream, deadline: Instant) -> Self {
@@ -49,6 +85,7 @@ impl<'a> Exchange<'a> {
             stream,
             deadline,
             received: 0,
+            need_sent: None,
         }
     }
 
@@ -85,6 +122,9 @@ impl<'a> Exchange<'a> {
         keys: impl Iterator<Item = ObjectKey>,
     ) -> Result<(), AdmissionError> {
         self.write_frame(&(count as u64).to_le_bytes())?;
+        if let Some(sent) = &mut self.need_sent {
+            **sent = true;
+        }
         for key in keys {
             self.write_frame(&key_frame(key))?;
         }
@@ -208,6 +248,17 @@ pub fn send_release(
     exchange.write_frame(&len.to_le_bytes())?;
     exchange.write_frame(&bytes)?;
     let count = exchange.length()?;
+    if count == u64::MAX {
+        let length = u32::from_le_bytes(exchange.read_array()?) as usize;
+        if length > 4096 {
+            return Err(AdmissionError::Malformed("admission refusal length"));
+        }
+        let mut reason = vec![0; length];
+        exchange.read_exact(&mut reason)?;
+        let reason = String::from_utf8(reason)
+            .map_err(|_| AdmissionError::Malformed("admission refusal"))?;
+        return Err(AdmissionError::Refused(reason));
+    }
     if count > listing.len() as u64 || count > limits.outstanding as u64 {
         return Err(AdmissionError::Limit(Limit::Outstanding));
     }

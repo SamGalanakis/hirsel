@@ -29,7 +29,8 @@ pub mod sym {
     pub const REMOVED: Symbol = Symbol(116);
     pub const STEPS: Symbol = Symbol(117);
     pub const SIMD: Symbol = Symbol(118);
-    pub const CROSS: Symbol = Symbol(119);
+    pub const INERT: Symbol = Symbol(119);
+    pub const CROSS: Symbol = Symbol(120);
     pub const FN: Symbol = Symbol(1);
     pub const LET: Symbol = Symbol(2);
     pub const MUT: Symbol = Symbol(3);
@@ -47,6 +48,7 @@ pub mod sym {
     pub const COPY: Symbol = Symbol(15);
     pub const VIEW: Symbol = Symbol(16);
     pub const TYPE: Symbol = Symbol(17);
+    pub const QUESTION_FATARROW: Symbol = Symbol(18);
     pub const RESOURCE: Symbol = Symbol(19);
     pub const SCOPED: Symbol = Symbol(20);
     pub const REGION: Symbol = Symbol(21);
@@ -193,7 +195,7 @@ impl Default for Symbols {
             Arc::from("copy"),
             Arc::from("view"),
             Arc::from("type"),
-            Arc::from(""), // Unused terminal ID.
+            Arc::from("?=>"),
             Arc::from("resource"),
             Arc::from("scoped"),
             Arc::from("region"),
@@ -289,7 +291,7 @@ impl Default for Symbols {
         strings.push(Arc::from("streamable"));
         strings.push(Arc::from("clone"));
         strings.push(Arc::from("codec"));
-        strings.extend(["via", "to", "from", "removed", "steps", "Simd", "cross"].map(Arc::from));
+        strings.extend(["via", "to", "from", "removed", "steps", "Simd", "inert", "cross"].map(Arc::from));
         let mut single = empty_single();
         for (i, s) in strings.iter().enumerate().skip(1) {
             if let [b] = s.as_bytes() {
@@ -450,6 +452,7 @@ fn fixed_symbol(text: &str) -> Option<Symbol> {
         "streamable" => sym::STREAMABLE,
         "clone" => sym::CLONE,
         "codec" => sym::CODEC,
+        "inert" => sym::INERT,
         "via" => sym::VIA,
         "to" => sym::TO,
         "from" => sym::FROM,

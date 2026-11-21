@@ -111,9 +111,9 @@ type Partition: cross {
 
 fn partition_name(p: u64) -> String {
     let mut s = string.new()
-    result.unwrap(string.push(mut s, "p"))
-    result.unwrap(string.push_u64(mut s, p))
-    result.unwrap(string.push(mut s, ".log"))
+    string.push(mut s, "p")
+    string.push_u64(mut s, p)
+    string.push(mut s, ".log")
     s
 }
 
@@ -124,20 +124,20 @@ fn partition(take job: Partition) -> u64 waits {
     result.unwrap(conn.send(hello, take c))
     let _ = take hello
     let mut groups = 0u64
-    let mut batch: Bytes = result.unwrap(list.with_capacity(65536))
+    let mut batch: Bytes = list.with_capacity(65536)
     let mut acks: List[Client[u64]] = list.new()
     while let Ok(take first) = conn.receive(input) {
         list.clear(mut batch)
         let Commit(rec: take r, ack: take a) = take first
-        result.unwrap(list.append(mut batch, r))
-        result.unwrap(list.push(mut acks, take a))
+        list.append(mut batch, r)
+        list.push(mut acks, take a)
         let mut more = true
         while more {
             match conn.try_receive(input) {
                 Ok(take more_c) => {
                     let Commit(rec: take r2, ack: take a2) = take more_c
-                    result.unwrap(list.append(mut batch, r2))
-                    result.unwrap(list.push(mut acks, take a2))
+                    list.append(mut batch, r2)
+                    list.push(mut acks, take a2)
                 },
                 Error(_) => {
                     more = false
@@ -190,9 +190,9 @@ type Tool: send {
 
 // Returns (first digest word, held ns).
 fn tool_call(mut t: Tool, size: u64, seed: u64) -> (u64, u64) waits {
-    let mut req: Bytes = result.unwrap(list.with_capacity(16))
-    result.unwrap(list.put_word_le(mut req, size))
-    result.unwrap(list.put_word_le(mut req, seed))
+    let mut req: Bytes = list.with_capacity(16)
+    list.put_word_le(mut req, size)
+    list.put_word_le(mut req, seed)
     send_all(mut t.w, req)
     if !recv_exact(mut t.r, mut t.buf, 8 + size) {
         fail("tool closed")
@@ -227,7 +227,7 @@ fn call_task(take c: Call) -> Done waits {
 fn open_tool(nw: Net, clock: Clock, port: u64) -> Tool waits {
     let s = connect_retry(nw, clock, local_addr(port))
     let (rh, wh) = net.split(take s)
-    Tool(r: take rh, w: take wh, buf: result.unwrap(list.with_capacity(65536 + 8)))
+    Tool(r: take rh, w: take wh, buf: list.with_capacity(65536 + 8))
 }
 
 // ---- one session: a task in a session unit, owning its client's socket.
@@ -259,12 +259,12 @@ fn session(take job: Session) -> u64 waits {
         1
     }
     for _ in 0 .. count {
-        result.unwrap(list.push(mut tools, open_tool(nw, clock, tool_port)))
+        list.push(mut tools, open_tool(nw, clock, tool_port))
     }
-    let mut req: Bytes = result.unwrap(list.with_capacity(48))
-    let mut small: Bytes = result.unwrap(list.with_capacity(24))
+    let mut req: Bytes = list.with_capacity(48)
+    let mut small: Bytes = list.with_capacity(24)
     if ready_ack {
-        result.unwrap(list.put_word_le(mut small, sid))
+        list.put_word_le(mut small, sid)
         send_all(mut w, small)
     }
     let mut turns = 0u64
@@ -286,7 +286,7 @@ fn session(take job: Session) -> u64 waits {
                 acc = acc ^ dg
                 held = held + h
             }
-            result.unwrap(list.push(mut tools, take tool))
+            list.push(mut tools, take tool)
         } else {
             let mut jobs: List[Task[Done]] = list.new()
             for i in 0 .. ncalls {
@@ -294,11 +294,11 @@ fn session(take job: Session) -> u64 waits {
                     fail("no tool")
                 }
                 let c = Call(tool: take t, size: size_of(req[24 + i]), seed: int.wrapping_add(seed, i))
-                result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes 4096, take c, call_task))))
+                list.push(mut jobs, task.spawn(tasks, bytes 4096, take c, call_task))
             }
             while let Some(take h) = list.pop(mut jobs) {
                 let Done(tool: take t, digest: dg, held: hd) = result.unwrap(task.join(take h))
-                result.unwrap(list.push(mut tools, take t))
+                list.push(mut tools, take t)
                 acc = acc ^ dg
                 if hd > held {
                     held = hd
@@ -309,19 +309,19 @@ fn session(take job: Session) -> u64 waits {
             result.unwrap(conn.send(svc, SvcReq(x: turn ^ seed, reply: conn.client(back))))
             acc = acc ^ result.unwrap(conn.receive(answers))
         }
-        let mut rec: Bytes = result.unwrap(list.with_capacity(64))
-        result.unwrap(list.put_word_le(mut rec, turn))
-        result.unwrap(list.put_word_le(mut rec, acc))
-        result.unwrap(list.put_word_le(mut rec, held))
+        let mut rec: Bytes = list.with_capacity(64)
+        list.put_word_le(mut rec, turn)
+        list.put_word_le(mut rec, acc)
+        list.put_word_le(mut rec, held)
         for _ in 0 .. 5u64 {
-            result.unwrap(list.put_word_le(mut rec, 0u64))
+            list.put_word_le(mut rec, 0u64)
         }
         result.unwrap(conn.send(commit, Commit(rec: take rec, ack: conn.client(back))))
         let _ = result.unwrap(conn.receive(answers))
         list.clear(mut small)
-        result.unwrap(list.put_word_le(mut small, turn))
-        result.unwrap(list.put_word_le(mut small, acc))
-        result.unwrap(list.put_word_le(mut small, held))
+        list.put_word_le(mut small, turn)
+        list.put_word_le(mut small, acc)
+        list.put_word_le(mut small, held)
         send_all(mut w, small)
         turns = turns + 1
     }
@@ -375,7 +375,7 @@ fn front(take job: Front) -> u64 waits {
     let _ = take hello
     let mut commits: List[Client[Commit]] = list.new()
     for _ in 0 .. partitions {
-        result.unwrap(list.push(mut commits, result.unwrap(conn.receive(wiring))))
+        list.push(mut commits, result.unwrap(conn.receive(wiring)))
     }
     let _ = take wiring
     let per = if par {
@@ -384,7 +384,7 @@ fn front(take job: Front) -> u64 waits {
         SESSION_BYTES
     }
     let mut jobs: List[Task[u64]] = list.new()
-    let mut hello_buf: Bytes = result.unwrap(list.with_capacity(8))
+    let mut hello_buf: Bytes = list.with_capacity(8)
     for _ in 0 .. mine {
         let s = result.unwrap(conn.receive(incoming))
         let (rh, wh) = net.split(take s)
@@ -400,7 +400,7 @@ fn front(take job: Front) -> u64 waits {
             fail("no partition")
         }
         let one = Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take wh, sid: sid, commit: conn.client(commit), svc: conn.client(svc), tool_port: tool_port, par: par, ready_ack: ready_ack,)
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes per, take one, session))))
+        list.push(mut jobs, task.spawn(tasks, bytes per, take one, session))
     }
     // Release this unit's own clients so the partitions and the service see
     // Closed once the sessions end.
@@ -443,8 +443,8 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     let mut commits: List[Client[Commit]] = list.new()
     for p in 0 .. partitions {
         let job = Partition(d: d, p: p, hello: conn.client(ph))
-        result.unwrap(list.push(mut parts, result.unwrap(task.spawn_unit(tasks, bytes COMMIT_BYTES, take job, partition))))
-        result.unwrap(list.push(mut commits, result.unwrap(conn.receive(ph_in))))
+        list.push(mut parts, result.unwrap(task.spawn_unit(tasks, bytes COMMIT_BYTES, take job, partition)))
+        list.push(mut commits, result.unwrap(conn.receive(ph_in)))
     }
     let (sh, sh_in): (Client[Client[SvcReq]], Inbox[Client[SvcReq]]) = result.unwrap(conn.new(1, bytes 0))
     let svc_task = result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES, Service(hello: take sh), service))
@@ -460,9 +460,9 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     for u in 0 .. k {
         let mine = (sessions + k - 1 - u) / k
         let job = Front(tasks: tasks, nw: nw, clock: clock, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: conn.client(svc), hello: conn.client(fh),)
-        result.unwrap(list.push(mut fronts, result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES + mine * per, take job, front))))
+        list.push(mut fronts, result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES + mine * per, take job, front)))
         let FrontWiring(commits: wiring, sockets: sockets) = result.unwrap(conn.receive(fh_in))
-        result.unwrap(list.push(mut clients, take sockets))
+        list.push(mut clients, take sockets)
         for p in 0 .. partitions {
             let Some(c) = list.get(commits, p) else {
                 fail("no partition")
@@ -487,13 +487,13 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     let groups = join_all(take parts)
     let calls = result.unwrap(task.join(take svc_task))
     let mut line = string.new()
-    result.unwrap(string.push(mut line, "session turns="))
-    result.unwrap(string.push_u64(mut line, turns))
-    result.unwrap(string.push(mut line, " groups="))
-    result.unwrap(string.push_u64(mut line, groups))
-    result.unwrap(string.push(mut line, " svc="))
-    result.unwrap(string.push_u64(mut line, calls))
-    result.unwrap(string.push(mut line, "\n"))
+    string.push(mut line, "session turns=")
+    string.push_u64(mut line, turns)
+    string.push(mut line, " groups=")
+    string.push_u64(mut line, groups)
+    string.push(mut line, " svc=")
+    string.push_u64(mut line, calls)
+    string.push(mut line, "\n")
     result.unwrap(stderr.write(err, line))
     Ok(())
 }

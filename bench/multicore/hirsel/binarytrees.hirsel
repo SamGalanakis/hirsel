@@ -56,11 +56,11 @@ fn batch(take job: Job) -> u64 {
 }
 
 fn write_tree(out: Stdout, prefix: String, depth: u64, checked: u64) waits {
-    let mut line = result.unwrap(string.from(prefix))
-    result.unwrap(string.push_u64(mut line, depth))
-    result.unwrap(string.push(mut line, "\t check: "))
-    result.unwrap(string.push_u64(mut line, checked))
-    result.unwrap(string.push(mut line, "\n"))
+    let mut line = string.from(prefix)
+    string.push_u64(mut line, depth)
+    string.push(mut line, "\t check: ")
+    string.push_u64(mut line, checked)
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
 }
 
@@ -73,11 +73,11 @@ fn batch_bytes(depth: u64) -> u64 {
 }
 
 fn run_depth(take job: DepthJob) -> u64 waits {
-    let mut jobs: List[Task[u64]] = result.unwrap(list.with_capacity(BLOCKS))
+    let mut jobs: List[Task[u64]] = list.with_capacity(BLOCKS)
     for _ in 0 .. BLOCKS {
         let range = Job(depth: job.depth, iterations: job.iterations / BLOCKS)
-        let h = result.unwrap(task.spawn(job.spawner, bytes batch_bytes(job.depth), range, batch))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(job.spawner, bytes batch_bytes(job.depth), range, batch)
+        list.push(mut jobs, take h)
     }
     let mut sum: u64 = 0
     while let Some(take h) = list.pop(mut jobs) {
@@ -88,23 +88,23 @@ fn run_depth(take job: DepthJob) -> u64 waits {
 
 fn run_depths(tasks: Tasks, out: Stdout, maximum: u64) waits {
     let depths = maximum / 2 - 1
-    let mut jobs: List[Task[u64]] = result.unwrap(list.with_capacity(depths))
+    let mut jobs: List[Task[u64]] = list.with_capacity(depths)
     for i in 0 .. depths {
         let depth = (depths - i + 1) * 2
         let job = DepthJob(spawner: tasks, depth: depth, iterations: iterations_at(maximum, depth))
         // MEM-24 charges 256 bytes for a task, 8 for its u64 result and 32
         // for its primary cause cell, in addition to the child's limit.
         let allowance = BLOCKS * (batch_bytes(depth) + 296) + 65536
-        let h = result.unwrap(task.spawn(tasks, bytes allowance, job, run_depth))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(tasks, bytes allowance, job, run_depth)
+        list.push(mut jobs, take h)
     }
     for i in 0 .. depths {
         let depth = (i + 2) * 2
         let h = option.unwrap(list.pop(mut jobs))
         let sum = result.unwrap(task.join(take h))
         let mut prefix = string.new()
-        result.unwrap(string.push_u64(mut prefix, iterations_at(maximum, depth)))
-        result.unwrap(string.push(mut prefix, "\t trees of depth "))
+        string.push_u64(mut prefix, iterations_at(maximum, depth))
+        string.push(mut prefix, "\t trees of depth ")
         write_tree(out, prefix, depth, sum)
     }
 }

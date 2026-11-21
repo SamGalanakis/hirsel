@@ -7,7 +7,7 @@ pub fn main(d: Dir, c: Clock, ts: Tasks, out: Stdout, a: Args) -> Result[(), Exi
     if args.len(a) != 1u64 || option.unwrap(args.get(a, 0)) != "recorded" {
         return Error(Exit(status: 7))
     }
-    let h = result.unwrap(task.spawn(ts, bytes 64, 41u64, child))
+    let h = task.spawn(ts, bytes 64, 41u64, child)
     if result.unwrap(task.join(take h)) != 42u64 {
         return Error(Exit(status: 8))
     }

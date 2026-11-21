@@ -33,7 +33,7 @@ pub(crate) fn prepare<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
     reached: &[Identity],
     materialized: &InstanceSet,
-    entry: &DefPath,
+    entry: Roots<'_>,
     limit: usize,
 ) -> Result<Vec<ContentHash>, NativeStop> {
     prepare_inputs(modules, reached, entry, limit, |instance| {
@@ -51,7 +51,7 @@ pub(crate) fn prepare<'m>(
 pub(crate) fn prepare_inputs<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
     reached: &[Identity],
-    entry: &DefPath,
+    entry: Roots<'_>,
     limit: usize,
     mut input: impl FnMut(&Identity) -> Result<(FuncId, ContentHash, bool), NativeStop>,
 ) -> Result<Vec<ContentHash>, NativeStop> {
@@ -77,11 +77,19 @@ pub(crate) fn prepare_inputs<'m>(
             }
         }
     }
-    let root = *originals
-        .iter()
-        .find(|(k, _)| &k.definition == entry)
-        .unwrap()
-        .1;
+    let roots = match entry {
+        Roots::Entry(entry) => vec![
+            *originals
+                .iter()
+                .find(|(k, _)| &k.definition == entry)
+                .unwrap()
+                .1,
+        ],
+        // Every root is a public entry of the unit set: each walks alone, in
+        // identity order, so the variants and the originals kept are a
+        // function of the set, never of which root a program called.
+        Roots::All(roots) => roots.iter().map(|r| originals[r]).collect(),
+    };
     // The collector owns modules only during this call. Cow's source lifetime
     // remains independent of that mutable borrow.
     let body_identities = owners.clone();
@@ -91,11 +99,19 @@ pub(crate) fn prepare_inputs<'m>(
         bodies,
         owners,
         eligible,
-        root,
+        roots,
         reached.len(),
         limit,
     )?;
     Ok(body_identities)
+}
+
+/// Where the collector starts: a program's entry, or every root of a unit set
+/// that has no single entry (the separately lowered std, `std_release`).
+#[derive(Clone, Copy)]
+pub(crate) enum Roots<'a> {
+    Entry(&'a DefPath),
+    All(&'a [Identity]),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -105,7 +121,7 @@ fn collect<'m>(
     bodies: BTreeMap<ContentHash, Target>,
     owners: Vec<ContentHash>,
     eligible: BTreeSet<Identity>,
-    root: Target,
+    roots: Vec<Target>,
     semantic_count: usize,
     limit: usize,
 ) -> Result<(), NativeStop> {
@@ -118,7 +134,12 @@ fn collect<'m>(
         owners,
         eligible,
         variants: BTreeMap::new(),
-        pending: vec![(root, BTreeMap::new())],
+        bound: BTreeMap::new(),
+        pending: roots
+            .into_iter()
+            .rev()
+            .map(|root| (root, BTreeMap::new()))
+            .collect(),
         live: BTreeSet::new(),
         semantic_count,
         limit,
@@ -130,6 +151,9 @@ fn collect<'m>(
             continue;
         }
         c.visit(target, &bindings)?;
+    }
+    if let Some(path) = std::env::var_os("HIRSEL_STD_INVENTORY") {
+        c.inventory(std::path::Path::new(&path))?;
     }
     // An original is retained exactly when an unknown call or a function value
     // still reaches it. In particular, known-only sort graphs don't emit both
@@ -161,12 +185,81 @@ struct Work<'a, 'm> {
     owners: Vec<ContentHash>,
     eligible: BTreeSet<Identity>,
     variants: BTreeMap<ContentHash, Target>,
+    /// What each variant binds, by its code identity, for the inventory.
+    bound: BTreeMap<ContentHash, Vec<Known>>,
     pending: Vec<(Target, BTreeMap<u32, Known>)>,
     live: BTreeSet<ContentHash>,
     semantic_count: usize,
     limit: usize,
 }
 impl Work<'_, '_> {
+    /// The binding-owner inventory (std-reuse S1): a JSON line per live body
+    /// with the packages its definition, its type arguments' rows and hooks,
+    /// and each callable it binds come from, appended to `path`.
+    fn inventory(&self, path: &std::path::Path) -> Result<(), NativeStop> {
+        use std::io::Write as _;
+        fn package(definition: &DefPath) -> String {
+            definition.0.package.name.clone()
+        }
+        // The packages a unit's instance reads through its type arguments: each
+        // row's shape name (a builtin row names none) and each hook.
+        let closures = |unit: usize, f: FuncId| -> BTreeSet<String> {
+            let m = &self.modules[unit];
+            let key = &m.instances[m.functions[f.index()].instance.index()];
+            let mut packages = BTreeSet::new();
+            for &t in &key.arguments {
+                for row in m.closure(t).rows {
+                    if let Some((p, _)) = row.shape.name.split_once('@') {
+                        packages.insert(p.to_owned());
+                    }
+                    for hook in row.hooks.iter().flatten() {
+                        packages.insert(package(&hook.definition));
+                    }
+                }
+            }
+            packages
+        };
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        for (unit, m) in self.modules.iter().enumerate() {
+            for (i, function) in m.functions.iter().enumerate() {
+                let f = FuncId(i as u32);
+                let code = m.code_identity(f);
+                if function.body.is_none() || !self.live.contains(&code) {
+                    continue;
+                }
+                let identity = m.identity(function.instance);
+                let bound = self.bound.get(&code).map(|known| {
+                    known
+                        .iter()
+                        .map(|k| {
+                            let t = self.bodies[&k.code];
+                            let mut packages = closures(t.unit, t.function);
+                            packages.insert(package(&k.instance.definition));
+                            serde_json::json!({
+                                "definition": k.instance.definition.to_string(),
+                                "packages": packages,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                });
+                let row = serde_json::json!({
+                    "symbol": hirsel_core_ir::symbol(code),
+                    "definition": identity.definition.to_string(),
+                    "package": package(&identity.definition),
+                    "dictionaries": identity.dictionaries.len(),
+                    "closures": identity.closures.len(),
+                    "closure_packages": closures(unit, f),
+                    "variant": m.code_variants.contains_key(&f),
+                    "bound": bound,
+                });
+                writeln!(out, "{row}")?;
+            }
+        }
+        Ok(())
+    }
     /// The semantic instance of `f` in `unit`.
     fn identity(&self, unit: usize, f: FuncId) -> Identity {
         let m = &self.modules[unit];
@@ -223,6 +316,8 @@ impl Work<'_, '_> {
         self.modules.push(Cow::Owned(module));
         self.owners.push(self.owners[base.unit]);
         self.variants.insert(hash, target);
+        self.bound
+            .insert(hash, bindings.values().cloned().collect());
         self.pending.push((target, bindings));
         Ok(target)
     }
@@ -372,7 +467,13 @@ impl Work<'_, '_> {
             if m.code_variants.contains_key(&f) {
                 continue;
             }
-            let t = self.originals[&m.identity(m.functions[f.index()].instance)];
+            // A callee in a separately lowered std is not a unit here.
+            let Some(&t) = self
+                .originals
+                .get(&m.identity(m.functions[f.index()].instance))
+            else {
+                continue;
+            };
             self.pending.push((t, BTreeMap::new()));
         }
         Ok(())
@@ -461,10 +562,10 @@ b0(v0: ptr, v1: u64):
             bodies,
             vec![ContentHash::default()],
             eligible,
-            Target {
+            vec![Target {
                 unit: 0,
                 function: FuncId(0),
-            },
+            }],
             4,
             limit,
         )?;
@@ -548,7 +649,14 @@ fn root() -> u64 { let delta:u64=1; forward(41u64, fn(x:u64)->u64 {x+delta}) }
             .iter()
             .map(|k| Cow::Borrowed(reached.materialized.get(k).ir().unwrap()))
             .collect();
-        prepare(&mut modules, keys, &reached.materialized, &entry, 64).unwrap();
+        prepare(
+            &mut modules,
+            keys,
+            &reached.materialized,
+            Roots::Entry(&entry),
+            64,
+        )
+        .unwrap();
         assert_eq!(
             modules.len(),
             keys.len() + 2,
@@ -597,7 +705,14 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
                 .iter()
                 .flat_map(|m| m.code_variants.values().copied())
                 .collect();
-            prepare(&mut modules, keys, &reached.materialized, &entry, 64).unwrap();
+            prepare(
+                &mut modules,
+                keys,
+                &reached.materialized,
+                Roots::Entry(&entry),
+                64,
+            )
+            .unwrap();
             assert_eq!(
                 modules
                     .iter()

@@ -11,7 +11,7 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     let mut total: u32 = 0
     for _ in 0 .. warmup + iterations {
         let mut primes: Bytes = list.new()
-        helper.mem(list.fill(mut primes, n + 1, 1))?
+        list.fill(mut primes, n + 1, 1)
         primes[0] = 0
         primes[1] = 0
         let fn64: f64 = float.from_int(n)

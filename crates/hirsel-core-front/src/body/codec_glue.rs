@@ -12,11 +12,11 @@ use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 pub enum CodecOp {
     /// `() -> Codec[T]`: the maker, the tuple row's codec hook.
     Of,
-    /// The encoder `fn(T, mut Bytes) -> Result[(), Capacity]`.
+    /// The encoder `fn(T, mut Bytes) -> Result[(), EncodeError]`.
     Encode,
-    /// The decoder `fn(Bytes, mut u64) -> Result[T, Stop]`.
+    /// The decoder `fn(Bytes, mut u64) -> Result[T, DecodeError]`.
     Decode,
-    /// The describer `fn(mut Schema, Codec[T]) -> Result[(), Capacity]`.
+    /// The describer `fn(mut Schema, Codec[T]) -> Result[(), EncodeError]`.
     Describe,
 }
 const OPS: [(CodecOp, &str); 4] = [
@@ -27,8 +27,8 @@ const OPS: [(CodecOp, &str); 4] = [
 ];
 
 /// The rows a tuple codec's operations read, which are its key's arguments in this
-/// order: the tuple, `Codec[T]`, `Result[T, Stop]`, `Result[(), Capacity]`, `Bytes`,
-/// `Schema`, then per component its row, `Codec` and `Result[_, Stop]`. Naming the
+/// order: the tuple, `Codec[T]`, `Result[T, DecodeError]`, `Result[(), EncodeError]`, `Bytes`,
+/// `Schema`, then per component its row, `Codec` and `Result[_, DecodeError]`. Naming the
 /// components keeps their types in the key's closures, where a field alone would not
 /// (a String field is the `seq u8` a Bytes field is).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -529,14 +529,14 @@ impl Derive<'_> {
         let ShapeBody::Variant(cases) = &self.module.types[rows.decoded.index()].body else {
             return Err("the tuple codec's decode result is not a variant".into());
         };
-        let Some(FieldTy::Inline(stop)) = cases
+        let Some(FieldTy::Inline(error)) = cases
             .get(1)
             .and_then(|c| c.fields.first())
             .map(|f| f.ty.clone())
         else {
-            return Err("the tuple codec's decode refusal is not a Stop".into());
+            return Err("the tuple codec's decode refusal is not a DecodeError".into());
         };
-        let stop = TypeId(stop.0);
+        let error = TypeId(error.0);
         let ShapeBody::Record(fields) = self.module.types[rows.tuple.index()].body.clone() else {
             return Err("the tuple codec's row is not a tuple".into());
         };
@@ -599,15 +599,15 @@ impl Derive<'_> {
                 c,
                 AddressBase::Address(result),
                 &[Step::CaseField { case: 1, field: 0 }],
-                PlaceTy::Declared(stop),
+                PlaceTy::Declared(error),
             );
             let from = Self::address(
                 c,
                 AddressBase::Address(slot),
                 &[Step::CaseField { case: 1, field: 0 }],
-                PlaceTy::Declared(stop),
+                PlaceTy::Declared(error),
             );
-            let bytes = c.field_size(&FieldTy::Inline(TypeRef(stop.0)));
+            let bytes = c.field_size(&FieldTy::Inline(TypeRef(error.0)));
             c.inst(Inst::Copy { to, from, bytes });
             Self::returns(c);
             c.start(next);
@@ -702,7 +702,7 @@ impl Derive<'_> {
         Self::returns(c);
         Ok(())
     }
-    /// std's `schema_tuple(mut s: Schema, n: u64) -> Result[(), Capacity]`, as a row.
+    /// std's `schema_tuple(mut s: Schema, n: u64) -> Result[(), EncodeError]`, as a row.
     fn schema_tuple(&mut self) -> (FuncId, SigId) {
         let mut definition = self.of.clone();
         definition.0.name = "schema_tuple".into();

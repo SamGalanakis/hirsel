@@ -4,7 +4,7 @@ TLS is a provider operation. The provider performs the cryptography: the OS prov
 uses rustls. A program never handles keys, records or certificates. A program asks for a
 client handshake on a connected socket and gets back the two halves of an encrypted
 stream. Those halves are the `ReadHalf` and `WriteHalf` of [Net](net.md). After the
-handshake, `net.recv_bounded` and `net.send_pair` move plaintext, so code written over the
+handshake, `host.recv_bounded` and `host.send_pair` move plaintext, so code written over the
 halves works over TCP and over TLS without change.
 
 A `Secret` is a credential that program code cannot read. Its bytes are held by the run,
@@ -66,7 +66,7 @@ pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[St
 
 The following checks run in order, before issue. Each refuses with no host effect.
 
-1. `s` was not made by `net.connect`: `Denied`. A socket from `accept` cannot be the
+1. `s` was not made by `host.connect`: `Denied`. A socket from `accept` cannot be the
    client side of a handshake.
 2. `name` is invalid: `Tls(Name)`.
 3. `alpn` breaks its limits: `Tls(Alpn)`.
@@ -98,14 +98,14 @@ The halves from `tls.connect` are ordinary halves. The rules of
 [NET-1](net.md#net-1-socket-operation-declarations) and
 [NET-7](net.md#net-7-owned-connections) hold for them, with the following meanings:
 
-- **Receive.** `net.recv_bounded` appends decrypted plaintext only: at most
+- **Receive.** `host.recv_bounded` appends decrypted plaintext only: at most
   `max_receive` bytes, and never more than the caller's spare capacity. If plaintext is
   already decrypted and buffered, the receive completes without socket I/O. Otherwise it
   waits until a whole record has arrived, so a readable socket can still leave it
   pending. A delivery of 0 bytes means the peer sent `close_notify`. If the transport
   ends without `close_notify`, the receive gives `Tls(Truncated)` (RFC 8446 §6.1). After
   a `Tls` failure, every later receive on that half gives the same failure.
-- **Send.** `net.send_pair` returns the number of plaintext bytes the TLS stream
+- **Send.** `host.send_pair` returns the number of plaintext bytes the TLS stream
   committed. A byte is committed when the session has taken it into a record. The
   session sends the ciphertext of committed bytes before the ciphertext of any later
   send, and before `close_notify`. `Ok(n)` means `n` bytes are committed. If the deadline
@@ -299,6 +299,15 @@ sent, or the operation fails. These checks run before issue, each with no effect
 The provider receives the bytes from run-owned memory. They never pass through program
 memory or a buffer that the program can see.
 
+**Virtual streams.** A TLS half of a `Net` made by `provide.net` ([core](core.md#provide))
+was verified by its server, not by a trust rule the run was granted, so it never satisfies
+a granted secret: `send_secret` on it gives `Denied` before issue for a `Secret` from an
+entry grant, whatever its patterns, and the server sees nothing. A `Secret` made by
+`secret.seal` passes the two checks above as usual. Its server receives the operation as
+`SendSecret` with the `Secret` itself, narrowed to the stream's verified name, and never its
+bytes (`provide.secret`). A server that forwards it to a real `tls.send_secret` passes that
+real stream's checks again.
+
 Failure after a partial send is different from `send_pair`. On `TimedOut`, `Aborted` or
 a transport error after some bytes were committed, the half is **spent**: every later
 send on it gives `Reset`. The reason is that the caller cannot resume in the middle of
@@ -316,7 +325,8 @@ memory. The tag, or the constant-time verdict for exactly 32 tag bytes, is a del
 that passes the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), and the
 key never does. A secret's `to` text takes an optional use word after its patterns: `mac`
 permits both operations, and `verify` permits only verification. A list may then have no
-patterns. `narrow` intersects uses, with `mac` and `verify` giving `verify`. Without the
+patterns. The words `mac` and `verify` are reserved in this text and cannot name DNS destinations.
+`narrow` intersects uses, with `mac` and `verify` giving `verify`. Without the
 use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
 signing oracle wherever it is sent, which is why the use must be granted. A signature
 sink with another algorithm follows the same rule.
@@ -355,10 +365,10 @@ and L (more than three).
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
 | **T1** OS TLS provider | L | — | core declarations (`tls.connect`, `Trust`, `Handshake`, `TlsFailure`, the `NetError.Tls` case); `TLS_CONNECT` and TLS halves in `os.rs` and `os_net.rs` over rustls with `ring` and `rustls-native-certs` (Buck third-party fixups); the `Tls` rule in grant parsing, `net.narrow` and the C rule struct; the C entry; the LLVM and Cranelift lowering of `tls.connect` | TL1–TL8 |
-| **T2** recordings | M | T1 | in the recording build, `TLS_CONNECT` issue and delivery codecs, the TLS halves under the recorded `Net` grant, the format-4 header `Tls` rule record, credential-bearing file mode and export gate ([recording](../recording.md)) | RL3 |
+| **T2** recordings | M | T1 | in the recording build, `TLS_CONNECT` issue and delivery codecs, the TLS halves under the recorded `Net` grant, the format-5 header `Tls` rule record, credential-bearing file mode and export gate ([recording](../recording.md)) | RL3 |
 | **T3** evaluator and scripted provider | M | T1 | the evaluator's call form for tag 22; peer scripts in the scripted provider (`model_net`) with handshake results and plaintext steps | scripted TL5, TL7 |
 | **T4** Secret | M | T1, T2 | the `Secret` core type and grant kind 11, launcher sources `env:` and `file:`, `seal`, `narrow`, `render`, `SEND_SECRET` in the OS and scripted providers, its designation and grant record in a recording, the spent-half rule | TL10–TL13 |
-| **T5** HTTPS client | S | T1, T4, http-client-1439 | std `tls` api page; `https` connect = `net.connect`, then `tls.connect` offering `http/1.1`, then the plain client's reader and writer over the halves; `Secret` header values written through `send_secret`; `[secret]` in request and error renders | TL10 (the client's case), and one HTTPS round trip in the existing http client harness |
+| **T5** HTTPS client | S | T1, T4, http-client-1439 | std `tls` api page; `https` connect = `host.connect`, then `tls.connect` offering `http/1.1`, then the plain client's reader and writer over the halves; `Secret` header values written through `send_secret`; `[secret]` in request and error renders | TL10 (the client's case), and one HTTPS round trip in the existing http client harness |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5 is last.

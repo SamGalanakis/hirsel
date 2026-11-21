@@ -9,8 +9,8 @@ fn work(take s: In) waits {
     result.unwrap(channel.send(tx, acc))
 }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(tx: take tx, out: out), work))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, In(tx: take tx, out: out), work)
     let mut polls: u64 = 0
     let got = loop {
         match channel.try_receive(rx) {

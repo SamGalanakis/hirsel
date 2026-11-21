@@ -1,5 +1,5 @@
 // expect: accept
-// expect: run item_refuses_before_growth() = 1608
+// expect: run item_refuses_before_growth() = 1608 used 32
 // expect: run failed_cleanup() = fail Division trace 9,2,1
 // expect: run transfer(false) = 83 copies 80,0
 // expect: run transfer(true) = 83 copies 80,0
@@ -18,30 +18,30 @@ type Pair: key + ordered {
     b: u64
 }
 
-fn item() -> Result[Pair, Capacity] {
-    let _: List[u64] = list.with_capacity(2)?
-    Ok(Pair(a: 1, b: 2))
+fn item() -> Pair {
+    let _: List[u64] = list.with_capacity(2)
+    Pair(a: 1, b: 2)
 }
 
-fn push_item(mut full: List[Pair]) -> Result[(), Capacity] {
-    match list.push(mut full, item()?) {
-        Ok(()) => Ok(()),
-        Error((why, _)) => Error(why),
-    }
+fn push_item(mut full: List[Pair]) {
+    list.push(mut full, item())
 }
 
 fn item_refuses_before_growth() -> u64 {
     // Two 16-byte elements fill the 32-byte backing block. Only eight bytes
     // remain for item's first admission. Growth would request 4 * 16.
-    let result = bound bytes 40 {
-        let mut full: List[Pair] = result.unwrap(list.with_capacity(2))
-        result.unwrap(list.push(mut full, Pair(a: 3, b: 4)))
-        result.unwrap(list.push(mut full, Pair(a: 5, b: 6)))
-        push_item(mut full)
-    }
-    match result {
-        Ok(Error(why)) => why.requested * 100 + why.available,
-        _ => 0,
+    let result = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 40 {
+            let mut full: List[Pair] = list.with_capacity(2)
+            list.push(mut full, Pair(a: 3, b: 4))
+            list.push(mut full, Pair(a: 5, b: 6))
+            push_item(mut full)
+            0
+        }
+    })
+    match caught(take result) {
+        Some(why) => why.requested * 100 + why.available,
+        None => 0,
     }
 }
 
@@ -84,8 +84,8 @@ fn replacement_value(fails: bool) -> Envelope {
 }
 
 fn replacement(fails: bool, index: u64) -> u64 {
-    let mut xs: List[Envelope] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut xs, Envelope(part: new_part(1, 1))))
+    let mut xs: List[Envelope] = list.with_capacity(1)
+    list.push(mut xs, Envelope(part: new_part(1, 1)))
     let old = list.set(mut xs, index, replacement_value(fails))
     old.part.id * 10 + xs[0].part.id
 }
@@ -109,7 +109,7 @@ fn nested_return() -> u64 {
 fn send_or_return(tx: Sender[List[u64]], send: bool) -> List[u64] {
     let payload = {
         let mut values: List[u64] = list.new()
-        result.unwrap(list.fill(mut values, 10, 83u64))
+        list.fill(mut values, 10, 83u64)
         take values
     }
     if send {
@@ -120,7 +120,7 @@ fn send_or_return(tx: Sender[List[u64]], send: bool) -> List[u64] {
 }
 
 fn transfer(send: bool) -> u64 {
-    let (tx, rx): (Sender[List[u64]], Receiver[List[u64]]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[List[u64]], Receiver[List[u64]]) = channel.new(1)
     let returned = send_or_return(tx, send)
     if send {
         let received = result.unwrap(channel.try_receive(rx))
@@ -158,26 +158,24 @@ fn result_writes_once(n: u64) -> u64 {
 }
 
 fn spare_slot_writes_once(n: u64) -> u64 {
-    let mut xs: List[Eight] = result.unwrap(list.with_capacity(1))
-    match list.push(mut xs, eight(n)) {
-        Ok(()) => xs[0].a + 2 * xs[0].b + 3 * xs[0].c + 4 * xs[0].d + 5 * xs[0].e + 6 * xs[0].f + 7 * xs[0].g + 8 * xs[0].h,
-        Error(_) => 0,
-    }
+    let mut xs: List[Eight] = list.with_capacity(1)
+    list.push(mut xs, eight(n))
+    xs[0].a + 2 * xs[0].b + 3 * xs[0].c + 4 * xs[0].d + 5 * xs[0].e + 6 * xs[0].f + 7 * xs[0].g + 8 * xs[0].h
 }
 
 fn collection_order() -> u64 {
     let mut d: Deque[Pair] = deque.new()
-    result.unwrap(deque.push_back(mut d, Pair(a: 9, b: 0)))
+    deque.push_back(mut d, Pair(a: 9, b: 0))
     let _ = deque.pop_front(mut d)
-    result.unwrap(deque.push_front(mut d, Pair(a: 2, b: 0)))
-    result.unwrap(deque.push_front(mut d, Pair(a: 1, b: 0)))
+    deque.push_front(mut d, Pair(a: 2, b: 0))
+    deque.push_front(mut d, Pair(a: 1, b: 0))
     let first = option.unwrap(deque.pop_front(mut d))
     let second = option.unwrap(deque.pop_front(mut d))
     let mut h: Heap[Pair] = heap.new()
-    result.unwrap(heap.push(mut h, Pair(a: 4, b: 0)))
-    result.unwrap(heap.push(mut h, Pair(a: 2, b: 0)))
-    result.unwrap(heap.push(mut h, Pair(a: 3, b: 0)))
-    result.unwrap(heap.push(mut h, Pair(a: 1, b: 0)))
+    heap.push(mut h, Pair(a: 4, b: 0))
+    heap.push(mut h, Pair(a: 2, b: 0))
+    heap.push(mut h, Pair(a: 3, b: 0))
+    heap.push(mut h, Pair(a: 1, b: 0))
     let mut order = first.a * 10 + second.a
     while heap.len(h) != 0 {
         let next = option.unwrap(heap.pop(mut h))
@@ -188,9 +186,25 @@ fn collection_order() -> u64 {
 
 fn map_values(fails: bool) -> u64 {
     let mut m: Map[Pair, Envelope] = map.new()
-    result.unwrap(map.reserve(mut m, 2))
-    result.unwrap(map.insert(mut m, Pair(a: 17, b: 19), Envelope(part: new_part(1, 1))))
-    result.unwrap(map.insert(mut m, Pair(a: 17, b: 19), replacement_value(fails)))
+    map.reserve(mut m, 2)
+    map.insert(mut m, Pair(a: 17, b: 19), Envelope(part: new_part(1, 1)))
+    map.insert(mut m, Pair(a: 17, b: 19), replacement_value(fails))
     let got = option.unwrap(map.get(m, Pair(a: 17, b: 19)))
     map.len(m) * 10 + got.part.id
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

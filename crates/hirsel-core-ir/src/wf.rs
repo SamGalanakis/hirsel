@@ -87,19 +87,19 @@ pub fn module(m: &Module) -> R {
             }
         }
         if let Some(f) = t.clone {
-            // A core own row's clone body: (from, to) -> (requested, available).
+            // A core own row's clone body: (from, to) -> (); a refusal raises.
             let sig = m
                 .functions
                 .get(f.0 as usize)
                 .and_then(|f| m.signatures.get(f.signature.index()));
             let want = Signature {
                 params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-                results: vec![Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
+                results: vec![],
                 dest: None,
                 never: false,
             };
             need(sig == Some(&want), || {
-                format!("t{i}: clone body is not (ptr, ptr) -> (u64, u64)")
+                format!("t{i}: clone body is not (ptr, ptr) -> ()")
             })?;
             need(
                 t.repr == hirsel_core_layout::Repr::Own && core_fn(m, f.0),
@@ -532,8 +532,18 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             }
             Terminator::Raise { cause, cleanup } => {
                 c.fail(*cleanup, true)?;
-                if let RaiseCause::Fail(a) = cause {
-                    c.place(*a)?;
+                match cause {
+                    RaiseCause::Fail(a) => {
+                        c.place(*a)?;
+                    }
+                    RaiseCause::Capacity {
+                        requested,
+                        available,
+                    } => {
+                        c.is(*requested, Ty::Scalar(Scalar::U64))?;
+                        c.is(*available, Ty::Scalar(Scalar::U64))?;
+                    }
+                    RaiseCause::Unwrap | RaiseCause::Bounds => {}
                 }
             }
             Terminator::Propagate | Terminator::Unreachable => {}
@@ -1152,7 +1162,6 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             overflow,
             size,
             align,
-            fail,
         } => {
             c.def(result)?;
             c.def(available)?;
@@ -1230,8 +1239,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             }
             need(align.is_power_of_two(), || {
                 "alignment is not a power of two".into()
-            })?;
-            c.fail(fail, true)
+            })
         }
         Inst::Grow {
             result,
@@ -1244,7 +1252,6 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             capacity,
             moved,
             refund,
-            fail,
         } => {
             c.def(result)?;
             c.def(available)?;
@@ -1268,8 +1275,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             })?;
             need(align.is_power_of_two(), || {
                 "alignment is not a power of two".into()
-            })?;
-            c.fail(fail, true)
+            })
         }
         Inst::Free { block, charge } => {
             c.is(block, Ty::Ptr)?;

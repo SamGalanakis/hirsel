@@ -8,10 +8,10 @@ pub type Account: send {
 }
 
 // A codec: encode appends one value; decode reads one value at `at` and advances it.
-// Decode is Ok(None) for malformed bytes and Error(c) only when an allocation is refused.
+// Decode returns None for malformed bytes. Refused allocations raise Capacity.
 pub type Codec[T] {
-    encode: fn(T, mut Bytes) -> Result[(), Capacity],
-    decode: fn(Bytes, mut u64) -> Result[Option[T], Capacity]
+    encode: fn(T, mut Bytes),
+    decode: fn(Bytes, mut u64) -> Option[T]
 }
 
 pub opaque type Table[T] {
@@ -34,10 +34,17 @@ pub fn get[T](t: Table[T], k: u64) -> Option[View[T]] in t {
 // Installs v at k, replacing and dropping any earlier row. On Capacity the table is
 // unchanged and the row comes back.
 pub fn put[T](mut t: Table[T], k: u64, take v: T) -> Result[(), (Capacity, T)] {
-    match map.insert(mut t.rows, k, take v) {
-        Ok(()) => Ok(()),
-        Error((c, (_, take back))) => Error((c, take back)),
+    let absent = match map.get(t.rows, k) {
+        None => true,
+        Some(_) => false,
     }
+    if absent {
+        if let Error(c) = map.try_reserve(mut t.rows, 1) {
+            return Error((c, take v))
+        }
+    }
+    map.insert(mut t.rows, k, take v)
+    Ok(())
 }
 
 pub fn remove[T](mut t: Table[T], k: u64) -> Option[T] {
@@ -45,15 +52,15 @@ pub fn remove[T](mut t: Table[T], k: u64) -> Option[T] {
 }
 
 // Room for n more new keys: afterwards the next n puts of absent keys admit nothing.
-pub fn reserve[T](mut t: Table[T], n: u64) -> Result[(), Capacity] {
-    map.reserve(mut t.rows, n)
+pub fn try_reserve[T](mut t: Table[T], n: u64) -> Result[(), Capacity] {
+    map.try_reserve(mut t.rows, n)
 }
 
-pub fn encode[T](t: Table[T], v: T, mut out: Bytes) -> Result[(), Capacity] {
+pub fn encode[T](t: Table[T], v: T, mut out: Bytes) {
     (t.codec.encode)(v, mut out)
 }
 
-pub fn decode[T](t: Table[T], b: Bytes, mut at: u64) -> Result[Option[T], Capacity] {
+pub fn decode[T](t: Table[T], b: Bytes, mut at: u64) -> Option[T] {
     (t.codec.decode)(b, mut at)
 }
 
@@ -72,35 +79,35 @@ fn get_u64(b: Bytes, mut at: u64) -> Option[u64] {
 
 // Layout: id, balance (two's complement), owner byte length, owner UTF-8 bytes;
 // each integer is eight little-endian bytes.
-fn encode_account(a: Account, mut out: Bytes) -> Result[(), Capacity] {
-    list.put_word_le(mut out, a.id)?
+fn encode_account(a: Account, mut out: Bytes) {
+    list.put_word_le(mut out, a.id)
     let balance: u64 = int.truncate(a.balance)
-    list.put_word_le(mut out, balance)?
-    list.put_word_le(mut out, string.byte_len(a.owner))?
+    list.put_word_le(mut out, balance)
+    list.put_word_le(mut out, string.byte_len(a.owner))
     list.append(mut out, string.as_bytes(a.owner))
 }
 
-fn decode_account(b: Bytes, mut at: u64) -> Result[Option[Account], Capacity] {
+fn decode_account(b: Bytes, mut at: u64) -> Option[Account] {
     let mut p = at
     let Some(id) = get_u64(b, mut p) else {
-        return Ok(None)
+        return None
     }
     let Some(bal) = get_u64(b, mut p) else {
-        return Ok(None)
+        return None
     }
     let Some(n) = get_u64(b, mut p) else {
-        return Ok(None)
+        return None
     }
     // p <= len(b) here, so the subtraction cannot overflow; `p + n > len` could.
     if n > list.len(b) - p {
-        return Ok(None)
+        return None
     }
-    let mut raw: Bytes = list.with_capacity(n)?
-    list.append(mut raw, list.slice(b, p, p + n))?
+    let mut raw: Bytes = list.with_capacity(n)
+    list.append(mut raw, list.slice(b, p, p + n))
     let owner = match string.from_utf8(take raw) {
         Ok(take s) => s,
-        Error(_) => return Ok(None),
+        Error(_) => return None,
     }
     at = p + n
-    Ok(Some(Account(id: id, owner: take owner, balance: int.truncate(bal))))
+    Some(Account(id, owner: take owner, balance: int.truncate(bal)))
 }

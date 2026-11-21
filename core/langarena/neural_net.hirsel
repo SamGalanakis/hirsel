@@ -23,14 +23,12 @@ type Network: shareable {
 }
 
 fn push[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
-    match list.push(mut xs, take x) {
-        Ok(()) => Ok(()),
-        Error((c, take unused)) => Error(Capacity(c))
-    }
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 fn neurons(n: u64, mut g: helper.Lcg) -> Result[List[Neuron], helper.Error] {
-    let mut ns: List[Neuron] = helper.mem(list.with_capacity(n))?
+    let mut ns: List[Neuron] = list.with_capacity(n)
     for _ in 0 .. n {
         let t = helper.next_float(mut g, 1.0) * 2.0 - 1.0
         push(mut ns, Neuron(threshold: t, prev_threshold: t, output: 0.0, error: 0.0, incoming: list.new(), outgoing: list.new()))?
@@ -116,7 +114,7 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
         }
     }
     // Preserve upstream checksum evaluation on a deep copy of the trained state.
-    let mut net_copy: Network = helper.mem(clone(n))?
+    let mut net_copy: Network = clone(n)
     let mut values: List[f64] = list.new()
     feed(mut net_copy, 0.0, 0.0)
     push(mut values, net_copy.output[0].output)?

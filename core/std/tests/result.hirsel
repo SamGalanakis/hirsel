@@ -25,19 +25,3 @@ fn map_err_ok() -> u64 {
         e + 1
     }))
 }
-
-// The Capacity is kept and the value it carried is dropped.
-// expect: run capacity_only_error() = 8
-fn capacity_only_error() -> u64 {
-    let r: Result[u64, (Capacity, u64)] = Error((Capacity(requested: 8, available: 0), 7))
-    match result.capacity_only(take r) {
-        Ok(_) => 0,
-        Error(c) => c.requested,
-    }
-}
-
-// expect: run capacity_only_ok() = 6
-fn capacity_only_ok() -> u64 {
-    let r: Result[u64, (Capacity, u64)] = Ok(6)
-    result.unwrap(result.capacity_only(take r))
-}

@@ -15,8 +15,8 @@ fn total(mut xs: List[String]) -> u64 {
 
 fn total_run() -> u64 {
     let mut xs: List[String] = list.new()
-    result.unwrap(list.push(mut xs, "abc"))
-    result.unwrap(list.push(mut xs, "def"))
+    list.push(mut xs, "abc")
+    list.push(mut xs, "def")
     total(mut xs)
 }
 

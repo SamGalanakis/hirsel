@@ -1,7 +1,7 @@
 // test-of: core.map
 // test-reason: private slot state is required to prove moved entries are not cleaned twice
 fn word(i: u64) -> String {
-    result.unwrap(string.from(match i {
+    string.from(match i {
         0 => "a",
         1 => "b",
         2 => "c",
@@ -19,7 +19,7 @@ fn word(i: u64) -> String {
         14 => "o",
         15 => "p",
         _ => "q"
-    }))
+    })
 }
 
 // Removing eight entries and filling the table forces compact before key16.
@@ -28,7 +28,7 @@ fn word(i: u64) -> String {
 fn drained_after_compact() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 9 {
-        result.unwrap(map.insert(mut m, i, word(i)))
+        map.insert(mut m, i, word(i))
     }
     let _ = map.remove(mut m, 0)
     let _ = map.remove(mut m, 2)
@@ -39,9 +39,9 @@ fn drained_after_compact() -> u64 {
     let _ = map.remove(mut m, 5)
     let _ = map.remove(mut m, 7)
     for i in 9u64 .. 16 {
-        result.unwrap(map.insert(mut m, i, word(i)))
+        map.insert(mut m, i, word(i))
     }
-    result.unwrap(map.insert(mut m, 16, word(16)))
+    map.insert(mut m, 16, word(16))
     let mut count: u64 = 0
     for take (k, v) in m {
         if k != count + 8 || v != word(k) {
@@ -59,7 +59,7 @@ fn drained_after_compact() -> u64 {
 fn drained_past_dead_slots() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 4 {
-        result.unwrap(map.insert(mut m, i, word(i)))
+        map.insert(mut m, i, word(i))
     }
     let _ = map.remove(mut m, 0)
     let _ = map.remove(mut m, 2)
@@ -78,7 +78,7 @@ fn drained_past_dead_slots() -> u64 {
 fn early_break_cleans_tail() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 4 {
-        result.unwrap(map.insert(mut m, i, word(i)))
+        map.insert(mut m, i, word(i))
     }
     let mut count: u64 = 0
     for take (k, v) in m {
@@ -94,7 +94,7 @@ fn early_break_cleans_tail() -> u64 {
 fn failing_body_cleans_tail() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 4 {
-        result.unwrap(map.insert(mut m, i, word(i)))
+        map.insert(mut m, i, word(i))
     }
     let mut count: u64 = 0
     for take (k, v) in m {
@@ -108,7 +108,7 @@ fn failing_body_cleans_tail() -> u64 {
 // expect: run narrow_map_keys_use_value_parameters() = 42
 fn narrow_map_keys_use_value_parameters() -> u64 {
     let mut counts: Map[u32, u64] = map.new()
-    result.unwrap(map.insert(mut counts, 5u32, 42u64))
+    map.insert(mut counts, 5u32, 42u64)
     match map.get(counts, 5u32) {
         Some(value) => value,
         None => 0,
@@ -127,27 +127,51 @@ fn update_or_insert_once() -> bool {
             value += 1
             value
         }
-        let first = result.unwrap(map.update_or_insert(mut m, 5u64, 7u64, bump))
-        let second = result.unwrap(map.update_or_insert(mut m, 5u64, 50u64, bump))
+        let first = map.update_or_insert(mut m, 5u64, 7u64, bump)
+        let second = map.update_or_insert(mut m, 5u64, 50u64, bump)
         (first, second)
     }
     let saved = option.unwrap(map.get(m, 5u64))
     first == 8 && second == 9 && saved == 9 && calls == 2 && map.len(m) == 1
 }
 
-// Admission refusal returns both owned inputs and skips the callback.
+// Admission is refused before the callback runs: the failure is the refused
+// Capacity, never the callback's Unwrap.
 // expect: run update_or_insert_refused() = true
 fn update_or_insert_refused() -> bool {
-    result.unwrap(bound bytes 0 {
-        let mut m: Map[String, String] = map.new()
-        let mut called = false
-        let response = map.update_or_insert(mut m, "key", "value", scoped fn(mut value: String) {
-            called = true
-            value = "changed"
-        })
-        match take response {
-            Error((c, (key, value))) => c.available == 0 && key == "key" && value == "value" && !called && map.len(m) == 0,
-            Ok(()) => false,
+    match refusal(isolate(fn() -> Result[(), Capacity] {
+        bound bytes 0 {
+            let mut m: Map[String, String] = map.new()
+            map.update_or_insert(mut m, "key", "value", scoped fn(mut value: String) {
+                let none: Option[u64] = None
+                let _ = option.unwrap(none)
+            })
         }
-    })
+    })) {
+        Some(c) => c.available == 0,
+        None => false,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

@@ -5,19 +5,17 @@ fn build_tree(depth: u64, mut seed: u32, mut count: u32) -> Result[Tree, Capacit
     count += 1
     if depth == 1 {
         let size: u64 = int.widen(next_random(mut seed) % 10 + 1)
-        let bought: Result[List[Option[Box[Tree]]], Capacity] = list.with_capacity(size)
-        let mut leaves = bought?
+        let mut leaves: List[Option[Box[Tree]]] = list.with_capacity(size)
         for _ in 0 .. size {
             let leaf: Option[Box[Tree]] = None
-            result.capacity_only(list.push(mut leaves, take leaf))?
+            list.push(mut leaves, take leaf)
         }
         return Ok(Leaf(take leaves))
     }
-    let branch_list: Result[List[Tree], Capacity] = list.with_capacity(4)
-    let mut branches = branch_list?
+    let mut branches: List[Tree] = list.with_capacity(4)
     for _ in 0u64 .. 4 {
         let child = build_tree(depth - 1, mut seed, mut count)?
-        result.capacity_only(list.push(mut branches, take child))?
+        list.push(mut branches, take child)
     }
     Ok(Branch(take branches))
 }
@@ -26,10 +24,10 @@ fn next_random(mut seed: u32) -> u32 {
     small.next_random(mut seed)
 }
 
-pub fn storage() -> Result[u32, Capacity] {
+pub fn storage(depth: u64) -> Result[u32, Capacity] {
     let mut count = 0u32
     let mut seed = 74755u32
-    let tree = build_tree(7, mut seed, mut count)?
+    let tree = build_tree(depth, mut seed, mut count)?
     Ok(count)
 }
 
@@ -73,17 +71,17 @@ fn move_disks(mut towers: Towers, n: u64, from: u64, to: u64) -> bool {
     move_disks(mut towers, n - 1, from, other) && move_disks(mut towers, 1, from, to) && move_disks(mut towers, n - 1, other, to)
 }
 
-pub fn towers_benchmark() -> Result[u32, Capacity] {
+pub fn towers_benchmark(count: u64) -> Result[u32, Capacity] {
     let mut towers = Towers(piles:[None, None, None], moves: 0)
-    let mut disks = 14u64
+    let mut disks = count + 1
     while disks > 0 {
         disks -= 1
-        let disk = result.capacity_only(box.new(Disk(size: disks, next: None)))?
+        let disk = box.new(Disk(size: disks, next: None))
         if !push(mut towers, 0, take disk) {
             return Ok(0)
         }
     }
-    if move_disks(mut towers, 13, 0, 1) {
+    if move_disks(mut towers, count, 0, 1) {
         Ok(towers.moves)
     } else {
         Ok(0)

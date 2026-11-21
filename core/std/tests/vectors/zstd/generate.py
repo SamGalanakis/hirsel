@@ -60,9 +60,9 @@ def refresh():
 
 
 def literal(hex_bytes):
-    return 'result.unwrap(b"' + "".join(
+    return 'b"' + "".join(
         fr"\x{hex_bytes[at:at + 2]}" for at in range(0, len(hex_bytes), 2)
-    ) + '")'
+    ) + '"'
 
 
 def emit():
@@ -71,12 +71,12 @@ def emit():
         print(f"fn {name}() -> List[Bytes] {{")
         print("    let mut items: List[Bytes] = list.new()")
         for value in corpus[name]:
-            print(f"    result.unwrap(list.push(mut items, {literal(value)}))")
+            print(f"    list.push(mut items, {literal(value)})")
         print("    take items\n}")
     print("fn references() -> List[(u64, u64, Bytes)] {")
     print("    let mut items: List[(u64, u64, Bytes)] = list.new()")
     for original, dictionary, packed in corpus["frames"]:
-        print(f"    result.unwrap(list.push(mut items, ({original}u64, {dictionary}u64, {literal(packed)})))")
+        print(f"    list.push(mut items, ({original}u64, {dictionary}u64, {literal(packed)}))")
     print("    take items\n}")
 
 

@@ -1609,17 +1609,11 @@ fn run_quiescence(dir: &std::path::Path, mode: &str, expected: &str) {
     );
 }
 
-fn quiescence_directory(law: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("hirsel-quiescence-{law}-{}", std::process::id()));
-    std::fs::create_dir(&dir).unwrap();
-    dir
-}
-
 #[test]
 fn deadlock_seals_each_live_tape_after_the_last_runnable_task() {
-    let last = quiescence_directory("last");
-    run_quiescence(&last, "last-record", "Deadlock");
-    let bytes = std::fs::read(last.join("x")).unwrap();
+    let last = tempfile::tempdir().unwrap();
+    run_quiescence(last.path(), "last-record", "Deadlock");
+    let bytes = std::fs::read(last.path().join("x")).unwrap();
     let recorded = frames(&bytes).1;
     // The opener makes a channel and spawns twice. C hands its allowance
     // back and ends. Neither of the two receives commits.
@@ -1630,13 +1624,12 @@ fn deadlock_seals_each_live_tape_after_the_last_runnable_task() {
             ending: Ending::deadlock(5),
         })
     );
-    run_quiescence(&last, "last-replay", "Deadlock");
-    std::fs::remove_dir_all(last).unwrap();
+    run_quiescence(last.path(), "last-replay", "Deadlock");
 
-    let two = quiescence_directory("two");
-    run_quiescence(&two, "two-record", "Deadlock");
-    let x = std::fs::read(two.join("x")).unwrap();
-    let y = std::fs::read(two.join("y")).unwrap();
+    let two = tempfile::tempdir().unwrap();
+    run_quiescence(two.path(), "two-record", "Deadlock");
+    let x = std::fs::read(two.path().join("x")).unwrap();
+    let y = std::fs::read(two.path().join("y")).unwrap();
     // Moving the opener to Y leaves X with no members, but seven events.
     for (bytes, events) in [(&x, 7), (&y, 0)] {
         assert_eq!(
@@ -1647,8 +1640,7 @@ fn deadlock_seals_each_live_tape_after_the_last_runnable_task() {
             }]
         );
     }
-    run_quiescence(&two, "two-replay", "Deadlock");
-    std::fs::remove_dir_all(two).unwrap();
+    run_quiescence(two.path(), "two-replay", "Deadlock");
 }
 
 #[test]
@@ -1689,8 +1681,8 @@ fn schedule_fault_child() {
 }
 
 fn replay_schedule_fault(bytes: &[u8], chooser: u8, case: &str, at: Option<u64>) {
-    let dir = quiescence_directory("fault");
-    let path = dir.join("tape");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tape");
     std::fs::write(&path, bytes).unwrap();
     let output = crate::test_process::command()
         .args([
@@ -1705,7 +1697,6 @@ fn replay_schedule_fault(bytes: &[u8], chooser: u8, case: &str, at: Option<u64>)
         .env("TAPE_FAULT_CASE", case)
         .output()
         .unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
     assert!(
         matches!(output.status.code(), Some(0 | 1 | 102)),
         "{case}: {output:?}"

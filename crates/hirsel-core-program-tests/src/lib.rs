@@ -115,6 +115,8 @@ impl Checked {
 #[cfg(test)]
 mod cases;
 #[cfg(test)]
+mod spec_tests;
+#[cfg(test)]
 mod std_seed;
 
 mod source;

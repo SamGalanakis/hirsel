@@ -19,7 +19,7 @@ for measurements.
 ```sh
 cargo run --locked --release --manifest-path bench/wire/Cargo.toml --bin wire-reference -- \
   --listen 127.0.0.1:7700 --wal /tmp/checkbox-reference.wal \
-  --per-ip-sessions 20000 --per-ip-new-principals 20000 --principal-rate 1000000000 \
+  --per-ip-sessions 20000 --principal-rate 1000000000 \
   --target x86_64-unknown-linux-gnu --n-place 1048576
 cargo run --locked --release --manifest-path bench/wire/Cargo.toml --bin wire-load -- \
   echo --samples 2000
@@ -38,7 +38,8 @@ canonical `core/programs/store/frame-vectors.json`. The Rust convergence driver
 is a smoke test until the W4c/W6 SDK harness is available. A local Rust smoke
 pass does not qualify the Node/browser `converge` acceptance.
 
-Welcome includes the launch target and `n_place`. `--n-place` is required;
+The `hirsel.2` Welcome carries the Caller, launch target and `n_place`.
+`--n-place` is required;
 `--target` defaults to the host architecture with `unknown-linux-gnu`. These
 identify the run and do not claim that the hand-written Rust registry enforces
 a Hirsel task allowance.

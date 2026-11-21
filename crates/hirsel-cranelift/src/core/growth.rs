@@ -24,7 +24,6 @@ impl Function<'_, '_, '_> {
         capacity: Value,
         moved: Value,
         refund: Value,
-        fail: Option<BlockId>,
     ) -> Result<[Value; 2]> {
         let classic = self.b.create_block();
         let refused = self.b.create_block();
@@ -116,13 +115,6 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(done, &[values[0].into(), zero.into()]);
         self.b.switch_to_block(refused);
         let room = self.b.block_params(refused)[0];
-        let status = self.c_call(
-            "hirsel_core_allocation_status",
-            &[P, P],
-            &[B],
-            &[self.context, zero],
-        )?[0];
-        self.guard(status, 6, fail)?;
         self.b.ins().jump(done, &[zero.into(), room.into()]);
         self.b.switch_to_block(done);
         Ok([self.b.block_params(done)[0], self.b.block_params(done)[1]])

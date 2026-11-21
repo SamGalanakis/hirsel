@@ -20,7 +20,7 @@ fn unhex(s: String) -> Bytes {
         } else {
             c - b'0'
         }
-        result.unwrap(list.push(mut b, hi * 16 + lo))
+        list.push(mut b, hi * 16 + lo)
         at += 2
     }
     take b
@@ -42,7 +42,7 @@ fn event(e: websocket.Event) -> u16 {
 fn first(b: Bytes, role: websocket.Role, max: u64) -> u16 {
     let mut d = websocket.decoder(role, max)
     let mut at: u64 = 0
-    event(result.unwrap(websocket.next(mut d, b, mut at)))
+    event(websocket.next(mut d, b, mut at))
 }
 
 fn payload(e: websocket.Event, expected: Bytes) -> bool {
@@ -76,7 +76,7 @@ fn control(e: websocket.Event, kind: u16, expected: Bytes) -> bool {
         _ => return false
     }
     let mut b: Bytes = list.new()
-    result.unwrap(websocket.control(c, mut b))
+    websocket.control(c, mut b)
     b == expected
 }
 
@@ -86,8 +86,8 @@ fn read_frames() -> bool {
     let b = unhex("82 07 01 02 03 04 05 06 07 82 03 03 02 01 99")
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
-    let a = payload(result.unwrap(websocket.next(mut d, b, mut at)), unhex("01 02 03 04 05 06 07")) && at == 9
-    let c = payload(result.unwrap(websocket.next(mut d, b, mut at)), unhex("03 02 01")) && at == 14
+    let a = payload(websocket.next(mut d, b, mut at), unhex("01 02 03 04 05 06 07")) && at == 9
+    let c = payload(websocket.next(mut d, b, mut at), unhex("03 02 01")) && at == 14
     a && c && first(list.slice(b, at, list.len(b)), Client, 256) == 0
 }
 
@@ -98,10 +98,10 @@ fn from_partially_read() -> bool {
     let mut d = websocket.decoder(Client, 256)
     let a = unhex("82 07 01")
     let mut at: u64 = 0
-    let partial = event(result.unwrap(websocket.next(mut d, a, mut at))) == 0 && websocket.buffered(d) == 1
+    let partial = event(websocket.next(mut d, a, mut at)) == 0 && websocket.buffered(d) == 1
     let b = unhex("02 03 04 05 06 07")
     at = 0
-    partial && payload(result.unwrap(websocket.next(mut d, b, mut at)), unhex("01 02 03 04 05 06 07")) && at == 6
+    partial && payload(websocket.next(mut d, b, mut at), unhex("01 02 03 04 05 06 07")) && at == 6
 }
 
 // Oversized length is rejected from the ten-byte header before a mask/payload.
@@ -113,55 +113,51 @@ fn length_before_reserve() -> bool {
     let refused = bound bytes 0 {
         let mut d = websocket.decoder(Server, 262144)
         let mut at: u64 = 0
-        match websocket.next(mut d, b, mut at) {
-            Ok(e) => event(take e) == 1009 && at == 10 && websocket.capacity(d) == 0,
-            Error(_) => false
-        }
+        event(websocket.next(mut d, b, mut at)) == 1009 && at == 10 && websocket.capacity(d) == 0
     }
     let c = unhex("82 ff 00 00 00 00 00 04 00 00 00 00 00 00 61 62 63")
     let partial = bound bytes 8208 {
-        let scratch: Bytes = result.unwrap(list.with_capacity(8192))
+        let scratch: Bytes = list.with_capacity(8192)
         let mut d = websocket.decoder(Server, 262144)
         let mut at: u64 = 0
-        match websocket.next(mut d, c, mut at) {
-            Ok(e) => event(take e) == 0 && websocket.buffered(d) == 3 && websocket.capacity(d) == 4 && list.capacity(scratch) == 8192,
-            Error(_) => false
-        }
+        event(websocket.next(mut d, c, mut at)) == 0 && websocket.buffered(d) == 3 && websocket.capacity(d) == 4 && list.capacity(scratch) == 8192
     }
     result.unwrap(refused) && result.unwrap(partial)
 }
 
 // A 65th payload byte needs a 128-byte allocation while the 64-byte
-// prefix is still live. Refusal leaves the cursor and the prefix unchanged.
+// prefix is still live: under 128 bytes it raises Capacity(128, 64).
 // expect: run grow_preserves_partial() = true
 fn grow_preserves_partial() -> bool {
     let mut prefix = unhex("82 c1 00 00 00 00")
     for _ in 0u64 .. 64u64 {
-        result.unwrap(list.push(mut prefix, 97u8))
+        list.push(mut prefix, 97u8)
     }
     let last = unhex("62")
-    let small = bound bytes 128u64 {
-        let mut d = websocket.decoder(Server, 256u64)
-        let mut at = 0u64
-        let got_prefix = event(result.unwrap(websocket.next(mut d, prefix, mut at))) == 0
-        at = 0u64
-        let refused = match websocket.next(mut d, last, mut at) {
-            Error(Capacity(requested: 128u64, available: 64u64)) => true,
-            _ => false,
+    let small = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 128u64 {
+            let mut d = websocket.decoder(Server, 256u64)
+            let mut at = 0u64
+            let got_prefix = event(websocket.next(mut d, prefix, mut at)) == 0
+            at = 0u64
+            got_prefix && event(websocket.next(mut d, last, mut at)) == 2
         }
-        got_prefix && refused && at == 0u64 && websocket.buffered(d) == 64u64 && websocket.capacity(d) == 64u64
+    })
+    let refused = match caught(take small) {
+        Some(c) => c.requested == 128u64 && c.available == 64u64,
+        None => false,
     }
     let enough = bound bytes 192u64 {
         let mut d = websocket.decoder(Server, 256u64)
         let mut at = 0u64
-        let got_prefix = event(result.unwrap(websocket.next(mut d, prefix, mut at))) == 0
+        let got_prefix = event(websocket.next(mut d, prefix, mut at)) == 0
         at = 0u64
         match websocket.next(mut d, last, mut at) {
-            Ok(Message(message)) => got_prefix && list.len(message) == 65u64 && list.slice(message, 0u64, 64u64) == list.slice(prefix, 6u64, 70u64) && message[64u64] == 98u8,
+            Message(message) => got_prefix && list.len(message) == 65u64 && list.slice(message, 0u64, 64u64) == list.slice(prefix, 6u64, 70u64) && message[64u64] == 98u8,
             _ => false,
         }
     }
-    result.unwrap(small) && result.unwrap(enough)
+    refused && result.unwrap(enough)
 }
 
 // RFC 6455 section 5.7 Hello, mask 37fa213d. Hand-derived masked bytes.
@@ -171,12 +167,12 @@ fn masks_both_roles() -> bool {
     let b = unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
     let mut d = websocket.decoder(Server, 256)
     let mut at: u64 = 0
-    let decoded = payload(result.unwrap(websocket.next(mut d, b, mut at)), result.unwrap(b"Hello"))
+    let decoded = payload(websocket.next(mut d, b, mut at), b"Hello")
     let mut split = websocket.decoder(Server, 256)
     at = 0
-    let partial = event(result.unwrap(websocket.next(mut split, list.slice(b, 0, 8), mut at))) == 0
+    let partial = event(websocket.next(mut split, list.slice(b, 0, 8), mut at)) == 0
     at = 0
-    decoded && partial && payload(result.unwrap(websocket.next(mut split, list.slice(b, 8, 11), mut at)), result.unwrap(b"Hello"))
+    decoded && partial && payload(websocket.next(mut split, list.slice(b, 8, 11), mut at), b"Hello")
 }
 
 // Binary fragment + Ping emits Pong work before continuation has arrived.
@@ -186,10 +182,10 @@ fn binary_ping_mid_fragments() -> bool {
     let b = unhex("02 81 00 00 00 00 61 89 81 00 00 00 00 70")
     let mut d = websocket.decoder(Server, 256)
     let mut at: u64 = 0
-    let ping = control(result.unwrap(websocket.next(mut d, b, mut at)), 9, result.unwrap(b"p")) && at == list.len(b) && websocket.buffered(d) == 1
+    let ping = control(websocket.next(mut d, b, mut at), 9, b"p") && at == list.len(b) && websocket.buffered(d) == 1
     let c = unhex("80 82 00 00 00 00 62 63")
     at = 0
-    ping && payload(result.unwrap(websocket.next(mut d, c, mut at)), result.unwrap(b"abc"))
+    ping && payload(websocket.next(mut d, c, mut at), b"abc")
 }
 
 // F16: U+20AC split across text fragments, with an intervening Ping.
@@ -199,8 +195,8 @@ fn ping_mid_fragments() -> bool {
     let b = unhex("01 01 e2 89 01 70 80 02 82 ac")
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
-    let ping = control(result.unwrap(websocket.next(mut d, b, mut at)), 9, result.unwrap(b"p")) && at == 6
-    let text = match result.unwrap(websocket.next(mut d, b, mut at)) {
+    let ping = control(websocket.next(mut d, b, mut at), 9, b"p") && at == 6
+    let text = match websocket.next(mut d, b, mut at) {
         Text(v) => v == unhex("e2 82 ac"),
         _ => false
     }
@@ -243,7 +239,7 @@ fn rejects_reserved_opcode() -> u16 {
 fn rejects_nested_data() -> u16 {
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
-    event(result.unwrap(websocket.next(mut d, unhex("02 00 82 00"), mut at)))
+    event(websocket.next(mut d, unhex("02 00 82 00"), mut at))
 }
 
 // Mutant: accept_unmasked.
@@ -273,8 +269,8 @@ fn close_validation() -> bool {
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
     let b = unhex("88 05 03 e8 62 79 65")
-    let closed = control(result.unwrap(websocket.next(mut d, b, mut at)), 8, unhex("03 e8 62 79 65"))
-    closed && event(result.unwrap(websocket.next(mut d, b, mut at))) == 65535 && first(unhex("88 00"), Client, 256) == 8 && first(unhex("88 01 00"), Client, 256) == 1002 && first(unhex("88 02 03 ed"), Client, 256) == 1002 && first(unhex("88 02 03 e7"), Client, 256) == 1002 && first(unhex("88 03 03 e8 ff"), Client, 256) == 1007 && first(unhex("88 04 03 e8 e2 82"), Client, 256) == 1007 && first(unhex("88 02 0b b8"), Client, 256) == 8
+    let closed = control(websocket.next(mut d, b, mut at), 8, unhex("03 e8 62 79 65"))
+    closed && event(websocket.next(mut d, b, mut at)) == 65535 && first(unhex("88 00"), Client, 256) == 8 && first(unhex("88 01 00"), Client, 256) == 1002 && first(unhex("88 02 03 ed"), Client, 256) == 1002 && first(unhex("88 02 03 e7"), Client, 256) == 1002 && first(unhex("88 03 03 e8 ff"), Client, 256) == 1007 && first(unhex("88 04 03 e8 e2 82"), Client, 256) == 1007 && first(unhex("88 02 0b b8"), Client, 256) == 8
 }
 
 // Full legal payload and fragmented assembly at the configured limit. No
@@ -282,18 +278,18 @@ fn close_validation() -> bool {
 // expect: run assembly_at_limit() = true
 fn assembly_at_limit() -> bool {
     let mut b = unhex("02 7e 00 80")
-    result.unwrap(list.fill(mut b, 128, b'a'))
-    result.unwrap(list.append(mut b, unhex("80 7e 00 80")))
-    result.unwrap(list.fill(mut b, 128, b'b'))
+    list.fill(mut b, 128, b'a')
+    list.append(mut b, unhex("80 7e 00 80"))
+    list.fill(mut b, 128, b'b')
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
-    let full = match result.unwrap(websocket.next(mut d, b, mut at)) {
+    let full = match websocket.next(mut d, b, mut at) {
         Message(v) => list.len(v) == 256 && v[0] == b'a' && v[127] == b'a' && v[128] == b'b' && v[255] == b'b',
         _ => false
     }
     let mut over = websocket.decoder(Client, 128)
     at = 0
-    full && event(result.unwrap(websocket.next(mut over, b, mut at))) == 1009
+    full && event(websocket.next(mut over, b, mut at)) == 1009
 }
 
 // Every split point in the masked frame gives exactly one final message.
@@ -304,11 +300,11 @@ fn all_splits() -> bool {
     for k in 0u64 .. list.len(b) {
         let mut d = websocket.decoder(Server, 256)
         let mut at: u64 = 0
-        if event(result.unwrap(websocket.next(mut d, list.slice(b, 0, k), mut at))) != 0 {
+        if event(websocket.next(mut d, list.slice(b, 0, k), mut at)) != 0 {
             return false
         }
         at = 0
-        if !payload(result.unwrap(websocket.next(mut d, list.slice(b, k, list.len(b)), mut at)), result.unwrap(b"Hello")) {
+        if !payload(websocket.next(mut d, list.slice(b, k, list.len(b)), mut at), b"Hello") {
             return false
         }
     }
@@ -322,15 +318,15 @@ fn encode_vectors() -> bool {
     let mut client = websocket.encoder(Client, 256)
     let mut out: Bytes = list.new()
     let mask: Inline[u8, 4] =[0x37, 0xfa, 0x21, 0x3d]
-    let masked = result.unwrap(websocket.encode(mut client, true, 2, result.unwrap(b"Hello"), mask, mut out)) == Ok(()) && out == unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
+    let masked = websocket.encode(mut client, true, 2, b"Hello", mask, mut out) == Ok(()) && out == unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
     let mut server = websocket.encoder(Server, 256)
     list.clear(mut out)
     let no_mask: Inline[u8, 4] =[0; 4]
-    let ping = result.unwrap(websocket.encode(mut server, true, 9, unhex("04 05"), no_mask, mut out)) == Ok(())
-    let pong = result.unwrap(websocket.encode(mut server, true, 10, unhex("01"), no_mask, mut out)) == Ok(()) && out == unhex("89 02 04 05 8a 01 01")
+    let ping = websocket.encode(mut server, true, 9, unhex("04 05"), no_mask, mut out) == Ok(())
+    let pong = websocket.encode(mut server, true, 10, unhex("01"), no_mask, mut out) == Ok(()) && out == unhex("89 02 04 05 8a 01 01")
     list.clear(mut out)
-    let closed = result.unwrap(websocket.encode(mut server, true, 8, unhex("03 e8"), no_mask, mut out)) == Ok(()) && out == unhex("88 02 03 e8")
-    masked && ping && pong && closed && result.unwrap(websocket.encode(mut server, true, 2, result.unwrap(b"x"), no_mask, mut out)) == Error(1002)
+    let closed = websocket.encode(mut server, true, 8, unhex("03 e8"), no_mask, mut out) == Ok(()) && out == unhex("88 02 03 e8")
+    masked && ping && pong && closed && websocket.encode(mut server, true, 2, b"x", no_mask, mut out) == Error(1002)
 }
 
 // The sender has the same fragmentation, text and size contract as the reader.
@@ -340,12 +336,12 @@ fn encode_validation() -> bool {
     let mut e = websocket.encoder(Server, 4)
     let mut out: Bytes = list.new()
     let mask: Inline[u8, 4] =[0; 4]
-    let start = result.unwrap(websocket.encode(mut e, false, 1, unhex("e2"), mask, mut out)) == Ok(())
-    let ping = result.unwrap(websocket.encode(mut e, true, 9, result.unwrap(b"p"), mask, mut out)) == Ok(())
-    let finished = result.unwrap(websocket.encode(mut e, true, 0, unhex("82 ac"), mask, mut out)) == Ok(())
-    let invalid = result.unwrap(websocket.encode(mut e, true, 8, unhex("00"), mask, mut out)) == Error(1002)
+    let start = websocket.encode(mut e, false, 1, unhex("e2"), mask, mut out) == Ok(())
+    let ping = websocket.encode(mut e, true, 9, b"p", mask, mut out) == Ok(())
+    let finished = websocket.encode(mut e, true, 0, unhex("82 ac"), mask, mut out) == Ok(())
+    let invalid = websocket.encode(mut e, true, 8, unhex("00"), mask, mut out) == Error(1002)
     let before = list.len(out)
-    let long = result.unwrap(websocket.encode(mut e, true, 2, result.unwrap(b"fives"), mask, mut out)) == Error(1009) && list.len(out) == before
+    let long = websocket.encode(mut e, true, 2, b"fives", mask, mut out) == Error(1009) && list.len(out) == before
     start && ping && finished && invalid && long
 }
 
@@ -354,7 +350,7 @@ fn encode_validation() -> bool {
 // reserve_declared (caught for a tiny arrival in length_before_reserve).
 fn receive_default(raw: Bytes) -> bool {
     result.unwrap(bound bytes 401408 {
-        let scratch: Bytes = result.unwrap(list.with_capacity(8192))
+        let scratch: Bytes = list.with_capacity(8192)
         let mut d = websocket.decoder(Client, 262144)
         let mut offset: u64 = 0
         let mut done = false
@@ -366,13 +362,13 @@ fn receive_default(raw: Bytes) -> bool {
             }
             let mut at: u64 = 0
             match websocket.next(mut d, list.slice(raw, offset, end), mut at) {
-                Ok(Message(v)) => {
+                Message(v) => {
                     if list.len(v) != 262144 || v[0] != b'a' || v[262143] != b'a' {
                         return false
                     };
                     done = true
                 },
-                Ok(Need) => {},
+                Need => {},
                 _ => return false
             }
             if at != end - offset {
@@ -387,11 +383,11 @@ fn receive_default(raw: Bytes) -> bool {
 // expect: run full_default_limit() = true
 fn full_default_limit() -> bool {
     let mut one = unhex("82 7f 00 00 00 00 00 04 00 00")
-    result.unwrap(list.fill(mut one, 262144, b'a'))
+    list.fill(mut one, 262144, b'a')
     let mut fragments = unhex("02 7f 00 00 00 00 00 02 00 00")
-    result.unwrap(list.fill(mut fragments, 131072, b'a'))
-    result.unwrap(list.append(mut fragments, unhex("80 7f 00 00 00 00 00 02 00 00")))
-    result.unwrap(list.fill(mut fragments, 131072, b'a'))
+    list.fill(mut fragments, 131072, b'a')
+    list.append(mut fragments, unhex("80 7f 00 00 00 00 00 02 00 00"))
+    list.fill(mut fragments, 131072, b'a')
     receive_default(one) && receive_default(fragments)
 }
 
@@ -411,23 +407,23 @@ fn ping_preserves_assembly() -> bool {
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
     let first_part = unhex("02 01 61 89 01 70")
-    let ignored = result.unwrap(websocket.next(mut d, first_part, mut at))
+    let ignored = websocket.next(mut d, first_part, mut at)
     at = 0
-    payload(result.unwrap(websocket.next(mut d, unhex("80 02 62 63"), mut at)), result.unwrap(b"abc"))
+    payload(websocket.next(mut d, unhex("80 02 62 63"), mut at), b"abc")
 }
 
 // The read-ahead offset is handed directly to the decoder; no copying or
 // discarded tail between the handshake and the first frame. Mutant: drop_tail.
 // expect: run upgrade_frame_handoff() = true
 fn upgrade_frame_handoff() -> bool {
-    let mut input = result.unwrap(result.unwrap(websocket.request(result.unwrap(b"example.com"), result.unwrap(b"the sample nonce"), false)))
-    result.unwrap(list.append(mut input, unhex("82 83 00 00 00 00 61 62 63")))
-    let mut at = match result.unwrap(websocket.server(input)) {
+    let mut input = result.unwrap(websocket.request(b"example.com", b"the sample nonce", false))
+    list.append(mut input, unhex("82 83 00 00 00 00 61 62 63"))
+    let mut at = match websocket.server(input) {
         Upgraded(end, _) => end,
         _ => return false
     }
     let mut d = websocket.decoder(Server, 262144)
-    payload(result.unwrap(websocket.next(mut d, input, mut at)), result.unwrap(b"abc")) && at == list.len(input)
+    payload(websocket.next(mut d, input, mut at), b"abc") && at == list.len(input)
 }
 
 // Thirteen payload bytes cross an eight-byte word and a five-byte tail.
@@ -436,22 +432,22 @@ fn upgrade_frame_handoff() -> bool {
 // Mutant: tail_unmasked.
 // expect: run mask_word_tail() = true
 fn mask_word_tail() -> bool {
-    let plain = result.unwrap(b"Hello, world!")
+    let plain = b"Hello, world!"
     let wire = unhex("82 8d 37 fa 21 3d 7f 9f 4d 51 58 d6 01 4a 58 88 4d 59 16")
     let mask: Inline[u8, 4] =[0x37, 0xfa, 0x21, 0x3d]
     let mut enc = websocket.encoder(Client, 256)
     let mut out: Bytes = list.new()
-    if result.unwrap(websocket.encode(mut enc, true, 2, plain, mask, mut out)) != Ok(()) || out != wire {
+    if websocket.encode(mut enc, true, 2, plain, mask, mut out) != Ok(()) || out != wire {
         return false
     }
     for cut in 0u64 .. list.len(wire) {
         let mut dec = websocket.decoder(Server, 256)
         let mut at: u64 = 0
-        if event(result.unwrap(websocket.next(mut dec, list.slice(wire, 0, cut), mut at))) != 0 {
+        if event(websocket.next(mut dec, list.slice(wire, 0, cut), mut at)) != 0 {
             return false
         }
         at = 0
-        if !payload(result.unwrap(websocket.next(mut dec, list.slice(wire, cut, list.len(wire)), mut at)), plain) {
+        if !payload(websocket.next(mut dec, list.slice(wire, cut, list.len(wire)), mut at), plain) {
             return false
         }
     }
@@ -548,21 +544,21 @@ fn connection_timers(c: Clock) -> bool {
 fn blocked_pong_drains() -> bool {
     let config = wsock.defaults()
     let mut encoder = result.unwrap(wsock.outbound(Server, config, None))
-    let frame = result.unwrap(wsock.encode(mut encoder, true, 2, result.unwrap(b"abc")))
+    let frame = result.unwrap(wsock.encode(mut encoder, true, 2, b"abc"))
     let mut pending = wsock.write_buffer()
     result.unwrap(wsock.offer(mut pending, take frame))
     wsock.wrote(mut pending, 2)
     let mut ping_payload = websocket.Control(data:[0; 125], len: 1)
     ping_payload.data[0] = b'p'
     wsock.owe_pong(mut pending, ping_payload)
-    let blocked = !result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.remaining(pending) == result.unwrap(b"abc")
+    let blocked = !result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.remaining(pending) == b"abc"
     wsock.wrote(mut pending, 3)
-    let other = result.unwrap(wsock.encode(mut encoder, true, 2, result.unwrap(b"later")))
+    let other = result.unwrap(wsock.encode(mut encoder, true, 2, b"later"))
     let priority = match wsock.offer(mut pending, take other) {
         Error(_) => true,
         Ok(_) => false
     }
-    let drained = !result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.remaining(pending) == result.unwrap(b"\x8a\x01p")
+    let drained = !result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.remaining(pending) == b"\x8a\x01p"
     wsock.wrote(mut pending, 3)
     blocked && priority && drained && result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.idle(pending)
 }
@@ -583,14 +579,14 @@ fn fragment_frame_progress() -> bool {
     let mut d = websocket.decoder(Client, 256)
     let mut at: u64 = 0
     let a = unhex("01 01 61")
-    let start = websocket.frame_count(d) == 0 && event(result.unwrap(websocket.next(mut d, a, mut at))) == 0 && websocket.frame_count(d) == 1
+    let start = websocket.frame_count(d) == 0 && event(websocket.next(mut d, a, mut at)) == 0 && websocket.frame_count(d) == 1
     at = 0
     let b = unhex("00 01 62")
-    let middle = event(result.unwrap(websocket.next(mut d, b, mut at))) == 0 && websocket.frame_count(d) == 2
+    let middle = event(websocket.next(mut d, b, mut at)) == 0 && websocket.frame_count(d) == 2
     at = 0
-    let last = result.unwrap(websocket.next(mut d, unhex("80 01 63"), mut at))
+    let last = websocket.next(mut d, unhex("80 01 63"), mut at)
     start && middle && websocket.frame_count(d) == 3 && match last {
-        Text(text) => text == result.unwrap(b"abc"),
+        Text(text) => text == b"abc",
         _ => false
     }
 }
@@ -604,7 +600,7 @@ fn utf8_missing_final_continuation_splits() -> bool {
     for split in 0u64 .. end {
         let mut d = websocket.decoder(Client, 256)
         let mut at: u64 = 0
-        let Ok(Need) = websocket.next(mut d, list.slice(b, 0, split), mut at) else {
+        let Need = websocket.next(mut d, list.slice(b, 0, split), mut at) else {
             return false
         }
         if at != split {
@@ -612,13 +608,13 @@ fn utf8_missing_final_continuation_splits() -> bool {
         }
         at = 0
         let tail = list.slice(b, split, end)
-        let Ok(Reject(code)) = websocket.next(mut d, tail, mut at) else {
+        let Reject(code) = websocket.next(mut d, tail, mut at) else {
             return false
         }
         if code != 1007 || at != end - split {
             return false
         }
-        let Ok(Ended) = websocket.next(mut d, tail, mut at) else {
+        let Ended = websocket.next(mut d, tail, mut at) else {
             return false
         }
         if at != end - split {
@@ -653,7 +649,7 @@ fn autobahn_text_messages() -> bool {
     for (raw, expected) in rows {
         let mut decoder = websocket.decoder(Client, 256)
         let mut at: u64 = 0
-        let received = result.unwrap(websocket.next(mut decoder, unhex(raw), mut at))
+        let received = websocket.next(mut decoder, unhex(raw), mut at)
         match expected {
             Some(message) => if !payload(received, unhex(message)) || event(received) != 1 {
                 return false
@@ -683,14 +679,14 @@ fn autobahn_fails_fast_on_utf8() -> bool {
         let mut decoder = websocket.decoder(Client, 256)
         let mut at: u64 = 0
         let prefix_bytes = unhex(prefix)
-        let Ok(Need) = websocket.next(mut decoder, prefix_bytes, mut at) else {
+        let Need = websocket.next(mut decoder, prefix_bytes, mut at) else {
             return false
         }
         if at != list.len(prefix_bytes) {
             return false
         }
         at = 0
-        let Ok(Reject(1007)) = websocket.next(mut decoder, unhex(invalid), mut at) else {
+        let Reject(1007) = websocket.next(mut decoder, unhex(invalid), mut at) else {
             return false
         }
     }
@@ -742,14 +738,14 @@ fn autobahn_received_length_frames(text: bool, opcode: u8, fill: u8) -> bool {
     // Case 1.x.7. Eight-byte extended length.
     ("7f 00 00 00 00 00 01 00 00", 65536u64),] {
         let mut frame: Bytes = list.new()
-        result.unwrap(list.push(mut frame, opcode))
-        result.unwrap(list.append(mut frame, unhex(header)))
+        list.push(mut frame, opcode)
+        list.append(mut frame, unhex(header))
         let mut want: Bytes = list.new()
-        result.unwrap(list.fill(mut want, n, fill))
-        result.unwrap(list.append(mut frame, want))
+        list.fill(mut want, n, fill)
+        list.append(mut frame, want)
         let mut decoder = websocket.decoder(Client, 65536)
         let mut at: u64 = 0
-        let got = result.unwrap(websocket.next(mut decoder, frame, mut at))
+        let got = websocket.next(mut decoder, frame, mut at)
         let matches = match got {
             Text(data) => text && data == want,
             Message(data) => !text && data == want,
@@ -774,4 +770,20 @@ fn autobahn_text_frame_lengths() -> bool {
 // expect: run autobahn_binary_frame_lengths() = true
 fn autobahn_binary_frame_lengths() -> bool {
     autobahn_received_length_frames(false, 0x82, 0xfe)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

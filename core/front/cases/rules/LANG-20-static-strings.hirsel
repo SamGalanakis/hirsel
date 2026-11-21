@@ -1,0 +1,16 @@
+// expect: accept
+const NAME: String = "hirsel"
+
+const TITLE: String = NAME
+
+fn title() -> String {
+    TITLE
+}
+
+fn charged() -> u64 {
+    let mut total = 0u64
+    for _ in 0u64 .. 4 {
+        total += string.byte_len(TITLE)
+    }
+    total
+}

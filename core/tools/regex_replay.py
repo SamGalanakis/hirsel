@@ -32,10 +32,10 @@ pub fn rx5_main(out: Stdout) -> Result[(), Exit] waits {
         return Error(Exit(status: 1))
     }
     let mut answer = "RX5 threshold "
-    result.unwrap(string.push_u64(mut answer, threshold))
-    result.unwrap(string.push(mut answer, " "))
-    result.unwrap(string.push_u64(mut answer, fixed_capture))
-    result.unwrap(string.push(mut answer, "\\n"))
+    string.push_u64(mut answer, threshold)
+    string.push(mut answer, " ")
+    string.push_u64(mut answer, fixed_capture)
+    string.push(mut answer, "\\n")
     result.unwrap(stdout.write(out, answer))
     Ok(())
 }
@@ -108,7 +108,8 @@ def run(compiler, runtime, recording_runtime, evaluator):
             refused = Counter((requested, available) for kind, _, requested, available in admission["events"]
                               if kind == 17)
             # For a, W(S) = 48S + 182. At B=16384 S=81 and the charge is 16,280.
-            expected = Counter((size, size - 1) for size in (2264, 16280, 206158430744))
+            # The largest cache uses S=floor((2^31-1)/4) states.
+            expected = Counter((size, size - 1) for size in (2264, 16280, 103079215640))
             assert refused == expected, refused
             threshold = evaluate(engine, cfg, entry + "rx5_threshold")["outcome"]
             assert threshold["kind"] == "returned" and len(threshold["values"]) == 1, threshold

@@ -14,12 +14,9 @@ type Q {
 type Choice = Small(u8) | Large(u64) | Empty
 
 fn fill[T: plain](r: Region, xs: List[T]) -> Result[FixedSpan[T] in r, Capacity] {
-    let mut b: SpanBuilder[T, in r] = span.with_capacity(r, 1)?
+    let mut b: SpanBuilder[T, in r] = span.with_capacity(r, 1)
     for x in xs {
-        match span.push(mut b, x) {
-            Ok(()) => {},
-            Error((c, _)) => return Error(c)
-        }
+        span.push(mut b, x)
     }
     Ok(span.finish(take b))
 }

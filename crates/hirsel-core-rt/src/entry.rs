@@ -18,6 +18,7 @@ use std::{
         unix::ffi::OsStrExt,
     },
     path::Path,
+    sync::Mutex,
 };
 pub const DIR: u8 = 0;
 pub const NET: u8 = 1;
@@ -136,6 +137,14 @@ pub struct SecretOperations {
     pub(crate) read: fn([&[u8]; 3], u64) -> Option<crate::secret::Granted>,
 }
 
+/// Validates and snapshots the names covered by a live Env grant.
+pub struct EnvOperations {
+    load: unsafe fn(&OsConfig, bool) -> Result<Option<Box<crate::env::Env>>, StartupError>,
+}
+
+#[unsafe(no_mangle)]
+pub static hirsel_core_os_env_ops: EnvOperations = EnvOperations { load: load_env };
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OsConfig {
@@ -165,6 +174,9 @@ pub struct OsConfig {
     pub secret_grants_len: usize,
     /// Installed by the native linker for a launch with Secret grants.
     pub secret_ops: *const SecretOperations,
+    pub env_patterns: View,
+    /// Installed by the native linker for a launch with an Env grant.
+    pub env_ops: *const EnvOperations,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -173,6 +185,7 @@ impl OsConfig {
             process_ops: &hirsel_core_os_process_ops,
             socket_activation: &hirsel_core_os_socket_activation,
             secret_ops: &crate::secret::hirsel_core_os_secret_ops,
+            env_ops: &hirsel_core_os_env_ops,
             ..*self
         }
     }
@@ -187,11 +200,61 @@ pub struct OsProcess {
     _metadata: Box<[Grant]>,
     _net_rules: Option<crate::net::RulesStorage>,
     secrets: Vec<crate::secret::Granted>,
+    _env: Option<Box<crate::env::Env>>,
+    stdin: Option<Box<crate::stdin::Stream>>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
     pub(crate) config: Config,
     _launch: Box<Metadata>,
     describe_out: Option<OwnedFd>,
+    host: Option<HostLaunch>,
+}
+
+pub(crate) struct HostLaunch {
+    pub(crate) control: Mutex<Option<OwnedFd>>,
+    pub(crate) scratch: u64,
+}
+
+/// The callback and its state are installed together by the OS launcher.
+pub(crate) unsafe fn launch_host<'a>(run: *const Config) -> Option<&'a HostLaunch> {
+    let run = unsafe { run.as_ref()? };
+    let writer = run.describe_output?;
+    if !std::ptr::fn_addr_eq(
+        writer,
+        describe_output as unsafe extern "C" fn(*mut u8, *const u8, usize) -> bool,
+    ) {
+        return None;
+    }
+    unsafe { run.state.cast::<OsProcess>().as_ref()?.host.as_ref() }
+}
+
+fn receive_host_control() -> io::Result<Option<OwnedFd>> {
+    let Some(control) = std::env::var_os("HIRSEL_CONTROL_FD") else {
+        return Ok(None);
+    };
+    if control != "4" || std::env::var_os("HIRSEL_HOST_PID").is_none() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    // SAFETY: the host transfers fd 4. Check its peer before taking ownership.
+    unsafe {
+        let mut peer: libc::sockaddr_un = std::mem::zeroed();
+        let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
+        if libc::getpeername(4, (&raw mut peer).cast(), &mut len) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if i32::from(peer.sun_family) != libc::AF_UNIX {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = OwnedFd::from_raw_fd(4);
+        let flags = libc::fcntl(4, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(4, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(fd))
+    }
 }
 #[repr(C)]
 pub struct OpenProcess {
@@ -215,11 +278,26 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
 }
+pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    if text.len() != 2 * N {
+        return Err(invalid());
+    }
+    let mut out = [0u8; N];
+    for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
+        let hi = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
+        let lo = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
+        *byte = (hi * 16 + lo) as u8;
+    }
+    Ok(out)
+}
 pub(crate) enum StartupError {
     Io(io::Error),
     MissingGrant(usize),
     MissingSecret(usize),
     NetRules,
+    EnvPatterns,
+    EnvSecretOverlap(String),
     UnsupportedHostOpenat2(io::Error),
 }
 impl From<io::Error> for StartupError {
@@ -231,13 +309,45 @@ impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
             Self::Io(error) | Self::UnsupportedHostOpenat2(error) => error,
-            Self::MissingGrant(_) | Self::MissingSecret(_) | Self::NetRules => {
-                io::Error::from_raw_os_error(libc::EACCES)
-            }
+            Self::MissingGrant(_)
+            | Self::MissingSecret(_)
+            | Self::NetRules
+            | Self::EnvPatterns
+            | Self::EnvSecretOverlap(_) => io::Error::from_raw_os_error(libc::EACCES),
         }
     }
 }
+
+unsafe fn load_env(
+    input: &OsConfig,
+    describe_mode: bool,
+) -> Result<Option<Box<crate::env::Env>>, StartupError> {
+    // SAFETY: the launcher pins the pattern and Secret source tables.
+    unsafe {
+        let patterns = std::str::from_utf8(bytes(input.env_patterns))
+            .ok()
+            .and_then(hirsel_core_net::EnvPatterns::parse)
+            .ok_or(StartupError::EnvPatterns)?;
+        for i in 0..input.secret_grants_len {
+            let source = bytes((*input.secret_grants.add(i))[1]);
+            if let Ok(source) = std::str::from_utf8(source)
+                && let Some(hirsel_core_net::SecretSource::Env(name)) =
+                    hirsel_core_net::SecretSource::parse(source)
+                && patterns.covers(name)
+            {
+                return Err(StartupError::EnvSecretOverlap(name.to_owned()));
+            }
+        }
+        Ok((!describe_mode).then(|| Box::new(crate::env::Env::snapshot(patterns))))
+    }
+}
+
 impl OsProcess {
+    #[cfg(feature = "record")]
+    pub(crate) fn host_launch(&self) -> Option<&HostLaunch> {
+        self.host.as_ref()
+    }
+
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     /// Matching socket activation metadata is consumed during process startup,
     /// before other threads can access the environment.
@@ -248,6 +358,7 @@ impl OsProcess {
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
+            crate::process::arm_host_parent()?;
             let argv = (0..input.args_len).map(|index| bytes(*input.args.add(index)));
             for value in argv.clone() {
                 std::str::from_utf8(value)
@@ -287,9 +398,18 @@ impl OsProcess {
             } else {
                 None
             };
+            let env = if input.grant_mask & (1 << ENV) != 0 {
+                let operations = input.env_ops.as_ref().ok_or(StartupError::EnvPatterns)?;
+                (operations.load)(input, describe_mode)?
+            } else {
+                None
+            };
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let mut launch = launch_metadata(target, n_place, describe_mode);
+            if prepare_path.is_some() {
+                launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
+            }
             if preview_mode {
                 use std::io::Read;
                 let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
@@ -312,6 +432,12 @@ impl OsProcess {
             } else {
                 None
             };
+            let host_control = receive_host_control()?;
+            if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+            }
+            let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
+                .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
             let mut os = Box::new(OsProvider::new(
                 duplicate(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
                     input.stdout_fd
@@ -341,6 +467,19 @@ impl OsProcess {
                     dirs.push((operations.grant)(&mut os, path)?);
                 }
             }
+            let host_scratch = if host_control.is_some() {
+                let operations =
+                    directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
+                let path = std::env::var_os("HIRSEL_SCRATCH")
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+                let path = Path::new(&path);
+                if !path.is_absolute() {
+                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                }
+                Some((operations.grant)(&mut os, path)?)
+            } else {
+                None
+            };
             let views = args
                 .iter()
                 .map(|a| Buffer {
@@ -435,10 +574,11 @@ impl OsProcess {
                             } else {
                                 provider_pointer
                             },
-                            handle: if kind == NET {
-                                net_rules.as_ref().unwrap().handle()
-                            } else {
-                                0
+                            handle: match kind {
+                                NET => net_rules.as_ref().unwrap().handle(),
+                                STDIN => std::ptr::from_ref(stdin.as_deref().unwrap()) as u64,
+                                ENV => env.as_ref().unwrap().handle(),
+                                _ => 0,
                             },
                         });
                     }
@@ -448,6 +588,17 @@ impl OsProcess {
                 kind: ARGS,
                 provider: provider_pointer,
                 handle: 0,
+            });
+            let host = host_control.zip(host_scratch).map(|(control, handle)| {
+                metadata.push(Grant {
+                    kind: DIR,
+                    provider: provider_pointer,
+                    handle,
+                });
+                HostLaunch {
+                    control: Mutex::new(Some(control)),
+                    scratch: metadata.len() as u64,
+                }
             });
             let metadata = metadata.into_boxed_slice();
             let config = Config {
@@ -478,11 +629,14 @@ impl OsProcess {
                 _metadata: metadata,
                 _net_rules: net_rules,
                 secrets,
+                _env: env,
+                stdin,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],
                 config,
                 _launch: launch,
                 describe_out,
+                host,
             });
             let mut probe = Some(probe);
             for n in 0..input.parameters_len {
@@ -559,6 +713,7 @@ unsafe extern "C" fn close_grants(state: *mut u8) {
     unsafe {
         let process = &mut *state.cast::<OsProcess>();
         process.secrets.clear();
+        drop(process.stdin.take());
         drop(process.os.take());
         drop(process.describe_out.take());
     }
@@ -601,7 +756,8 @@ pub unsafe extern "C" fn hirsel_core_os_run(
 /// # Safety
 /// Input/name/entry contracts are os_run's; sources follows
 /// abi_sites::hirsel_core_os_process_set_sources through reporting. The native
-/// linker supplies the operations tables for directory, Process and Net grants.
+/// linker supplies the operations tables for directory, Process, Net, Secret
+/// and Env grants.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     input: *const OsConfig,
@@ -725,6 +881,15 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
             line.extend_from_slice(b"Net requires --grant ");
             line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());
             line.push(b'\n');
+        }
+        StartupError::EnvPatterns => {
+            line.extend_from_slice(hirsel_core_net::EnvPatterns::SYNTAX.as_bytes());
+            line.push(b'\n');
+        }
+        StartupError::EnvSecretOverlap(name) => {
+            line.extend_from_slice(
+                format!("Env grant covers Secret source variable {name:?}\n").as_bytes(),
+            );
         }
         StartupError::MissingGrant(index) => {
             line.extend_from_slice(b"grant `");

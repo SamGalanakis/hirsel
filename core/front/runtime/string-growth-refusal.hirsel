@@ -1,8 +1,20 @@
-// Static capacity-0 storage is preserved when either growth operation refuses.
+// Growing static capacity-0 storage admits a fresh 8-byte block; with no room left the
+// admission raises Capacity for exactly that block, whichever growth operation asks.
 pub fn main()->Result[(),Exit] {
-    let mut s="keep"
-    match string.reserve(mut s,1) { Error(c) => if c.available!=0u64 || c.requested!=8u64 { return Error(Exit(status:1)) }, _ => return Error(Exit(status:2)) }
-    match string.push(mut s,"x") { Error(c) => if c.available!=0u64 || c.requested!=8u64 { return Error(Exit(status:3)) }, _ => return Error(Exit(status:4)) }
-    if s!="keep" || string.byte_len(s)!=4u64 || list.capacity(string.as_bytes(s))!=0u64 { return Error(Exit(status:5)) }
+    if refused(isolate(fn() -> Result[u64, Capacity] { let mut s = "keep"; string.reserve(mut s, 1); Ok(string.byte_len(s)) })) != 8u64 { return Error(Exit(status:1)) }
+    if refused(isolate(fn() -> Result[u64, Capacity] { let mut s = "keep"; string.push(mut s, "x"); Ok(string.byte_len(s)) })) != 8u64 { return Error(Exit(status:3)) }
     Ok(())
+}
+
+// The bytes requested by a caught refusal that found no room, else 0.
+fn refused(r: Result[Result[Result[u64, Capacity], Causes], Capacity]) -> u64 {
+    if let Ok(Error(causes)) = r {
+        for c in causes {
+            if let Capacity(k) = c.kind {
+                if k.available == 0u64 { return k.requested }
+            }
+            return 0u64
+        }
+    }
+    0u64
 }

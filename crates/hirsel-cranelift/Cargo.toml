@@ -2,6 +2,7 @@
 name = "hirsel-cranelift"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
@@ -15,6 +16,7 @@ cranelift-module = { version = "=0.136.3", default-features = false, features = 
 cranelift-object = { version = "=0.136.3", default-features = false }
 
 [dev-dependencies]
+tempfile = "3"
 cranelift-codegen = { version = "=0.136.3", default-features = false, features = ["timing"] }
 hirsel-intern = { path = "../hirsel-intern" }
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }

@@ -19,7 +19,6 @@ impl FunctionEmitter<'_> {
         size: &Value,
         align: u64,
         overflow: Option<ValueId>,
-        fail: Option<BlockId>,
         capacity: &Value,
         moved: &Value,
         refund: &Value,
@@ -166,18 +165,6 @@ impl FunctionEmitter<'_> {
                 rooms.push((available, probe_refused));
             }
             let refused_room = self.emit(Operation::Phi(&i64, &rooms));
-            let status = self.call_declared(
-                "hirsel_core_allocation_status",
-                Type::I8,
-                &[ptr(CONTEXT), ptr(Value::Null)],
-                FnAttrs::default(),
-                &CallAttrs {
-                    cold: true,
-                    ..CallAttrs::default()
-                },
-            );
-            let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
-            self.branch_failure(&failed, fail, Some(6));
             self.br(refused_done);
             self.block(refused_done);
             self.br(done);
@@ -238,18 +225,6 @@ impl FunctionEmitter<'_> {
         self.br(done);
         self.block(refused_label);
         let room = self.emit(Operation::Phi(&i64, &[(room, allocated)]));
-        let status = self.call_declared(
-            "hirsel_core_allocation_status",
-            Type::I8,
-            &[ptr(CONTEXT), ptr(Value::Null)],
-            FnAttrs::default(),
-            &CallAttrs {
-                cold: true,
-                ..CallAttrs::default()
-            },
-        );
-        let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
-        self.branch_failure(&failed, fail, Some(6));
         self.br(refused_done);
         self.block(refused_done);
         self.br(done);

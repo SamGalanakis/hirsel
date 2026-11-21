@@ -12,7 +12,7 @@
 // then "e": 4 bytes.
 // expect: run appended() = 4
 fn append(mut s: String, c: char) {
-    result.unwrap(string.push_char(mut s, c))
+    string.push_char(mut s, c)
 }
 
 fn trimmed(mut s: String) {
@@ -20,7 +20,7 @@ fn trimmed(mut s: String) {
 }
 
 fn joined(mut s: String, t: String) {
-    result.unwrap(string.push(mut s, t))
+    string.push(mut s, t)
 }
 
 fn appended() -> u64 {

@@ -20,12 +20,18 @@ await client.whenReady();
 const api = bind(client);
 ```
 
+For reconnect recovery, supply an application `credential` that the server's
+binding maps to the same Caller on each open.
+Storage keeps the Caller returned by the server with each stream. When an
+anonymous reconnect receives a fresh Caller, any pending call becomes
+`LocallyUnknown` and the new stream starts at position zero.
+
 Node 22 or later uses the same `Client`, global `WebSocket` and generated
 bindings. Pass `new NodeStorage(stateDirectory)` from `@hirsel/client/node`.
 The Node adapter requires the system `flock` command. It holds the installation
 lock and each stream lease with kernel file locks; no stale lockfile cleanup is
 needed. State replacement writes a private temporary file, syncs it, renames it
-and syncs the directory. Protect the state directory as a bearer credential.
+and syncs the directory. The state directory holds pending arguments and replies.
 
 Each client leases one stream and permits one call in flight. Recovering clients
 reject new calls until the durable pending request finishes. `onRecovered`

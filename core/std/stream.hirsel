@@ -27,24 +27,25 @@ pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Boun
         return Error(InvalidStream)
     }
     let coding: codec.Codec[P] = codec.of()
-    let made = bound bytes ((size + 7) / 8 * 8) {
-        let mut block: Bytes = list.with_capacity(size)?
-        list.fill(mut block, out_cap, 0u8)?
-        codec.encode(coding, state, mut block)?
-        take block
+    let made: Result[Result[Bytes, codec.EncodeError], Capacity] = bound bytes ((size + 7) / 8 * 8) {
+        let mut block: Bytes = list.with_capacity(size)
+        list.fill(mut block, out_cap, 0u8)
+        match codec.encode(coding, state, mut block) {
+            Ok(()) => Ok(take block),
+            Error(e) => Error(e),
+        }
     }
     match take made {
-        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room: room, driver: driver)),
+        Ok(Ok(take block)) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, driver)),
+        Ok(Error(_)) => Error(InvalidStream),
         Error(e) => Error(Allocation(e)),
     }
 }
 
 pub fn header(mut s: Spec, take name: Bytes, take value: Bytes) -> Result[(), http.HandlerError] {
     http.check_response_field(name, value)?
-    match list.push(mut s.fields, (take name, take value)) {
-        Ok(()) => Ok(()),
-        Error((e, _)) => Error(Allocation(e)),
-    }
+    list.push(mut s.fields, (take name, take value))
+    Ok(())
 }
 
 pub fn status(s: Spec) -> u16 {
@@ -69,12 +70,12 @@ pub type Offer: send {
 }
 
 pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppress: bool, at: u64, pre_head: u64) -> Offer {
-    let Spec(status: _, fields: _, block: take owned, state_at: state_at, room: room, driver: driver) = take s
+    let Spec(status: _, fields: _, block: take owned, state_at, room, driver) = take s
     let mut block = take owned
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
-    Offer(block: take block, head_len: list.len(head), state_at: state_at, room: room, driver: driver, chunked: chunked, heartbeat: heartbeat, suppress: suppress, at: at, pre_head: pre_head)
+    Offer(block: take block, head_len: list.len(head), state_at, room, driver, chunked, heartbeat, suppress, at, pre_head)
 }
 
 type Delivery: send = Item(Bytes) | Staged(Bytes) | Committed | Sent(SentUnit) | WriteFailed | ReadEnd | Tick | SourceEnded | Stop
@@ -112,10 +113,10 @@ fn next_event[P: codec + send, E](take previous: P, room: Bounds, next: fn(mut P
 }
 
 pub fn produce[P: codec + send, E](take seed: Seed, next: fn(mut P) -> Result[Option[Bytes], E] waits) waits {
-    let Seed(block: take block, at: at, inbox: take inbox, credits: take credits, room: room) = take seed
+    let Seed(block: take block, at, inbox: take inbox, credits: take credits, room) = take seed
     let decoded = codec.decode_at((codec.of() : codec.Codec[P]), block, at)
     discard(take block)
-    if let Ok(Ok(take initial)) = take decoded {
+    if let Ok(take initial) = take decoded {
         let mut state = take initial
         while let Ok(()) = channel.receive(credits) {
             match next_event(take state, room, next) {
@@ -187,7 +188,7 @@ type Alarm: send {
 fn monitor(take job: Monitor) -> ReadHalf waits {
     let Monitor(half: take half, remaining: limit, inbox: take inbox) = take job
     let mut reader = take half
-    let mut buffer: Bytes = result.unwrap(list.with_capacity(64))
+    let mut buffer: Bytes = list.with_capacity(64)
     let mut remaining = limit
     loop {
         list.clear(mut buffer)
@@ -206,7 +207,7 @@ fn monitor(take job: Monitor) -> ReadHalf waits {
 }
 
 fn alarm(take job: Alarm) waits {
-    let Alarm(clock: c, from: start, interval: period, pre_head: pre_head, inbox: take inbox) = take job
+    let Alarm(clock: c, from: start, interval: period, pre_head, inbox: take inbox) = take job
     let mut next = clock.deadline_after_ms(start, period)
     let mut pending = pre_head
     loop {
@@ -275,9 +276,9 @@ fn write_head(mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u
 }
 
 fn writer(take job: Writer) -> WriteHalf waits {
-    let Writer(half: take half, block: take block, size: size, out_cap: capacity, chunked: chunked, suppressed: suppressed, clock: c, pre_head: pre_head, write_ms: ms, stop: take signal, inbox: take inbox, units: take units) = take job
+    let Writer(half: take half, block: take block, size, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, stop: take signal, inbox: take inbox, units: take units) = take job
     let mut socket = take half
-    let mut scratch: Bytes = result.unwrap(list.with_capacity(capacity))
+    let mut scratch: Bytes = list.with_capacity(capacity)
     let _ = list.append(mut scratch, list.slice(block, 0, size))
     if let Error(_) = channel.send(inbox, Staged(take block)) {
         return take socket
@@ -343,42 +344,36 @@ pub fn reservation(offer: Offer, out_cap: u64) -> u64 {
 }
 
 fn stop_producer(mut running: Option[Task[()]]) {
-    let current = replace(mut running, None)
-    if let Some(take active) = take current {
-        let mut producer = take active
+    if let Some(mut producer) = running {
         task.cancel(mut producer)
-        running = Some(take producer)
     }
 }
 
 pub fn drive(take job: Work) waits {
-    let Work(transport: take transport, tasks: tasks, control: take control) = take job
-    let Transfer(reader: take input, writer: take output, offer: take offer, buffered: buffered, clock: c, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
+    let Work(transport: take transport, tasks, control: take control) = take job
+    let Transfer(reader: take input, writer: take output, offer: take offer, buffered, clock: c, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
     if buffered > allowance {
         return
     }
-    let Offer(block: take block, head_len: head_len, state_at: state_at, room: room, driver: driver, chunked: chunked, heartbeat: heartbeat, suppress: suppress, at: at, pre_head: pre_head) = take offer
-    let messages: Result[(Sender[Delivery], Receiver[Delivery]), Capacity] = channel.new(6)
-    let (tx, rx) = result.unwrap(take messages)
+    let Offer(block: take block, head_len, state_at, room, driver, chunked, heartbeat, suppress, at, pre_head) = take offer
+    let (tx, rx): (Sender[Delivery], Receiver[Delivery]) = channel.new(6)
     if let Some(owner) = control {
         if !http.register_stream(owner, StopHandle(inbox: channel.sender(tx))) {
             return
         }
     }
     let signal = http.stream_signal(control)
-    let instructions: Result[(Sender[Unit], Receiver[Unit]), Capacity] = channel.new(1)
-    let (units, writes) = result.unwrap(take instructions)
-    let credits: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(2)
-    let (give, take_credit) = result.unwrap(take credits)
+    let (units, writes): (Sender[Unit], Receiver[Unit]) = channel.new(1)
+    let (give, take_credit): (Sender[()], Receiver[()]) = channel.new(2)
     let _ = channel.try_send(give, ())
     let _ = channel.try_send(give, ())
-    let mut queue: List[Bytes] = result.unwrap(list.with_capacity(2))
-    let writing = Writer(half: take output, block: take block, size: head_len, out_cap: capacity, chunked: chunked, suppressed: suppress, clock: c, pre_head: pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes)
+    let mut queue: List[Bytes] = list.with_capacity(2)
+    let writing = Writer(half: take output, block: take block, size: head_len, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes)
     let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(tx))
-    let waking = Alarm(clock: c, from: at, interval: period, pre_head: pre_head, inbox: channel.sender(tx))
-    let mut write_task = result.unwrap(task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer))
-    let mut read_task = result.unwrap(task.spawn(tasks, bytes 64, take watching, monitor))
-    let mut alarm_task = result.unwrap(task.spawn(tasks, bytes 4096, take waking, alarm))
+    let waking = Alarm(clock: c, from: at, interval: period, pre_head, inbox: channel.sender(tx))
+    let mut write_task = task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer)
+    let mut read_task = task.spawn(tasks, bytes 64, take watching, monitor)
+    let mut alarm_task = task.spawn(tasks, bytes 4096, take waking, alarm)
     let mut producer: Option[Task[()]] = None
     let mut credit: Option[Receiver[()]] = Some(take take_credit)
     let mut head_started = false
@@ -426,8 +421,8 @@ pub fn drive(take job: Work) waits {
                             discard(take packet)
                         } else {
                             let receiver = option.unwrap(replace(mut credit, None))
-                            let seed = Seed(block: take packet, at: state_at, inbox: channel.sender(tx), credits: take receiver, room: room)
-                            producer = Some(result.unwrap(task.spawn(tasks, bytes room.producer_bytes, take seed, driver)))
+                            let seed = Seed(block: take packet, at: state_at, inbox: channel.sender(tx), credits: take receiver, room)
+                            producer = Some(task.spawn(tasks, bytes room.producer_bytes, take seed, driver))
                         }
                         let _ = channel.try_send(units, Head)
                     }

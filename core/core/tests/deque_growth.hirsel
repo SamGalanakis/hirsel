@@ -3,16 +3,16 @@
 fn grow_at_head(cap: u64, head: u64, front: bool) -> bool {
     let mut d: Deque[u64] = deque.new()
     for i in 0u64 .. cap {
-        result.unwrap(deque.push_back(mut d, i + 1))
+        deque.push_back(mut d, i + 1)
     }
     for _ in 0u64 .. head {
         let x = option.unwrap(deque.pop_front(mut d))
-        result.unwrap(deque.push_back(mut d, x))
+        deque.push_back(mut d, x)
     }
     if front {
-        result.unwrap(deque.push_front(mut d, 99))
+        deque.push_front(mut d, 99)
     } else {
-        result.unwrap(deque.push_back(mut d, 99))
+        deque.push_back(mut d, 99)
     }
     if deque.len(d) != cap + 1 {
         return false
@@ -48,7 +48,7 @@ fn growth_every_head() -> bool {
 }
 
 fn label(i: u64) -> String {
-    result.unwrap(string.from(match i {
+    string.from(match i {
         0 => "a",
         1 => "b",
         2 => "c",
@@ -57,43 +57,31 @@ fn label(i: u64) -> String {
         5 => "f",
         6 => "g",
         _ => "h"
-    }))
+    })
 }
 
 fn refuse_at_head(cap: u64, head: u64, front: bool) -> bool {
-    let mut d: Deque[String] = deque.new()
-    for i in 0u64 .. cap {
-        result.unwrap(deque.push_back(mut d, label(i)))
-    }
-    for _ in 0u64 .. head {
-        let x = option.unwrap(deque.pop_front(mut d))
-        result.unwrap(deque.push_back(mut d, take x))
-    }
-    let x = result.unwrap(string.from("refused"))
-    let attempt = bound bytes 0 {
-        if front {
-            deque.push_front(mut d, take x)
-        } else {
+    refused_request(isolate(fn() -> Result[(), Capacity] {
+        let mut d: Deque[String] = deque.new()
+        for i in 0u64 .. cap {
+            deque.push_back(mut d, label(i))
+        }
+        for _ in 0u64 .. head {
+            let x = option.unwrap(deque.pop_front(mut d))
             deque.push_back(mut d, take x)
         }
-    }
-    let returned = match attempt {
-        Ok(Error((c, take value))) => c.requested == cap * 2 * 24 && value == "refused",
-        _ => false,
-    }
-    if !returned || deque.len(d) != cap {
-        return false
-    }
-    for i in 0u64 .. cap {
-        let value = option.unwrap(deque.pop_front(mut d))
-        if value != label((head + i) % cap) {
-            return false
+        let x = string.from("refused")
+        bound bytes 0 {
+            if front {
+                deque.push_front(mut d, take x)
+            } else {
+                deque.push_back(mut d, take x)
+            }
         }
-    }
-    deque.len(d) == 0
+    })) == cap * 2 * 24
 }
 
-// Refusal must precede either transfer, preserving the head, values and owner.
+// Growth at every head asks for the doubled ring and raises when refused.
 // expect: run refused_growth_every_head() = true
 fn refused_growth_every_head() -> bool {
     let mut cap: u64 = 1
@@ -106,4 +94,27 @@ fn refused_growth_every_head() -> bool {
         cap *= 2
     }
     true
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match refusal(r) {
+        Some(c) => c.requested,
+        None => 99,
+    }
 }

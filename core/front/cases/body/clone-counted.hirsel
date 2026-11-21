@@ -15,13 +15,9 @@ type Piece {
 }
 
 fn shared() -> u64 {
-    let Ok(c) = rc.new(Chunk(id: 7)) else {
-        return 999
-    }
-    let q: Result[Rc[Chunk], Capacity] = clone(c)
-    let Ok(_q) = q else {
-        return 998
-    }
+    let c = rc.new(Chunk(id: 7))
+    let q: Rc[Chunk] = clone(c)
+    let _q = take q
     match rc.try_unwrap(take c) {
         Ok(_) => 0,
         Error(h) => h.id
@@ -29,14 +25,10 @@ fn shared() -> u64 {
 }
 
 fn inside() -> u64 {
-    let Ok(c) = rc.new(Chunk(id: 7)) else {
-        return 999
-    }
+    let c = rc.new(Chunk(id: 7))
     let p = Piece(chunk: take c, lo: 4)
-    let r: Result[Piece, Capacity] = clone(p)
-    let Ok(q) = r else {
-        return 998
-    }
+    let r: Piece = clone(p)
+    let q = take r
     let Piece(chunk: h, lo: _) = take p
     match rc.try_unwrap(take h) {
         Ok(_) => 0,

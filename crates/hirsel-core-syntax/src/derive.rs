@@ -853,7 +853,7 @@ impl<'a> Machine<'a> {
             }
             body += "}\n";
             format!(
-                "return match replace(mut d{}$, None) {{ Some(y$) => Ok(take y$), None => Error(Bad(Invalid(at$))) }}",
+                "return match replace(mut d{}$, None) {{ Some(y$) => Ok(take y$), None => Error(Invalid(at$)) }}",
                 self.entry
             )
         } else {
@@ -903,7 +903,7 @@ impl<'a> Machine<'a> {
         let mut branches = vec![];
         for v in 0..shapes.len() {
             branches.push(if shapes[v].removed {
-                "return Error(Bad(Invalid(start$)))\n".to_owned()
+                "return Error(Invalid(start$))\n".to_owned()
             } else {
                 let (b, value) = self.seg(w, m, v, 0, "a", "continue");
                 let check = reject_empty(empty[v].as_deref(), "start$");
@@ -948,14 +948,13 @@ impl<'a> Machine<'a> {
         }
     }
     /// Push a frame of resume point `r` holding `values`, and start its member.
-    fn push(&self, w: &Gen<'a>, r: usize, values: Vec<String>, jump: &str) -> String {
-        let c = w.c;
+    fn push(&self, r: usize, values: Vec<String>, jump: &str) -> String {
         let mut s = String::new();
         if !self.frame(r).is_empty() {
-            let _ = writeln!(s, "{c}full(list.push(mut r{r}$, {}))?", tuple(&values));
+            let _ = writeln!(s, "list.push(mut r{r}$, {})", tuple(&values));
         }
         if self.tagged() {
-            let _ = writeln!(s, "{c}full(list.push(mut ts$, {r}u64))?");
+            let _ = writeln!(s, "list.push(mut ts$, {r}u64)");
         }
         if self.multi() {
             let _ = writeln!(s, "next$ = {}", self.step(r).edge.unwrap().1);
@@ -1003,12 +1002,12 @@ impl<'a> Machine<'a> {
             let r = self.resume_at(m, v, k);
             match edge {
                 Edge::Direct => {
-                    s += &self.push(w, r, saved(k), jump);
+                    s += &self.push(r, saved(k), jump);
                     return (s, None);
                 }
                 Edge::Option => {
                     let inner = w.empty_codec_at(&self.g.members[child].1, step.source);
-                    let push = self.push(w, r, saved(k), jump);
+                    let push = self.push(r, saved(k), jump);
                     let start = format!("{pre}start{k}$");
                     let check = reject_empty(Some(&inner), &start);
                     let _ = write!(
@@ -1018,7 +1017,7 @@ impl<'a> Machine<'a> {
                     );
                 }
                 Edge::Ok(other) | Edge::Error(other) => {
-                    let push = self.push(w, r, saved(k), jump);
+                    let push = self.push(r, saved(k), jump);
                     let (at, side) = match edge {
                         Edge::Ok(_) => ("== 0", "Error"),
                         _ => ("!= 0", "Ok"),
@@ -1040,8 +1039,8 @@ impl<'a> Machine<'a> {
                     let mut values = saved(k);
                     values.extend([format!("take {pre}k{k}$"), format!("{pre}n{k}$")]);
                     let push = format!(
-                        "let {pre}k{k}$: {text} = {c}room({pre}n{k}$)?\n{}",
-                        self.push(w, r, values, jump)
+                        "let {pre}k{k}$: {text} = {c}room({pre}n{k}$)\n{}",
+                        self.push(r, values, jump)
                     );
                     let _ = write!(
                         s,
@@ -1060,13 +1059,13 @@ impl<'a> Machine<'a> {
                     ]);
                     let push = format!(
                         "let {pre}q{k}$ = {c}take_with(b$, mut at$, {ck})?\n{}",
-                        self.push(w, r, values, jump)
+                        self.push(r, values, jump)
                     );
                     let _ = write!(
                         s,
                         "let {pre}n{k}$ = {c}take_count(b$, mut at$, {c}least({ck}) + {least})?\n\
                          let mut {pre}m{k}$: {text} = map.new()\n\
-                         if let Error(f$) = map.reserve(mut {pre}m{k}$, {pre}n{k}$) {{\n    return Error(Full(f$))\n}}\n\
+                         map.reserve(mut {pre}m{k}$, {pre}n{k}$)\n\
                          if {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$ = take {pre}m{k}$\n",
                         indent(&push)
                     );
@@ -1105,7 +1104,7 @@ impl<'a> Machine<'a> {
         }
         if !names.is_empty() {
             let none = if self.tagged() {
-                "return Error(Bad(Invalid(at$)))"
+                "return Error(Invalid(at$))"
             } else {
                 finish
             };
@@ -1118,7 +1117,7 @@ impl<'a> Machine<'a> {
         if self.multi() {
             let _ = writeln!(
                 s,
-                "let x$ = match replace(mut d{child}$, None) {{\n    Some(y$) => take y$,\n    None => return Error(Bad(Invalid(at$)))\n}}"
+                "let x$ = match replace(mut d{child}$, None) {{\n    Some(y$) => take y$,\n    None => return Error(Invalid(at$))\n}}"
             );
         } else {
             s += "let x$ = take done$\n";
@@ -1140,10 +1139,10 @@ impl<'a> Machine<'a> {
             Edge::List => {
                 let mut values = saved();
                 values.extend(["take bx$".to_owned(), "bl$ - 1".to_owned()]);
-                let push = self.push(w, r, values, "break");
+                let push = self.push(r, values, "break");
                 let _ = write!(
                     s,
-                    "let mut bx$ = take bk$\n{c}full(list.push(mut bx$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    "let mut bx$ = take bk$\nlist.push(mut bx$, take x$)\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
                     indent(&push)
                 );
             }
@@ -1153,12 +1152,12 @@ impl<'a> Machine<'a> {
                 values.extend(["take bx$".into(), "bl$ - 1".into(), "take bn$".into()]);
                 let push = format!(
                     "let key_at$ = at$\nlet bn$ = {c}take_with(b$, mut at$, {ck})?\n\
-                     if map.contains(bx$, bn$) {{\n    return Error(Bad(Duplicate(key_at$)))\n}}\n{}",
-                    self.push(w, r, values, "break")
+                     if map.contains(bx$, bn$) {{\n    return Error(Duplicate(key_at$))\n}}\n{}",
+                    self.push(r, values, "break")
                 );
                 let _ = write!(
                     s,
-                    "let mut bx$ = take bm$\n{c}full(map.insert(mut bx$, take bq$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    "let mut bx$ = take bm$\nmap.insert(mut bx$, take bq$, take x$)\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
                     indent(&push)
                 );
             }
@@ -1240,7 +1239,7 @@ impl<'a> Gen<'a> {
     }
     fn put(&mut self, ty: &Ty<'a>, v: &str) -> String {
         let c = self.c;
-        match *ty {
+        let mut stmt = match *ty {
             Ty::Scalar(x, _) => format!("{c}put_{x}({v}, mut out$)"),
             Ty::List(e, source) => format!("{c}put_list({v}, {}, mut out$)", self.of_at(e, source)),
             Ty::Option(e) => format!("{c}put_option({v}, {}, mut out$)", self.of(e)),
@@ -1251,7 +1250,11 @@ impl<'a> Gen<'a> {
                 self.of(e)
             ),
             Ty::With(t) => format!("{c}put_with({v}, {}, mut out$)", self.of(t)),
+        };
+        if !matches!(*ty, Ty::Scalar(name, _) if name != "string") {
+            stmt.push('?');
         }
+        stmt
     }
     fn take(&mut self, ty: &Ty<'a>) -> String {
         let c = self.c;
@@ -1271,7 +1274,7 @@ impl<'a> Gen<'a> {
     fn schema(&mut self, ty: &Ty<'a>) -> String {
         let c = self.c;
         match *ty {
-            Ty::Scalar(x, _) => format!("    {c}schema_{x}(mut s$)?\n"),
+            Ty::Scalar(x, _) => format!("    {c}schema_{x}(mut s$)\n"),
             Ty::List(e, source) => {
                 format!("    {c}schema_list(mut s$, {})?\n", self.of_at(e, source))
             }
@@ -1304,17 +1307,14 @@ impl<'a> Gen<'a> {
             }
         }
     }
-    /// Statements, each but the last followed by `?`; none is `Ok(())`.
+    /// Writes the fields in order, propagating any unrepresentable count.
     fn sequence(steps: &[String], indent: &str) -> String {
-        if steps.is_empty() {
-            return format!("{indent}Ok(())\n");
+        let mut body = String::new();
+        for step in steps {
+            let _ = writeln!(body, "{indent}{step}");
         }
-        let last = steps.len() - 1;
-        steps
-            .iter()
-            .enumerate()
-            .map(|(i, s)| format!("{indent}{s}{}\n", if i == last { "" } else { "?" }))
-            .collect()
+        let _ = writeln!(body, "{indent}Ok(())");
+        body
     }
     fn items(mut self, out: &mut String) {
         let decl = self.decl;
@@ -1333,7 +1333,7 @@ impl<'a> Gen<'a> {
             (None, Body::Sum(variants)) => self.sum_encode(variants),
         };
         let header = format!(
-            "fn {name}$encode{generics}(x$: {ty}, mut out$: Bytes) -> Result[(), Capacity]"
+            "fn {name}$encode{generics}(x$: {ty}, mut out$: Bytes) -> Result[(), {c}EncodeError]"
         );
         self.function(out, &header, &body);
         let body = match (&decl.via, self.group, &decl.body) {
@@ -1345,12 +1345,13 @@ impl<'a> Gen<'a> {
             (None, None, Body::Record(entries)) => self.record_decode(entries),
             (None, None, Body::Sum(variants)) => self.sum_decode(variants),
         };
-        let header =
-            format!("fn {name}$decode{generics}(b$: Bytes, mut at$: u64) -> Result[{ty}, {c}Stop]");
+        let header = format!(
+            "fn {name}$decode{generics}(b$: Bytes, mut at$: u64) -> Result[{ty}, {c}DecodeError]"
+        );
         self.function(out, &header, &body);
         let body = self.schema_body();
         let header = format!(
-            "fn {name}$schema{generics}(mut s$: {c}Schema, c$: {c}Codec[{ty}]) -> Result[(), Capacity]"
+            "fn {name}$schema{generics}(mut s$: {c}Schema, c$: {c}Codec[{ty}]) -> Result[(), {c}EncodeError]"
         );
         self.function(out, &header, &body);
         let (lets, least) = self.least_body();
@@ -1412,15 +1413,11 @@ impl<'a> Gen<'a> {
             } else {
                 format!("{}({})", v.name, binds.join(", "))
             };
-            if steps.len() == 1 {
-                let _ = writeln!(arms, "        {pattern} => {},", steps[0]);
-            } else {
-                let _ = write!(
-                    arms,
-                    "        {pattern} => {{\n{}        }}\n",
-                    Self::sequence(&steps, "            ")
-                );
-            }
+            let _ = write!(
+                arms,
+                "        {pattern} => {{\n{}        }}\n",
+                Self::sequence(&steps, "            ")
+            );
             let code = arms.split_off(start);
             arms += &self.mapped.mark(v.source, code);
         }
@@ -1452,7 +1449,7 @@ impl<'a> Gen<'a> {
         let last = variants.len().saturating_sub(1);
         for (tag, v) in variants.iter().enumerate() {
             let value = if v.removed {
-                "Error(Bad(Invalid(start$)))".to_owned()
+                "Error(Invalid(start$))".to_owned()
             } else if v.payload.is_empty() {
                 format!("Ok({})", v.name)
             } else {
@@ -1667,7 +1664,7 @@ impl<'a> Gen<'a> {
 
 fn reject_empty(test: Option<&str>, start: &str) -> String {
     test.map_or_else(String::new, |test| {
-        format!("if {test} {{ return Error(Bad(Invalid({start}))) }}\n")
+        format!("if {test} {{ return Error(Invalid({start})) }}\n")
     })
 }
 

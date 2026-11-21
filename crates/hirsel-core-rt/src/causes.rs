@@ -49,6 +49,17 @@ impl Cause {
     pub fn fail(message: StringMessage, site: u64) -> Self {
         Self { message, site }
     }
+    /// `Capacity(c)` (MEM-21): `c`'s words where `Fail`'s carrier has data and length.
+    pub fn capacity(capacity: Capacity, site: u64) -> Self {
+        Self {
+            message: StringMessage {
+                data: capacity.requested as *mut u8,
+                len: capacity.available,
+                capacity: crate::abi_layout::cause_kind_word(CAPACITY),
+            },
+            site,
+        }
+    }
     pub fn kind(&self) -> u8 {
         crate::abi_layout::cause_kind(self.message.capacity)
     }
@@ -305,7 +316,6 @@ pub(crate) struct Resource {
     creator: u64,
     previous: Option<Funding>,
     previous_resource: *mut Resource,
-    previous_grant_depth: usize,
     /// The resource's frame while it cleans through a drain (LANG-19): its
     /// storage's recipe, the recipe's cursor, and the logical storage refunded
     /// once the recipe is done. The storage itself never holds a frame word.
@@ -342,7 +352,6 @@ pub unsafe fn resource_new(
         creator: crate::tasks::current_id(),
         previous: None,
         previous_resource: ptr::null_mut(),
-        previous_grant_depth: usize::MAX,
         holder: std::mem::MaybeUninit::uninit(),
         recipe: None,
         cursor: 0,
@@ -365,8 +374,6 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
     // SAFETY: the emitter supplies the live resource's uniquely owned metadata.
     let resource = unsafe { &mut *block::resource(pointer) };
     resource.previous_resource = context.active_resource;
-    resource.previous_grant_depth = context.grant_depth;
-    context.grant_depth = context.bound_depth;
     resource.previous = Some(std::mem::replace(
         &mut context.current,
         resource.grant.take().unwrap(),
@@ -392,7 +399,6 @@ pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8
     context.current.handover(resource.creator);
     context.current = resource.previous.take().unwrap();
     context.active_resource = resource.previous_resource;
-    context.grant_depth = resource.previous_grant_depth;
     context.current.normalize();
     context.current.bind();
     context.finalizing -= 1;

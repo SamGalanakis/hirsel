@@ -729,6 +729,8 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
     files_env = {
         "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
         "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+        # A runtime that writes the logical charge report.
+        "HIRSEL_CORE_RT_OBSERVED_ARCHIVE": "//:core-driver-observed-runtime-pic",
     }
     if case_filter == "native::tests::":
         files_env["HIRSEL_CORE_RT_SCRIPTED_ARCHIVE"] = "//:core-scripted-runtime-pic"

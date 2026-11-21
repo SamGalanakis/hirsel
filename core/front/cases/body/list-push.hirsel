@@ -1,24 +1,21 @@
 // expect: accept
 // expect: run fresh_push() = 711
 // expect: run grew() = 711
-// expect: run returned_input() = 73231 trace 7
 // expect: run stored_input() = 7 trace 7
 // expect: run grant_failure() = fail Capacity
 // A drop has no grant, so grow raises out of a push there: the taken element is
 // the caller's until a store consumes it, so the raise drops it exactly once.
 // expect: run raised_push() = fail Capacity trace 7
-// push taken as a function value hands the element back in its Error.
-// expect: run value_error() = 50
 // The pushed place is evaluated once.
 // expect: run effectful_place() = 107
-fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)] {
+fn push[T](mut xs: List[T], take x: T) {
     list.push(mut xs, take x)
 }
 
 fn fresh_push() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(push(mut xs, 7u64))
-    result.unwrap(push(mut xs, 11u64))
+    push(mut xs, 7u64)
+    push(mut xs, 11u64)
     if list.len(xs) == 2 && list.capacity(xs) == 4 {
         xs[0] * 100 + xs[1]
     } else {
@@ -27,9 +24,9 @@ fn fresh_push() -> u64 {
 }
 
 fn grew() -> u64 {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(1))
-    result.unwrap(push(mut xs, 7u64))
-    result.unwrap(push(mut xs, 11u64))
+    let mut xs: List[u64] = list.with_capacity(1)
+    push(mut xs, 7u64)
+    push(mut xs, 11u64)
     if list.len(xs) == 2 && list.capacity(xs) == 4 {
         xs[0] * 100 + xs[1]
     } else {
@@ -43,25 +40,10 @@ resource type Mark {
     let _ = m.id
 }
 
-fn returned_input() -> u64 {
-    let r = bound bytes 71 {
-        let mut xs: List[Mark] = list.new()
-        let x = result.unwrap(Mark(id: 7))
-        match list.push(mut xs, take x) {
-            Ok(()) => 999u64,
-            Error((e, take back)) => back.id * 10000 + e.requested * 100 + e.available + list.len(xs),
-        }
-    }
-    match r {
-        Ok(n) => n,
-        Error(_) => 0
-    }
-}
-
 fn stored_input() -> u64 {
     let mut xs: List[Mark] = list.new()
     let x = result.unwrap(Mark(id: 7))
-    result.unwrap(list.push(mut xs, take x))
+    list.push(mut xs, take x)
     xs[0].id
 }
 
@@ -72,7 +54,7 @@ resource type Grow {
 }
 
 fn grant_failure() -> u64 {
-    let xs: List[u64] = result.unwrap(list.with_capacity(1))
+    let xs: List[u64] = list.with_capacity(1)
     match Grow(xs: take xs) {
         Ok(_g) => 0u64,
         Error(_) => 999
@@ -96,19 +78,6 @@ fn raised_push() -> u64 {
     }
 }
 
-fn value_error() -> u64 {
-    let cb: fn(mut List[String], take String) -> Result[(), (Capacity, String)] = list.push
-    let mut xs: List[String] = list.new()
-    let x = result.unwrap(string.from("seven"))
-    let r = bound bytes 0 {
-        cb(mut xs, take x)
-    }
-    match r {
-        Ok(Error((_, take back))) => string.byte_len(back) * 10 + list.len(xs),
-        _ => 0
-    }
-}
-
 fn bump(mut n: u64) -> u64 {
     n += 1
     0
@@ -116,8 +85,8 @@ fn bump(mut n: u64) -> u64 {
 
 fn effectful_place() -> u64 {
     let mut xs: List[List[u64]] = list.new()
-    result.unwrap(list.push(mut xs, list.new()))
+    list.push(mut xs, list.new())
     let mut n: u64 = 0
-    result.unwrap(list.push(mut xs[bump(mut n)], 7))
+    list.push(mut xs[bump(mut n)], 7)
     n * 100 + xs[0][0]
 }

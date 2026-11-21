@@ -52,7 +52,7 @@ impl Cx<'_, '_, '_> {
                 Some(self.pointer(to, n))
             }
             "with_capacity" => self.span_with_capacity(vals[0]?, vals[1]?, es, result, n),
-            "push" => self.span_push(vals[0]?, vals[1], elem, es, result, n),
+            "push" => self.span_push(vals[0]?, vals[1], elem, es, n),
             "finish" => self.span_finish(vals[0]?, result, n),
             _ => {
                 self.gap(n, "this span construction operation is not built");
@@ -202,7 +202,6 @@ impl Cx<'_, '_, '_> {
         let (charge, size) = self.blob_size(capacity, es, n)?;
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -214,41 +213,10 @@ impl Cx<'_, '_, '_> {
                 overflow: None,
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         Some((block, available, charge))
-    }
-
-    /// `Capacity { requested, available }` at `steps` from `base`.
-    pub(super) fn capacity_at(
-        &mut self,
-        base: AddressBase,
-        steps: &[Step],
-        charge: ValueId,
-        available: ValueId,
-        n: NodeId,
-    ) -> Option<()> {
-        let cty = self.capacity_ty(n);
-        let id = self.place_row(cty, "a capacity without a place is not built", n)?;
-        let at = self.address(base, steps, PlaceTy::Declared(id), n);
-        for (i, v) in [charge, available].into_iter().enumerate() {
-            let f = self.address(
-                AddressBase::Address(at),
-                &[Step::Field(i as u32)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            self.inst(
-                Inst::Store {
-                    address: f,
-                    value: v,
-                },
-                n,
-            );
-        }
-        Some(())
     }
 
     fn span_with_capacity(
@@ -264,51 +232,19 @@ impl Cx<'_, '_, '_> {
         let (block, available, charge) = self.region_blob(region, count, es, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, block, null, n);
-        let (yes, no, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, no, n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let w = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
         for (offset, v) in [(0, count), (8, w), (16, zero)] {
             self.put_word(AddressBase::Value(block), &[], offset, v, n)?;
         }
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
-        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
-        self.put_word(AddressBase::Address(to), &ok, 8, region, n)?;
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(join);
+        self.put_word(AddressBase::Address(to), &[], 0, block, n)?;
+        self.put_word(AddressBase::Address(to), &[], 8, region, n)?;
         Some(self.pointer(to, n))
     }
 
-    /// T1.6: a push that cannot grow returns `(Capacity, x)` and leaves the builder as
-    /// it was; growth moves to `max(4, 2 × capacity)` and leaves the old bytes charged
+    /// T1.6: a push that cannot grow raises `Capacity` and leaves the builder as it
+    /// was; growth moves to `max(4, 2 × capacity)` and leaves the old bytes charged
     /// until the region closes (MEM-3, FAIL-6).
     fn span_push(
         &mut self,
@@ -316,12 +252,9 @@ impl Cx<'_, '_, '_> {
         x: Option<ValueId>,
         elem: TyId,
         es: ElemSize,
-        result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
-        let to = self.new_slot(PlaceTy::Declared(id), n);
         let blob = self.get_word(AddressBase::Value(b), 0, Ty::Ptr, n)?;
         let region = self.get_word(AddressBase::Value(b), 8, Ty::Ptr, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
@@ -346,7 +279,7 @@ impl Cx<'_, '_, '_> {
         self.branch(full, grow, room, n);
         self.start(room);
         self.jump(put, &[blob], n);
-        // Grow into a new blob, or hand `x` back.
+        // Grow into a new blob, or raise.
         self.start(grow);
         let two = self.konst(u64t, 2, n)?;
         let doubled = self.word_op(BinaryOp::Mul, cap, two, n);
@@ -354,13 +287,7 @@ impl Cx<'_, '_, '_> {
         let new_cap = self.word_op(BinaryOp::Max, doubled, four, n);
         let (fresh, available, charge) = self.region_blob(region, new_cap, es, n)?;
         let admitted = self.test(CompareOp::Ne, fresh, null, n);
-        let (moved, refused, end) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, moved, refused, n);
-        self.start(moved);
+        self.raise_unless(admitted, charge, available, n);
         let w = self.konst(u64t, 8, n)?;
         for (offset, v) in [(0, new_cap), (8, w), (16, count)] {
             self.put_word(AddressBase::Value(fresh), &[], offset, v, n)?;
@@ -397,27 +324,6 @@ impl Cx<'_, '_, '_> {
         self.start(after);
         self.put_word(AddressBase::Value(b), &[], 0, fresh, n)?;
         self.jump(put, &[fresh], n);
-        self.start(refused);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        let err = Step::CaseField { case: 1, field: 0 };
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[err, Step::Field(0)],
-            charge,
-            available,
-            n,
-        )?;
-        let back_ty = self.place_ty(elem, n)?;
-        let back = self.address(AddressBase::Address(to), &[err, Step::Field(1)], back_ty, n);
-        let r = self.rep_at(elem, n)?;
-        self.install(back, r, x, n);
-        self.jump(end, &[], n);
         // Room: encode `x` after the count elements and count it.
         self.start(put);
         let blob = self.block_params(put)[0];
@@ -426,6 +332,7 @@ impl Cx<'_, '_, '_> {
         let bytes = self.word_op(BinaryOp::Mul, count, size, n);
         let head = self.konst(u64t, HEAD, n)?;
         let at = self.word_op(BinaryOp::Add, bytes, head, n);
+        let r = self.rep_at(elem, n)?;
         match es {
             ElemSize::Known(_) => self.encode_plain(blob, at, elem, r, x?, n)?,
             ElemSize::Rigid(_) => self.encode_rigid(blob, at, elem, x?, n)?,
@@ -433,16 +340,7 @@ impl Cx<'_, '_, '_> {
         let one = self.konst(u64t, 1, n)?;
         let next = self.word_op(BinaryOp::Add, count, one, n);
         self.put_word(AddressBase::Value(blob), &[], 16, next, n)?;
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(end, &[], n);
-        self.start(end);
-        Some(self.pointer(to, n))
+        None
     }
 
     fn elem_size(&mut self, es: ElemSize, n: NodeId) -> Option<ValueId> {

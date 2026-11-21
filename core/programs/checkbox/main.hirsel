@@ -42,9 +42,9 @@ fn chunk(i: Bit) -> u32 {
 }
 
 fn zero_chunk() -> Bytes {
-    let mut data: Bytes = result.unwrap(list.with_capacity(64u64))
+    let mut data: Bytes = list.with_capacity(64u64)
     for _ in 0u64 .. 64u64 {
-        result.unwrap(list.push(mut data, 0u8))
+        list.push(mut data, 0u8)
     }
     data
 }
@@ -79,7 +79,7 @@ fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
 
 fn asset(path: Bytes) -> Option[std.wsock.Asset] {
     if path == string.as_bytes("/") {
-        return Some(std.wsock.Asset(name: result.unwrap(string.from("index.html")), content_type: result.unwrap(string.from("text/html; charset=utf-8"))))
+        return Some(std.wsock.Asset(name: string.from("index.html"), content_type: string.from("text/html; charset=utf-8")))
     }
     let name = if path == string.as_bytes("/client.js") {
         "client.js"
@@ -92,20 +92,18 @@ fn asset(path: Bytes) -> Option[std.wsock.Asset] {
     } else {
         return None
     }
-    Some(std.wsock.Asset(name: result.unwrap(string.from(name)), content_type: result.unwrap(string.from("text/javascript; charset=utf-8"))))
+    Some(std.wsock.Asset(name: string.from(name), content_type: string.from("text/javascript; charset=utf-8")))
 }
 
 type Settings {
     listen: Addr,
     proxies: List[std.wsock.Prefix],
-    policy: store.ingress.Config
 }
 
 fn settings(a: Args) -> Result[Settings, Exit] {
     let invalid = Exit(status: 2u8)
     let mut listen = Addr(ip: V4(0x7f000001u32), port: 7700u16)
     let mut proxies: List[std.wsock.Prefix] = list.new()
-    let mut policy = store.ingress.defaults()
     let mut i = 0u64
     while i < args.len(a) {
         let name = option.unwrap(args.get(a, i))
@@ -131,27 +129,13 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             let Some(prefix) = std.wsock.parse_prefix(value) else {
                 return Error(invalid)
             }
-            result.unwrap(list.push(mut proxies, prefix))
+            list.push(mut proxies, prefix)
         } else {
-            let Ok(n) = (int.parse(value) : Result[u64, ParseError]) else {
-                return Error(invalid)
-            }
-            if n == 0u64 || n > 1000000000u64 {
-                return Error(invalid)
-            }
-            if name == "--per-ip-sessions" {
-                policy.sessions = n
-            } else if name == "--per-ip-new-principals" {
-                policy.mint_burst = n
-            } else if name == "--principal-rate" {
-                policy.call_period_ns = 1000000000u64 / n
-            } else {
-                return Error(invalid)
-            }
+            return Error(invalid)
         }
         i += 2u64
     }
-    Ok(Settings(listen: listen, proxies: take proxies, policy: policy))
+    Ok(Settings(listen: listen, proxies: take proxies))
 }
 
 // A stop admits for no extra time, then gives admitted work and open sessions this long.
@@ -161,18 +145,14 @@ const STOP_GRACE_MS: u64 = 5000u64
 // `stop` (runner.main), which drains and closes the store.
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, take stop: Receiver[()]) -> Result[(), Exit] waits {
     let selection = store.runner.launch_selection(a)?
-    let Settings(listen: listen, proxies: take proxies, policy: options) = settings(a)?
-    let (policy, take admission_task) = result.unwrap(store.ingress.start(tasks, c, random, options, 8388608u64))
+    let Settings(listen: listen, proxies: take proxies) = settings(a)?
     let mut session = store.runner.wire_defaults(65536u64, N_PLACE)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
     let config: store.runner.PlaceConfig[(), Handles, ()] = store.runner.PlaceConfig(backing: Disk(directory, store.defaults()),
         selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
-        session: session, max_sessions: store.runner.WIRE_OWNER_LIMIT, proxies: take proxies, policy: take policy, n_publisher: 67108864u64,
-        listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), triggers: None)
+        session: session, max_sessions: store.runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
+        listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(store.ingress.binding()), triggers: None)
     let ended = store.runner.operate(take config, take stop, result.unwrap(store.runner.status_root()), None)
-    let mut admission = take admission_task
-    task.cancel(mut admission)
-    let _ = task.join(take admission)
     match ended {
         Ok(_) => Ok(()),
         Error(_) => Error(Exit(status: 1u8)),

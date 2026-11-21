@@ -853,9 +853,6 @@ fn repeated_path_results_keep_dependency_reads_and_binding_versions() {
     }
 }
 
-#[path = "spec_tests.rs"]
-mod spec_tests;
-
 #[test]
 fn a_function_is_not_a_namespace_for_a_dotted_path() {
     let (index, files) = fixture(&[(

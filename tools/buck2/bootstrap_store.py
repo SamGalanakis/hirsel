@@ -203,9 +203,11 @@ def _clear_staging(root: pathlib.Path, name: str) -> None:
 
 
 def _discard(root: pathlib.Path, entry: pathlib.Path) -> None:
-    dead = pathlib.Path(tempfile.mkdtemp(prefix=entry.name + ".", dir=root / "tmp")) / "dead"
-    os.rename(entry, dead)
-    _remove(dead.parent)
+    discarded = pathlib.Path(tempfile.mkdtemp(prefix=entry.name + ".", dir=root / "tmp"))
+    try:
+        os.rename(entry, discarded / "dead")
+    finally:
+        _remove(discarded)
 
 
 def _fill(root: pathlib.Path, name: str, identity, build) -> None:

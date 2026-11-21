@@ -15,7 +15,7 @@ fn wpt_eventsource_data() -> bool {
     // format-field-id.any.js. Preserve the first event's non-ASCII ID.
     ("hello", Some("…"), "id: …\ndata: hello\n\n"),]
     for (data, id, wire) in rows {
-        let mut out = result.unwrap(sse.buffer(64))
+        let mut out = sse.buffer(64)
         if sse.event(mut out, None, id, string.as_bytes(data)) != Ok(()) || sse.as_bytes(out) != string.as_bytes(wire) {
             return false
         }
@@ -24,16 +24,16 @@ fn wpt_eventsource_data() -> bool {
 }
 
 fn sse_split(wire: Bytes, split: u64, expected: String, last: String, retry: Option[u64]) -> bool {
-    let mut d = result.unwrap(sse.decoder(128))
-    let mut seen: Bytes = result.unwrap(list.with_capacity(256))
+    let mut d = sse.decoder(128)
+    let mut seen: Bytes = list.with_capacity(256)
     for (start, stop) in[(0u64, split), (split, list.len(wire))] {
         result.unwrap(sse.feed(mut d, list.slice(wire, start, stop), fn(name: Bytes, data: Bytes, id: Bytes) {
-            result.unwrap(list.append(mut seen, name))
-            result.unwrap(list.append(mut seen, string.as_bytes("|")))
-            result.unwrap(list.append(mut seen, data))
-            result.unwrap(list.append(mut seen, string.as_bytes("|")))
-            result.unwrap(list.append(mut seen, id))
-            result.unwrap(list.append(mut seen, string.as_bytes(";")))
+            list.append(mut seen, name)
+            list.append(mut seen, string.as_bytes("|"))
+            list.append(mut seen, data)
+            list.append(mut seen, string.as_bytes("|"))
+            list.append(mut seen, id)
+            list.append(mut seen, string.as_bytes(";"))
         }))
     }
     sse.finish(mut d)

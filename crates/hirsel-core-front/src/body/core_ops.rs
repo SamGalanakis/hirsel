@@ -21,12 +21,16 @@ pub(crate) enum Kernel {
     SecretRender,
     ArgsLen,
     ArgsGet,
+    Env(HostOp),
+    /// A virtual provider's construction or its hand's operation (core.md, Provide).
+    Provide(HostOp),
     NewOwner(Option<Counted>),
     Share(Counted),
     TryUnwrap(Counted),
     WithUnique(Counted),
     Unbox,
     Spawn,
+    TrySpawn,
     CheckCancel,
     Cancel,
     Join,
@@ -164,6 +168,13 @@ operations! {
     ("host", "open", Lane::Runtime(Kernel::Host(HostOp::Open)), "B", "core-ops-914", false),
     ("host", "read", Lane::Runtime(Kernel::Host(HostOp::Read)), "B", "core-ops-914", false),
     ("host", "write", Lane::Runtime(Kernel::Host(HostOp::Write)), "B", "core-ops-914", false),
+    ("host", "open_dir", Lane::Runtime(Kernel::Host(HostOp::OpenDir)), "B", "fs-ops-1502", false),
+    ("host", "entries", Lane::Runtime(Kernel::Host(HostOp::Entries)), "B", "fs-ops-1502", false),
+    ("host", "next_entries", Lane::Runtime(Kernel::Host(HostOp::NextEntries)), "B", "fs-ops-1502", false),
+    ("host", "stat", Lane::Runtime(Kernel::Host(HostOp::Stat)), "B", "fs-ops-1502", false),
+    ("host", "stat_file", Lane::Runtime(Kernel::Host(HostOp::StatFile)), "B", "fs-ops-1502", false),
+    ("host", "read_at", Lane::Runtime(Kernel::Host(HostOp::ReadAt)), "B", "fs-ops-1502", false),
+    ("host", "write_at", Lane::Runtime(Kernel::Host(HostOp::WriteAt)), "B", "fs-ops-1502", false),
     ("host", "close", Lane::Runtime(Kernel::Host(HostOp::Close)), "B", "core-ops-914", false),
     ("host", "try_lock", Lane::Runtime(Kernel::Host(HostOp::TryLock)), "B", "core-ops-914", false),
     ("host", "unlock", Lane::Runtime(Kernel::Host(HostOp::Unlock)), "B", "core-ops-914", false),
@@ -252,6 +263,7 @@ operations! {
     ("list", "len", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "capacity", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "reserve", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "try_reserve", Lane::Value, "A", "capacity-unwind-1492", false),
     ("list", "get", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "slice", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "push", Lane::Value, "A", "core-check-calls-910", false),
@@ -272,8 +284,8 @@ operations! {
     ("sha256", "blocks", Lane::Value, "A", "sha256-hardware", false),
     ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "pop_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "try_regrow", Lane::Value, "A", "capacity-unwind-1492", true),
     ("map", "compact", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "swap_value", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "kill", Lane::Value, "A", "core-check-callables-913", true),
@@ -324,13 +336,33 @@ operations! {
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
+    ("stdin", "read", Lane::Runtime(Kernel::Net(HostOp::StdinRead)), "B", "stdin-env-1501", false),
+    ("env", "get", Lane::Runtime(Kernel::Env(HostOp::EnvGet)), "B", "stdin-env-1501", false),
+    ("env", "len", Lane::Runtime(Kernel::Env(HostOp::EnvLen)), "B", "stdin-env-1501", false),
+    ("env", "name", Lane::Runtime(Kernel::Env(HostOp::EnvName)), "B", "stdin-env-1501", false),
+    ("env", "narrow", Lane::Runtime(Kernel::Net(HostOp::EnvNarrow)), "B", "stdin-env-1501", false),
     ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
     ("tls", "connect", Lane::Runtime(Kernel::Net(HostOp::TlsConnect)), "B", "tls-t1-1442", false),
     ("tls", "send_secret", Lane::Runtime(Kernel::Net(HostOp::SendSecret)), "B", "tls-t4-1447", false),
     ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
+    ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
+    ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
+    ("provide", "clock", Lane::Runtime(Kernel::Provide(HostOp::ProvideClock)), "B", "provide-r8a-1533", false),
+    ("provide", "random", Lane::Runtime(Kernel::Provide(HostOp::ProvideRandom)), "B", "provide-r8a-1533", false),
+    ("provide", "process", Lane::Runtime(Kernel::Provide(HostOp::ProvideProcess)), "B", "provide-r8a-1533", false),
+    ("clock", "advance_to", Lane::Runtime(Kernel::Provide(HostOp::ClockAdvance)), "B", "provide-r8a-1533", false),
+    ("clock", "set_wall", Lane::Runtime(Kernel::Provide(HostOp::ClockSetWall)), "B", "provide-r8a-1533", false),
+    ("clock", "idle", Lane::Runtime(Kernel::Provide(HostOp::ClockIdle)), "B", "provide-r8a-1533", false),
+    ("process", "trigger", Lane::Runtime(Kernel::Provide(HostOp::ProcessTrigger)), "B", "provide-r8a-1533", false),
+    ("provide", "stdout", Lane::Runtime(Kernel::Provide(HostOp::ProvideStdout)), "B", "provide-r8a-1533", false),
+    ("provide", "stderr", Lane::Runtime(Kernel::Provide(HostOp::ProvideStderr)), "B", "provide-r8a-1533", false),
+    ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
+    ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
+    ("provide", "payload", Lane::Runtime(Kernel::Provide(HostOp::CallPayload)), "B", "provide-r8a-1533", false),
+    ("provide", "commit", Lane::Runtime(Kernel::Provide(HostOp::PortReply)), "B", "provide-r8a-1533", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
     ("string", "byte_len", Lane::Runtime(Kernel::StringList("len")), "A", "core-ops-914", false),
@@ -342,6 +374,7 @@ operations! {
     ("string", "shorten", Lane::Runtime(Kernel::StringShorten), "A", "core-ops-914", true),
     ("task", "spawn", Lane::Runtime(Kernel::Spawn), "B", "core-ops-914", false),
     ("task", "spawn_unit", Lane::Runtime(Kernel::SpawnUnit), "B", "mc-units-lang", false),
+    ("task", "try_spawn", Lane::Runtime(Kernel::TrySpawn), "B", "core-ops-914", false),
     ("task", "join", Lane::Runtime(Kernel::Join), "B", "core-ops-914", false),
     ("task", "cancel", Lane::Runtime(Kernel::Cancel), "B", "core-ops-914", false),
     ("task", "check_cancel", Lane::Runtime(Kernel::CheckCancel), "B", "core-ops-914", false),
@@ -362,13 +395,15 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
         && f.path.0.modules == ["runner"]
         && matches!(
             f.path.0.name.as_str(),
-            "launch_word" | "launch_text" | "launch_emit"
+            "launch_word" | "launch_text" | "launch_emit" | "launch_socket" | "launch_scratch"
         )
     {
         return Some(match f.path.0.name.as_str() {
             "launch_word" => u16::MAX,
             "launch_text" => u16::MAX - 1,
-            _ => u16::MAX - 2,
+            "launch_emit" => u16::MAX - 2,
+            "launch_socket" => u16::MAX - 3,
+            _ => u16::MAX - 4,
         });
     }
     if !f.path.package_is("core", "1") || f.body.is_some() {
@@ -420,6 +455,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<Option<ValueId>> {
         let binding = self.p.core_operations[f]?;
+        if matches!(binding, i if i == u16::MAX - 3 || i == u16::MAX - 4) {
+            let u = Ty::Scalar(Scalar::U64);
+            let field = self.konst(u, u64::from(binding == u16::MAX - 4), n)?;
+            let [handle, ..] = self.runtime_row(RtOp::LaunchHandle, &[Arg::Value(field)], n)?;
+            let has_handle = self.runtime_nonzero(u, handle, n)?;
+            return Some(self.runtime_result(
+                result,
+                has_handle,
+                n,
+                |cx, to, ty| {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(at, &[], u, handle, n);
+                    }
+                },
+                |_, _, _| {},
+            ));
+        }
         if binding == u16::MAX - 2 {
             return Some(
                 self.runtime_row(RtOp::DescribeEmit, &[Arg::Value(vals[0]?)], n)
@@ -724,13 +778,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .runtime_row(RtOp::ArgsLen, &[Arg::Value(vals[0]?)], n)
                 .map(|values| values[0]),
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
+            Kernel::Env(op) => self.runtime_env(op, vals, result, n),
+            Kernel::Provide(op) => self.runtime_provide(op, vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_net(HostOp::SecretSeal, f, vals, result, n),
             Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
-            Kernel::Spawn => self.runtime_spawn(
-                types[0], types[1], vals[0]?, vals[1]?, vals[2], vals[3]?, result, n,
+            Kernel::Spawn | Kernel::TrySpawn => self.runtime_spawn(
+                types[0],
+                types[1],
+                vals[0]?,
+                vals[1]?,
+                vals[2],
+                vals[3]?,
+                result,
+                kernel == Kernel::TrySpawn,
+                n,
             ),
             Kernel::SpawnUnit => self.runtime_spawn_unit(
                 types[0], types[1], vals[0]?, vals[1]?, vals[2], vals[3]?, result, n,
@@ -772,7 +836,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_carrier(result, handle, n)
             }
             Kernel::ChannelNew => self.runtime_channel(types[0], vals[0]?, result, n),
-            Kernel::LatestNew => self.runtime_latest_new(vals[0], result, n),
+            Kernel::LatestNew => self.runtime_latest_new(types[0], vals[0], result, n),
             Kernel::LatestHandle => {
                 let handle = self.runtime_handle(vals[0]?, n);
                 let [handle, ..] =
@@ -802,7 +866,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::TryReceive => self.runtime_try_receive(types[0], vals[0]?, result, n),
             Kernel::Join => self.runtime_join(types[0], vals[0]?, result, n),
             Kernel::LogNew => self.runtime_log_new(types[0], result, n),
-            Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
+            Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], n),
             Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
@@ -1040,26 +1104,47 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    /// `latest.new`: the root admits `LATEST_ROOT` from the current limit; a
-    /// refusal hands the taken `Arc[T]` back in the error (CONC-13).
+    /// The `ty` an admitting runtime operation builds into a fresh slot once
+    /// `ok`; a refusal raises `Capacity { requested, available }` first (MEM-21).
+    pub(super) fn runtime_admitted(
+        &mut self,
+        ty: TyId,
+        ok: ValueId,
+        [requested, available]: [ValueId; 2],
+        n: NodeId,
+        build: impl FnOnce(&mut Self, AddressId),
+    ) -> Option<ValueId> {
+        self.raise_unless(ok, requested, available, n);
+        if self.rep_at(ty, n)? == Rep::None {
+            return None;
+        }
+        let id = self.runtime_type(ty, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        build(self, to);
+        if !self.live() {
+            return None;
+        }
+        let value = self.pointer(to, n);
+        self.temp(ty, Some(value));
+        Some(value)
+    }
+
+    /// `latest.new`: the root admits `LATEST_ROOT` from the current limit and owns
+    /// the taken `Arc[T]`; a refusal raises with the Arc still the caller's (CONC-13).
     fn runtime_latest_new(
         &mut self,
+        item: TyId,
         arc: Option<ValueId>,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        // The refusal pair `(Capacity, Arc[T])` names the root's item type.
-        let TyKind::Adt(_, outcome) = self.t.kind(result).clone() else {
-            self.gap(n, "a latest.new result that is not a Result is not built");
+        // The root keeps the drop of its holder, `Arc[T]`.
+        let Some(arc_decl) = self.p.core_decl("Arc") else {
+            self.gap(n, "latest.new without the prelude's Arc is not built");
             return None;
         };
-        let TyKind::Tuple(pair) = self.t.kind(outcome[1]).clone() else {
-            self.gap(n, "a latest.new refusal that is not a pair is not built");
-            return None;
-        };
-        let item = pair[1];
-        let id = self.runtime_type(item, n)?;
-        let rep = self.rep_at(item, n)?;
+        let holder = self.t.mk(TyKind::Adt(arc_decl, vec![item]));
+        let id = self.runtime_type(holder, n)?;
         let node = self.runtime_handle(arc?, n);
         let requested = self.konst(
             Ty::Scalar(Scalar::U64),
@@ -1068,36 +1153,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )?;
         let [latest, available, ..] =
             self.runtime_row(RtOp::LatestNew { item: id }, &[Arg::Value(node)], n)?;
-        // The root owns the Arc on success; the error owns it on refusal.
-        self.consume(arc, n);
         let ok = self.runtime_nonzero(Ty::Ptr, latest, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(at, &[Step::Field(0)], Ty::Ptr, latest, n);
-                }
-            },
-            |cx, to, pair| {
-                let TyKind::Tuple(parts) = cx.t.kind(pair).clone() else {
-                    return;
-                };
-                if let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
-                {
-                    if let Some(at) = cx.runtime_field(to, &[Step::Field(0)], parts[0], n) {
-                        cx.runtime_capacity(at, requested, available, n);
-                    }
-                    if let Some(at) = cx.runtime_field(to, &[Step::Field(1)], item, n) {
-                        cx.install(at, rep, arc, n);
-                    }
-                }
-            },
-        )
+        self.runtime_admitted(result, ok, [requested, available], n, |cx, to| {
+            cx.consume(arc, n);
+            cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, latest, n);
+        })
     }
 
     fn runtime_channel(
@@ -1116,32 +1176,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let [sender, receiver, available, ..] =
             self.runtime_row(RtOp::ChannelNew { item: id }, &[Arg::Value(cap)], n)?;
         let ok = self.runtime_nonzero(Ty::Ptr, sender, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, pair| {
-                let TyKind::Tuple(types) = cx.t.kind(pair).clone() else {
-                    return;
-                };
-                if let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], pair, n)
-                {
-                    for (i, (ty, handle)) in types.into_iter().zip([sender, receiver]).enumerate() {
-                        if let Some(field) = cx.runtime_field(to, &[Step::Field(i as u32)], ty, n) {
-                            cx.runtime_store(field, &[Step::Field(0)], Ty::Ptr, handle, n);
-                        }
-                    }
+        self.runtime_admitted(result, ok, [requested, available], n, |cx, to| {
+            let TyKind::Tuple(types) = cx.t.kind(result).clone() else {
+                return;
+            };
+            for (i, (ty, handle)) in types.into_iter().zip([sender, receiver]).enumerate() {
+                if let Some(field) = cx.runtime_field(to, &[Step::Field(i as u32)], ty, n) {
+                    cx.runtime_store(field, &[Step::Field(0)], Ty::Ptr, handle, n);
                 }
-            },
-            |cx, to, capacity| {
-                if let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
-                {
-                    cx.runtime_capacity(to, requested, available, n);
-                }
-            },
-        )
+            }
+        })
     }
 
     /// Saturated exact charge. Overflow is a recoverable refusal by the runtime;
@@ -1512,8 +1556,11 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Host(_)
             | Kernel::Net(_)
             | Kernel::ArgsLen
-            | Kernel::ArgsGet => true,
-            Kernel::CarrierMove
+            | Kernel::ArgsGet
+            | Kernel::Env(_) => true,
+            // A virtual provider observes only run state the program made.
+            Kernel::Provide(_)
+            | Kernel::CarrierMove
             | Kernel::CarrierView
             | Kernel::SecretSeal
             | Kernel::SecretRender
@@ -1526,6 +1573,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::WithUnique(_)
             | Kernel::Unbox
             | Kernel::Spawn
+            | Kernel::TrySpawn
             | Kernel::CheckCancel
             | Kernel::Cancel
             | Kernel::Join
@@ -1560,7 +1608,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
         let Some(i) = p.core_operations[f] else {
             continue;
         };
-        if i >= u16::MAX - 2 {
+        if i >= u16::MAX - 4 {
             continue;
         }
         let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {
@@ -1633,6 +1681,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: Option<ValueId>,
         function: ValueId,
         result: TyId,
+        try_spawn: bool,
         n: NodeId,
     ) -> Option<ValueId> {
         // Native task-entry glue follows x/r.carried. The fixed runtime C entry
@@ -1660,8 +1709,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ],
             n,
         )?;
-        self.consume(value, n);
         let ok = self.runtime_nonzero(Ty::Ptr, task, n)?;
+        // `task.spawn` raises with `x` still the caller's; `task.try_spawn` hands
+        // it back in `Error((c, x))` (CONC-3).
+        if !try_spawn {
+            return self.runtime_admitted(result, ok, [requested, available], n, |cx, to| {
+                cx.consume(value, n);
+                cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, task, n);
+            });
+        }
+        self.consume(value, n);
         self.runtime_result(
             result,
             ok,
@@ -1730,7 +1787,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let node = self.value(Ty::Ptr);
         let available = self.value(u);
-        let fail = self.fail_to(n);
         let edge = match kind {
             None => FieldTy::Box(TypeRef(id.0)),
             Some(Counted::Rc) => FieldTy::Rc(TypeRef(id.0)),
@@ -1747,54 +1803,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: Some(overflow),
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
-        // Allocation commits normally to either the new owner or the handback
-        // error. A grant failure enters cleanup before this consumption.
-        self.consume(value, n);
+        // A refusal raises with the value still the caller's, so cleanup drops it.
         let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, owner| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], owner, n)
-                {
-                    cx.runtime_store(at, &[Step::Field(0)], Ty::Ptr, node, n);
-                    let at = cx.owner_payload(node, id, kind.is_some(), n);
-                    if let Some(at) = at {
-                        let at = match rep {
-                            Rep::Scalar(_) => cx.address(
-                                AddressBase::Address(at),
-                                &[Step::Field(0)],
-                                rep.stored().unwrap(),
-                                n,
-                            ),
-                            _ => at,
-                        };
-                        cx.install(at, rep, value, n);
-                    }
-                }
-            },
-            |cx, to, pair| {
-                let TyKind::Tuple(parts) = cx.t.kind(pair).clone() else {
-                    return;
+        self.runtime_admitted(result, ok, [charge, available], n, |cx, to| {
+            cx.consume(value, n);
+            cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
+            if let Some(at) = cx.owner_payload(node, id, kind.is_some(), n) {
+                let at = match rep {
+                    Rep::Scalar(_) => cx.address(
+                        AddressBase::Address(at),
+                        &[Step::Field(0)],
+                        rep.stored().unwrap(),
+                        n,
+                    ),
+                    _ => at,
                 };
-                if let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
-                {
-                    if let Some(at) = cx.runtime_field(to, &[Step::Field(0)], parts[0], n) {
-                        cx.runtime_capacity(at, charge, available, n);
-                    }
-                    if let Some(at) = cx.runtime_field(to, &[Step::Field(1)], item, n) {
-                        cx.install(at, rep, value, n);
-                    }
-                }
-            },
-        )
+                cx.install(at, rep, value, n);
+            }
+        })
     }
 
     pub(super) fn list_ty(&mut self, item: TyId, n: NodeId) -> Option<TyId> {
@@ -1825,7 +1854,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let node = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let edge = FieldTy::Box(TypeRef(id.0));
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: node,
@@ -1837,47 +1865,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: Some(overflow),
                 size: payload,
                 align: 8,
-                fail,
             },
             n,
         );
         let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, log| {
-                // The node itself is the List carrier: {data, len, capacity}.
-                cx.set_carrier_word(node, carrier, SeqWord::Data, null, n);
-                cx.set_carrier_word(node, carrier, SeqWord::Cap, zero, n);
-                cx.set_carrier_word(node, carrier, SeqWord::Len, zero, n);
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], log, n)
-                {
-                    cx.runtime_store(at, &[Step::Field(0)], Ty::Ptr, node, n);
-                }
-            },
-            |cx, to, cap| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], cap, n)
-                {
-                    cx.runtime_capacity(at, charge, available, n);
-                }
-            },
-        )
+        self.runtime_admitted(result, ok, [charge, available], n, |cx, to| {
+            // The node itself is the List carrier: {data, len, capacity}.
+            cx.set_carrier_word(node, carrier, SeqWord::Data, null, n);
+            cx.set_carrier_word(node, carrier, SeqWord::Cap, zero, n);
+            cx.set_carrier_word(node, carrier, SeqWord::Len, zero, n);
+            cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
+        })
     }
 
-    /// Append through the pointer loaded from the Log carrier. The temporary
-    /// reserve result is adapted to the public `(Capacity, E)` refusal so the
-    /// taken element remains available until the reserve decision.
+    /// Append through the pointer loaded from the Log carrier. A refused reserve
+    /// raises with the taken element still the caller's, so cleanup drops it.
     fn runtime_log_append(
         &mut self,
         item: TyId,
         log: ValueId,
         value: Option<ValueId>,
-        result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         let log_ty = self.log_ty(item, n)?;
@@ -1891,45 +1900,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let node = self.read_bits(node_at, Ty::Ptr, n);
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        let cap = self.prelude("Capacity", n)?;
-        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
-        let reserve = self.prelude("Result", n)?;
-        let reserve = self.t.mk(TyKind::Adt(reserve, vec![UNIT, cap]));
-        let reserved =
-            self.list_reserve(item, node, one, super::lists::Ask::Bounded, reserve, n)?;
-        let reserve_id =
-            self.place_row(reserve, "a log reserve without a place is not built", n)?;
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        let from = self.address(
-            AddressBase::Value(reserved),
-            &[],
-            PlaceTy::Declared(reserve_id),
-            n,
-        );
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: from,
-            },
-            n,
-        );
-        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, zero, n);
-        let out_id = match self.rep(result) {
-            Ok(Rep::Place(id)) => id,
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-            _ => return None,
-        };
-        let out = self.new_slot(PlaceTy::Declared(out_id), n);
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        self.list_branch(ok, yes, no, n);
+        self.list_reserve(item, node, one, super::lists::Ask::Bounded, n)?;
         let item_rep = self.rep_at(item, n)?;
-        self.start(yes);
         let carrier = self.list_carrier(item, n)?;
         let len = self.carrier_word(node, carrier, SeqWord::Len, n);
         let element = self.list_element(item, node, len, n)?;
@@ -1939,68 +1911,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
         self.set_carrier_word(node, carrier, SeqWord::Len, new_len, n);
-        self.inst(
-            Inst::SetCase {
-                address: out,
-                case: 0,
-            },
-            n,
-        );
         self.consume(value, n);
-        self.jump(done, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: out,
-                case: 1,
-            },
-            n,
-        );
-        let error_ty = match self.t.kind(result).clone() {
-            TyKind::Adt(_, args) => args[1],
-            _ => {
-                self.gap(n, "a log append that is not a declared type is not built");
-                return None;
-            }
-        };
-        let cap_at = self.runtime_field(out, &[Step::CaseField { case: 1, field: 0 }], error_ty, n);
-        let cap_at = self.named(cap_at, "a log refusal without a place is not built", n)?;
-        let cap_id = self.runtime_type(cap, n)?;
-        let old_cap = self.address(
-            AddressBase::Address(from),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(cap_id),
-            n,
-        );
-        for field in 0..2 {
-            let src = self.address(
-                AddressBase::Address(old_cap),
-                &[Step::Field(field)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            let value = self.read_bits(src, Ty::Scalar(Scalar::U64), n);
-            self.runtime_store(
-                cap_at,
-                &[Step::Field(field)],
-                Ty::Scalar(Scalar::U64),
-                value,
-                n,
-            );
-        }
-        if let Some(at) = self.runtime_field(
-            out,
-            &[Step::CaseField { case: 1, field: 0 }, Step::Field(1)],
-            item,
-            n,
-        ) {
-            self.install(at, item_rep, value, n);
-        }
-        self.jump(done, &[], n);
-        self.start(done);
-        let out = self.pointer(out, n);
-        self.temp(result, Some(out));
-        Some(out)
+        None
     }
 
     fn runtime_log_finish(
@@ -2482,11 +2394,202 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Arg::Value(vals[0]?), Arg::Value(vals[1]?)],
             n,
         )?;
-        let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
-            self.gap(
+        self.runtime_optional_view(value, result, n)
+    }
+
+    fn runtime_env(
+        &mut self,
+        op: HostOp,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let args: Vec<_> = vals
+            .iter()
+            .copied()
+            .map(|v| v.map(Arg::Value))
+            .collect::<Option<_>>()?;
+        let [value, error, ..] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        match op {
+            HostOp::EnvLen => Some(value),
+            HostOp::EnvName => self.runtime_optional_view(value, result, n),
+            HostOp::EnvGet => {
+                let tag = Ty::Scalar(Scalar::U8);
+                let ok = self.runtime_compare(tag, error, 0, n)?;
+                self.runtime_result(
+                    result,
+                    ok,
+                    n,
+                    |cx, to, ty| {
+                        let view = cx.runtime_optional_view(value, ty, n);
+                        cx.runtime_case_payload(to, 0, ty, view, n);
+                    },
+                    |cx, to, ty| {
+                        let Some(at) =
+                            cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                        else {
+                            return;
+                        };
+                        let denied = cx.runtime_compare(tag, error, 1, n).unwrap();
+                        let no_name = cx.new_block(&[]);
+                        let invalid_value = cx.new_block(&[]);
+                        let done = cx.new_block(&[]);
+                        cx.runtime_branch(denied, no_name, invalid_value, n);
+                        cx.start(no_name);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 0,
+                            },
+                            n,
+                        );
+                        cx.jump(done, &[], n);
+                        cx.start(invalid_value);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 1,
+                            },
+                            n,
+                        );
+                        cx.jump(done, &[], n);
+                        cx.start(done);
+                    },
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// `provide.clock/random/process/stdout/stderr`, the hand operations and
+    /// the served-port operations (core.md, Provide). A constructor's pair is
+    /// (value, written): the capability and its hand or `Served` end.
+    fn runtime_provide(
+        &mut self,
+        op: HostOp,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let hand = matches!(
+            op,
+            HostOp::ClockAdvance
+                | HostOp::ClockSetWall
+                | HostOp::ClockIdle
+                | HostOp::ProcessTrigger
+                | HostOp::PortNext
+                | HostOp::PortReply
+        );
+        // A resource operand arrives as its key, or as a pointer to it when the
+        // caller lends or hands over a place.
+        let mut args = Vec::new();
+        for (i, v) in vals.iter().enumerate() {
+            let v = (*v)?;
+            let resource = (i == 0
+                && (hand || matches!(op, HostOp::CallWord | HostOp::CallPayload)))
+                || (i == 1 && op == HostOp::PortReply);
+            let by_place = resource && self.b.values[v.index()] == Ty::Ptr;
+            args.push(Arg::Value(if by_place {
+                self.runtime_key(v, n)
+            } else {
+                v
+            }));
+        }
+        let [value, _, _, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        if matches!(
+            op,
+            HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
+        ) {
+            // A cell's charge (MEM-24): a refusal answers grant 0 with the
+            // available bytes in `written`.
+            let requested = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
+            let ok = self.runtime_nonzero(u, value, n)?;
+            self.raise_unless(ok, requested, written, n);
+        }
+        if matches!(op, HostOp::ProvideStdout | HostOp::ProvideStderr) {
+            // A port's room, with its own record, saturating as the run time's.
+            let cell = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
+            let requested = self.value(u);
+            self.inst(
+                Inst::IntArith {
+                    result: requested,
+                    flag: None,
+                    op: ArithOp::Add,
+                    mode: ArithMode::Saturating,
+                    left: cell,
+                    right: vals[0]?,
+                },
                 n,
-                "an argument lookup that is not a declared type is not built",
             );
+            let ok = self.runtime_nonzero(u, value, n)?;
+            self.raise_unless(ok, requested, written, n);
+        }
+        match op {
+            HostOp::ProvideClock
+            | HostOp::ProvideProcess
+            | HostOp::ProvideStdout
+            | HostOp::ProvideStderr => {
+                let id = self.runtime_type(result, n)?;
+                let to = self.new_slot(PlaceTy::Declared(id), n);
+                self.runtime_store(to, &[Step::Field(0)], u, value, n);
+                self.runtime_store(to, &[Step::Field(1)], u, written, n);
+                Some(self.pointer(to, n))
+            }
+            HostOp::ProvideRandom => Some(value),
+            HostOp::ClockIdle => {
+                let zero = self.konst(u, 0, n)?;
+                let some = self.test(CompareOp::Ne, written, zero, n);
+                self.runtime_result(
+                    result,
+                    some,
+                    n,
+                    |cx, to, ty| cx.runtime_case_payload(to, 1, ty, Some(value), n),
+                    |_, _, _| {},
+                )
+            }
+            HostOp::PortNext => {
+                // The Call is a resource place holding its key, as `host.open`'s file.
+                let zero = self.konst(u, 0, n)?;
+                let some = self.test(CompareOp::Ne, written, zero, n);
+                self.runtime_result(
+                    result,
+                    some,
+                    n,
+                    |cx, to, ty| {
+                        if let Some(to) =
+                            cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                        {
+                            cx.runtime_store(to, &[], u, value, n);
+                        }
+                    },
+                    |_, _, _| {},
+                )
+            }
+            HostOp::CallWord | HostOp::PortReply => {
+                if op == HostOp::PortReply {
+                    self.consume(vals[1], n);
+                }
+                Some(value)
+            }
+            HostOp::ProcessTrigger => {
+                self.consume(vals[0], n);
+                None
+            }
+            HostOp::ClockAdvance | HostOp::ClockSetWall | HostOp::CallPayload => None,
+            _ => unreachable!(),
+        }
+    }
+
+    fn runtime_optional_view(
+        &mut self,
+        value: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+            self.gap(n, "a provider lookup requires an Option of a view");
+
             return None;
         };
         let payload = arguments[0];
@@ -2626,6 +2729,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             op,
             HostOp::Read
                 | HostOp::Write
+                | HostOp::ReadAt
+                | HostOp::WriteAt
+                | HostOp::NextEntries
+                | HostOp::StatFile
                 | HostOp::Close
                 | HostOp::TryLock
                 | HostOp::Unlock
@@ -2638,7 +2745,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let mut args = [Arg::Value(handle); 3];
         let len = match op {
-            HostOp::Rename => {
+            HostOp::Rename | HostOp::ReadAt | HostOp::WriteAt => {
                 args[1] = Arg::Value(vals[1]?);
                 args[2] = Arg::Value(vals[2]?);
                 3
@@ -2654,6 +2761,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             HostOp::Read
             | HostOp::Write
+            | HostOp::OpenDir
+            | HostOp::NextEntries
+            | HostOp::Stat
             | HostOp::Mkdir
             | HostOp::Mkdtemp
             | HostOp::Remove
@@ -2675,7 +2785,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // Its failure cleanup must not close the same key a second time.
             self.consume(vals[0], n);
         }
-        let [value, error, code, written] = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+        let stat = matches!(op, HostOp::Stat | HostOp::StatFile);
+        let (value, error, code, written, kind) = if stat {
+            let [value, error, code, time, kind] =
+                self.runtime_outputs(RtOp::Host(op), &args[..len], n)?;
+            (value, error, code, time, Some(kind))
+        } else {
+            let [value, error, code, written] =
+                self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+            (value, error, code, written, None)
+        };
         if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             return Some(value);
         }
@@ -2685,15 +2804,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| match op {
-                HostOp::Open => {
+                HostOp::Open | HostOp::Entries => {
                     if let Some(to) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                     {
                         cx.runtime_store(to, &[], u64t, value, n);
                     }
                 }
-                HostOp::Read | HostOp::Mkdtemp | HostOp::Random => {
-                    cx.runtime_case_payload(to, 0, ty, Some(value), n)
+                HostOp::Read
+                | HostOp::ReadAt
+                | HostOp::Mkdtemp
+                | HostOp::Random
+                | HostOp::OpenDir
+                | HostOp::NextEntries => cx.runtime_case_payload(to, 0, ty, Some(value), n),
+                HostOp::Stat | HostOp::StatFile => {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_stat(ty, at, kind.unwrap(), value, written, n);
+                    }
                 }
                 HostOp::TryLock => {
                     if let Some(boolean) = cx.runtime_nonzero(u64t, value, n) {
@@ -2706,7 +2835,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if let Some(to) =
                     cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
                 {
-                    if matches!(op, HostOp::Write | HostOp::Stdout | HostOp::Stderr) {
+                    if matches!(
+                        op,
+                        HostOp::Write | HostOp::WriteAt | HostOp::Stdout | HostOp::Stderr
+                    ) {
                         cx.runtime_write_error(to, ty, written, error, code, n);
                     } else {
                         cx.runtime_io_error(to, error, code, n);
@@ -2714,6 +2846,51 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
+    }
+
+    fn runtime_stat(
+        &mut self,
+        ty: TyId,
+        at: AddressId,
+        kind: ValueId,
+        size: ValueId,
+        modified_ns: ValueId,
+        n: NodeId,
+    ) {
+        let Some((_, tag)) = self.net_field(ty, at, 0, n) else {
+            return;
+        };
+        self.runtime_store(at, &[Step::Field(1)], Ty::Scalar(Scalar::U64), size, n);
+        self.runtime_store(
+            at,
+            &[Step::Field(2)],
+            Ty::Scalar(Scalar::I64),
+            modified_ns,
+            n,
+        );
+        let join = self.new_block(&[]);
+        for case in 0..3 {
+            let Some(matches) = self.runtime_compare(Ty::Scalar(Scalar::U8), kind, case as u64, n)
+            else {
+                return;
+            };
+            let yes = self.new_block(&[]);
+            let next = self.new_block(&[]);
+            self.runtime_branch(matches, yes, next, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: tag, case }, n);
+            self.jump(join, &[], n);
+            self.start(next);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: tag,
+                case: 3,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
     }
 
     /// A HostFile's entire carrier is the opaque u64 key into the run's
@@ -3086,6 +3263,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
+            return self.runtime_secret_mac(op, vals, result, n);
+        }
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(
             op,
@@ -3132,11 +3312,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend([vals[1]?, vals[2]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
                 }
+                HostOp::StdinRead => {
+                    operands.push(vals[1]?);
+                    operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
+                }
                 HostOp::SendSecret => {
                     operands.extend([vals[1]?, vals[2]?, vals[3]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
                 }
-                HostOp::SecretSeal | HostOp::SecretNarrow => operands.push(vals[1]?),
+                HostOp::SecretSeal | HostOp::SecretNarrow | HostOp::EnvNarrow => {
+                    operands.push(vals[1]?)
+                }
                 HostOp::NetSplit => {}
                 _ => unreachable!(),
             }
@@ -3162,8 +3348,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let policy_result = matches!(
             op,
-            HostOp::NetNarrow | HostOp::SecretSeal | HostOp::SecretNarrow
+            HostOp::NetNarrow | HostOp::SecretSeal | HostOp::SecretNarrow | HostOp::EnvNarrow
         );
+        if policy_result {
+            // Error 1 is `Invalid`; a larger one is a refusal, raised (MEM-21).
+            let one = self.konst(Ty::Scalar(Scalar::U8), 1, n)?;
+            let decided = self.test(CompareOp::Le, error, one, n);
+            self.raise_unless(decided, value, written, n);
+        }
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
         self.runtime_result(
             result,
@@ -3171,7 +3363,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
             |cx, to, ty| {
                 if policy_result
-                    || matches!(op, HostOp::RecvBounded | HostOp::SendPair | HostOp::Resolve)
+                    || matches!(
+                        op,
+                        HostOp::RecvBounded
+                            | HostOp::SendPair
+                            | HostOp::Resolve
+                            | HostOp::StdinRead
+                    )
                 {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n);
                 } else if op == HostOp::Connect {
@@ -3198,14 +3396,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
                 {
                     if policy_result {
-                        let invalid = cx
-                            .runtime_compare(Ty::Scalar(Scalar::U8), error, 1, n)
-                            .unwrap();
-                        let yes = cx.new_block(&[]);
-                        let no = cx.new_block(&[]);
-                        let join = cx.new_block(&[]);
-                        cx.runtime_branch(invalid, yes, no, n);
-                        cx.start(yes);
                         cx.inst(
                             Inst::SetCase {
                                 address: at,
@@ -3213,32 +3403,68 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             },
                             n,
                         );
-                        cx.jump(join, &[], n);
-                        cx.start(no);
-                        cx.inst(
-                            Inst::SetCase {
-                                address: at,
-                                case: 1,
-                            },
-                            n,
-                        );
-                        let TyKind::Adt(d, _) = cx.t.kind(ty) else {
-                            return;
-                        };
-                        let DeclBody::Variant(cases) = &cx.p.decls[d.index()].body else {
-                            return;
-                        };
-                        let cap = cases[1].fields[0].ty;
-                        if let Some(cap) =
-                            cx.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], cap, n)
-                        {
-                            cx.runtime_capacity(cap, value, written, n);
-                        }
-                        cx.jump(join, &[], n);
-                        cx.start(join);
+                    } else if op == HostOp::StdinRead {
+                        cx.runtime_stdin_error(at, error, code, n);
                     } else {
                         cx.runtime_net_error(at, ty, error, code, n);
                     }
+                }
+            },
+        )
+    }
+
+    fn runtime_secret_mac(
+        &mut self,
+        op: HostOp,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let signing = op == HostOp::SecretHmac;
+        let third = if signing {
+            let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+                unreachable!("the MAC builtin returns a Result")
+            };
+            let id = self.runtime_type(arguments[0], n)?;
+            let output = self.new_slot(PlaceTy::Declared(id), n);
+            self.pointer(output, n)
+        } else {
+            vals[2]?
+        };
+        let [value, error, ..] = self.runtime_row(
+            RtOp::Host(op),
+            &[
+                Arg::Value(vals[0]?),
+                Arg::Value(vals[1]?),
+                Arg::Value(third),
+            ],
+            n,
+        )?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                let value = if signing {
+                    Some(third)
+                } else {
+                    cx.runtime_nonzero(u, value, n)
+                };
+                cx.runtime_case_payload(to, 0, ty, value, n);
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.inst(
+                        Inst::SetCase {
+                            address: at,
+                            case: 0,
+                        },
+                        n,
+                    );
                 }
             },
         )
@@ -3320,6 +3546,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Step::CaseField { case: 1, field: 0 }],
             u,
             index,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+    fn runtime_stdin_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
+        let join = self.new_block(&[]);
+        for (tag, case) in [(7, 0), (6, 1)] {
+            let on = self
+                .runtime_compare(Ty::Scalar(Scalar::U8), error, tag, n)
+                .unwrap();
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 2,
+            },
+            n,
+        );
+        self.runtime_store(
+            to,
+            &[Step::CaseField { case: 2, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            code,
             n,
         );
         self.jump(join, &[], n);

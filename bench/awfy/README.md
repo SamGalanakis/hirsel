@@ -46,7 +46,14 @@ python3 bench/awfy/profiles.py "$out/build" "$out/awfy/samples.json" \
 
 Each AWFY execution selects one benchmark by name and takes an outer iteration
 count and an inner size. A sample runs one outer iteration at the size in
-`rebench.conf`. The runtime sample counts process-tree user instructions and
+`rebench.conf`. For fixed-input workloads the sampler also supplies the
+reference data to all three ports as a fourth argument. Queens reads a
+cyclic sequence of board sizes, with one digit per search and ten searches
+per inner iteration. The board uses `88888888`. The other numeric workloads
+read comma-separated values, one per inner iteration. Json and JsonPool
+receive the upstream RAP document as text.
+
+The runtime sample counts process-tree user instructions and
 takes peak RSS from GNU time. The startup sample measures monotonic elapsed time
 from the spawn request to the first line confirming the work. For Hello that
 line is the greeting. For AWFY it follows one complete checked outer iteration.
@@ -158,12 +165,15 @@ server and the Rust reference, using an ephemeral port.
 Use at least two measurement CPUs. The first runs AWFY, LangArena and the
 checkbox server. The second runs the checkbox loader. A measurement CPU
 must have a core to itself within the run's CPU assignment. The board
-reports sibling activity for each sample. It holds
-`/run/user/1000/hirsel-board.lock` while measuring by default. It needs Linux perf user
+reports sibling activity for each sample. The default lock is
+`/run/user/<uid>/hirsel-board.lock` for the current user. The board needs Linux perf user
 counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
 with the captured logs. Add `--baseline PREVIOUS/board.json` to check each
 nightly gate.
+
+Set `HIRSEL_BOARD_CARGO_ENV=NAME=VALUE` if your Cargo wrapper needs an
+environment setting to stay inside the board's existing resource limits.
 
 - The instruction gate flags a Hirsel increase greater than 2% on any row.
   Hirsel and peer CPU counters require equal enabled and running times.

@@ -221,7 +221,7 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
 
 
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
-            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False):
+            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False, tape=None):
     width = len(cpus)
     siblings = sibling_cpus(cpus, allow_smt=allow_smt)
     command = command or sample_command(bins, case, language, width, size, s0)
@@ -230,6 +230,9 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
     directory = out / f"{case}-{language.lower()}-{width}"
     directory.mkdir()
     launch = measured_command(directory, cpus, command, profile, cycles)
+    env = sample_env(width, language, test_pool)
+    if tape is not None:
+        env["HIRSEL_RECORD"] = str(tape)
     stdin = sample_stdin(bins, case, language)
     if lock_path:
         wait_load()
@@ -238,7 +241,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
             fcntl.flock(lock, fcntl.LOCK_EX)
         with (smt_activity(siblings, f"{case}/{language}/{width}") as busy, stdin.open("rb") as inp,
               (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err):
-            result = subprocess.run(launch, cwd=ROOT, env=sample_env(width, language, test_pool),
+            result = subprocess.run(launch, cwd=ROOT, env=env,
                                     stdin=inp, stdout=out_file, stderr=err)
     cpu_list = ",".join(map(str, cpus))
     row = {"status": "ok", "cpus": cpu_list, "smt_busy_percent": busy}
@@ -447,8 +450,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
         board = bins / "checkbox"
         port = int((board / "port").read_text())
         listen = f"127.0.0.1:{port}"
-        options = ["--listen", listen, "--per-ip-sessions", "20000",
-                   "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
+        options = ["--listen", listen]
         if language == "Hirsel":
             # The grant names this path at link time. Move the old tree aside
             # between samples and retain it with that sample's raw evidence.
@@ -458,6 +460,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
         else:
             server_env["TOKIO_WORKER_THREADS"] = str(width)
             server = [bins / "wire/release/wire-reference", *options,
+                      "--per-ip-sessions", "20000", "--principal-rate", "1000000000",
                       "--wants", board / "wants.bin", "--n-place", "1048576",
                       "--wal", directory / "checkbox.wal"]
         load = [bins / "wire/release/wire-load", "converge", "--url", f"ws://{listen}/hirsel",
@@ -524,19 +527,18 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
     return counters | data | {"metrics": metrics, "service_seconds": service_seconds}
 
 
-def replay_sample(bins, path, row, tape, cpu, wanted):
-    if row["status"] == "ok":
-        command = regimes.command(bins, row["case"], "Hirsel", 1, row["size"],
-                                  row["rounds"], "replay", tape)
-        with ((path / "replay.stdout").open("wb") as output,
-              (path / "replay.stderr").open("wb") as err):
-            result = subprocess.run(
-                ["taskset", "-c", str(cpu), ROOT / "tools/capped", *map(str, command)],
-                cwd=ROOT, stdout=output, stderr=err, env=sample_env(1, "Hirsel", True))
-        if result.returncode or (path / "replay.stdout").read_bytes() != wanted:
-            row["status"] = f"replay-failed:{result.returncode}"
-    if (bins / tape).exists():
-        shutil.move(bins / tape, path / "run.tape")
+def replay_sample(command, path, row, tape, cpu):
+    if row["status"] != "ok":
+        return
+    with ((path / "replay.stdout").open("wb") as output,
+          (path / "replay.stderr").open("wb") as err):
+        result = subprocess.run(
+            ["taskset", "-c", str(cpu), ROOT / "tools/capped",
+             *command, "--tape", tape, "-o", path / "replay"],
+            cwd=ROOT, stdout=output, stderr=err, env=sample_env(1, "Hirsel", True))
+    if result.returncode or (path / "replay.stdout").read_bytes():
+        row["status"] = f"replay-failed:{result.returncode}"
+    (path / "replay").unlink(missing_ok=True)
 
 
 @contextmanager
@@ -595,7 +597,12 @@ def run_regimes(args, parser, bins, out, workers):
                 parser.error("socket and checkbox cases require disjoint --load-cpus")
             if set(args.load_cpus).intersection(sibling_cpus(args.measure_cpus)):
                 parser.error("load CPUs must also be on separate physical cores")
+    replay_command = None
     if args.mode == "recorded":
+        replay_config = bins / "regimes-replay.json"
+        if not replay_config.is_file():
+            parser.error("recorded runs require building the regimes with --recording-runtime")
+        replay_command = json.loads(replay_config.read_text())
         if args.case and any(not regimes.WORKLOADS[case].recorded for case in cases):
             parser.error("a selected case has no recording and replay path")
         if args.profile:
@@ -625,21 +632,21 @@ def run_regimes(args, parser, bins, out, workers):
                             cpus = args.measure_cpus[:width]
                             path = point / f"{case}-{lang.lower()}-{width}"
                             recorded = args.mode == "recorded" and lang == "Hirsel"
-                            tape = f"{case}-{grain}ns-{rounds}r-w{width}-r{repeat}.tape"
-                            # The native Dir grant points to the private build directory.
-                            tape = f"{out.name}-{tape}"
+                            tape = path / "run.tape" if recorded else None
                             if work.connections or case == "checkbox":
                                 row = observe_service(bins, path, case, lang, cpus, args.load_cpus,
                                                       size, rounds, wanted, profile=args.profile,
                                                       allow_smt=args.allow_smt, cycles=args.cycles)
                             else:
-                                extra = ("record", tape) if recorded else ()
-                                command = regimes.command(bins, case, lang, width, size, rounds, *extra)
+                                command = regimes.command(bins, case, lang, width, size, rounds)
+                                if recorded:
+                                    command[0] = bins / "hirsel/regimes-recording"
                                 row = observe(bins, point, case, lang, cpus, size, wanted, False,
                                               None, test_pool=True, command=command, profile=args.profile,
-                                              allow_smt=args.allow_smt, cycles=args.cycles)
+                                              allow_smt=args.allow_smt, cycles=args.cycles, tape=tape)
                                 if path.exists():
-                                    (path / "command").write_text(shlex.join(map(str, command)) + "\n")
+                                    launch = ["env", f"HIRSEL_RECORD={tape}", *command] if tape else command
+                                    (path / "command").write_text(shlex.join(map(str, launch)) + "\n")
                                     row["metrics"] = stderr_metrics(path)
                             row |= {"case": case, "language": lang, "width": width, "size": size,
                                     "rounds": rounds, "grain_ns": grain, "repeat": repeat,
@@ -649,12 +656,11 @@ def run_regimes(args, parser, bins, out, workers):
                             if lang == "Hirsel" and path.exists():
                                 row["pool"] = pool_counters(path, case, size)
                             if recorded:
-                                chooser = 0 if width == 1 else 2
-                                row["recorded_with"] = f"testing archive, tape.open/tape.tasks, chooser {chooser}"
-                            group.append((path, row, tape if recorded else None))
+                                row["recorded_with"] = "recording build with testing runtime"
+                            group.append((path, row, tape))
                         for path, row, tape in group:
                             if tape:
-                                replay_sample(bins, path, row, tape, args.measure_cpus[0], wanted)
+                                replay_sample(replay_command, path, row, tape, args.measure_cpus[0])
                             lang = row["language"]
                             rows.append(row)
                             print(f"{case} {grain}ns {lang} {width} repeat {repeat}: {row['status']}",

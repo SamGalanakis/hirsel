@@ -13,7 +13,7 @@ fn child(take x: Input) {
     let d = result.unwrap(Delayed(clock: v.clock, out: v.out));
 }
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), child))
+    let mut h = task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), child)
     host.sleep_until(clock, host.mono_ns(clock) + 2000000u64)
     task.cancel(mut h)
     match task.join(take h) {

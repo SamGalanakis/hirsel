@@ -19,35 +19,31 @@ type EchoState: shareable + send {
 }
 
 fn echo(req: http.Request, scratch: Region, mut b: http.Body, state: EchoState) -> Result[http.Outcome, http.ResponseError] waits {
-    let allocated: Result[Bytes, Capacity] = list.with_capacity(192)
-    let mut out = match take allocated {
-        Ok(take x) => take x,
-        Error(e) => return Error(Allocation(e))
-    }
+    let mut out: Bytes = list.with_capacity(192)
     let raw_path = http.path(req)
     if raw_path == string.as_bytes("/scratch") {
-        let first: Result[SpanBuilder[u8, in scratch], Capacity] = span.with_capacity(scratch, 3072)
-        let mut buf = match take first {
-            Ok(take x) => take x,
-            Error(e) => return Error(Allocation(e)),
+        let mut buf: SpanBuilder[u8, in scratch] = span.with_capacity(scratch, 3072)
+        let second = isolate(fn() -> Result[u64, Capacity] {
+            let more: SpanBuilder[u8, in scratch] = span.with_capacity(scratch, 4096)
+            let _ = take more
+            Ok(0)
+        })
+        let charged = match caught(take second) {
+            Some(_) => true,
+            None => false,
         }
-        let second: Result[SpanBuilder[u8, in scratch], Capacity] = span.with_capacity(scratch, 4096)
-        let charged = match take second {
-            Error(_) => true,
-            Ok(_) => false,
-        }
-        result.unwrap(span.push(mut buf, b'x'))
+        span.push(mut buf, b'x')
         let contents = span.finish(take buf)
         if !charged || contents[0] != b'x' {
             return Ok(Reply(http.response(500, take out, true)?))
         }
     } else if raw_path == string.as_bytes("/large") {
-        result.unwrap(list.fill(mut out, 160, b'x'))
+        list.fill(mut out, 160, b'x')
     } else if raw_path == string.as_bytes("/direct") {
-        result.unwrap(list.fill(mut out, 2048, b'Z'))
+        list.fill(mut out, 2048, b'Z')
     } else if raw_path == string.as_bytes("/when") {
         let mut time = string.new()
-        result.unwrap(string.push_u64(mut time, host.mono_ns(state.clock)))
+        string.push_u64(mut time, host.mono_ns(state.clock))
         let _ = list.append(mut out, string.as_bytes(time))
     } else if raw_path != string.as_bytes("/skip") {
         if let Some(inline) = http.inline_body(req) {
@@ -66,9 +62,9 @@ fn echo(req: http.Request, scratch: Region, mut b: http.Body, state: EchoState) 
 }
 
 fn test_server(take server: TestServer) waits {
-    let TestServer(listener: take l, c: c, tasks: tasks, cfg: take cfg, routes: take routes) = take server
-    let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut listeners, take l))
+    let TestServer(listener: take l, c, tasks, cfg: take cfg, routes: take routes) = take server
+    let mut listeners: List[Listener] = list.with_capacity(1)
+    list.push(mut listeners, take l)
     result.unwrap(http.serve(take listeners, c, tasks, take cfg, take routes, EchoState(clock: c)))
 }
 
@@ -82,8 +78,8 @@ fn listen_for_law(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config) -> (Tas
 fn listen_with_routes(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, take routes: router.Router[EchoState]) -> (Task[()], Addr) waits {
     let addr = Addr(ip: V4(2130706433), port: 0)
     let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
-    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg, routes: take routes)
-    (result.unwrap(task.spawn(tasks, bytes 262144, take job, test_server)), where_to)
+    let job = TestServer(listener: take listener, c, tasks, cfg: take cfg, routes: take routes)
+    (task.spawn(tasks, bytes 262144, take job, test_server), where_to)
 }
 
 // The client resumes independently of the writer under test.
@@ -139,7 +135,7 @@ type Drip: send {
 }
 
 fn drip(take plan: Drip) waits {
-    let Drip(w: take w, c: c, start: start, first_ms: first_ms, every_ms: every_ms) = take plan
+    let Drip(w: take w, c, start, first_ms, every_ms) = take plan
     let mut output = take w
     let raw = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
     for i in 0u64 .. list.len(raw) {
@@ -164,8 +160,8 @@ fn http_absolute_deadlines(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let socket = result.unwrap(host.connect(n, addr, Never))
     let (r, w) = net.split(take socket)
     let mut input = take r
-    let sender = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take w, c: c, start: accepted, first_ms: 8, every_ms: 4), drip))
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let sender = task.spawn(tasks, bytes 1024, Drip(w: take w, c, start: accepted, first_ms: 8, every_ms: 4), drip)
+    let mut received: Bytes = list.with_capacity(512)
     if client_head(mut input, mut received, c, after_ms(accepted, 60)) != 408 || !within_wake(host.mono_ns(c) - accepted, 16, 4) {
         return false
     }
@@ -183,7 +179,7 @@ fn http_absolute_deadlines(n: Net, c: Clock, tasks: Tasks) -> bool waits {
         return false
     }
     let previous = host.mono_ns(c)
-    let later = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take output2, c: c, start: previous, first_ms: 5, every_ms: 5), drip))
+    let later = task.spawn(tasks, bytes 1024, Drip(w: take output2, c, start: previous, first_ms: 5, every_ms: 5), drip)
     list.clear(mut received)
     client_head(mut input2, mut received, c, after_ms(previous, 60)) == 408 && within_wake(host.mono_ns(c) - previous, 25, 5)
 }
@@ -202,7 +198,7 @@ fn http_committed_prefix(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     if !client_send(mut output, string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), end) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if !client_end(mut input, mut received, end) {
         return false
     }
@@ -233,7 +229,7 @@ fn http_lazy_continue(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     if !client_send(mut output, request, At(c, until)) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if client_head(mut input, mut received, c, until) != 100 || received != string.as_bytes("HTTP/1.1 100 Continue\r\n\r\n") || !client_send(mut output, string.as_bytes("abc"), At(c, until)) {
         return false
     }
@@ -252,7 +248,7 @@ type ClientJob: send {
 }
 
 fn client_write(take job: ClientJob) waits {
-    let ClientJob(w: take w, raw: take raw, until: until) = take job
+    let ClientJob(w: take w, raw: take raw, until) = take job
     let mut output = take w
     let _ = client_send(mut output, raw, until)
 }
@@ -263,8 +259,8 @@ fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, l
     let (r, w) = net.split(take socket)
     let mut input = take r
     let end = At(c, after_ms(host.mono_ns(c), 90))
-    let writer = result.unwrap(task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take requests, until: end), client_write))
-    let mut received: Bytes = result.unwrap(list.with_capacity(1024))
+    let writer = task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take requests, until: end), client_write)
+    let mut received: Bytes = list.with_capacity(1024)
     if !client_end(mut input, mut received, end) {
         return false
     }
@@ -284,27 +280,24 @@ fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, l
 // same connection can use the full allowance again.
 // expect: run http_request_scratch(network) = true
 fn http_request_scratch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    let requests = result.unwrap(b"GET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    let requests = b"GET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
     pipelined(n, c, tasks, take requests, 3, 0)
 }
 
 fn capture_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
     let body = match http.capture(req, "id") {
-        Some(s) => match http.copy_bytes(string.as_bytes(s)) {
-            Ok(take copied) => take copied,
-            Error(e) => return Error(Allocation(e)),
-        },
+        Some(s) => http.copy_bytes(string.as_bytes(s)),
         None => list.new(),
     }
     Ok(Reply(http.response(200, take body, false)?))
 }
 
 fn static_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
-    Ok(Reply(http.response(201, result.unwrap(b"fixed"), false)?))
+    Ok(Reply(http.response(201, b"fixed", false)?))
 }
 
 fn explicit_head(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
-    Ok(Reply(http.response(202, result.unwrap(b"head"), false)?))
+    Ok(Reply(http.response(202, b"head", false)?))
 }
 
 fn tail_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
@@ -321,7 +314,7 @@ fn route_wire(n: Net, c: Clock, addr: Addr, request: Bytes, status: u16, length:
     let mut input = take r
     let mut output = take w
     let until = At(c, after_ms(host.mono_ns(c), 90))
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if !client_send(mut output, request, until) || !client_end(mut input, mut received, until) {
         return false
     }
@@ -384,7 +377,7 @@ fn upgrade_echo(take handover: upgrade.Taken) waits {
     if session.argument != 7 || !upgrade.established(mut session.socket) {
         return
     }
-    let mut incoming: Bytes = result.unwrap(list.with_capacity(3))
+    let mut incoming: Bytes = list.with_capacity(3)
     let until = At(session.clock, after_ms(host.mono_ns(session.clock), 20))
     while list.len(incoming) < 3 {
         match upgrade.read(mut session.socket, mut incoming, until) {
@@ -438,7 +431,7 @@ fn http_upgrade_handoff(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     if !client_send(mut output, request, At(c, until)) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if client_head(mut input, mut received, c, until) != 101 {
         return false
     }
@@ -464,9 +457,9 @@ fn http_upgrade_handoff(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 fn next_stream_item(mut index: u64) -> Result[Option[Bytes], Capacity] {
     index += 1
     if index == 1 {
-        Ok(Some(b"one"?))
+        Ok(Some(b"one"))
     } else if index == 2 {
-        Ok(Some(b"two"?))
+        Ok(Some(b"two"))
     } else {
         Ok(None)
     }
@@ -507,8 +500,7 @@ fn http_raw_stream(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 }
 
 fn stalled_item(mut index: u64) -> Result[Option[Bytes], Capacity] waits {
-    let waiting: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1)
-    let (tx, rx) = waiting?
+    let (tx, rx): (Sender[()], Receiver[()]) = channel.new(1)
     let _ = channel.receive(rx)
     let _ = channel.try_send(tx, ())
     Ok(None)
@@ -521,8 +513,8 @@ fn stalled_stream(take seed: stream.Seed) waits {
 fn heartbeat_route(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
     let room = stream.Bounds(event_max: 128, producer_bytes: 4096, producer_steps: 256)
     let mut spec = stream.spec(req, 200, room, 0u64, stalled_stream)?
-    let name = result.unwrap(b"Content-Type")
-    let value = result.unwrap(b"text/event-stream")
+    let name = b"Content-Type"
+    let value = b"text/event-stream"
     stream.header(mut spec, take name, take value)?
     Ok(Stream(take spec))
 }
@@ -555,9 +547,9 @@ fn asset_reply(req: http.Request, scratch: Region, mut out: http.Responder, stat
 }
 
 fn serve_asset_law(take job: AssetServer) waits {
-    let AssetServer(listener: take listener, c: clock, tasks: tasks, entries: take state) = take job
-    let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut listeners, take listener))
+    let AssetServer(listener: take listener, c: clock, tasks, entries: take state) = take job
+    let mut listeners: List[Listener] = list.with_capacity(1)
+    list.push(mut listeners, take listener)
     let mut routes: router.Builder[assets.Manifest] = router.builder()
     result.unwrap(router.add(mut routes, "GET", "/{path...}", router.raw(asset_reply)))
     let mut cfg = test_config()
@@ -566,28 +558,24 @@ fn serve_asset_law(take job: AssetServer) waits {
 }
 
 fn gzip_hello() -> Bytes {
-    result.unwrap(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00")
+    b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00"
 }
 
-fn identity_tag() -> String {
-    "\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\""
-}
+const IDENTITY_TAG: String = "\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\""
 
-fn gzip_tag() -> String {
-    "\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\""
-}
+const GZIP_TAG: String = "\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\""
 
 fn asset_manifest() -> assets.Manifest {
-    let identity = result.unwrap(assets.representation(Identity, result.unwrap(b"hello"), result.unwrap(string.from(identity_tag()))))
-    let gzip = result.unwrap(assets.representation(Gzip, gzip_hello(), result.unwrap(string.from(gzip_tag()))))
-    let mut formats: List[assets.Representation] = result.unwrap(list.with_capacity(2))
-    result.unwrap(list.push(mut formats, take identity))
-    result.unwrap(list.push(mut formats, take gzip))
-    let mut names: List[String] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut names, result.unwrap(string.from("index.html"))))
-    let item = assets.Entry(path: take names, fingerprint: result.unwrap(string.from("index-2cf24dba.html")), media_type: result.unwrap(string.from("text/html")), formats: take formats)
-    let mut entries: List[assets.Entry] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut entries, take item))
+    let identity = assets.representation(Identity, b"hello", string.from(IDENTITY_TAG))
+    let gzip = assets.representation(Gzip, gzip_hello(), string.from(GZIP_TAG))
+    let mut formats: List[assets.Representation] = list.with_capacity(2)
+    list.push(mut formats, take identity)
+    list.push(mut formats, take gzip)
+    let mut names: List[String] = list.with_capacity(1)
+    list.push(mut names, string.from("index.html"))
+    let item = assets.Entry(path: take names, fingerprint: string.from("index-2cf24dba.html"), media_type: string.from("text/html"), formats: take formats)
+    let mut entries: List[assets.Entry] = list.with_capacity(1)
+    list.push(mut entries, take item)
     assets.manifest(take entries)
 }
 
@@ -606,7 +594,7 @@ fn asset_wire(n: Net, c: Clock, addr: Addr, request: String, status: u16, tag: S
     let mut input = take r
     let mut output = take w
     let until = At(c, after_ms(host.mono_ns(c), 90))
-    let mut received: Bytes = result.unwrap(list.with_capacity(768))
+    let mut received: Bytes = list.with_capacity(768)
     if !client_send(mut output, string.as_bytes(request), until) || !client_end(mut input, mut received, until) {
         return false
     }
@@ -620,9 +608,9 @@ fn asset_wire(n: Net, c: Clock, addr: Addr, request: String, status: u16, tag: S
 // expect: run http_asset_validators(network) = true
 fn http_asset_validators(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
-    let job = AssetServer(listener: take listener, c: c, tasks: tasks, entries: asset_manifest())
-    let server = result.unwrap(task.spawn(tasks, bytes 262144, take job, serve_asset_law))
-    asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, gzip_tag(), "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, gzip_tag(), "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes(""))
+    let job = AssetServer(listener: take listener, c, tasks, entries: asset_manifest())
+    let server = task.spawn(tasks, bytes 262144, take job, serve_asset_law)
+    asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, IDENTITY_TAG, "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, GZIP_TAG, "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, GZIP_TAG, "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, IDENTITY_TAG, "no-cache", "", "5", string.as_bytes(""))
 }
 
 fn step_work(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
@@ -650,7 +638,7 @@ fn http_handler_steps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut output = take w
     let deadline = At(c, after_ms(host.mono_ns(c), 90))
     let request = string.as_bytes("GET /small HTTP/1.1\r\nHost: a\r\n\r\n")
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if !client_send(mut output, request, deadline) || !client_end(mut input, mut received, deadline) || list.len(received) != 0 {
         return false
     }
@@ -665,9 +653,9 @@ type StopServer: send {
 }
 
 fn stop_server(take job: StopServer) waits {
-    let StopServer(listener: take listener, c: c, tasks: tasks, stop: take stop) = take job
-    let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut listeners, take listener))
+    let StopServer(listener: take listener, c, tasks, stop: take stop) = take job
+    let mut listeners: List[Listener] = list.with_capacity(1)
+    list.push(mut listeners, take listener)
     let mut routes: router.Builder[EchoState] = router.builder()
     result.unwrap(router.add(mut routes, "GET", "/{tail...}", router.raw(echo)))
     result.unwrap(router.add(mut routes, "GET", "/live", router.Route(handler: heartbeat_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768), steps: None)))
@@ -685,9 +673,8 @@ fn stop_server(take job: StopServer) waits {
 
 fn stop_fixture(n: Net, c: Clock, tasks: Tasks) -> (Task[()], Addr, Sender[u64]) waits {
     let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
-    let stops: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1)
-    let (stop, receive_stop) = result.unwrap(take stops)
-    let server = result.unwrap(task.spawn(tasks, bytes 262144, StopServer(listener: take listener, c: c, tasks: tasks, stop: take receive_stop), stop_server))
+    let (stop, receive_stop): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let server = task.spawn(tasks, bytes 262144, StopServer(listener: take listener, c, tasks, stop: take receive_stop), stop_server)
     (take server, addr, take stop)
 }
 
@@ -710,7 +697,7 @@ fn http_stop_exchange(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     if !client_send(mut active_write, string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\n\r\n"), until) {
         return false
     }
-    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    let mut reply: Bytes = list.with_capacity(512)
     if client_head(mut active_read, mut reply, c, end) != 200 {
         return false
     }
@@ -718,7 +705,7 @@ fn http_stop_exchange(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     if let Error(_) = channel.send(stop, after_ms(stop_at, 40)) {
         return false
     }
-    let mut idle_tail: Bytes = result.unwrap(list.with_capacity(16))
+    let mut idle_tail: Bytes = list.with_capacity(16)
     if !client_end(mut idle_read, mut idle_tail, until) || list.len(idle_tail) != 0 || host.mono_ns(c) >= after_ms(stop_at, 40) {
         return false
     }
@@ -754,7 +741,7 @@ fn http_stop_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut input = take r
     let mut output = take w
     let request = string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\n\r\n")
-    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    let mut reply: Bytes = list.with_capacity(512)
     if !client_send(mut output, request, until) || client_head(mut input, mut reply, c, end) != 200 {
         return false
     }
@@ -792,7 +779,7 @@ fn http_stop_stream(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (r, w) = net.split(result.unwrap(host.connect(n, addr, until)))
     let mut input = take r
     let mut output = take w
-    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    let mut reply: Bytes = list.with_capacity(512)
     if !client_send(mut output, string.as_bytes("GET /live HTTP/1.1\r\nHost: a\r\n\r\n"), until) || client_head(mut input, mut reply, c, end) != 200 {
         return false
     }
@@ -820,11 +807,11 @@ fn controlled_upgrade(take handover: upgrade.Taken) waits {
     if !upgrade.established(mut session.socket) {
         return
     }
-    let mut data: Bytes = result.unwrap(list.with_capacity(8))
+    let mut data: Bytes = list.with_capacity(8)
     if let Ok(1) = upgrade.read(mut session.socket, mut data, Never) {
         if let Some(d) = upgrade.stop_deadline(session.socket) {
             list.clear(mut data)
-            result.unwrap(list.put_word_le(mut data, d))
+            list.put_word_le(mut data, d)
             let mut sent: u64 = 0
             while sent < 8 {
                 match upgrade.write(mut session.socket, list.slice(data, sent, 8), Never) {
@@ -852,7 +839,7 @@ fn http_stop_upgrade(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (r, w) = net.split(result.unwrap(host.connect(n, addr, until)))
     let mut input = take r
     let mut output = take w
-    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    let mut reply: Bytes = list.with_capacity(512)
     let request = string.as_bytes("GET /protocol HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
     if !client_send(mut output, request, until) || client_head(mut input, mut reply, c, end) != 101 {
         return false
@@ -882,7 +869,7 @@ fn http_stop_upgrade(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 // handler also closes, even though the handler returns a 200.
 // expect: run http_drain_and_sticky_failure(network) = true
 fn http_drain_and_sticky_failure(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    pipelined(n, c, tasks, result.unwrap(b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\nxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 2, 0) && pipelined(n, c, tasks, result.unwrap(b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 24\r\n\r\nabcdefghijklmnopqrstuvwxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 1, 0) && pipelined(n, c, tasks, result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nQ\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 1, 0) && pipelined(n, c, tasks, result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n4001\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 1, 0)
+    pipelined(n, c, tasks, b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\nxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 2, 0) && pipelined(n, c, tasks, b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 24\r\n\r\nabcdefghijklmnopqrstuvwxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 0) && pipelined(n, c, tasks, b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nQ\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 0) && pipelined(n, c, tasks, b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n4001\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 0)
 }
 
 // L5. With an eight-byte model queue, an unread 160-byte response cannot
@@ -896,10 +883,10 @@ fn http_output_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut input = take r
     let start = host.mono_ns(c)
     let end = At(c, after_ms(start, 60))
-    let raw = result.unwrap(b"GET /large HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-    let sender = result.unwrap(task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take raw, until: end), client_write))
+    let raw = b"GET /large HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
+    let sender = task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take raw, until: end), client_write)
     host.sleep_until(c, after_ms(start, 35))
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if !client_end(mut input, mut received, end) {
         return false
     }
@@ -912,7 +899,7 @@ fn http_output_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 // Exactly three responses must arrive in order, with the long body last.
 // expect: run http_pipeline_order(network) = true
 fn http_pipeline_order(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    pipelined(n, c, tasks, result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\nGET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 3, 160)
+    pipelined(n, c, tasks, b"GET / HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\nGET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 3, 160)
 }
 
 // L11a. Completing a first response releases its first-phase slot, but
@@ -931,7 +918,7 @@ fn http_socket_caps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut output = take w
     let deadline = after_ms(host.mono_ns(c), 80)
     let request = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if !client_send(mut output, request, At(c, deadline)) || client_head(mut input, mut received, c, deadline) != 200 {
         return false
     }
@@ -953,7 +940,7 @@ fn http_socket_caps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 }
 
 fn empty_get(mut w: WriteHalf, mut r: ReadHalf, raw: Bytes, c: Clock, until: u64) -> u16 waits {
-    let mut got: Bytes = result.unwrap(list.with_capacity(512))
+    let mut got: Bytes = list.with_capacity(512)
     if client_send(mut w, raw, At(c, until)) {
         client_head(mut r, mut got, c, until)
     } else {
@@ -976,7 +963,7 @@ fn http_first_phase_refund(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let excess = result.unwrap(host.connect(n, addr, Never))
     let (bad_in, bad_out) = net.split(take excess)
     let mut refused = take bad_in
-    let mut got: Bytes = result.unwrap(list.with_capacity(512))
+    let mut got: Bytes = list.with_capacity(512)
     if client_head(mut refused, mut got, c, until) != 503 {
         return false
     }
@@ -998,7 +985,7 @@ fn http_first_phase_refund(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 fn http_trusted_source_caps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut cfg = test_config()
     cfg.ip_sockets_max = 1
-    result.unwrap(list.push(mut cfg.ingress, wsock.Prefix(ip: V4(2130706433), bits: 32)))
+    list.push(mut cfg.ingress, wsock.Prefix(ip: V4(2130706433), bits: 32))
     let (server, addr) = listen_for_law(n, c, tasks, take cfg)
     let left = result.unwrap(host.connect(n, addr, Never))
     let (r, w) = net.split(take left)
@@ -1031,7 +1018,7 @@ fn http_head_response(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     if !client_send(mut output, string.as_bytes("HEAD /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), end) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     client_end(mut input, mut received, end) && received == string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 160\r\nConnection: close\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n")
 }
 
@@ -1053,7 +1040,7 @@ fn http_drain_timeout_and_linger(n: Net, c: Clock, tasks: Tasks) -> bool waits {
         return false
     }
     let started = host.mono_ns(c)
-    let mut got: Bytes = result.unwrap(list.with_capacity(128))
+    let mut got: Bytes = list.with_capacity(128)
     if !client_end(mut input, mut got, At(c, until)) || list.len(got) != 0 || !within_wake(host.mono_ns(c) - started, 10, 1) {
         return false
     }
@@ -1078,10 +1065,10 @@ fn http_handler_starts_after_commit(n: Net, c: Clock, tasks: Tasks) -> bool wait
     let start = host.mono_ns(c)
     let read_start = after_ms(start, 5)
     let end = At(c, after_ms(start, 60))
-    let raw = result.unwrap(b"GET /large HTTP/1.1\r\nHost: a\r\n\r\nGET /when HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-    let writer = result.unwrap(task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take raw, until: end), client_write))
+    let raw = b"GET /large HTTP/1.1\r\nHost: a\r\n\r\nGET /when HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
+    let writer = task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take raw, until: end), client_write)
     host.sleep_until(c, read_start)
-    let mut received: Bytes = result.unwrap(list.with_capacity(1024))
+    let mut received: Bytes = list.with_capacity(1024)
     if !client_end(mut input, mut received, end) {
         return false
     }
@@ -1094,7 +1081,7 @@ fn http_handler_starts_after_commit(n: Net, c: Clock, tasks: Tasks) -> bool wait
     if http1.response(rest, mut second) != Complete || second.status != 200 {
         return false
     }
-    let stamp = result.unwrap(http.copy_bytes(list.slice(rest, second.end, list.len(rest))))
+    let stamp = http.copy_bytes(list.slice(rest, second.end, list.len(rest)))
     let text = result.unwrap(string.from_utf8(take stamp))
     match int.parse_uint(text, 10) {
         Ok(at) => at >= read_start,
@@ -1116,7 +1103,7 @@ fn http_large_body_fits_connection(n: Net, c: Clock, tasks: Tasks) -> bool waits
     if !client_send(mut output, string.as_bytes("GET /direct HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), end) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(4096))
+    let mut received: Bytes = list.with_capacity(4096)
     if !client_end(mut input, mut received, end) {
         return false
     }
@@ -1159,8 +1146,8 @@ fn http_configured_head_bounds(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 
 fn response_split(wire: Bytes, split: u64, head_only: bool, expected_status: u16, expected_body: String, next: bool) -> bool {
     let mut r = result.unwrap(http_client.reader())
-    let mut body: Bytes = result.unwrap(list.with_capacity(64))
-    let mut piece: Bytes = result.unwrap(list.with_capacity(2))
+    let mut body: Bytes = list.with_capacity(64)
+    let mut piece: Bytes = list.with_capacity(2)
     let mut have_head = false
     let mut ended = false
     for (start, stop) in[(0u64, split), (split, list.len(wire))] {
@@ -1179,7 +1166,7 @@ fn response_split(wire: Bytes, split: u64, head_only: bool, expected_status: u16
                         if n != list.len(piece) {
                             return false
                         }
-                        result.unwrap(list.append(mut body, piece))
+                        list.append(mut body, piece)
                     },
                     End => {
                         ended = true
@@ -1220,7 +1207,7 @@ fn invalid_response(wire: Bytes, over_head: bool) -> bool {
     match http_client.parse_head(mut r, false, 64) {
         Error(BodyFraming) => true,
         Ok(true) => {
-            let mut out: Bytes = result.unwrap(list.with_capacity(64))
+            let mut out: Bytes = list.with_capacity(64)
             match http_client.read_buffered(mut r, mut out) {
                 Error(BodyFraming) => true,
                 _ => false,
@@ -1236,10 +1223,10 @@ fn invalid_response(wire: Bytes, over_head: bool) -> bool {
 fn http_client_response_fragments() -> bool {
     let rows: Inline[(String, u16, String, bool, bool), 7] =[("HTTP/1.1 200 OK\r\nX-Test: yes\r\nTransfer-Encoding: chunked\r\n\r\n2;tag=\"a;b\"\r\nhi\r\n3\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n", 200, "hibye", false, true), ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello", 200, "hello", false, true), ("HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nhello", 200, "hello", false, false), ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 200, "", true, true), ("HTTP/1.1 204 No Content\r\nX-Test: yes\r\n\r\n", 204, "", false, true), ("HTTP/1.1 304 Not Modified\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 304, "", false, true), ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 3\r\n\r\nyes", 200, "yes", false, true),]
     for (response, status, body, head_only, next) in rows {
-        let mut wire: Bytes = result.unwrap(list.with_capacity(512))
-        result.unwrap(list.append(mut wire, string.as_bytes(response)))
+        let mut wire: Bytes = list.with_capacity(512)
+        list.append(mut wire, string.as_bytes(response))
         if next {
-            result.unwrap(list.append(mut wire, string.as_bytes("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")))
+            list.append(mut wire, string.as_bytes("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n"))
         }
         for i in 0u64 .. list.len(wire) + 1 {
             if !response_split(wire, i, head_only, status, body, next) {
@@ -1250,10 +1237,10 @@ fn http_client_response_fragments() -> bool {
     // RFC 9112 §6.3 rejects ambiguous framing. §7.1 warns against overflow.
     let both = string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n")
     let overflow = string.as_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10000000000000000\r\n")
-    let mut long: Bytes = result.unwrap(list.with_capacity(8192))
-    result.unwrap(list.append(mut long, string.as_bytes("HTTP/1.1 200 OK\r\nX: ")))
+    let mut long: Bytes = list.with_capacity(8192)
+    list.append(mut long, string.as_bytes("HTTP/1.1 200 OK\r\nX: "))
     let room = 8192 - list.len(long)
-    result.unwrap(list.fill(mut long, room, b'a'))
+    list.fill(mut long, room, b'a')
     invalid_response(both, false) && invalid_response(overflow, false) && invalid_response(long, true)
 }
 
@@ -1262,7 +1249,7 @@ fn post_echo(mut client: http_client.Connection, expected: String) -> bool waits
     if http_client.status(http_client.head(client)) != 200 {
         return false
     }
-    let mut data: Bytes = result.unwrap(list.with_capacity(128))
+    let mut data: Bytes = list.with_capacity(128)
     while result.unwrap(http_client.read(mut client, mut data)) != 0 {}
     data == string.as_bytes(expected) && http_client.reusable(client)
 }
@@ -1306,25 +1293,25 @@ fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, 
         return false
     }
     let mut fields: List[http_client.Header] = list.new()
-    let bearer = result.unwrap(string.into_bytes("Bearer "))
-    let enabled = result.unwrap(string.into_bytes("enabled"))
-    result.unwrap(list.push(mut fields, http_client.Header(name: "Authorization", value: Protected(take bearer, token))))
-    result.unwrap(list.push(mut fields, http_client.Header(name: "X-Trace", value: Public(take enabled))))
-    result.unwrap(list.push(mut fields, http_client.Header(name: "X-Second", value: Protected(list.new(), token))))
+    let bearer = string.into_bytes("Bearer ")
+    let enabled = string.into_bytes("enabled")
+    list.push(mut fields, http_client.Header(name: "Authorization", value: Protected(take bearer, token)))
+    list.push(mut fields, http_client.Header(name: "X-Trace", value: Public(take enabled)))
+    list.push(mut fields, http_client.Header(name: "X-Second", value: Protected(list.new(), token)))
     let request = http_client.Request(method: "GET", target: "/reject", headers: take fields, body: Fixed(0))
     result.unwrap(http_client.start(mut client, request, end))
-    let mut description: Bytes = result.unwrap(list.with_capacity(256))
+    let mut description: Bytes = list.with_capacity(256)
     result.unwrap(http_client.render_request(mut description, request))
     result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take description))))
     let failure: http_client.Error = match http_client.finish_request(mut client, 128) {
         Error(BodyFraming) => BodyFraming,
         _ => return false,
     }
-    let mut rendered: Bytes = result.unwrap(list.with_capacity(256))
+    let mut rendered: Bytes = list.with_capacity(256)
     result.unwrap(http_client.render_error(mut rendered, failure, request))
     let message = result.unwrap(string.from_utf8(take rendered))
-    let events: Log[String] = result.unwrap(log.new())
-    result.unwrap(log.append(events, take message))
+    let events: Log[String] = log.new()
+    log.append(events, take message)
     let entries = log.finish(take events)
     result.unwrap(stderr.write(err, entries[0]))
     http_client.close(take client)
@@ -1337,8 +1324,8 @@ fn listen_with_budget(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, bud
     result.unwrap(router.add(mut routes, "POST", "/{tail...}", router.raw(echo)))
     let addr = Addr(ip: V4(2130706433), port: 0)
     let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
-    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg, routes: result.unwrap(router.build(take routes)))
-    (result.unwrap(task.spawn(tasks, bytes budget, take job, test_server)), where_to)
+    let job = TestServer(listener: take listener, c, tasks, cfg: take cfg, routes: result.unwrap(router.build(take routes)))
+    (task.spawn(tasks, bytes budget, take job, test_server), where_to)
 }
 
 fn client_response(mut r: ReadHalf, mut received: Bytes, c: Clock, deadline: u64) -> (u16, u64, u64) waits {
@@ -1394,7 +1381,7 @@ fn http_lazy_scratch_read_and_drain(n: Net, c: Clock, tasks: Tasks) -> bool wait
     if !client_send(mut output, post_head, At(c, until)) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if client_head(mut input, mut received, c, until) != 100 {
         return false
     }
@@ -1465,7 +1452,7 @@ fn http_bodyless_connection_admission_budget(n: Net, c: Clock, tasks: Tasks) -> 
     }
     let (r2, w2) = net.split(result.unwrap(host.connect(n, tight_addr, Never)))
     let mut in2 = take r2
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if !client_end(mut in2, mut received, At(c, until)) {
         return false
     }
@@ -1507,7 +1494,7 @@ fn http_body_scratch_release_and_linger(n: Net, c: Clock, tasks: Tasks) -> bool 
     if !client_send(mut out1, post, At(c, until)) {
         return false
     }
-    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    let mut received: Bytes = list.with_capacity(512)
     if client_head(mut in1, mut received, c, until) != 100 || !client_send(mut out1, string.as_bytes("hello"), At(c, until)) {
         return false
     }
@@ -1548,4 +1535,20 @@ fn http_body_scratch_release_and_linger(n: Net, c: Clock, tasks: Tasks) -> bool 
     }
     let mut h2 = http1.head()
     http1.response(received, mut h2) == Complete && h2.status == 200 && list.slice(received, h2.end, list.len(received)) == string.as_bytes("world")
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

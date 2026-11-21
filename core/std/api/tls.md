@@ -2,7 +2,7 @@
 
 [API overview](../API.md). [TLS and secrets specification](../../../docs/spec/tls.md).
 
-Connect a numeric address with `net.connect`, then pass the owned socket, its
+Connect a numeric address with `host.connect`, then pass the owned socket, its
 verification name, a trust policy and the ordered ALPN offer to `tls.connect`.
 The handshake consumes the socket and returns the read and write halves,
 the selected zero-based ALPN index if there is one, and the SHA-256 digest
@@ -10,7 +10,7 @@ of the peer's leaf certificate in four big-endian words. Use `System` for
 the system roots or `Roots(pem)` for an exact PEM bundle. The Net grant must
 cover the verification name, port and trust policy.
 
-Use ordinary `net.recv_bounded` and `net.send_pair` on the returned halves.
+Use ordinary `host.recv_bounded` and `host.send_pair` on the returned halves.
 A receive of zero bytes means the peer closed TLS cleanly. Transport EOF
 without a TLS close notification gives `Tls(Truncated)`.
 

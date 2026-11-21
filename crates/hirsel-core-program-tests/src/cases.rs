@@ -1507,7 +1507,7 @@ fn literal_aggregate_call_inference() {
 #[test]
 fn list_set_transfers_the_indexed_element() {
     let checked = Checked::source(
-        "fn set_one(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }\nfn probe() -> u64 { let mut xs: List[u64] = result.unwrap(list.with_capacity(2)); result.unwrap(list.push(mut xs, 5u64)); result.unwrap(list.push(mut xs, 7u64)); let old = set_one(mut xs); xs[0] * 10000 + old * 100 + xs[1] }",
+        "fn set_one(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }\nfn probe() -> u64 { let mut xs: List[u64] = list.with_capacity(2); list.push(mut xs, 5u64); list.push(mut xs, 7u64); let old = set_one(mut xs); xs[0] * 10000 + old * 100 + xs[1] }",
         None,
     );
     assert!(
@@ -1543,6 +1543,40 @@ fn list_set_transfers_the_indexed_element() {
         let failures = run_case(&root().join("cases/body").join(case));
         assert!(failures.is_empty(), "{case}: {failures:?}");
     }
+}
+
+#[test]
+fn field_puns() {
+    let failures: Vec<_> = [
+        "LANG-9-17-field-puns.hirsel",
+        "LANG-9-17-field-puns-refused.hirsel",
+    ]
+    .into_iter()
+    .flat_map(|name| run_case(&root().join("cases/rules").join(name)))
+    .collect();
+
+    let address = |source: &str| {
+        let path = DefPath::from_full("app@1/main/probe").unwrap();
+        let request = Checked::source(source, None);
+        let identity = Identity::plain(path);
+        request
+            .product
+            .units([identity.clone()], 256)
+            .unwrap()
+            .address(&identity)
+            .unwrap()
+    };
+    let ty = "type Point { x: u64, y: u64 }\n";
+    let make = format!("{ty}fn probe(x: u64, y: u64) -> Point {{ Point(x, y) }}");
+    let read = format!("{ty}fn probe(p: Point) -> u64 {{ let Point(x, y) = p; x - y }}");
+    let construction_equal =
+        address(&make) == address(&make.replace("Point(x, y)", "Point(x: x, y: y)"));
+    let pattern_equal =
+        address(&read) == address(&read.replace("Point(x, y)", "Point(x: x, y: y)"));
+    assert!(
+        failures.is_empty() && construction_equal && pattern_equal,
+        "field pun conformance: {failures:?}; equal construction code addresses: {construction_equal}; equal pattern code addresses: {pattern_equal}",
+    );
 }
 
 #[test]
@@ -2093,6 +2127,52 @@ fn step_bounds_rules() {
         &root().join("../../crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel"),
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn explicit_drop_and_option_copied() {
+    let mut failures = run_case(&root().join("cases/body/explicit-drop.hirsel"));
+    failures.extend(run_case(&root().join("cases/body/option-copied.hirsel")));
+    assert!(
+        failures.is_empty(),
+        "drop and copied contracts: {failures:#?}"
+    );
+}
+
+#[test]
+fn static_strings_preserve_budget_law() {
+    let mut failures = vec![];
+    for name in [
+        "LANG-20-static-strings.hirsel",
+        "LANG-20-static-strings-refused.hirsel",
+    ] {
+        failures.extend(run_case(&root().join("cases/rules").join(name)));
+    }
+
+    let source = include_str!("../../../core/front/cases/rules/LANG-20-static-strings.hirsel");
+    let run = |text: &str| {
+        let (program, functions) = crate::SourceProgram::lower(text, None);
+        eval::run(&program, functions["charged"], &[], 8)
+    };
+    let published = run(source);
+    let inline = run(&source.replace("byte_len(TITLE)", "byte_len(\"hirsel\")"));
+    assert_eq!(inline.outcome, eval::Outcome::Returned(vec![24]));
+    assert_eq!(failures, Vec::<String>::new(), "static string conformance");
+    assert_eq!(
+        (
+            published.outcome,
+            published.admissions,
+            published.peak_reserved,
+            published.used
+        ),
+        (
+            inline.outcome,
+            inline.admissions,
+            inline.peak_reserved,
+            inline.used
+        ),
+        "static string uses have the literal's result and charges at an eight-byte limit",
+    );
 }
 
 #[test]

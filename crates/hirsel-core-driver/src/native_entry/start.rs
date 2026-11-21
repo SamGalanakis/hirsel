@@ -113,6 +113,16 @@ pub(super) fn emit(
     } else {
         f.constant(0)
     };
+    let env_ops =
+        if plan.replay.is_none() && plan.grant_mask & (1 << grant_kind("Env").unwrap()) != 0 {
+            let operations = f
+                .object
+                .declare_data("hirsel_core_os_env_ops", Linkage::Import, false, false)
+                .map_err(error)?;
+            f.address(operations)
+        } else {
+            f.constant(0)
+        };
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -136,6 +146,12 @@ pub(super) fn emit(
             f.constant(plan.secret_grants.len() as u64),
         ),
         (abi::OS_CONFIG_SECRET_OPS, secret_ops),
+        (abi::OS_CONFIG_ENV_PATTERNS, f.address(data.env_patterns)),
+        (
+            abi::OS_CONFIG_ENV_PATTERNS_LEN,
+            f.constant(plan.env_patterns.as_ref().map_or(0, String::len) as u64),
+        ),
+        (abi::OS_CONFIG_ENV_OPS, env_ops),
     ] {
         f.store(value, config, offset);
     }

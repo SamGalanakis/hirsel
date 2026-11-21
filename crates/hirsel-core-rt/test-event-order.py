@@ -145,7 +145,11 @@ def main():
     parser.add_argument('--release', action='store_true')
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
-    work = Path(tempfile.mkdtemp(prefix='event-order-'))
+    with tempfile.TemporaryDirectory(prefix='hirsel-event-order-') as scratch:
+        return check_event_order(args, Path(scratch))
+
+
+def check_event_order(args, work):
     recorder = work / 'recorder.o'
     subprocess.run([str(args.cc), '-c', '-fPIC', str(RECORDER), '-I', str(ROOT / 'crates/hirsel-core-rt/include'),
                     '-o', str(recorder)], check=True)

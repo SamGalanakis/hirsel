@@ -31,8 +31,8 @@ fn swizzle_16_16(key: u8) -> u64 {
     let indices: Simd[u8, 16] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255])
     let picked = simd.swizzle(table, indices)
     let octets = picked
-    let mut b: Bytes = result.unwrap(list.with_capacity(16))
-    result.unwrap(list.put_lanes(mut b, octets, 16))
+    let mut b: Bytes = list.with_capacity(16)
+    list.put_lanes(mut b, octets, 16)
     sum_bytes(b)
 }
 
@@ -41,8 +41,8 @@ fn swizzle_16_32(key: u8) -> u64 {
     let indices: Simd[u8, 32] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255, 15, key, 16, 31, 32, 255, 4, 7, 2, 8, 14, 17, 240, 255, 0, 31])
     let picked = simd.swizzle(table, indices)
     let octets = picked
-    let mut b: Bytes = result.unwrap(list.with_capacity(32))
-    result.unwrap(list.put_lanes(mut b, octets, 32))
+    let mut b: Bytes = list.with_capacity(32)
+    list.put_lanes(mut b, octets, 32)
     sum_bytes(b)
 }
 
@@ -51,8 +51,8 @@ fn swizzle_32_16(key: u8) -> u64 {
     let indices: Simd[u8, 16] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255])
     let picked = simd.swizzle(table, indices)
     let octets: Simd[u8, 16] = simd.cast(picked)
-    let mut b: Bytes = result.unwrap(list.with_capacity(16))
-    result.unwrap(list.put_lanes(mut b, octets, 16))
+    let mut b: Bytes = list.with_capacity(16)
+    list.put_lanes(mut b, octets, 16)
     sum_bytes(b)
 }
 
@@ -61,8 +61,8 @@ fn swizzle_32_32(key: u8) -> u64 {
     let indices: Simd[u8, 32] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255, 15, key, 16, 31, 32, 255, 4, 7, 2, 8, 14, 17, 240, 255, 0, 31])
     let picked = simd.swizzle(table, indices)
     let octets: Simd[u8, 32] = simd.cast(picked)
-    let mut b: Bytes = result.unwrap(list.with_capacity(32))
-    result.unwrap(list.put_lanes(mut b, octets, 32))
+    let mut b: Bytes = list.with_capacity(32)
+    list.put_lanes(mut b, octets, 32)
     sum_bytes(b)
 }
 
@@ -76,14 +76,14 @@ fn sum_bytes(b: Bytes) -> u64 {
 }
 
 fn tail_block() -> u64 {
-    let input = result.unwrap(b"abcdefghijklmnopqrstuvwxyz012345678")
-    let mut output: Bytes = result.unwrap(list.with_capacity(35))
+    let input = b"abcdefghijklmnopqrstuvwxyz012345678"
+    let mut output: Bytes = list.with_capacity(35)
     let a: Simd[u8, 16] = list.lanes(input, 0)
     let b: Simd[u8, 16] = list.lanes(input, 16)
-    result.unwrap(list.put_lanes(mut output, a, 16))
-    result.unwrap(list.put_lanes(mut output, b, 16))
+    list.put_lanes(mut output, a, 16)
+    list.put_lanes(mut output, b, 16)
     for i in 32u64 .. 35u64 {
-        result.unwrap(list.push(mut output, input[i]))
+        list.push(mut output, input[i])
     }
     sum_bytes(output)
 }
@@ -126,7 +126,7 @@ fn keep_halves(pick: bool) -> u64 {
 fn zero_append() -> bool {
     let mut b: Bytes = list.new()
     let v: Simd[u8, 32] = simd.splat(42)
-    result.unwrap(list.put_lanes(mut b, v, 0))
+    list.put_lanes(mut b, v, 0)
     list.capacity(b) == 0 && list.len(b) == 0
 }
 

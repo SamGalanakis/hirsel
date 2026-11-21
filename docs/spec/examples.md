@@ -19,7 +19,7 @@ an own value held inline in its slot, built in the caller's place
 `Text` copy is refused: it raises `Capacity`, the failure cleans the region and leaves the
 bound scope, and `isolate` returns its causes.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Mem(Capacity)
 type Word[in r] { text: Text in r, len: u64 }
 
@@ -75,10 +75,10 @@ Outcome: success.
 
 Refused edits:
 
-- Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 29:7, a value
-  whose type mentions `r` leaves its block.
-- Drop the region parameter from `Word` (`type Word { text: Text, len: u64 }`): refused,
-  MEM-6 at 2:13, a region field of an own type names its region.
+- Make the region block's value `w` instead of `w.len`: refused, LANG-11 at 29:7, the bound's
+  body must be the `u64` that `measure` returns.
+- Drop the region from `Word`'s field (`type Word[in r] { text: Text, len: u64 }`): refused,
+  MEM-6 at 2:19, a stored region field names its region.
 
 ## 2. Expression tree in one compact blob
 
@@ -88,7 +88,7 @@ puts land at offsets 0, 9, 18, 27 and 36, and the root is the last, at 36, so th
 needs 45 bytes. In 32 bytes the fourth put (27 + 9 > 32) writes nothing and returns
 `Overflow`. Each `Child` carries the destination's identity, and every put checks it.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 @compact(u32) type Expr = Num(u64) | Add(Link[Expr], Link[Expr])
 
@@ -145,8 +145,9 @@ Outcome: success.
 Refused edits:
 
 - Bind a link as a value: replace `eval(a)` with `{ let k: Link[Expr] = a; eval(k) }`:
-  refused, MEM-10 at 17:48, a link is never a value.
-- Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:79, a compact type has no own
+  refused, LANG-11 at 17:61, `a` is a view of the target, since a link is never a value
+  (MEM-10).
+- Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:72, a compact type has no own
   field.
 
 ## 3. Tallying words, and a refused push
@@ -157,7 +158,7 @@ first push grows an empty `List[u64]` to 4 elements (32 bytes). The fifth push g
 push raises `Capacity` with `requested` 64. The failure cleans `xs` and leaves the bound,
 and `isolate` returns it as a value.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 
 fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
@@ -239,7 +240,7 @@ Refused edits:
 Pieces are counted. The undo list shares the first piece, so `try_unwrap` cannot take it
 and returns the handle.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 type Piece: shareable { text: String }
 
@@ -294,8 +295,8 @@ Outcome: success.
 
 Refused edits:
 
-- Insert `type Doc: send { pieces: List[Rc[Piece]] }` as line 3: refused, CONC-2 at 3:31,
-  `Rc` is not `send`.
+- Insert `type Doc: send { pieces: List[Rc[Piece]] }` as line 3: refused, CONC-2 at 3:18,
+  `pieces` holds an `Rc`, which is not `send`.
 - Use `first` after `try_unwrap`: insert `let again = rc.share(first)` before the last
   `Ok(())`: refused, OWN-5 at 39:24, `first` was moved.
 
@@ -306,7 +307,7 @@ may call waiting operations. `close` ends a step without its finalizer. Values a
 in reverse order on every exit edge; the second call fails after two steps exist, so they
 are dropped before the failure reaches the run.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Mem(Capacity)
 
 resource type Step { name: String, out: Stdout }
@@ -356,7 +357,7 @@ lines, the second dropped `b` then `a` before the failure ended the run.
 
 Refused edits:
 
-- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 26:14, `c` was
+- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 26:9, `c` was
   moved.
 - Use `?` in the finalizer: `drop(s) { stdout.write(s.out, s.name)? }`: refused, FAIL-11 at
   4:40, no `?` in a finalizer.
@@ -368,7 +369,7 @@ another, and `main` sums what arrives. The endpoints travel as spawn payloads. E
 last sender closes its channel when the task is cleaned, which ends the next loop. The
 output does not depend on the schedule.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Join(JoinError)
 type Ends: send { input: Receiver[u64], output: Sender[u64] }
 
@@ -432,14 +433,15 @@ Refused edits:
 
 - Receive from `rx1` after it moved into `ends`: insert `let _ = channel.receive(rx1)`
   before `let mut total`: refused, OWN-5 at 42:27, `rx1` was moved.
-- Give `Ends` a field `seen: Rc[u64]`: refused, CONC-2 at 2:68, `Rc` is not `send`.
+- Give `Ends` a field `seen: Rc[u64]`: refused, CONC-2 at 2:62, `seen` holds an `Rc`, which
+  is not `send`.
 
 ## 7. A child's failure is a value at join
 
 The child adds two `u8` values of 200 and fails with `Overflow`. Its cleanup runs in the
 child; the joiner receives `Failed` with the cause chain as an error value and carries on.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 
 fn sum(take xs: List[u8]) -> u8 {
@@ -510,7 +512,7 @@ usual separate charges. Inside `bound bytes 72` the admission is refused with
 bound, and `isolate` returns it. With a guessed `bytes 4096` instead, `finish_trim`
 would refund 4016 at publication and keep 80.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Build(BuildError) | Syntax(u64)
 @compact(u32) type Json = Null | False | True | Num(u64) | Str(Text) | Arr(IndexedSpan[Json])
 

@@ -31,6 +31,7 @@ pub struct Declared {
     fns: Vec<FnDecl>,
     constants: Vec<Constant>,
     constant_parts: Vec<ConstValue>,
+    constant_strings: Vec<Vec<u8>>,
     constant_ids: Vec<Option<u32>>,
     by_path: Vec<(DefPath, Def)>,
     by_definition: Vec<Option<Def>>,
@@ -307,6 +308,7 @@ impl<'a> Program<'a> {
             fns: self.fns.own_iter().cloned().collect(),
             constants: self.constants.own_iter().cloned().collect(),
             constant_parts: self.constant_parts.own_iter().cloned().collect(),
+            constant_strings: self.constant_strings.own_iter().cloned().collect(),
             constant_ids: self.constant_ids.own_iter().cloned().collect(),
             by_path: self.by_path.iter().map(|(p, d)| (p.clone(), *d)).collect(),
             by_definition: self.by_definition.own_iter().cloned().collect(),
@@ -377,6 +379,9 @@ impl<'a> Program<'a> {
         d.constant_parts
             .into_iter()
             .for_each(|r| p.constant_parts.push(r));
+        d.constant_strings
+            .into_iter()
+            .for_each(|r| p.constant_strings.push(r));
         d.constant_ids
             .into_iter()
             .for_each(|r| p.constant_ids.push(r));
@@ -429,6 +434,7 @@ impl<'a> Program<'a> {
             ("fns", rows(self.fns.iter())),
             ("constants", rows(self.constants.iter())),
             ("constant_parts", rows(self.constant_parts.iter())),
+            ("constant_strings", rows(self.constant_strings.iter())),
             ("constant_ids", rows(self.constant_ids.iter())),
             ("by_path", by_path),
             ("by_definition", rows(self.by_definition.iter())),

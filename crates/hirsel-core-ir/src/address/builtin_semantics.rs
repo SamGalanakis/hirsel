@@ -1,21 +1,23 @@
 //! Per-definition semantics numbers for compiler-implemented core functions.
 
 use hirsel_core_ids::DefPath;
+use std::cmp::Ordering;
 
+// Keep entries ordered by module and name for binary search.
 // Add entries at 1. Increment the entry when its builtin semantics change.
 const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
-    ("arc", "new", 1),
+    ("arc", "new", 2),
     ("arc", "share", 1),
     ("arc", "try_unwrap", 1),
     ("arc", "with_unique", 1),
     ("args", "get", 1),
     ("args", "len", 1),
-    ("box", "new", 1),
+    ("box", "new", 2),
     ("box", "unbox", 1),
     ("bytebuf", "append_inline", 1),
     ("bytebuf", "as_bytes", 1),
     ("bytebuf", "freeze", 1),
-    ("channel", "new", 1),
+    ("channel", "new", 2),
     ("channel", "receive", 1),
     ("channel", "send", 1),
     ("channel", "sender", 1),
@@ -33,8 +35,8 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("code", "revision", 1),
     ("core", "build_in", 1),
     ("core", "build_stream_in", 1),
-    ("core", "clone", 1),
-    ("core", "clone_in", 1),
+    ("core", "clone", 2),
+    ("core", "clone_in", 2),
     ("core", "emit", 1),
     ("core", "fail", 1),
     ("core", "finish", 1),
@@ -97,19 +99,25 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "accept", 1),
     ("host", "close", 1),
     ("host", "connect", 1),
+    ("host", "entries", 1),
     ("host", "listen", 1),
     ("host", "mkdir", 1),
     ("host", "mkdtemp", 1),
     ("host", "mono_ns", 1),
+    ("host", "next_entries", 1),
     ("host", "open", 1),
+    ("host", "open_dir", 1),
     ("host", "random", 1),
     ("host", "read", 1),
+    ("host", "read_at", 1),
     ("host", "recv_bounded", 1),
     ("host", "remove", 1),
     ("host", "remove_tree", 1),
     ("host", "rename", 1),
     ("host", "send_pair", 1),
     ("host", "sleep_until", 1),
+    ("host", "stat", 1),
+    ("host", "stat_file", 1),
     ("host", "stopped", 1),
     ("host", "sync", 1),
     ("host", "sync_dir", 1),
@@ -117,6 +125,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "unlock", 1),
     ("host", "wall_ms", 1),
     ("host", "write", 1),
+    ("host", "write_at", 1),
     ("indexed", "get", 1),
     ("inline", "copy_from_slice", 1),
     ("inline", "word_be", 1),
@@ -143,26 +152,26 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("int", "wrapping_shl", 1),
     ("int", "wrapping_sub", 1),
     ("latest", "handle", 1),
-    ("latest", "new", 1),
+    ("latest", "new", 2),
     ("latest", "publish", 1),
     ("latest", "read", 1),
-    ("list", "append", 1),
+    ("list", "append", 2),
     ("list", "capacity", 1),
     ("list", "clear", 1),
     ("list", "copy_from_slice", 1),
-    ("list", "fill", 1),
+    ("list", "fill", 2),
     ("list", "get", 1),
     ("list", "lanes", 1),
     ("list", "len", 1),
     ("list", "new", 1),
     ("list", "pop", 1),
-    ("list", "push", 1),
-    ("list", "put_lanes", 1),
-    ("list", "set_lanes", 1),
-    ("list", "put_word_be", 1),
-    ("list", "put_word_le", 1),
-    ("list", "reserve", 1),
+    ("list", "push", 2),
+    ("list", "put_lanes", 2),
+    ("list", "put_word_be", 2),
+    ("list", "put_word_le", 2),
+    ("list", "reserve", 2),
     ("list", "set", 1),
+    ("list", "set_lanes", 1),
     ("list", "slice", 1),
     ("list", "slots_empty", 1),
     ("list", "slots_finish_list", 1),
@@ -177,12 +186,13 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("list", "slots_take", 1),
     ("list", "slots_view", 1),
     ("list", "swap", 1),
-    ("list", "with_capacity", 1),
+    ("list", "try_reserve", 1),
+    ("list", "with_capacity", 2),
     ("list", "word_be", 1),
     ("list", "word_le", 1),
-    ("log", "append", 1),
+    ("log", "append", 2),
     ("log", "finish", 1),
-    ("log", "new", 1),
+    ("log", "new", 2),
     ("map", "capacity", 1),
     ("map", "compact", 1),
     ("map", "hash", 1),
@@ -192,7 +202,6 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("map", "kill", 1),
     ("map", "len", 1),
     ("map", "new", 1),
-    ("map", "pop_entry", 1),
     ("map", "push_entry", 1),
     ("map", "regrow", 1),
     ("map", "slot_hash", 1),
@@ -206,16 +215,18 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("net", "narrow", 1),
     ("net", "split", 1),
     ("option", "unwrap", 1),
-    ("rc", "new", 1),
+    ("rc", "new", 2),
     ("rc", "share", 1),
     ("rc", "try_unwrap", 1),
     ("rc", "with_unique", 1),
     ("result", "unwrap", 1),
-    ("secret", "narrow", 1),
+    ("secret", "hmac_sha256", 1),
+    ("secret", "narrow", 2),
     ("secret", "render", 1),
-    ("secret", "seal", 1),
+    ("secret", "seal", 2),
+    ("secret", "verify_hmac_sha256", 1),
     ("seq", "get", 1),
-    ("seq", "index_in", 1),
+    ("seq", "index_in", 2),
     ("seq", "len", 1),
     ("seq", "nth", 1),
     ("sha1", "blocks", 1),
@@ -237,8 +248,8 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("span", "finish", 1),
     ("span", "get", 1),
     ("span", "len", 1),
-    ("span", "push", 1),
-    ("span", "with_capacity", 1),
+    ("span", "push", 2),
+    ("span", "with_capacity", 2),
     ("stderr", "write", 1),
     ("stderr", "write_bytes", 1),
     ("stdout", "write", 1),
@@ -247,17 +258,18 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("string", "byte_len", 1),
     ("string", "new", 1),
     ("string", "of_bytes", 1),
-    ("string", "push", 1),
-    ("string", "reserve", 1),
+    ("string", "push", 2),
+    ("string", "reserve", 2),
     ("string", "shorten", 1),
     ("string", "to_bytes", 1),
     ("string", "view_string", 1),
     ("task", "cancel", 1),
     ("task", "check_cancel", 1),
     ("task", "join", 1),
-    ("task", "spawn", 1),
+    ("task", "spawn", 2),
+    ("task", "try_spawn", 1),
     ("text", "as_string", 1),
-    ("text", "copy_in", 1),
+    ("text", "copy_in", 2),
     ("text", "len", 1),
     ("tls", "connect", 1),
     ("tls", "send_secret", 1),
@@ -269,6 +281,45 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("writer", "push", 1),
     ("writer", "scalar", 1),
 ];
+
+// str::cmp is not const. Match its byte order for the compile-time check.
+const fn compare(left: &str, right: &str) -> Ordering {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut i = 0;
+    while i < left.len() && i < right.len() {
+        if left[i] != right[i] {
+            return if left[i] < right[i] {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        i += 1;
+    }
+    if left.len() < right.len() {
+        Ordering::Less
+    } else if left.len() > right.len() {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+const _: () = {
+    let mut i = 1;
+    while i < BUILTIN_SEMANTICS.len() {
+        let (module, name, _) = BUILTIN_SEMANTICS[i - 1];
+        let (next_module, next_name, _) = BUILTIN_SEMANTICS[i];
+        let ordered = match compare(module, next_module) {
+            Ordering::Less => true,
+            Ordering::Equal => matches!(compare(name, next_name), Ordering::Less),
+            Ordering::Greater => false,
+        };
+        assert!(ordered, "builtin semantics keys must be strictly sorted");
+        i += 1;
+    }
+};
 
 pub(super) fn number(definition: &DefPath) -> Option<u32> {
     let [module] = definition.0.modules.as_slice() else {

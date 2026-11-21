@@ -13,7 +13,7 @@ use tokio_tungstenite::{
 pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub struct Client {
     pub socket: Socket,
-    pub token: Vec<u8>,
+    pub credential: Vec<u8>,
     pub image: Vec<u8>,
     pub version: u64,
     pub toggle_slot: u32,
@@ -27,11 +27,11 @@ pub struct Client {
     pending: bool,
 }
 impl Client {
-    pub async fn connect(url: &str, wants: &[Want], token: Option<Vec<u8>>) -> Result<Self> {
+    pub async fn connect(url: &str, wants: &[Want], credential: Option<Vec<u8>>) -> Result<Self> {
         let mut request = url.into_client_request()?;
         request
             .headers_mut()
-            .insert("Sec-WebSocket-Protocol", "hirsel.1".parse()?);
+            .insert("Sec-WebSocket-Protocol", "hirsel.2".parse()?);
         let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
             request,
             Some(crate::websocket_config()),
@@ -41,12 +41,13 @@ impl Client {
         if let MaybeTlsStream::Plain(tcp) = socket.get_ref() {
             tcp.set_nodelay(true)?;
         }
+        let credential = credential.unwrap_or_else(|| rand::random::<[u8; 16]>().to_vec());
         socket
             .send(Message::Binary(
-                codec::encode(&Frame::Hello(token, wants.to_vec())).into(),
+                codec::encode(&Frame::Hello(Some(credential.clone()), wants.to_vec())).into(),
             ))
             .await?;
-        let Frame::Welcome(token, _, _, _, _, _) = read_frame(&mut socket).await? else {
+        let Frame::Welcome(_, _, _, _, _, _) = read_frame(&mut socket).await? else {
             return Err("expected Welcome first".into());
         };
         let mut slots = Vec::new();
@@ -62,7 +63,7 @@ impl Client {
         }
         Ok(Self {
             socket,
-            token,
+            credential,
             image: vec![0; IMAGE_BYTES],
             version: 0,
             toggle_slot: slots[0],
@@ -205,8 +206,23 @@ mod tests {
         let mut pending = true;
         let mut bits = vec![0; IMAGE_BYTES];
         bits[0] = 2;
-        assert!(apply_batch(&mut image, &mut pending, 2, &[], &[codec::chunk_row(2, 0, &bits)]).is_err());
-        assert!(!apply_batch(&mut image, &mut pending, 2, &[2], &[codec::chunk_row(2, 0, &bits)])?);
+        assert!(
+            apply_batch(
+                &mut image,
+                &mut pending,
+                2,
+                &[],
+                &[codec::chunk_row(2, 0, &bits)]
+            )
+            .is_err()
+        );
+        assert!(!apply_batch(
+            &mut image,
+            &mut pending,
+            2,
+            &[2],
+            &[codec::chunk_row(2, 0, &bits)]
+        )?);
         assert_eq!(image[0], 2);
         assert!(apply_batch(&mut image, &mut pending, 2, &[2], &[])?);
         assert_eq!(image[0], 0);
@@ -298,11 +314,11 @@ pub async fn converge(
                 client.start_call(0, p, bit).await?;
                 if j == reconnect {
                     // Deliberately lose a possible outcome and resend the same p on the same principal.
-                    let token = client.token.clone();
+                    let credential = client.credential.clone();
                     let repairs = client.repairs;
                     let resubscribes = client.resubscribes;
                     drop(client);
-                    client = Client::connect(&url, &wants, Some(token)).await?;
+                    client = Client::connect(&url, &wants, Some(credential)).await?;
                     client.repairs = repairs;
                     client.resubscribes = resubscribes;
                     client.snapshot().await?;

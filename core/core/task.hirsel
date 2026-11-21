@@ -1,5 +1,8 @@
 // Module `task` (CONC-1 to CONC-8).
-pub fn spawn[X: send, R: send](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R waits) -> Result[Task[R], (Capacity, X)]
+pub fn spawn[X: send, R: send](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R waits) -> Task[R]
+
+// Like spawn, handing a refusal back as a value with x instead of raising it (MEM-21).
+pub fn try_spawn[X: send, R: send](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R waits) -> Result[Task[R], (Capacity, X)]
 
 pub fn spawn_unit[X: cross, R: cross](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R waits) -> Result[Task[R], (Capacity, X)]
 

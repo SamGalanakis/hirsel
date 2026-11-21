@@ -17,8 +17,8 @@ fn build(mut doc: Document, depth: u32, mut seed: u32) -> Result[TreeRef, Capaci
     let start = list.len(doc.slots)
     let tree = Tree(start: int.narrow(start), count: count)
     let handle = TreeRef(index: int.narrow(list.len(doc.trees) + 1))
-    result.capacity_only(list.push(mut doc.trees, take tree))?
-    list.fill(mut doc.slots, int.widen(count), TreeRef(index: 0))?
+    list.push(mut doc.trees, take tree)
+    list.fill(mut doc.slots, int.widen(count), TreeRef(index: 0))
     if depth > 1 {
         for slot in start .. start + int.widen(count) {
             let child = build(mut doc, depth - 1, mut seed)?
@@ -28,10 +28,10 @@ fn build(mut doc: Document, depth: u32, mut seed: u32) -> Result[TreeRef, Capaci
     Ok(handle)
 }
 
-pub fn benchmark() -> Result[u64, Capacity] {
+pub fn benchmark(depth: u64) -> Result[u64, Capacity] {
     let mut doc = Document(trees: list.new(), slots: list.new())
     let mut seed = 74755u32
-    let root = build(mut doc, 7, mut seed)?
+    let root = build(mut doc, int.narrow(depth), mut seed)?
     let index: u64 = int.widen(root.index - 1)
     if doc.trees[index].count == 4 {
         Ok(list.len(doc.trees))

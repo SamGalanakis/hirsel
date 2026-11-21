@@ -46,7 +46,7 @@ not charged.
 
 ```hirsel
 fn make(n: u64) -> Result[List[u64], Capacity] {
-  let xs = bound bytes 1024 { list.with_capacity(n) }?   // after the scope, xs is the caller's
+  let xs: List[u64] = bound bytes 1024 { list.with_capacity(n) }?   // after the scope, xs is the caller's
   Ok(xs)
 }
 ```
@@ -132,6 +132,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | a log's entries | as `List[E]` storage |
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
+| a virtual provider's port or cell ([core](core.md#provide)) | a port: its room `n`, from the constructing task's limit, refunded when the port is gone; a cell: 32, from the current limit, held until the run ends as a narrowed grant's rule storage is, since its plain capability can be copied anywhere |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
 
 `list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
@@ -139,6 +140,15 @@ allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an emp
 `text.copy_in` still admit their count header ([core](core.md)). A `clone` or `clone_in`
 charges each copy at capacity equal to its length, and a compact `clone_in` charges the
 selected value's bytes when its type is streamable and the whole copied blob otherwise ([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
+
+**Charge parity.** A provider operation's charges are the caller's, and they do not depend
+on the provider: against a virtual provider ([core](core.md#provide)) the caller pays exactly
+the admissions and steps it pays against the host for the same operations and results. Every
+byte the server keeps (handle records, staged reply bytes) comes out of its port's room `n`,
+which the server admitted at `provide.dir`, `provide.net`, `provide.stdout` or
+`provide.stderr`; bytes a server copies out with `provide.payload` land in capacity the server
+already holds. A reply that needs more room than is left raises `Capacity` in the server and
+never charges the caller.
 
 Creating a resource admits its cause cell, and can therefore be refused; then
 nothing was admitted, so nothing is refunded, and the literal's fields come back in its

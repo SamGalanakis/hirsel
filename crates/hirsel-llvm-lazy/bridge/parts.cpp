@@ -66,7 +66,7 @@ extern "C" LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMMo
 namespace {
 
 // An instance symbol (`h` and 64 lowercase hex digits) with its bridge
-// suffixes (`.register`, `.words`, `.infallible`): unique in a program and the
+// suffixes (`.register`, `.words`, `.infallible`, `.ok`): unique in a program and the
 // same in every program.
 bool instance_name(StringRef n) {
     if (n.size() < 65 || n[0] != 'h') return false;
@@ -650,6 +650,44 @@ void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned j
     });
 }
 
+// The bodies a separately generated library lends the programs over it, as
+// bitcode: every definition `available_externally`, under the name its part's
+// object defines (a local definition's own name with `own` after it, as the
+// library's link contract renames it), each constant `linkonce_odr` hidden as
+// a part defines it. A program's optimizer may inline a body and then drops
+// it; every call it keeps reaches the part. A body over `limit` instructions,
+// or one naming a symbol module assembly sets, is lent as a declaration.
+void lent_bodies(const Module &m, const StringMap<std::string> &sets, size_t limit, StringRef own,
+                 SmallVectorImpl<char> &out) {
+    ValueToValueMapTy map;
+    std::unique_ptr<Module> p = CloneModule(m, map);
+    p->setModuleInlineAsm(ArrayRef<Module::GlobalAsmFragment>());
+    for (GlobalVariable &g : p->globals()) {
+        if (g.isDeclaration()) continue;
+        g.setLinkage(GlobalValue::LinkOnceODRLinkage);
+        g.setVisibility(GlobalValue::HiddenVisibility);
+    }
+    for (Function &f : *p) {
+        if (f.isDeclaration()) continue;
+        size_t size = 0;
+        bool lent = true;
+        for (BasicBlock &b : f)
+            for (Instruction &i : b) {
+                ++size;
+                for (const Use &op : i.operands())
+                    if (auto *g = dyn_cast<GlobalVariable>(op.get()); g && sets.count(g->getName())) lent = false;
+            }
+        if (f.hasLocalLinkage()) {
+            f.setName(f.getName() + own);
+            f.setLinkage(GlobalValue::ExternalLinkage);
+            f.setVisibility(GlobalValue::HiddenVisibility);
+        }
+        if (lent && size <= limit) f.setLinkage(GlobalValue::AvailableExternallyLinkage);
+        else f.deleteBody();
+    }
+    bitcode(*p, out);
+}
+
 }  // namespace
 
 // Generate every definition of `module` a caller does not hold. Each
@@ -661,11 +699,13 @@ void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned j
 // and the caller cuts per part. Otherwise each missed part is generated from
 // its bitcode alone on up to `jobs` threads, and `deliver` gets its object, in
 // part order. A module that cannot be cut (`unsplittable`) is one part named
-// "" keyed by the module's key and generated whole.
+// "" keyed by the module's key and generated whole. With `lend`, a library's
+// bodies (`lent_bodies`, under `lend_limit` and `own`) go to `lend` first.
 // Returns 0, or 1 with `*error` set to an LLVM message.
 extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     int (*reuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t),
-    void (*deliver)(void *, const uint8_t *, size_t), void *context, char **error) {
+    void (*deliver)(void *, const uint8_t *, size_t), void *context, size_t lend_limit,
+    const char *own, void (*lend)(void *, const uint8_t *, size_t), char **error) {
     Module &m = *unwrap(module);
     TargetMachine &tm = *reinterpret_cast<TargetMachine *>(machine);
     // A section per definition, and no code generation across definitions:
@@ -686,6 +726,15 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     }
     name_from_content(m);
     bool whole = !unsplittable(m).empty();
+    if (lend) {
+        if (whole) {
+            *error = strdup(("a library that lends its bodies is cut per definition: " + unsplittable(m)).c_str());
+            return 1;
+        }
+        SmallVector<char, 0> lent;
+        lent_bodies(m, asm_lines(m), lend_limit, own, lent);
+        lend(context, (const uint8_t *)lent.data(), lent.size());
+    }
     auto ask = [&](StringRef name, const hirsel_key::Digest &key) {
         return reuse(context, name.data(), name.size(), machine_key.data(), machine_key.size(),
                      key.data(), key.size()) != 0;

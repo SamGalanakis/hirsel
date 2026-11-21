@@ -40,14 +40,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Some(self.list_word(vals[0]?, vals[1]?, result, name == "word_be", n));
         }
         if module == ["list"] && matches!(name, "put_word_le" | "put_word_be") {
-            return Some(self.list_put_word(
-                vals[0]?,
-                vals[1]?,
-                types[0],
-                result,
-                name == "put_word_be",
-                n,
-            ));
+            self.list_put_word(vals[0]?, vals[1]?, types[0], name == "put_word_be", n)?;
+            return Some(None);
         }
         if module == ["inline"] && matches!(name, "word_le" | "word_be") {
             return Some(self.inline_word(
@@ -114,22 +108,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_clear(item, vals[0]?, n);
                 return Some(None);
             }
-            "push" => return Some(self.list_push(item, vals[0]?, vals[1], result, n, None)),
-            "fill" => return Some(self.list_fill(item, vals[0]?, vals[1]?, vals[2], result, n)),
-            "append" => return Some(self.list_append(item, vals[0]?, vals[1]?, result, n)),
+            "push" => return Some(self.list_push(item, vals[0]?, vals[1], n, None)),
+            "fill" => {
+                self.list_fill(item, vals[0]?, vals[1]?, vals[2], n)?;
+                return Some(None);
+            }
+            "append" => {
+                self.list_append(item, vals[0]?, vals[1]?, n)?;
+                return Some(None);
+            }
             "copy_from_slice" => {
                 self.list_copy_from_slice(item, vals[0]?, vals[1]?, vals[2]?, n)?;
                 return Some(None);
             }
             "reserve" => {
-                return Some(self.list_reserve(
-                    item,
-                    vals[0]?,
-                    vals[1]?,
-                    super::lists::Ask::Reserve,
-                    result,
-                    n,
-                ));
+                self.list_reserve(item, vals[0]?, vals[1]?, super::lists::Ask::Reserve, n)?;
+                return Some(None);
+            }
+            "try_reserve" => {
+                return Some(self.list_try_reserve(item, vals[0]?, vals[1]?, result, n));
             }
             "get" => return Some(self.list_get(item, vals[0]?, vals[1]?, result, n)),
             "set" => return Some(self.list_set(item, vals[0]?, vals[1]?, vals[2], n)),

@@ -27,9 +27,9 @@ fn growth_shadow_copies_back_data_and_capacity() {
 #[test]
 fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     fs::write(
-        scratch.0.join("input.o"),
+        scratch.path().join("input.o"),
         program.cranelift_object(NATIVE_TARGET, false, false, false),
     )
     .unwrap();
@@ -101,16 +101,37 @@ int main(void) {{
 fn blocked_channel_is_a_named_run_stop() {
     let source = r#"
 fn waiting() -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     result.unwrap(channel.receive(rx))
+}
+
+// A virtual Clock's deadline fires only from advance_to; its hand is held but
+// never moved, so the run is quiescent: Deadlock (FAIL-15), not a host timer.
+fn virtual_sleep() -> u64 waits {
+    let (c, h) = provide.clock(0, 0)
+    host.sleep_until(c, 1)
+    1
+}
+
+// A write to a port the writer serves itself waits for a `next` that no task
+// can reach: the run is quiescent with the Served end still held (FAIL-15).
+fn self_served() -> u64 waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let served = take s
+    let _ = stdout.write(o, "x")
+    let _ = take served
+    1
 }
 "#;
     let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
-    assert_eq!(
-        eval::run(&module, names["waiting"], &[], 1_000_000).outcome,
-        Outcome::Stopped("Deadlock")
-    );
-    execute(&module, &[(names["waiting"], vec![])], false);
+    for name in ["waiting", "virtual_sleep", "self_served"] {
+        assert_eq!(
+            eval::run(&module, names[name], &[], 1_000_000).outcome,
+            Outcome::Stopped("Deadlock"),
+            "{name}"
+        );
+        execute(&module, &[(names[name], vec![])], false);
+    }
 }
 
 use hirsel_core_program_tests::wire_socket;
@@ -118,9 +139,9 @@ use hirsel_core_program_tests::wire_socket;
 fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
     let (program, names) =
         hirsel_core_program_tests::SourceProgram::lower(wire_socket::SOURCE, None);
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     fs::write(
-        scratch.0.join("input.o"),
+        scratch.path().join("input.o"),
         program.cranelift_object(NATIVE_TARGET, false, false, false),
     )
     .unwrap();

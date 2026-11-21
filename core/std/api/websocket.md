@@ -8,12 +8,12 @@ random client nonces and a fresh four-byte mask for each encoded client frame.
 
 `server` parses a bounded upgrade and returns its response and consumed byte
 offset. `client` checks a 101 against the actual challenge and the client's
-protocol offer. `Ready(end, selected)` reports whether hirsel.1 was selected.
+protocol offer. `Ready(end, selected)` reports whether hirsel.2 was selected.
 An offer may be declined; the runner requires `selected` through its own
 configuration. Unoffered protocols and every extension are refused. Preserve
 `input[end..]` as the initial frame input. `request` constructs the fixed
-`/hirsel` request. Refused 426 requires a `Sec-WebSocket-Version: 13` response
-header. All paths expose Capacity separately from protocol refusal.
+`/hirsel` request and returns `Result[Bytes, u16]`. Refused 426 requires a `Sec-WebSocket-Version: 13` response
+header. Allocation refusal raises Capacity.
 
 `decoder` and `next` consume arbitrarily split input, stop at one event, and
 advance a caller-owned cursor. A Ping is immediate even inside a fragmented
@@ -22,7 +22,9 @@ binary messages are distinct events. Text UTF-8 state spans fragments and
 control frames. A Close event contains a validated payload to echo. Reject and
 Close terminate decoding and release partial assembly.
 
-`encoder` validates outgoing frames and appends one wire frame. It tracks
+`encode` validates and appends one wire frame. `binary_head` appends the header
+of an unmasked binary frame. Both return `Result[(), u16]` and raise Capacity
+on refused allocation. The encoder tracks
 fragmentation and close state. The owner retains that frame and its send
 cursor until it is fully written, and flushes any Close under one absolute
 close deadline. The driver also owns the composite upgrade deadline and idle

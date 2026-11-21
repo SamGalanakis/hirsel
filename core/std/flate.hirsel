@@ -6,7 +6,7 @@ pub type Format: key = Raw | Zlib | Gzip
 
 pub type FlateError: key = Truncated | Corrupt(u64) | Header | Checksum | TooLarge | TrailingData(u64)
 
-pub type Error = Data(FlateError) | Capacity(Capacity)
+pub type Error = Data(FlateError)
 
 pub type Step {
     consumed: u64,
@@ -62,12 +62,12 @@ const DISTANCE_TABLE: u64 = 659
 const TABLE_SIZE: u64 = 707
 
 /// Start a raw, zlib or gzip decoder with an admitted window and tables.
-pub fn decoder(format: Format) -> Result[Decoder, Capacity] {
-    let mut window: Bytes = list.with_capacity(WINDOW)?
-    list.fill(mut window, WINDOW, 0)?
-    let mut tables: List[u16] = list.with_capacity(TABLE_SIZE)?
-    list.fill(mut tables, TABLE_SIZE, 0)?
-    Ok(Decoder(format: format, phase: Start(), fault: None(), bits: Bits(data: 0, count: 0, used: 0, at: 0, offset: 0), window: take window, tables: take tables, size: 0, max_distance: WINDOW, last: false, pending: 0, distance: 0, header_crc: 0, crc: 0, adler_a: 1, adler_b: 0))
+pub fn decoder(format: Format) -> Decoder {
+    let mut window: Bytes = list.with_capacity(WINDOW)
+    list.fill(mut window, WINDOW, 0)
+    let mut tables: List[u16] = list.with_capacity(TABLE_SIZE)
+    list.fill(mut tables, TABLE_SIZE, 0)
+    Decoder(format: format, phase: Start(), fault: None(), bits: Bits(data: 0, count: 0, used: 0, at: 0, offset: 0), window: take window, tables: take tables, size: 0, max_distance: WINDOW, last: false, pending: 0, distance: 0, header_crc: 0, crc: 0, adler_a: 1, adler_b: 0)
 }
 
 fn read_bits(mut b: Bits, input: Bytes, n: u64) -> Result[u64, FlateError] {
@@ -586,17 +586,10 @@ pub fn decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Byte
     }))
 }
 
-fn admit[T](take work: Result[T, Capacity]) -> Result[T, Error] {
-    match take work {
-        Ok(value) => Ok(take value),
-        Error(error) => Error(Capacity(error)),
-    }
-}
-
 /// Decode one stream with a checked output bound. A following byte is
 /// TrailingData at its input offset. Work and allocation are linear.
 pub fn decode(format: Format, data: Bytes, max_output: u64) -> Result[Bytes, Error] {
-    let mut d = admit(decoder(format))?
+    let mut d = decoder(format)
     let mut out: Bytes = list.new()
     while true {
         let capacity = list.capacity(out)
@@ -618,7 +611,7 @@ pub fn decode(format: Format, data: Bytes, max_output: u64) -> Result[Bytes, Err
                 if limit == max_output {
                     return Error(Data(TooLarge()))
                 }
-                admit(list.reserve(mut out, 1))?
+                list.reserve(mut out, 1)
             },
             Ok(Continue()) => (),
             Error(error) => return Error(Data(error)),
@@ -654,18 +647,18 @@ pub opaque type Encoder {
 
 /// Start a deterministic DEFLATE stream at level 0 through 9. Allocates the
 /// block and staging buffers and, for levels above zero, the hash chains.
-pub fn encoder(format: Format, level: u8) -> Result[Encoder, Capacity] {
+pub fn encoder(format: Format, level: u8) -> Encoder {
     let depth = SEARCH[int.widen(level)]
     let mut heads: List[u16] = list.new()
     let mut links: List[u16] = list.new()
     if depth != 0 {
-        heads = list.with_capacity(BLOCK_BYTES)?
-        links = list.with_capacity(BLOCK_BYTES)?
-        list.fill(mut heads, BLOCK_BYTES, 0)?
-        list.fill(mut links, BLOCK_BYTES, 0)?
+        heads = list.with_capacity(BLOCK_BYTES)
+        links = list.with_capacity(BLOCK_BYTES)
+        list.fill(mut heads, BLOCK_BYTES, 0)
+        list.fill(mut links, BLOCK_BYTES, 0)
     }
-    let block: Bytes = list.with_capacity(BLOCK_BYTES)?
-    let pending: Bytes = list.with_capacity(STAGED_BYTES)?
+    let block: Bytes = list.with_capacity(BLOCK_BYTES)
+    let pending: Bytes = list.with_capacity(STAGED_BYTES)
     let mut e = Encoder(format: format, level: level, block: take block, pending: take pending, scanned: 0, heads: take heads, links: take links, word: 0, bits: 0, crc: 0, adler_a: 1, adler_b: 0, size: 0, final_written: false)
     match format {
         Raw() => (),
@@ -695,7 +688,7 @@ pub fn encoder(format: Format, level: u8) -> Result[Encoder, Capacity] {
             let _ = list.put_word_le(mut e.pending, 0xff00u16 | xfl)
         },
     }
-    Ok(take e)
+    take e
 }
 
 fn write_bits(mut e: Encoder, value: u64, n: u64) {
@@ -953,22 +946,22 @@ pub fn finish_step(mut e: Encoder, mut out: Bytes) -> Step {
 }
 
 /// Encode exactly one stream at level 0 through 9.
-pub fn encode(format: Format, data: Bytes, level: u8) -> Result[Bytes, Capacity] {
-    let mut e = encoder(format, level)?
+pub fn encode(format: Format, data: Bytes, level: u8) -> Bytes {
+    let mut e = encoder(format, level)
     let mut out: Bytes = list.new()
     let n = list.len(data)
     let mut at: u64 = 0
     while at < n {
-        list.reserve(mut out, 1)?
+        list.reserve(mut out, 1)
         let step = encode_step(mut e, data, at, n, mut out)
         at += step.consumed
     }
     while true {
-        list.reserve(mut out, 1)?
+        list.reserve(mut out, 1)
         let step = finish_step(mut e, mut out)
         if step.ended {
-            return Ok(take out)
+            return take out
         }
     }
-    Ok(take out)
+    take out
 }

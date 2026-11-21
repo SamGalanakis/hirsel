@@ -2,22 +2,22 @@
 // clone_in requires a region value of the expected type.
 // Resource, scoped and opaque owners cannot be cloned.
 
-// expect: refuse MEM-17 at 15:48
-// expect: refuse MEM-17 at 16:90
-// expect: refuse MEM-17 at 17:51
-// expect: refuse MEM-17 at 18:57
+// expect: refuse MEM-17 at 15:30
+// expect: refuse MEM-17 at 16:72
+// expect: refuse MEM-17 at 17:33
+// expect: refuse MEM-17 at 18:39
 @compact(u32) type RowS { name: Text, n: u64 }
 
 type P: shareable { s: String }
-fn freeze(r: Region, x: Text) -> Result[Text in r, Capacity] { clone_in(r, x) }
-fn inner(b: Box[Rc[P]]) -> Result[P, Capacity] { clone(b) }
-fn same(p: P) -> Result[P, Capacity] { clone(p) }
-fn wrong(x: u64) -> Result[String, Capacity] { clone(x) }
-fn dup(r: Region, b: SpanBuilder[u8, in r]) -> Result[SpanBuilder[u8, in r], Capacity] { clone(b) }
-fn chain(c: Causes) -> Result[Causes, Capacity] { clone(c) }
-fn items[T](xs: List[T]) -> Result[List[T], Capacity] { clone(xs) }
+fn freeze(r: Region, x: Text) -> Text in r { clone_in(r, x) }
+fn inner(b: Box[Rc[P]]) -> P { clone(b) }
+fn same(p: P) -> P { clone(p) }
+fn wrong(x: u64) -> String { clone(x) }
+fn dup(r: Region, b: SpanBuilder[u8, in r]) -> SpanBuilder[u8, in r] { clone(b) }
+fn chain(c: Causes) -> Causes { clone(c) }
+fn items[T](xs: List[T]) -> List[T] { clone(xs) }
 
-fn convert(r: Region, x: String) -> Result[Text in r, Capacity] { clone_in(r, x) }
-fn wrong_region_type(r: Region, x: Text) -> Result[RowS in r, Capacity] { clone_in(r, x) }
-// expect: refuse MEM-17 at 20:67
-// expect: refuse MEM-17 at 21:75
+fn convert(r: Region, x: String) -> Text in r { clone_in(r, x) }
+fn wrong_region_type(r: Region, x: Text) -> RowS in r { clone_in(r, x) }
+// expect: refuse MEM-17 at 20:49
+// expect: refuse MEM-17 at 21:57

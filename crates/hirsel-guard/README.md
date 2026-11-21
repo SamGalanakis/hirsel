@@ -30,8 +30,8 @@ workspace crate.
   stacks and reservations such as `Vec::with_capacity`, but neither file mappings
   nor `PROT_NONE` ranges. An address-space limit would also count the shared
   libraries and the arenas glibc reserves without touching.
-- `jobs()` is the worker count for a runner's threads or processes:
-  `HIRSEL_JOBS`, else 2. A malformed or zero value exits 2.
+- `jobs()` returns the number of CPUs available to the process, capped at
+  `HIRSEL_JOBS` when set. A malformed or zero value exits 2.
 
 Under Buck2 the test rule (`tools/buck2/defs.bzl`) sets `HIRSEL_MEMORY_LIMIT` to
 the run's grant, twice the binary's measured `memory_kb` (the pool kills a run past

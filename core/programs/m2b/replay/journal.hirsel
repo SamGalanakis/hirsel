@@ -31,7 +31,7 @@ pub type Recorded = fn(Bytes) -> Result[Bytes, Capacity]
 
 // A journal in record mode; each recorded call runs under `bound bytes limit`.
 pub fn recording(limit: u64) -> Journal {
-    Journal(entries: list.new(), replay: false, at: 0, limit: limit)
+    Journal(entries: list.new(), replay: false, at: 0, limit)
 }
 
 // Switches to replay from the first entry.
@@ -56,26 +56,21 @@ fn full[T](take r: Result[T, Capacity]) -> Result[T, Diverged] {
 }
 
 fn owned(b: Bytes) -> Result[Bytes, Diverged] {
-    let mut out: Bytes = full(list.with_capacity(list.len(b)))?
-    full(list.append(mut out, b))?
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
     Ok(out)
 }
 
 fn put_u8(mut out: Bytes, x: u8) -> Result[(), Diverged] {
-    match list.push(mut out, x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Full(c)),
-    }
+    list.push(mut out, x)
+    Ok(())
 }
 
 fn put_u64(mut out: Bytes, x: u64) -> Result[(), Diverged] {
     let mut i: u64 = 0
     while i < 8 {
         let byte: u8 = int.truncate(x >> (i * 8))
-        match list.push(mut out, byte) {
-            Ok(()) => {},
-            Error((c, _)) => return Error(Full(c)),
-        }
+        list.push(mut out, byte)
         i += 1
     }
     Ok(())
@@ -89,7 +84,7 @@ fn get_u64(b: Bytes, at: u64) -> Option[u64] {
 }
 
 fn u64_bytes(x: u64) -> Result[Bytes, Diverged] {
-    let mut b: Bytes = full(list.with_capacity(8))?
+    let mut b: Bytes = list.with_capacity(8)
     put_u64(mut b, x)?
     Ok(b)
 }
@@ -100,7 +95,7 @@ fn outcome_bytes(r: Result[Bytes, Capacity]) -> Result[Bytes, Diverged] {
     match r {
         Ok(o) => {
             put_u8(mut b, 0)?
-            full(list.append(mut b, o))?
+            list.append(mut b, o)
         },
         Error(c) => {
             put_u8(mut b, 1)?
@@ -112,11 +107,9 @@ fn outcome_bytes(r: Result[Bytes, Capacity]) -> Result[Bytes, Diverged] {
 }
 
 fn record(mut j: Journal, code: Code, arg: Bytes, take outcome: Bytes) -> Result[(), Diverged] {
-    let e = Entry(code: code, arg: owned(arg)?, outcome: take outcome)
-    match list.push(mut j.entries, take e) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Full(c)),
-    }
+    let e = Entry(code, arg: owned(arg)?, outcome: take outcome)
+    list.push(mut j.entries, take e)
+    Ok(())
 }
 
 // The replay check common to every recorded operation: the entry at the cursor
@@ -220,10 +213,10 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
             Unwrap => put_u8(mut b, 4)?,
             Fail(text) => {
                 put_u8(mut b, 5)?
-                full(list.append(mut b, string.as_bytes(text)))?
+                list.append(mut b, string.as_bytes(text))
             },
             Cancelled => put_u8(mut b, 6)?,
-            Capacity => put_u8(mut b, 7)?,
+            Capacity(_) => put_u8(mut b, 7)?,
             OutOfTime => put_u8(mut b, 9)?,
         }
         break

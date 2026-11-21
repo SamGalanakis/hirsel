@@ -10,7 +10,7 @@ pub enum KeyOp {
     Equal,
     Order,
     Ordered(CompareOp),
-    /// `$clone[T](from, to) -> (requested, available)`: MEM-17's own copy.
+    /// `$clone[T](from, to)`: MEM-17's own copy; a refusal raises `Capacity`.
     Clone,
     /// `$encode[T](from, blob, at)`: MEM-9's packed encoding of a plain `T` written at
     /// byte `at` of `blob` (a span builder's push in a rigid body, MEM-12).
@@ -59,9 +59,12 @@ impl KeyOp {
             Self::Hash => {}
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
             Self::Equal | Self::Order | Self::Ordered(_) => params.push(view(ty)),
-            Self::Clone => params.push(out(ty)),
-            Self::Encode => {
-                params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
+            Self::Clone | Self::Encode => {
+                if self == Self::Clone {
+                    params.push(out(ty));
+                } else {
+                    params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
+                }
                 return Signature {
                     params,
                     results: vec![],
@@ -69,14 +72,6 @@ impl KeyOp {
                     never: false,
                 };
             }
-        }
-        if self == Self::Clone {
-            return Signature {
-                params,
-                results: vec![Ty::Scalar(Scalar::U64); 2],
-                dest: None,
-                never: false,
-            };
         }
         Signature {
             params,

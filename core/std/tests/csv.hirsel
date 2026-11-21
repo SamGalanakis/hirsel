@@ -1,6 +1,6 @@
 // test-vectors
 fn dialect(delimiter: u8, crlf: bool) -> csv.Dialect {
-    csv.Dialect(delimiter: delimiter, crlf: crlf)
+    csv.Dialect(delimiter, crlf)
 }
 
 fn read_is(text: Bytes, d: csv.Dialect, expected: List[List[String]]) -> bool {
@@ -74,9 +74,9 @@ fn write_rows(rows: List[List[String]], d: csv.Dialect) -> Result[String, Capaci
     let mut w = csv.writer(d)
     for row in rows {
         for field in row {
-            csv.field(mut w, mut out, field)?
+            csv.field(mut w, mut out, field)
         }
-        csv.end(mut w, mut out)?
+        csv.end(mut w, mut out)
     }
     Ok(take out)
 }
@@ -94,7 +94,7 @@ fn write_is(rows: List[List[String]], d: csv.Dialect, expected: String) -> bool 
 // Mutant: reject a final CR before the next chunk can supply its LF.
 // expect: run every_split() = true
 fn every_split() -> bool {
-    let text = result.unwrap(b"id,\"a\"\"\"\r\n\n\"embedded\r\nline\",part\r\n\"paired\"\"quotes\",\r\n01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123,last\nend,row")
+    let text = b"id,\"a\"\"\"\r\n\n\"embedded\r\nline\",part\r\n\"paired\"\"quotes\",\r\n01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123,last\nend,row"
     let d = dialect(44, true)
     let mut full: List[csv.Field] = list.new()
     let mut resumed: List[csv.Field] = list.new()
@@ -151,7 +151,7 @@ fn every_split() -> bool {
 // C7. core/std/api/csv.md, Grammar. Mutant: report the field start on syntax errors.
 // expect: run grammar_offsets() = true
 fn grammar_offsets() -> bool {
-    invalid_at(result.unwrap(b"a\"b"), 1) && invalid_at(result.unwrap(b"\"a\"b"), 3) && invalid_at(result.unwrap(b"\"ab"), 0) && invalid_at(result.unwrap(b"a\rb"), 1)
+    invalid_at(b"a\"b", 1) && invalid_at(b"\"a\"b", 3) && invalid_at(b"\"ab", 0) && invalid_at(b"a\rb", 1)
 }
 
 // The quoted field starts at 1 and has n+3 raw bytes (a doubled quote and a).
@@ -162,13 +162,13 @@ fn field_markers_cross_blocks() -> bool {
     let d = dialect(b';', true)
     let mut fields: List[csv.Field] = list.new()
     for n in 0u64 .. 80 {
-        let prefix = result.unwrap(string.repeat("x", n))
-        let mut input = result.unwrap(string.from("\""))
-        result.unwrap(string.push(mut input, prefix))
-        result.unwrap(string.push(mut input, "\"\"a\";"))
-        result.unwrap(string.push(mut input, prefix))
-        result.unwrap(string.push(mut input, "\r\n"))
-        result.unwrap(string.push(mut input, padding))
+        let prefix = string.repeat("x", n)
+        let mut input = string.from("\"")
+        string.push(mut input, prefix)
+        string.push(mut input, "\"\"a\";")
+        string.push(mut input, prefix)
+        string.push(mut input, "\r\n")
+        string.push(mut input, padding)
         let next = result.unwrap(csv.record(string.as_bytes(input), 0, d, true, mut fields))
         if next != Record(2 * n + 8) || list.len(fields) != 2 {
             return false
@@ -178,9 +178,9 @@ fn field_markers_cross_blocks() -> bool {
         if !first.quoted || first.span.start != 1 || first.span.end != n + 4 || second.quoted || second.span.start != n + 6 || second.span.end != 2 * n + 6 {
             return false
         }
-        let mut bad = result.unwrap(string.from(prefix))
-        result.unwrap(string.push(mut bad, "\""))
-        result.unwrap(string.push(mut bad, padding))
+        let mut bad = string.from(prefix)
+        string.push(mut bad, "\"")
+        string.push(mut bad, padding)
         if !invalid_at(string.as_bytes(bad), n) {
             // At n=0 the quote is an opening quote with no closing one; it
             // still reports the offset of that opener.
@@ -193,13 +193,13 @@ fn field_markers_cross_blocks() -> bool {
 // C8. core/std/api/csv.md, Field and Error. Mutant: append before validating UTF-8.
 // expect: run invalid_utf8_is_atomic() = true
 fn invalid_utf8_is_atomic() -> bool {
-    let text = result.unwrap(b"a,\"\"\"\xc3\xa9\"\"\xff\"")
+    let text = b"a,\"\"\"\xc3\xa9\"\"\xff\""
     let mut fields: List[csv.Field] = list.new()
     let d = dialect(44, false)
     if result.unwrap(csv.record(text, 0, d, true, mut fields)) != Record(11) || list.len(fields) != 2 {
         return false
     }
-    let mut out = result.unwrap(string.from("prefix"))
+    let mut out = string.from("prefix")
     let Error(NotUtf8(at)) = csv.field_text(text, fields[1], mut out) else {
         return false
     }
@@ -218,11 +218,11 @@ fn fixture_rows(text: String) -> List[List[String]] {
         let mut row: List[String] = list.new()
         while at < end {
             let field_end = option.unwrap(string.find(text, at, field_sep))
-            let field = result.unwrap(string.from(string.slice(text, at, field_end)))
-            result.unwrap(list.push(mut row, take field))
+            let field = string.from(string.slice(text, at, field_end))
+            list.push(mut row, take field)
             at = field_end + string.byte_len(field_sep)
         }
-        result.unwrap(list.push(mut rows, take row))
+        list.push(mut rows, take row)
         at = end + string.byte_len(row_sep)
     }
     take rows
@@ -253,91 +253,91 @@ fn writer_round_trip() -> bool {
 // expect: run python_reader() = true
 fn python_reader() -> bool {
     let d = dialect(44, false)
-    if !read_is(result.unwrap(b"\n"), d, fixture_rows("␞")) {
+    if !read_is(b"\n", d, fixture_rows("␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\r\n"), d, fixture_rows("␞")) {
+    if !read_is(b"\r\n", d, fixture_rows("␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\n\r\n\n"), d, fixture_rows("␞␞␞")) {
+    if !read_is(b"\n\r\n\n", d, fixture_rows("␞␞␞")) {
         return false
     }
-    if !read_is(result.unwrap(b","), d, fixture_rows("␟␟␞")) {
+    if !read_is(b",", d, fixture_rows("␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b",\n"), d, fixture_rows("␟␟␞")) {
+    if !read_is(b",\n", d, fixture_rows("␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b",,\r\n"), d, fixture_rows("␟␟␟␞")) {
+    if !read_is(b",,\r\n", d, fixture_rows("␟␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"\""), d, fixture_rows("␟␞")) {
+    if !read_is(b"\"\"", d, fixture_rows("␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"\"\n"), d, fixture_rows("␟␞")) {
+    if !read_is(b"\"\"\n", d, fixture_rows("␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"\",\n"), d, fixture_rows("␟␟␞")) {
+    if !read_is(b"\"\",\n", d, fixture_rows("␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b",\"\"\r\n"), d, fixture_rows("␟␟␞")) {
+    if !read_is(b",\"\"\r\n", d, fixture_rows("␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"\",\"\""), d, fixture_rows("␟␟␞")) {
+    if !read_is(b"\"\",\"\"", d, fixture_rows("␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"\"\"\""), d, fixture_rows("\"␟␞")) {
+    if !read_is(b"\"\"\"\"", d, fixture_rows("\"␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"\"\"\"\"\"\"\"\n"), d, fixture_rows("\"\"\"␟␞")) {
+    if !read_is(b"\"\"\"\"\"\"\"\"\n", d, fixture_rows("\"\"\"␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"a,\"b,c\",d\r\n"), d, fixture_rows("a␟b,c␟d␟␞")) {
+    if !read_is(b"a,\"b,c\",d\r\n", d, fixture_rows("a␟b,c␟d␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"a\rb\",\"a\nb\",\"a\r\nb\"\n"), d, fixture_rows("a\rb␟a\nb␟a\r\nb␟␞")) {
+    if !read_is(b"\"a\rb\",\"a\nb\",\"a\r\nb\"\n", d, fixture_rows("a\rb␟a\nb␟a\r\nb␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"a,b\r\n\n\"c\",\"d\"\"e\"\nx,y"), d, fixture_rows("a␟b␟␞␞c␟d\"e␟␞x␟y␟␞")) {
+    if !read_is(b"a,b\r\n\n\"c\",\"d\"\"e\"\nx,y", d, fixture_rows("a␟b␟␞␞c␟d\"e␟␞x␟y␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"a,\n\"b\","), d, fixture_rows("a␟␟␞b␟␟␞")) {
+    if !read_is(b"a,\n\"b\",", d, fixture_rows("a␟␟␞b␟␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"a, b,  c\n"), d, fixture_rows("a␟ b␟  c␟␞")) {
+    if !read_is(b"a, b,  c\n", d, fixture_rows("a␟ b␟  c␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"#comment,\"#quoted\"\n"), d, fixture_rows("#comment␟#quoted␟␞")) {
+    if !read_is(b"#comment,\"#quoted\"\n", d, fixture_rows("#comment␟#quoted␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\xef\xbb\xbfa,b\n"), d, fixture_rows("\u{feff}a␟b␟␞")) {
+    if !read_is(b"\xef\xbb\xbfa,b\n", d, fixture_rows("\u{feff}a␟b␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\xc3\xa9,\"\xce\xbb\xe9\x9b\xaa\",\"\xf0\x9f\x98\x80\"\r\n"), d, fixture_rows("é␟λ雪␟😀␟␞")) {
+    if !read_is(b"\xc3\xa9,\"\xce\xbb\xe9\x9b\xaa\",\"\xf0\x9f\x98\x80\"\r\n", d, fixture_rows("é␟λ雪␟😀␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\" trailing space \", leading\n"), d, fixture_rows(" trailing space ␟ leading␟␞")) {
+    if !read_is(b"\" trailing space \", leading\n", d, fixture_rows(" trailing space ␟ leading␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\x00,\"a\x00b\"\n"), d, fixture_rows("\0␟a\0b␟␞")) {
+    if !read_is(b"\x00,\"a\x00b\"\n", d, fixture_rows("\0␟a\0b␟␞")) {
         return false
     }
-    if !read_is(result.unwrap(b"\"first\nsecond\nthird\"\n"), d, fixture_rows("first\nsecond\nthird␟␞")) {
+    if !read_is(b"\"first\nsecond\nthird\"\n", d, fixture_rows("first\nsecond\nthird␟␞")) {
         return false
     }
-    if !syntax_error(result.unwrap(b"x,\"unterminated")) {
+    if !syntax_error(b"x,\"unterminated") {
         return false
     }
-    if !syntax_error(result.unwrap(b"\"")) {
+    if !syntax_error(b"\"") {
         return false
     }
-    if !syntax_error(result.unwrap(b"\"unclosed\r\nnext line")) {
+    if !syntax_error(b"\"unclosed\r\nnext line") {
         return false
     }
-    if !syntax_error(result.unwrap(b"\"closed\"x")) {
+    if !syntax_error(b"\"closed\"x") {
         return false
     }
-    if !syntax_error(result.unwrap(b"\"closed\" x,other\n")) {
+    if !syntax_error(b"\"closed\" x,other\n") {
         return false
     }
     true
@@ -374,147 +374,147 @@ fn python_writer() -> bool {
 // expect: run go_reader() = true
 fn go_reader() -> bool {
     // Simple.
-    if !read_is(result.unwrap(b"a,b,c\n"), dialect(44, false), fixture_rows("a␟b␟c␟␞")) {
+    if !read_is(b"a,b,c\n", dialect(44, false), fixture_rows("a␟b␟c␟␞")) {
         return false
     }
     // CRLF.
-    if !read_is(result.unwrap(b"a,b\r\nc,d\r\n"), dialect(44, false), fixture_rows("a␟b␟␞c␟d␟␞")) {
+    if !read_is(b"a,b\r\nc,d\r\n", dialect(44, false), fixture_rows("a␟b␟␞c␟d␟␞")) {
         return false
     }
     // BareCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"a,b\rc,d\r\n"), 3) {
+    if !invalid_at(b"a,b\rc,d\r\n", 3) {
         return false
     }
     // NoEOLTest.
-    if !read_is(result.unwrap(b"a,b,c"), dialect(44, false), fixture_rows("a␟b␟c␟␞")) {
+    if !read_is(b"a,b,c", dialect(44, false), fixture_rows("a␟b␟c␟␞")) {
         return false
     }
     // Semicolon.
-    if !read_is(result.unwrap(b"a;b;c\n"), dialect(59, false), fixture_rows("a␟b␟c␟␞")) {
+    if !read_is(b"a;b;c\n", dialect(59, false), fixture_rows("a␟b␟c␟␞")) {
         return false
     }
     // MultiLine.
-    if !read_is(result.unwrap(b"\"two\nline\",\"one line\",\"three\nline\nfield\""), dialect(44, false), fixture_rows("two\nline␟one line␟three\nline\nfield␟␞")) {
+    if !read_is(b"\"two\nline\",\"one line\",\"three\nline\nfield\"", dialect(44, false), fixture_rows("two\nline␟one line␟three\nline\nfield␟␞")) {
         return false
     }
     // BlankLine. Deviation: blank lines are zero-field records.
-    if !read_is(result.unwrap(b"a,b,c\n\nd,e,f\n\n"), dialect(44, false), fixture_rows("a␟b␟c␟␞␞d␟e␟f␟␞␞")) {
+    if !read_is(b"a,b,c\n\nd,e,f\n\n", dialect(44, false), fixture_rows("a␟b␟c␟␞␞d␟e␟f␟␞␞")) {
         return false
     }
     // LeadingSpace.
-    if !read_is(result.unwrap(b" a,  b,   c\n"), dialect(44, false), fixture_rows(" a␟  b␟   c␟␞")) {
+    if !read_is(b" a,  b,   c\n", dialect(44, false), fixture_rows(" a␟  b␟   c␟␞")) {
         return false
     }
     // NoComment.
-    if !read_is(result.unwrap(b"#1,2,3\na,b,c"), dialect(44, false), fixture_rows("#1␟2␟3␟␞a␟b␟c␟␞")) {
+    if !read_is(b"#1,2,3\na,b,c", dialect(44, false), fixture_rows("#1␟2␟3␟␞a␟b␟c␟␞")) {
         return false
     }
     // BadDoubleQuotes.
-    if !invalid_at(result.unwrap(b"a\"\"b,c"), 1) {
+    if !invalid_at(b"a\"\"b,c", 1) {
         return false
     }
     // BadBareQuote.
-    if !invalid_at(result.unwrap(b"a \"word\",\"b\""), 2) {
+    if !invalid_at(b"a \"word\",\"b\"", 2) {
         return false
     }
     // BadTrailingQuote.
-    if !invalid_at(result.unwrap(b"\"a word\",b\""), 10) {
+    if !invalid_at(b"\"a word\",b\"", 10) {
         return false
     }
     // ExtraneousQuote. Deviation: the offset is the byte after the closing quote.
-    if !invalid_at(result.unwrap(b"\"a \"word\",\"b\""), 4) {
+    if !invalid_at(b"\"a \"word\",\"b\"", 4) {
         return false
     }
     // FieldCount.
-    if !read_is(result.unwrap(b"a,b,c\nd,e"), dialect(44, false), fixture_rows("a␟b␟c␟␞d␟e␟␞")) {
+    if !read_is(b"a,b,c\nd,e", dialect(44, false), fixture_rows("a␟b␟c␟␞d␟e␟␞")) {
         return false
     }
     // TrailingCommaEOF.
-    if !read_is(result.unwrap(b"a,b,c,"), dialect(44, false), fixture_rows("a␟b␟c␟␟␞")) {
+    if !read_is(b"a,b,c,", dialect(44, false), fixture_rows("a␟b␟c␟␟␞")) {
         return false
     }
     // TrailingCommaEOL.
-    if !read_is(result.unwrap(b"a,b,c,\n"), dialect(44, false), fixture_rows("a␟b␟c␟␟␞")) {
+    if !read_is(b"a,b,c,\n", dialect(44, false), fixture_rows("a␟b␟c␟␟␞")) {
         return false
     }
     // NotTrailingComma3.
-    if !read_is(result.unwrap(b"a,b,c, \n"), dialect(44, false), fixture_rows("a␟b␟c␟ ␟␞")) {
+    if !read_is(b"a,b,c, \n", dialect(44, false), fixture_rows("a␟b␟c␟ ␟␞")) {
         return false
     }
     // CommaFieldTest.
-    if !read_is(result.unwrap(b"x,y,z,w\nx,y,z,\nx,y,,\nx,,,\n,,,\n\"x\",\"y\",\"z\",\"w\"\n\"x\",\"y\",\"z\",\"\"\n\"x\",\"y\",\"\",\"\"\n\"x\",\"\",\"\",\"\"\n\"\",\"\",\"\",\"\"\n"), dialect(44, false), fixture_rows("x␟y␟z␟w␟␞x␟y␟z␟␟␞x␟y␟␟␟␞x␟␟␟␟␞␟␟␟␟␞x␟y␟z␟w␟␞x␟y␟z␟␟␞x␟y␟␟␟␞x␟␟␟␟␞␟␟␟␟␞")) {
+    if !read_is(b"x,y,z,w\nx,y,z,\nx,y,,\nx,,,\n,,,\n\"x\",\"y\",\"z\",\"w\"\n\"x\",\"y\",\"z\",\"\"\n\"x\",\"y\",\"\",\"\"\n\"x\",\"\",\"\",\"\"\n\"\",\"\",\"\",\"\"\n", dialect(44, false), fixture_rows("x␟y␟z␟w␟␞x␟y␟z␟␟␞x␟y␟␟␟␞x␟␟␟␟␞␟␟␟␟␞x␟y␟z␟w␟␞x␟y␟z␟␟␞x␟y␟␟␟␞x␟␟␟␟␞␟␟␟␟␞")) {
         return false
     }
     // StartLine1. Deviation: the offset is the byte after the closing quote.
-    if !invalid_at(result.unwrap(b"a,\"b\nc\"d,e"), 7) {
+    if !invalid_at(b"a,\"b\nc\"d,e", 7) {
         return false
     }
     // StartLine2. Deviation: unterminated field errors point to the opening quote.
-    if !invalid_at(result.unwrap(b"a,b\n\"d\n\n,e"), 4) {
+    if !invalid_at(b"a,b\n\"d\n\n,e", 4) {
         return false
     }
     // CRLFInQuotedField. Deviation: quoted CRLF is preserved.
-    if !read_is(result.unwrap(b"A,\"Hello\r\nHi\",B\r\n"), dialect(44, false), fixture_rows("A␟Hello\r\nHi␟B␟␞")) {
+    if !read_is(b"A,\"Hello\r\nHi\",B\r\n", dialect(44, false), fixture_rows("A␟Hello\r\nHi␟B␟␞")) {
         return false
     }
     // TrailingCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field1,field2\r"), 13) {
+    if !invalid_at(b"field1,field2\r", 13) {
         return false
     }
     // QuotedTrailingCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"\"field\"\r"), 7) {
+    if !invalid_at(b"\"field\"\r", 7) {
         return false
     }
     // QuotedTrailingCRCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"\"field\"\r\r"), 7) {
+    if !invalid_at(b"\"field\"\r\r", 7) {
         return false
     }
     // FieldCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field\rfield\r"), 5) {
+    if !invalid_at(b"field\rfield\r", 5) {
         return false
     }
     // FieldCRCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field\r\rfield\r\r"), 5) {
+    if !invalid_at(b"field\r\rfield\r\r", 5) {
         return false
     }
     // FieldCRCRLF. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field\r\r\nfield\r\r\n"), 5) {
+    if !invalid_at(b"field\r\r\nfield\r\r\n", 5) {
         return false
     }
     // FieldCRCRLFCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field\r\r\n\rfield\r\r\n\r"), 5) {
+    if !invalid_at(b"field\r\r\n\rfield\r\r\n\r", 5) {
         return false
     }
     // FieldCRCRLFCRCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field\r\r\n\r\rfield\r\r\n\r\r"), 5) {
+    if !invalid_at(b"field\r\r\n\r\rfield\r\r\n\r\r", 5) {
         return false
     }
     // MultiFieldCRCRLFCRCR. Deviation: a lone CR is invalid outside quotes.
-    if !invalid_at(result.unwrap(b"field1,field2\r\r\n\r\rfield1,field2\r\r\n\r\r,"), 13) {
+    if !invalid_at(b"field1,field2\r\r\n\r\rfield1,field2\r\r\n\r\r,", 13) {
         return false
     }
     // QuotedFieldMultipleLF.
-    if !read_is(result.unwrap(b"\"\n\n\n\n\""), dialect(44, false), fixture_rows("\n\n\n\n␟␞")) {
+    if !read_is(b"\"\n\n\n\n\"", dialect(44, false), fixture_rows("\n\n\n\n␟␞")) {
         return false
     }
     // MultipleCRLF. Deviation: blank lines are zero-field records.
-    if !read_is(result.unwrap(b"\r\n\r\n\r\n\r\n"), dialect(44, false), fixture_rows("␞␞␞␞")) {
+    if !read_is(b"\r\n\r\n\r\n\r\n", dialect(44, false), fixture_rows("␞␞␞␞")) {
         return false
     }
     // QuoteWithTrailingCRLF. Deviation: the offset is the byte after the closing quote.
-    if !invalid_at(result.unwrap(b"\"foo\"bar\"\r\n"), 5) {
+    if !invalid_at(b"\"foo\"bar\"\r\n", 5) {
         return false
     }
     // DoubleQuoteWithTrailingCRLF.
-    if !read_is(result.unwrap(b"\"foo\"\"bar\"\r\n"), dialect(44, false), fixture_rows("foo\"bar␟␞")) {
+    if !read_is(b"\"foo\"\"bar\"\r\n", dialect(44, false), fixture_rows("foo\"bar␟␞")) {
         return false
     }
     // EvenQuotes.
-    if !read_is(result.unwrap(b"\"\"\"\"\"\"\"\""), dialect(44, false), fixture_rows("\"\"\"␟␞")) {
+    if !read_is(b"\"\"\"\"\"\"\"\"", dialect(44, false), fixture_rows("\"\"\"␟␞")) {
         return false
     }
     // OddQuotes. Deviation: unterminated field errors point to the opening quote.
-    if !invalid_at(result.unwrap(b"\"\"\"\"\"\"\""), 0) {
+    if !invalid_at(b"\"\"\"\"\"\"\"", 0) {
         return false
     }
     true
@@ -525,7 +525,7 @@ fn go_reader() -> bool {
 // Mutant: validate UTF-8 while scanning a record or shorten the invalid field's span.
 // expect: run binary_field() = true
 fn binary_field() -> bool {
-    let text = result.unwrap(b"x09A\xb4\x1c,aktau")
+    let text = b"x09A\xb4\x1c,aktau"
     let mut fields: List[csv.Field] = list.new()
     if result.unwrap(csv.record(text, 0, dialect(44, false), true, mut fields)) != Record(12) || list.len(fields) != 2 {
         return false
@@ -536,14 +536,14 @@ fn binary_field() -> bool {
     let Error(NotUtf8(at)) = csv.field_text(text, first, mut out) else {
         return false
     }
-    raw == result.unwrap(b"x09A\xb4\x1c") && !first.quoted && at == 4
+    raw == b"x09A\xb4\x1c" && !first.quoted && at == 4
 }
 
 // C4. Go src/encoding/csv/reader_test.go:360-362 (EvenQuotes), csv.md, Field.
 // Mutant: include the outer quotes or collapse a pair in the raw field span.
 // expect: run raw_quoted_span() = true
 fn raw_quoted_span() -> bool {
-    let text = result.unwrap(b"x,\"\"\"\"\"\"\"\"")
+    let text = b"x,\"\"\"\"\"\"\"\""
     let mut fields: List[csv.Field] = list.new()
     let next = result.unwrap(csv.record(text, 0, dialect(44, false), true, mut fields))
     next == Record(10) && list.len(fields) == 2 && fields[1] == csv.Field(span: http1.Span(start: 3, end: 9), quoted: true)
@@ -551,7 +551,7 @@ fn raw_quoted_span() -> bool {
 
 fn bad_read_delimiter(delimiter: u8) -> bool {
     let mut fields: List[csv.Field] = list.new()
-    result.unwrap(csv.record(result.unwrap(b"a\n"), 0, dialect(delimiter, false), true, mut fields)) == End
+    result.unwrap(csv.record(b"a\n", 0, dialect(delimiter, false), true, mut fields)) == End
 }
 
 // C4. BadComma1, Go src/encoding/csv/reader_test.go:373-375.
@@ -706,52 +706,8 @@ fn go_writer() -> bool {
 fn bad_write_delimiter() -> bool {
     let mut w = csv.writer(dialect(34, false))
     let mut out = string.new()
-    result.unwrap(csv.field(mut w, mut out, "foo"))
+    csv.field(mut w, mut out, "foo")
     false
-}
-
-// RFC 4180 section 2. A comma in a field requires quotes. The delimiter must
-// stay pending when the destination cannot grow.
-// expect: run writer_field_refusal_retries() = true
-fn writer_field_refusal_retries() -> bool {
-    let mut w = csv.writer(dialect(44, true))
-    let mut out = string.new()
-    result.unwrap(string.reserve(mut out, 8))
-    result.unwrap(csv.field(mut w, mut out, "aaa"))
-    let denied = result.unwrap(bound bytes 0 {
-        csv.field(mut w, mut out, "b,b")
-    })
-    if let Ok(_) = denied {
-        return false
-    }
-    if out != "aaa" {
-        return false
-    }
-    result.unwrap(csv.field(mut w, mut out, "b,b"))
-    result.unwrap(csv.end(mut w, mut out))
-    out == "aaa,\"b,b\"\r\n"
-}
-
-// RFC 4180 section 2. Quote the sole empty field and end it with CRLF.
-// An early reset would change what the same writer appends on retry.
-// expect: run writer_end_refusal_retries() = true
-fn writer_end_refusal_retries() -> bool {
-    let mut w = csv.writer(dialect(44, true))
-    let mut out = string.new()
-    result.unwrap(string.reserve(mut out, 8))
-    result.unwrap(string.push(mut out, "abcde\r\n"))
-    result.unwrap(csv.field(mut w, mut out, ""))
-    let denied = result.unwrap(bound bytes 0 {
-        csv.end(mut w, mut out)
-    })
-    if let Ok(_) = denied {
-        return false
-    }
-    if out != "abcde\r\n" {
-        return false
-    }
-    result.unwrap(csv.end(mut w, mut out))
-    out == "abcde\r\n\"\"\r\n"
 }
 
 // Source and Rust reader differences are in vectors/csv/README.md.
@@ -760,7 +716,7 @@ fn csv_spectrum() -> bool {
     for row in csv_spectrum_data() {
         let (name, input, expected) = row
         if !read_is(string.as_bytes(input), dialect(44, false), fixture_rows(expected)) {
-            fail(result.unwrap(string.from(name)))
+            fail(string.from(name))
         }
     }
     let (input, offset) = csv_spectrum_bare_quote()

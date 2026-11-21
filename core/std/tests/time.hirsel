@@ -115,29 +115,37 @@ fn rfc_write() -> bool {
 fn full_date() -> bool {
     let d = option.unwrap(time.date(0, 2, 29))
     let mut s = "date="
-    result.unwrap(time.push_date(mut s, d))
+    time.push_date(mut s, d)
     s == "date=0000-02-29" && result.unwrap(time.parse_date("0000-02-29")) == d && time.year(d) == 0 && time.month(d) == 2 && time.day(d) == 29 && out_of_range(time.parse_date("2023-02-29")) && invalid(time.parse_date("2024-2-29"), 6) && invalid(time.parse_date("2024-02-29Z"), 10)
 }
 
-// T4. Hand-derived write contracts. Mutant: write a prefix before a failed
-// reserve or leave part of the timestamp after discovering a range error.
+// T4. Hand-derived write contracts. Mutant: leave part of the timestamp after
+// discovering a range error. A refused reserve raises Capacity.
 // expect: run rfc_atomic() = true
 fn rfc_atomic() -> bool {
     let mut s = "prefix"
     let t = stamp(-62167219200, 0)
     let range = time.push_rfc3339(mut s, t, -1, 3)
-    let cap = bound bytes 0 {
-        time.push_rfc3339(mut s, t, 0, 3)
-    }
-    let date_cap = bound bytes 0 {
-        time.push_date(mut s, option.unwrap(time.date(0, 1, 1)))
-    }
-    out_of_range(range) && s == "prefix" && (match cap {
-        Ok(Error(Capacity(_))) => true,
-        _ => false,
-    }) && (match date_cap {
-        Ok(Error(_)) => true,
-        _ => false,
+    let cap = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut line = string.new()
+            let _ = time.push_rfc3339(mut line, t, 0, 3)
+            string.byte_len(line)
+        }
+    })
+    let date_cap = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut line = string.new()
+            time.push_date(mut line, option.unwrap(time.date(0, 1, 1)))
+            string.byte_len(line)
+        }
+    })
+    out_of_range(range) && s == "prefix" && (match caught(take cap) {
+        Some(_) => true,
+        None => false,
+    }) && (match caught(take date_cap) {
+        Some(_) => true,
+        None => false,
     })
 }
 
@@ -208,7 +216,7 @@ fn duration_parse_errors() -> bool {
 
 fn duration_written(d: i64, expected: String) -> bool {
     let mut out = string.new()
-    result.unwrap(time.push_duration(mut out, d))
+    time.push_duration(mut out, d)
     out == expected
 }
 
@@ -230,7 +238,7 @@ fn duration_write() -> bool {
         }
         if value > 0 {
             let mut neg = "-"
-            result.unwrap(string.push(mut neg, spelling))
+            string.push(mut neg, spelling)
             if !duration_written(-value, neg) {
                 return false
             }
@@ -239,22 +247,21 @@ fn duration_write() -> bool {
     true
 }
 
-// T6. Go src/time/time.go:947-1030 and the atomic append contract.
-// Mutant: write the sign into the caller's String before reserving the entire text.
 // expect: run duration_atomic() = true
 fn duration_atomic() -> bool {
+    let cap = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let mut s = string.new()
+            time.push_duration(mut s, -1500)
+            string.byte_len(s)
+        }
+    })
+    match caught(take cap) {
+        Some(_) => {},
+        None => return false,
+    }
     let mut s = "prefix"
-    let cap = bound bytes 0 {
-        time.push_duration(mut s, -1500)
-    }
-    if s != "prefix" {
-        return false
-    }
-    match cap {
-        Ok(Error(_)) => {},
-        _ => return false,
-    }
-    result.unwrap(time.push_duration(mut s, -1500))
+    time.push_duration(mut s, -1500)
     s == "prefix-1.5µs"
 }
 
@@ -323,4 +330,20 @@ fn civil_offset_bounds() -> bool {
 fn timestamp_offset_bounds() -> bool {
     let c = option.unwrap(time.civil(stamp(0, 0), 0))
     time.timestamp(c, -1440) == None
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

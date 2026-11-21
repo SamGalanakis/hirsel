@@ -48,7 +48,7 @@ fn release(mut s: Store, root: Option[u32]) {
 }
 
 fn node(mut s: Store, key: u32, value: u64, left: Option[u32], right: Option[u32]) -> Result[Option[u32], m1.support.Error] {
-    let n = Node(key: key, value: value, left: left, right: right, refs: 1)
+    let n = Node(key, value, left, right, refs: 1)
     let h: u32 = if let Some(i) = s.free {
         let next = match s.slots[int.widen(i)] {
             Free(next) => next,
@@ -59,11 +59,7 @@ fn node(mut s: Store, key: u32, value: u64, left: Option[u32], right: Option[u32
         i
     } else {
         let i: u32 = int.narrow(list.len(s.slots))
-        if let Error((c, _)) = list.push(mut s.slots, Live(n)) {
-            release(mut s, left)
-            release(mut s, right)
-            return m1.support.mem(Error(c))
-        }
+        list.push(mut s.slots, Live(n))
         i
     }
     s.live += 1
@@ -98,10 +94,8 @@ fn draft(mut s: Store, root: Option[u32], key: u32, value: u64, mut count: u64, 
         (retain(mut s, n.left), retain(mut s, n.right))
     }
     count += 1
-    let admitted = match m1.support.name("draft.node", count, "") {
-        Ok(take site) => m1.support.admission(variant, site, 0),
-        Error(take e) => Error(take e),
-    }
+    let site = m1.support.name("draft.node", count, "")
+    let admitted = m1.support.admission(variant, site, 0)
     if let Error(take e) = admitted {
         release(mut s, left)
         release(mut s, right)
@@ -166,21 +160,21 @@ fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wait
     let pin = retain(mut s, current)
     let mut completed: u64 = 0
     let outcome = updates(input, at, n, m1.support.case_variant(argv), mut s, mut current, mut completed)
-    let mut rendered = m1.support.name("updates=", completed, " pinned=")?
-    m1.support.num(mut rendered, sum(s, pin, n))?
-    m1.support.add(mut rendered, " current=")?
-    m1.support.num(mut rendered, sum(s, current, n))?
-    m1.support.add(mut rendered, " live=")?
-    m1.support.num(mut rendered, s.live)?
-    m1.support.add(mut rendered, "\nafter-unpin=")?
+    let mut rendered = m1.support.name("updates=", completed, " pinned=")
+    string.push_u64(mut rendered, sum(s, pin, n))
+    string.push(mut rendered, " current=")
+    string.push_u64(mut rendered, sum(s, current, n))
+    string.push(mut rendered, " live=")
+    string.push_u64(mut rendered, s.live)
+    string.push(mut rendered, "\nafter-unpin=")
     release(mut s, pin)
-    m1.support.num(mut rendered, s.live)?
-    m1.support.add(mut rendered, "\nafter-current=")?
+    string.push_u64(mut rendered, s.live)
+    string.push(mut rendered, "\nafter-current=")
     release(mut s, current)
-    m1.support.num(mut rendered, s.live)?
-    m1.support.add(mut rendered, "\n")?
+    string.push_u64(mut rendered, s.live)
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
     {
         let closed = tx
     }

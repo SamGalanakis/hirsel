@@ -14,10 +14,8 @@ type Maze {
 }
 
 fn push[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
-    match list.push(mut xs, take x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Capacity(c))
-    }
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 fn walkable(k: u32) -> bool {
@@ -35,9 +33,9 @@ fn make(width: u64, height: u64, mut g: helper.Lcg) -> Result[Maze, helper.Error
     } else {
         height
     }
-    let mut cells: List[List[Cell]] = helper.mem(list.with_capacity(h))?
+    let mut cells: List[List[Cell]] = list.with_capacity(h)
     for y in 0 .. h {
-        let mut row: List[Cell] = helper.mem(list.with_capacity(w))?
+        let mut row: List[Cell] = list.with_capacity(w)
         for x in 0 .. w {
             let mut neighbors: Inline[(u64, u64), 4] =[(0u64, 0u64); 4]
             let border = x == 0 || y == 0 || x == w - 1 || y == h - 1
@@ -57,7 +55,7 @@ fn make(width: u64, height: u64, mut g: helper.Lcg) -> Result[Maze, helper.Error
                 4
             } else {
                 0
-            }, neighbors: neighbors, x: x, y: y))?
+            }, neighbors, x, y))?
         }
         push(mut cells, take row)?
     }
@@ -79,7 +77,7 @@ fn reset(mut m: Maze) {
 }
 
 fn dig(mut m: Maze, start: (u64, u64)) -> Result[(), helper.Error] {
-    let mut stack: List[(u64, u64)] = helper.mem(list.with_capacity(m.width * m.height))?
+    let mut stack: List[(u64, u64)] = list.with_capacity(m.width * m.height)
     push(mut stack, start)?
     while let Some((y, x)) = list.pop(mut stack) {
         let neighbors: Inline[(u64, u64), 4] = m.cells[y][x].neighbors
@@ -155,15 +153,12 @@ fn maze_hash(m: Maze) -> u32 {
 fn bfs(m: Maze) -> Result[List[(u64, u64)], helper.Error] {
     let target = (m.height - 2, m.width - 2)
     let mut seen: List[bool] = list.new()
-    helper.mem(list.fill(mut seen, m.width * m.height, false))?
+    list.fill(mut seen, m.width * m.height, false)
     seen[m.width + 1] = true
     let mut path: List[(u64, u64, i32)] = list.new()
     push(mut path, (1u64, 1u64, -1i32))?
     let mut queue: Deque[u64] = deque.new()
-    match deque.push_back(mut queue, 0u64) {
-        Ok(()) => {},
-        Error((c, _)) => return Error(Capacity(c))
-    }
+    deque.push_back(mut queue, 0u64)
     while let Some(id) = deque.pop_front(mut queue) {
         let (y, x, _) = path[id]
         let neighbors: Inline[(u64, u64), 4] = m.cells[y][x].neighbors
@@ -185,10 +180,7 @@ fn bfs(m: Maze) -> Result[List[(u64, u64)], helper.Error] {
                 seen[at] = true
                 let prev: i32 = int.narrow(id)
                 push(mut path, (ny, nx, prev))?
-                match deque.push_back(mut queue, list.len(path) - 1) {
-                    Ok(()) => {},
-                    Error((c, _)) => return Error(Capacity(c))
-                }
+                deque.push_back(mut queue, list.len(path) - 1)
             }
         }
     }
@@ -219,17 +211,14 @@ fn astar(m: Maze) -> Result[List[(u64, u64)], helper.Error] {
     let mut from: List[i32] = list.new()
     let mut scores: List[i32] = list.new()
     let mut best: List[i32] = list.new()
-    helper.mem(list.fill(mut from, size, -1i32))?
-    helper.mem(list.fill(mut scores, size, 2147483647i32))?
-    helper.mem(list.fill(mut best, size, 2147483647i32))?
+    list.fill(mut from, size, -1i32)
+    list.fill(mut scores, size, 2147483647i32)
+    list.fill(mut best, size, 2147483647i32)
     scores[start] = 0
     let f = heuristic(1, 1, ty, tx)
     best[start] = f
     let mut open: Heap[(i32, u64)] = heap.new()
-    match heap.push(mut open, (f, start)) {
-        Ok(()) => {},
-        Error((c, _)) => return Error(Capacity(c))
-    }
+    heap.push(mut open, (f, start))
     while let Some((_, current)) = heap.pop(mut open) {
         if current == target {
             let mut result: List[(u64, u64)] = list.new()
@@ -256,10 +245,7 @@ fn astar(m: Maze) -> Result[List[(u64, u64)], helper.Error] {
                 let next = tentative + heuristic(ny, nx, ty, tx)
                 if next < best[at] {
                     best[at] = next
-                    match heap.push(mut open, (next, at)) {
-                        Ok(()) => {},
-                        Error((c, _)) => return Error(Capacity(c))
-                    }
+                    heap.push(mut open, (next, at))
                 }
             }
         }

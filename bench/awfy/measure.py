@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from arena import group, root_mib
-from build import ROOT, sha256
+from build import ROOT, fixture, sha256
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 from elf_census import STRIP_FLAGS, strip_image
 
@@ -145,9 +145,16 @@ def rows(root, arena, upstream):
         return
     yield "Hello", {side: ([root / f"{side}-hello"], HELLO) for side in SIDES}
     config = (upstream / "rebench.conf").read_text().split("# VMs have a name")[0]
+    # Use the reference value on every iteration. The ports consume these
+    # inputs in order at runtime and can also run a nonuniform sequence.
+    inputs = {"Bounce": "50,50", "List": "15,15", "Permute": "6,6",
+              "Queens": "88888888", "Richards": "10000,10000", "Sieve": "5000,5000",
+              "Storage": "7,7", "Towers": "13,13"}
     for name, inner in re.findall(r"^            - (\w+):\n                extra_args: (\d+)$", config, re.M):
+        workload_input = fixture(upstream) if name == "Json" else inputs.get(name)
+        args = [workload_input] if workload_input is not None else []
         yield name, {
-            side: ([root / f"{side}-harness", name, "1", inner],
+            side: ([root / f"{side}-harness", name, "1", inner, *args],
                    name.encode() + rb": iterations=1 runtime: \d+us\n" if side == "rust" else rb"verified\n")
             for side in SIDES
         }
@@ -160,11 +167,11 @@ def pool_rows(root, upstream):
             continue
         marker = f"verified checksum={checksums[name]}\n".encode()
         for side in ("hirsel", "goose"):
-            _, _, outer, inner = commands[side][0]
-            commands[side] = ([root / f"{side}-pools", name + "Pool", outer, inner], marker)
-        _, _, outer, inner = commands["rust"][0]
+            _, _, *args = commands[side][0]
+            commands[side] = ([root / f"{side}-pools", name + "Pool", *args], marker)
+        _, _, *args = commands["rust"][0]
         row = name + "Pool"
-        commands["rust"] = ([root / "rust-pool_index", row, outer, inner],
+        commands["rust"] = ([root / "rust-pool_index", row, *args],
                             row.encode() + rb": iterations=1 runtime: \d+us\n")
         yield name, commands
 

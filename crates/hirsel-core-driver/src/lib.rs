@@ -7,9 +7,11 @@ pub mod code_admission;
 pub mod code_store;
 pub mod describe;
 mod diagnostics;
+mod host;
 mod image;
 mod image_index;
 mod image_unit;
+mod inspect;
 pub mod installation;
 mod product;
 pub mod sdk;
@@ -48,10 +50,11 @@ pub use native::{
 };
 pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable};
-pub use test_run::{Runner, TestOutcome};
+pub use test_run::{Runner, Source, TestCache, TestOutcome};
 mod meter;
 pub use diagnostics::{
-    Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceFiles, SourceSite, line_column,
+    Diagnostic, DiagnosticHint, IncompleteDiagnostic, ResourceDiagnostic, SourceFiles, SourceSite,
+    line_column,
 };
 pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, Units, collect_instances};
@@ -395,6 +398,7 @@ pub struct CheckProduct {
     pub incomplete: Vec<Incomplete>,
     pub resources: Vec<ResourceRefusal>,
     pub bytes: usize,
+    /// Definition paths whose body products were recomputed by this request.
     pub rechecked: Vec<DefPath>,
     pub root: ContentHash,
     pub snapshot: ContentHash,
@@ -426,6 +430,10 @@ impl CheckProduct {
     }
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty()
+    }
+    /// The identities of the rechecked bodies, independent of traversal order.
+    pub fn rechecked_paths(&self) -> BTreeSet<&DefPath> {
+        self.rechecked.iter().collect()
     }
     pub fn demand_body(&self, definition: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
         if let Some(body) = self.definitions.get(definition) {

@@ -1,13 +1,12 @@
 // expect: run go() = 3700300
-// expect: run refused() = 48001
+// expect: run refused() = 48 used 32
 // MEM-12: `seq.index_in` builds a sequence's offset table once in a region block, so
 // `seq.get` reads element i with a bounds check and one offset load. The elements are
 // Num(4), Str("abc") and Num(7), of different sizes, so a wrong offset reads a wrong or
 // broken element. Hand-derived: count 3 * 1000000, get 2 = Num(7) -> 7 * 100000, get 1
 // = Str("abc") -> 100 * 3, get 3 is past the count -> None (0, else 50).
 // refused(): the bound leaves room for the built value but not the block, round8(24 +
-// 8 * 3) = 48 bytes, so index_in returns Capacity requested 48; it charges nothing,
-// so a second attempt sees the same available (+1).
+// 8 * 3) = 48 bytes, so index_in raises Capacity requested 48.
 @compact(u16)
 type J = Num(u64) | Str(Text) | Arr(SeqSpan[J])
 
@@ -47,7 +46,7 @@ fn go() -> u64 {
     region r {
         match make(r) {
             Ok(Arr(xs)) => match seq.index_in(r, xs) {
-                Ok(ix) => {
+                ix => {
                     let two: u64 = match seq.get(ix, 2) {
                         Some(z) => 100000 * num(z),
                         None => 1
@@ -62,7 +61,6 @@ fn go() -> u64 {
                     }
                     seq.len(xs) * 1000000 + two + one + past
                 },
-                Error(_) => 96,
             },
             Ok(_) => 97,
             Error(_) => 99,
@@ -71,26 +69,37 @@ fn go() -> u64 {
 }
 
 fn refused() -> u64 {
-    let got = bound bytes 216 {
-        region r {
-            match make(r) {
-                Ok(Arr(xs)) => match seq.index_in(r, xs) {
-                    Ok(_) => 1u64,
-                    Error(e) => match seq.index_in(r, xs) {
-                        Ok(_) => 2u64,
-                        Error(f) => if e.available == f.available {
-                            e.requested * 1000 + 1
-                        } else {
-                            3u64
-                        },
+    let got = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 216 {
+            region r {
+                match make(r) {
+                    Ok(Arr(xs)) => {
+                        let _ = seq.index_in(r, xs)
+                        1u64
                     },
-                },
-                _ => 4u64,
+                    _ => 4u64,
+                }
             }
         }
+    })
+    match caught(take got) {
+        Some(e) => e.requested,
+        None => 5u64
     }
-    match got {
-        Ok(k) => k,
-        Error(_) => 5u64
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

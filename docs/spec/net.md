@@ -89,7 +89,7 @@ The runner starts accepting after it publishes `Ready`. Dropping the listener cl
 this process's descriptor, leaving the host's socket and accept queue live.
 
 Graceful finish, prefix I/O, try-first waiting, reset propagation and the scheduler's
-poll registration are specified by NET-1 through NET-10 and implemented after W1a.
+poll registration are specified by NET-1 and NET-7 and implemented after W1a.
 
 ### NET-11: Name resolution
 

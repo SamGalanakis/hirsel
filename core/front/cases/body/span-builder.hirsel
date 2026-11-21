@@ -12,22 +12,16 @@ type P {
     hi: u64
 }
 
-fn make(r: Region, n: u64) -> Result[SpanBuilder[P, in r], Capacity] {
+fn make(r: Region, n: u64) -> SpanBuilder[P, in r] {
     span.with_capacity(r, n)
 }
 
 fn total(k: u64) -> u64 {
     region r {
-        let mut b = match make(r, 2) {
-            Ok(b) => b,
-            Error(_) => return 999
-        }
+        let mut b = make(r, 2)
         let mut i: u64 = 0
         while i < k {
-            match span.push(mut b, P(lo: i, hi: 7)) {
-                Ok(()) => {},
-                Error(_) => return 998
-            }
+            span.push(mut b, P(lo: i, hi: 7))
             i += 1
         }
         let s = span.finish(take b)
@@ -44,10 +38,7 @@ fn second(k: u64) -> u64 {
         let mut b: SpanBuilder[P, in r] = span.builder(r)
         let mut i: u64 = 0
         while i < k {
-            match span.push(mut b, P(lo: i, hi: 7)) {
-                Ok(()) => {},
-                Error(_) => return 998
-            }
+            span.push(mut b, P(lo: i, hi: 7))
             i += 1
         }
         let s = span.finish(take b)

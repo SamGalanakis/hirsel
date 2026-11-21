@@ -7,8 +7,8 @@ fn http_response_fields() -> bool {
         return false
     }
     let mut r = result.unwrap(response(200, list.new(), false))
-    if let Error(HeaderReserved) = header(mut r, result.unwrap(b"TrAnSfEr-EnCoDiNg"), result.unwrap(b"chunked")) {
-        if let Error(HeaderInvalid) = header(mut r, result.unwrap(b"X-Value"), result.unwrap(b"ok\r\nInjected: value")) {
+    if let Error(HeaderReserved) = header(mut r, b"TrAnSfEr-EnCoDiNg", b"chunked") {
+        if let Error(HeaderInvalid) = header(mut r, b"X-Value", b"ok\r\nInjected: value") {
             return list.len(r.fields) == 0
         }
     }
@@ -19,8 +19,8 @@ fn http_response_fields() -> bool {
 // HTTP-4(11): 204 omits the length even when the response owns a body.
 // expect: run http_response_wire_head() = true
 fn http_response_wire_head() -> bool {
-    let mut out: Bytes = result.unwrap(list.with_capacity(128))
-    let mut r = result.unwrap(response(204, result.unwrap(b"unexpected"), false))
+    let mut out: Bytes = list.with_capacity(128)
+    let mut r = result.unwrap(response(204, b"unexpected", false))
     result.unwrap(content_type(mut r, ApplicationJson))
     let mut cache = date_cache()
     let first = "HTTP/1.0 204 No Content\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:00 GMT\r\n\r\n"
@@ -56,7 +56,7 @@ fn http_response_wire_head() -> bool {
 // HTTP-4(8): validate both authorities and use the one in an absolute-form target.
 // expect: run http_absolute_authority() = true
 fn http_absolute_authority() -> bool {
-    let raw = result.unwrap(b"GET http://[2001:0DB8::7]:65535/a?raw=%ff HTTP/1.1\r\nHost: origin.example\r\n\r\n")
+    let raw = b"GET http://[2001:0DB8::7]:65535/a?raw=%ff HTTP/1.1\r\nHost: origin.example\r\n\r\n"
     let mut h = http1.head()
     if http1.request(raw, mut h) != Complete {
         return false
@@ -68,7 +68,7 @@ fn http_absolute_authority() -> bool {
     }
     let spans_match = part(raw, auth) == string.as_bytes("[2001:0DB8::7]:65535") && part(raw, meta.path) == string.as_bytes("/a") && part(raw, meta.query) == string.as_bytes("raw=%ff")
     let names_valid = valid_authority(string.as_bytes("LocalHost:80")) && valid_authority(string.as_bytes("abcdefgh%20.example"))
-    let bad_names_refused = !valid_authority(result.unwrap(b"abcdefg\xc1.example")) && !valid_authority(string.as_bytes("abcdefgh%2G.example"))
+    let bad_names_refused = !valid_authority(b"abcdefg\xc1.example") && !valid_authority(string.as_bytes("abcdefgh%2G.example"))
     spans_match && names_valid && bad_names_refused
 }
 
@@ -87,11 +87,11 @@ fn request_refused(raw: Bytes, status: u16) -> bool {
 // CONNECT and authority-form are 501. Unsupported expectations are 417.
 // expect: run http_request_policy_refusals() = true
 fn http_request_policy_refusals() -> bool {
-    let mixed = result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\nExpect: later\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let mixed = b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\nExpect: later\r\nTransfer-Encoding: chunked\r\n\r\n"
     if !request_refused(mixed, 417) {
         return false
     }
-    request_refused(result.unwrap(b"GET / HTTP/1.1\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\nhost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET http://other/ HTTP/1.1\r\nHost: a:65536\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET http://[1::2::3]/ HTTP/1.1\r\nHost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"CONNECT a:80 HTTP/1.1\r\nHost: a\r\n\r\n"), 501) && request_refused(result.unwrap(b"GET a:80 HTTP/1.1\r\nHost: a\r\n\r\n"), 501) && request_refused(result.unwrap(b"GET * HTTP/1.1\r\nHost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nExpect: later\r\n\r\n"), 417)
+    request_refused(b"GET / HTTP/1.1\r\n\r\n", 400) && request_refused(b"GET / HTTP/1.1\r\nHost: a\r\nhost: a\r\n\r\n", 400) && request_refused(b"GET http://other/ HTTP/1.1\r\nHost: a:65536\r\n\r\n", 400) && request_refused(b"GET http://[1::2::3]/ HTTP/1.1\r\nHost: a\r\n\r\n", 400) && request_refused(b"CONNECT a:80 HTTP/1.1\r\nHost: a\r\n\r\n", 501) && request_refused(b"GET a:80 HTTP/1.1\r\nHost: a\r\n\r\n", 501) && request_refused(b"GET * HTTP/1.1\r\nHost: a\r\n\r\n", 400) && request_refused(b"POST / HTTP/1.1\r\nHost: a\r\nExpect: later\r\n\r\n", 417)
 }
 
 fn bad_path(s: String) -> bool {
@@ -114,8 +114,8 @@ fn http_segment_boundaries() -> bool {
 // A 72-byte buffer refuses before copying Date. A 75-byte buffer fits exactly.
 // expect: run http_cached_date_capacity() = true
 fn http_cached_date_capacity() -> bool {
-    let mut exact: Bytes = result.unwrap(list.with_capacity(75))
-    let mut short: Bytes = result.unwrap(list.with_capacity(72))
+    let mut exact: Bytes = list.with_capacity(75)
+    let mut short: Bytes = list.with_capacity(72)
     let r = result.unwrap(response(200, list.new(), false))
     let mut cache = date_cache()
     let wall = 951782400000u64

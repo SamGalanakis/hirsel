@@ -45,12 +45,14 @@ def manifests(root, out):
 
 
 def command(compiler, runtime, out, manifest, entry, store, tag, cc, profile_front=False):
-    host = out / 'host'
-    host.mkdir(exist_ok=True)
+    grants = ['--grant', 'Stdout']
+    if entry == 'langarena@1/suite/main':
+        host = out / 'host'
+        host.mkdir(exist_ok=True)
+        grants.extend(['--dir', str(host), '--grant', 'Tasks'])
     return [str(compiler), 'build', *(['--profile-front'] if profile_front else []), '--inputs', str(manifest), '--entry', entry,
             '--store', str(store), '--json', '--backend', 'cranelift',
-            '--runtime', str(runtime), '--cc', str(cc), '--dir', str(host), '--grant', 'Stdout',
-            '--grant', 'Tasks', '-o', str(out / (tag + '.bin')),
+            '--runtime', str(runtime), '--cc', str(cc), *grants, '-o', str(out / (tag + '.bin')),
             '--metrics', str(out / (tag + '.metrics.json'))]
 
 

@@ -22,7 +22,14 @@ standard library. Its values are made only by its own module, from entry grants 
 by attenuation (CAP-7), so no program can forge one.
 A `Secret` can also be sealed from bytes the program already holds
 ([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
-before, because it already held those bytes. A capability that holds state is a
+before, because it already held those bytes. A capability is also made by **virtual
+construction**: `provide.dir`, `provide.net`, `provide.stdout`, `provide.stderr`,
+`provide.clock`, `provide.random` and `provide.process` ([core](core.md#provide)) each make
+a fresh capability whose provider is local state of the run, with the endpoint that answers
+it (a `Served` port, a `ClockHand` or a `StopTrigger`). Virtual construction grants no host
+authority: what such a capability reaches is only what the program that answers it already
+reaches (CAP-1), and a virtual `Net` never authorizes a granted `Secret`
+([TLS-5](tls.md#tls-5-secrets)). A capability that holds state is a
 resource ([OWN-3](ownership.md#own-3-kinds)); one that only designates authority is plain,
 and copying it copies the designation, never the thing designated. Each capability type
 declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
@@ -71,7 +78,12 @@ The **provider operations** are exactly the host primitives listed in [core](cor
 standard library's capability modules are ordinary code over them, and a program cannot
 declare another. Each is carried out by a **provider**: the implementation behind the
 capability, chosen by the run's configuration: the host, or a controlled provider such as
-a simulation that a test configures. Programs cannot tell providers apart except by the
+a simulation that a test configures. A program may also select a provider itself, by
+calling the operations on a capability of virtual construction (CAP-2): the program's own
+code answers them through `provide` ([core](core.md#provide)). This selects a provider for
+the existing operations; it declares no new one. The caller pays the same charges and
+admissions against a virtual provider as against the host for the same operations
+([MEM-24](budgets.md#mem-24-logical-charges)). Programs cannot tell providers apart except by the
 values the operations return. An engine may call a provider in more than one
 form, never with different behaviour: a provider that forwards every operation to another
 is indistinguishable from it. A provider operation that may wait is declared `waits` and is a cancellation point
@@ -105,8 +117,8 @@ gives `Denied` and creates nothing:
 ```hirsel
 fn scratch(d: Dir) -> Result[(Dir, String), IoError] waits {
   let mut name = string.new()
-  match string.reserve(mut name, 34) { Ok(()) => {}, Error(_) => return Error(Other(0)) }
-  match string.push(mut name, "t-") { Ok(()) => {}, Error(_) => return Error(Other(0)) }
+  string.reserve(mut name, 34)
+  string.push(mut name, "t-")
   let dir = host.mkdtemp(d, mut name)?
   Ok((dir, take name))
 }
@@ -221,19 +233,18 @@ a crash without repeating an outside effect wraps each such effect in the store'
 library, which commits a started row before the effect and its result before the result is
 used ([runner](../../core/std/api/runner.md#store-triggers)).
 
-**Simulation.** A test that needs controlled inputs grants a simulation provider (CAP-5);
-it never records from inside the program, since no program type is a tape. The simulation
-provider is the **model world**. On the evaluator it is the whole host: `Args`, `Stdout`,
+**Simulation.** Grant the **model world** simulation provider (CAP-5) to a test that
+needs controlled inputs. On the evaluator it is the whole host: `Args`, `Stdout`,
 `Stderr`, a virtual `Clock`, `Dir` and its files, `Random` and `Net`, each capability
 parameter of a law or case bound to a fresh one (`crates/hirsel-core-ir/src/eval.rs`). Its
 network and clock are the deterministic model of `crates/hirsel-core-net` (`model`), which
 native runs select through the runtime's model provider for `Net` and `Clock`, with every
-other operation going to the host. The program-held `Tape`, removed with `CauseKind::Tape`
-(whose wire number stays retired), is replaced use by use:
+other operation going to the host. Wire cause number 9 stays retired. Choose a testing or
+recording tool by what the run needs:
 
-| use of the program-held `Tape` | replacement |
+| need | tool |
 |---|---|
 | a substitute `Clock`, `Args`, `Stdout`, `Stderr` or `Dir` for a test | the model world on the evaluator; natively, a granted scratch directory and the host's streams |
 | controlled network input and time | the model world's network and virtual clock, on the evaluator and natively |
-| recording a run, its scheduling (`tape.tasks`) included, and replaying it with no host | a recording build and replay (above) |
+| recording a run and its scheduling, then replaying it with no host | a recording build and replay (above) |
 | a program's own record of its calls, for re-execution | ordinary code over the store, as the replay corpus (`core/corpus/m2b/replay`, `m2b.journal`) and the runner's durable replies do |

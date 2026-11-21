@@ -14,7 +14,7 @@ pub type Dictionary {
 pub fn new() -> Result[Dictionary, Capacity] {
     let mut buckets: List[Option[u64]] = list.new()
     let empty: Option[u64] = None
-    list.fill(mut buckets, 16, empty)?
+    list.fill(mut buckets, 16, empty)
     Ok(Dictionary(buckets: take buckets, entries: list.new()))
 }
 
@@ -39,7 +39,7 @@ fn transfer(mut d: Dictionary) -> Result[(), Capacity] {
     let size = list.len(d.buckets)
     let mut buckets: List[Option[u64]] = list.new()
     let empty: Option[u64] = None
-    list.fill(mut buckets, size * 2, empty)?
+    list.fill(mut buckets, size * 2, empty)
     for i in 0 .. size {
         let mut next = d.buckets[i]
         let mut low_tail: Option[u64] = None
@@ -89,7 +89,7 @@ pub fn put(mut d: Dictionary, key: u64, value: u64) -> Result[(), Capacity] {
         next = entry.next
     }
     let added = list.len(d.entries)
-    result.capacity_only(list.push(mut d.entries, Entry(key: key, hash: hashed, value: value, next: None)))?
+    list.push(mut d.entries, Entry(key: key, hash: hashed, value: value, next: None))
     if let Some(index) = previous {
         d.entries[index].next = Some(added)
     } else {

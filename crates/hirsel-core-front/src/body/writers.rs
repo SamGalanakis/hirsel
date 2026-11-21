@@ -393,7 +393,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(
                 Inst::SetCase {
                     address: e,
-                    case: 1,
+                    case: 0,
                 },
                 n,
             );
@@ -663,30 +663,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.store_at(blob, at, tag, a);
             }
             for (i, (&e, f)) in args.iter().zip(fields).enumerate() {
-                let e = match (self.kind(e), labelled) {
-                    (NodeKind::LabelledArgument, true) if self.token_text(e) == f.name => {
-                        self.kids(e)[0]
-                    }
-                    (NodeKind::LabelledArgument, true) => {
-                        let name = &f.name;
-                        self.refuse_label(
-                            e,
-                            Some(name),
-                            format!("expected the field `{name}` here"),
-                        );
-                        return None;
-                    }
-                    (NodeKind::LabelledArgument, false) => {
-                        self.refuse_label(e, None, "this payload is not labelled".to_owned());
-                        return None;
-                    }
-                    (_, true) => {
-                        let name = &f.name;
-                        self.refuse_label(e, Some(name), format!("the field `{name}` is labelled"));
-                        return None;
-                    }
-                    (_, false) => e,
-                };
+                let e = self.constructor_argument(e, f, labelled)?;
                 self.write_operand(state, writer, ftys[i], e, sinks)?;
             }
             return Some(());
@@ -1169,7 +1146,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let to = self.new_slot(PlaceTy::Declared(rid), n);
         let block = self.value(Ty::Ptr);
         let available = self.value(u64t);
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -1181,35 +1157,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: None,
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, block, null, n);
-        let (yes, refused, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, refused, n);
-        self.start(refused);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
         let from = self.address(AddressBase::Value(source), &[Step::Byte(start)], byte, n);
         let steps = [Step::Byte(head)];
@@ -1227,22 +1180,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
-        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
+        self.put_word(AddressBase::Address(to), &[], 0, block, n)?;
         if let Some((offset, w)) = locator {
             self.put_word(AddressBase::Value(block), &[], 0, bytes, n)?;
             self.put_word(AddressBase::Value(block), &[], 8, w, n)?;
-            self.put_word(AddressBase::Address(to), &ok, 8, offset, n)?;
+            self.put_word(AddressBase::Address(to), &[], 8, offset, n)?;
         }
-        self.jump(join, &[], n);
-        self.start(join);
         Some(self.pointer(to, n))
     }
 
@@ -1310,13 +1253,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(
             Inst::SetCase {
                 address: e,
-                case: 1,
+                case: 0,
             },
             n,
         );
         self.jump(join, &[], n);
         self.start(admit);
-        let (blob, entry) = self.admit_blob(region, bytes, true, to, eid, join, n)?;
+        let (blob, entry) = self.admit_blob(region, bytes, true, n)?;
         let wv = self.u64k(w, n)?;
         let head = self.u64k(HEAD, n)?;
         self.put_word(AddressBase::Value(blob), &[], 0, bytes, n)?;
@@ -1368,9 +1311,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         region: ValueId,
         bytes: ValueId,
         entry: bool,
-        to: AddressId,
-        eid: TypeId,
-        join: BlockId,
         n: NodeId,
     ) -> Option<(ValueId, Option<ValueId>)> {
         let u64t = Ty::Scalar(Scalar::U64);
@@ -1397,7 +1337,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let blob = self.value(Ty::Ptr);
         let available = self.value(u64t);
         let region_entry = entry.then(|| self.value(u64t));
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: blob,
@@ -1409,32 +1348,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: Some(huge),
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, blob, null, n);
-        let (yes, refused) = (self.new_block(&[]), self.new_block(&[]));
-        self.branch(admitted, yes, refused, n);
-        self.start(refused);
-        let e = self.error_place(to, eid, n);
-        self.inst(
-            Inst::SetCase {
-                address: e,
-                case: 0,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(e),
-            &[Step::CaseField { case: 0, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         Some((blob, region_entry))
     }
     /// `x` rounded up to a multiple of 8; `x` is below the blob cap, so it does not wrap.
@@ -1467,26 +1386,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let mut out = Vec::with_capacity(k);
         for (&e, f) in args.iter().zip(fields) {
-            out.push(match (self.kind(e), labelled) {
-                (NodeKind::LabelledArgument, true) if self.token_text(e) == f.name => {
-                    self.kids(e)[0]
-                }
-                (NodeKind::LabelledArgument, true) => {
-                    let name = &f.name;
-                    self.refuse_label(e, Some(name), format!("expected the field `{name}` here"));
-                    return None;
-                }
-                (NodeKind::LabelledArgument, false) => {
-                    self.refuse_label(e, None, "this payload is not labelled".to_owned());
-                    return None;
-                }
-                (_, true) => {
-                    let name = &f.name;
-                    self.refuse_label(e, Some(name), format!("the field `{name}` is labelled"));
-                    return None;
-                }
-                (_, false) => e,
-            });
+            out.push(self.constructor_argument(e, f, labelled)?);
         }
         Some(out)
     }
@@ -1838,7 +1738,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(
                 Inst::SetCase {
                     address: e,
-                    case: 1,
+                    case: 0,
                 },
                 n,
             );
@@ -1868,7 +1768,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.compact_root(ty, w, n)?;
         let (to, eid) = self.build_result(result, n)?;
         let join = self.new_block(&[]);
-        let (blob, _) = self.admit_blob(region, bytes, false, to, eid, join, n)?;
+        let (blob, _) = self.admit_blob(region, bytes, false, n)?;
         // The room a put may use: n, but never past the blob cap of W (MEM-9).
         let cap = if w == 8 {
             u64::MAX - HEAD
@@ -2199,47 +2099,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.region_blob(region, len, super::spans::ElemSize::Known(1), n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, blob, null, n);
-        let (yes, no, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, no, n);
-        self.start(yes);
+        self.raise_unless(admitted, charge, available, n);
         let w = self.u64k(8, n)?;
         self.put_word(AddressBase::Value(blob), &[], 8, w, n)?;
         self.put_word(AddressBase::Value(blob), &[], 16, len, n)?;
         let data = self.u64k(24, n)?;
         self.copy_string(blob, data, s, len, n)?;
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
         let at = self.u64k(16, n)?;
-        self.put_word(AddressBase::Address(to), &ok, 0, blob, n)?;
-        self.put_word(AddressBase::Address(to), &ok, 8, at, n)?;
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            charge,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(join);
+        self.put_word(AddressBase::Address(to), &[], 0, blob, n)?;
+        self.put_word(AddressBase::Address(to), &[], 8, at, n)?;
         Some(self.pointer(to, n))
     }
 
@@ -2348,7 +2216,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let size = self.add_k(words, 24, n)?;
         let block = self.value(Ty::Ptr);
         let available = self.value(u64t);
-        let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -2360,35 +2227,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 overflow: None,
                 size,
                 align: 8,
-                fail,
             },
             n,
         );
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, block, null, n);
-        let (yes, refused, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        self.branch(admitted, yes, refused, n);
-        self.start(refused);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.capacity_at(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            size,
-            available,
-            n,
-        )?;
-        self.jump(join, &[], n);
-        self.start(yes);
+        self.raise_unless(admitted, size, available, n);
         for (off, v) in [(0, blob), (8, at), (16, count)] {
             self.put_word(AddressBase::Value(block), &[], off, v, n)?;
         }
@@ -2420,17 +2264,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let i1 = self.add_k(i, 1, n)?;
         self.jump(lp, &[i1, next], n);
         self.start(done);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
-        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
-        self.jump(join, &[], n);
-        self.start(join);
+        self.put_word(AddressBase::Address(to), &[], 0, block, n)?;
         Some(self.pointer(to, n))
     }
     /// `seq.get(x, i)` (MEM-12): a bounds check against the block's count and one
@@ -2592,5 +2426,106 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(done, &[], n);
         self.start(done);
         Some(self.pointer(to, n))
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// MEM-4: whether `callee` takes a writer and returns a `Result`, read from its
+    /// declared signature or, for a local callable, its type.
+    pub(super) fn writer_call(&self, callee: NodeId) -> bool {
+        let writer = |ty: TyId| {
+            matches!(self.t.kind(ty), TyKind::Adt(d, _)
+                if self.p.decls[d.index()].role == Some(Role::Writer))
+        };
+        let result = |ty: TyId| {
+            matches!(self.t.kind(ty), TyKind::Adt(d, _)
+                if is_core_prelude(&self.p.decls[d.index()].path, &["Result"]))
+        };
+        match self.call_target(callee) {
+            Some(Target::Definition(id)) => match self.p.by_definition[id.0 as usize].as_ref() {
+                Some(Def::Fn(f)) => {
+                    let g = &self.p.fns[*f as usize];
+                    result(g.result) && g.params.iter().any(|p| writer(p.ty))
+                }
+                _ => false,
+            },
+            Some(&Target::Binder(b)) => {
+                self.vars
+                    .get(b as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|v| {
+                        matches!(self.t.kind(v.ty), TyKind::Fn(ps, r, _, _)
+                    if result(*r) && ps.iter().any(|&(_, p)| writer(p)))
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// MEM-4: whether the call `n` is the operand of a `?` or in its body's returned
+    /// tail (the operand of `return`, or the result reached through blocks and `if`
+    /// and `match` arms), never a `let` initializer, an argument, a scrutinee or a
+    /// discarded expression.
+    pub(super) fn writer_placed(&mut self, n: NodeId) -> bool {
+        if self.writer_sites.is_none() {
+            let tree = &self.item.tree;
+            let mut sites = HashSet::default();
+            let mut stack = vec![(self.item.root, false)];
+            while let Some((m, tail)) = stack.pop() {
+                let kids = tree.children(m);
+                match tree.node(m).kind {
+                    NodeKind::Call => {
+                        if tail {
+                            sites.insert(m);
+                        }
+                        stack.extend(kids.iter().map(|&k| (k, false)));
+                    }
+                    NodeKind::Group | NodeKind::Return | NodeKind::Region | NodeKind::Labelled => {
+                        let tail = tail || tree.node(m).kind == NodeKind::Return;
+                        stack.extend(kids.iter().map(|&k| (k, tail)));
+                    }
+                    NodeKind::Try => {
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, i == 0)));
+                    }
+                    NodeKind::Block => {
+                        for (i, &st) in kids.iter().enumerate() {
+                            if i + 1 == kids.len()
+                                && tree.node(st).kind == NodeKind::ExpressionStatement
+                            {
+                                stack.push((tree.children(st)[0], tail));
+                            } else {
+                                stack.push((st, false));
+                            }
+                        }
+                    }
+                    NodeKind::If => {
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, tail && i > 0)));
+                    }
+                    NodeKind::Arm => {
+                        let last = kids.len().saturating_sub(1);
+                        stack.extend(
+                            kids.iter()
+                                .enumerate()
+                                .map(|(i, &k)| (k, tail && i == last)),
+                        );
+                    }
+                    NodeKind::Match => {
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, tail && i > 0)));
+                    }
+                    NodeKind::Function
+                    | NodeKind::Drop
+                    | NodeKind::CloneHook
+                    | NodeKind::Closure
+                    | NodeKind::ScopedClosure => {
+                        let last = kids.len().saturating_sub(1);
+                        stack.extend(kids.iter().enumerate().map(|(i, &k)| (k, i == last)));
+                    }
+                    _ => stack.extend(kids.iter().map(|&k| (k, false))),
+                }
+            }
+            self.writer_sites = Some(sites);
+        }
+        self.writer_sites.as_ref().is_some_and(|s| s.contains(&n))
     }
 }

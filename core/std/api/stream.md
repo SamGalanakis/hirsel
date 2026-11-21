@@ -4,7 +4,8 @@
 
 `spec(request, status, bounds, state, producer)` encodes the initial state
 and reserves a prefix for the response head in one block. `header` adds a
-response field. Return `Stream(spec)` from a route with a `stream_bytes`
+response field. Refusal to enter the byte bound returns Allocation. A refused
+allocation in the body raises Capacity. Return `Stream(spec)` from a route with a `stream_bytes`
 allowance. The supervisor admits the group before the first response byte.
 
 The producer is a function that takes a `Seed` and calls

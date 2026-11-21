@@ -1,6 +1,6 @@
 // Module `path`: text operations for names relative to a Dir (core.md, Host).
 /// A fault at a byte offset in the input, or a refused growth of the output string.
-pub type Error = Invalid(u64) | Capacity(Capacity)
+pub type Error = Invalid(u64)
 
 fn component_fault(c: String) -> Option[u64] {
     if c == "" || c == "." || c == ".." {
@@ -44,8 +44,8 @@ pub fn is_name(c: String) -> bool {
 }
 
 /// Appends p, inserting a slash when out is nonempty. Checks p only.
-/// Fails: Invalid at a byte offset in p, or Capacity. Both the check and the reservation
-/// precede any write, so out is unchanged on error.
+/// Fails: Invalid at a byte offset in p, with out unchanged. Raises Capacity; the
+/// check and the reservation precede any write.
 /// Alloc: GROWTH of out. Cost: O(len p), plus copying out when it grows.
 /// Ex: `std.path.join(mut p, user)?; std.path.join(mut p, "inbox")?`
 pub fn join(mut out: String, p: String) -> Result[(), Error] {
@@ -55,13 +55,11 @@ pub fn join(mut out: String, p: String) -> Result[(), Error] {
     } else {
         1
     }
-    if let Error(c) = string.reserve(mut out, separator + string.byte_len(p)) {
-        return Error(Capacity(c))
-    }
+    string.reserve(mut out, separator + string.byte_len(p))
     if separator == 1 {
-        let _ = string.push(mut out, "/")
+        string.push(mut out, "/")
     }
-    let _ = string.push(mut out, p)
+    string.push(mut out, p)
     Ok(())
 }
 

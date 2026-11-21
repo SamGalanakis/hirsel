@@ -84,9 +84,9 @@ fn borrow_text[in r](mut h: Holder30[in r]) -> View[String] in h {
 
 fn region_use() -> Result[u64, Capacity] {
     region r {
-        let mut h = Holder30(text: text.copy_in(r, "a")?, n: 0)
+        let mut h = Holder30(text: text.copy_in(r, "a"), n: 0)
         let v = borrow_text(mut h)
-        let more = text.copy_in(r, "b")?
+        let more = text.copy_in(r, "b")
         Ok(string.byte_len(v))
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::{
     AddressBase, AddressId, AllocPlace, Arg, Body, Callee, FuncId, Function, Inst, Loan, Module,
-    Param, PlaceTy, SlotId, Step, Terminator, TypeId, ValueId,
+    Param, PlaceTy, RaiseCause, SlotId, Step, Terminator, TypeId, ValueId,
 };
 use hirsel_core_layout::{Body as Shaped, FieldTy, POINTER, Repr, SEQ_CARRIER, Ty};
 
@@ -660,6 +660,17 @@ impl<'a> Seal<'a> {
                     for v in vs.get(&b.pools.values).unwrap_or(&[]) {
                         self.used(*v, Use::Other);
                     }
+                }
+                Terminator::Raise {
+                    cause:
+                        RaiseCause::Capacity {
+                            requested,
+                            available,
+                        },
+                    ..
+                } => {
+                    self.used(*requested, Use::Other);
+                    self.used(*available, Use::Other);
                 }
                 Terminator::Jump(_)
                 | Terminator::Unreachable

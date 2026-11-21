@@ -43,7 +43,7 @@ type Holder[F] {
 }
 
 fn fresh() -> Tx[u64] {
-    let text = result.unwrap(string.from("x"));
+    let text = string.from("x");
     Tx(n: 5u64, text: text)
 }
 

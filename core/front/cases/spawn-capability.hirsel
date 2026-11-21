@@ -6,11 +6,9 @@ fn child(take out: Stdout) -> u64 {
 }
 
 fn go(out: Stdout, tasks: Tasks) -> u64 waits {
-    match task.spawn(tasks, bytes 0, out, child) {
-        Ok(take h) => match task.join(take h) {
-            Ok(v) => v,
-            Error(_) => 2
-        },
-        Error(_) => 3,
+    let h = task.spawn(tasks, bytes 0, out, child)
+    match task.join(take h) {
+        Ok(v) => v,
+        Error(_) => 2
     }
 }

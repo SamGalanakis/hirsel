@@ -2,9 +2,9 @@
 // expect: accept
 // expect: run exact(3) = 3
 // expect: run exact(0) = 0
-// expect: run overflow() = 18446744073709551615
+// expect: run overflow() = 18446744073709551615 used 32
 // expect: run padding() = 3
-// expect: run short_limit() = 3231
+// expect: run short_limit() = 3231 used 32
 // expect: run empty_limit() = 0
 // expect: run zero_sized() = 18446744073709551615
 type Padded {
@@ -12,26 +12,29 @@ type Padded {
     b: u64
 }
 
-fn make[T](n: u64) -> Result[List[T], Capacity] {
+fn make[T](n: u64) -> List[T] {
     list.with_capacity(n)
 }
 
 fn exact(n: u64) -> u64 {
-    let xs: List[u64] = result.unwrap(make(n));
+    let xs: List[u64] = make(n);
     list.capacity(xs)
 }
 
 fn overflow() -> u64 {
-    let r: Result[List[u64], Capacity] = make(18446744073709551615u64)
-    match r {
-        Ok(take xs) => list.capacity(xs),
-        Error(e) => e.requested
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        let xs: List[u64] = make(18446744073709551615u64)
+        Ok(list.capacity(xs))
+    })
+    match caught(take r) {
+        Some(e) => e.requested,
+        None => 0
     }
 }
 
 fn padding() -> u64 {
     let r = bound bytes 32 {
-        let xs: List[Padded] = make(3)?
+        let xs: List[Padded] = make(3)
         list.capacity(xs)
     }
     match r {
@@ -41,19 +44,21 @@ fn padding() -> u64 {
 }
 
 fn short_limit() -> u64 {
-    let r = bound bytes 31 {
-        let xs: List[Padded] = make(3)?
-        list.capacity(xs)
-    }
-    match r {
-        Ok(n) => n,
-        Error(e) => e.requested * 100 + e.available
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 31 {
+            let xs: List[Padded] = make(3)
+            list.capacity(xs)
+        }
+    })
+    match caught(take r) {
+        Some(e) => e.requested * 100 + e.available,
+        None => 0
     }
 }
 
 fn empty_limit() -> u64 {
     let r = bound bytes 0 {
-        let xs: List[u8] = make(0)?;
+        let xs: List[u8] = make(0);
         list.capacity(xs)
     }
     match r {
@@ -63,6 +68,22 @@ fn empty_limit() -> u64 {
 }
 
 fn zero_sized() -> u64 {
-    let xs: List[()] = result.unwrap(make(18446744073709551615u64))
+    let xs: List[()] = make(18446744073709551615u64)
     list.capacity(xs)
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
 }

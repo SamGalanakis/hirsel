@@ -37,9 +37,9 @@ fn build(doc: &mut Document, depth: u32, random: &mut Random) -> TreeRef {
     handle
 }
 
-pub fn benchmark() -> usize {
+pub fn benchmark(depth: u32) -> usize {
     let mut doc = Document::default();
-    let root = build(&mut doc, 7, &mut Random::new());
+    let root = build(&mut doc, depth, &mut Random::new());
     if doc.trees[(root.0 - 1) as usize].count == 4 {
         doc.trees.len()
     } else {

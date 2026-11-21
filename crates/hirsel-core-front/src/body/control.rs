@@ -17,6 +17,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let r = self.statements(n, want);
         self.returned_local = outer;
         let value = std::mem::replace(&mut self.tail_ty, UNIT);
+        // MEM-7: a local bound to a Region value ends with this block, and so does
+        // every value whose type names it.
+        if r.0 != ERROR && self.opened_region_in(r.0, scope).is_some() {
+            self.refuse(
+                "MEM-7",
+                n,
+                "a value whose type names a region local cannot leave its block",
+            );
+        }
         let captured_return = self.fd.body == Some(n) && self.return_descriptor(r.1);
         if !captured_return {
             self.result_place_anchors(scope, n, r.0);
@@ -532,6 +541,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             born: self.born,
             exits: self.exits.len(),
             scopes: self.pattern_scope_mark(),
+            slots: self.scope_slots.len(),
             owners: self.owner_mark(),
         });
     }
@@ -1197,6 +1207,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (UNIT, None)
             }
         };
+        // MEM-7: a carried value whose type names a region opened inside the frame
+        // leaves that region's block.
+        if let Some(e) = value
+            && self.opened_region_in(t, self.frames[i].slots).is_some()
+        {
+            self.refuse(
+                "MEM-7",
+                e,
+                "a value whose type names a region opened in the loop cannot leave it",
+            );
+        }
         let f = &mut self.frames[i];
         f.left = true;
         if f.ty.is_none() && t != NEVER {

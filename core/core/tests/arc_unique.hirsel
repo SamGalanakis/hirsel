@@ -19,8 +19,8 @@ type Growing: shareable + send {
 // expect: run unique_in_place() = true
 fn unique_in_place() -> bool {
     let r = bound bytes 32 {
-        let mut a = result.unwrap(arc.new(Hits(n: 41)))
-        let mut b = result.unwrap(rc.new(Hits(n: 41)))
+        let mut a = arc.new(Hits(n: 41))
+        let mut b = rc.new(Hits(n: 41))
         let x = arc.with_unique(mut a, scoped fn(mut h: Hits) -> u64 {
             h.n += 1;
             h.n
@@ -50,8 +50,8 @@ fn unique_in_place() -> bool {
 // Sharing refuses without calling f, including when f itself captures the share.
 // expect: run shared_does_not_call() = true
 fn shared_does_not_call() -> bool {
-    let mut a = result.unwrap(arc.new(Hits(n: 41)))
-    let mut b = result.unwrap(rc.new(Hits(n: 41)))
+    let mut a = arc.new(Hits(n: 41))
+    let mut b = rc.new(Hits(n: 41))
     let g = arc.share(a)
     let h = rc.share(b)
     let mut calls = 0u64
@@ -81,8 +81,8 @@ fn shared_does_not_call() -> bool {
 // Once the outer payload is lent mutably, its nested holder is a writable place.
 // expect: run nested_unique() = true
 fn nested_unique() -> bool {
-    let mut a = result.unwrap(arc.new(ArcPair(leaf: result.unwrap(arc.new(Hits(n: 41))))))
-    let mut b = result.unwrap(rc.new(RcPair(leaf: result.unwrap(rc.new(Hits(n: 41))))))
+    let mut a = arc.new(ArcPair(leaf: arc.new(Hits(n: 41))))
+    let mut b = rc.new(RcPair(leaf: rc.new(Hits(n: 41))))
     let x = arc.with_unique(mut a, scoped fn(mut p: ArcPair) -> Option[()] {
         arc.with_unique(mut p.leaf, scoped fn(mut h: Hits) {
             h.n += 1
@@ -106,14 +106,14 @@ fn growth_balances() -> bool {
     let r = bound bytes 128 {
         let mut ok = true
         for i in 0u64 .. 20 {
-            let mut a = result.unwrap(arc.new(Growing(xs: list.new())))
-            let mut b = result.unwrap(rc.new(Growing(xs: list.new())))
+            let mut a = arc.new(Growing(xs: list.new()))
+            let mut b = rc.new(Growing(xs: list.new()))
             let x = arc.with_unique(mut a, scoped fn(mut p: Growing) -> u64 {
-                result.unwrap(list.push(mut p.xs, i));
+                list.push(mut p.xs, i);
                 list.len(p.xs)
             })
             let y = rc.with_unique(mut b, scoped fn(mut p: Growing) -> u64 {
-                result.unwrap(list.push(mut p.xs, i));
+                list.push(mut p.xs, i);
                 list.len(p.xs)
             })
             ok = ok && match (x, y) {
@@ -132,7 +132,7 @@ fn growth_balances() -> bool {
 // A failure after installation propagates through the callback and cleans h.
 // expect: run arc_failure() = fail Overflow
 fn arc_failure() -> u64 {
-    let mut a = result.unwrap(arc.new(Hits(n: 41)))
+    let mut a = arc.new(Hits(n: 41))
     let _ = arc.with_unique(mut a, scoped fn(mut p: Hits) {
         p.n = 42;
         p.n += 18446744073709551615u64
@@ -142,7 +142,7 @@ fn arc_failure() -> u64 {
 
 // expect: run rc_failure() = fail Overflow
 fn rc_failure() -> u64 {
-    let mut a = result.unwrap(rc.new(Hits(n: 41)))
+    let mut a = rc.new(Hits(n: 41))
     let _ = rc.with_unique(mut a, scoped fn(mut p: Hits) {
         p.n = 42;
         p.n += 18446744073709551615u64
@@ -163,10 +163,10 @@ fn child_read(take a: Arc[Hits]) -> u64 {
 // schedule: seeds 32 max_events 80
 // expect: run foreign_share(tasks) = true
 fn foreign_share(tasks: Tasks) -> bool waits {
-    let mut a = result.unwrap(arc.new(Hits(n: 41)))
+    let mut a = arc.new(Hits(n: 41))
     let g = arc.share(a)
-    let child = result.unwrap(task.spawn(tasks, bytes 65536, take g, child_read))
-    let second = result.unwrap(task.spawn(tasks, bytes 65536, arc.share(a), child_read))
+    let child = task.spawn(tasks, bytes 65536, take g, child_read)
+    let second = task.spawn(tasks, bytes 65536, arc.share(a), child_read)
     loop {
         match arc.with_unique(mut a, scoped fn(mut p: Hits) {
             p.n += 1

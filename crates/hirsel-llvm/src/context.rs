@@ -5,7 +5,7 @@
 //! disposal and no handle outlives its owner. No raw handle leaves this module, and none is
 //! public.
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_uint, c_void};
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -200,10 +200,16 @@ impl<'context> Module<'context> {
                     machine: LLVMTargetMachineRef,
                     prune: LLVMBool,
                     prepay_steps: LLVMBool,
+                    report: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, c_uint)>,
+                    receiver: *mut c_void,
+                    lent: *const u8,
+                    lent_len: usize,
                 ) -> LLVMErrorRef;
                 fn hirsel_llvm_specialize_release(
                     module: LLVMModuleRef,
                     machine: LLVMTargetMachineRef,
+                    lent: *const u8,
+                    lent_len: usize,
                 ) -> LLVMErrorRef;
                 fn hirsel_llvm_cleanup_release(
                     module: LLVMModuleRef,
@@ -216,7 +222,16 @@ impl<'context> Module<'context> {
                 ) -> LLVMErrorRef;
             }
             hirsel_llvm_inline_snapshot_calls(self.raw);
-            let mut error = hirsel_llvm_optimize_release(self.raw, machine.raw, 0, 0);
+            let mut error = hirsel_llvm_optimize_release(
+                self.raw,
+                machine.raw,
+                0,
+                0,
+                None,
+                ptr::null_mut(),
+                std::ptr::null(),
+                0,
+            );
             if error.is_null() {
                 unsafe extern "C" {
                     fn hirsel_llvm_scalarize_aggregate_phis(
@@ -234,7 +249,7 @@ impl<'context> Module<'context> {
                 unsafe extern "C" {
                     fn hirsel_llvm_inline_recursive_leaves(module: LLVMModuleRef);
                 }
-                error = hirsel_llvm_specialize_release(self.raw, machine.raw);
+                error = hirsel_llvm_specialize_release(self.raw, machine.raw, ptr::null(), 0);
                 if !error.is_null() {
                     let message = LLVMGetErrorMessage(error);
                     let text = CStr::from_ptr(message).to_string_lossy().into_owned();

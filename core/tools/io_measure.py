@@ -118,7 +118,9 @@ def main():
             command = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest),
                        '--entry', f'langarena@1/{module}/main', '--backend', engine,
                        '--runtime', str(args.runtime.resolve()), '--store', str(out / 'store'),
-                       '--dir', str(host), '--grant', 'Stdout', '--json', '-o', str(binary)]
+                       '--grant', 'Stdout', '--json', '-o', str(binary)]
+            if operation == 'read':
+                command.extend(['--dir', str(host)])
             if engine == 'llvm':
                 command.append('--release')
             build = checked(command)

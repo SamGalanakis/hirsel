@@ -1,0 +1,70 @@
+// RFC 2104 with SHA-256's 64-byte block size.
+pub opaque type Hmac {
+    inner: sha256.Sha256,
+    outer: sha256.Sha256,
+}
+
+/// Prepare the two SHA-256 states. Alloc: none. Cost: O(len(key)).
+pub fn start(key: Bytes) -> Hmac {
+    let n = list.len(key)
+    let mut block: Inline[u8, 64] =[0; 64]
+    if n > 64 {
+        let digest = sha256.hash(key)
+        for i in 0u64 .. 32u64 {
+            block[i] = digest[i]
+        }
+    } else {
+        for i in 0u64 .. n {
+            block[i] = key[i]
+        }
+    }
+    for i in 0u64 .. 64u64 {
+        block[i] ^= 0x36
+    }
+    let inner = sha256.start_block(block)
+    for i in 0u64 .. 64u64 {
+        block[i] ^= 0x6a // 0x36 XOR 0x5c
+    }
+    Hmac(inner: inner, outer: sha256.start_block(block))
+}
+
+/// Append input[lo, hi), with list.slice's checked range semantics.
+/// Alloc: none. Cost: O(hi-lo).
+pub fn add(mut h: Hmac, input: Bytes, lo: u64, hi: u64) {
+    sha256.add(mut h.inner, input, lo, hi)
+}
+
+/// Append one byte. Alloc: none. Cost: O(1).
+pub fn add_byte(mut h: Hmac, x: u8) {
+    sha256.add_byte(mut h.inner, x)
+}
+
+/// Return the current tag. Alloc: none. Cost: O(1).
+pub fn finish(h: Hmac) -> Inline[u8, 32] {
+    let digest = sha256.finish(h.inner)
+    let mut outer = h.outer
+    for x in digest {
+        sha256.add_byte(mut outer, x)
+    }
+    sha256.finish(outer)
+}
+
+/// Authenticate all data. Alloc: none. Cost: O(len(key) + len(data)).
+pub fn sha256(key: Bytes, data: Bytes) -> Inline[u8, 32] {
+    let mut h = start(key)
+    add(mut h, data, 0, list.len(data))
+    finish(h)
+}
+
+/// Compare tags in time that depends only on their lengths. Alloc: none.
+pub fn equal(a: Bytes, b: Bytes) -> bool {
+    let n = list.len(a)
+    if n != list.len(b) {
+        return false
+    }
+    let mut diff: u8 = 0
+    for i in 0u64 .. n {
+        diff |= a[i] ^ b[i]
+    }
+    diff == 0
+}

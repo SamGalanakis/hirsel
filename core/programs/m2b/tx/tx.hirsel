@@ -18,10 +18,7 @@ pub scoped type Tx[T] {
 
 // Records k as read, then returns the row this transaction sees at k.
 pub fn read[T](tx: Tx[T], k: u64) -> Result[Option[View[T]], Abort] in tx {
-    match log.append(tx.reads, k) {
-        Ok(()) => {},
-        Error((c, _)) => return Error(Full(c)),
-    }
+    log.append(tx.reads, k)
     match map.get(tx.writes, k) {
         Some(v) => Ok(Some(v)),
         None => Ok(table.get(tx.base, k)),
@@ -29,10 +26,8 @@ pub fn read[T](tx: Tx[T], k: u64) -> Result[Option[View[T]], Abort] in tx {
 }
 
 pub fn write[T](mut tx: Tx[T], k: u64, take v: T) -> Result[(), Abort] {
-    match map.insert(mut tx.writes, k, take v) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Full(c)),
-    }
+    map.insert(mut tx.writes, k, take v)
+    Ok(())
 }
 
 // Runs body(tx) once against db and commits its writes only when it returns Ok.
@@ -68,7 +63,7 @@ fn commit[T, R](mut db: table.Table[T], take writes: Map[u64, T], take r: R) -> 
             },
         }
     }
-    if let Error(c) = table.reserve(mut db, fresh) {
+    if let Error(c) = table.try_reserve(mut db, fresh) {
         return Refused(c)
     }
     for take (k, v) in writes {

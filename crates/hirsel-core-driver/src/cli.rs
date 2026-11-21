@@ -22,7 +22,16 @@ pub enum OptionId {
     Dir,
     Grant,
     Filter,
+    TestJobs,
+    Interface,
+    Dependents,
+    Transitive,
+    AffectedTests,
+    Unused,
+    InspectLibrary,
+    InspectStd,
     TestTimeout,
+    Rerun,
     Release,
     DebugLines,
     Backend,
@@ -45,6 +54,7 @@ pub enum OptionId {
     Help,
     Install,
     FmtCheck,
+    FmtStdin,
     Signatures,
     ListRules,
     SdkOut,
@@ -52,6 +62,21 @@ pub enum OptionId {
     NPlace,
     Url,
     CallTimeout,
+    Control,
+    HostState,
+    Workdir,
+    Listen,
+    Scratch,
+    GrantAdded,
+    MaxPause,
+    MaxRecipeBytes,
+    MaxClosure,
+    MaxDecodeBytes,
+    StagingBytes,
+    AdmitTimeout,
+    HostMemory,
+    StartRetries,
+    TapeRetention,
 }
 struct OptionSpec {
     id: OptionId,
@@ -77,16 +102,19 @@ commands! {
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
+    "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
+    "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] --limit BYTES --runtime ARCHIVE [options]", "Run each discovered @test in an independent process.";
+    "inspect", "inspect [package-dir | --std] (--interface [--json] | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
-    "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
+    "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
     "explain", "explain RULE|debug-lines | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
     "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
@@ -98,6 +126,55 @@ macro_rules! option {
 }
 static OPTIONS: &[OptionSpec] = &[
     option!(
+        Interface,
+        ["--interface"],
+        None,
+        ["inspect"],
+        "Print public declarations."
+    ),
+    option!(
+        Dependents,
+        ["--dependents"],
+        Some("DEF"),
+        ["inspect"],
+        "List definitions that use DEF. Use a full or package-relative definition path."
+    ),
+    option!(
+        Transitive,
+        ["--transitive"],
+        None,
+        ["inspect"],
+        "Follow indirect users with --dependents."
+    ),
+    option!(
+        AffectedTests,
+        ["--affected-tests"],
+        Some("DEF"),
+        ["inspect"],
+        "List cache-eligible tests a semantic edit to DEF may rerun."
+    ),
+    option!(
+        Unused,
+        ["--unused"],
+        None,
+        ["inspect"],
+        "List unreachable definitions. An app starts at main and its tests. A library starts at its public items."
+    ),
+    option!(
+        InspectLibrary,
+        ["--library"],
+        None,
+        ["inspect"],
+        "Use library roots for --unused even if the package has a main function."
+    ),
+    option!(
+        InspectStd,
+        ["--std"],
+        None,
+        ["inspect"],
+        "Inspect the source standard library from --libraries or the checkout."
+    ),
+    option!(
         Recipe,
         ["--recipe"],
         Some("HASH"),
@@ -108,8 +185,113 @@ static OPTIONS: &[OptionSpec] = &[
         CodeStore,
         ["--code-store"],
         Some("DIR"),
-        ["build", "publish"],
+        ["build", "publish", "host", "deploy"],
         "Select the immutable code store."
+    ),
+    option!(
+        Control,
+        ["--control"],
+        Some("SOCKET"),
+        ["host", "deploy"],
+        "Host control socket."
+    ),
+    option!(
+        HostState,
+        ["--state"],
+        Some("DIR"),
+        ["host", "replay"],
+        "Private host state directory."
+    ),
+    option!(
+        TapeRetention,
+        ["--tape-retention"],
+        Some("DAYS"),
+        ["host"],
+        "Retain a recording's pinned image for this many days. Default 30."
+    ),
+    option!(
+        Workdir,
+        ["--workdir"],
+        Some("DIR"),
+        ["host"],
+        "Working directory for each place launch."
+    ),
+    option!(
+        Listen,
+        ["--listen"],
+        Some("ADDR"),
+        ["host"],
+        "TCP address for the inherited listener."
+    ),
+    option!(
+        Scratch,
+        ["--scratch"],
+        Some("DIR"),
+        ["host"],
+        "Private scratch directory for exports and prepare."
+    ),
+    option!(
+        GrantAdded,
+        ["--grant-added"],
+        None,
+        ["deploy"],
+        "Allow the proposed recipe to widen grants."
+    ),
+    option!(
+        MaxPause,
+        ["--max-pause"],
+        Some("MS"),
+        ["host"],
+        "Bound the pre-install write pause. Default 2000 ms."
+    ),
+    option!(
+        MaxRecipeBytes,
+        ["--max-recipe-bytes"],
+        Some("BYTES"),
+        ["host"],
+        "Maximum recipe size."
+    ),
+    option!(
+        MaxClosure,
+        ["--max-closure"],
+        Some("COUNT"),
+        ["host"],
+        "Maximum number of code objects per deploy."
+    ),
+    option!(
+        MaxDecodeBytes,
+        ["--max-decode-bytes"],
+        Some("BYTES"),
+        ["host"],
+        "Cumulative allocation budget for decoding one recipe."
+    ),
+    option!(
+        StagingBytes,
+        ["--staging-bytes"],
+        Some("BYTES"),
+        ["host"],
+        "Total space available for incoming objects."
+    ),
+    option!(
+        AdmitTimeout,
+        ["--admit-timeout"],
+        Some("SECONDS"),
+        ["host", "deploy"],
+        "Deadline for the recipe and Need exchange."
+    ),
+    option!(
+        HostMemory,
+        ["--memory"],
+        Some("BYTES"),
+        ["host"],
+        "Combined limit for serving and candidate launches."
+    ),
+    option!(
+        StartRetries,
+        ["--start-retries"],
+        Some("COUNT"),
+        ["host"],
+        "Retries before reporting a failed start."
     ),
     option!(
         ReleaseManifest,
@@ -171,8 +353,8 @@ static OPTIONS: &[OptionSpec] = &[
         Record,
         ["--record"],
         Some("TAPE"),
-        ["run"],
-        "Build the recording build and record all program grants and scheduling to a new, owner-only tape."
+        ["run", "host"],
+        "Build with recording enabled. Run writes TAPE. Host writes owner-only recordings in TAPE as a directory."
     ),
     option!(
         Tape,
@@ -214,7 +396,14 @@ static OPTIONS: &[OptionSpec] = &[
         ["--check"],
         None,
         ["fmt"],
-        "List differing files without writing; exit 1 when any differ."
+        "Exit 1 on differences without writing. For files, list paths that differ."
+    ),
+    option!(
+        FmtStdin,
+        ["--stdin"],
+        None,
+        ["fmt"],
+        "Read source from standard input and write the formatted bytes to standard output."
     ),
     option!(
         Signatures,
@@ -249,6 +438,7 @@ static OPTIONS: &[OptionSpec] = &[
             "run",
             "replay",
             "test",
+            "inspect",
             "core-product",
             "std-product",
             "env",
@@ -260,7 +450,9 @@ static OPTIONS: &[OptionSpec] = &[
         SourceCore,
         ["--source-core"],
         None,
-        ["check", "build", "publish", "run", "replay", "test", "sdk"],
+        [
+            "check", "build", "publish", "run", "replay", "test", "inspect", "sdk"
+        ],
         "Check supplied core and std sources."
     ),
     option!(
@@ -296,7 +488,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--grant"],
         Some("KIND"),
         ["build", "publish", "run", "replay", "test"],
-        "Grant a capability kind; Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Repeat for more kinds."
+        "Grant a capability kind. Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
     ),
     option!(
         Filter,
@@ -306,11 +498,25 @@ static OPTIONS: &[OptionSpec] = &[
         "Select test definition paths containing TEXT."
     ),
     option!(
+        TestJobs,
+        ["-j"],
+        Some("N"),
+        ["test"],
+        "Run up to N isolated test children at once. Defaults to the number of CPUs in the process affinity mask."
+    ),
+    option!(
         TestTimeout,
         ["--test-timeout"],
         Some("SECONDS"),
         ["test"],
         "Bound each test's execution, excluding build time."
+    ),
+    option!(
+        Rerun,
+        ["--rerun"],
+        None,
+        ["test"],
+        "Execute every selected test, reusing no recorded pass."
     ),
     option!(
         Release,
@@ -430,7 +636,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--libraries"],
         Some("ROOT"),
         [
-            "check", "image", "build", "publish", "run", "replay", "test", "sdk"
+            "check", "image", "build", "publish", "run", "replay", "test", "inspect", "sdk"
         ],
         "Select a root containing core/ and std/."
     ),
@@ -446,6 +652,7 @@ static OPTIONS: &[OptionSpec] = &[
             "run",
             "replay",
             "test",
+            "inspect",
             "core-product",
             "std-product",
             "sdk"
@@ -604,7 +811,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         arguments: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
-        if argument == "--" && matches!(name.as_str(), "run" | "call") {
+        if argument == "--" && matches!(name.as_str(), "run" | "call" | "host") {
             invocation.arguments.extend(arguments);
             break;
         }

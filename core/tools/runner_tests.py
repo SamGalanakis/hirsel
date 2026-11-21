@@ -3,22 +3,26 @@
 
 R0 owns core, session, and frame laws, including the generated p19 and L12
 fixtures. Its L4/L20 cases compare exact retained bytes across native runs.
-R1 owns calls, admission, and ingress. The wire target runs the socket cases.
+R1 owns calls and admission. The wire target runs the socket cases.
 Without --part, both R0 and R1 run.
 
 The crash adapter runs the W2 filesystem cuts and one failed journal sync.
-RC1's L31 checks that the disk store never writes the plaintext Hello token.
+RC1's L31 checks that the disk store never writes the plaintext Hello credential.
 """
 import argparse
 import base64
+from contextlib import contextmanager
 import json
 import shlex
 import os
+import socket
 import sys
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
+from urllib.request import urlopen
 
 from case_progress import run_case
 from std_native import MODEL_NET_RULES, ROOT
@@ -36,7 +40,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
+CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'anonymous_fresh', 'granted_copied', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'repair_delivered',
          'dir_one_head', 'dir_open_during_close', 'dir_idle_unload', 'dir_reopen_keeps')
 # The place directory's laws (RUNNER-SPEC §13.6) bind sockets and use disk stores.
@@ -275,7 +279,7 @@ def l12_module(path, variant, expect=None, revision=None):
               "// The fingerprint of ea's 32-byte code revision; 0 when it has none or another length.",
               'pub fn law_l12_revision() -> u64 {', '    match code.revision(code.describe(ea)) {',
               '        Some(r) => {', '            if list.len(r) != 32u64 {', '                return 0u64', '            }',
-              '            let mut b: Bytes = list.new()', '            result.unwrap(list.append(mut b, r))',
+              '            let mut b: Bytes = list.new()', '            list.append(mut b, r)',
               '            std.codec.fingerprint_of(b)', '        }', '        None => 0u64,', '    }', '}', '']
     if expect is not None:
         lines += ['@test', 'fn test_l12_describe() -> Result[(), ()] {',
@@ -336,6 +340,187 @@ def l10_holds(values):
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
+HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index', 'pinned_recording_uses_retained_image')
+
+
+def host_law(args, root, work, engine, name):
+    manifest_path = manifest(root, work, name, extra=[
+        (root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
+    sources = json.loads(manifest_path.read_text())
+    for package in sources['packages']:
+        for source in package['sources']:
+            path = Path(source['file'])
+            frozen = work / 'sources' / path.relative_to(root)
+            frozen.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, frozen)
+            source['file'] = str(frozen)
+    manifest_path.write_text(json.dumps(sources))
+
+    compiler = str(args.compiler.resolve())
+    publish_store = work / 'published'
+    launch_store = work / 'place'
+    (launch_store / 'live').mkdir(parents=True)
+    state = work / 'host-state'
+    control = work / 'admin.sock'
+
+    def publish(n_place):
+        command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
+                   '--entry', 'store@1/runner_crash/host_main', '--backend', engine,
+                   '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
+                   '--limit', '268435456', '--n-place', str(n_place), '--dir', 'live',
+                   '--grant', 'Net=Listen 127.0.0.0/8 0-65535']
+        for capability in ('Clock', 'Random', 'Tasks', 'Process'):
+            command += ['--grant', capability]
+        return checked(command, engine=engine, case=f'{name}:publish-{n_place}').stdout.strip()
+
+    old_n_place, new_n_place = 1048576, 2097152
+    old_recipe, new_recipe = publish(old_n_place), publish(new_n_place)
+    assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
+
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        address = f'127.0.0.1:{probe.getsockname()[1]}'
+    command = [compiler, 'host', old_recipe, '--control', str(control), '--state', str(state),
+               '--listen', address, '--workdir', str(launch_store), '--code-store', str(publish_store)]
+    deploy = [compiler, 'deploy', new_recipe, '--control', str(control), '--code-store', str(publish_store)]
+
+    def ready():
+        with urlopen(f'http://{address}/hirsel/status', timeout=0.2) as response:
+            status = json.load(response)
+        assert status['phase'] == 'ready', status
+        return status
+
+    def welcome_n_place():
+        with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
+            with peer.makefile('rb') as stream:
+                peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
+                              'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.2\r\n'
+                              'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
+                assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
+                for line in stream:
+                    if line == b'\r\n':
+                        break
+                # Hello(Some(credential), []) binds the fixture's application Caller.
+                hello = b'\0' * 4 + b'\x01\0\0\0\x10\0\0\0' + os.urandom(16) + b'\0' * 4
+                mask = os.urandom(4)
+                masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(hello))
+                peer.sendall(bytes([0x82, 0x80 | len(hello)]) + mask + masked)
+                opcode, length = stream.read(2)
+                assert opcode == 0x82 and 12 <= length < 126, f'unexpected Welcome frame header {opcode:#x} {length}'
+                frame = stream.read(length)
+                assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
+                return int.from_bytes(frame[-8:], 'little')
+
+    @contextmanager
+    def running_host(*options):
+        with tempfile.TemporaryFile(mode='w+') as log:
+            host = subprocess.Popen([*command, *options], stdout=log, stderr=log)
+            try:
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline and host.poll() is None:
+                    try:
+                        status = ready() if control.exists() else None
+                    except OSError:
+                        status = None
+                    if status is not None:
+                        break
+                    time.sleep(0.025)
+                else:
+                    log.seek(0)
+                    raise RuntimeError(f'place did not become Ready: {log.read()}')
+                yield host, status
+            except Exception as error:
+                log.seek(0)
+                detail = log.read().strip()
+                if detail:
+                    error.add_note(detail)
+                raise
+            finally:
+                if host.poll() is None:
+                    comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(host.pid)], text=True)
+                    assert comm.strip() == 'hirsel', comm
+                    host.kill()
+                host.wait(timeout=15)
+
+    index = state / 'activations'
+    if name == 'pinned_recording_uses_retained_image':
+        recordings = work / 'recordings'
+        with running_host('--record', str(recordings)) as (_, old):
+            tapes = list(recordings.glob('*.tape'))
+            assert len(tapes) == 1, 'the first activation did not start a recording'
+            tape = tapes[0]
+            checked(deploy, engine=engine, case=f'{name}:retire-recording')
+
+        with running_host() as (_, _):
+            plain_deploy = deploy.copy()
+            plain_deploy[2] = old_recipe
+            checked(plain_deploy, engine=engine, case=f'{name}:assemble-with-plain-runtime')
+            assert ready()['digest'] != old['digest'], 'the second runtime did not change the image'
+            pinned = (state / 'pins' / tape.stem).read_bytes()[-32:].hex()
+            active = (state / 'active').read_bytes()[-32:].hex()
+            recorded_assembly = (state / 'assemblies' / pinned).read_bytes()
+            plain_assembly = (state / 'assemblies' / active).read_bytes()
+            assert recorded_assembly[:32] == plain_assembly[:32], 'toolchain switch changed the recipe'
+            assert recorded_assembly[32:64] != plain_assembly[32:64], 'toolchain fingerprint did not change'
+            checked(deploy, engine=engine, case=f'{name}:retire-last-recorded-activation')
+        assert not any(entry.name.endswith('-0000000000000001') for entry in index.iterdir()), 'recording pin test kept the old activation indexed'
+        assert not any(entry.name.endswith('-0000000000000002') for entry in index.iterdir()), 'the previous recording still roots its image through the index'
+
+        # The replay launcher has no assembly toolchain. A successful replay
+        # can only use the immutable recording image in the host image store.
+        installed = Path(compiler).parent
+        replay_only = work / 'replay-only'
+        replay_only.mkdir()
+        shutil.copyfile(compiler, replay_only / 'hirsel')
+        (replay_only / 'hirsel').chmod(0o700)
+        (replay_only / 'lib').symlink_to(installed / 'lib', target_is_directory=True)
+        replay = [str(replay_only / 'hirsel'), 'replay', '--state', str(state), '--tape', str(tape)]
+        result = checked(replay, engine=engine, case=f'{name}:replay')
+        assert result.stdout.strip() == 'Sealed', 'replay did not seal against the pinned image'
+        pin = state / 'pins' / tape.stem
+        withheld = work / 'withheld-pin'
+        pin.rename(withheld)
+        try:
+            refused = run_case(f'{name}:missing-pin', engine, replay, capture_output=True, text=True)
+            assert refused.returncode == 3 and refused.stderr.strip() == 'Unknown(ImageGone)', refused.stderr
+        finally:
+            withheld.rename(pin)
+        return
+
+    with running_host() as (host, old):
+        assert old['n_place'] == old_n_place, 'OLD started with the wrong allowance'
+        assert welcome_n_place() == old_n_place, 'OLD Welcome used the wrong allowance'
+        if name == 'installed_before_index':
+            saved = state / 'saved-activations'
+            index.rename(saved)
+            try:
+                attempt = run_case(name, engine, deploy, capture_output=True, text=True, timeout=150)
+                assert attempt.returncode != 0, 'deploy confirmed with its activation index unavailable'
+                assert host.wait(timeout=15) != 0, 'host continued after losing the index write'
+                assert len(list((state / 'pending').iterdir())) == 1, 'the installed attempt lost its pending root'
+            finally:
+                saved.rename(index)
+        else:
+            deployed = json.loads(checked(deploy, engine=engine, case=f'{name}:deploy').stdout)
+            assert deployed['activation'] == 2, 'cutover did not publish activation 2'
+            assert ready()['n_place'] == new_n_place, 'NEW started with the wrong allowance'
+            assert f'grant Dir={launch_store / "live"}' in deployed['preview'], 'preview resolved Dir outside --workdir'
+            assert (launch_store / 'live' / 'MANIFEST').is_file(), 'place opened outside --workdir'
+
+    with running_host() as (_, new):
+        assert new['n_place'] == new_n_place, 'restart did not recover the installed assembly'
+        assert welcome_n_place() == new_n_place, 'recovered Welcome used the wrong allowance'
+        assert new['digest'] == old['digest'], 'varying only n_place changed the image digest'
+        assert len(list((state / 'images').iterdir())) == 1, 'the shared image was duplicated or removed'
+        records = sorted(index.iterdir())
+        assert len(records) == 2, 'the activation index did not retain both activations'
+        names = [entry.read_bytes().hex() for entry in records]
+        assert names[0] != names[1], 'one mutable record replaced the two assemblies'
+        for key, recipe in zip(names, (old_recipe, new_recipe), strict=True):
+            assembly = (state / 'assemblies' / key).read_bytes()
+            assert assembly[:32].hex() == recipe, 'activation selected another recipe'
+        assert not list((state / 'pending').iterdir()), 'recovery left an installed pending record'
 
 
 def crashes(args, root, work, engine, name):
@@ -364,8 +549,7 @@ def drain_deadline(args, root, work, engine, name, runner=None, activation=False
     return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
                        entry='store@1/runner_crash/' + ('main' if activation else 'stop_main'), adapter='runner_crash.c',
                        scenarios=('runner-activation', 'runner-activation-genesis') if activation else (),
-                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else stop_cases,
-                       extra_grants=() if activation else ('Process',))
+                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else stop_cases)
 
 
 def add_legacy_activation(root, work, manifest_path, revision):
@@ -409,7 +593,7 @@ fn probe_pre_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, fenced: bool) -> (
         Error(Unsupported(0x0070)) => want(fenced, "legacy rejected the unfenced generation"),
         Ok(take db) => {
             want(!fenced, "legacy recovered a fenced generation")
-            let (_sender, from): (Sender[legacy.runner.Req], Receiver[legacy.runner.Req]) = result.unwrap(channel.new(1u64))
+            let (_sender, from): (Sender[legacy.runner.Req], Receiver[legacy.runner.Req]) = channel.new(1u64)
             let mail = result.unwrap(legacy.runner.mailbox(1u64))
             let opened = legacy.runner.place_head(take db, code.describe(old_place), N_PLACE, code.describe(old_migrate),
                 code.describe(old_handles), take from, take mail, tasks, 1048576u64)
@@ -446,7 +630,7 @@ def no_secret_at_rest(args, root, work, engine, row):
         command += ['--cc', str(args.cc.resolve())]
     checked(command, os.environ, engine=engine, case=f'{name}:build')
     nonce = os.urandom(16)
-    encoded = base64.b64encode(b'anon:' + nonce).decode('ascii')
+    encoded = base64.b64encode(nonce).decode('ascii')
     ran = run_case(name, engine, [str(binary), encoded], capture_output=True, text=True)
     files = [p for p in directory.rglob('*') if p.is_file()]
     found = sorted(str(p.relative_to(directory)) for p in files if nonce in p.read_bytes())
@@ -492,6 +676,20 @@ def evaluate(evaluator, inputs_path, definition, launch_image=None):
     out = report.get('outcome') or {}
     value = out.get('values', [None])[0] if result.returncode == 0 and out.get('kind') == 'returned' else None
     return value, report
+
+
+def granted_bound(args, root, work, row):
+    name = 'wire_granted_nonplain'
+    rejected = manifest(root, work, name, extra=[(root / f'core/programs/store/{name}.hirsel', name)])
+    command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
+               '--source-core', '--source-std', '--store', str(work / name), '--json']
+    checked = run_case(name, 'checker', command, capture_output=True, text=True)
+    report = json.loads(checked.stdout)
+    actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
+    expected = [('LANG-12', '`store@1/wire_granted_nonplain/OwnedGrant` is not plain')]
+    passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
+              and not report.get('incomplete') and not report.get('resources'))
+    row(engine='checker', law=name, passed=passed, result=report)
 
 
 def activation_body_edit(root, work):
@@ -602,22 +800,6 @@ def session_laws(args, root, work, engines, row):
                 and all(t.get('passed') for t in tests), result=report)
 
 
-def ingress_laws(args, root, work, engines, row):
-    names = ('limits', 'rates_and_expiry', 'retirement_steps', 'reply_isolated')
-    selected = manifest(root, work, 'ingress')
-    if 'evaluator' in engines:
-        for name in names:
-            value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/ingress/law_' + name)
-            row(engine='evaluator', law='ingress_' + name, passed=value == 1, result=report)
-    for engine in (e for e in engines if e != 'evaluator'):
-        definition = 'store@1/ingress/test_ingress'
-        code, report = native_run(args, engine, selected, work / f'ingress-store-{engine}', definition)
-        tests = report.get('tests', [])
-        row(engine=engine, law='ingress', passed=code == 0
-            and [t['definition'] for t in tests] == [definition]
-            and all(t.get('passed') for t in tests), result=report)
-
-
 SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
 # L28's owner half: a dropped unit's Outcome rows ride in a Reset that never closes 1008,
 # and an owner removal reaches the publisher only while the writer holds no content unit.
@@ -664,7 +846,6 @@ def admission_laws(args, root, work, engines, row):
 
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
-             'session_limit_503', 'principal_limit_1013', 'call_rate_overloaded',
              'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget',
              'cli_call_exact_value', 'cli_call_fingerprint_mismatch'}
     for engine in (e for e in engines if e != 'evaluator'):
@@ -794,7 +975,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
     p.add_argument('--compiler', type=Path)
-    p.add_argument('--evaluator', type=Path, required=True)
+    p.add_argument('--evaluator', type=Path)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     p.add_argument('--schedule-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_SCRIPTED_ARCHIVE'))
     p.add_argument('--observed', type=Path,
@@ -806,13 +987,25 @@ def main():
     p.add_argument('--activation-legacy-rev')
     p.add_argument('--stop-case', choices=STOP_CASES)
     p.add_argument('--call-law', action='append', choices=CALLS)
+    p.add_argument('--host-law', choices=HOST_LAWS)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host'])
     args = p.parse_args()
+    if args.part == 'host':
+        if not args.host_law or not args.compiler or len(args.backend or []) != 1 or args.backend == ['evaluator']:
+            p.error('host requires an installed --compiler, one native --backend, and --host-law')
+        with tempfile.TemporaryDirectory(prefix='hirsel-host-law-') as tmp:
+            host_law(args, args.root.resolve(), Path(tmp), args.backend[0], args.host_law)
+        print(f'{args.backend[0]} host {args.host_law}: passed', flush=True)
+        return 0
+    if args.host_law:
+        p.error('--host-law requires --part host')
+    if not args.evaluator:
+        p.error('--evaluator is required')
     if args.stop_case and args.part != 'deadline':
         p.error('--stop-case requires --part deadline')
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')
@@ -848,8 +1041,6 @@ def main():
             return int(not rows or any(not result['passed'] for result in rows))
         if args.part == 'admission' or (r1 and args.part != 'calls'):
             admission_laws(args, root, work, engines, row)
-        if args.part == 'ingress' or (r1 and args.part != 'calls'):
-            ingress_laws(args, root, work, engines, row)
         if r0 or args.part == 'session':
             session_laws(args, root, work, engines, row)
         if r0:
@@ -859,13 +1050,15 @@ def main():
         if args.part in (None, 'r1', 'rc1'):
             for engine in (e for e in engines if e != 'evaluator'):
                 no_secret_at_rest(args, root, work, engine, row)
-        if args.part in ('wire', 'session', 'ingress', 'admission', 'socket', 'rc1'):
+        if args.part in ('wire', 'session', 'admission', 'socket', 'rc1'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             for r in rows:
                 if not r['passed']:
                     print('FAIL', json.dumps(r)[:2000])
             return int(any(not r['passed'] for r in rows))
+        if r1 and 'granted_copied' in selected_calls and args.compiler is not None:
+            granted_bound(args, root, work, row)
         base = manifest(root, work, 'inputs')
         if r0:
             values = l12_values(evaluator, root, work, 'tree')

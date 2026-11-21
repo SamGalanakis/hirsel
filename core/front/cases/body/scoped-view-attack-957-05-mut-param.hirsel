@@ -4,5 +4,4 @@ fn run(mut xs: List[u64]) -> Result[Result[u64, Causes], Capacity] {
 }
 pub fn main() -> Result[(), ()] { let mut xs: List[u64] = list.new(); let _ = run(mut xs); Ok(()) }
 
-// expect: refuse LANG-18 at 1:37
 // expect: refuse FAIL-16 at 3:13

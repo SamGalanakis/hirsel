@@ -1,5 +1,5 @@
 fn clone_request(source: &str, dir: &Path) -> CheckRequest {
-    core_request("pub fn main() -> Result[(), Exit] { let p = probe.Probe(value: \"kept\"); let q: probe.Probe[String] = result.unwrap(clone(p)); if q.value == \"kept\" { Ok(()) } else { Error(Exit(status: 7)) } }", &[("probe", source)], dir)
+    core_request("pub fn main() -> Result[(), Exit] { let p = probe.Probe(value: \"kept\"); let q: probe.Probe[String] = clone(p); if q.value == \"kept\" { Ok(()) } else { Error(Exit(status: 7)) } }", &[("probe", source)], dir)
 }
 /// An app over the real core with `probes` added to it as core modules.
 fn core_request(main: &str, probes: &[(&str, &str)], dir: &Path) -> CheckRequest {
@@ -14,7 +14,7 @@ fn core_request(main: &str, probes: &[(&str, &str)], dir: &Path) -> CheckRequest
     request.inputs.packages[1] = core;
     request
 }
-const CLONE_PROBE: &str = "pub type Probe[T] { value: T }\nclone[T](p: Probe[T]) { let copied: Result[T, Capacity] = clone(p.value); match take copied { Ok(take x) => Ok(Probe(value: take x)), Error(c) => Error(c) } }\npub fn untouched() -> u64 { 42u64 }\n";
+const CLONE_PROBE: &str = "pub type Probe[T] { value: T }\nclone[T](p: Probe[T]) { let copied: T = clone(p.value); Probe(value: take copied) }\npub fn untouched() -> u64 { 42u64 }\n";
 
 #[test]
 fn clone_body_keys_preserve_type_identity_across_edits_and_reordering() {
@@ -75,11 +75,11 @@ fn clone_product_body_is_reached_llvm() { clone_product(Backend::Llvm); }
 fn hook_request(hook: Option<&str>, dir: &Path) -> CheckRequest {
     let held = "pub type P { value: u64 }\npub fn make(v: u64) -> P { P(value: v) }\npub fn value(p: P) -> u64 { p.value }\n";
     let with = |name: &str, other: &str| {
-        let hooked = "clone(p: held.P) { Ok(held.make(held.value(p) + 1u64)) }\n";
+        let hooked = "clone(p: held.P) { held.make(held.value(p) + 1u64) }\n";
         format!("{other}{}", if hook == Some(name) { hooked } else { "" })
     };
     let (a, b) = (with("hook_a", "pub fn other() -> u64 { 0u64 }\n"), with("hook_b", "pub fn other() -> u64 { 1u64 }\n"));
-    core_request("fn copies() -> u64 { let p = held.make(7u64); let copied: held.P = result.unwrap(clone(p)); held.value(copied) * 100u64 + held.value(p) }\npub fn main() -> Result[(), Exit] { let v = copies(); if v == 807u64 { Error(Exit(status: 8)) } else if v == 707u64 { Error(Exit(status: 7)) } else { Error(Exit(status: 9)) } }", &[("held", held), ("hook_a", &a), ("hook_b", &b)], dir)
+    core_request("fn copies() -> u64 { let p = held.make(7u64); let copied: held.P = clone(p); held.value(copied) * 100u64 + held.value(p) }\npub fn main() -> Result[(), Exit] { let v = copies(); if v == 807u64 { Error(Exit(status: 8)) } else if v == 707u64 { Error(Exit(status: 7)) } else { Error(Exit(status: 9)) } }", &[("held", held), ("hook_a", &a), ("hook_b", &b)], dir)
 }
 /// A type's clone hook selection, absence included, keys every body that
 /// clones the type. Law: after the hook moves to another module, appears or

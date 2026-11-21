@@ -1,4 +1,4 @@
-//! Provider-aware mechanical HostFile ownership. The native carrier is a u64
+//! Provider-aware ownership of mechanical files and listings. The carrier is a u64
 //! run-local key; provider metadata is private and never read inline by emitters.
 use crate::{Context, provider::*};
 use std::{
@@ -12,6 +12,8 @@ use std::{
 struct File {
     provider: Provider,
     handle: u64,
+    mode: u8,
+    close_op: u8,
 }
 // SAFETY: transferring the opaque callback descriptor does not access its
 // state. The runtime invokes it under the run's provider calling contract.
@@ -20,8 +22,7 @@ unsafe impl Send for File {}
 unsafe impl Sync for File {}
 
 pub(crate) const DYNAMIC_GRANT: u64 = 1 << 63;
-/// A substitute Args vector (tape.rs): pinned for the run, so its views stay
-/// valid after the tape ends.
+/// A tape's Args vector, pinned for the lifetime of the run.
 struct Vector {
     _bytes: Vec<Vec<u8>>,
     views: Vec<Buffer>,
@@ -89,12 +90,19 @@ pub(crate) struct Files {
     pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
     pub(crate) tls: crate::os_tls::Streams,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     #[cfg(feature = "record")]
     pub(crate) net_tape: Option<crate::net::SocketTape>,
+    #[cfg(feature = "record")]
+    pub(crate) secret_mac_tape: Option<crate::secret::MacTape>,
+    #[cfg(feature = "record")]
+    pub(crate) managed_control: (u64, u64),
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
     // Children inherit these entries without borrowing the scheduler's sockets.
     pub(crate) registry: Registry,
+    /// The run's virtual clock, random and process cells (`provide`).
+    pub(crate) cells: crate::provide::Cells,
 }
 impl Registry {
     /// Pin a substitute Args vector and return its handle.
@@ -155,7 +163,12 @@ impl Registry {
         id
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.insert_grant(File { provider, handle })
+        self.insert_grant(File {
+            provider,
+            handle,
+            mode: 0,
+            close_op: CLOSE,
+        })
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         let file = Arc::as_ptr(&self.0.lock().unwrap().grants[&handle]);
@@ -165,6 +178,29 @@ impl Registry {
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
         self.0.lock().unwrap().grants[&handle].handle
     }
+    /// A virtual provider's live resource: a ClockHand or StopTrigger
+    /// (CLOSE_CELL, which closes nothing but itself), a `Served` end
+    /// (CLOSE_SERVED) or a `Call` (CLOSE_CALL, `handle` its call id).
+    pub(crate) fn held(&self, provider: Provider, handle: u64, close_op: u8) -> u64 {
+        self.insert(File {
+            provider,
+            handle,
+            mode: 0,
+            close_op,
+        })
+    }
+    pub(crate) fn file_handle(&self, key: u64) -> u64 {
+        self.file(key).handle
+    }
+    pub(crate) fn file_provider(&self, key: u64) -> Provider {
+        self.file(key).provider
+    }
+    /// Consume a live StopTrigger or Call without closing it: its provider
+    /// and handle.
+    pub(crate) fn take_held(&self, key: u64) -> (Provider, u64) {
+        let file = self.take_file(key);
+        (file.provider, file.handle)
+    }
 }
 impl Files {
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
@@ -172,11 +208,13 @@ impl Files {
         self.tls.sessions.clear();
         self.connected.clear();
         self.net_grants.get_mut().unwrap().clear();
+        self.env_grants.get_mut().unwrap().clear();
         *self.secrets.get_mut().unwrap() = crate::secret::Secrets::default();
         if let Some(files) = &mut self.registry.0.get_mut().unwrap().live {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };
         }
+        crate::provide::forget(&mut self.cells);
     }
 }
 
@@ -187,11 +225,11 @@ unsafe fn close_files(files: &mut BTreeMap<u64, File>, context: *mut Context) {
     }
 }
 
-fn close_request(handle: u64, site: u64) -> Request {
+fn close_request(file: File, site: u64) -> Request {
     Request {
-        operation: CLOSE,
+        operation: file.close_op,
         mode: 0,
-        handle,
+        handle: file.handle,
         path: ptr::null(),
         path_len: 0,
         buffer: Buffer {
@@ -207,20 +245,15 @@ unsafe fn close(context: *mut Context, file: File) {
     // driver's C check and W/I cancellation do not apply under the shield.
     unsafe {
         (*context).cancel_shield += 1;
-        let _ = drive(
-            context,
-            &file.provider,
-            &mut close_request(file.handle, 0),
-            None,
-        );
+        let _ = drive(context, &file.provider, &mut close_request(file, 0), None);
         (*context).cancel_shield -= 1;
     }
 }
 
-/// Open through the selected provider and publish an eight-byte HostFile key.
+/// Open a mechanical file or listing through the selected provider.
 /// No logical admission; registry storage is provider bookkeeping (MEM-24).
 /// # Safety
-/// Live run context, provider and OPEN request; callbacks obey CAP-8 and retain
+/// Live run context, provider and OPEN or ENTRIES request; callbacks obey CAP-8 and retain
 /// their state until the run closes its grants. Success transfers sole ownership.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_file_open(
@@ -231,6 +264,12 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
     // SAFETY: exclusive operation borrows; no registry borrow spans a callback.
     unsafe {
         let mut issued = None;
+        let mode = (*request).mode;
+        let close_op = if (*request).operation == ENTRIES {
+            CLOSE_ENTRIES
+        } else {
+            CLOSE
+        };
         let mut result = drive(context, provider, request, Some(&mut issued));
         let Some(issued) = issued else {
             return result;
@@ -240,14 +279,18 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
             result.value = (*(*context).host_files).registry.insert(File {
                 provider,
                 handle: result.value,
+                mode,
+                close_op,
             });
         } else if issued.status == 0 && issued.error == IoError::OK {
-            // Delivery failed after a committed open: the unpublished file is ours.
+            // Delivery failed after issue opened a resource. Close the unpublished key.
             close(
                 context,
                 File {
                     provider,
                     handle: issued.value,
+                    mode,
+                    close_op,
                 },
             );
         }
@@ -280,6 +323,9 @@ pub unsafe extern "C" fn hirsel_core_host_file(
             (*registry).registry.file(file)
         };
         (*request).handle = owned.handle;
+        if matches!((*request).operation, READ_AT | WRITE_AT) {
+            (*request).mode = owned.mode;
+        }
         if (*request).operation != CLOSE {
             return drive(context, &owned.provider, request, None);
         }
@@ -292,7 +338,7 @@ pub unsafe extern "C" fn hirsel_core_host_file(
     }
 }
 
-/// Mechanical drop: consume the file, bypass cancellation, ignore close outcome.
+/// Drop a file or listing, bypassing cancellation and ignoring close errors.
 /// Admits nothing, returns no failure status, and never retries an OS close.
 /// # Safety
 /// File is the sole live carrier in this run, consumed exactly once by this call.
@@ -305,8 +351,7 @@ pub unsafe extern "C" fn hirsel_core_hostfile_drop(context: *mut Context, file: 
     }
 }
 
-/// The argument vector `args` designates: a substitute's (tape/abi.rs), or
-/// the run's own.
+/// The argument vector for a live run or its recording provider.
 /// # Safety
 /// A live run context; `args` is a live Args operand of the run.
 pub(crate) unsafe fn args<'a>(context: *const Context, args: u64) -> &'a [Buffer] {

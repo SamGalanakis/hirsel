@@ -13,14 +13,3 @@ pub fn map_err[T, E, F](take r: Result[T, E], f: scoped fn(take E) -> F) -> Resu
         Error(take e) => Error(f(take e)),
     }
 }
-
-/// r with the argument an allocating core operation gave back dropped from its error,
-/// leaving the Capacity (`list.push`, `box.new` and `pool.insert` return what they would
-/// have taken, core.md "Errors"). The argument is cleaned. Cost: O(1) plus that cleanup.
-/// Ex: `result.capacity_only(list.push(mut path, v))?` in a function returning `Result[_, Capacity]`
-pub fn capacity_only[T, X](take r: Result[T, (Capacity, X)]) -> Result[T, Capacity] {
-    match r {
-        Ok(take x) => Ok(take x),
-        Error((c, _)) => Error(c),
-    }
-}

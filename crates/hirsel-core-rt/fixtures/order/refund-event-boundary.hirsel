@@ -7,17 +7,17 @@
 // Hand-derived count: 65.
 type Input:send { ready: Sender[Bytes] }
 fn worker(take s: Input) -> u64 {
-    let first: Bytes = result.unwrap(list.with_capacity(800))
+    let first: Bytes = list.with_capacity(800)
     result.unwrap(channel.try_send(s.ready, take first))
     let mut refused = 0u64
     loop {
-        let next: Result[Bytes, Capacity] = list.with_capacity(800)
-        match next { Ok(b) => return refused, Error(_) => { refused += 1 } }
+        let mut b: Bytes = list.new()
+        match list.try_reserve(mut b, 800) { Ok(()) => return refused, Error(_) => { refused += 1 } }
     }
 }
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
-    let (ready, ready_rx): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(1))
-    let h = result.unwrap(task.spawn(tasks, bytes 1024, Input(ready: take ready), worker))
+    let (ready, ready_rx): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 1024, Input(ready: take ready), worker)
     let _ = result.unwrap(channel.receive(ready_rx))
     let n = result.unwrap(task.join(take h))
     if n == 65u64 { Ok(()) } else { Error(Exit(status: 64u8)) }

@@ -111,6 +111,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
         grant_mask,
         net_rules,
         secret_grants,
+        env_patterns,
         // An observation build writes a report besides its answer; it is
         // never recorded (`Request` is not made for one).
         logical_charge_report: _,
@@ -132,6 +133,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
             grant_mask,
             net_rules,
             secret_grants,
+            env_patterns,
             recording,
             replay,
             toolchain.image,
@@ -287,8 +289,18 @@ pub(crate) struct Answer<'a> {
     pub(crate) native: Option<&'a BuildProduct>,
 }
 impl Value {
-    pub(crate) fn of(answer: Answer<'_>) -> Self {
+    pub(crate) fn of(answer: Answer<'_>) -> Option<Self> {
         let product = answer.product;
+        // This shortcut has no index. Even a lookup that yielded no hint
+        // needs to go through the render path.
+        let has_lookup = if let Some(reach) = answer.reach {
+            reach.diagnostics.iter().any(|d| d.unresolved.is_some())
+        } else {
+            product.diagnostics.iter().any(|d| d.unresolved.is_some())
+        };
+        if has_lookup {
+            return None;
+        }
         // A rendered name back to its file: the first request file of that
         // name, which renders as it under this key; else the name itself.
         let mut positions = BTreeMap::new();
@@ -317,7 +329,7 @@ impl Value {
             required: required.map(str::to_owned),
             message: message.to_owned(),
         };
-        Self {
+        Some(Self {
             limits: Limits::current(),
             root: product.root,
             check_accepted: product.accepted(),
@@ -369,7 +381,7 @@ impl Value {
                 observation_mode: n.observation_mode,
                 debug_lines: n.debug_lines,
             }),
-        }
+        })
     }
 }
 
@@ -414,6 +426,7 @@ impl Hit {
                     declared: r.declared.as_deref(),
                     required: r.required.as_deref(),
                     message: &r.message,
+                    hint: None,
                 })
                 .collect(),
             incomplete: value

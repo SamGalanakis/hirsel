@@ -6,7 +6,7 @@
 // expect: run byte_at(18446744073709551615) = 255
 // expect: run generic() = 1
 fn byte_at(i: u64) -> u8 {
-    let xs = result.unwrap(b"abcd")
+    let xs = b"abcd"
     match list.get(xs, i) {
         Some(x) => x,
         None => 255
@@ -21,7 +21,7 @@ fn present[T](xs: List[T]) -> u64 {
 }
 
 fn generic() -> u64 {
-    let xs = result.unwrap(b"abcd");
+    let xs = b"abcd";
     present(xs)
 }
 
@@ -33,6 +33,6 @@ fn second[T: plain](xs: List[T]) -> T {
 }
 
 fn generic_value() -> u8 {
-    let xs = result.unwrap(b"abcd");
+    let xs = b"abcd";
     second(xs)
 }

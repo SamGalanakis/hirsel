@@ -5,7 +5,7 @@ use crate::codec::{self, Bad, Done, Entry, Frame, Outcome, Refusal, Row, Want};
 use crate::{BITS, CHUNKS, IMAGE_BYTES, MAX_FRAME, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -30,7 +30,6 @@ type Stream = (Principal, u32);
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub per_ip_sessions: usize,
-    pub per_ip_new_principals: u32,
     pub principal_rate: u32,
     pub principal_burst: u32,
 }
@@ -38,7 +37,6 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             per_ip_sessions: 32,
-            per_ip_new_principals: 10,
             principal_rate: 20,
             principal_burst: 40,
         }
@@ -48,7 +46,6 @@ impl Limits {
     pub fn benchmark() -> Self {
         Self {
             per_ip_sessions: 20000,
-            per_ip_new_principals: 20000,
             principal_rate: 1_000_000_000,
             principal_burst: 40,
         }
@@ -582,7 +579,6 @@ pub async fn serve(
     let mut sessions = JoinSet::new();
     let mut next = 0u64;
     let mut ip_slots: HashMap<std::net::IpAddr, Arc<Semaphore>> = HashMap::new();
-    let principals = Arc::new(Mutex::new(HashMap::new()));
     let pending = Arc::new(Semaphore::new(1024));
     let rates: Rates = Arc::new(Mutex::new(HashMap::new()));
     tokio::pin!(stop);
@@ -600,10 +596,10 @@ pub async fn serve(
                     }); continue;
                 };
                 next += 1; let id = next; let tx = tx.clone(); let digest = digest.clone(); let wants = wants.clone();
-                let principals = principals.clone(); let launch = launch.clone(); let rates = rates.clone();
+                let launch = launch.clone(); let rates = rates.clone();
                 sessions.spawn(async move {
                     let _ip = ip_permit;
-                    let ingress = Ingress { ip: addr.ip(), principals, pending: pending_permit, limits, rates };
+                    let ingress = Ingress { pending: pending_permit, limits, rates };
                     let r = session(socket, id, tx.clone(), digest, wants, ingress, launch).await;
                     let _ = tx.send(Command::Leave(id)).await; r
                 });
@@ -626,8 +622,6 @@ pub async fn serve(
 }
 
 struct Ingress {
-    ip: std::net::IpAddr,
-    principals: Arc<Mutex<HashMap<std::net::IpAddr, VecDeque<tokio::time::Instant>>>>,
     pending: OwnedSemaphorePermit,
     limits: Limits,
     rates: Rates,
@@ -653,13 +647,13 @@ fn handshake(
             .to_str()
             .unwrap_or("")
             .split(',')
-            .any(|p| p.trim() == "hirsel.1")
+            .any(|p| p.trim() == "hirsel.2")
         {
             return Err(Response::builder().status(400).body(None).unwrap());
         }
         response
             .headers_mut()
-            .insert("Sec-WebSocket-Protocol", "hirsel.1".parse().unwrap());
+            .insert("Sec-WebSocket-Protocol", "hirsel.2".parse().unwrap());
     }
     Ok(response)
 }
@@ -693,54 +687,32 @@ async fn session(
         }
     })
     .await??;
-    let Frame::Hello(token, requested) = first else {
+    let Frame::Hello(credential, requested) = first else {
         return Err("expected Hello first".into());
     };
-    let principal: Principal = match token {
-        None => {
-            let admitted = {
-                let mut windows = ingress.principals.lock().unwrap();
-                let now = tokio::time::Instant::now();
-                let mints = windows.entry(ingress.ip).or_default();
-                while mints
-                    .front()
-                    .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
-                {
-                    mints.pop_front();
-                }
-                if mints.len() >= ingress.limits.per_ip_new_principals as usize {
-                    false
-                } else {
-                    mints.push_back(now);
-                    true
-                }
-            };
-            if !admitted {
-                ws.close(Some(CloseFrame {
-                    code: CloseCode::Again,
-                    reason: "overloaded".into(),
-                }))
-                .await?;
-                return Ok(());
-            }
-            rand::random()
+    let principal: Principal = match credential {
+        Some(bytes) if bytes.len() == 16 => {
+            let mut hash = Sha256::new();
+            hash.update(b"hirsel.example.credential.v1");
+            hash.update(bytes);
+            hash.finalize()[..16].try_into()?
         }
-        Some(b) if b.len() == 21 && b.starts_with(b"anon:") => b[5..].try_into()?,
         _ => {
             ws.close(Some(CloseFrame {
-                code: CloseCode::Again,
-                reason: "invalid principal".into(),
+                code: CloseCode::Policy,
+                reason: "invalid credential".into(),
             }))
             .await?;
             return Ok(());
         }
     };
     drop(ingress.pending);
-    let mut token = b"anon:".to_vec();
-    token.extend(principal);
     ws.send(Message::Binary(
         codec::encode(&Frame::Welcome(
-            token,
+            codec::Caller {
+                issuer: 2,
+                subject: principal.to_vec(),
+            },
             4,
             1024 * 1024,
             digest.to_vec(),

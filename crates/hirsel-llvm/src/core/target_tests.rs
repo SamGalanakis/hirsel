@@ -68,8 +68,8 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
     let module = Module::default();
     let body = Body::default();
     let failures = failure::Failures::new(&module);
-    let dir = std::env::temp_dir().join(format!("hirsel-core-targets-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
         let mut text = sink::TextSink::default();
         let mut items = Items::new(&module);
@@ -246,7 +246,6 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
             }
         }
     }
-    std::fs::remove_dir_all(dir).unwrap();
     Ok(())
 }
 
@@ -295,9 +294,8 @@ int main(void) {{
 }}
 "#
     );
-    let dir =
-        std::env::temp_dir().join(format!("hirsel-core-target-failure-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     std::fs::write(dir.join("probe.c"), c).unwrap();
     let prefix = llvm_prefix;
     let include = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include");
@@ -343,6 +341,5 @@ int main(void) {{
             }
         }
     }
-    std::fs::remove_dir_all(dir).unwrap();
     Ok(())
 }

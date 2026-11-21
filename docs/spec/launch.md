@@ -56,8 +56,8 @@ of one program are different executables, so their digests differ
 
 `Welcome.executable` carries this digest, including an empty digest for
 unavailable identity. Generated bindings record digest, target and `n_place`.
-`Welcome` carries `(principal, q, budget, executable, target, n_place)`, retaining
-tag 4; target and allowance are independent of the executable digest.
+`Welcome` carries `(caller, q, budget, executable, target, n_place)` under
+tag 4 of `hirsel.2`. Target and allowance are independent of the executable digest.
 When either identity is unavailable the diagnostic is "identity unknown", with
 no mismatch report. A differing available digest, target or `n_place` produces
 a developer diagnostic only. Compatibility is decided by entry identity and
@@ -310,6 +310,14 @@ so the store's `releases` rows keep their format, and a recording pin names the 
 the run it records and is synced before `Pinned` is answered. A retained digest whose image is
 missing gives `Unknown(ImageGone)`.
 
+`hirsel host --record DIRECTORY` assembles with the recording runtime. The host
+assigns each serving process a recording ID and syncs its pin before launching
+the process. A pin names the assembly record and carries its expiry. The
+default retention period is 30 days, set by `--tape-retention DAYS`.
+`hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
+the pin and runs the verified image from the host image store. Replay takes the
+arguments and launch metadata from the recording.
+
 When the host starts, before any collection, it reconciles every attempt. Staging with no
 pending record is removed. For each pending record it probes the place as hot deploy's recovery
 does: if the recovered activation is the attempt's (a cut after install but before its
@@ -329,8 +337,13 @@ the ones the preview reported for that record. A retry after drift keeps the rec
 fresh attempt and export. The write pause keeps hot deploy's own checks (attempt and prepared
 digest, store identity, version and activation, capacity, and the deadline), and no fetch,
 assembly or closure walk runs inside it. The deploy reports the fetch time, the assembly time
-and the write pause as three separate figures. A recorded digest is recovered from its retained
-bytes and never by assembling again.
+and the write pause as three separate figures. The write pause starts with the first cutover
+request. If OLD held a write during the pause, the host finishes the report when NEW's wire
+writer confirms that it flushed the first durable write outcome. Otherwise the pause ends at
+NEW's Ready. If NEW exits or retires without flushing a durable write outcome, its Ready ends
+the pause. The host can serve another deploy while a report waits for this notice, and the
+report wait has no deadline. A recorded digest is recovered from its retained bytes and never
+by assembling again.
 
 Laws: `grant_binding_order`, where a launch that reports which directory each `Dir` parameter
 received gives the given paths, and exchanging them exchanges the reports; `assemble_is_build`,

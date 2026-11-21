@@ -86,18 +86,15 @@ def fixture(upstream):
     prefix = "const RAP_BENCHMARK_MINIFIED = "
     literal, = (line[len(prefix):-1] for line in source.splitlines() if line.startswith(prefix))
     text = ast.literal_eval(literal)
-    return json.dumps(text, ensure_ascii=False)
+    return text
 
 
 def hirsel(args, matched=False):
     artifacts = json.loads(args.artifacts.read_text())
     compiler, runtime = (artifacts[key] for key in ("compiler", "runtime"))
     spec = inputs(ROOT, "harness")
-    rap = args.out / "rap.hirsel"
-    literal = fixture(args.upstream)
-    rap.write_text(f"pub fn document() -> String {{ {literal} }}\n")
     rap_data = args.out / "rap.json"
-    rap_data.write_bytes(json.loads(literal).encode("utf-8"))
+    rap_data.write_bytes(fixture(args.upstream).encode("utf-8"))
     rap_digest = sha256(rap_data)
     sources = list((HERE / "hirsel").glob("*.hirsel"))
     if matched:
@@ -107,13 +104,13 @@ def hirsel(args, matched=False):
             "havlak.benchmark(inner)": "havlak_pool.benchmark(inner)",
             "cd.benchmark(inner)": "cd_pool.benchmark(inner)",
             "deltablue.benchmark(inner)": "deltablue_pool.benchmark(inner)",
-            "lists.list_benchmark()": "linked_small.list_benchmark()",
-            "trees.towers_benchmark()": "linked_small.towers_benchmark()",
+            "lists.list_benchmark(first)": "linked_small.list_benchmark(first)",
+            "trees.towers_benchmark(disks)": "linked_small.towers_benchmark(disks)",
         })
         sources += [harness, *variants.glob("*.hirsel")]
     spec["packages"][-1].update(package={"name": "awfy", "version": "1"}, sources=[
         {"file": str(source), "modules": [source.stem], "signatures": False}
-        for source in [*sorted(sources), rap]
+        for source in sorted(sources)
     ])
     out = args.out
     manifest = out / "hirsel-inputs.json"
@@ -157,8 +154,6 @@ def goose_executable(compiler, source, output, env, cflags=()):
 def goose(args, matched=False):
     source = args.out / "goose-src"
     shutil.copytree(HERE / "goose", source, dirs_exist_ok=True)
-    (source / "rap.goose").write_text(
-        f"namespace rap;\nfn document() -> const u8[:] {{ return {fixture(args.upstream)}; }}\n")
     if matched:
         for variant in (HERE / "pool-ports/goose").glob("*.goose"):
             shutil.copyfile(variant, source / variant.name)
@@ -173,12 +168,100 @@ def goose(args, matched=False):
 
 
 def rust(args, matched=False):
-    sources = [("harness", args.rust / "src/main.rs")]
+    source = args.out / "rust-src"
+    shutil.copytree(args.rust / "src", source)
+    main = source / "main.rs"
+    port(main, main, {
+        "fn run(name: &str, inner: i32)": "fn run(name: &str, inner: i32, input: &str)",
+        **{f"small::{name}_inner(inner)": f"small::{name}_inner(inner, input)"
+           for name in ("bounce", "list", "permute", "sieve", "storage", "towers")},
+        "small::queens_inner(inner)": "small::queens_inner(inner, input.as_bytes())",
+        "json::inner(inner)": "json::inner(inner, input)",
+        "richards::inner(inner)": "richards::inner(inner, input)",
+        "if !run(name, inner)": "if !run(name, inner, args.get(4).map_or(name, String::as_str))",
+    })
+    small = source / "small.rs"
+    port(small, small, {
+        "use crate::som::Random;": """use crate::som::Random;
+
+pub fn verify_numbers(inner: i32, input: &str, limit: i32, mut check: impl FnMut(i32) -> bool) -> bool {
+    (0..inner).zip(input.split(',').cycle()).all(|(_, value)| {
+        value.parse::<i32>().is_ok_and(|n| n > 0 && n <= limit && check(n))
+    })
+}""",
+        "fn bounce()": "fn bounce(steps: i32)",
+        "for _ in 0..50 {": "for _ in 0..steps {",
+        "pub fn bounce_inner(inner: i32) -> bool { (0..inner).all(|_| bounce() == 1331) }":
+            "pub fn bounce_inner(inner: i32, input: &str) -> bool { verify_numbers(inner, input, 50, |steps| bounce(steps) == 1331) }",
+        "fn list()": "fn list(first: i32)",
+        "make_list(15)": "make_list(first)",
+        "let xn = x.unwrap().next.as_deref();": "let xn = x?.next.as_deref();",
+        "let yn = y.unwrap().next.as_deref();": "let yn = y?.next.as_deref();",
+        "let zn = z.unwrap().next.as_deref();": "let zn = z?.next.as_deref();",
+        "let r = tail(a.as_deref(), b.as_deref(), c.as_deref()).unwrap();":
+            "let Some(r) = tail(a.as_deref(), b.as_deref(), c.as_deref()) else { return 0; };",
+        "pub fn list_inner(inner: i32) -> bool { (0..inner).all(|_| list() == 10) }":
+            "pub fn list_inner(inner: i32, input: &str) -> bool { verify_numbers(inner, input, 15, |first| list(first) == 10) }",
+        "pub fn permute_inner(inner: i32) -> bool {\n    (0..inner).all(|_| {":
+            "pub fn permute_inner(inner: i32, input: &str) -> bool {\n    verify_numbers(inner, input, 6, |size| {",
+        "p.permute(6);": "p.permute(size);",
+        "pub fn sieve_inner(inner: i32) -> bool {\n    (0..inner).all(|_| {":
+            "pub fn sieve_inner(inner: i32, input: &str) -> bool {\n    verify_numbers(inner, input, 5000, |size| {",
+        "sieve(&mut flags, 5000)": "sieve(&mut flags, size)",
+        "pub fn storage_inner(inner: i32) -> bool {\n    (0..inner).all(|_| {":
+            "pub fn storage_inner(inner: i32, input: &str) -> bool {\n    verify_numbers(inner, input, 7, |depth| {",
+        "build_tree_depth(7,": "build_tree_depth(depth,",
+        "pub fn towers_inner(inner: i32) -> bool {\n    (0..inner).all(|_| {":
+            "pub fn towers_inner(inner: i32, input: &str) -> bool {\n    verify_numbers(inner, input, 13, |disks| {",
+        "t.build_tower_at(0, 13);": "t.build_tower_at(0, disks);",
+        "t.move_disks(13, 0, 1);": "t.move_disks(disks, 0, 1);",
+        "fn queens(&mut self)": "fn queens(&mut self, size: i32)",
+        "self.place_queen(0)": "self.place_queen(0, size)",
+        "fn place_queen(&mut self, c: i32)": "fn place_queen(&mut self, c: i32, size: i32)",
+        "for r in 0..8 {": "for r in 0..size {",
+        "if c == 7": "if c + 1 == size",
+        "self.place_queen(c + 1)": "self.place_queen(c + 1, size)",
+        """fn queens() -> bool {
+    let mut q = Queens { free_maxs: vec![], free_rows: vec![], free_mins: vec![], queen_rows: vec![] };
+    let mut result = true;
+    for _ in 0..10 { result = result && q.queens(); }
+    result
+}
+
+pub fn queens_inner(inner: i32) -> bool { (0..inner).all(|_| queens()) }""":
+        """pub fn queens_inner(inner: i32, sizes: &[u8]) -> bool {
+    if sizes.is_empty() { return false; }
+    let mut sizes = sizes.iter().copied().cycle();
+    (0..inner).all(|_| {
+        let mut q = Queens { free_maxs: vec![], free_rows: vec![], free_mins: vec![], queen_rows: vec![] };
+        let mut solved = 0;
+        for digit in sizes.by_ref().take(10) {
+            if !(b'4'..=b'8').contains(&digit) { return false; }
+            if q.queens(i32::from(digit - b'0')) { solved += 1; }
+        }
+        solved == 10
+    })
+}""",
+    })
+    port(source / "json.rs", source / "json.rs", {
+        "pub fn inner(inner: i32)": "pub fn inner(inner: i32, input: &str)",
+        "Parser::new(RAP)": "Parser::new(input)",
+        '\nconst RAP: &str = include_str!("rap.json");\n': "",
+    })
+    port(source / "richards.rs", source / "richards.rs", {
+        "fn start(&mut self)": "fn start(&mut self, count: i32)",
+        "control: 1, count: 10000": "control: 1, count",
+        "pub fn inner(inner: i32) -> bool {\n    (0..inner).all(|_| {":
+            "pub fn inner(inner: i32, input: &str) -> bool {\n    crate::small::verify_numbers(inner, input, 10000, |count| {",
+        "s.start()": "s.start(count)",
+    })
+    sources = [("harness", main)]
     if getattr(args, "hello", True):
         sources.append(("hello", HERE / "hello.rs"))
     if matched:
+        standard = source
         source = args.out / "rust-pool-src"
-        shutil.copytree(args.rust / "src", source)
+        shutil.copytree(standard, source)
         variants = sorted((HERE / "pool-ports/rust").glob("*.rs"))
         for variant in variants:
             shutil.copyfile(variant, source / variant.name)
@@ -188,11 +271,11 @@ def rust(args, matched=False):
             "havlak::inner(inner)": "havlak_pool::benchmark(inner)",
             "cd::inner(inner)": "cd_pool::inner(inner)",
             "deltablue::inner(inner)": "deltablue_pool::inner(inner)",
-            "small::list_inner(inner)": "(0..inner).all(|_| linked_small::list() == 10)",
-            "small::towers_inner(inner)": "(0..inner).all(|_| linked_small::towers() == 8191)",
+            "small::list_inner(inner, input)": "small::verify_numbers(inner, input, 15, |n| linked_small::list(n.into()) == 10)",
+            "small::towers_inner(inner, input)": "small::verify_numbers(inner, input, 13, |n| linked_small::towers(n as usize) == 8191)",
             "    match name {\n": '    match name {\n'
-            '        "JsonPool" => (0..inner).all(|_| json_pool::benchmark() == 156),\n'
-            '        "StoragePool" => (0..inner).all(|_| trees_pool::benchmark() == 5461),\n',
+            '        "JsonPool" => (0..inner).all(|_| json_pool::benchmark(input.as_bytes()) == 156),\n'
+            '        "StoragePool" => small::verify_numbers(inner, input, 7, |n| trees_pool::benchmark(n as u32) == 5461),\n',
         })
         sources.append(("pool_index", main))
     for module, source in sources:

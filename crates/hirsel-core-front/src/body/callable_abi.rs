@@ -320,7 +320,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let xrep = self.rep_at(x, n)?;
         if let Some(place) = xrep.stored() {
             let at = self.address(AddressBase::Address(input), &[Step::Field(1)], place, n);
-            self.install(at, xrep, value, n);
+            match (xrep, value) {
+                // The caller still owns the input while spawn admits the task.
+                (Rep::Place(id), Some(from)) => self.copy_bytes_to(at, from, id, n),
+                _ => self.install(at, xrep, value, n),
+            }
         }
         let signature = match self.indirect_signature(&[(Mode::Take, wrapped)], r, &mut vec![]) {
             Ok(s) => s,

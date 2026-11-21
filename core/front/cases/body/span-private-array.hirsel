@@ -5,14 +5,8 @@
 fn values() -> u64 {
     region r {
         let mut b: SpanBuilder[Inline[(u8, u64), 2], in r] = span.builder(r)
-        match span.push(mut b,[(1u8, 7u64), (2u8, 11u64)]) {
-            Ok(()) => {},
-            Error(_) => return 998
-        }
-        match span.push(mut b,[(3u8, 13u64), (4u8, 17u64)]) {
-            Ok(()) => {},
-            Error(_) => return 998
-        }
+        span.push(mut b,[(1u8, 7u64), (2u8, 11u64)])
+        span.push(mut b,[(3u8, 13u64), (4u8, 17u64)])
         let xs = span.finish(take b)
         let mut total: u64 = 0
         for row in xs {

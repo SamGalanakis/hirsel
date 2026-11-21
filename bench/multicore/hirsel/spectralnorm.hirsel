@@ -5,7 +5,7 @@ type Job: send { vector: Arc[Vector], transpose: bool, start: u64, end: u64 }
 
 fn multiply_rows(take job: Job) -> List[f64] {
     let n = list.len(job.vector.values)
-    let mut rows: List[f64] = result.unwrap(list.with_capacity(job.end - job.start))
+    let mut rows: List[f64] = list.with_capacity(job.end - job.start)
     for row in job.start .. job.end {
         let mut sum: f64 = 0.0
         for col in 0 .. n {
@@ -14,25 +14,25 @@ fn multiply_rows(take job: Job) -> List[f64] {
             let divisor: f64 = float.from_int(k * (k + 1) / 2 + index + 1)
             sum += job.vector.values[col] / divisor
         }
-        result.unwrap(list.push(mut rows, sum))
+        list.push(mut rows, sum)
     }
     take rows
 }
 
 fn multiply(tasks: Tasks, take values: List[f64], transpose: bool) -> List[f64] waits {
     let n = list.len(values)
-    let vector = result.unwrap(arc.new(Vector(values: take values)))
-    let mut jobs: List[Task[List[f64]]] = result.unwrap(list.with_capacity(BLOCKS))
+    let vector = arc.new(Vector(values: take values))
+    let mut jobs: List[Task[List[f64]]] = list.with_capacity(BLOCKS)
     for index in 0 .. BLOCKS {
         let block = BLOCKS - index - 1
         let job = Job(vector: arc.share(vector), transpose: transpose, start: block * n / BLOCKS, end: (block + 1) * n / BLOCKS)
-        let h = result.unwrap(task.spawn(tasks, bytes 65536, take job, multiply_rows))
-        result.unwrap(list.push(mut jobs, take h))
+        let h = task.spawn(tasks, bytes 65536, take job, multiply_rows)
+        list.push(mut jobs, take h)
     }
-    let mut output: List[f64] = result.unwrap(list.with_capacity(n))
+    let mut output: List[f64] = list.with_capacity(n)
     while let Some(take h) = list.pop(mut jobs) {
         let rows = result.unwrap(task.join(take h))
-        result.unwrap(list.append(mut output, rows))
+        list.append(mut output, rows)
     }
     take output
 }
@@ -41,7 +41,7 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let Some(number) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let n: u64 = result.unwrap(int.parse(number))
     let mut u: List[f64] = list.new()
-    result.unwrap(list.fill(mut u, n, 1.0))
+    list.fill(mut u, n, 1.0)
     for _ in 0u64 .. 9 {
         let au = multiply(tasks, take u, false)
         let v = multiply(tasks, take au, true)
@@ -51,8 +51,8 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     // v is needed for the final dot products. Preserve it on the last pass.
     let au = multiply(tasks, take u, false)
     let v = multiply(tasks, take au, true)
-    let mut saved: List[f64] = result.unwrap(list.with_capacity(n))
-    result.unwrap(list.append(mut saved, v))
+    let mut saved: List[f64] = list.with_capacity(n)
+    list.append(mut saved, v)
     let av = multiply(tasks, take saved, false)
     let last_u = multiply(tasks, take av, true)
     let mut uv: f64 = 0.0
@@ -62,8 +62,8 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
         vv += v[i] * v[i]
     }
     let mut line = string.new()
-    result.unwrap(std.float.push_fixed64(mut line, float.sqrt(uv / vv), 9))
-    result.unwrap(string.push(mut line, "\n"))
+    std.float.push_fixed64(mut line, float.sqrt(uv / vv), 9)
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
     Ok(())
 }

@@ -4,10 +4,10 @@
 fn clone_wrapped_partial() -> u64 {
     let mut d: Deque[u64] = deque.new()
     for i in 0u64 .. 4 {
-        result.unwrap(deque.push_back(mut d, i))
+        deque.push_back(mut d, i)
     }
     let _ = deque.pop_front(mut d)
-    let mut cloned: Deque[u64] = result.unwrap(clone(d))
+    let mut cloned: Deque[u64] = clone(d)
     let mut a: u64 = 0
     let mut b: u64 = 0
     while deque.len(cloned) > 0 {
@@ -24,12 +24,12 @@ fn clone_wrapped_partial() -> u64 {
 fn clone_nested_live_range() -> u64 {
     let mut d: Deque[u64] = deque.new()
     for i in 0u64 .. 4 {
-        result.unwrap(deque.push_back(mut d, i))
+        deque.push_back(mut d, i)
     }
     let _ = deque.pop_front(mut d)
     let mut xs: List[Deque[u64]] = list.new()
-    result.unwrap(list.push(mut xs, take d))
-    let mut copied: List[Deque[u64]] = result.unwrap(clone(xs))
+    list.push(mut xs, take d)
+    let mut copied: List[Deque[u64]] = clone(xs)
     let mut left = option.unwrap(list.pop(mut xs))
     let mut right = option.unwrap(list.pop(mut copied))
     let mut a: u64 = 0

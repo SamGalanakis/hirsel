@@ -86,6 +86,7 @@ pub(crate) fn refusal(rule: &str, primary: Site, message: impl Into<String>) -> 
         declared: None,
         required: None,
         message: message.into(),
+        unresolved: None,
     }
 }
 
@@ -114,6 +115,7 @@ pub struct Program<'a> {
     pub fns: Rows<FnDecl>,
     pub constants: Rows<Constant>,
     pub constant_parts: Rows<ConstValue>,
+    pub(crate) constant_strings: Rows<Vec<u8>>,
     pub(crate) constant_ids: Rows<Option<u32>>,
     pub by_path: HashMap<DefPath, Def>,
     pub by_definition: Rows<Option<Def>>,
@@ -145,9 +147,10 @@ pub struct Program<'a> {
 }
 
 /// The core types lowering builds, matches or lays out without the program naming
-/// them: a capacity failure, a string literal, a region, a `Causes` element. A
+/// them: a capacity failure, a string literal, a region, a `Causes` element, the
+/// `Arc[T]` holder a `Latest` root drops. A
 /// body's reuse key covers every one, since no resolved name of the body reaches it.
-pub const PRELUDE: [&str; 14] = [
+pub const PRELUDE: [&str; 15] = [
     "String",
     "Result",
     "Capacity",
@@ -162,6 +165,7 @@ pub const PRELUDE: [&str; 14] = [
     "Bytes",
     "Option",
     "OutOfTime",
+    "Arc",
 ];
 /// The items body lowering calls by a path it builds from a callee the body
 /// resolves, keeping the callee's package and modules and replacing its name:
@@ -281,6 +285,7 @@ impl<'a> Program<'a> {
             "Bytes" => 11,
             "Option" => 12,
             "OutOfTime" => 13,
+            "Arc" => 14,
             _ => panic!("`{name}` is not a core prelude type"),
         };
         debug_assert_eq!(PRELUDE[slot], name);
@@ -489,6 +494,9 @@ impl<'a> Program<'a> {
             }),
             constant_parts: library.map_or_else(Rows::default, |l| {
                 Rows::overlay(std::sync::Arc::clone(&l.constant_parts))
+            }),
+            constant_strings: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.constant_strings))
             }),
             constant_ids: {
                 let mut ids = library.map_or_else(Rows::default, |l| {

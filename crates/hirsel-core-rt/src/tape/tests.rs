@@ -277,6 +277,7 @@ struct Ob {
     error: IoError,
     written: u64,
     status: u8,
+    kind: u8,
     bytes: Vec<u8>,
 }
 
@@ -329,7 +330,7 @@ fn call(
         // SAFETY: the provider initialised the carrier up to the request's len.
         unsafe { carrier.set_len(r.buffer.len) };
     }
-    let created = o.status == 0 && o.error == IoError::OK && matches!(op, OPEN | MKDTEMP);
+    let created = o.status == 0 && o.error == IoError::OK && creates_object(op);
     Ob {
         op,
         value: if created {
@@ -340,6 +341,7 @@ fn call(
         error: o.error,
         written: o.written,
         status: o.status,
+        kind: o.kind,
         bytes: carrier.clone(),
     }
 }
@@ -442,6 +444,7 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         arg: b"arg".to_vec(),
         net_rules: vec![],
         secret_grants: vec![],
+        env: None,
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -560,10 +563,10 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is vectors.py's format-4 derivation from REPLAY-SPEC §5,
+/// The oracle is vectors.py's format-5 derivation from REPLAY-SPEC §5,
 /// checked with libxxhash. Its Call header has a 32-byte revision.
 #[test]
-fn the_encoder_writes_the_format_4_model_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         tape_id: std::array::from_fn(|i| i as u8),
@@ -576,6 +579,7 @@ fn the_encoder_writes_the_format_4_model_tape_byte_for_byte() {
         arg: b"arg-7".to_vec(),
         net_rules: vec![],
         secret_grants: vec![],
+        env: None,
     };
     let mono = |v: u64| Frame::Op {
         task: 0,
@@ -1563,8 +1567,10 @@ fn tape_frames(mut bytes: &[u8]) -> Vec<Frame> {
 /// (before the sync helper) that no longer replays.
 #[test]
 fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
+    crate::openat2_required::require();
     super::run::check_launch_replay();
-    let root = std::env::temp_dir().join(format!("hirsel-tape-{}", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     let (world_dir, store_dir) = (root.join("world"), root.join("store"));
     std::fs::create_dir_all(&world_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
@@ -1692,6 +1698,8 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
         } else {
             assert_eq!(failed, [11]);
         }
+        // The recording's blocks are written by the writer thread.
+        super::writer::flush();
         let frames = tape_frames(&std::fs::read(store_dir.join("t")).unwrap());
         let syncs_at: Vec<usize> = (0..frames.len())
             .filter(|&i| {
@@ -1773,6 +1781,8 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
             .iter()
             .all(|o| o.status == 0 && o.error == IoError::OK)
     );
+    // The recording's blocks are written by the writer thread.
+    super::writer::flush();
     let frames = tape_frames(&std::fs::read(store_dir.join("t")).unwrap());
     let issued = frames
         .iter()
@@ -1792,7 +1802,117 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     assert_eq!(refuse.calls.get(), 0);
 
     drop(os);
-    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Replay supplies directory records, file data, and metadata after the
+/// recorded host namespace disappears. The substitute may issue no host call.
+#[test]
+fn filesystem_observations_survive_removing_the_recorded_directory() {
+    super::run::check_launch_replay();
+    crate::openat2_required::require();
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
+    let world = root.join("world");
+    let store = root.join("store");
+    std::fs::create_dir_all(world.join("child")).unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    let file_path = world.join("child/data");
+    let data = std::fs::File::create(&file_path).unwrap();
+    let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(2);
+    data.set_times(std::fs::FileTimes::new().set_modified(before_epoch))
+        .unwrap();
+    drop(data);
+    std::fs::create_dir(world.join("child/other")).unwrap();
+    let stdout = std::fs::File::create(root.join("stdout")).unwrap();
+    let stderr = std::fs::File::create(root.join("stderr")).unwrap();
+    let mut os = Box::new(OsProvider::new(stdout.into(), stderr.into()));
+    let (wd, sd) = (os.grant(&world).unwrap(), os.grant(&store).unwrap());
+    let (store, real) = (os.provider(), os.provider());
+
+    let taped = |mode: Mode, host: Provider, wd: u64| {
+        let mut observations = Vec::new();
+        in_task(mode == Mode::Record, &mut |context| {
+            TASK.set(context);
+            let mut h = header(REVISION);
+            h.kind = KIND_RUN;
+            // SAFETY: the provider and tape store grant are pinned outside this task.
+            let (tape, _) =
+                unsafe { Tape::open(REVISION, (store, sd), b"t", mode, &h, &expect()) }.unwrap();
+            let root = tape.on_tape(crate::entry::DIR, (host, wd)).unwrap();
+            let open_dir = plain(root, OPEN_DIR, 0, b"child");
+            let dir = (root.0, handle_like(root.1, open_dir.value));
+            let open_entries = plain(dir, ENTRIES, 0, &[]);
+            let listing = (dir.0, handle_like(dir.1, open_entries.value));
+            let open_file = plain(dir, OPEN, 4, b"data");
+            let file = (dir.0, handle_like(dir.1, open_file.value));
+            observations = vec![
+                open_dir,
+                open_entries,
+                spare(listing, NEXT_ENTRIES, &[], 258),
+                spare(listing, NEXT_ENTRIES, &[], 258),
+                plain(listing, CLOSE_ENTRIES, 0, &[]),
+                plain(dir, STAT, 0, b"data"),
+                open_file,
+                call(
+                    file,
+                    WRITE_AT,
+                    4,
+                    &4u64.to_le_bytes(),
+                    &mut b"Z".to_vec(),
+                    true,
+                ),
+                call(
+                    file,
+                    READ_AT,
+                    4,
+                    &2u64.to_le_bytes(),
+                    &mut Vec::with_capacity(8),
+                    false,
+                ),
+                plain(file, STAT_FILE, 0, &[]),
+                plain(file, CLOSE, 0, &[]),
+            ];
+            tape.end(&ending()).unwrap();
+            TASK.set(ptr::null_mut());
+        });
+        observations
+    };
+
+    let recorded = taped(Mode::Record, real, wd);
+    assert!(
+        recorded
+            .iter()
+            .all(|o| o.status == 0 && o.error == IoError::OK)
+    );
+    assert_eq!(recorded[2].value, 2);
+    assert_eq!(recorded[3].value, 0);
+    assert_eq!(
+        (
+            recorded[5].kind,
+            recorded[5].value,
+            recorded[5].written as i64
+        ),
+        (0, 0, -2_000_000_000)
+    );
+    assert_eq!(
+        (recorded[7].written, recorded[8].bytes.as_slice()),
+        (1, &[0, 0, b'Z'][..])
+    );
+    assert_eq!((recorded[9].kind, recorded[9].value), (0, 5));
+
+    std::fs::remove_dir_all(&world).unwrap();
+    let blocked = Counted::new(None);
+    let replayed = taped(Mode::Replay, blocked.provider(), 0);
+    assert_eq!(
+        blocked.calls.get(),
+        0,
+        "replay touched the removed directory"
+    );
+    assert_eq!(
+        replayed, recorded,
+        "the recorded filesystem observations changed"
+    );
+    drop(os);
 }
 
 /// A REPEAT needs two consecutive CHOOSE frames in its block and a positive

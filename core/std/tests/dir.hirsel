@@ -45,8 +45,8 @@ fn remove_all_missing(d: Dir) -> u64 waits {
 // a file can be written in it through the Dir returned.
 // expect: run create_temp_names(dir) = true
 fn create_temp_names(d: Dir) -> bool waits {
-    let mut name = result.unwrap(string.with_capacity(40))
-    result.unwrap(string.push(mut name, "t-"))
+    let mut name = string.with_capacity(40)
+    string.push(mut name, "t-")
     let tmp = result.unwrap(dir.create_temp(d, mut name))
     result.unwrap(file.write(tmp, "x", string.as_bytes("1")))
     let grew = string.byte_len(name) > 2 && string.starts_with(name, "t-")
@@ -81,4 +81,55 @@ fn remove_tree_keeps_completed_prefix(d: Dir) -> bool waits {
     let kept = list.len(b) == 1 && b[0] == b'b'
     result.unwrap(dir.remove_all(d, "tree"))
     kept
+}
+
+// Every encoded record fits alone in 258 bytes. No pair fits, so a reader
+// must retain a record it fetched at the end of the preceding call.
+// expect: run list_small_batches(dir) = true
+fn list_small_batches(d: Dir) -> bool waits {
+    result.unwrap(dir.create_dir(d, "scan"))
+    let scan = result.unwrap(dir.narrow(d, "scan"))
+    let b = string.repeat("b", 255)
+    let a = string.repeat("a", 254)
+    let c = string.repeat("C", 253)
+    result.unwrap(dir.create_dir(scan, b))
+    result.unwrap(file.write(scan, a, string.as_bytes("a")))
+    result.unwrap(file.write(scan, c, string.as_bytes("C")))
+    let mut handle = result.unwrap(dir.entries(scan))
+    let mut buf: Bytes = list.with_capacity(258)
+    let mut seen: u8 = 0
+    loop {
+        let count = result.unwrap(dir.next_entries(mut handle, mut buf))
+        if count == 0 {
+            if list.len(buf) != 0 {
+                fail("an empty batch appended bytes")
+            }
+            break
+        }
+        let size: u16 = list.word_le(buf, 1)
+        let name_len: u64 = int.widen(size)
+        if count != 1 || list.len(buf) != 3 + name_len {
+            fail("a batch did not contain exactly one whole record")
+        }
+        let first = buf[3]
+        let mask: u8 = if first == b'b' && size == 255 && buf[0] == 1 {
+            1
+        } else if first == b'a' && size == 254 && buf[0] == 0 {
+            2
+        } else if first == b'C' && size == 253 && buf[0] == 0 {
+            4
+        } else {
+            fail("unexpected listing record")
+        }
+        if seen & mask != 0 {
+            fail("a directory entry was delivered twice")
+        }
+        seen = seen | mask
+        list.clear(mut buf)
+    }
+    if seen != 7 {
+        fail("an entry was lost between batches")
+    }
+    let sorted = result.unwrap(dir.list(scan))
+    list.len(sorted) == 3 && sorted[0].name == c && sorted[1].name == a && sorted[2].name == b
 }

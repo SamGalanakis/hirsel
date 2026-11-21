@@ -37,6 +37,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             own: None,
             anchors: 0,
             mut_anchor: false,
+            lent: None,
         });
         self.born += 1;
         self.set(b, Avail::Live, n);
@@ -271,6 +272,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.check_holds_at(p, act, self.span(n))
     }
     pub(super) fn check_holds_at(&mut self, p: Place, act: Act, site: Span) -> bool {
+        self.check_holds_skipping(p, act, site, 0..0)
+    }
+    /// As `check_holds`, ignoring the records in `skip`: the selection views a `mut`
+    /// pattern binding's loan subsumes (OWN-15).
+    pub(super) fn check_holds_except(
+        &mut self,
+        p: Place,
+        act: Act,
+        n: NodeId,
+        skip: std::ops::Range<usize>,
+    ) -> bool {
+        self.check_holds_skipping(p, act, self.span(n), skip)
+    }
+    fn check_holds_skipping(
+        &mut self,
+        p: Place,
+        act: Act,
+        site: Span,
+        skip: std::ops::Range<usize>,
+    ) -> bool {
         crate::cost_scope!("phase", "ownership state");
         if matches!(act, Act::Write) {
             self.capture_write(p.slot, site);
@@ -279,6 +300,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return true;
         }
         for i in (0..self.freezes.len()).rev() {
+            if skip.contains(&i) {
+                continue;
+            }
             let f = self.freezes[i];
             if overlap(&self.steps, f.place, p)
                 && let Some(rule) = breaks(f.hold, act)
@@ -289,6 +313,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Hold::CallView(..) => "is viewed by an argument of this call",
                     Hold::CallMut(..) => "is lent `mut` to this call",
                     Hold::Assign => "is reserved by an assignment",
+                    Hold::Lent(_) => "is lent `mut` to a pattern binding",
                 };
                 let cause = self.cause(f.site);
                 self.refuse_from(
@@ -312,8 +337,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn refreeze(&mut self, f: Freeze) {
         crate::cost_scope!("phase", "ownership state");
-        self.vars[f.place.slot as usize].as_mut().unwrap().holds += 1;
+        let var = self.vars[f.place.slot as usize].as_mut().unwrap();
+        var.holds += 1;
+        let lent = var.lent;
         self.freezes.push(f);
+        // A hold on a `mut` pattern binding holds the scrutinee place it names, so a
+        // freeze anchored to it outlives the arm (OWN-15, OWN-20). An assignment's
+        // reservation through it needs no copy: the loan already excludes the rest.
+        if let Some(lent) = lent
+            && f.hold != Hold::Assign
+        {
+            let place = self.unalias(f.place, lent);
+            self.refreeze(Freeze { place, ..f });
+        }
+    }
+    /// The scrutinee place a place of `mut` pattern binding names, `lent` being the
+    /// binding's own (OWN-15).
+    pub(super) fn unalias(&mut self, place: Place, lent: Place) -> Place {
+        let start = self.steps.len() as u32;
+        self.steps
+            .extend_from_within(lent.start as usize..(lent.start + lent.len) as usize);
+        self.steps
+            .extend_from_within(place.start as usize..(place.start + place.len) as usize);
+        Place {
+            slot: lent.slot,
+            start,
+            len: lent.len + place.len,
+        }
     }
     /// Rewrite or end the records from `from` on: `f` gives a record's new hold, or
     /// None when it ends.
@@ -337,8 +387,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
     /// `n` is not a place; Err when it was refused or is not built.
     pub(super) fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
-        if self.ascribed_operand.is_some_and(|(source, _)| source == n) {
-            let (_, at) = self.ascribed_operand.take().unwrap();
+        if self.resolved_operand.is_some_and(|(source, _)| source == n) {
+            let (_, at) = self.resolved_operand.take().unwrap();
             self.anchors.place = Some((n, at));
             return Ok(Some(at));
         }
@@ -356,7 +406,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     if at.ty == ty {
                         Ok(Some(at))
                     } else {
-                        self.ascribed_operand = Some((*value, at));
+                        self.resolved_operand = Some((*value, at));
                         Ok(None)
                     }
                 } else {
@@ -516,7 +566,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let Some((i, ft)) = found else {
             if inner != ERROR {
-                self.refuse("LANG-9", n, format!("this type has no field `{name}`"));
+                let mut refusal = refusal(
+                    "LANG-9",
+                    self.cause(n),
+                    format!("this type has no field `{name}`"),
+                );
+                if let TyKind::Adt(d, _) = self.t.kind(inner) {
+                    let decl = &self.p.decls[d.index()];
+                    refusal = refusal.with_unresolved(name, NameScope::Field(decl.path.clone()));
+                }
+                self.push_refusal(refusal);
             }
             return Err(());
         };
@@ -719,7 +778,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         n,
                     );
                 }
-                PStep::Any => unreachable!("payload overlap marker is not an emitted place"),
+                PStep::Case(..) => unreachable!("a pattern's payload place is not emitted"),
             }
             if let Some(place @ PlaceTy::Declared(_)) = self.place_ty(ty, n) {
                 let pointer = self.pointer(address, n);
@@ -1460,14 +1519,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let d = self.depth;
         let tail = self.type_kind(value) != Kind::Scoped;
         self.unfreeze(freezes, |h| {
-            let ends = h == Hold::View(Extent::Block(d)) || tail && h == Hold::View(Extent::Temp);
+            let ends = h == Hold::View(Extent::Block(d))
+                || h == Hold::Lent(d)
+                || tail && h == Hold::View(Extent::Temp);
             (!ends).then_some(h)
         });
         if !self.dead {
             for i in start..self.scope_slots.len() {
                 let s = self.scope_slots[i];
                 let v = self.var(s);
-                if matches!(v.avail, Avail::Live | Avail::Maybe) && !self.copies(v.ty) {
+                // A `mut` pattern binding owns nothing, so nothing is dropped with it.
+                if matches!(v.avail, Avail::Live | Avail::Maybe)
+                    && !self.copies(v.ty)
+                    && v.lent.is_none()
+                {
                     self.check_holds_at(Place::whole(s), Act::Write, self.close_brace(n));
                 }
             }

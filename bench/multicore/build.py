@@ -210,7 +210,8 @@ def hirsel_inputs(src):
     ]}
 
 
-def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False):
+def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False, *,
+                 recording_runtime=None):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
@@ -219,6 +220,9 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
         str(llvm / "lib"), os.environ.get("LD_LIBRARY_PATH")
     ]))
     succeeded = True
+    replay = out / "regimes-replay.json"
+    if regimes:
+        replay.unlink(missing_ok=True)
     for src in sorted((BENCH / "hirsel").glob("*.hirsel")):
         case = src.stem
         if (case == "regimes") != regimes:
@@ -233,28 +237,48 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
         inputs.write_text(json.dumps(hirsel_inputs(src)))
         # Build independently so a refusal in one port still leaves the other binaries usable.
         log = out / f"hirsel-{case}.log"
-        command = [
-            ROOT / "tools/capped", compiler, "build", "--inputs", inputs,
-            "--entry", f"multicore@1/{case}/main", "--backend", engine,
-            "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
-            "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", "268435456",
-            "--json", "-o", path / case,
+        common = [
+            "--inputs", inputs, "--entry", f"multicore@1/{case}/main",
+            "--backend", engine, "--cc", llvm / "bin/clang", "--store", out / "store",
         ]
-        if case == "mandelbrot":
-            command += ["--grant", "Clock", "--grant", "Stderr"]
-        if s8u:
-            command += ["--grant", "Clock"]
-        if regimes:
-            command += ["--grant", "Clock", "--grant", "Stderr", "--debug-lines", "on",
-                        "--grant", "Net=Listen 127.0.0.1/32 0-65535"]
         if engine == "llvm":
-            command.append("--release")
+            common.append("--release")
+        if regimes:
+            common += ["--debug-lines", "on"]
+        grants = ["--grant", "Stdout", "--grant", "Tasks", "--limit", "268435456"]
+        if case in {"knucleotide", "regimes"}:
+            grants += ["--dir", out]
+        if case == "mandelbrot" or regimes:
+            grants += ["--grant", "Clock", "--grant", "Stderr"]
+        elif s8u:
+            grants += ["--grant", "Clock"]
+        if regimes:
+            grants += ["--grant", "Net=Listen 127.0.0.1/32 0-65535"]
+        command = [
+            ROOT / "tools/capped", compiler, "build", *common, *grants,
+            "--runtime", runtime, "--json", "-o", path / case,
+        ]
         with log.open("wb") as file:
             result = subprocess.run(list(map(str, command)), env=env, stdout=file, stderr=subprocess.STDOUT)
         if result.returncode:
             succeeded = False
             (path / case).unlink(missing_ok=True)
             print(f"Hirsel {case}: exit {result.returncode}; see {log}", flush=True)
+        if regimes and recording_runtime and result.returncode == 0:
+            recorded = path / "regimes-recording"
+            archive = ["--runtime", recording_runtime]
+            with (out / "hirsel-regimes-recording.log").open("wb") as file:
+                result = subprocess.run(
+                    list(map(str, [ROOT / "tools/capped", compiler, "build", *common, *grants,
+                                   *archive, "--recording", "--json", "-o", recorded])),
+                    env=env, stdout=file, stderr=subprocess.STDOUT,
+                )
+            if result.returncode:
+                succeeded = False
+                recorded.unlink(missing_ok=True)
+                print(f"Hirsel recording build: exit {result.returncode}; see its log", flush=True)
+            else:
+                replay.write_text(json.dumps(list(map(str, [compiler, "replay", *common, *archive]))))
     return succeeded
 
 
@@ -312,6 +336,8 @@ def main():
     parser.add_argument("--goose", type=Path, help="Goose compiler built from d5ae5bbd")
     parser.add_argument("--hirsel", type=Path, help="release Hirsel driver")
     parser.add_argument("--runtime", type=Path, help="native runtime archive (testing for --regimes)")
+    parser.add_argument("--recording-runtime", type=Path,
+                        help="testing runtime with recording enabled for recorded --regimes runs")
     parser.add_argument("--engine", choices=["llvm", "cranelift"], default="llvm")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
@@ -320,6 +346,8 @@ def main():
     selection.add_argument("--s0", action="store_true", help="build only the S0 Hirsel, Tokio and Rust fixtures")
     selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
+    if options.recording_runtime and not options.regimes:
+        parser.error("--recording-runtime requires --regimes")
     if options.regimes:
         languages = ["rust", "go", "hirsel"]
     elif options.s8u:
@@ -345,7 +373,11 @@ def main():
         elif language == "go":
             build_go(out, options.game.resolve() if options.game else None, options.go)
         elif language == "hirsel":
-            succeeded = build_hirsel(out, options.hirsel.resolve(), options.runtime.resolve(), options.engine, options.s0, options.s8u, options.regimes)
+            succeeded = build_hirsel(
+                out, options.hirsel.resolve(), options.runtime.resolve(), options.engine,
+                options.s0, options.s8u, options.regimes,
+                recording_runtime=options.recording_runtime.resolve() if options.recording_runtime else None,
+            )
         elif language == "goose":
             build_goose(out, options.goose.resolve())
     if options.regimes:

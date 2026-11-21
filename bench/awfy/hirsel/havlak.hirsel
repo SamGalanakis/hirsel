@@ -17,7 +17,7 @@ type Graph {
 
 fn create_node(mut graph: Graph, name: u64) -> Result[(), Capacity] {
     while list.len(graph.blocks) <= name {
-        result.capacity_only(list.push(mut graph.blocks, Block(incoming: list.new(), outgoing: list.new(), present: false)))?
+        list.push(mut graph.blocks, Block(incoming: list.new(), outgoing: list.new(), present: false))
     }
     graph.blocks[name].present = true
     Ok(())
@@ -26,9 +26,9 @@ fn create_node(mut graph: Graph, name: u64) -> Result[(), Capacity] {
 fn add_edge(mut graph: Graph, from: u64, to: u64) -> Result[(), Capacity] {
     create_node(mut graph, from)?
     create_node(mut graph, to)?
-    result.capacity_only(list.push(mut graph.blocks[from].outgoing, to))?
-    result.capacity_only(list.push(mut graph.blocks[to].incoming, from))?
-    result.capacity_only(list.push(mut graph.edges, (from, to)))
+    list.push(mut graph.blocks[from].outgoing, to)
+    list.push(mut graph.blocks[to].incoming, from)
+    Ok(list.push(mut graph.edges, (from, to)))
 }
 
 fn straight(mut graph: Graph, from: u64, count: u64) -> Result[u64, Capacity] {
@@ -93,7 +93,7 @@ fn append_unique(mut items: List[u64], n: u64) -> Result[(), Capacity] {
     if contains(items, n) {
         Ok(())
     } else {
-        result.capacity_only(list.push(mut items, n))
+        Ok(list.push(mut items, n))
     }
 }
 
@@ -109,11 +109,11 @@ fn contains(items: List[u64], target: u64) -> bool {
 fn new_loop(mut loops: List[SimpleLoop], block: Option[u64], reducible: bool) -> Result[u64, Capacity] {
     let mut blocks: List[u64] = list.new()
     if let Some(node) = block {
-        result.capacity_only(list.push(mut blocks, node))?
+        list.push(mut blocks, node)
     }
     let index = list.len(loops)
     let value = SimpleLoop(blocks: take blocks, children: list.new(), parent: None, root: block == None, reducible: reducible, depth: 0, nesting: 0)
-    result.capacity_only(list.push(mut loops, take value))?
+    list.push(mut loops, take value)
     Ok(index)
 }
 
@@ -169,14 +169,14 @@ fn new_finder(size: u64) -> Result[Finder, Capacity] {
     for _ in 0 .. size {
         let incoming: List[u64] = list.new()
         let back: List[u64] = list.new()
-        result.capacity_only(list.push(mut f.incoming, take incoming))?
-        result.capacity_only(list.push(mut f.back, take back))?
+        list.push(mut f.incoming, take incoming)
+        list.push(mut f.back, take back)
     }
     let zero = 0u64
-    list.fill(mut f.header, size, zero)?
-    list.fill(mut f.kind, size, Top)?
-    list.fill(mut f.last, size, zero)?
-    list.fill(mut f.nodes, size, UnionNode(parent: 0, block: None, loop_id: None, ordinal: 0))?
+    list.fill(mut f.header, size, zero)
+    list.fill(mut f.kind, size, Top)
+    list.fill(mut f.last, size, zero)
+    list.fill(mut f.nodes, size, UnionNode(parent: 0, block: None, loop_id: None, ordinal: 0))
     Ok(take f)
 }
 
@@ -207,7 +207,7 @@ fn find_set(mut f: Finder, start: u64) -> Result[u64, Capacity] {
     while node != f.nodes[node].parent {
         let parent = f.nodes[node].parent
         if parent != f.nodes[parent].parent {
-            result.capacity_only(list.push(mut path, node))?
+            list.push(mut path, node)
         }
         node = parent
     }
@@ -228,7 +228,7 @@ fn identify_edges(graph: Graph, mut f: Finder, size: u64) -> Result[(), Capacity
                 let v = option.unwrap(numbers.get(f.number, pred))
                 if v != UNVISITED {
                     if ancestor(f, w, v) {
-                        result.capacity_only(list.push(mut f.back[w], v))?
+                        list.push(mut f.back[w], v)
                     } else {
                         append_unique(mut f.incoming[w], v)?
                     }
@@ -249,11 +249,11 @@ fn process_header(mut f: Finder, mut loops: List[SimpleLoop], w: u64, block: u64
             f.kind[w] = SelfLoop
         } else {
             let root = find_set(mut f, v)?
-            result.capacity_only(list.push(mut pool, root))?
+            list.push(mut pool, root)
         }
     }
     let mut work: List[u64] = list.new()
-    list.append(mut work, pool)?
+    list.append(mut work, pool)
     if list.len(pool) != 0 {
         f.kind[w] = Reducible
     }
@@ -272,8 +272,8 @@ fn process_header(mut f: Finder, mut loops: List[SimpleLoop], w: u64, block: u64
                 f.kind[w] = Irreducible
                 append_unique(mut f.incoming[w], y)?
             } else if y != w && !contains(pool, root) {
-                result.capacity_only(list.push(mut work, root))?
-                result.capacity_only(list.push(mut pool, root))?
+                list.push(mut work, root)
+                list.push(mut pool, root)
             }
             i += 1
         }

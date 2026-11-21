@@ -30,10 +30,10 @@ fn compute(take job: Work) -> u64 {
 fn independent(tasks: Tasks, lanes: u64, waves: u64, grain: u64) -> u64 waits {
     let mut sum = 0u64
     for wave in 0 .. waves {
-        let mut jobs: List[Task[u64]] = result.unwrap(list.with_capacity(lanes))
+        let mut jobs: List[Task[u64]] = list.with_capacity(lanes)
         for lane in 0 .. lanes {
             let job = Work(start: 1 + wave * lanes + lane, count: 1, grain: grain)
-            result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, job, compute))))
+            list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, job, compute))
         }
         while let Some(take h) = list.pop(mut jobs) {
             sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
@@ -62,10 +62,10 @@ fn stage(take job: Stage) -> () waits {
 }
 
 fn pair(take job: Pair) -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let (out, reply): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (out, reply): (Sender[u64], Receiver[u64]) = channel.new(1)
     let child = Stage(input: take rx, output: take out, count: job.work.count, grain: job.work.grain)
-    let h = result.unwrap(task.spawn(job.tasks, bytes TASK_BYTES, take child, stage))
+    let h = task.spawn(job.tasks, bytes TASK_BYTES, take child, stage)
     let mut sum = 0u64
     for i in 0 .. job.work.count {
         result.unwrap(channel.send(tx, job.work.start + i))
@@ -79,7 +79,7 @@ fn chain(take job: Pair) -> u64 waits {
     let mut sum = 0u64
     for i in 0 .. job.work.count {
         let leaf = Work(start: job.work.start + i, count: 1, grain: job.work.grain)
-        let h = result.unwrap(task.spawn(job.tasks, bytes TASK_BYTES, leaf, compute))
+        let h = task.spawn(job.tasks, bytes TASK_BYTES, leaf, compute)
         sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
     }
     sum
@@ -89,7 +89,7 @@ fn parallel_pairs(tasks: Tasks, count: u64, grain: u64, f: fn(take Pair) -> u64 
     let mut jobs: List[Task[u64]] = list.new()
     for lane in 0 .. LANES {
         let job = Pair(tasks: tasks, work: Work(start: lane * count + 1, count: count, grain: grain))
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes 131072, job, f))))
+        list.push(mut jobs, task.spawn(tasks, bytes 131072, job, f))
     }
     let mut sum = 0u64
     while let Some(take h) = list.pop(mut jobs) {
@@ -125,11 +125,11 @@ fn join_all(take pending: List[Task[()]]) waits {
 }
 
 fn fan_in(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
-    let (out, input): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let (out, input): (Sender[u64], Receiver[u64]) = channel.new(64)
     let mut jobs: List[Task[()]] = list.new()
     for lane in 0 .. LANES {
         let job = Producer(output: channel.sender(out), work: Work(start: lane * count + 1, count: count, grain: grain))
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, produce))))
+        list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take job, produce))
     }
     let sum = collect(input, LANES * count)
     join_all(take jobs)
@@ -150,34 +150,34 @@ fn dispatch(take job: Dispatch) -> () waits {
 }
 
 fn fan_out(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
-    let (out, input): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let (out, input): (Sender[u64], Receiver[u64]) = channel.new(64)
     let mut jobs: List[Task[()]] = list.new()
     let mut outputs: List[Sender[u64]] = list.new()
     for _ in 0 .. LANES {
-        let (send, receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
-        result.unwrap(list.push(mut outputs, take send))
+        let (send, receive): (Sender[u64], Receiver[u64]) = channel.new(64)
+        list.push(mut outputs, take send)
         let job = Stage(input: take receive, output: channel.sender(out), count: count, grain: grain)
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, stage))))
+        list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take job, stage))
     }
     let job = Dispatch(outputs: take outputs, count: count)
-    result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, dispatch))))
+    list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take job, dispatch))
     let sum = collect(input, LANES * count)
     join_all(take jobs)
     sum
 }
 
 fn pipeline(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
-    let (sender, receiver): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let (sender, receiver): (Sender[u64], Receiver[u64]) = channel.new(64)
     let mut input = take receiver
     let mut jobs: List[Task[()]] = list.new()
     for _ in 0 .. 8u64 {
-        let (out, next): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+        let (out, next): (Sender[u64], Receiver[u64]) = channel.new(64)
         let job = Stage(input: take input, output: take out, count: count, grain: grain)
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, stage))))
+        list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take job, stage))
         input = take next
     }
     let source = Producer(output: take sender, work: Work(start: 1, count: count, grain: 0))
-    result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take source, produce))))
+    list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take source, produce))
     let sum = collect(input, count)
     join_all(take jobs)
     sum
@@ -196,8 +196,8 @@ fn tree(take job: Branch) -> u64 waits {
     let left = Branch(tasks: job.tasks, start: job.start, leaves: half, grain: job.grain)
     let right = Branch(tasks: job.tasks, start: job.start + half, leaves: half, grain: job.grain)
     let allowance = (2 * half - 1) * TASK_BYTES
-    let a = result.unwrap(task.spawn(job.tasks, bytes allowance, left, tree))
-    let b = result.unwrap(task.spawn(job.tasks, bytes allowance, right, tree))
+    let a = task.spawn(job.tasks, bytes allowance, left, tree)
+    let b = task.spawn(job.tasks, bytes allowance, right, tree)
     int.wrapping_add(result.unwrap(task.join(take a)), result.unwrap(task.join(take b)))
 }
 
@@ -245,19 +245,19 @@ fn touch(take job: Client) -> u64 waits {
 }
 
 fn hub(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
-    let (request, requests): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let (release, releases): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let (request, requests): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (release, releases): (Sender[()], Receiver[()]) = channel.new(1)
     let mut replies: List[Sender[()]] = list.new()
     let mut clients: List[Task[u64]] = list.new()
     for lane in 0 .. LANES {
-        let (grant, permit): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
-        result.unwrap(list.push(mut replies, take grant))
+        let (grant, permit): (Sender[()], Receiver[()]) = channel.new(1)
+        list.push(mut replies, take grant)
         let job = Client(request: channel.sender(request), release: channel.sender(release), grant: take permit,
                          lane: lane, work: Work(start: lane * count + 1, count: count, grain: grain))
-        result.unwrap(list.push(mut clients, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, touch))))
+        list.push(mut clients, task.spawn(tasks, bytes TASK_BYTES, take job, touch))
     }
     let job = Hub(request: take requests, release: take releases, replies: take replies, count: LANES * count)
-    let owner = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, broker))
+    let owner = task.spawn(tasks, bytes TASK_BYTES, take job, broker)
     let mut sum = 0u64
     while let Some(take h) = list.pop(mut clients) {
         sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
@@ -286,11 +286,11 @@ fn arc_worker(take job: ArcJob) -> u64 {
 }
 
 fn arc_hub(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
-    let shared = result.unwrap(arc.new(Shared(value: 1)))
+    let shared = arc.new(Shared(value: 1))
     let mut jobs: List[Task[u64]] = list.new()
     for lane in 0 .. LANES {
         let job = ArcJob(shared: arc.share(shared), work: Work(start: lane * count + 1, count: count, grain: grain))
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, arc_worker))))
+        list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take job, arc_worker))
     }
     let mut sum = 0u64
     while let Some(take h) = list.pop(mut jobs) {
@@ -325,23 +325,23 @@ fn hot_pair(take job: Hot) -> (u64, u64) waits {
 }
 
 fn append(mut line: String, name: String, value: u64) {
-    result.unwrap(string.push(mut line, name))
-    result.unwrap(string.push_u64(mut line, value))
-    result.unwrap(string.push(mut line, "\n"))
+    string.push(mut line, name)
+    string.push_u64(mut line, value)
+    string.push(mut line, "\n")
 }
 
 fn timers(tasks: Tasks, clock: Clock, err: Stderr, count: u64, grain: u64, hot: u64) -> u64 waits {
-    let mut jobs: List[Task[(u64, u64)]] = result.unwrap(list.with_capacity(count))
+    let mut jobs: List[Task[(u64, u64)]] = list.with_capacity(count)
     let mut hot_tasks: List[Task[(u64, u64)]] = list.new()
     if hot != 0 {
         let work = Work(start: count + 1, count: hot, grain: grain)
         let job = Hot(pair: Pair(tasks: tasks, work: work), clock: clock)
-        result.unwrap(list.push(mut hot_tasks, result.unwrap(task.spawn(tasks, bytes 131072, job, hot_pair))))
+        list.push(mut hot_tasks, task.spawn(tasks, bytes 131072, job, hot_pair))
     }
     for i in 0 .. count {
         let job = Sleeper(clock: clock, id: i + 1, grain: if hot == 0 { grain } else { 0 },
                           delay: 2000000 + i * 1000)
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes 8192, job, sleeper))))
+        list.push(mut jobs, task.spawn(tasks, bytes 8192, job, sleeper))
     }
     let mut sum = 0u64
     let mut lag = 0u64
@@ -418,7 +418,7 @@ fn serve(take job: Connection) -> u64 waits {
     let (reader, writer) = net.split(take socket)
     let mut input = take reader
     let mut output = take writer
-    let mut buffer: Bytes = result.unwrap(list.with_capacity(8))
+    let mut buffer: Bytes = list.with_capacity(8)
     let mut sum = 0u64
     for _ in 0 .. count {
         list.clear(mut buffer)
@@ -434,7 +434,7 @@ fn serve(take job: Connection) -> u64 waits {
         sum = int.wrapping_add(sum, mixed)
         list.clear(mut buffer)
         for i in 0 .. 8u64 {
-            result.unwrap(list.push(mut buffer, int.truncate(mixed >> (8 * i))))
+            list.push(mut buffer, int.truncate(mixed >> (8 * i)))
         }
         let mut sent = 0u64
         while sent < 8 {
@@ -456,7 +456,7 @@ fn sockets(tasks: Tasks, net: Net, err: Stderr, port: u16, connections: u64, cou
     for _ in 0 .. connections {
         let (take socket, _) = result.unwrap(host.accept(mut input, Never))
         let job = Connection(socket: take socket, count: count, grain: grain)
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, serve))))
+        list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take job, serve))
     }
     let mut sum = 0u64
     while let Some(take h) = list.pop(mut jobs) {
@@ -467,10 +467,10 @@ fn sockets(tasks: Tasks, net: Net, err: Stderr, port: u16, connections: u64, cou
 
 fn receipt(completed: u64, sum: u64) -> String {
     let mut line = string.new()
-    result.unwrap(string.push_u64(mut line, completed))
-    result.unwrap(string.push(mut line, " "))
-    result.unwrap(string.push_u64(mut line, sum))
-    result.unwrap(string.push(mut line, "\n"))
+    string.push_u64(mut line, completed)
+    string.push(mut line, " ")
+    string.push_u64(mut line, sum)
+    string.push(mut line, "\n")
     line
 }
 

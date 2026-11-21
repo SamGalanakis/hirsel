@@ -126,10 +126,10 @@ fn finalized() -> u64 {
 }
 
 fn for_captured() -> u64 {
-    let mut l: List[u64] = result.unwrap(list.with_capacity(3))
-    result.unwrap(list.push(mut l, 1))
-    result.unwrap(list.push(mut l, 2))
-    result.unwrap(list.push(mut l, 3))
+    let mut l: List[u64] = list.with_capacity(3)
+    list.push(mut l, 1)
+    list.push(mut l, 2)
+    list.push(mut l, 3)
     let f = scoped fn(x: u64) -> u64 {
         if x == 0 {
             0
@@ -213,10 +213,7 @@ fn string_capture() -> u64 {
 }
 
 fn arc_capture() -> u64 {
-    let a = match arc.new(Pair(a: 3, b: 4)) {
-        Ok(a) => a,
-        Error(_) => return 0
-    }
+    let a = arc.new(Pair(a: 3, b: 4))
     let f = scoped fn(x: u64) -> u64 {
         if x == 0 {
             1
@@ -227,22 +224,16 @@ fn arc_capture() -> u64 {
     f(0) + f(1)
 }
 
-fn make(r: Region, c: u64) -> Result[SpanBuilder[u64, in r], Capacity] {
+fn make(r: Region, c: u64) -> SpanBuilder[u64, in r] {
     span.with_capacity(r, c)
 }
 
 fn region_view() -> u64 {
     region r {
-        let mut b = match make(r, 4) {
-            Ok(b) => b,
-            Error(_) => return 0
-        }
+        let mut b = make(r, 4)
         let mut i: u64 = 1
         while i <= 4 {
-            match span.push(mut b, i) {
-                Ok(()) => {},
-                Error(_) => return 0
-            }
+            span.push(mut b, i)
             i += 1
         }
         let s = span.finish(take b)
@@ -264,16 +255,16 @@ fn region_view() -> u64 {
 fn child(tasks: Tasks) -> u64 waits {
     let a: u64 = 3
     let b: u64 = 4
-    let f: own[send] fn(u64) -> u64 = result.unwrap(fn(x: u64) -> u64 {
+    let f: own[send] fn(u64) -> u64 = fn(x: u64) -> u64 {
         if x == 0 {
             a
         } else {
             b + x
         }
-    })
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, take f, fn(take g: own[send] fn(u64) -> u64) -> u64 {
+    }
+    let h = task.spawn(tasks, bytes 4096, take f, fn(take g: own[send] fn(u64) -> u64) -> u64 {
         g(1) + g(0)
-    }))
+    })
     result.unwrap(task.join(take h))
 }
 
@@ -286,7 +277,7 @@ fn handle(tasks: Tasks) -> u64 waits {
         if x == 0 {
             1
         } else {
-            let h = result.unwrap(task.spawn(tasks, bytes 64, x, add_one))
+            let h = task.spawn(tasks, bytes 64, x, add_one)
             result.unwrap(task.join(take h))
         }
     }

@@ -1,0 +1,32 @@
+// expect: refuse LANG-9 at 14:14
+// expect: refuse LANG-9 at 18:13
+// expect: refuse LANG-9 at 22:11
+// expect: refuse LANG-17 at 26:18
+type Point {
+    x: i64,
+    y: i64
+}
+
+const X: i64 = 1
+type Capital { X: i64, y: i64 }
+
+fn arithmetic(x: i64, y: i64) -> Point {
+    Point(x, y + 1)
+}
+
+fn nonlocal(y: i64) -> Capital {
+    Capital(X, y)
+}
+
+fn out_of_order(x: i64, y: i64) -> Point {
+    Point(y, x: x)
+}
+
+fn bad_pattern(p: Point) -> i64 {
+    let Point(x, other) = p
+    0
+}
+
+// expect: compared LANG-9 at 14:14 | positional | y:
+// expect: compared LANG-9 at 18:13 | positional | X:
+// expect: compared LANG-9 at 22:11 | y: | x:

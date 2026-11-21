@@ -98,6 +98,7 @@ pub struct Library {
     pub fns: Arc<Table<FnDecl>>,
     pub constants: Arc<Table<Constant>>,
     pub constant_parts: Arc<Table<ConstValue>>,
+    pub(crate) constant_strings: Arc<Table<Vec<u8>>>,
     pub constant_ids: Arc<Table<Option<u32>>>,
     pub paths: Map<hirsel_core_ids::DefPath, Def>,
     pub modules: usize,
@@ -113,6 +114,7 @@ impl Library {
             fns: Arc::new(writer.table(&self.fns)?),
             constants: Arc::new(writer.table(&self.constants)?),
             constant_parts: Arc::new(writer.table(&self.constant_parts)?),
+            constant_strings: Arc::new(writer.table(&self.constant_strings)?),
             constant_ids: Arc::new(writer.table(&self.constant_ids)?),
             paths: writer.map(&self.paths)?,
             modules: self.modules,
@@ -130,6 +132,7 @@ impl Program<'_> {
             fns: self.fns.freeze(),
             constants: self.constants.freeze(),
             constant_parts: self.constant_parts.freeze(),
+            constant_strings: self.constant_strings.freeze(),
             constant_ids: self.constant_ids.freeze(),
             paths: {
                 let mut paths = self.library_paths.as_deref().cloned().unwrap_or_default();

@@ -16,7 +16,8 @@
 /// capability_provider(ctx,handle)/capability_handle(ctx,handle) expose the
 /// selected provider and its local designation to core provider adapters.
 /// args_len/get take (context, Args handle [, index]); views remain run-owned.
-/// Stdin and Env have no v1 operations. Process supplies the first stop. Net has explicit rule lists and
+/// Stdin shares one input stream. Env reads a run-owned snapshot. Process supplies
+/// the first stop. Net has explicit rule lists and
 /// try-first socket operations over a per-run epoll driver. Tasks authorizes the
 /// source spawn; FORM #121 carries that designation through its provider. No
 /// handle contains an address or reveals a descriptor to source code.
@@ -31,12 +32,13 @@ pub use crate::entry::{
     hirsel_core_os_process_new, hirsel_core_os_run,
 };
 
-/// FORM #50: closed provider rows resolve the capability or HostFile provider.
-/// Operands point to carriers; only read/mkdtemp can change length. Capacity 0
-/// never owns storage. Outcome is value@0, error-tag@8, code@12, written@16,
-/// status@24; clocks/args have no failure status. C declarations are in host.h.
+/// FORM #50: closed provider rows resolve the capability or resource provider.
+/// Read, read_at, next_entries and mkdtemp can change carrier length.
+/// Outcome is value@0, error-tag@8, code@12, written@16, status@24 and kind@25.
+/// Stat uses value for size and written for signed modification nanoseconds.
 pub use crate::host_ops::{
-    hirsel_core_host_op, hirsel_core_host_rename, hirsel_core_host_sleep_until,
+    hirsel_core_host_at, hirsel_core_host_op, hirsel_core_host_rename,
+    hirsel_core_host_sleep_until, hirsel_core_host_stat,
 };
 pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
 pub use crate::provider::hirsel_core_host;

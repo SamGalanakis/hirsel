@@ -6,10 +6,7 @@ type Node {
 }
 
 fn tree(item: i32, depth: i32) -> Result[Box[Node], helper.Error] {
-    let mut node = match box.new(Node(left: None, right: None, item: item)) {
-        Ok(take n) => take n,
-        Error((c, take unused)) => return Error(Capacity(c))
-    }
+    let mut node = box.new(Node(left: None, right: None, item))
     if depth > 0 {
         let shift: i32 = int.narrow(depth - 1)
         let offset = 1i32 << shift
@@ -41,9 +38,7 @@ type ArenaNode {
 fn build_arena(mut arena: List[ArenaNode], item: i32, depth: i32) -> Result[i32, helper.Error] {
     let at = list.len(arena)
     let idx: i32 = int.narrow(at)
-    if let Error((c, _)) = list.push(mut arena, ArenaNode(item: item, left: -1, right: -1)) {
-        return Error(Capacity(c))
-    }
+    list.push(mut arena, ArenaNode(item, left: -1, right: -1))
     if depth > 0 {
         let offset = 1i32 << (depth - 1)
         let left = build_arena(mut arena, item - offset, depth - 1)?

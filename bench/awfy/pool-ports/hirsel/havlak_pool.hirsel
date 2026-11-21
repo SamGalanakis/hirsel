@@ -16,7 +16,7 @@ fn empty() -> Chain {
 
 fn append(mut chain: Chain, mut links: List[Link], value: u64) -> Result[(), Capacity] {
     let index = list.len(links)
-    result.capacity_only(list.push(mut links, Link(value: value, next: NONE)))?
+    list.push(mut links, Link(value: value, next: NONE))
     if chain.head == NONE {
         chain.head = index
     } else {
@@ -50,7 +50,7 @@ type Graph {
 
 fn create_node(mut graph: Graph, name: u64) -> Result[(), Capacity] {
     while list.len(graph.blocks) <= name {
-        result.capacity_only(list.push(mut graph.blocks, Block(incoming: empty(), outgoing: empty(), present: false)))?
+        list.push(mut graph.blocks, Block(incoming: empty(), outgoing: empty(), present: false))
     }
     graph.blocks[name].present = true
     Ok(())
@@ -61,7 +61,7 @@ fn add_edge(mut graph: Graph, from: u64, to: u64) -> Result[(), Capacity] {
     create_node(mut graph, to)?
     append(mut graph.blocks[from].outgoing, mut graph.links, to)?
     append(mut graph.blocks[to].incoming, mut graph.links, from)?
-    result.capacity_only(list.push(mut graph.edges, (from, to)))
+    Ok(list.push(mut graph.edges, (from, to)))
 }
 
 fn straight(mut graph: Graph, from: u64, count: u64) -> Result[u64, Capacity] {
@@ -139,7 +139,7 @@ fn contains(items: List[u64], target: u64) -> bool {
 fn new_loop(mut forest: Forest, block: Option[u64], reducible: bool) -> Result[u64, Capacity] {
     let index = list.len(forest.loops)
     let loop_value = SimpleLoop(blocks: empty(), children: empty(), parent: None, root: block == None, reducible: reducible, depth: 0, nesting: 0)
-    result.capacity_only(list.push(mut forest.loops, loop_value))?
+    list.push(mut forest.loops, loop_value)
     if let Some(node) = block {
         append(mut forest.loops[index].blocks, mut forest.links, node)?
     }
@@ -198,14 +198,14 @@ type Finder {
 fn new_finder(size: u64) -> Result[Finder, Capacity] {
     let mut f = Finder(incoming: list.new(), back: list.new(), links: list.new(), number: numbers_pool.new()?, header: list.new(), kind: list.new(), last: list.new(), nodes: list.new())
     for _ in 0 .. size {
-        result.capacity_only(list.push(mut f.incoming, empty()))?
-        result.capacity_only(list.push(mut f.back, empty()))?
+        list.push(mut f.incoming, empty())
+        list.push(mut f.back, empty())
     }
     let zero = 0u64
-    list.fill(mut f.header, size, zero)?
-    list.fill(mut f.kind, size, Top)?
-    list.fill(mut f.last, size, zero)?
-    list.fill(mut f.nodes, size, UnionNode(parent: 0, block: None, loop_id: None, ordinal: 0))?
+    list.fill(mut f.header, size, zero)
+    list.fill(mut f.kind, size, Top)
+    list.fill(mut f.last, size, zero)
+    list.fill(mut f.nodes, size, UnionNode(parent: 0, block: None, loop_id: None, ordinal: 0))
     Ok(take f)
 }
 
@@ -237,7 +237,7 @@ fn find_set(mut f: Finder, start: u64) -> Result[u64, Capacity] {
     while node != f.nodes[node].parent {
         let parent = f.nodes[node].parent
         if parent != f.nodes[parent].parent {
-            result.capacity_only(list.push(mut path, node))?
+            list.push(mut path, node)
         }
         node = parent
     }
@@ -284,11 +284,11 @@ fn process_header(mut f: Finder, mut forest: Forest, w: u64, block: u64) -> Resu
             f.kind[w] = SelfLoop
         } else {
             let root = find_set(mut f, v)?
-            result.capacity_only(list.push(mut pool, root))?
+            list.push(mut pool, root)
         }
     }
     let mut work: List[u64] = list.new()
-    list.append(mut work, pool)?
+    list.append(mut work, pool)
     if list.len(pool) != 0 {
         f.kind[w] = Reducible
     }
@@ -307,8 +307,8 @@ fn process_header(mut f: Finder, mut forest: Forest, w: u64, block: u64) -> Resu
                 f.kind[w] = Irreducible
                 unique(mut f.incoming[w], mut f.links, y)?
             } else if y != w && !contains(pool, root) {
-                result.capacity_only(list.push(mut work, root))?
-                result.capacity_only(list.push(mut pool, root))?
+                list.push(mut work, root)
+                list.push(mut pool, root)
             }
             i = f.links[i].next
         }

@@ -1,0 +1,29 @@
+// OWN-4, LANG-14, CONC-14: `inert` is the empty holds set (OWN-2), computed and never declared.
+// An owning closure captures `T: inert` and `Wrap[T]` for it; `codec` implies `inert`, so a
+// body relies on it for `T: codec` and wires a generic flow item; a type that holds a
+// capability is not `inert`.
+type Tagged: inert { n: u64 }
+
+type Wrap[T: plain] { item: T }
+
+fn equals[T: inert + key](take x: T) -> own fn(T) -> bool {
+    fn(y: T) -> bool { y == x }
+}
+
+fn wrapped[T: plain + inert](take w: Wrap[T]) -> own fn() -> u64 {
+    fn() -> u64 { let _ = w; 1 }
+}
+
+fn needs_inert[T: inert](x: T) -> u64 { 1 }
+
+fn from_codec[T: codec](x: T) -> u64 { needs_inert(x) }
+
+fn holding(c: Clock) -> u64 { needs_inert(c) }
+
+fn generic_port[T: plain + codec](mut f: Flow, input: Into[T]) -> Result[Port[T], Wire] {
+    flow.port(mut f, input, 1)
+}
+
+// expect: refuse OWN-4 at 5:14
+// expect: refuse LANG-12 at 21:43
+// expect: compared LANG-12 at 21:43 | core@1/core/Clock | inert

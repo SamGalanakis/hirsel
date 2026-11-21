@@ -67,39 +67,124 @@ fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
 }
 
 /// A body's identity is its item's source bytes from its first significant
-/// token. Leading trivia remains owned by the item for formatting and lexical
-/// diagnostics, but it is outside the body key and its item-relative anchors.
+/// token to the end of its last one. The body's item-relative anchors (its
+/// refusal and flow sites, its IR instructions' `Anchor`s) are byte offsets
+/// from the first token, so the bytes between them are part of what its record
+/// holds: whitespace inside the item moves them. Trivia before the first token
+/// and after the last (the owned line break, a trailing comment) is read only
+/// by the formatter and the syntax diagnostics, which come from the parse.
 fn body_identity(item: Item<'_>) -> ContentHash {
-    ContentHash::of_parts("hirsel.item-source.v2", [item.source_text().as_bytes()])
+    let start = item.file_offset;
+    let end = item
+        .tree
+        .tokens
+        .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|t| !t.kind.is_trivia() && !matches!(t.kind, TokenKind::Eof) && t.span.start >= start)
+        .map_or(start, |t| t.span.end);
+    ContentHash::of_parts(
+        "hirsel.item-source.v3",
+        [item.text[start as usize..end as usize].as_bytes()],
+    )
 }
 
-/// A signature's identity is its header tokens: a reader's reported sites are
-/// all in its own item (`DiskCheckRef::of`), so the header's layout is not
-/// part of what a reader depends on. An item that fails to parse anywhere,
-/// its body included, resolves nothing (`ResolutionScratch::resolve`), so its
-/// header lowers to the refused type: the same tokens are another signature.
-fn header_identity(item: Item<'_>) -> ContentHash {
-    // Token spans are file offsets.
-    let end = if matches!(
+/// The header's end as a file offset: a function's body block start, else
+/// past every token of the item. Token spans are file offsets.
+fn header_file_end(item: Item<'_>) -> usize {
+    if matches!(
         item.tree.node(item.root).kind,
         NodeKind::Function | NodeKind::CloneHook
     ) {
         item.file_offset as usize + header_end(item)
     } else {
         usize::MAX
-    };
+    }
+}
+
+/// The item's header tokens, the shape's part for this item: the declared
+/// tables a shape selects hold every header token's meaning, the parameter
+/// names included (`hirsel_core_front::layer`). An item that fails to parse
+/// anywhere, its body included, resolves nothing (`ResolutionScratch::resolve`),
+/// so its header lowers to the refused type: the same tokens are another
+/// signature.
+fn header_identity(item: Item<'_>) -> ContentHash {
     let domain = if item.range.has_errors {
         "hirsel.header-tokens.unparsed.v1"
     } else {
         "hirsel.header-tokens.v2"
     };
-    token_identity(item, end, domain)
+    token_identity(item, header_file_end(item), domain)
+}
+
+/// A signature's identity as its readers depend on it, the header row's
+/// `digest`. A reader's reported sites are all in its own item
+/// (`DiskCheckRef::of`), so the header's layout is not part of it. Nor is the
+/// spelling of a parameter's binding: a call is positional (labels are refused
+/// on ordinary calls, LANG-9), a reader's refusals render its own parameters,
+/// and anchors and region roots name a callee's parameter by index. So when
+/// every binding name is distinct and no other header token spells one (an
+/// anchor, a default or an outlives clause naming a parameter keeps its
+/// spelling), the bindings hash as their token kind alone; their count, order,
+/// modes, types and `waits` stay. Any other header is `shape`, its full tokens.
+fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
+    let root = item.tree.node(item.root);
+    if item.range.has_errors || !matches!(root.kind, NodeKind::Function | NodeKind::CloneHook) {
+        return shape;
+    }
+    let text =
+        |t: &hirsel_core_syntax::Token| &item.text[t.span.start as usize..t.span.end as usize];
+    let mut bindings: Vec<usize> = item
+        .tree
+        .children(item.root)
+        .iter()
+        .filter(|&&c| item.tree.node(c).kind == NodeKind::Parameters)
+        .flat_map(|&c| item.tree.children(c))
+        .filter_map(|&p| item.tree.node(p).token.map(|t| t.0 as usize))
+        .collect();
+    bindings.sort_unstable();
+    if bindings.is_empty() {
+        return shape;
+    }
+    let end = header_file_end(item);
+    let header = (item.range.tokens.start as usize..item.range.tokens.end as usize).filter(|&i| {
+        let t = &item.tree.tokens[i];
+        !t.kind.is_trivia() && !matches!(t.kind, TokenKind::Eof) && (t.span.start as usize) < end
+    });
+    let mut names: Vec<&str> = bindings
+        .iter()
+        .map(|&i| text(&item.tree.tokens[i]))
+        .collect();
+    names.sort_unstable();
+    let distinct = names.windows(2).all(|w| w[0] != w[1]);
+    let spelled = header.clone().any(|i| {
+        bindings.binary_search(&i).is_err()
+            && names.binary_search(&text(&item.tree.tokens[i])).is_ok()
+    });
+    if !distinct || spelled {
+        return shape;
+    }
+    ContentHash::of_parts_stream("hirsel.signature-tokens.v1", |parts| {
+        for i in header {
+            let t = &item.tree.tokens[i];
+            let spelling = match bindings.binary_search(&i) {
+                Ok(_) => "",
+                Err(_) => text(t),
+            };
+            parts.part_byte_slice(t.kind as u8, spelling.as_bytes());
+        }
+        Ok(())
+    })
+    .expect("signature token hash")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Header {
+    /// The signature as readers depend on it (`signature_identity`).
     digest: ContentHash,
-    /// The item's source bytes, the body key's `body`.
+    /// The item's source bytes from its first token to its last
+    /// (`body_identity`), the body key's `body`.
     source: ContentHash,
     // Publication preserves definition IDs, and requests append to that index.
     // Signature dependencies are already resolved by the producing request.
@@ -315,6 +400,56 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, usize)>, Vec<Siblings>) {
     }
     (forms, siblings)
 }
+
+fn codec_reads(index: &NameIndex) -> impl Iterator<Item = Option<DefinitionId>> + '_ {
+    let std = index.symbols.find("std");
+    let codec = index.symbols.find("codec");
+    index
+        .packages
+        .iter()
+        .filter(move |p| Some(p.name) == std && codec.is_some())
+        .flat_map(move |p| {
+            let module = codec.and_then(|name| index.child(p.root, name));
+            hirsel_core_front::STRUCTURAL_CODECS
+                .iter()
+                .map(|(_, maker)| *maker)
+                .chain([hirsel_core_front::BYTES_CODEC])
+                .chain(hirsel_core_front::TUPLE_CODEC_READS)
+                .map(move |maker| index.definition(module?, index.symbols.find(maker)?))
+        })
+}
+
+impl Siblings {
+    fn inputs<'a>(
+        &'a self,
+        index: &'a NameIndex,
+    ) -> impl Iterator<Item = Option<DefinitionId>> + 'a {
+        hirsel_core_front::SIBLING_READS[self.row]
+            .3
+            .iter()
+            .map(|name| index.definition(self.module, index.symbols.find(name)?))
+    }
+}
+
+/// Signature inputs for lowering that have no explicit source reference.
+pub(crate) fn implicit_reads(
+    index: &NameIndex,
+) -> (Vec<DefinitionId>, BTreeMap<DefinitionId, Vec<DefinitionId>>) {
+    let prelude = prelude(index)
+        .into_iter()
+        .map(|id| DefinitionId(id as u32))
+        .chain(codec_reads(index).flatten())
+        .collect();
+    let (forms, siblings) = forms(index);
+    let mut by_form = BTreeMap::<_, Vec<_>>::new();
+    for (form, row) in forms {
+        by_form
+            .entry(form)
+            .or_default()
+            .extend(siblings[row].inputs(index).flatten());
+    }
+    (prelude, by_form)
+}
 /// The gate's inputs (OPTION-L L2): the environment, and every module's
 /// identity and item header digests in order. Both read the manifests and the
 /// parse, and a module's path from the index, never a resolution, so the gate
@@ -323,6 +458,7 @@ pub(crate) struct Shape {
     environment: ContentHash,
     items: ContentHash,
     modules: Demand<ContentHash>,
+    /// Each item's `signature_identity`, its header row's digest.
     headers: Vec<Vec<ContentHash>>,
 }
 impl Shape {
@@ -357,7 +493,7 @@ impl Shape {
                 for item in m.syntax.items() {
                     let digest = header_identity(item);
                     parts.part_byte_slice(1, &digest.0);
-                    row.push(digest);
+                    row.push(signature_identity(item, digest));
                 }
                 headers.push(row);
             }
@@ -816,29 +952,9 @@ impl Keys {
             return Ok(*hash);
         }
         let prelude = self.prelude_closure(index)?;
-        let mut makers = vec![];
-        if let (Some(std), Some(codec)) = (index.symbols.find("std"), index.symbols.find("codec")) {
-            for p in index.packages.iter().filter(|p| p.name == std) {
-                let module = index.child(p.root, codec);
-                for maker in hirsel_core_front::STRUCTURAL_CODECS
-                    .iter()
-                    .map(|(_, maker)| *maker)
-                    .chain([hirsel_core_front::BYTES_CODEC])
-                    .chain(hirsel_core_front::TUPLE_CODEC_READS)
-                {
-                    let id = module.and_then(|m| {
-                        index
-                            .symbols
-                            .find(maker)
-                            .and_then(|name| index.definition(m, name))
-                    });
-                    makers.push(match id {
-                        Some(id) => Some(self.closure(index, id.0 as usize)?),
-                        None => None,
-                    });
-                }
-            }
-        }
+        let makers: Vec<_> = codec_reads(index)
+            .map(|id| id.map(|id| self.closure(index, id.0 as usize)).transpose())
+            .collect::<io::Result<_>>()?;
         // Without std the component is the prelude's own hash.
         let hash = match makers.is_empty() {
             true => prelude,
@@ -956,20 +1072,10 @@ impl Keys {
         if let Some(hash) = siblings.hash.get() {
             return Ok(*hash);
         }
-        let names = hirsel_core_front::SIBLING_READS[siblings.row].3;
-        let mut reads = Vec::with_capacity(names.len());
-        for name in names {
-            reads.push(
-                match index
-                    .symbols
-                    .find(name)
-                    .and_then(|name| index.definition(siblings.module, name))
-                {
-                    Some(id) => Some(self.closure(index, id.0 as usize)?),
-                    None => None,
-                },
-            );
-        }
+        let reads: Vec<_> = siblings
+            .inputs(index)
+            .map(|id| id.map(|id| self.closure(index, id.0 as usize)).transpose())
+            .collect::<io::Result<_>>()?;
         let hash = ContentHash::of_parts(
             "hirsel.sibling-reads.v1",
             [&encode(&(siblings.row, reads))?[..]],

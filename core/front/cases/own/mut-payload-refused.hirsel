@@ -1,0 +1,72 @@
+// OWN-15, OWN-9, OWN-11, LANG-17: each refusal is at the place the text names.
+// expect: refuse LANG-17 at 19:32
+// expect: refuse OWN-15 at 23:22
+// expect: refuse OWN-15 at 27:32
+// expect: refuse OWN-9 at 32:66
+// expect: refuse OWN-9 at 38:54
+// expect: refuse OWN-11 at 42:32
+// expect: refuse LANG-17 at 46:15
+// expect: refuse LANG-17 at 50:14
+// expect: refuse OWN-15 at 54:28
+// expect: refuse OWN-9 at 58:48
+// expect: refuse OWN-15 at 67:21
+type Source = Text(String) | Count(u64)
+type Lines { input: Source, buffer: String }
+type Pair = Both(String, Option[String]) | Neither
+
+fn grew(mut s: String) -> bool { let _ = string.push(mut s, "!"); true }
+fn lend_early(mut src: Source) {
+    match src { Text(mut s) if grew(mut s) => {}, _ => {} }
+}
+
+fn bump_view(src: Source) {
+    match src { Text(mut s) => {}, Count(_) => {} }
+}
+
+fn mixed(mut p: Pair) {
+    match p { Both(mut a, Some(take b)) => {}, _ => {} }
+}
+
+fn retag(mut l: Lines) {
+    match l.input {
+        Text(mut s) => { let _ = string.push(mut l.buffer, "x"); l.input = Count(0) }
+        Count(_) => {}
+    }
+}
+
+fn grow_list(mut xs: List[Source]) {
+    match xs[0] { Text(mut s) => { let _ = list.push(mut xs, Count(0)); }, Count(_) => {} }
+}
+
+fn steal(mut src: Source) -> String {
+    match src { Text(mut s) => take s, Count(_) => string.new() }
+}
+
+fn whole(mut s: String) {
+    match s { mut t => {} }
+}
+
+fn unpack(take o: Option[String]) {
+    let Some(mut s) = take o else { return }
+}
+
+fn temporary() {
+    match Count(1) { Count(mut n) => { n += 1 }, Text(_) => {} }
+}
+
+fn read_sum(mut src: Source) -> u64 {
+    match src { Count(mut n) => { n += 1; size(src) }, Text(_) => 0 }
+}
+
+fn size(src: Source) -> u64 {
+    match src { Text(s) => string.byte_len(s), Count(n) => n }
+}
+
+fn through_view(a: Source) {
+    let mut p = (view a, 0u64)
+    match p { (Text(mut s), _) => { let _ = string.push(mut s, "!") }, _ => {} }
+}
+// expect: cause OWN-9 at 32:66 from 32:14
+// expect: cause OWN-9 at 38:54 from 38:24
+// expect: cause OWN-11 at 42:32 from 42:22
+// expect: cause OWN-9 at 58:48 from 58:23

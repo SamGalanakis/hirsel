@@ -1,7 +1,7 @@
 // Native provider boundary cases; run with crates/hirsel-core-rt/test-mkdtemp.py.
 fn round_trip(d: Dir, prefix: String, capacity: u64) -> bool waits {
-    let mut name = result.unwrap(string.with_capacity(capacity))
-    result.unwrap(string.push(mut name, prefix))
+    let mut name = string.with_capacity(capacity)
+    string.push(mut name, prefix)
     let tmp = result.unwrap(dir.create_temp(d, mut name))
     result.unwrap(file.write(tmp, "x", string.as_bytes("1")))
     let valid = string.starts_with(name, prefix) && string.byte_len(name) > string.byte_len(prefix)
@@ -21,8 +21,8 @@ fn prefix_one_byte_short(d: Dir) -> bool waits { round_trip(d, "prefix--", 39) }
 // expect: run prefix_slash(dir) = true
 fn prefix_slash(d: Dir) -> bool waits {
     result.unwrap(dir.create_dir(d, "p"))
-    let mut name = result.unwrap(string.with_capacity(40))
-    result.unwrap(string.push(mut name, "p/"))
+    let mut name = string.with_capacity(40)
+    string.push(mut name, "p/")
     let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
     let untouched = name == "p/"
     let empty_parent = match host.remove(d, "p") { Ok(()) => true, _ => false }
@@ -35,8 +35,8 @@ fn prefix_parent(d: Dir) -> bool waits { round_trip(d, "..", 40) }
 fn prefix_dot(d: Dir) -> bool waits { round_trip(d, ".", 40) }
 // expect: run prefix_nul(dir) = true
 fn prefix_nul(d: Dir) -> bool waits {
-    let mut name = result.unwrap(string.with_capacity(40))
-    result.unwrap(string.push(mut name, "nul\0byte"))
+    let mut name = string.with_capacity(40)
+    string.push(mut name, "nul\0byte")
     let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
     denied && name == "nul\0byte"
 }

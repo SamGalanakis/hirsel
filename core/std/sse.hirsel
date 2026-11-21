@@ -4,9 +4,9 @@ pub opaque type EventBuf: send {
 
 pub type SseError: key = Field | Utf8 | TooLarge
 
-pub fn buffer(size: u64) -> Result[EventBuf, Capacity] {
-    let data: Bytes = list.with_capacity(size)?
-    Ok(EventBuf(data: take data))
+pub fn buffer(size: u64) -> EventBuf {
+    let data: Bytes = list.with_capacity(size)
+    EventBuf(data: take data)
 }
 
 pub fn as_bytes(out: EventBuf) -> View[Bytes] in out {
@@ -149,13 +149,13 @@ pub opaque type Decoder: send {
 }
 
 /// Allocates fixed storage for a line, event data, name and two ID buffers.
-pub fn decoder(max_bytes: u64) -> Result[Decoder, Capacity] {
-    let line_buffer: Bytes = list.with_capacity(max_bytes)?
-    let data: Bytes = list.with_capacity(max_bytes)?
-    let name: Bytes = list.with_capacity(max_bytes)?
-    let pending: Bytes = list.with_capacity(max_bytes)?
-    let last: Bytes = list.with_capacity(max_bytes)?
-    Ok(Decoder(max_bytes: max_bytes, line: take line_buffer, data: take data, name: take name, pending_id: take pending, last_id: take last, id_changed: false, retry: None, first_line: true, skip_lf: false, stopped: false))
+pub fn decoder(max_bytes: u64) -> Decoder {
+    let line_buffer: Bytes = list.with_capacity(max_bytes)
+    let data: Bytes = list.with_capacity(max_bytes)
+    let name: Bytes = list.with_capacity(max_bytes)
+    let pending: Bytes = list.with_capacity(max_bytes)
+    let last: Bytes = list.with_capacity(max_bytes)
+    Decoder(max_bytes, line: take line_buffer, data: take data, name: take name, pending_id: take pending, last_id: take last, id_changed: false, retry: None, first_line: true, skip_lf: false, stopped: false)
 }
 
 pub fn last_event_id(d: Decoder) -> View[Bytes] in d {

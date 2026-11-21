@@ -16,7 +16,7 @@ count, headers and types is the caller's job.
 pub type Dialect: key { delimiter: u8, crlf: bool }
 pub type Field: key { span: http1.Span, quoted: bool }
 pub type Next: key = Record(u64) | End | Need
-pub type Error = Invalid(u64) | NotUtf8(u64) | Capacity(Capacity)
+pub type Error = Invalid(u64) | NotUtf8(u64)
 pub opaque type Writer { d: Dialect, fields: u64, empty_first: bool }
 ```
 

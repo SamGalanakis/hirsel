@@ -59,9 +59,8 @@ fn adapt[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Cod
     let ran = bound bytes budget {
         let run = scoped fn() -> Result[Result[R, Capacity], DecodeFail] {
             match std.codec.decode(ca, arg) {
-                Ok(Ok(take a)) => Ok(body(take a)),
-                Ok(Error(e)) => Error(DecodeFail(e: e)),
-                Error(c) => Ok(Error(c)),
+                Ok(take a) => Ok(body(take a)),
+                Error(e) => Error(DecodeFail(e: e)),
             }
         }
         isolate(run)
@@ -72,7 +71,7 @@ fn adapt[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Cod
             let mut out: Bytes = list.new()
             match std.codec.encode(cr, r, mut out) {
                 Ok(()) => Returned(take out),
-                Error(c) => Failed(OutOfBytes(c)),
+                Error(_) => fail("isolate-call: unrepresentable reply count"),
             }
         },
         Ok(Ok(Ok(Ok(Error(c))))) => Failed(OutOfBytes(c)),
@@ -82,36 +81,31 @@ fn adapt[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Cod
     }
 }
 
-fn key_of[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Described), Capacity] {
+fn key_of[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Described), std.codec.EncodeError] {
     let id = code.identity(f)
-    let mut identity: Bytes = list.with_capacity(list.len(id))?
-    match list.append(mut identity, id) { Ok(()) => (), Error(c) => return Error(c) }
+    let mut identity: Bytes = list.with_capacity(list.len(id))
+    list.append(mut identity, id)
     let args_schema = std.codec.schema(ca)?
     let result_schema = std.codec.schema(cr)?
     let args = std.codec.fingerprint_of(args_schema)
     let result = std.codec.fingerprint_of(result_schema)
-    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)?
-    match list.append(mut key, identity) { Ok(()) => (), Error(c) => return Error(c) }
-    std.codec.put_u64(args, mut key)?
-    std.codec.put_u64(result, mut key)?
+    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
+    list.append(mut key, identity)
+    std.codec.put_u64(args, mut key)
+    std.codec.put_u64(result, mut key)
     Ok((take key, Described(kind: Compute, identity: take identity, args_schema: take args_schema, result_schema: take result_schema, args: args, result: result)))
 }
 
-pub fn register[A, R](mut r: Registry, f: StaticFn[fn(take A) -> Result[R, Capacity]], take ca: std.codec.Codec[A], take cr: std.codec.Codec[R]) -> Result[(), Capacity] {
+pub fn register[A, R](mut r: Registry, f: StaticFn[fn(take A) -> Result[R, Capacity]], take ca: std.codec.Codec[A], take cr: std.codec.Codec[R]) -> Result[(), std.codec.EncodeError] {
     let (take key, take d) = key_of(f, ca, cr)?
     let made = fn(arg: Bytes, budget: u64) -> Outcome { adapt(f, ca, cr, arg, budget) }
     let run = match made {
         Ok(take g) => take g,
         Error((c, _)) => return Error(c),
     }
-    match map.insert(mut r.slots, take key, Slot(run: take run)) {
-        Ok(()) => (),
-        Error((c, _)) => return Error(c),
-    }
-    match list.push(mut r.described, take d) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(c),
-    }
+    map.insert(mut r.slots, take key, Slot(run: take run))
+    list.push(mut r.described, take d)
+    Ok(())
 }
 
 // A call in the same run: argument bytes in, an Outcome out.
@@ -152,15 +146,15 @@ fn head(take h: Head) -> u64 waits {
 fn key_for(r: Registry, i: u64) -> Bytes {
     let d = r.described[i]
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, d.identity))
-    result.unwrap(std.codec.put_u64(d.args, mut key))
-    result.unwrap(std.codec.put_u64(d.result, mut key))
+    list.append(mut key, d.identity)
+    std.codec.put_u64(d.args, mut key)
+    std.codec.put_u64(d.result, mut key)
     take key
 }
 
 fn arg_of(i: u64) -> Bytes {
     let mut a: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(i, mut a))
+    std.codec.put_u64(i, mut a)
     take a
 }
 
@@ -190,17 +184,14 @@ pub fn main(tasks: Tasks, argv: Args) -> Result[(), Exit] waits {
             }
         }
     } else {
-        let q: (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(64u64))
+        let q: (Sender[Req], Receiver[Req]) = channel.new(64u64)
         let (qtx, qrx) = take q
-        let o: (Sender[Outcome], Receiver[Outcome]) = result.unwrap(channel.new(64u64))
+        let o: (Sender[Outcome], Receiver[Outcome]) = channel.new(64u64)
         let (otx, orx) = take o
-        let h = match task.spawn(tasks, bytes 1048576u64, Head(r: take r, rx: take qrx, tx: take otx), head) {
-            Ok(take h) => take h,
-            Error(_) => return Error(Exit(status: 6)),
-        }
+        let h = task.spawn(tasks, bytes 1048576u64, Head(r: take r, rx: take qrx, tx: take otx), head)
         for i in 0u64 .. n {
             let mut k: Bytes = list.new()
-            result.unwrap(list.append(mut k, key))
+            list.append(mut k, key)
             match channel.send(qtx, Req(key: take k, arg: arg_of(i))) { Ok(()) => (), Error(_) => return Error(Exit(status: 7)) }
             match channel.receive(orx) {
                 Ok(Returned(b)) => { if b[0u64] == 1u8 { trues += 1u64 } },

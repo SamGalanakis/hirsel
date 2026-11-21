@@ -46,6 +46,13 @@ pub struct Request {
     pub buffer: Buffer,
     pub site: u64,
 }
+impl Request {
+    pub(crate) fn offset(&self) -> u64 {
+        // SAFETY: positioned requests pin eight little-endian offset bytes.
+        u64::from_le_bytes(unsafe { self.path.cast::<[u8; 8]>().read() })
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Outcome {
@@ -53,6 +60,8 @@ pub struct Outcome {
     pub error: IoError,
     pub written: u64,
     pub status: u8,
+    /// File kind for a successful STAT or STAT_FILE.
+    pub kind: u8,
 }
 
 #[repr(C)]
@@ -77,7 +86,7 @@ pub const STEP_PENDING: u8 = 1;
 /// operation except the clock reads (CONC-7; REPLAY-SPEC section 3, C).
 #[inline(always)]
 pub(crate) fn cancellation_point(operation: u8) -> bool {
-    operation != WALL_MS && operation != MONO_NS
+    !matches!(operation, WALL_MS | MONO_NS | SECRET_MAC)
 }
 pub const ABORT_CANCEL: u8 = 1;
 pub const ABORT_DEADLINE: u8 = 2;
@@ -173,6 +182,7 @@ pub(crate) const CANCELLED: Outcome = Outcome {
     error: IoError::OK,
     written: 0,
     status: 1,
+    kind: 0,
 };
 /// Run one operation through C, W, I and D. Returns the outcome `deliver`
 /// returned and records in `issued` the one the provider produced (issue,
@@ -211,16 +221,28 @@ unsafe fn drive_with(
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
             }
-            if operation == MKDTEMP
-                && (*request)
-                    .buffer
-                    .len
-                    .checked_add(32)
-                    .is_none_or(|n| n > (*request).buffer.capacity)
+            let request = &*request;
+            if (operation == MKDTEMP
+                && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
+                || (operation == NEXT_ENTRIES
+                    && request.buffer.capacity.saturating_sub(request.buffer.len) < 258)
+                || (operation == WRITE_AT
+                    && request
+                        .offset()
+                        .checked_add(request.buffer.len as u64)
+                        .is_none())
             {
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
                 return CANCELLED;
             }
+        }
+        if (operation == READ_AT && !matches!((*request).mode, 0 | 4))
+            || (operation == WRITE_AT && !matches!((*request).mode, 1 | 3 | 4))
+        {
+            return Outcome {
+                error: IoError::from_errno(libc::EACCES),
+                ..Outcome::default()
+            };
         }
         if !authorize(&*provider, &mut *request) {
             return crate::net::DENIED;

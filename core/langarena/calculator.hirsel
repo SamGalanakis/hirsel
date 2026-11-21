@@ -3,17 +3,12 @@
 type Node = Number(i64) | Variable(String) | Binary(u8, Box[Node], Box[Node]) | Assignment(String, Box[Node])
 
 fn boxed(take n: Node) -> Result[Box[Node], helper.Error] {
-    match box.new(take n) {
-        Ok(take b) => Ok(take b),
-        Error((c, _)) => Error(Capacity(c))
-    }
+    Ok(box.new(take n))
 }
 
 fn push[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
-    match list.push(mut xs, take x) {
-        Ok(()) => Ok(()),
-        Error((c, _)) => Error(Capacity(c))
-    }
+    list.push(mut xs, take x)
+    Ok(())
 }
 
 fn snippet(mut out: String, pattern: String, values: Inline[i64, 10]) -> Result[(), helper.Error] {
@@ -22,10 +17,10 @@ fn snippet(mut out: String, pattern: String, values: Inline[i64, 10]) -> Result[
     while i < list.len(b) {
         if b[i] == b'#' {
             let index: u64 = int.widen(b[i + 1] - b'0')
-            helper.mem(string.push_i64(mut out, values[index]))?
+            string.push_i64(mut out, values[index])
             i += 2
         } else {
-            helper.mem(string.push_char(mut out, option.unwrap(char.from_u32(int.widen(b[i])))))?
+            string.push_char(mut out, option.unwrap(char.from_u32(int.widen(b[i]))))
             i += 1
         }
     }
@@ -33,29 +28,29 @@ fn snippet(mut out: String, pattern: String, values: Inline[i64, 10]) -> Result[
 }
 
 fn generate(n: i64) -> Result[String, helper.Error] {
-    let mut out = helper.mem(string.from("v0 = 1\n"))?
+    let mut out = string.from("v0 = 1\n")
     for i in 1i64 .. 11i64 {
-        helper.mem(string.push(mut out, "v"))?
-        helper.mem(string.push_i64(mut out, i))?
-        helper.mem(string.push(mut out, " = v"))?
-        helper.mem(string.push_i64(mut out, i - 1))?
-        helper.mem(string.push(mut out, " + "))?
-        helper.mem(string.push_i64(mut out, i))?
-        helper.mem(string.push(mut out, "\n"))?
+        string.push(mut out, "v")
+        string.push_i64(mut out, i)
+        string.push(mut out, " = v")
+        string.push_i64(mut out, i - 1)
+        string.push(mut out, " + ")
+        string.push_i64(mut out, i)
+        string.push(mut out, "\n")
     }
     let templates: Inline[String, 10] =["(v#0 / 3) * 4 - #9 / (3 + (18 - v#1)) % v#2 + 2 * ((9 - v#5) * (v#4 + 7))", "v#0 + (v#1 + v#2) * v#3 - (v#4 / v#5)", "(3789 - (((v#6)))) + 1", "4/2 * (1-3) + v#8/v#4", "1+2+3+4+5+6+v#0", "(99999 / v#2)", "0 + 0 - v#7", "((((((((((v#5)))))))))) * 2", "#9 * (v#0%6)%7", "(1)/(0-v#4) + (v#6)"]
     let mut g = helper.lcg()
     for i in 0 .. n {
         let v = i + 10
-        helper.mem(string.push(mut out, "v"))?
-        helper.mem(string.push_i64(mut out, v))?
-        helper.mem(string.push(mut out, " = v"))?
-        helper.mem(string.push_i64(mut out, v - 1))?
-        helper.mem(string.push(mut out, " + "))?
+        string.push(mut out, "v")
+        string.push_i64(mut out, v)
+        string.push(mut out, " = v")
+        string.push_i64(mut out, v - 1)
+        string.push(mut out, " + ")
         let choice: u64 = int.narrow(helper.next_int(mut g, 10))
         let values: Inline[i64, 10] =[v - 1, v - 2, v - 3, v - 4, v - 5, v - 6, v - 7, v - 8, v - 9, i]
         snippet(mut out, templates[choice], values)?
-        helper.mem(string.push(mut out, "\n"))?
+        string.push(mut out, "\n")
     }
     Ok(take out)
 }
@@ -96,7 +91,7 @@ fn factor(source: String, mut pos: u64) -> Result[Node, helper.Error] {
         while int.is_ascii_alpha(at(source, pos)) || int.is_ascii_digit(at(source, pos)) {
             pos += 1
         }
-        let name = helper.mem(string.from(string.slice(source, start, pos)))?
+        let name = string.from(string.slice(source, start, pos))
         skip(source, mut pos)
         if at(source, pos) == b'=' {
             pos += 1
@@ -189,8 +184,8 @@ fn evaluate(node: Node, mut variables: Map[String, i64]) -> Result[i64, helper.E
         },
         Assignment(name, child) => {
             let value = evaluate(child, mut variables)?
-            let key = helper.mem(string.from(name))?
-            helper.mem(result.capacity_only(map.insert(mut variables, take key, value)))?
+            let key = string.from(name)
+            map.insert(mut variables, take key, value)
             Ok(value)
         },
     }

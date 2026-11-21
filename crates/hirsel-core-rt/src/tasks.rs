@@ -1727,14 +1727,21 @@ impl Scheduler {
                 // SAFETY: each entry points to its pinned provider operation.
                 || self.parked.live.values().any(|arm| unsafe {
                     let task = arm.task;
-                    !(*task)
-                        .group
-                        .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
+                    let provider = &(*(*task).operation).provider;
+                    !crate::provide::owns(provider)
+                        && !(*task)
+                            .group
+                            .is_some_and(|group| group.drives_replay(*provider))
                 })
         }
         #[cfg(not(feature = "record"))]
         {
-            self.readies.outside() || !self.parked.live.is_empty() || self.lang_waits()
+            self.readies.outside()
+                // SAFETY: each entry points to its pinned provider operation.
+                || self.parked.live.values().any(|arm| unsafe {
+                    !crate::provide::owns(&(*(*arm.task).operation).provider)
+                })
+                || self.lang_waits()
         }
     }
 
@@ -1743,6 +1750,12 @@ impl Scheduler {
     fn lang_waits(&self) -> bool {
         // SAFETY: the run pins its unit.
         !self.lang.is_null() && unsafe { (*self.lang).waits } > 0
+    }
+
+    /// Quiescence first wakes the run's own `clock.idle` waits (FAIL-15);
+    /// returns whether it did, so the scheduler takes their readies.
+    fn quiesce(&self) -> bool {
+        crate::provide::quiesce(&|token| self.parked.live.contains_key(&ReadyToken(token)))
     }
 
     fn stop_quiescent(&mut self) -> ! {
@@ -1863,6 +1876,9 @@ impl Scheduler {
                     }
                     return;
                 }
+                if self.quiesce() {
+                    return;
+                }
                 self.stop_quiescent();
             }
             return;
@@ -1886,6 +1902,9 @@ impl Scheduler {
             }
             None => {
                 if !self.has_outside_wait() && !flow_pending {
+                    if self.quiesce() {
+                        return;
+                    }
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
@@ -2101,6 +2120,36 @@ unsafe fn cancel_flag<'a>(task: *const Task) -> &'a AtomicBool {
     }
 }
 
+/// Whether the operation `token`, parked in the running task's run, has a
+/// cancellation request it observes that the scheduler has not applied yet. A
+/// served port's reply loses to it (CONC-7; provide NOTES 16), so the outcome
+/// does not depend on whether the server yielded after `task.cancel`.
+pub(crate) fn call_cancelled(token: u64) -> bool {
+    let task = CURRENT.get();
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: the running task pins its run; a parked task pins its operation.
+    unsafe {
+        let Some(arm) = (*(*task).run).parked.live.get(&ReadyToken(token)) else {
+            return false;
+        };
+        let caller = arm.task;
+        let op = (*caller).operation;
+        !op.is_null() && (*op).observes_cancel && cancel_flag(caller).load(Ordering::Acquire)
+    }
+}
+
+/// The running task's context, for a provider's `deliver`.
+pub(crate) fn current_context() -> *mut Context {
+    let task = CURRENT.get();
+    if task.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: the running task pins its context.
+    unsafe { (*task).context }
+}
+
 /// Whether a cancellation request takes effect on this task now. A finalizer
 /// and a shielded region observe none (CONC-7, tasks.md:129; FAIL-11,
 /// failure.md:173; CONC-8, tasks.md:140): under either the request stays
@@ -2313,6 +2362,10 @@ impl Outside {
 
     /// Publish to the issuing waiter before releasing its outside work.
     pub(crate) fn complete(self, token: u64) {
+        self.ready(token);
+    }
+
+    pub(crate) fn ready(&self, token: u64) {
         self.0.push(token);
     }
 
@@ -2825,6 +2878,10 @@ unsafe fn alone(
                     block(Some(w.deadline_ns));
                 }
                 WAIT_PARK => {
+                    // Only the program readies a cell's wait, and no other task runs.
+                    if crate::provide::owns(p) && !crate::provide::quiesce(&|t| t == token) {
+                        crate::process::stop(b"Deadlock");
+                    }
                     block(None);
                 }
                 _ => crate::process::stop(b"Provider"),
@@ -2835,6 +2892,11 @@ unsafe fn alone(
             match step.kind {
                 STEP_DONE => return Some(step.outcome),
                 STEP_PENDING => {
+                    // A call on a served port waits on its server, and no
+                    // other task runs to serve it (FAIL-15).
+                    if crate::provide::owns(p) {
+                        crate::process::stop(b"Deadlock");
+                    }
                     let deadline = (step.deadline_ns != 0).then_some(step.deadline_ns);
                     if block(deadline) {
                         step = (p.resume)(p.state, request, token);
@@ -4381,14 +4443,14 @@ impl RunPtr {
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
                     _ => {}
                 }
-                let trim = waiting_heap(task, direct).cloned();
+                // The commit keeps custody with this dispatcher until the
+                // waiting heap has finished its local trim.
+                if let Some(heap) = waiting_heap(task, direct) {
+                    heap.trim();
+                }
                 // The outgoing active unit is live across release. This
                 // publishes every receiver's already-counted hand-off first.
                 drop(commit);
-                // A woken task that resumes elsewhere meanwhile waits on the heap lock.
-                if let Some(heap) = trim {
-                    heap.trim();
-                }
                 // The worker-private stock unmaps an excess stack outside the commit.
                 if let Some(stack) = ended {
                     (*worker).stock.recycle_shared(stack, &pool.spare);
@@ -4453,6 +4515,10 @@ impl RunPtr {
                 && deadline.is_none()
                 && !run.has_outside_wait()
             {
+                if run.quiesce() {
+                    pool.wake(index);
+                    return;
+                }
                 run.stop_quiescent();
             }
             #[cfg(test)]

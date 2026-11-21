@@ -63,12 +63,17 @@ pub struct Row {
     pub value: Option<Vec<u8>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Caller {
+    pub issuer: u8,
+    pub subject: Vec<u8>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     Hello(Option<Vec<u8>>, Vec<Want>),
     Call(u32, u64, u32, u32, Vec<u8>),
     Subscribe(u32, u32, Vec<u8>, Option<Vec<u8>>),
     Unsubscribe(u32),
-    Welcome(Vec<u8>, u32, u64, Vec<u8>, String, u64),
+    Welcome(Caller, u32, u64, Vec<u8>, String, u64),
     Placed(Entry),
     Batch(u64, Vec<u32>, Vec<Row>, Vec<Done>),
     Ended(u32, Outcome),
@@ -170,6 +175,7 @@ record!(Room {
     requested,
     available
 });
+record!(Caller { issuer, subject });
 record!(Bad { kind, at });
 record!(Row { sub, key, value });
 record!(Done { stream, p, outcome });
@@ -184,9 +190,9 @@ sum!(Refusal { 0 => NoEntry, 1 => Malformed(bad), 2 => Overloaded, 3 => Deadline
 sum!(Fault { 0 => Raised(kind), 1 => OutOfBytes(room), 2 => OutOfTime(ticks), 3 => Gone });
 sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 3 => Abandoned, 4 => InDoubt });
 sum!(Frame {
-    0 => Hello(token, wants), 1 => Call(stream, p, slot, deadline, arg),
+    0 => Hello(credential, wants), 1 => Call(stream, p, slot, deadline, arg),
     2 => Subscribe(sub, slot, arg, resume), 3 => Unsubscribe(sub),
-    4 => Welcome(principal, q, budget, executable, target, n_place), 5 => Placed(entry),
+    4 => Welcome(caller, q, budget, executable, target, n_place), 5 => Placed(entry),
     6 => Batch(version, complete, rows, done), 7 => Ended(sub, outcome), 8 => Reset(version, done),
 });
 

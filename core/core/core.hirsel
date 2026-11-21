@@ -120,7 +120,9 @@ pub opaque type Tasks
 
 pub opaque type Secret
 
-pub type SecretError = Invalid | Capacity(Capacity)
+pub type SecretError = Invalid()
+
+pub type MacError = Denied()
 
 pub opaque resource type Socket
 
@@ -158,11 +160,38 @@ pub type TlsPin = SystemPin | Sha256(Bytes)
 
 pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String)
 
-pub type RuleError = Invalid | Capacity(Capacity)
+pub type RuleError = Invalid()
 
 pub opaque resource type HostFile
 
-pub type OpenMode = Read | Write | Append | CreateNew
+pub opaque resource type HostEntries
+
+// The hand that moves a `provide.clock` Clock, and the trigger that stops a
+// `provide.process` Process (core.md, Provide).
+pub opaque resource type ClockHand
+
+pub opaque resource type StopTrigger
+
+// A served port's server end and one call taken from it (core.md, Provide).
+pub opaque resource type Served[Op]
+
+pub opaque resource type Call[Op]
+
+pub type Withdrawn = Withdrawn()
+
+pub type StreamOp = Write(len: u64)
+
+pub type StreamReply = Done | WriteFailed(WriteError)
+
+pub type Kind = File | Directory | Symlink | Other
+
+pub type Stat {
+    kind: Kind,
+    size: u64,
+    modified_ns: i64
+}
+
+pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite
 
 pub type Capacity {
     requested: u64,
@@ -200,9 +229,9 @@ pub type Cause {
     site: Site
 }
 
-pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity | OutOfTime
+pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity(Capacity) | OutOfTime
 
-pub type BuildError = Capacity(Capacity) | Overflow
+pub type BuildError = Overflow()
 
 pub type IoError = NotFound | Denied | Exists | Closed | Other(u32)
 
@@ -217,13 +246,16 @@ pub type FloatError = NaN | OutOfRange
 
 pub fn fail(take msg: String) -> Never
 
+/// Ends the owner here, including its implicit finalizer.
+pub fn drop[T](take x: T) {}
+
 pub fn isolate[R](body: scoped fn() -> R) -> Result[Result[R, Causes], Capacity]
 
 pub fn replace[T](mut q: T, take v: T) -> T
 
-pub fn clone[T, U](x: T) -> Result[U, Capacity]
+pub fn clone[T, U](x: T) -> U
 
-pub fn clone_in[T, U](r: Region, x: T) -> Result[U in r, Capacity]
+pub fn clone_in[T, U](r: Region, x: T) -> U in r
 
 pub fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
 

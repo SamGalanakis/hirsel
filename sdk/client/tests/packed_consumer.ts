@@ -6,7 +6,7 @@ import {Frame} from './generated/frame.js';
 import {bind, identity, want} from './generated/entries.js';
 
 const payload = await readFile(new URL('./payload.bin', import.meta.url));
-const principal = Uint8Array.of(97, 110, 111, 110, 58, ...Array<number>(16).fill(1));
+const caller = {issuer: 2, subject: new Uint8Array(16).fill(1)};
 
 function openSocket(): Socket {
   const emit = (frame: Frame) => {
@@ -19,7 +19,7 @@ function openSocket(): Socket {
       const frame = Frame.decode(data);
       if (frame.tag === 'Hello') {
         assert.deepEqual(frame.values[1], want);
-        emit({tag: 'Welcome', values: [principal, 1, 262144n, identity.digest, identity.target, identity.n_place]});
+        emit({tag: 'Welcome', values: [caller, 1, 262144n, identity.digest, identity.target, identity.n_place]});
         emit({tag: 'Placed', value: {tag: 'Ready', value: 0}});
       } else {
         assert.equal(frame.tag, 'Call');

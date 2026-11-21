@@ -9,9 +9,8 @@ fn core_dir() -> std::path::PathBuf {
 /// This overlay only exposes the private capacity word to the law's source.
 #[test]
 fn churn_capacity_and_order() {
-    let dir = std::env::temp_dir().join(format!("hirsel-map-churn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     for file in std::fs::read_dir(core_dir()).unwrap() {
         let path = file.unwrap().path();
         if path.extension().is_some_and(|e| e == "hirsel") {
@@ -27,7 +26,7 @@ fn churn_capacity_and_order() {
     std::fs::write(map, source).unwrap();
     let (index, inputs) = inputs_with_core(
         include_str!("../../../core/front/fixtures/map-churn.hirsel"),
-        &dir,
+        dir,
     );
     let p = Program::declare(&index, &inputs);
     assert!(
@@ -38,7 +37,6 @@ fn churn_capacity_and_order() {
     );
     let (module, functions) =
         crate::SourceProgram::from_inputs(&index, &inputs, |d| d.package_is("app", "1"));
-    std::fs::remove_dir_all(dir).unwrap();
     for (peak, live) in [(1, 1), (3, 3), (8, 8), (33, 33), (33, 1)] {
         let report = eval::run(&module, functions["churn"], &[peak, live], 1 << 20);
         assert_eq!(

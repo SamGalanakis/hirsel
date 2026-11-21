@@ -385,13 +385,25 @@ Returned owned errors are dropped by emitted FORM glue before their outcome is
 reported; a failure from that cleanup is a failed test too. An `Exit` never makes
 an `Error` pass. The driver does not share a test's run or root bookkeeping.
 
-Human output is one `pass <definition>` or `fail <definition>: <reason>` line per
-selected test. Error outcomes say `error`; failures, stops and setup refusals
+`-j N` limits concurrent children and defaults to the CPU count in the
+process affinity mask. `-j 1` runs everything serially. Tests with a granted
+Dir, Net, Stdin or Secret run alone, in discovery order. Captured output
+streams, Tasks, Env snapshots and Process stop handles are local to each
+child. Clock and Random grants also allow parallel runs. Replay, emulator
+runs and runs with a shared charge report run serially. Test children start
+without inherited host place launch settings. Rows always appear in discovery order.
+
+Human output names the verdict, `cached` or `executed`, and the definition in
+each selected test's row. Error outcomes say `error`. Failures, stops and setup refusals
 include the run's stderr, with lines joined by ` | `. `--json` instead retains
-each test's status and captured stdout/stderr or build-stop reason. Exit 0 means
-at least one test ran and every selected test passed; 1 means a selected test
-failed; 2 means no tests matched or configuration could not be read. `--backend`
-and `--release` select the same engines and options as `build`; `--output` is a
+each test's status and captured stdout/stderr or build-stop reason. Each row
+includes child wall time in milliseconds (`wall_ms` in JSON), excluding build
+and link time. Replay rows sum the recording and replay child times. Cached
+rows and refusals without a child outcome have no time (`null` in JSON).
+Exit 0 means at least one test matched and every selected test passed. Exit 1
+means a selected test failed. Exit 2 means no tests matched or configuration
+could not be read. `--backend` and `--release` select the same engines and
+options as `build`. `--output` is a
 test-executable directory, defaulting to the private store's `native/tests`.
 
 `test --test-timeout <positive seconds>` optionally bounds each independent

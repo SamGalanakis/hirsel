@@ -12,11 +12,11 @@ fn timer(take t: Timer) waits {
     result.unwrap(channel.send(tx, 7u64))
 }
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let (tx0, rx0): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    let (tx1, rx1): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx0, rx0): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (tx1, rx1): (Sender[u64], Receiver[u64]) = channel.new(1)
     let seed = channel.sender(tx1)
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, Ends(tx: take tx0, rx: take rx1), relay))
-    let t = result.unwrap(task.spawn(tasks, bytes 4096, Timer(tx: take seed, clock: clock), timer))
+    let h = task.spawn(tasks, bytes 4096, Ends(tx: take tx0, rx: take rx1), relay)
+    let t = task.spawn(tasks, bytes 4096, Timer(tx: take seed, clock: clock), timer)
     if result.unwrap(channel.receive(rx0)) == 7u64 { result.unwrap(stdout.write(out, "7")) }
     result.unwrap(task.join(take h))
     result.unwrap(task.join(take t))

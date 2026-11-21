@@ -13,8 +13,8 @@ fn peer(take out: Stdout) waits {
 }
 
 pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
-    let a = result.unwrap(task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), sleeper))
-    let b = result.unwrap(task.spawn(tasks, bytes 4096, out, peer))
+    let a = task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), sleeper)
+    let b = task.spawn(tasks, bytes 4096, out, peer)
     result.unwrap(task.join(take a))
     result.unwrap(task.join(take b))
     Ok(())

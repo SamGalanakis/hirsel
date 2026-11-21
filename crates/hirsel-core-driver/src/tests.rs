@@ -1,6 +1,9 @@
 use super::*;
 use hirsel_core_ir::{FuncId, eval};
 
+#[path = "diagnostic_hints.rs"]
+mod diagnostic_hints;
+
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
     std::fs::write(&source_file, source).unwrap();
@@ -47,35 +50,39 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
 }
 
 fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Arc<CheckProduct> {
+    #[derive(serde::Deserialize)]
+    struct StoreManifest {
+        packages: Vec<PackageManifest>,
+    }
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request =
         CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
-    request.inputs.packages.push(PackageManifest {
-        package: package("store"),
-        dependencies: vec![package("core"), package("std")],
-        sources: [
-            ("core/programs/store/store.hirsel", "store"),
-            ("core/programs/store/ingress.hirsel", "ingress"),
-            ("core/programs/store/runner.hirsel", "runner"),
-            (
-                "crates/hirsel-core-driver/src/testdata/runner_launch.hirsel",
-                "runner_launch",
-            ),
-        ]
-        .into_iter()
-        .map(|(file, module)| hirsel_core_resolve::ModuleSource {
-            file: if module == "runner" {
-                runner_override
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| root.join(file))
-            } else {
-                root.join(file)
-            },
-            modules: vec![module.into()],
-            signatures: false,
-        })
-        .collect(),
+    let StoreManifest { mut packages } = serde_json::from_slice(
+        &std::fs::read(root.join("core/programs/store/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    for source in packages.iter_mut().flat_map(|package| &mut package.sources) {
+        source.file = root.join(&source.file);
+    }
+    let store = packages
+        .iter_mut()
+        .find(|p| p.package == package("store"))
+        .unwrap();
+    if let Some(path) = runner_override {
+        store
+            .sources
+            .iter_mut()
+            .find(|source| source.modules == ["runner"])
+            .unwrap()
+            .file = path.to_owned();
+    }
+    store.sources.push(hirsel_core_resolve::ModuleSource {
+        file: root.join("crates/hirsel-core-driver/src/testdata/runner_launch.hirsel"),
+        modules: vec!["runner_launch".into()],
+        signatures: false,
     });
+    request.inputs.packages.extend(packages);
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();
@@ -2361,10 +2368,11 @@ fn edit_kinds_publish_the_fresh_build() {
         }
         // Hand-derived fan-out. A signature edit of `helper.config` rechecks
         // config and its four readers. Trivia before an item changes only its
-        // file record; trivia inside or on the end of an item changes its key.
+        // file record, as does trivia after its last token; trivia inside an
+        // item changes its key.
         let (rechecked, files): (&[&str], usize) = match kind {
-            "body" | "import" | "same_line_comment" | "body_blank" => (&["dispatch"], 1),
-            "comment" | "between" | "trailing" | "whitespace" => (&[], 1),
+            "body" | "import" | "body_blank" => (&["dispatch"], 1),
+            "comment" | "between" | "trailing" | "same_line_comment" | "whitespace" => (&[], 1),
             "signature" => (&["config", "dispatch", "main", "more", "other"], 3),
             "add" => (&["extra_item"], 1),
             "insert" => (&["inserted"], 1),
@@ -3293,25 +3301,15 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             )),
             Some(vec!["checksum_str"]),
         ),
+        // A parameter's name is no reader's input: calls are positional.
         (
-            "signature",
+            "parameter_name",
             vec![],
             only(edited(
                 "pub fn checksum_str(s: String) -> u32 {\n    checksum_bytes(string.as_bytes(s))\n",
                 "pub fn checksum_str(t: String) -> u32 {\n    checksum_bytes(string.as_bytes(t))\n",
             )),
-            Some(vec![
-                "checksum_f64",
-                "checksum_str",
-                "dispatch",
-                "dispatch",
-                "dispatch",
-                "dispatch",
-                "dispatch",
-                "helper_laws",
-                "run_regex",
-                "tally",
-            ]),
+            Some(vec!["checksum_str"]),
         ),
         (
             "comment",
@@ -3539,7 +3537,7 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n\
          let mut d: Deque[u64] = deque.new()\n\
          let _ = deque.push_back(mut d, 1)\n\
-         let mut w = result.unwrap(std.io.out(out, 16))\n\
+         let mut w = std.io.out(out, 16)\n\
          result.unwrap(std.io.write(mut w, \"x\"))\n\
          let xs: List[(u64, u8)] = list.new()\n\
          let b: Bytes = list.new()\n\

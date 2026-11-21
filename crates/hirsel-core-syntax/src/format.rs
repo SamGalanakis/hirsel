@@ -1,6 +1,7 @@
 //! Token-role layout adapted from Goose format.h and Hirsel's doc/trivia printer.
 //! AST statement boundaries, as in Go's printer, replace source-dependent breaks.
 use crate::*;
+use std::io;
 
 /// Canonical layout of a complete parse. Invalid source has no formatted result.
 /// Prints every non-whitespace token verbatim, including comments and semicolons.
@@ -30,6 +31,97 @@ pub fn format(parsed: &ParseOutput) -> Option<String> {
     );
     out.push_str(&tail);
     Some(out)
+}
+
+/// Format a complete parse and prove that the result preserves its syntax.
+/// `mode` must be the mode used to parse the input. `None` means the input
+/// already carried a diagnostic or resource refusal. An error means the
+/// formatter produced a result it could not prove equivalent.
+pub fn format_verified(
+    parsed: &ParseOutput,
+    mode: ParseMode,
+    symbols: &mut Symbols,
+) -> io::Result<Option<String>> {
+    let Some(output) = format(parsed) else {
+        return Ok(None);
+    };
+    if output != parsed.syntax.source {
+        verify_format(parsed, &output, mode, symbols)?;
+    }
+    Ok(Some(output))
+}
+
+pub(crate) fn verify_format(
+    original: &ParseOutput,
+    output: &str,
+    mode: ParseMode,
+    symbols: &mut Symbols,
+) -> io::Result<()> {
+    let reparsed = parse(output, mode, symbols);
+    let failure = |reason| io::Error::other(format!("internal formatter error: {reason}"));
+    if !reparsed.diagnostics.is_empty() || reparsed.resource_refusal.is_some() {
+        return Err(failure("formatted source did not parse cleanly"));
+    }
+    let before = &original.syntax;
+    let after = &reparsed.syntax;
+    fn tokens(file: &SyntaxFile) -> impl Iterator<Item = (TokenKind, &str)> {
+        file.tree
+            .tokens
+            .iter()
+            .zip(0..)
+            .map(move |(token, i)| (token.kind, file.tree.token_text(&file.source, TokenId(i))))
+    }
+    if !tokens(before).eq(tokens(after)) {
+        return Err(failure("formatted source changed tokens or comments"));
+    }
+    if !same_ast(before, after) {
+        return Err(failure("formatted source changed the syntax tree"));
+    }
+    // Identical token streams make comment indices directly comparable. The
+    // parser assigns leading and trailing comments to items or to the file tail.
+    fn comments(item: Item<'_>) -> impl Iterator<Item = u32> {
+        item.range
+            .tokens
+            .clone()
+            .filter(move |&i| item.tree.tokens[i as usize].kind.is_trivia())
+    }
+    if !before
+        .items()
+        .zip(after.items())
+        .all(|(a, b)| comments(a).eq(comments(b)))
+    {
+        return Err(failure("formatted source changed item comment attachment"));
+    }
+    Ok(())
+}
+
+pub(crate) fn same_ast(before: &SyntaxFile, after: &SyntaxFile) -> bool {
+    fn nodes(item: Item<'_>) -> impl Iterator<Item = NodeId> {
+        item.range.nodes.clone().map(NodeId)
+    }
+    fn token<'a>(item: Item<'a>, node: &Node) -> Option<&'a str> {
+        node.token.map(|id| item.tree.token_text(item.text, id))
+    }
+    before.items.len() == after.items.len()
+        && before.items().zip(after.items()).all(|(a, b)| {
+            a.root.0 - a.range.nodes.start == b.root.0 - b.range.nodes.start
+                && a.range.nodes.len() == b.range.nodes.len()
+                && nodes(a).zip(nodes(b)).all(|(aid, bid)| {
+                    let left = a.tree.node(aid);
+                    let right = b.tree.node(bid);
+                    left.kind == right.kind
+                        && token(a, left) == token(b, right)
+                        && a.tree
+                            .children(aid)
+                            .iter()
+                            .map(|id| id.0 - a.range.nodes.start)
+                            .eq(b
+                                .tree
+                                .children(bid)
+                                .iter()
+                                .map(|id| id.0 - b.range.nodes.start))
+                })
+        })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -82,6 +174,17 @@ fn item_text(item: &Item) -> String {
                 if let Some(token) = node.token {
                     roles[token.0 as usize].unary = true;
                 }
+            }
+            // `e ?=> |p| v`: the arm's pipes hug its pattern.
+            NodeKind::Try
+                if children.len() == 2 && tree.node(children[1]).kind == NodeKind::Arm =>
+            {
+                let pattern = tree.node(tree.children(children[1])[0]);
+                roles[pattern.origin.tokens.start as usize].attach = true;
+                let close = (pattern.origin.tokens.end as usize..range.end)
+                    .find(|&t| !tree.tokens[t].kind.is_trivia())
+                    .unwrap();
+                roles[close].attach = true;
             }
             NodeKind::Call | NodeKind::Index => {
                 let callee_end = tree.node(children[0]).origin.tokens.end as usize;

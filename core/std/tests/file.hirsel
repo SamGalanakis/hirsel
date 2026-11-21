@@ -20,11 +20,10 @@ fn io_code(e: IoError) -> u64 {
     }
 }
 
-/// 0 for Ok, an IoError's code, 6 for Capacity, 7 for NotUtf8.
+/// An IoError's code, or 7 for NotUtf8.
 fn read_code(e: file.Error) -> u64 {
     match e {
         Io(x) => io_code(x),
-        Capacity(_) => 6,
         NotUtf8 => 7,
     }
 }
@@ -50,7 +49,7 @@ fn write_empties_first(d: Dir) -> u64 waits {
 // expect: run read_grows(dir) = 10000
 fn read_grows(d: Dir) -> u64 waits {
     let mut data: Bytes = list.new()
-    result.unwrap(list.fill(mut data, 10000, 7))
+    list.fill(mut data, 10000, 7)
     result.unwrap(file.write(d, "big", data))
     let b = result.unwrap(file.read(d, "big"))
     list.len(b)
@@ -75,7 +74,7 @@ fn read_string_text(d: Dir) -> bool waits {
 // expect: run read_string_not_utf8(dir) = 7
 fn read_string_not_utf8(d: Dir) -> u64 waits {
     let mut data: Bytes = list.new()
-    result.unwrap(list.fill(mut data, 1, 255))
+    list.fill(mut data, 1, 255)
     result.unwrap(file.write(d, "bad", data))
     match file.read_string(d, "bad") {
         Ok(_) => 0,
@@ -90,7 +89,7 @@ fn read_into_in_steps(d: Dir) -> u64 waits {
     result.unwrap(file.write_all(mut out, string.as_bytes("abc")))
     result.unwrap(file.close(take out))
     let mut src = result.unwrap(file.open(d, "s", Read))
-    let mut buf: Bytes = result.unwrap(list.with_capacity(2))
+    let mut buf: Bytes = list.with_capacity(2)
     let a = result.unwrap(file.read_into(mut src, mut buf))
     list.clear(mut buf)
     let b = result.unwrap(file.read_into(mut src, mut buf))

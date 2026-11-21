@@ -5,17 +5,17 @@ type Hits: shareable + send {
 // Shared update copies, unique update admits no second 16-byte node.
 // expect: run update_copies_only_shared() = true
 fn update_copies_only_shared() -> bool {
-    let mut a = result.unwrap(arc.new(Hits(n: 41)))
+    let mut a = arc.new(Hits(n: 41))
     let g = arc.share(a)
-    let value = result.unwrap(arc.update(mut a, scoped fn(mut p: Hits) -> u64 {
+    let value = arc.update(mut a, scoped fn(mut p: Hits) -> u64 {
         p.n += 1;
         p.n
-    }))
+    })
     let unique = bound bytes 16 {
-        let mut b = result.unwrap(arc.new(Hits(n: 41)))
-        result.unwrap(arc.update(mut b, scoped fn(mut p: Hits) {
+        let mut b = arc.new(Hits(n: 41))
+        arc.update(mut b, scoped fn(mut p: Hits) {
             p.n += 1
-        }))
+        })
         b.n == 42
     }
     value == 42 && a.n == 42 && g.n == 41 && match unique {
@@ -24,24 +24,41 @@ fn update_copies_only_shared() -> bool {
     }
 }
 
-// A refused replacement leaves h shared and does not run f.
+// A shared update refused once a 16-byte bound is spent raises Capacity; the other
+// holders keep 41.
 // expect: run update_capacity_keeps_holder() = true
 fn update_capacity_keeps_holder() -> bool {
-    let r = bound bytes 16 {
-        let mut a = result.unwrap(arc.new(Hits(n: 41)))
-        let g = arc.share(a)
-        let mut calls = 0u64
-        let refused = match arc.update(mut a, scoped fn(mut p: Hits) {
-            calls += 1;
-            p.n = 99
-        }) {
-            Error(_) => true,
-            Ok(_) => false
+    let a = arc.new(Hits(n: 41))
+    let g = arc.share(a)
+    let r = isolate(fn() -> Result[u64, Capacity] {
+        let mut local = arc.share(a)
+        bound bytes 16 {
+            let spent = arc.new(Hits(n: 0))
+            arc.update(mut local, scoped fn(mut p: Hits) -> u64 {
+                p.n = 99;
+                p.n
+            })
         }
-        refused && calls == 0 && a.n == 41 && g.n == 41
+    })
+    let refused = match caught(take r) {
+        Some(_) => true,
+        None => false,
     }
+    refused && a.n == 41 && g.n == 41
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {
-        Ok(v) => v,
-        _ => false
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

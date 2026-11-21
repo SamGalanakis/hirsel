@@ -308,28 +308,28 @@ pub fn scoped_sums_fail() -> u64 {
 // The native driver prints each actual outer value after the caught failure.
 pub fn main(out: Stdout) -> Result[(), Exit] waits {
     let mut line = string.new()
-    result.unwrap(string.push_u64(mut line, array_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, view_parameter_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, take_copy_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, recursive_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, mutual_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, region_call_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, region_fit_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, map_entry_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, qualified_field_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, plain_array_fail()))
-    result.unwrap(string.push(mut line, "\n"))
-    result.unwrap(string.push_u64(mut line, scoped_sums_fail()))
-    result.unwrap(string.push(mut line, "\n"))
+    string.push_u64(mut line, array_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, view_parameter_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, take_copy_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, recursive_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, mutual_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, region_call_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, region_fit_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, map_entry_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, qualified_field_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, plain_array_fail())
+    string.push(mut line, "\n")
+    string.push_u64(mut line, scoped_sums_fail())
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
     Ok(())
 }
@@ -339,7 +339,6 @@ fn make_stamp(r: Region, n: u64) -> Result[Stamp in r, Capacity] {
         dest.put(mut d, Stamp(n: n))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
     }
 }

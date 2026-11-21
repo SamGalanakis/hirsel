@@ -297,6 +297,17 @@ fn mark_values(body: &mut Body, aliases: &[ValueId], used: &mut [bool]) {
             }
             Terminator::Branch { condition, .. } => use_value(*condition),
             Terminator::Switch { value, .. } => use_value(*value),
+            Terminator::Raise {
+                cause:
+                    hirsel_core_ir::RaiseCause::Capacity {
+                        requested,
+                        available,
+                    },
+                ..
+            } => {
+                use_value(*requested);
+                use_value(*available)
+            }
             _ => {}
         }
     }
@@ -572,6 +583,17 @@ pub(super) fn compact(
         match term {
             Terminator::Branch { condition, .. } => map(condition),
             Terminator::Switch { value, .. } => map(value),
+            Terminator::Raise {
+                cause:
+                    hirsel_core_ir::RaiseCause::Capacity {
+                        requested,
+                        available,
+                    },
+                ..
+            } => {
+                map(requested);
+                map(available)
+            }
             _ => {}
         }
     }

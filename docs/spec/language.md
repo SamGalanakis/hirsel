@@ -32,7 +32,7 @@ fn f(take a: T) -> bool { a.name == "x" && keep(take a) }   // a.name's view end
 ```
 ```hirsel
 fn copy_len(s: String) -> u64 {
-  if let Ok(t) = string.from(s) { string.byte_len(t) } else { 0 }   // the copy lives in the branch
+  if let Ok(t) = string.from_utf8(string.into_bytes(string.from(s))) { string.byte_len(t) } else { 0 }   // the copy lives in the branch
 }
 ```
 
@@ -319,7 +319,7 @@ fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwr
 ```hirsel
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
-fn f() -> i64 { ev(result.unwrap(box.new(Lit(6i64)))) }  // refused: LANG-11, at box.new: T is N
+fn f(take o: Option[Box[N]]) -> i64 { ev(option.unwrap(take o)) }  // refused: LANG-11, at take o: T is N
 ```
 ```hirsel unbuilt
 fn fits(s: String) -> bool { match (int.parse(s) : Result[u8, ParseError]) { Ok(_) => true, Error(_) => false } }
@@ -383,7 +383,7 @@ fields and variants ([SEM-10](semantics.md#sem-10-codecs)) count.
 fn same[T: key](a: T, b: T) -> bool { a == b }
 ```
 ```hirsel
-fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T is not key
+fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-21, T is not key
 ```
 ```hirsel
 fn keep(r: Option[Rc[HostFile]]) -> u64 { 0 }             // refused: LANG-12, at HostFile: not shareable
@@ -398,7 +398,7 @@ fn g(v: Option[u64]) -> bool { v == None }
 ```hirsel
 fn f() -> bool { let x = None; x == Some(1u64) }          // refused: LANG-12, at None: T is open
 fn h(v: Option[u64]) -> bool { None == v }                // refused: LANG-12, at None: T is open
-fn g() -> u64 { let y = Ok(1u64); 0 }                     // refused: LANG-12, at Ok(1u64): E is open
+fn g() -> u64 { let y = Error(1u64); 0 }                  // refused: LANG-12, at Error(1u64): T is open
 ```
 ```hirsel
 fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at the call: f64 is not integer
@@ -596,16 +596,16 @@ fn zero(x: f64) -> u64 { match float.total_order(x, 0.0) { Equal => 1, _ => 2 } 
 ```hirsel
 fn zero(x: f64) -> u64 { match x { 0.0 => 1, _ => 2 } }   // refused: LANG-17, f64 is not key
 ```
-```hirsel unbuilt
-fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError] {
+```hirsel
+fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError] waits {
   match input { Some(mut f) => host.read(mut f, mut buf), None => Ok(0) }
 }
 ```
-```hirsel unbuilt
+```hirsel
 fn whole(mut s: String) { match s { mut t => {} } }      // refused: LANG-17, a mut binding is a payload
 ```
-```hirsel unbuilt
-fn unpack(mut o: Option[String]) { let Some(mut s) = o else { return } }   // refused: LANG-17
+```hirsel
+fn unpack(take o: Option[String]) { let Some(mut s) = o else { return } }  // refused: LANG-17
 ```
 
 ### LANG-18: Errors
@@ -659,6 +659,16 @@ fn f() -> Result[u64, ParseError] { let r: Result[u64, ParseError] = receipt(); 
 ```hirsel
 fn receipt[E]() -> Result[u64, E] { loop {} }
 fn f() -> Result[u64, ParseError] { let n: u64 = receipt()?; Ok(n) }   // refused: LANG-12, at receipt(): E is open
+```
+```hirsel
+type ReadError = Parse(ParseError) | Short(u64)
+fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
+fn read(n: u64) -> Result[u64, ReadError] { let h = half(n) ?=> Parse; Ok(h) }
+fn mark(n: u64) -> Result[u64, ReadError] { Ok(half(n) ?=> |_| Short(n)) }
+```
+```hirsel
+fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
+fn f(n: u64) -> Option[u64] { Some(half(n) ?=> |_| 0) }   // refused: LANG-18, the function returns an Option
 ```
 
 ### LANG-19: Recursion

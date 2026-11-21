@@ -1,6 +1,9 @@
 //! Linux descriptor-relative host operations. No path is authorized by a prior
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
 use crate::provider::*;
+
+mod listing;
+use listing::Listing;
 use std::{
     collections::BTreeMap,
     ffi::{CStr, CString},
@@ -44,6 +47,7 @@ pub struct OsProvider {
     epoch: u64,
     directories: BTreeMap<u64, OwnedFd>,
     files: BTreeMap<u64, OwnedFd>,
+    listings: BTreeMap<u64, Listing>,
     next: u64,
     temporary: u64,
     in_flight_syncs: Vec<*mut crate::os_sync::SyncCell>,
@@ -79,6 +83,7 @@ impl OsProvider {
             epoch: monotonic_ns(),
             directories: BTreeMap::new(),
             files: BTreeMap::new(),
+            listings: BTreeMap::new(),
             next: 1,
             temporary: 0,
             in_flight_syncs: Vec::new(),
@@ -141,7 +146,10 @@ impl OsProvider {
         } else {
             unsafe { std::slice::from_raw_parts(request.path, request.path_len) }
         };
-        if matches!(request.operation, OPEN | MKDIR | REMOVE | REMOVE_TREE) {
+        if matches!(
+            request.operation,
+            OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | STAT
+        ) {
             valid_path(path)?;
         }
         match request.operation {
@@ -151,6 +159,7 @@ impl OsProvider {
                     1 => libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
                     2 => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                    4 => libc::O_RDWR | libc::O_CREAT,
                     _ => unreachable!(),
                 };
                 let fd = beneath(self.directories[&request.handle].as_raw_fd(), path, flags)?;
@@ -158,20 +167,80 @@ impl OsProvider {
                 self.files.insert(id, fd);
                 out.value = id;
             }
-            READ => {
+            OPEN_DIR => {
+                let root = self.directories[&request.handle].as_raw_fd();
+                let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_RDONLY;
+                let dir = beneath(root, path, flags).map_err(|error| {
+                    if error.raw_os_error() == Some(libc::ENOTDIR) {
+                        io::Error::from_raw_os_error(libc::EACCES)
+                    } else {
+                        error
+                    }
+                })?;
+                let id = self.id();
+                self.directories.insert(id, dir);
+                out.value = id;
+            }
+            ENTRIES => {
+                let root = self.directories[&request.handle].as_raw_fd();
+                // Open a fresh description so independently opened listings have distinct cursors.
+                let fd = beneath(root, b".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+                let listing = Listing::open(fd)?;
+                let id = self.id();
+                self.listings.insert(id, listing);
+                out.value = id;
+            }
+            NEXT_ENTRIES => {
+                let listing = self
+                    .listings
+                    .get_mut(&request.handle)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+                match listing.append(&mut request.buffer) {
+                    Ok(count) => out.value = count,
+                    Err(error) => {
+                        out.error = IoError {
+                            tag: 5,
+                            code: error.raw_os_error().unwrap_or(libc::EIO) as u32,
+                        };
+                    }
+                }
+            }
+            CLOSE_ENTRIES => {
+                let listing = self
+                    .listings
+                    .remove(&request.handle)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+                drop(listing);
+            }
+            STAT => {
+                let root = self.directories[&request.handle].as_raw_fd();
+                let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
+                return stat(fd.as_raw_fd());
+            }
+            STAT_FILE => return stat(self.files[&request.handle].as_raw_fd()),
+            READ | READ_AT => {
                 let fd = self.files[&request.handle].as_raw_fd();
+                let offset = (request.operation == READ_AT).then(|| request.offset());
                 let b = &mut request.buffer;
                 // A single read either commits a prefix or fails without moving the
                 // cursor. No read_exact retry can discard an already consumed prefix.
                 if b.capacity > b.len {
                     // SAFETY: spare capacity is writable; fd is held by this provider.
-                    let n = unsafe { libc::read(fd, b.data.add(b.len).cast(), b.capacity - b.len) };
+                    let n = unsafe {
+                        let data = b.data.add(b.len).cast();
+                        let spare = b.capacity - b.len;
+                        match offset {
+                            Some(at) if at > i64::MAX as u64 => 0,
+                            Some(at) => libc::pread(fd, data, spare, at as i64),
+                            None => libc::read(fd, data, spare),
+                        }
+                    };
                     let n = syscall(n)? as usize;
                     b.len += n;
                     out.value = n as u64;
                 }
             }
-            WRITE => {
+            WRITE | WRITE_AT => {
                 return Ok(write_request(
                     self.files[&request.handle].as_raw_fd(),
                     request,
@@ -553,6 +622,13 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
     }
+    if unsafe { (*request).operation == STDIN_READ } {
+        // SAFETY: STDIN_READ carries the adapter's live Stdin request.
+        let step = unsafe { (crate::stdin::operations(request).step)(request, token, true) };
+        #[cfg(test)]
+        probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
+        return step;
+    }
     if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) }
         && let Some(sync) = unsafe { (*state.cast::<OsProvider>()).sync_file }
         // SAFETY: the directory provider owns the request's handle.
@@ -617,14 +693,26 @@ pub(crate) mod probe {
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
     unsafe { (*(*request).path.cast::<crate::net::NetworkRequest>()).os }
 }
-/// The OS provider without directory operations parks only socket requests.
+/// The OS provider without directory operations parks socket and Stdin requests.
 unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
-    // SAFETY: an outstanding socket request pins its Net extension.
-    unsafe { (socket_operations(request).step)(request, token, false) }
+    // SAFETY: an outstanding request pins its socket or stdin operands.
+    unsafe {
+        if (*request).operation == STDIN_READ {
+            (crate::stdin::operations(request).step)(request, token, false)
+        } else {
+            (socket_operations(request).step)(request, token, false)
+        }
+    }
 }
 unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
-    // SAFETY: an outstanding socket request pins its Net extension.
-    unsafe { (socket_operations(request).abort)(request, token, reason) }
+    // SAFETY: an outstanding request pins its socket or stdin operands.
+    unsafe {
+        if (*request).operation == STDIN_READ {
+            (crate::stdin::operations(request).abort)(request, token, reason)
+        } else {
+            (socket_operations(request).abort)(request, token, reason)
+        }
+    }
 }
 unsafe extern "C" fn resume_with_directory(
     state: *mut u8,
@@ -745,7 +833,8 @@ fn write_request(fd: i32, request: &Request) -> Outcome {
         // SAFETY: the caller pins the readable input bytes through delivery.
         unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
     };
-    write_all(fd, bytes)
+    let offset = (request.operation == WRITE_AT).then(|| request.offset());
+    write_all_from(fd, bytes, offset)
 }
 
 fn random(request: &mut Request) -> io::Result<Outcome> {
@@ -782,10 +871,33 @@ fn syscall(rc: isize) -> io::Result<isize> {
     }
 }
 pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
+    write_all_from(fd, bytes, None)
+}
+
+fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: live descriptor and remaining readable bytes.
-        let n = unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        let n = unsafe {
+            let data = bytes[written..].as_ptr().cast();
+            let len = bytes.len() - written;
+            match offset {
+                Some(at) => {
+                    let Some(at) = at
+                        .checked_add(written as u64)
+                        .and_then(|n| i64::try_from(n).ok())
+                    else {
+                        return Outcome {
+                            written: written as u64,
+                            error: IoError::from_errno(libc::EFBIG),
+                            ..Outcome::default()
+                        };
+                    };
+                    libc::pwrite(fd, data, len, at)
+                }
+                None => libc::write(fd, data, len),
+            }
+        };
         if n < 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::EINTR) {
@@ -868,25 +980,52 @@ fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
 /// The file type (`S_IFMT` bits) of `name` in `parent`, not following a final link;
 /// `None` when nothing has that name.
 fn leaf_kind(parent: &OwnedFd, name: &CString) -> io::Result<Option<libc::mode_t>> {
-    // SAFETY: zeroed stat is a valid out-parameter for fstatat.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: pinned parent, NUL-terminated leaf, live out-parameter.
+    Ok(leaf_stat(parent.as_raw_fd(), name)?.map(|st| st.st_mode & libc::S_IFMT))
+}
+
+fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::stat>> {
+    // SAFETY: the parent descriptor and basename are live. The final link is not followed.
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe {
         libc::fstatat(
-            parent.as_raw_fd(),
+            parent,
             name.as_ptr(),
-            &mut st,
+            st.as_mut_ptr(),
             libc::AT_SYMLINK_NOFOLLOW,
         )
     };
-    if rc == 0 {
-        return Ok(Some(st.st_mode & libc::S_IFMT));
+    match syscall(rc as isize) {
+        // SAFETY: a successful fstatat initialized the out parameter.
+        Ok(_) => Ok(Some(unsafe { st.assume_init() })),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+        Err(error) => Err(error),
     }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ENOENT) {
-        return Ok(None);
+}
+
+fn stat(fd: i32) -> io::Result<Outcome> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the caller retains fd and fstat writes the supplied stat.
+    syscall(unsafe { libc::fstat(fd, st.as_mut_ptr()) } as isize)?;
+    let st = unsafe { st.assume_init() };
+    let overflow = |_| io::Error::from_raw_os_error(libc::EOVERFLOW);
+    let size = u64::try_from(st.st_size).map_err(overflow)?;
+    let nanos = i128::from(st.st_mtime) * 1_000_000_000 + i128::from(st.st_mtime_nsec);
+    let nanos = i64::try_from(nanos).map_err(overflow)?;
+    Ok(Outcome {
+        value: size,
+        written: nanos as u64,
+        kind: file_kind(st.st_mode),
+        ..Outcome::default()
+    })
+}
+
+fn file_kind(mode: libc::mode_t) -> u8 {
+    match mode & libc::S_IFMT {
+        libc::S_IFREG => 0,
+        libc::S_IFDIR => 1,
+        libc::S_IFLNK => 2,
+        _ => 3,
     }
-    Err(error)
 }
 fn remove(fd: i32, name: &CString) -> io::Result<()> {
     // SAFETY: unlinkat never follows the final symlink; directory removal is retried explicitly.

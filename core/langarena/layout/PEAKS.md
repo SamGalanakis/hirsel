@@ -71,7 +71,7 @@ RSS samples, so that field stays n/a rather than using observed-run RSS.
 
 Collected evidence: `peak-first/results.json`, `peak-native/results.json`,
 `peak-rust/results.json`, per-run charge JSON and Massif profiles under
-`/workspace/code/hirsel-briefs/core-regions-pools-922/`. Existing shipping rows are
+the core-regions-pools-922 evidence archive. Existing shipping rows are
 in `shipping-runtime/results.json` and the retained Rust sampler JSON files.
 `peak.py` reproduces peaks with the canonical artifact-helper JSON and an explicit
 observed archive. It never invokes perf or supplies timing/RSS result fields.

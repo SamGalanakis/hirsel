@@ -1,5 +1,5 @@
 // Module `latest` (CONC-13): an event-ordered immutable Arc root.
-pub fn new[T: shareable + send](take a: Arc[T]) -> Result[Latest[T], (Capacity, Arc[T])]
+pub fn new[T: shareable + send](take a: Arc[T]) -> Latest[T]
 
 pub fn handle[T: shareable + send](h: Latest[T]) -> Latest[T]
 

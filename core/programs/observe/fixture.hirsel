@@ -7,22 +7,22 @@ pub fn entry() -> Bytes {
     let ca: std.codec.Codec[Request] = std.codec.of()
     let cr: std.codec.Codec[Result[Recorded, u32]] = std.codec.of()
     let mut b: Bytes = list.new()
-    result.unwrap(list.append(mut b, code.identity(code.describe(record))))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b))
+    list.append(mut b, code.identity(code.describe(record)))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b)
     b
 }
 
 // STORE v2.24 section 1.8. This hashes fixture inputs, not store-private state.
 pub fn digest(key: Bytes, args: Bytes) -> Bytes {
     let mut input: Bytes = list.new()
-    result.unwrap(list.push(mut input, 17u8))
-    result.unwrap(list.append(mut input, string.as_bytes("hirsel.request.v1")))
+    list.push(mut input, 17u8)
+    list.append(mut input, string.as_bytes("hirsel.request.v1"))
     result.unwrap(std.codec.put_list(key, std.codec.of_u8(), mut input))
     result.unwrap(std.codec.put_list(args, std.codec.of_u8(), mut input))
     let sum = std.sha256.hash(input)
     let mut out_digest: Bytes = list.new()
-    for byte in sum { result.unwrap(list.push(mut out_digest, byte)) }
+    for byte in sum { list.push(mut out_digest, byte) }
     out_digest
 }
 
@@ -41,7 +41,7 @@ pub fn law_digest() -> bool {
     if list.len(got) != 32u64 { return false }
     for i in 0u64 .. 32u64 { if got[i] != expected[i] { return false } }
     let mut other: Bytes = list.new()
-    result.unwrap(list.push(mut other, 1u8))
+    list.push(mut other, 1u8)
     got != digest(empty, other)
 }
 

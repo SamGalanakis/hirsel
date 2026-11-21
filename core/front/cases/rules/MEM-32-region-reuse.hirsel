@@ -1,9 +1,6 @@
 fn once() -> u64 {
     region r {
-        match text.copy_in(r, "scratch") {
-            Ok(t) => text.len(t),
-            Error(_) => 0
-        }
+        text.len(text.copy_in(r, "scratch"))
     }
 }
 

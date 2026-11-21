@@ -16,9 +16,9 @@ fn count() -> u64 {
 }
 
 fn pushed() -> u64 {
-    let cb: fn(mut List[u64], take u64) -> Result[(), (Capacity, u64)] = list.push
+    let cb: fn(mut List[u64], take u64) = list.push
     let mut xs: List[u64] = list.new()
     let x: u64 = 5
-    result.unwrap(cb(mut xs, take x))
+    cb(mut xs, take x)
     list.len(xs) * 10 + xs[0]
 }

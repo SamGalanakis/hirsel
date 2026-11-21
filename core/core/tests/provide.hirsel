@@ -1,0 +1,323 @@
+// provide cells (core.md, Provide; CONC-7). A virtual Clock's timers fire only
+// from clock.advance_to; clock.idle answers the earliest deadline still waited
+// on once every other task waits. provide.random(seed) is SplitMix64 (Vigna's
+// reference: seed 0 gives 0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4,
+// 0x06c45d188009454f), eight little-endian bytes per step, the last step cut
+// to the spare capacity.
+fn sleeper(take c: Clock) -> u64 waits {
+    host.sleep_until(c, 100)
+    host.mono_ns(c)
+}
+
+// The child sleeps until 100 on a clock that starts at 10. advance_to(50) is
+// short of the deadline, so the child stays asleep and idle still reports 100.
+// advance_to(150) wakes it and it reads 150. With no sleeper left, idle is None.
+// expect: run virtual_sleep(tasks) = true
+fn virtual_sleep(tasks: Tasks) -> bool waits {
+    let (c, h) = provide.clock(10, 7)
+    let mut hand = take h
+    let child = task.spawn(tasks, bytes 65536, c, sleeper)
+    let start = host.mono_ns(c) == 10 && host.wall_ms(c) == 7
+    let first = clock.idle(mut hand) == Some(100)
+    clock.advance_to(mut hand, 50)
+    let short = clock.idle(mut hand) == Some(100) && host.mono_ns(c) == 50
+    clock.advance_to(mut hand, 150)
+    let woke = result.unwrap(task.join(take child)) == 150
+    clock.set_wall(mut hand, 9)
+    start && first && short && woke && clock.idle(mut hand) == None && host.wall_ms(c) == 9
+}
+
+// Moving a virtual clock backwards keeps it where it is (monotonic).
+// expect: run never_back() = true
+fn never_back() -> bool {
+    let (c, h) = provide.clock(10, 0)
+    let mut hand = take h
+    clock.advance_to(mut hand, 5)
+    host.mono_ns(c) == 10
+}
+
+// Seed 0: ten bytes are step one (8 LE bytes) and the first two of step two;
+// the next eight bytes are step three (the rest of step two is not kept).
+// expect: run seeded_bytes() = true
+fn seeded_bytes() -> bool {
+    let r = provide.random(0)
+    let mut b: Bytes = list.with_capacity(10)
+    host.random(r, mut b)
+    let first = list.len(b) == 10 && b[0] == 0xaf && b[1] == 0xcd && b[2] == 0x1d && b[3] == 0x7b && b[4] == 0x39 && b[5] == 0xa8 && b[6] == 0x20 && b[7] == 0xe2 && b[8] == 0xf4 && b[9] == 0x65
+    let mut c: Bytes = list.with_capacity(8)
+    host.random(r, mut c)
+    first && c[0] == 0x4f && c[1] == 0x45 && c[2] == 0x09 && c[3] == 0x80 && c[4] == 0x18 && c[5] == 0x5d && c[6] == 0xc4 && c[7] == 0x06
+}
+
+fn watcher(take p: Process) -> u64 waits {
+    host.stopped(p)
+    1
+}
+
+// A watcher of a provide.process Process completes only after its trigger.
+// expect: run stopped_after_trigger(tasks) = true
+fn stopped_after_trigger(tasks: Tasks) -> bool waits {
+    let (p, t) = provide.process()
+    let child = task.spawn(tasks, bytes 65536, p, watcher)
+    process.trigger(take t)
+    result.unwrap(task.join(take child)) == 1
+}
+
+type Peer: send {
+    w: WriteHalf,
+    hand: ClockHand,
+    real: Clock,
+    go: Receiver[u64]
+}
+
+// Writes one byte 20 ms of real time later, then, once the reader says so,
+// moves the virtual clock to the reader's deadline. It hands its half back
+// so the stream stays open (no end of stream) until the reader has joined.
+fn peer(take p: Peer) -> WriteHalf waits {
+    let Peer(w: take wh, hand: take h, real, go: take go) = take p
+    let mut w = take wh
+    let mut hand = take h
+    host.sleep_until(real, host.mono_ns(real) + 20000000)
+    let sent = result.unwrap(host.send_pair(mut w, string.as_bytes("x"), string.as_bytes(""), Never))
+    let _ = result.unwrap(channel.receive(go))
+    clock.advance_to(mut hand, 100 + sent - 1)
+    take w
+}
+
+// CONC-7: a receive bounded by At(v, 100) on a virtual clock at 0 does not
+// expire in real time (the byte sent 20 ms later arrives), and expires once
+// advance_to reaches 100: the second receive gives TimedOut.
+// expect: run virtual_deadline(network) = true
+fn virtual_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (v, hand) = provide.clock(0, 0)
+    let (listener, where_to) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 1))
+    let mut l = take listener
+    let client = result.unwrap(host.connect(n, where_to, Never))
+    let (server, _) = result.unwrap(host.accept(mut l, Never))
+    let (unused_r, w) = net.split(take client)
+    let (rh, unused_w) = net.split(take server)
+    let mut r = take rh
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let job = task.spawn(tasks, bytes 65536, Peer(w: take w, hand: take hand, real: c, go: take rx), peer)
+    let mut b: Bytes = list.with_capacity(4)
+    let first = host.recv_bounded(mut r, mut b, 4, At(v, 100))
+    result.unwrap(channel.send(tx, 1))
+    let second = host.recv_bounded(mut r, mut b, 4, At(v, 100))
+    let kept = result.unwrap(task.join(take job))
+    let arrived = match first {
+        Ok(k) => k == 1,
+        _ => false
+    }
+    let expired = match second {
+        Error(TimedOut) => true,
+        _ => false
+    }
+    arrived && expired && host.mono_ns(v) == 100
+}
+
+// A cell admits 32 bytes from the current limit (MEM-24), held until the run
+// ends as a narrowed grant. A bound of 32 fits one cell: a second asks 32 of
+// the 0 left. A bound of 24 refuses the first, asking 32 of 24.
+// expect: run cell_charge() = true
+fn cell_charge() -> bool {
+    let one = bound bytes 32 {
+        let r = provide.random(1)
+        true
+    }
+    let fits = match one {
+        Ok(v) => v,
+        _ => false
+    }
+    let second = match refusal(isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 32 {
+            let r = provide.random(1)
+            let s = provide.random(2)
+            true
+        }
+    })) {
+        Some(c) => c.requested == 32 && c.available == 0,
+        None => false
+    }
+    let first = match refusal(isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 24 {
+            let (c, h) = provide.clock(0, 0)
+            true
+        }
+    })) {
+        Some(c) => c.requested == 32 && c.available == 24,
+        None => false
+    }
+    fits && second && first
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+// Served stdout ports (core.md, Provide). A write waits as a Call until the
+// server replies: the first is answered Done, the second WriteFailed with one
+// byte written and Other(5), which the writer sees exactly.
+fn echo_writer(take o: Stdout) -> bool waits {
+    let first = match stdout.write(o, "hello") {
+        Ok(_) => true,
+        _ => false
+    }
+    let second = match stdout.write(o, "abc") {
+        Error(e) => e.written == 1 && match e.error {
+            Other(code) => code == 5,
+            _ => false
+        },
+        _ => false
+    }
+    first && second
+}
+
+// The server reads Write(5) and the five bytes "hello", answers Done, then
+// answers the three-byte write WriteFailed(1, Other(5)). Once the writer has
+// ended, next waits until every task waits and returns None.
+// expect: run echo(tasks) = true
+fn echo(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, o, echo_writer)
+    let first = match provide.next(mut served) {
+        Some(take call) => {
+            let len = match provide.stream_op(call) {
+                Write(len) => len
+            }
+            let mut b: Bytes = list.with_capacity(8)
+            provide.payload(call, 0, mut b)
+            let read = len == 5 && list.len(b) == 5 && b[0] == 0x68 && b[1] == 0x65 && b[4] == 0x6f
+            let answered = match provide.reply(mut served, take call, provide.stream_reply(Done)) {
+                Ok(_) => true,
+                _ => false
+            }
+            read && answered
+        },
+        None => false
+    }
+    let second = match provide.next(mut served) {
+        Some(take call) => {
+            let failed = WriteFailed(WriteError(written: 1, error: Other(5)))
+            match provide.reply(mut served, take call, provide.stream_reply(failed)) {
+                Ok(_) => true,
+                _ => false
+            }
+        },
+        None => false
+    }
+    let wrote = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    first && second && wrote && quiet
+}
+
+fn lone_writer(take o: Stdout) -> bool waits {
+    let _ = stdout.write(o, "x")
+    true
+}
+
+// CONC-7 and NOTES 16: once the writer's cancellation is requested, a reply
+// to its taken call is Withdrawn, and the writer ends Cancelled.
+// expect: run withdrawn(tasks) = true
+fn withdrawn(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let mut served = take s
+    let mut child = task.spawn(tasks, bytes 65536, o, lone_writer)
+    let refused = match provide.next(mut served) {
+        Some(take call) => {
+            task.cancel(mut child)
+            match provide.reply(mut served, take call, provide.stream_reply(Done)) {
+                Error(Withdrawn()) => true,
+                _ => false
+            }
+        },
+        None => false
+    }
+    let cancelled = match task.join(take child) {
+        Error(Cancelled(take causes)) => {
+            let _ = take causes
+            true
+        },
+        _ => false
+    }
+    refused && cancelled
+}
+
+fn closed_writer(take o: Stdout) -> bool waits {
+    match stdout.write(o, "x") {
+        Error(e) => e.written == 0 && match e.error {
+            Closed => true,
+            _ => false
+        },
+        _ => false
+    }
+}
+
+fn seal(take s: Served[StreamOp]) {
+    let _ = take s
+}
+
+// Cleaning the Served end seals the port: the taken call and the other
+// writer's call (queued, or issued after the seal) complete Closed with
+// nothing written, a later write is Closed at once, and dropping the taken
+// Call afterwards changes nothing.
+// expect: run sealed(tasks) = true
+fn sealed(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let mut served = take s
+    let a = task.spawn(tasks, bytes 65536, o, closed_writer)
+    let b = task.spawn(tasks, bytes 65536, o, closed_writer)
+    let taken = provide.next(mut served)
+    seal(take served)
+    let both = result.unwrap(task.join(take a)) && result.unwrap(task.join(take b))
+    let held = match take taken {
+        Some(take call) => {
+            let _ = take call
+            true
+        },
+        None => false
+    }
+    held && both && closed_writer(o)
+}
+
+// NOTES 20: a Call given to another port's reply is consumed as a dropped
+// one: the reply is Withdrawn and its writer sees Closed with nothing written.
+// expect: run foreign_call(tasks) = true
+fn foreign_call(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let (_, t) = provide.stderr(bytes 64)
+    let mut served = take s
+    let mut other = take t
+    let child = task.spawn(tasks, bytes 65536, o, closed_writer)
+    let refused = match provide.next(mut served) {
+        Some(take call) => {
+            match provide.reply(mut other, take call, provide.stream_reply(Done)) {
+                Error(Withdrawn()) => true,
+                _ => false
+            }
+        },
+        None => false
+    }
+    let closed = result.unwrap(task.join(take child))
+    let _ = take served
+    let _ = take other
+    refused && closed
+}

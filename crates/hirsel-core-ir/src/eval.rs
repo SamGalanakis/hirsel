@@ -19,7 +19,7 @@ use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
     compute, field_size, map_entry,
 };
-use hirsel_core_net::{Name, Pattern, SecretGrant};
+use hirsel_core_net::{Name, SecretGrant, SecretPolicy, SecretUse};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use zeroize::Zeroizing;
@@ -82,55 +82,240 @@ pub struct Checked {
 /// - A clock read returns the number of clock reads so far, itself included,
 ///   both clocks alike: the host clock has started before the run (a law that
 ///   adds to a read relies on it), and a sleep jumps it to the deadline.
-/// - Directories hold flat names: a key is (`Dir` handle, path bytes). `open`
-///   with `Read` needs a file (`NotFound`), `CreateNew` needs no entry (`Exists`),
-///   `Write` truncates or creates, `Append` creates and writes at the end; a
-///   directory is `Denied`. `read` fills the buffer's spare capacity from the
-///   file's cursor. `try_lock` takes the lock unless another open file of the
-///   same key holds it (then 0). `mkdtemp` appends `t<k>` to the name, k from 0,
-///   and returns a new `Dir`; it fails with `Bounds` when the name has fewer than
-///   32 spare bytes. `mkdir` of an existing key is `Exists`; `remove` and
-///   `remove_tree` of a missing one `NotFound`. `rename` moves a file to the
-///   new key, replacing a file there; a directory at either key is `Denied`.
-///   Open files refer to keys, so one open on a renamed or replaced name reads
-///   what is at that name now.
+/// - Directory keys pair a pinned directory identity with a single basename.
+///   Handles keep their file and independent cursor across namespace changes.
+///   Listings snapshot direct entries in the model's deterministic order.
+///   File mtime is the model clock at creation or last write. Directory
+///   metadata is kind Directory, size and mtime zero.
+///   No model operation introduces symbolic links.
+///
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
     launch_target: (u64, u64),
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
+    stdin: std::collections::VecDeque<u8>,
+    env_patterns: Vec<hirsel_core_net::EnvPatterns>,
+    env_entries: Vec<(String, u64, Option<u64>)>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     clock: u64,
-    nodes: std::collections::BTreeMap<(u64, Vec<u8>), Node>,
+    nodes: BTreeMap<DirKey, Node>,
+    directories: u64,
+    listings: Vec<Option<VecDeque<Vec<u8>>>>,
     files: Vec<Option<OpenFile>>,
     temporaries: u64,
     random: u8,
     network: Network,
-    net_charges: Vec<(Limit, u64)>,
+    grant_charges: Vec<(Limit, u64)>,
     secrets: Vec<EvalSecret>,
     tls_writes: BTreeMap<u64, (Name, bool)>,
+    /// `provide` cells: cell `i`'s capability and its hand or trigger are both
+    /// `CELL_BASE + i` (native hirsel-core-rt `provide`).
+    cells: Vec<VirtualCell>,
+}
+const CELL_BASE: u64 = 0x80_0000;
+/// A port's `Served` end is `SERVED_BASE + i` for cell `i`; its call `id` is
+/// `CALL_BASE + (i << 32) + id`.
+const SERVED_BASE: u64 = 0x90_0000;
+const CALL_BASE: u64 = 1 << 62;
+/// One call on a served port (native `provide::PortCall`). The caller's bytes
+/// are copied at issue: they cannot change while it waits, and `payload`
+/// answers them only while the call is unsettled, as natively.
+struct PortCall {
+    caller: usize,
+    words: [u64; 4],
+    data: Vec<u8>,
+    taken: bool,
+    held: bool,
+    answer: Option<Vec<u64>>,
+    finished: bool,
+}
+enum VirtualCell {
+    Clock {
+        mono: u64,
+        wall: u64,
+        /// Tasks waiting on a deadline of this clock, in registration order.
+        timers: Vec<(u64, usize)>,
+        /// Tasks in `clock.idle`, and whether quiescence has woken each.
+        idle: Vec<(usize, bool)>,
+    },
+    Random(u64),
+    Process {
+        stopped: bool,
+        waiters: Vec<usize>,
+    },
+    Port {
+        sealed: bool,
+        next: u64,
+        calls: BTreeMap<u64, PortCall>,
+        /// Tasks in `next`, and whether quiescence answered each None.
+        servers: Vec<(usize, bool)>,
+    },
+}
+impl VirtualCell {
+    fn queued(&self) -> Option<u64> {
+        let VirtualCell::Port { calls, .. } = self else {
+            unreachable!("a port")
+        };
+        calls
+            .iter()
+            .find(|(_, c)| !c.taken && !c.finished && c.answer.is_none())
+            .map(|(&id, _)| id)
+    }
+    /// Settle an unsettled call; returns its caller.
+    fn settle(&mut self, id: u64, answer: Vec<u64>) -> Option<usize> {
+        let VirtualCell::Port { calls, .. } = self else {
+            unreachable!("a port")
+        };
+        let call = calls.get_mut(&id)?;
+        if call.answer.is_some() || call.finished {
+            return None;
+        }
+        call.answer = Some(answer);
+        Some(call.caller)
+    }
+    fn prune(&mut self, id: u64) {
+        let VirtualCell::Port { calls, .. } = self else {
+            unreachable!("a port")
+        };
+        if calls.get(&id).is_some_and(|c| c.finished && !c.held) {
+            calls.remove(&id);
+        }
+    }
+}
+/// A sealed stream port's answer: `Closed`.
+const PORT_CLOSED: [u64; 4] = [0, 4, 0, 0];
+/// A deadline on the host model's clock or on a virtual clock's own timers.
+#[derive(Clone, Copy)]
+enum Due {
+    Host(u64),
+    Cell(usize, u64),
 }
 #[derive(Clone)]
 struct EvalSecret {
-    patterns: Box<[Pattern]>,
+    policy: SecretPolicy,
     bytes: Arc<Zeroizing<Vec<u8>>>,
 }
 
+type DirKey = (u64, Vec<u8>);
+
 enum Node {
-    File(Vec<u8>),
-    Dir,
+    File(Arc<Mutex<ModelFile>>),
+    Dir(u64),
 }
 struct OpenFile {
-    key: (u64, Vec<u8>),
-    at: usize,
+    file: Arc<Mutex<ModelFile>>,
+    at: u64,
     locked: bool,
+    mode: u8,
+}
+const FILE_PAGE: u64 = 4096;
+
+#[derive(Default)]
+struct ModelFile {
+    len: u64,
+    modified_ns: u64,
+    pages: BTreeMap<u64, Box<[u8; FILE_PAGE as usize]>>,
+}
+
+impl ModelFile {
+    fn read(&self, at: u64, count: usize) -> Vec<u8> {
+        let mut bytes = vec![0; count];
+        Self::visit(at, count, |page, from, to, pos| {
+            if let Some(page) = self.pages.get(&page) {
+                bytes[pos..pos + to - from].copy_from_slice(&page[from..to]);
+            }
+        });
+        bytes
+    }
+
+    fn write(&mut self, at: u64, bytes: &[u8]) {
+        Self::visit(at, bytes.len(), |page, from, to, pos| {
+            let page = self
+                .pages
+                .entry(page)
+                .or_insert_with(|| Box::new([0; FILE_PAGE as usize]));
+            page[from..to].copy_from_slice(&bytes[pos..pos + to - from]);
+        });
+        self.len = self.len.max(at + bytes.len() as u64);
+    }
+
+    fn visit(at: u64, count: usize, mut f: impl FnMut(u64, usize, usize, usize)) {
+        let mut pos = 0;
+        while pos < count {
+            let offset = at + pos as u64;
+            let from = (offset % FILE_PAGE) as usize;
+            let n = (count - pos).min(FILE_PAGE as usize - from);
+            f(offset / FILE_PAGE, from, from + n, pos);
+            pos += n;
+        }
+    }
 }
 /// The model host's largest block: an admitted allocation above it stops the run.
 const HOST_BYTES: u64 = 1 << 32;
 const FILE_BASE: u64 = 0x50_0000;
 const DIR_BASE: u64 = 0x60_0000;
+const LISTING_HANDLE: u64 = 1 << 63;
+
+const NOT_FOUND: u64 = 1;
+const DENIED: u64 = 2;
+const EXISTS: u64 = 3;
+const CLOSED: u64 = 4;
+const OTHER: u64 = 5;
+
+impl World {
+    fn dir_key(&self, mut dir: u64, path: &[u8]) -> Result<DirKey, (u64, u64)> {
+        let parts = path.split(|&b| b == b'/');
+        for part in parts.clone() {
+            if part.is_empty() || matches!(part, b"." | b"..") || part.contains(&0) {
+                return Err((DENIED, 0));
+            }
+            if part.len() > 255 {
+                return Err((OTHER, 36)); // ENAMETOOLONG
+            }
+        }
+        let mut parts = parts.peekable();
+        while let Some(part) = parts.next() {
+            let key = (dir, part.to_vec());
+            if parts.peek().is_none() {
+                return Ok(key);
+            }
+            dir = match self.nodes.get(&key) {
+                Some(Node::Dir(dir)) => *dir,
+                Some(Node::File(_)) => return Err((OTHER, 20)), // ENOTDIR
+                None => return Err((NOT_FOUND, 0)),
+            };
+        }
+        unreachable!("split always supplies a final component")
+    }
+
+    fn new_dir(&mut self, key: DirKey) -> u64 {
+        let dir = DIR_BASE + self.directories;
+        self.directories += 1;
+        self.nodes.insert(key, Node::Dir(dir));
+        dir
+    }
+
+    fn children(&self, dir: u64) -> impl Iterator<Item = (&DirKey, &Node)> {
+        self.nodes
+            .range((dir, Vec::new())..)
+            .take_while(move |((id, _), _)| *id == dir)
+    }
+
+    fn remove_children(&mut self, dir: u64) {
+        let mut directories = vec![dir];
+        while let Some(dir) = directories.pop() {
+            let names: Vec<_> = self.children(dir).map(|(key, _)| key.clone()).collect();
+            for key in names {
+                if let Some(Node::Dir(child)) = self.nodes.remove(&key) {
+                    directories.push(child);
+                }
+            }
+        }
+    }
+}
 
 const FN_BASE: u64 = 0x1000;
 const REGION_BASE: u64 = 0x10_0000;
@@ -385,7 +570,6 @@ struct Limit(Arc<LimitRecord>);
 #[derive(Debug)]
 struct LimitRecord {
     cap: u64,
-    grant: bool,
     /// Scheduler index of the task whose admissions this limit serves.
     owner: usize,
     state: Mutex<LimitState>,
@@ -399,10 +583,9 @@ struct LimitState {
 }
 
 impl Limit {
-    fn new(cap: u64, parent: Option<Self>, grant: bool, owner: usize) -> Self {
+    fn new(cap: u64, parent: Option<Self>, owner: usize) -> Self {
         Self(Arc::new(LimitRecord {
             cap,
-            grant,
             owner,
             state: Mutex::new(LimitState {
                 used: 0,
@@ -912,7 +1095,8 @@ pub fn run_nans_into(
 }
 
 /// Run an entry with the root task's startup charge and teardown, as the native
-/// process entry does. May supply a deterministic network and record CONC-10 events.
+/// process entry does. The limit must cover startup. May supply a deterministic
+/// network and record CONC-10 events.
 /// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
 /// module's items); an empty `sites` means the module's own (`source::module_sites`).
 #[allow(clippy::too_many_arguments)]
@@ -920,6 +1104,7 @@ pub fn run_entry(
     m: &Module,
     f: FuncId,
     args: &[u64],
+    limit: u64,
     nans: Nans,
     destination: Option<&mut [u8]>,
     instructions: u64,
@@ -933,7 +1118,7 @@ pub fn run_entry(
         m,
         f,
         args,
-        u64::MAX,
+        limit,
         WorldInput {
             nans,
             destination,
@@ -1053,6 +1238,29 @@ pub fn run_network(m: &Module, f: FuncId, args: &[u64], limit: u64, network: Net
     )
     .0
 }
+/// Run against supplied input bytes and environment. The evaluator reads no host
+/// process state. An environment supplied here has designation zero.
+pub fn run_stdio(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    stdin: &[u8],
+    env: Option<hirsel_core_net::EnvSnapshot>,
+) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            stdin,
+            env,
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
 struct WorldInput<'a> {
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
@@ -1060,6 +1268,8 @@ struct WorldInput<'a> {
     revisions: Option<&'a Revisions>,
     injection: Option<(usize, bool)>,
     argv: &'a [&'a str],
+    env: Option<hirsel_core_net::EnvSnapshot>,
+    stdin: &'a [u8],
     nans: Nans,
     destination: Option<&'a mut [u8]>,
     instructions: u64,
@@ -1077,6 +1287,8 @@ impl Default for WorldInput<'_> {
             revisions: None,
             injection: None,
             argv: &[],
+            env: None,
+            stdin: &[],
             nans: Nans::Canonical,
             destination: None,
             instructions: u64::MAX,
@@ -1119,14 +1331,19 @@ fn run_world(
         mach.world.launch_target = (target_data, target.len() as u64);
     }
     for a in input.argv {
-        let data = mach.block(a.len() as u64, None, 0, None);
-        mach.mem[split(data).0].bytes = a.as_bytes().to_vec();
-        let carrier = mach.block(24, None, 0, None);
-        mach.store(carrier, 8, data);
-        mach.store(carrier + 8, 8, a.len() as u64);
-        mach.mem[split(data).0].fixed = true;
-        mach.mem[split(carrier).0].fixed = true;
+        let carrier = mach.host_view(a.as_bytes());
         mach.world.args.push(carrier);
+    }
+    mach.world.stdin.extend(input.stdin);
+    if let Some(env) = input.env.take() {
+        mach.world.env_patterns.push(env.patterns);
+        for (name, value) in env.entries {
+            let name_view = mach.host_view(name.as_bytes());
+            let value_view = std::str::from_utf8(&value)
+                .ok()
+                .map(|s| mach.host_view(s.as_bytes()));
+            mach.world.env_entries.push((name, name_view, value_view));
+        }
     }
     // One descriptor per code identity, as the linker keeps one per program:
     // `{code, length, revision}` then the identity bytes, where `code` is a
@@ -1198,7 +1415,7 @@ fn run_world(
     let root = mach.root().clone();
     let primary_charge = if input.process_entry {
         mach.admit(&root, charge::TASK_RECORD + charge::CAUSE_CELL)
-            .expect("the entry has an unbounded root limit");
+            .expect("the entry limit covers its startup charge");
         charge::CAUSE_CELL
     } else {
         // A host call borrows a task with a primary cell outside its allowance.
@@ -1258,7 +1475,7 @@ fn run_world(
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
-    for (l, n) in std::mem::take(&mut mach.world.net_charges) {
+    for (l, n) in std::mem::take(&mut mach.world.grant_charges) {
         l.find().subtract(n);
     }
     // Refunds still pending when the run ends count toward its final use.
@@ -1338,6 +1555,10 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
                     continue;
                 }
             }
+            if s.ready.is_empty() && baton.quiesce() {
+                continue;
+            }
+            let s = &mut baton.sched;
             let Some(k) = s.ready.pop_front() else {
                 baton
                     .world
@@ -1486,6 +1707,7 @@ fn cause(r: RaiseCause) -> &'static str {
         RaiseCause::Unwrap => "Unwrap",
         RaiseCause::Bounds => "Bounds",
         RaiseCause::Fail(_) => "Fail",
+        RaiseCause::Capacity { .. } => "Capacity",
     }
 }
 
@@ -1497,7 +1719,7 @@ impl<'m> Machine<'m> {
             recipes,
             mem: Blocks::default(),
             peak_reserved: 0,
-            root: Some(Limit::new(limit, None, false, 0)),
+            root: Some(Limit::new(limit, None, 0)),
             regions: Vec::new(),
             children: Vec::new(),
             chans: Vec::new(),
@@ -1645,6 +1867,527 @@ impl<'m> Machine<'m> {
 }
 
 impl Machine<'_> {
+    fn cell(&self, handle: u64) -> Option<usize> {
+        handle
+            .checked_sub(CELL_BASE)
+            .map(|i| i as usize)
+            .filter(|&i| i < self.world.cells.len())
+    }
+    /// An operation's optional `Until` triple at `a[i..i + 3]`: present, clock, at.
+    fn until(&self, a: &[u64], i: usize) -> Option<Due> {
+        (a[i] != 0).then(|| match self.cell(a[i + 1]) {
+            Some(c) => Due::Cell(c, a[i + 2]),
+            None => Due::Host(a[i + 2]),
+        })
+    }
+    fn passed(&self, due: Due) -> bool {
+        match due {
+            Due::Host(at) => at <= self.world.clock,
+            Due::Cell(c, at) => match self.world.cells[c] {
+                VirtualCell::Clock { mono, .. } => at <= mono,
+                _ => unreachable!("an Until names a Clock"),
+            },
+        }
+    }
+    fn cell_timer(&mut self, c: usize, at: u64, k: usize) {
+        if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
+            && !timers.iter().any(|&(_, j)| j == k)
+        {
+            timers.push((at, k));
+        }
+    }
+    fn ready_provider(&mut self, k: usize) {
+        if self.sched.tasks[k].state == State::Provider {
+            self.sched.tasks[k].state = State::Ready;
+            self.sched.ready.push_back(k);
+        }
+    }
+    /// Park the running task on a cell until `done` holds; a cancellation that
+    /// takes effect there fails the wait Cancelled (native W park).
+    fn cell_wait(
+        &mut self,
+        t: &Task,
+        c: usize,
+        register: fn(&mut VirtualCell, usize),
+        done: fn(&VirtualCell, usize) -> bool,
+    ) -> X<()> {
+        while !done(&self.world.cells[c], t.k) {
+            register(&mut self.world.cells[c], t.k);
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(None)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                self.check_cancel(t)?;
+            }
+        }
+        Ok(())
+    }
+    /// The run is quiescent: wake its `clock.idle` waits after pruning deadlines
+    /// no parked task waits on (native `provide::quiesce`).
+    fn quiesce(&mut self) -> bool {
+        let tasks = &self.sched.tasks;
+        let parked = |k: usize| tasks[k].state == State::Provider;
+        let mut woken = Vec::new();
+        for cell in &mut self.world.cells {
+            if let VirtualCell::Clock { timers, idle, .. } = cell {
+                timers.retain(|&(_, k)| parked(k));
+                for (k, flag) in idle.iter_mut() {
+                    if !*flag && parked(*k) {
+                        *flag = true;
+                        woken.push(*k);
+                    }
+                }
+            }
+        }
+        if woken.is_empty() {
+            // No idle wait: a `next` with nothing queued answers None.
+            for cell in &mut self.world.cells {
+                if let VirtualCell::Port { .. } = cell
+                    && cell.queued().is_none()
+                    && let VirtualCell::Port { servers, .. } = cell
+                {
+                    for (k, flag) in servers.iter_mut() {
+                        if !*flag && parked(*k) {
+                            *flag = true;
+                            woken.push(*k);
+                        }
+                    }
+                }
+            }
+        }
+        for &k in &woken {
+            self.ready_provider(k);
+        }
+        !woken.is_empty()
+    }
+
+    /// The port and call id a `Call` handle designates.
+    fn call_of(h: u64) -> (usize, u64) {
+        let i = h - CALL_BASE;
+        ((i >> 32) as usize, i & 0xffff_ffff)
+    }
+
+    /// A caller's operation on a served port: queue it, ready the servers and
+    /// wait for its answer. A cancellation that takes effect before the
+    /// answer settles the call and fails Cancelled.
+    fn port_call(&mut self, t: &Task, c: usize, words: [u64; 4], data: Vec<u8>) -> X<Vec<u64>> {
+        self.check_cancel(t)?;
+        let VirtualCell::Port {
+            sealed,
+            next,
+            calls,
+            servers,
+        } = &mut self.world.cells[c]
+        else {
+            unreachable!()
+        };
+        if *sealed {
+            return Ok(PORT_CLOSED.to_vec());
+        }
+        let id = *next;
+        *next += 1;
+        calls.insert(
+            id,
+            PortCall {
+                caller: t.k,
+                words,
+                data,
+                taken: false,
+                held: false,
+                answer: None,
+                finished: false,
+            },
+        );
+        let servers: Vec<usize> = servers.iter().map(|&(k, _)| k).collect();
+        for k in servers {
+            self.ready_provider(k);
+        }
+        loop {
+            let VirtualCell::Port { calls, .. } = &mut self.world.cells[c] else {
+                unreachable!()
+            };
+            let call = calls.get_mut(&id).unwrap();
+            if let Some(answer) = call.answer.clone() {
+                call.finished = true;
+                self.world.cells[c].prune(id);
+                return Ok(answer);
+            }
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(None)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                let VirtualCell::Port { calls, .. } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                let call = calls.get_mut(&id).unwrap();
+                if call.answer.is_none() {
+                    call.finished = true;
+                    self.world.cells[c].prune(id);
+                    self.check_cancel(t)?;
+                }
+            }
+        }
+    }
+
+    /// `provide.next`: the oldest queued call, or None once quiescence answers.
+    fn port_next(&mut self, t: &Task, c: usize) -> X<Vec<u64>> {
+        self.check_cancel(t)?;
+        loop {
+            let queued = self.world.cells[c].queued();
+            let VirtualCell::Port { calls, servers, .. } = &mut self.world.cells[c] else {
+                unreachable!()
+            };
+            let quiesced = servers.iter().any(|&(k, q)| k == t.k && q);
+            if queued.is_some() || quiesced {
+                servers.retain(|&(k, _)| k != t.k);
+                let Some(id) = queued else {
+                    return Ok(vec![0, 0, 0, 0]);
+                };
+                let call = calls.get_mut(&id).unwrap();
+                call.taken = true;
+                call.held = true;
+                return Ok(vec![CALL_BASE + ((c as u64) << 32) + id, 0, 0, 1]);
+            }
+            if !servers.iter().any(|&(k, _)| k == t.k) {
+                servers.push((t.k, false));
+            }
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(None)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                if let VirtualCell::Port { servers, .. } = &mut self.world.cells[c] {
+                    servers.retain(|&(k, _)| k != t.k);
+                }
+                self.check_cancel(t)?;
+            }
+        }
+    }
+
+    /// A `Call` dropped without a reply, or the `Served` end cleaned (sealing
+    /// the port): settle as sealed.
+    fn port_drop(&mut self, h: u64) {
+        let mut callers = Vec::new();
+        if h >= CALL_BASE {
+            let (c, id) = Self::call_of(h);
+            let cell = &mut self.world.cells[c];
+            if let VirtualCell::Port { calls, .. } = cell
+                && let Some(call) = calls.get_mut(&id)
+            {
+                call.held = false;
+            }
+            callers.extend(cell.settle(id, PORT_CLOSED.to_vec()));
+            cell.prune(id);
+        } else {
+            let c = (h - SERVED_BASE) as usize;
+            let cell = &mut self.world.cells[c];
+            let VirtualCell::Port { sealed, calls, .. } = cell else {
+                unreachable!()
+            };
+            *sealed = true;
+            let ids: Vec<u64> = calls.keys().copied().collect();
+            for id in ids {
+                callers.extend(cell.settle(id, PORT_CLOSED.to_vec()));
+            }
+        }
+        for k in callers {
+            self.ready_provider(k);
+        }
+    }
+
+    /// The `provide` rows, and Clock, Random and Process operations on a cell.
+    fn provide(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Option<X<Vec<u64>>> {
+        let ok = |value: u64, written: u64| vec![value, 0, 0, written];
+        if matches!(
+            op,
+            HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
+        ) {
+            // A cell holds PROVIDE_CELL until the run ends, as a narrowed grant
+            // (MEM-24); a refusal answers 0 with the available bytes.
+            let payer = t.limits.last().unwrap();
+            let charge = hirsel_core_layout::charge::PROVIDE_CELL;
+            if let Err(available) = self.admit(payer, charge) {
+                return Some(Ok(ok(0, available)));
+            }
+            self.world.grant_charges.push((payer.clone(), charge));
+        }
+        if matches!(op, HostOp::ProvideStdout | HostOp::ProvideStderr) {
+            // A port's room with its own record, held until the run ends.
+            let payer = t.limits.last().unwrap();
+            let charge = hirsel_core_layout::charge::PROVIDE_CELL.saturating_add(a[0]);
+            if let Err(available) = self.admit(payer, charge) {
+                return Some(Ok(ok(0, available)));
+            }
+            self.world.grant_charges.push((payer.clone(), charge));
+        }
+        let new = |w: &mut World, cell| {
+            w.cells.push(cell);
+            CELL_BASE + w.cells.len() as u64 - 1
+        };
+        let reply = match op {
+            HostOp::ProvideClock => {
+                let h = new(
+                    &mut self.world,
+                    VirtualCell::Clock {
+                        mono: a[0],
+                        wall: a[1],
+                        timers: Vec::new(),
+                        idle: Vec::new(),
+                    },
+                );
+                ok(h, h)
+            }
+            HostOp::ProvideRandom => ok(new(&mut self.world, VirtualCell::Random(a[0])), 0),
+            HostOp::ProvideProcess => {
+                let process = VirtualCell::Process {
+                    stopped: false,
+                    waiters: Vec::new(),
+                };
+                let h = new(&mut self.world, process);
+                ok(h, h)
+            }
+            HostOp::ClockAdvance => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Clock { mono, timers, .. } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                *mono = (*mono).max(a[1]);
+                let now = *mono;
+                let mut due: Vec<_> = timers
+                    .iter()
+                    .copied()
+                    .filter(|&(at, _)| at <= now)
+                    .collect();
+                timers.retain(|&(at, _)| at > now);
+                due.sort_by_key(|&(at, _)| at);
+                for (_, k) in due {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ProvideStdout | HostOp::ProvideStderr => {
+                let port = VirtualCell::Port {
+                    sealed: false,
+                    next: 0,
+                    calls: BTreeMap::new(),
+                    servers: Vec::new(),
+                };
+                let h = new(&mut self.world, port);
+                ok(h, h - CELL_BASE + SERVED_BASE)
+            }
+            HostOp::PortNext => {
+                let c = (a[0] - SERVED_BASE) as usize;
+                return Some(self.port_next(t, c));
+            }
+            HostOp::CallWord => {
+                let (c, id) = Self::call_of(a[0]);
+                let VirtualCell::Port { calls, .. } = &self.world.cells[c] else {
+                    unreachable!()
+                };
+                ok(calls[&id].words[a[1].min(3) as usize], 0)
+            }
+            HostOp::CallPayload => {
+                let (c, id) = Self::call_of(a[0]);
+                let VirtualCell::Port { calls, .. } = &self.world.cells[c] else {
+                    unreachable!()
+                };
+                let call = &calls[&id];
+                if call.finished || call.answer.is_some() {
+                    return Some(Ok(ok(0, 0)));
+                }
+                let bytes = call.data.clone();
+                let (_, data, len, cap) = self.carrier(a[2]);
+                if cap.saturating_sub(len) < bytes.len() as u64 {
+                    return Some(Err(Stop::Cause("Bounds")));
+                }
+                self.put(data + len, &bytes);
+                self.store(a[2] + 8, 8, len + bytes.len() as u64);
+                ok(0, bytes.len() as u64)
+            }
+            HostOp::PortReply => {
+                // NOTES 16: a reply after the caller's cancellation is
+                // pending, or after the call was settled, is Withdrawn; a
+                // Call of another port is consumed as a dropped one (NOTES 20).
+                let (c, id) = Self::call_of(a[1]);
+                if c != (a[0] - SERVED_BASE) as usize {
+                    self.port_drop(a[1]);
+                    return Some(Ok(ok(1, 0)));
+                }
+                let VirtualCell::Port { calls, .. } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                let call = calls.get_mut(&id).unwrap();
+                call.held = false;
+                let caller = &self.sched.tasks[call.caller];
+                let pending =
+                    caller.state == State::Provider && caller.cancel && caller.cancellable;
+                let answer = match a[2] {
+                    0 => vec![0, 0, 0, call.words[1]],
+                    _ => vec![0, a[4], a[5], a[3]],
+                };
+                let cell = &mut self.world.cells[c];
+                let reply = if pending {
+                    None
+                } else {
+                    cell.settle(id, answer)
+                };
+                cell.prune(id);
+                match reply {
+                    Some(k) => {
+                        self.ready_provider(k);
+                        ok(0, 0)
+                    }
+                    None => ok(1, 0),
+                }
+            }
+            HostOp::ClockSetWall => {
+                let c = self.cell(a[0]).unwrap();
+                if let VirtualCell::Clock { wall, .. } = &mut self.world.cells[c] {
+                    *wall = a[1];
+                }
+                ok(0, 0)
+            }
+            HostOp::ProcessTrigger => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Process { stopped, waiters } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                *stopped = true;
+                for k in std::mem::take(waiters) {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ClockIdle => {
+                let c = self.cell(a[0]).unwrap();
+                if let Err(cancelled) = self.check_cancel(t) {
+                    return Some(Err(cancelled));
+                }
+                let waited = self.cell_wait(
+                    t,
+                    c,
+                    |cell, k| {
+                        if let VirtualCell::Clock { idle, .. } = cell
+                            && !idle.iter().any(|&(j, _)| j == k)
+                        {
+                            idle.push((k, false));
+                        }
+                    },
+                    |cell, k| match cell {
+                        VirtualCell::Clock { idle, .. } => {
+                            idle.iter().any(|&(j, woken)| j == k && woken)
+                        }
+                        _ => unreachable!(),
+                    },
+                );
+                if let VirtualCell::Clock { idle, .. } = &mut self.world.cells[c] {
+                    idle.retain(|&(j, _)| j != t.k);
+                }
+                if let Err(cancelled) = waited {
+                    return Some(Err(cancelled));
+                }
+                let VirtualCell::Clock { timers, .. } = &self.world.cells[c] else {
+                    unreachable!()
+                };
+                match timers.iter().map(|&(at, _)| at).min() {
+                    Some(at) => ok(at, 1),
+                    None => ok(0, 0),
+                }
+            }
+            HostOp::Stdout | HostOp::Stderr => {
+                let c = self.cell(a[0])?;
+                let (bytes, ..) = self.carrier(a[1]);
+                let words = [0, bytes.len() as u64, 0, 0];
+                return Some(self.port_call(t, c, words, bytes));
+            }
+            HostOp::WallMs
+            | HostOp::MonoNs
+            | HostOp::SleepUntil
+            | HostOp::Random
+            | HostOp::Stopped => {
+                let c = self.cell(a[0])?;
+                if !matches!(op, HostOp::WallMs | HostOp::MonoNs)
+                    && let Err(cancelled) = self.check_cancel(t)
+                {
+                    return Some(Err(cancelled));
+                }
+                match op {
+                    HostOp::WallMs | HostOp::MonoNs => {
+                        let VirtualCell::Clock { mono, wall, .. } = self.world.cells[c] else {
+                            unreachable!()
+                        };
+                        vec![if op == HostOp::MonoNs { mono } else { wall }]
+                    }
+                    HostOp::SleepUntil => {
+                        let at = a[1];
+                        loop {
+                            let VirtualCell::Clock { mono, .. } = self.world.cells[c] else {
+                                unreachable!()
+                            };
+                            if at <= mono {
+                                break;
+                            }
+                            self.cell_timer(c, at, t.k);
+                            self.sched.tasks[t.k].cancellable =
+                                t.shield == 0 && t.obligations.len() == 1;
+                            self.park(Some(Wait::Network(None)));
+                            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                                if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
+                                {
+                                    timers.retain(|&(_, k)| k != t.k);
+                                }
+                                if let Err(cancelled) = self.check_cancel(t) {
+                                    return Some(Err(cancelled));
+                                }
+                            }
+                        }
+                        ok(0, 0)
+                    }
+                    HostOp::Random => {
+                        let (_, data, len, cap) = self.carrier(a[1]);
+                        let spare = cap.saturating_sub(len) as usize;
+                        let VirtualCell::Random(state) = &mut self.world.cells[c] else {
+                            unreachable!()
+                        };
+                        let mut bytes = Vec::with_capacity(spare);
+                        while bytes.len() < spare {
+                            // SplitMix64: eight little-endian bytes a step.
+                            *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                            let mut z = *state;
+                            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                            let step = (z ^ (z >> 31)).to_le_bytes();
+                            let n = (spare - bytes.len()).min(8);
+                            bytes.extend_from_slice(&step[..n]);
+                        }
+                        self.put(data + len, &bytes);
+                        self.store(a[1] + 8, 8, len + spare as u64);
+                        ok(0, spare as u64)
+                    }
+                    _ => {
+                        let waited = self.cell_wait(
+                            t,
+                            c,
+                            |cell, k| {
+                                if let VirtualCell::Process { waiters, .. } = cell
+                                    && !waiters.contains(&k)
+                                {
+                                    waiters.push(k);
+                                }
+                            },
+                            |cell, _| matches!(cell, VirtualCell::Process { stopped: true, .. }),
+                        );
+                        if let VirtualCell::Process { waiters, .. } = &mut self.world.cells[c] {
+                            waiters.retain(|&k| k != t.k);
+                        }
+                        if let Err(cancelled) = waited {
+                            return Some(Err(cancelled));
+                        }
+                        vec![]
+                    }
+                }
+            }
+            _ => return None,
+        };
+        Some(Ok(reply))
+    }
+
     fn park_task(&mut self, t: &Task, condition: Condition) {
         self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
         self.park(Some(Wait::Task(condition)));
@@ -1801,6 +2544,63 @@ impl Machine<'_> {
         };
         (bytes, data, len, cap)
     }
+    fn host_view(&mut self, bytes: &[u8]) -> u64 {
+        let len = bytes.len() as u64;
+        let data = self.block(len, None, 0, None);
+        self.mem[split(data).0].bytes.copy_from_slice(bytes);
+        let carrier = self.block(24, None, 0, None);
+        self.store(carrier, 8, data);
+        self.store(carrier + 8, 8, len);
+        self.mem[split(data).0].fixed = true;
+        self.mem[split(carrier).0].fixed = true;
+        carrier
+    }
+
+    fn env(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::EnvPatterns;
+        let patterns = self.world.env_patterns.get(a[0] as usize);
+        let covered = |name: &str| patterns.is_some_and(|p| p.covers(name));
+        let mut rows = self.world.env_entries.iter().filter(|row| covered(&row.0));
+        let ok = |value| vec![value, 0, 0, 0];
+        let error = |tag| vec![0, tag, 0, 0];
+        match op {
+            HostOp::EnvLen => ok(rows.count() as u64),
+            HostOp::EnvName => ok(rows.nth(a[1] as usize).map_or(0, |row| row.1)),
+            HostOp::EnvGet => {
+                let name = std::str::from_utf8(self.carrier_bytes(a[1])).unwrap();
+                if !covered(name) {
+                    return error(1);
+                }
+                match self
+                    .world
+                    .env_entries
+                    .binary_search_by(|row| row.0.as_str().cmp(name))
+                {
+                    Ok(i) => self.world.env_entries[i].2.map_or_else(|| error(2), ok),
+                    Err(_) => ok(0),
+                }
+            }
+            HostOp::EnvNarrow => {
+                let text = std::str::from_utf8(self.carrier_bytes(a[1])).unwrap();
+                let Some(filter) = EnvPatterns::parse(text) else {
+                    return error(1);
+                };
+                let result = patterns.map_or_else(EnvPatterns::default, |p| p.intersect(&filter));
+                let charge = result.charge();
+                let payer = t.limits.last().unwrap();
+                let requested = charge.unwrap_or(u64::MAX);
+                if let Err(available) = self.admit_charge(payer, requested, charge.is_none()) {
+                    return vec![requested, 2, 0, available];
+                }
+                let key = self.world.env_patterns.len() as u64;
+                self.world.env_patterns.push(result);
+                self.world.grant_charges.push((payer.clone(), requested));
+                ok(key)
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn carrier_bytes(&self, carrier: u64) -> &[u8] {
         let len = self.load(carrier + 8, 8);
         if len == 0 {
@@ -1880,7 +2680,11 @@ impl Machine<'_> {
             HostOp::SendPair | HostOp::RecvBounded => 3,
             _ => 2,
         };
-        let deadline = (op != HostOp::Listen && a[until] != 0).then(|| a[until + 2]);
+        let deadline = if op == HostOp::Listen {
+            None
+        } else {
+            self.until(a, until)
+        };
         let spare = if op == HostOp::RecvBounded {
             cap.saturating_sub(len).min(a[2]) as usize
         } else {
@@ -1934,7 +2738,7 @@ impl Machine<'_> {
         }) {
             return vec![0, 1, 0, 0];
         }
-        if a[3] != 0 && a[5] <= self.world.clock {
+        if self.until(a, 3).is_some_and(|due| self.passed(due)) {
             return vec![0, 6, 0, 0];
         }
         let (data, len, cap) = (
@@ -1957,7 +2761,7 @@ impl Machine<'_> {
         &mut self,
         t: &Task,
         model: &hirsel_core_net::model::Model,
-        deadline: Option<u64>,
+        deadline: Option<Due>,
         mut attempt: impl FnMut(u64) -> Option<hirsel_core_net::model::Reply>,
     ) -> hirsel_core_net::model::Reply {
         let token = t.k as u64 + 1;
@@ -1965,11 +2769,19 @@ impl Machine<'_> {
             if let Some(reply) = attempt(token) {
                 break reply;
             }
-            if deadline.is_some_and(|at| at <= model.now()) {
+            if deadline.is_some_and(|due| self.passed(due)) {
                 break model.abort(token, false);
             }
             self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-            self.park(Some(Wait::Network(deadline)));
+            let host = match deadline {
+                Some(Due::Host(at)) => Some(at),
+                Some(Due::Cell(c, at)) => {
+                    self.cell_timer(c, at, t.k);
+                    None
+                }
+                None => None,
+            };
+            self.park(Some(Wait::Network(host)));
             if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
                 break model.abort(token, true);
             }
@@ -2028,7 +2840,7 @@ impl Machine<'_> {
             return Err(cancelled);
         }
         model.advance_to(self.world.clock);
-        let deadline = (a[6] != 0).then_some(a[8]);
+        let deadline = self.until(a, 6);
         let reply = self.network_attempt(t, &model, deadline, |token| {
             model.attempt_tls(key, &offered, token)
         });
@@ -2083,30 +2895,29 @@ impl Machine<'_> {
             .checked_add(1)
             .expect("run-local handle counter");
         grants.insert(key, intersections);
-        self.world.net_charges.push((payer.clone(), charge));
+        self.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
     }
 
     fn secret_policy(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
-        let Some(patterns) = std::str::from_utf8(self.carrier_bytes(a[1]))
+        let Some(policy) = std::str::from_utf8(self.carrier_bytes(a[1]))
             .ok()
-            .and_then(Pattern::parse_list)
+            .and_then(SecretPolicy::parse)
         else {
             return vec![0, 1, 0, 0];
         };
-        let (patterns, len) = if op == HostOp::SecretSeal {
-            (patterns, self.load(a[0] + 8, 8))
+        let (policy, len) = if op == HostOp::SecretSeal {
+            (policy, self.load(a[0] + 8, 8))
         } else {
             let Some(parent) = self.world.secrets.get(a[0] as usize) else {
                 return vec![0, 1, 0, 0];
             };
-            let intersection = Pattern::intersection(&parent.patterns, &patterns);
-            if intersection.is_empty() {
+            let Some(intersection) = parent.policy.intersect(&policy) else {
                 return vec![0, 1, 0, 0];
-            }
+            };
             (intersection, 0)
         };
-        let size = SecretGrant::logical_size(&patterns, len);
+        let size = SecretGrant::logical_size(&policy.patterns, len);
         let charge = size.unwrap_or(u64::MAX);
         let payer = t.limits.last().unwrap();
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
@@ -2125,9 +2936,34 @@ impl Machine<'_> {
             self.world.secrets[a[0] as usize].bytes.clone()
         };
         let key = self.world.secrets.len() as u64;
-        self.world.secrets.push(EvalSecret { patterns, bytes });
-        self.world.net_charges.push((payer.clone(), charge));
+        self.world.secrets.push(EvalSecret { policy, bytes });
+        self.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
+    }
+
+    fn secret_mac(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let secret = &self.world.secrets[a[0] as usize];
+        let signing = op == HostOp::SecretHmac;
+        let needed = if signing {
+            SecretUse::Mac
+        } else {
+            SecretUse::Verify
+        };
+        if secret.policy.usage < needed {
+            return vec![0, 1, 0, 0];
+        }
+        let data = self.carrier_bytes(a[1]);
+        if signing {
+            let tag = hirsel_core_net::hmac_sha256(&secret.bytes, data);
+            for (i, byte) in tag.into_iter().enumerate() {
+                self.store(a[2] + i as u64, 1, u64::from(byte));
+            }
+            vec![0, 0, 0, 0]
+        } else {
+            let verdict =
+                hirsel_core_net::verify_hmac_sha256(&secret.bytes, data, self.carrier_bytes(a[2]));
+            vec![u64::from(verdict), 0, 0, 0]
+        }
     }
 
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
@@ -2141,7 +2977,12 @@ impl Machine<'_> {
         let Some(secret) = self.world.secrets.get(a[2] as usize) else {
             return Ok(vec![0, 1, 0, 0]);
         };
-        if !secret.patterns.iter().any(|pattern| pattern.covers(name)) {
+        if !secret
+            .policy
+            .patterns
+            .iter()
+            .any(|pattern| pattern.covers(name))
+        {
             return Ok(vec![0, 1, 0, 0]);
         }
         let bytes = secret.bytes.clone();
@@ -2150,7 +2991,7 @@ impl Machine<'_> {
         self.check_cancel(t)?;
         let model = self.world.network.sockets.model().unwrap().clone();
         model.advance_to(self.world.clock);
-        let deadline = (a[4] != 0).then_some(a[6]);
+        let deadline = self.until(a, 4);
         let mut committed = 0;
         let reply = self.network_attempt(t, &model, deadline, |token| {
             model.attempt_secret(
@@ -2172,10 +3013,17 @@ impl Machine<'_> {
             return Ok(self.secret_policy(t, op, a));
         }
         self.deny_describe_capability();
+        if let Some(reply) = self.provide(t, op, a) {
+            return reply;
+        }
         match op {
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
+            HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
+            HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
+                return Ok(self.env(t, op, a));
+            }
             HostOp::SendPair
                 if self
                     .world
@@ -2187,11 +3035,11 @@ impl Machine<'_> {
             }
             _ => {}
         }
-        const NOT_FOUND: u64 = 1;
-        const DENIED: u64 = 2;
-        const EXISTS: u64 = 3;
         let ok = |value: u64, written: u64| vec![value, 0, 0, written];
         let error = |e: u64| vec![0, e, 0, 0];
+        let resolve = |(tag, code)| vec![0, tag, code, 0];
+        let stat = |kind: u64, size: u64, time: u64| vec![size, 0, 0, time, kind];
+        let stat_error = |(tag, code)| vec![0, tag, code, 0, 0];
         let file = |h: u64| (h - FILE_BASE) as usize;
         // Every operation but a clock read is a cancellation point at entry
         // (native provider `drive`, `cancellation_point`).
@@ -2214,7 +3062,29 @@ impl Machine<'_> {
             | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }
-            HostOp::TlsConnect | HostOp::SendSecret | HostOp::SecretSeal | HostOp::SecretNarrow => {
+            HostOp::TlsConnect
+            | HostOp::SendSecret
+            | HostOp::SecretSeal
+            | HostOp::SecretNarrow
+            | HostOp::SecretHmac
+            | HostOp::SecretVerifyHmac
+            | HostOp::EnvGet
+            | HostOp::EnvLen
+            | HostOp::EnvName
+            | HostOp::EnvNarrow
+            | HostOp::ProvideClock
+            | HostOp::ProvideRandom
+            | HostOp::ProvideProcess
+            | HostOp::ClockAdvance
+            | HostOp::ClockSetWall
+            | HostOp::ClockIdle
+            | HostOp::ProcessTrigger
+            | HostOp::ProvideStdout
+            | HostOp::ProvideStderr
+            | HostOp::PortNext
+            | HostOp::CallWord
+            | HostOp::CallPayload
+            | HostOp::PortReply => {
                 unreachable!()
             }
             HostOp::Resolve => self.network_resolve(a),
@@ -2268,6 +3138,22 @@ impl Machine<'_> {
                     error(1)
                 }
             }
+            HostOp::StdinRead => {
+                let (data, len, cap) = (
+                    self.load(a[1], 8),
+                    self.load(a[1] + 8, 8),
+                    self.load(a[1] + 16, 8),
+                );
+                let n = (cap.saturating_sub(len) as usize)
+                    .min(self.world.stdin.len())
+                    .min(64 * 1024);
+                if n != 0 {
+                    let bytes: Vec<_> = self.world.stdin.drain(..n).collect();
+                    self.put(data + len, &bytes);
+                    self.store(a[1] + 8, 8, len + n as u64);
+                }
+                ok(n as u64, 0)
+            }
             HostOp::Stopped => {
                 // The model has no OS signal source. Cancellation still wakes this wait.
                 self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
@@ -2319,61 +3205,174 @@ impl Machine<'_> {
                 ok(0, spare as u64)
             }
             HostOp::Open => {
-                let key = (a[0], self.carrier(a[1]).0);
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
                 let w = &mut self.world;
-                let at = match (w.nodes.get(&key), a[2]) {
-                    (Some(Node::Dir), _) => return Ok(error(DENIED)),
+                let mode = a[2] as u8;
+                let file = match (w.nodes.get(&key), mode) {
+                    (Some(Node::Dir(_)), _) => return Ok(error(DENIED)),
                     (None, 0) => return Ok(error(NOT_FOUND)),
                     (Some(_), 3) => return Ok(error(EXISTS)),
-                    (Some(Node::File(c)), 2) => c.len(),
-                    (Some(_), 0) => 0,
-                    _ => {
-                        let keep = a[2] == 2;
-                        let n = w.nodes.entry(key.clone()).or_insert(Node::File(Vec::new()));
-                        if let Node::File(c) = n
-                            && !keep
-                        {
-                            c.clear();
-                        }
-                        0
+                    (Some(Node::File(file)), _) => Arc::clone(file),
+                    (None, _) => {
+                        let file = Arc::new(Mutex::new(ModelFile {
+                            modified_ns: w.clock.min(i64::MAX as u64),
+                            ..ModelFile::default()
+                        }));
+                        w.nodes.insert(key, Node::File(Arc::clone(&file)));
+                        file
                     }
                 };
+                if mode == 1 {
+                    *file.lock().unwrap() = ModelFile {
+                        modified_ns: w.clock.min(i64::MAX as u64),
+                        ..ModelFile::default()
+                    };
+                }
                 w.files.push(Some(OpenFile {
-                    key,
-                    at,
+                    file,
+                    at: 0,
                     locked: false,
+                    mode,
                 }));
                 ok(FILE_BASE + w.files.len() as u64 - 1, 0)
             }
-            HostOp::Read => {
-                let (_, data, len, cap) = self.carrier(a[1]);
-                let i = file(a[0]);
-                let f = self.world.files[i].as_ref().expect("an open file");
-                let Some(Node::File(c)) = self.world.nodes.get(&f.key) else {
-                    return Ok(error(NOT_FOUND));
+            HostOp::OpenDir => {
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err((OTHER, 20)) => return Ok(error(DENIED)),
+                    Err(e) => return Ok(resolve(e)),
                 };
-                let n = (cap.saturating_sub(len) as usize).min(c.len() - f.at);
-                let bytes = c[f.at..f.at + n].to_vec();
+                match self.world.nodes.get(&key) {
+                    Some(Node::Dir(dir)) => ok(*dir, 0),
+                    Some(Node::File(_)) => error(DENIED),
+                    None => error(NOT_FOUND),
+                }
+            }
+            HostOp::Entries => {
+                let records = self
+                    .world
+                    .children(a[0])
+                    .map(|((_, name), node)| {
+                        let kind = u8::from(matches!(node, Node::Dir(_)));
+                        let mut record = vec![kind];
+                        record.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                        record.extend_from_slice(name);
+                        record
+                    })
+                    .collect();
+                let h = LISTING_HANDLE | self.world.listings.len() as u64;
+                self.world.listings.push(Some(records));
+                ok(h, 0)
+            }
+            HostOp::NextEntries => {
+                let (_, data, len, cap) = self.carrier(a[1]);
+                let spare = cap.saturating_sub(len);
+                if spare < 258 {
+                    return Err(Stop::Cause("Bounds"));
+                }
+                let Some(records) = self.world.listings[(a[0] & !LISTING_HANDLE) as usize].as_mut()
+                else {
+                    return Ok(error(CLOSED));
+                };
+                let mut bytes = Vec::new();
+                let mut count = 0;
+                while records
+                    .front()
+                    .is_some_and(|r| bytes.len() as u64 + r.len() as u64 <= spare)
+                {
+                    bytes.extend(records.pop_front().unwrap());
+                    count += 1;
+                }
+                if count != 0 {
+                    self.put(data + len, &bytes);
+                    self.store(a[1] + 8, 8, len + bytes.len() as u64);
+                }
+                ok(count, 0)
+            }
+            HostOp::Stat => {
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(stat_error(e)),
+                };
+                match self.world.nodes.get(&key) {
+                    Some(Node::Dir(_)) => stat(1, 0, 0),
+                    Some(Node::File(f)) => {
+                        let f = f.lock().unwrap();
+                        stat(0, f.len, f.modified_ns)
+                    }
+                    None => stat_error((NOT_FOUND, 0)),
+                }
+            }
+            HostOp::StatFile => {
+                if let Some(f) = &self.world.files[file(a[0])] {
+                    let f = f.file.lock().unwrap();
+                    stat(0, f.len, f.modified_ns)
+                } else {
+                    stat_error((CLOSED, 0))
+                }
+            }
+            HostOp::Read | HostOp::ReadAt => {
+                let positioned = op == HostOp::ReadAt;
+                let buffer = a[if positioned { 2 } else { 1 }];
+                let (_, data, len, cap) = self.carrier(buffer);
+                let i = file(a[0]);
+                let Some(f) = self.world.files[i].as_ref() else {
+                    return Ok(error(CLOSED));
+                };
+                if positioned && !matches!(f.mode, 0 | 4) {
+                    return Ok(error(DENIED));
+                }
+                let at = if positioned { a[1] } else { f.at };
+                let (n, bytes) = {
+                    let c = f.file.lock().unwrap();
+                    let n = cap.saturating_sub(len).min(c.len.saturating_sub(at)) as usize;
+                    (n, c.read(at, n))
+                };
                 if n > 0 {
                     self.put(data + len, &bytes);
-                    self.store(a[1] + 8, 8, len + n as u64);
+                    self.store(buffer + 8, 8, len + n as u64);
                 }
-                self.world.files[i].as_mut().unwrap().at += n;
+                if !positioned {
+                    self.world.files[i].as_mut().unwrap().at += n as u64;
+                }
                 ok(n as u64, 0)
             }
-            HostOp::Write => {
-                let (bytes, ..) = self.carrier(a[1]);
-                let i = file(a[0]);
-                let f = self.world.files[i].as_mut().expect("an open file");
-                let Some(Node::File(c)) = self.world.nodes.get_mut(&f.key) else {
-                    return Ok(error(NOT_FOUND));
-                };
-                let end = f.at + bytes.len();
-                if c.len() < end {
-                    c.resize(end, 0);
+            HostOp::Write | HostOp::WriteAt => {
+                let positioned = op == HostOp::WriteAt;
+                let (bytes, ..) = self.carrier(a[if positioned { 2 } else { 1 }]);
+                if positioned && a[1].checked_add(bytes.len() as u64).is_none() {
+                    return Err(Stop::Cause("Bounds"));
                 }
-                c[f.at..end].copy_from_slice(&bytes);
-                f.at = end;
+                let i = file(a[0]);
+                let Some(f) = self.world.files[i].as_mut() else {
+                    return Ok(error(CLOSED));
+                };
+                if positioned && !matches!(f.mode, 1 | 3 | 4) {
+                    return Ok(error(DENIED));
+                }
+                if bytes.is_empty() {
+                    return Ok(ok(0, 0));
+                }
+                let mut c = f.file.lock().unwrap();
+                let at = if positioned {
+                    a[1]
+                } else if f.mode == 2 {
+                    c.len
+                } else {
+                    f.at
+                };
+                let end = at + bytes.len() as u64;
+                if end > i64::MAX as u64 {
+                    return Ok(vec![0, 5, 27, 0]); // Other(EFBIG)
+                }
+                c.write(at, &bytes);
+                c.modified_ns = self.world.clock.min(i64::MAX as u64);
+                if !positioned {
+                    f.at = end;
+                }
                 ok(0, bytes.len() as u64)
             }
             HostOp::Close => {
@@ -2383,15 +3382,12 @@ impl Machine<'_> {
             }
             HostOp::TryLock | HostOp::Unlock => {
                 let i = file(a[0]);
-                let key = self.world.files[i]
-                    .as_ref()
-                    .expect("an open file")
-                    .key
-                    .clone();
-                let held =
-                    self.world.files.iter().enumerate().any(|(j, f)| {
-                        j != i && f.as_ref().is_some_and(|f| f.locked && f.key == key)
-                    });
+                let open = self.world.files[i].as_ref().expect("an open file");
+                let held = self.world.files.iter().enumerate().any(|(j, f)| {
+                    j != i
+                        && f.as_ref()
+                            .is_some_and(|f| f.locked && Arc::ptr_eq(&f.file, &open.file))
+                });
                 let take = op == HostOp::TryLock;
                 if take && held {
                     return Ok(ok(0, 0));
@@ -2400,25 +3396,34 @@ impl Machine<'_> {
                 ok(u64::from(take), 0)
             }
             HostOp::Mkdir => {
-                let key = (a[0], self.carrier(a[1]).0);
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
                 if self.world.nodes.contains_key(&key) {
                     return Ok(error(EXISTS));
                 }
-                self.world.nodes.insert(key, Node::Dir);
+                self.world.new_dir(key);
                 ok(0, 0)
             }
             HostOp::Rename => {
-                let from = (a[0], self.carrier(a[1]).0);
-                let to = (a[0], self.carrier(a[2]).0);
+                let from = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
+                let to = match self.world.dir_key(a[0], self.carrier_bytes(a[2])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
                 // core.md: a regular file `from` takes the name `to` in the one `Dir`,
                 // replacing a regular file there; anything else at either name is
                 // `Denied` and renames nothing.
                 match self.world.nodes.get(&from) {
                     None => return Ok(error(NOT_FOUND)),
-                    Some(Node::Dir) => return Ok(error(DENIED)),
+                    Some(Node::Dir(_)) => return Ok(error(DENIED)),
                     Some(Node::File(_)) => {}
                 }
-                if let Some(Node::Dir) = self.world.nodes.get(&to) {
+                if let Some(Node::Dir(_)) = self.world.nodes.get(&to) {
                     return Ok(error(DENIED));
                 }
                 // The same name: removed and put back, unchanged.
@@ -2427,24 +3432,47 @@ impl Machine<'_> {
                 ok(0, 0)
             }
             HostOp::Remove | HostOp::RemoveTree => {
-                let key = (a[0], self.carrier(a[1]).0);
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
+                if let Some(Node::Dir(dir)) = self.world.nodes.get(&key) {
+                    let dir = *dir;
+                    if op == HostOp::RemoveTree {
+                        self.world.remove_children(dir);
+                    } else if self.world.children(dir).next().is_some() {
+                        return Ok(resolve((OTHER, 39))); // ENOTEMPTY
+                    }
+                }
                 match self.world.nodes.remove(&key) {
                     Some(_) => ok(0, 0),
                     None => error(NOT_FOUND),
                 }
             }
             HostOp::Mkdtemp => {
-                let (_, data, len, cap) = self.carrier(a[1]);
-                if len + 32 > cap {
+                let (prefix, data, len, cap) = self.carrier(a[1]);
+                if cap.saturating_sub(len) < 32 {
                     return Err(Stop::Cause("Bounds"));
                 }
-                let k = self.world.temporaries;
-                self.world.temporaries += 1;
-                let name = format!("t{k}").into_bytes();
-                self.put(data + len, &name);
-                self.store(a[1] + 8, 8, len + name.len() as u64);
-                self.world.nodes.insert((a[0], name), Node::Dir);
-                ok(DIR_BASE + k, 0)
+                if prefix.iter().any(|&b| b == b'/' || b == 0) {
+                    return Ok(error(DENIED));
+                }
+                for _ in 0..128 {
+                    let k = self.world.temporaries;
+                    self.world.temporaries += 1;
+                    let suffix = format!("t{k}").into_bytes();
+                    let full = [prefix.as_slice(), &suffix].concat();
+                    if full.len() > 255 {
+                        return Ok(resolve((OTHER, 36))); // ENAMETOOLONG
+                    }
+                    let key = (a[0], full);
+                    if !self.world.nodes.contains_key(&key) {
+                        self.put(data + len, &suffix);
+                        self.store(a[1] + 8, 8, len + suffix.len() as u64);
+                        return Ok(ok(self.world.new_dir(key), 0));
+                    }
+                }
+                resolve((OTHER, 11)) // EAGAIN
             }
             HostOp::Sync | HostOp::SyncDir => ok(0, 0),
         })
@@ -2641,7 +3669,7 @@ impl Machine<'_> {
         if let Some(r) = &blk.res {
             if !r.settled {
                 let payer = blk.limit.as_ref().expect("a resource payer");
-                let grant = Limit::new(r.grant, Some(payer.clone()), true, self.sched.current);
+                let grant = Limit::new(r.grant, Some(payer.clone()), self.sched.current);
                 self.end_limit(grant, None);
             }
             n -= r.grant;
@@ -2917,7 +3945,22 @@ impl Machine<'_> {
             // MEM-24); the trace records the close by its handle.
             FieldTy::Handle(Handle::HostFile) => {
                 let h = self.load(at, 8);
+                if h & LISTING_HANDLE != 0 {
+                    self.world.listings[(h & !LISTING_HANDLE) as usize] = None;
+                    return false;
+                }
                 self.trace.push(h);
+                if h >= CALL_BASE || (SERVED_BASE..SERVED_BASE + 0x10_0000).contains(&h) {
+                    // A dropped Call settles its caller as sealed; a cleaned
+                    // Served end seals its port.
+                    self.port_drop(h);
+                    return false;
+                }
+                if (CELL_BASE..LISTING_HANDLE).contains(&h) {
+                    // A dropped ClockHand freezes its clock; a dropped
+                    // StopTrigger never stops its process.
+                    return false;
+                }
                 if let Some(file) = h
                     .checked_sub(FILE_BASE)
                     .and_then(|i| self.world.files.get_mut(i as usize))
@@ -3155,7 +4198,7 @@ impl Machine<'_> {
             let resource = self.mem[b].res.as_ref().expect("a resource block");
             let (grant, creator) = (resource.grant, resource.creator);
             let payer = self.mem[b].limit.clone().expect("charged");
-            let g = Limit::new(grant, Some(payer.clone()), true, self.sched.current);
+            let g = Limit::new(grant, Some(payer.clone()), self.sched.current);
             t.limits.push(g);
             t.obligations.push(Some(Cell {
                 limit: payer,
@@ -3233,6 +4276,11 @@ impl Machine<'_> {
                     self.store(cell + 8 * j as u64, 8, w);
                 }
             } else {
+                if c.kind == "Capacity" {
+                    // `Capacity(c)`: requested at 0, available at 8.
+                    self.store(cell, 8, c.message[0]);
+                    self.store(cell + 8, 8, c.message[1]);
+                }
                 self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
             }
             let site = self.site_word(c.site);
@@ -3422,12 +4470,7 @@ impl Machine<'_> {
                     return Ok(vec![0, moved, n]);
                 }
                 // The child's limit serves the child, the next scheduler record.
-                let lim = Limit::new(
-                    n,
-                    (!unit).then(|| cur.clone()),
-                    false,
-                    self.sched.tasks.len(),
-                );
+                let lim = Limit::new(n, (!unit).then(|| cur.clone()), self.sched.tasks.len());
                 let xb = self.block(self.held(x), None, 0, None);
                 if unit {
                     let item = self.cross_take(a[1], x, &owners);
@@ -3631,6 +4674,7 @@ impl Machine<'_> {
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
+            RtOp::LaunchHandle => vec![0],
             RtOp::DescribeEmit => {
                 if self.world.launch.as_ref().unwrap().is_describe() {
                     let (bytes, _, _, _) = self.carrier(a[0]);
@@ -4155,9 +5199,17 @@ impl Machine<'_> {
                 }
                 Terminator::Raise { cause: c, cleanup } => {
                     let mut message = [0; 3];
-                    if let RaiseCause::Fail(a) = c {
-                        let (p, _) = self.address(b, slots, &vals, &places, *a)?;
-                        message = [0, 8, 16].map(|o| self.load(p + o, 8));
+                    match c {
+                        RaiseCause::Fail(a) => {
+                            let (p, _) = self.address(b, slots, &vals, &places, *a)?;
+                            message = [0, 8, 16].map(|o| self.load(p + o, 8));
+                        }
+                        // `Capacity(c)`'s payload sits where `Fail`'s carrier does.
+                        RaiseCause::Capacity {
+                            requested,
+                            available,
+                        } => message = [vals[requested.index()], vals[available.index()], 0],
+                        RaiseCause::Unwrap | RaiseCause::Bounds => {}
                     }
                     t.at.last_mut().unwrap().0 = blk.anchor;
                     let site = self.site(t);
@@ -4671,7 +5723,6 @@ impl Machine<'_> {
                 }
                 let n = vals[charge.index()];
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
-                    Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) if let AllocPlace::Frame(at) = place => {
                         (vals[result.index()], vals[available.index()]) = (vals[at.index()], 0);
@@ -4839,7 +5890,7 @@ impl Machine<'_> {
                     Err(room) => (0, room),
                 };
                 if ok == 1 {
-                    let l = Limit::new(n, Some(cur.clone()), false, self.sched.current);
+                    let l = Limit::new(n, Some(cur.clone()), self.sched.current);
                     t.limits.push(l);
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
@@ -4916,7 +5967,6 @@ impl Machine<'_> {
                 let l = t.limits.last().unwrap().clone();
                 let n = vals[charge.index()];
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
-                    Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     // Refused: the carrier, its block and the block's elements stay.
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) => {
@@ -5260,7 +6310,7 @@ fn ended_byte_limits_release_their_records() {
     let root = machine.root().clone();
     for _ in 0..4096 {
         machine.admit(&root, 0).unwrap();
-        let scope = Limit::new(0, Some(root.clone()), false, 0);
+        let scope = Limit::new(0, Some(root.clone()), 0);
         peak = peak.max(meter.bytes());
         machine.end_limit(scope, None);
     }
@@ -5273,9 +6323,9 @@ fn ended_byte_limits_release_their_records() {
     // block refunds exactly its surviving charge to the root.
     drop(measure);
     machine.admit(&root, 64).unwrap();
-    let outer = Limit::new(64, Some(root.clone()), false, 0);
+    let outer = Limit::new(64, Some(root.clone()), 0);
     machine.admit(&outer, 48).unwrap();
-    let inner = Limit::new(48, Some(outer.clone()), false, 0);
+    let inner = Limit::new(48, Some(outer.clone()), 0);
     machine.admit(&inner, 8).unwrap();
     let block = machine.block(8, Some(inner.clone()), 8, None);
     machine.end_limit(inner, None);

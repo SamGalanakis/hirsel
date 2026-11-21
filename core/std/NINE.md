@@ -24,16 +24,9 @@ allocates (`Inline` arrays, `int.mul_wide`), so json converts no third error typ
 request-scratch's builder is sized with `span.with_capacity`, so it abandons no blocks. What
 remains awkward, most useful first:
 
-1. **Error conversion (all nine).** `?` propagates only an identical error type (LANG-18), and
-   every allocating core call returns `Capacity` or `(Capacity, X)`. Each workload has its own
-   error type with a Capacity arm (`JsonError`, `LruError`, `PathError`, ...), so every
-   `list.push`, `map.insert`, `string.from`, `string.push` and `rc.new` inside it is wrapped:
-   `result.map_err(list.push(mut xs, v), fn(take e: (Capacity, Json)) -> JsonError { Capacity(e.0) })?`,
-   or a `match`. Counting the calls sketched below, that is roughly 10 to 30 wrap sites per
-   workload: json and request-scratch the most, bfs the fewest (its four `with_capacity` calls).
-   A function that returns plain `Result[_, Capacity]` keeps bare `?` with
-   `result.capacity_only`, so the useful shape is small helpers returning `Capacity` and one
-   conversion at their caller.
+1. **Error conversion (all nine).** Settled: an allocating core call raises `Capacity`
+   (MEM-21) instead of returning it, so it needs no conversion, and `e ?=> m` (LANG-18)
+   converts the errors that remain at the exit.
 2. **generics tally.** `map.get_or` then `map.update` costs two hash probes per repeated word,
    where the side list it replaces cost one probe and an O(1) `list.set`. Either allocates
    nothing on a repeat; the side list stays the faster shape if the measurement cares.
@@ -86,7 +79,7 @@ unreachable target.
    error is primary and the later ones are suppressed, in order.
 5. Probe the lock with a freshly opened file, then report the destination's size and sum.
 
-- `let mut name = string.with_capacity(32)?` then `let tmp = dir.create_temp(d, mut name)?`:
+- `let mut name = string.with_capacity(32)` then `let tmp = dir.create_temp(d, mut name)?`:
   `host.mkdtemp` writes the directory's name into capacity the caller already holds. The run
   ends with `dir.remove_all(d, name)`, so nothing leaks.
 - `file.write(tmp, "source.txt", data)` for the source.
@@ -110,7 +103,7 @@ list are released in reverse order.
 
 - `list.with_capacity`, `list.push`, `list.len`, `list.get`
 - `string.from` (was `string.copy`), `string.push`, `string.byte_len`
-- Tally: a `Map[String, u64]`. A new word is `map.insert(mut m, string.from(w)?, 1)`; a repeat is
+- Tally: a `Map[String, u64]`. A new word is `map.insert(mut m, string.from(w), 1)`; a repeat is
   `let n = map.get_or(m, w, 0)` then `map.update(mut m, w, fn(mut v: u64) { v += 1 })`, which
   takes no key and admits nothing. Insertion order is the map's own, so the output walks `for (k, n) in m` (SEM-6). This
   replaces the side `List[u64]` of counts revision 2 needed; cost in item 3 above.

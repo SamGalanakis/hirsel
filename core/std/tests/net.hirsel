@@ -57,7 +57,7 @@ fn serve_crossed_socket(take ready: Client[Client[Socket]]) waits {
     let (read, write) = net.split(take socket)
     let mut r = take read
     let mut w = take write
-    let mut data: Bytes = result.unwrap(list.with_capacity(1))
+    let mut data: Bytes = list.with_capacity(1)
     result.unwrap(host.recv_bounded(mut r, mut data, 1, Never))
     let _ = result.unwrap(host.send_pair(mut w, data, string.as_bytes(""), Never))
 }
@@ -77,7 +77,7 @@ fn socket_served_by_receiving_unit(n: Net, _clock: Clock, tasks: Tasks) -> bool 
     let mut w = take write
     result.unwrap(host.send_pair(mut w, string.as_bytes("x"), string.as_bytes(""), Never))
     result.unwrap(conn.send(sockets, take socket))
-    let mut reply: Bytes = result.unwrap(list.with_capacity(1))
+    let mut reply: Bytes = list.with_capacity(1)
     let received = result.unwrap(host.recv_bounded(mut r, mut reply, 1, Never))
     result.unwrap(task.join(take helper))
     received == 1 && reply == string.as_bytes("x")
@@ -95,6 +95,6 @@ fn inbox_seal_closes_socket(n: Net, _clock: Clock, _tasks: Tasks) -> bool waits 
     let _ = take inbox
     let (read, _) = net.split(take client)
     let mut r = take read
-    let mut data: Bytes = result.unwrap(list.with_capacity(1))
+    let mut data: Bytes = list.with_capacity(1)
     result.unwrap(host.recv_bounded(mut r, mut data, 1, Never)) == 0
 }

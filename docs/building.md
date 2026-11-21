@@ -43,9 +43,13 @@ incomplete features and its resource refusals. `hirsel explain RULE` prints a
 specification rule (for example `hirsel explain CAP-4`), and `hirsel explain --list`
 lists them all.
 
-`hirsel fmt DIR` formats every source file in place and refuses malformed input
-without a partial edit. `hirsel fmt --check DIR` lists the files that differ and
-exits 1 when any do.
+`hirsel fmt FILE` formats one file in place. `hirsel fmt DIR` formats every
+`.hirsel` file in the directory tree. A source refusal prevents writes to the
+whole batch. `hirsel fmt --stdin` reads one source from standard input and sends
+the formatted bytes to standard output. `--check` exits 1 when the input differs
+from its formatted form. For a file or directory it lists differing paths, and
+for stdin it writes no formatted bytes. Use `--signatures` for core declarations
+that omit function bodies.
 
 ## Build and run
 
@@ -122,11 +126,15 @@ hirsel test app --limit 1048576 --grant Stdout
 ```
 
 `hirsel test` discovers each `@test` function ([PROG-4](spec/programs.md#prog-4-tests))
-in the package, builds it and runs it in its own process. `--limit BYTES` is
+in the package and runs each execution in its own process. `--limit BYTES` is
 mandatory and is each test run's root limit; `--dir` and `--grant` configure
-capabilities as for `run`. `--filter TEXT` selects the tests whose full definition
-path contains TEXT, and `--test-timeout SECONDS` bounds each test's execution. Every
-selected test runs whatever an earlier one did; no matching test exits 2.
+capabilities as for `run`. Parameterless tests receive no grants.
+`--filter TEXT` selects the tests whose full definition
+path contains TEXT, and `--test-timeout SECONDS` bounds each test's execution. An
+earlier failure does not stop later tests, and no matching test exits 2.
+Hirsel reuses passing results for capability-free native tests with matching code
+and configuration, and each row says `cached` or `executed`.
+Use `--rerun` to execute every selected test and refresh passing results.
 
 ## Limits
 

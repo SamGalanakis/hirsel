@@ -18,6 +18,7 @@ impl Cx<'_, '_, '_> {
                 self.konst(ty, bits, n)
             }
             crate::ConstData::Unit => None,
+            crate::ConstData::StaticString(_) => unreachable!("strings use their literal carrier"),
             crate::ConstData::Fields { .. } => {
                 let data = if let Some(&id) = self.e.constant_statics.get(&value) {
                     id
@@ -53,6 +54,7 @@ impl Cx<'_, '_, '_> {
         use hirsel_core_ir::StaticValue;
         match value.data {
             crate::ConstData::Bits(bits) => StaticValue::Bits(bits),
+            crate::ConstData::StaticString(_) => unreachable!("constant aggregates are plain"),
             crate::ConstData::Unit => StaticValue::Fields {
                 case: None,
                 fields: vec![],

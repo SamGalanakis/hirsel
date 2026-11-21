@@ -4,8 +4,11 @@
 /* Provider operations: Open 0, Read 1, Write 2, Close 3, TryLock 4, Unlock 5,
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
-   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28, Resolve 40.
-   Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
+   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
+   ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
+   Stat 46, StatFile 47, CloseEntries 48. Positioned requests carry an eight-byte little-endian
+   offset in path and the original open mode in mode.
+   Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
 /* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code).
    Network outcomes use 1 Denied, 2 Refused, 3 Unreachable, 4 InUse, 5 Reset,
@@ -23,7 +26,7 @@ typedef struct {
     uint64_t value;
     HirselCoreIoError error;
     uint64_t written;
-    uint8_t status;
+    uint8_t status, kind;
 } HirselCoreHostOutcome;
 /* Four-state provider ABI (C cancelled at entry, W waiting, I issued, D delivered).
    Wait kind: 0 Ready, 1 Until(deadline_ns), 2 Park. Step kind: 0 Done, 1 Pending
@@ -51,14 +54,18 @@ typedef struct {
 void hirsel_core_ready(uint64_t token);
 HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
 /* FORM #50: outcome layout value@0, error.tag@8, error.code@12, written@16,
-   status@24 (failure convention 3c242a8a). error 0 succeeds; 1..5 are IoError
+   status@24 (failure convention 3c242a8a), kind@25. Stat returns size in value,
+   signed modification nanoseconds in written, and the file kind in kind. error 0 succeeds; 1..5 are IoError
    case + 1. Clock rows ignore status and use value; waiting rows can fail with
-   Cancelled, mkdtemp also Bounds. Only read/mkdtemp update operand.len; data
-   and capacity never change. Capacity 0 borrows storage (even if len > 0).
+   Cancelled. Mkdtemp, positioned I/O and NextEntries can also fail with Bounds.
+   Read, ReadAt, Mkdtemp and NextEntries can update operand.len; data and
+   capacity never change. Capacity 0 borrows storage (even if len > 0).
    No row admits or grows/frees carrier storage. Null operand for no operand. */
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_io(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_clock(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_stat(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_at(HirselCoreContext *, uint8_t op, uint64_t handle, uint64_t at, HirselCoreBuffer *operand, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
 /* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.
@@ -68,7 +75,7 @@ HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t
 typedef uint64_t HirselCoreHostFile;
 HirselCoreHostOutcome hirsel_core_host_file_open(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
 HirselCoreHostOutcome hirsel_core_host_file(HirselCoreContext *, HirselCoreHostFile, HirselCoreHostRequest *);
-/* Drop consumes a live key once: no admission, cancellation or failure result;
+/* Drop consumes a live file or listing key once, with no admission or cancellation;
    ignores close errors (MEM-24), never retries close. Remaining files close
    before grants at normal/failure exit; run stops skip cleanup (_exit closes
    descriptors). OS calls retain the guarded foreign-call stack rule. */
@@ -159,6 +166,8 @@ typedef struct HirselCoreSocketActivation HirselCoreSocketActivation;
 extern const HirselCoreSocketActivation hirsel_core_os_socket_activation;
 typedef struct HirselCoreSecretOperations HirselCoreSecretOperations;
 extern const HirselCoreSecretOperations hirsel_core_os_secret_ops;
+typedef struct HirselCoreEnvOperations HirselCoreEnvOperations;
+extern const HirselCoreEnvOperations hirsel_core_os_env_ops;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -182,6 +191,9 @@ typedef struct {
     size_t secret_grants_len;
     /* Set to &hirsel_core_os_secret_ops for a sourced launch with Secrets. */
     const HirselCoreSecretOperations *secret_ops;
+    HirselCoreView env_patterns;
+    /* Set to &hirsel_core_os_env_ops for a sourced launch with Env. */
+    const HirselCoreEnvOperations *env_ops;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
@@ -223,6 +235,37 @@ HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, 
 /* RECV_BOUNDED (27): max_receive clips the request buffer's writable spare
    capacity. The caller's carrier publishes only the delivered length. */
 HirselCoreHostOutcome hirsel_core_host_recv_bounded(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint64_t max_receive, uint8_t, uint64_t, uint64_t, uint64_t);
+/* STDIN_READ (32): append at most the caller's existing spare capacity. */
+HirselCoreHostOutcome hirsel_core_stdin_read(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* Env get and name return a borrowed carrier address in Outcome.value (zero for None). */
+HirselCoreHostOutcome hirsel_core_env_get(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_env_len(HirselCoreContext *, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_env_name(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_env_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+/* provide cells (core.md, Provide). Constructors admit one cell from the
+   current limit; a refusal returns value 0 with written = available. Clock
+   answers (value = Clock grant, written = ClockHand key), random answers its
+   Random grant, process answers (value = Process grant, written = StopTrigger
+   key). The last argument of each call is the site. */
+HirselCoreHostOutcome hirsel_core_provide_clock(HirselCoreContext *, uint64_t mono, uint64_t wall, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_random(HirselCoreContext *, uint64_t seed, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_process(HirselCoreContext *, uint64_t);
+HirselCoreHostOutcome hirsel_core_clock_advance_to(HirselCoreContext *, uint64_t hand, uint64_t mono, uint64_t);
+HirselCoreHostOutcome hirsel_core_clock_set_wall(HirselCoreContext *, uint64_t hand, uint64_t wall, uint64_t);
+/* Suspends until every other task waits, then Outcome.value is the earliest
+   waited deadline and written is 1 when there is one. */
+HirselCoreHostOutcome hirsel_core_clock_idle(HirselCoreContext *, uint64_t hand, uint64_t);
+HirselCoreHostOutcome hirsel_core_process_trigger(HirselCoreContext *, uint64_t trigger, uint64_t);
+/* served ports (core.md, Provide). The constructors answer value = the
+ * capability's grant and written = the Served key; next answers written 1 with
+ * value = the Call key, or written 0 at quiescence; reply answers value 1 for
+ * Withdrawn. */
+HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, uint64_t);
+HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_payload(HirselCoreContext *, uint64_t call, uint64_t field, HirselCoreBuffer *out, uint64_t);
+HirselCoreHostOutcome hirsel_core_port_reply(HirselCoreContext *, uint64_t served, uint64_t call, uint64_t tag, uint64_t a, uint64_t b, uint64_t c, uint64_t);
 /* SEND_PAIR (26): buffer borrows the first prefix. The first word at path
    is a const HirselCoreBuffer * borrowing the second prefix. Both remain
    pinned through deliver. Outcome.value counts their concatenated prefix. */
@@ -257,6 +300,9 @@ typedef struct {
 HirselCoreHostOutcome hirsel_core_host_send_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_seal(HirselCoreContext *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+#define HIRSEL_CORE_SECRET_MAC 39
+HirselCoreHostOutcome hirsel_core_secret_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);

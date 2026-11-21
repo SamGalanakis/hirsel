@@ -48,10 +48,8 @@ fn identity_stable() {
         println!("IDENTITY {}", digest());
         return;
     }
-    let directory =
-        std::env::temp_dir().join(format!("hirsel-launch-identity-{}", std::process::id()));
-    std::fs::create_dir(&directory).unwrap();
-    let child_path = directory.join("launch-child");
+    let directory = tempfile::tempdir().unwrap();
+    let child_path = directory.path().join("launch-child");
     std::fs::copy(&executable, &child_path).unwrap();
     let mut child = std::process::Command::new(&child_path)
         .args(["--exact", "entry_tests::identity_stable", "--nocapture"])
@@ -74,7 +72,7 @@ fn identity_stable() {
         }
     }
     assert_eq!(first.len(), 64);
-    let replacement = directory.join("replacement");
+    let replacement = directory.path().join("replacement");
     std::fs::write(&replacement, b"a different executable on disk").unwrap();
     std::fs::rename(replacement, &child_path).unwrap();
     child.stdin.take().unwrap().write_all(&[1]).unwrap();
@@ -85,7 +83,6 @@ fn identity_stable() {
         tail.lines().any(|line| line == format!("IDENTITY {first}")),
         "{tail}"
     );
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -104,8 +101,8 @@ fn identity_unavailable() {
 
 #[test]
 fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
-    let path =
-        std::env::temp_dir().join(format!("hirsel-describe-entry-{}.out", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("describe.out");
     let out = File::create(&path).unwrap();
     let arguments = [
         b"--hirsel-describe".as_slice(),
@@ -141,7 +138,12 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
         socket_activation: std::ptr::null(),
         secret_grants: core::ptr::null(),
         secret_grants_len: 0,
+        env_patterns: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         secret_ops: std::ptr::null(),
+        env_ops: std::ptr::null(),
         target: View {
             data: target.as_ptr(),
             len: target.len(),
@@ -179,7 +181,6 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
     assert_eq!(fds(), before);
     assert_eq!(std::fs::read(&path).unwrap(), b"abc");
     drop(out);
-    std::fs::remove_file(path).unwrap();
 }
 #[test]
 fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
@@ -214,6 +215,14 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
             index: 0,
         },
         Requirement {
+            kind: ENV,
+            index: 0,
+        },
+        Requirement {
+            kind: STDIN,
+            index: 0,
+        },
+        Requirement {
             kind: TASKS,
             index: 0,
         },
@@ -227,7 +236,12 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
         socket_activation: std::ptr::null(),
         secret_grants: core::ptr::null(),
         secret_grants_len: 0,
+        env_patterns: crate::process::View {
+            data: b"HIRSEL_FIXTURE_*".as_ptr(),
+            len: b"HIRSEL_FIXTURE_*".len(),
+        },
         secret_ops: std::ptr::null(),
+        env_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -270,17 +284,32 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
                 hirsel_core_capability_provider(&context, operand),
                 (*process).provider
             );
-            if kind == NET {
-                let rules = &*(hirsel_core_capability_handle(&context, operand)
-                    as *const crate::net::Rules);
-                let decoded = rules
-                    .as_slice()
-                    .iter()
-                    .map(|rule| rule.address)
-                    .collect::<Vec<_>>();
-                assert_eq!(decoded, [net_rule.address]);
-            } else {
-                assert_eq!(hirsel_core_capability_handle(&context, operand), 0);
+            let handle = hirsel_core_capability_handle(&context, operand);
+            match kind {
+                NET => {
+                    assert_ne!(handle, 0);
+                    let rules = &*(handle as *const crate::net::Rules);
+                    let decoded = rules
+                        .as_slice()
+                        .iter()
+                        .map(|rule| rule.address)
+                        .collect::<Vec<_>>();
+                    assert_eq!(decoded, [net_rule.address]);
+                }
+                ENV => {
+                    assert_ne!(handle, 0);
+                    let outside = b"OUTSIDE_FIXTURE";
+                    let name = Buffer {
+                        data: outside.as_ptr().cast_mut(),
+                        len: outside.len(),
+                        capacity: 0,
+                    };
+                    let report = crate::env::hirsel_core_env_get(&mut context, operand, &name, 0);
+                    assert_eq!(report.error, IoError { tag: 1, code: 0 });
+                    assert_eq!(report.value, 0);
+                }
+                STDIN => assert_ne!(handle, 0),
+                _ => assert_eq!(handle, 0),
             }
         }
         let args = hirsel_core_entry_grant(process, ARGS, 0);
@@ -347,7 +376,12 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         socket_activation: std::ptr::null(),
         secret_grants: core::ptr::null(),
         secret_grants_len: 0,
+        env_patterns: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         secret_ops: std::ptr::null(),
+        env_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -440,7 +474,12 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         socket_activation: std::ptr::null(),
         secret_grants: core::ptr::null(),
         secret_grants_len: 0,
+        env_patterns: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         secret_ops: std::ptr::null(),
+        env_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -628,7 +667,12 @@ fn broken_pipe_child() {
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            env_patterns: crate::process::View {
+                data: std::ptr::null(),
+                len: 0,
+            },
             secret_ops: std::ptr::null(),
+            env_ops: std::ptr::null(),
             target: crate::process::View {
                 data: std::ptr::null(),
                 len: 0,

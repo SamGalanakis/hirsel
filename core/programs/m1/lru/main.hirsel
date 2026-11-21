@@ -59,7 +59,7 @@ fn touch(mut c: Cache, h: std.pool.Id[Entry]) {
 }
 
 fn put(mut c: Cache, key: String, value: String) -> Result[bool, m1.support.Error] {
-    let mut staged = m1.support.mem(string.from(value))?
+    let mut staged = string.from(value)
     let existing: Option[std.pool.Id[Entry]] = match map.get(c.index, key) {
         Some(h) => Some(h),
         None => None
@@ -72,8 +72,8 @@ fn put(mut c: Cache, key: String, value: String) -> Result[bool, m1.support.Erro
         return Ok(false)
     }
     // All payload copies precede eviction; the named refusal cannot alter the cache.
-    let owned_key = m1.support.mem(string.from(key))?
-    let index_key = m1.support.mem(string.from(key))?
+    let owned_key = string.from(key)
+    let index_key = string.from(key)
     let evicted = std.pool.len(c.slots) == 64
     if evicted {
         let h = option.unwrap(c.tail)
@@ -85,8 +85,8 @@ fn put(mut c: Cache, key: String, value: String) -> Result[bool, m1.support.Erro
         let _ = std.pool.remove(mut c.slots, h)
     }
     let e = Entry(key: take owned_key, payload: take staged, prev: None, next: None)
-    let h = m1.support.mem(result.capacity_only(std.pool.insert(mut c.slots, take e)))?
-    m1.support.insert(mut c.index, take index_key, h)?
+    let h = std.pool.insert(mut c.slots, take e)
+    map.insert(mut c.index, take index_key, h)
     front(mut c, h)
     if let None = c.first {
         c.first = Some(h)
@@ -104,7 +104,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
                 return Error(m1.support.error("Parse@cache-op"))
             }
             puts += 1
-            m1.support.admission(variant, m1.support.name("put", puts, ".payload")?, string.byte_len(value))?
+            m1.support.admission(variant, m1.support.name("put", puts, ".payload"), string.byte_len(value))?
             if put(mut c, key, value)? {
                 evictions += 1
             }
@@ -116,7 +116,7 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
             if let Some(h) = handle {
                 let value = {
                     let e = result.unwrap(std.pool.get(c.slots, h));
-                    m1.support.mem(string.from(e.payload))?
+                    string.from(e.payload)
                 }
                 touch(mut c, h)
                 hits += 1
@@ -137,38 +137,38 @@ fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut c
 
 fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
     let owner = m1.support.marker(tx, "cache")?
-    let mut c = Cache(slots: m1.support.mem(std.pool.with_capacity(64))?, index: map.new(), head: None, tail: None, first: None)
+    let mut c = Cache(slots: std.pool.with_capacity(64), index: map.new(), head: None, tail: None, first: None)
     let mut hits: u64 = 0
     let mut checksum: u64 = 0
     let mut evictions: u64 = 0
     let outcome = operations(mut c, input, variant, mut hits, mut checksum, mut evictions)
     let mut rendered = string.new()
-    m1.support.add(mut rendered, "hits=")?
-    m1.support.num(mut rendered, hits)?
-    m1.support.add(mut rendered, " sum=")?
-    m1.support.num(mut rendered, checksum)?
-    m1.support.add(mut rendered, " evictions=")?
-    m1.support.num(mut rendered, evictions)?
-    m1.support.add(mut rendered, "\norder=")?
+    string.push(mut rendered, "hits=")
+    string.push_u64(mut rendered, hits)
+    string.push(mut rendered, " sum=")
+    string.push_u64(mut rendered, checksum)
+    string.push(mut rendered, " evictions=")
+    string.push_u64(mut rendered, evictions)
+    string.push(mut rendered, "\norder=")
     let mut p = c.head
     let mut first = true
     while let Some(h) = p {
         let e = result.unwrap(std.pool.get(c.slots, h))
         if !first {
-            m1.support.add(mut rendered, ",")?
+            string.push(mut rendered, ",")
         }
         first = false
-        m1.support.add(mut rendered, e.key)?
+        string.push(mut rendered, e.key)
         p = e.next
     }
-    m1.support.add(mut rendered, "\n")?
+    string.push(mut rendered, "\n")
     m1.support.put(out, rendered)?
     outcome
 }
 
 fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
-    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(2))?
+    let (tx, rx): (Sender[String], Receiver[String]) = channel.new(2)
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
 }

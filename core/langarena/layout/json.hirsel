@@ -3,12 +3,8 @@
 // print retains one parsed document and creates/discards one output String per iteration.
 fn show(out: Stdout, n: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, n) {
-        return Error(Exit(status: 2))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 2))
-    }
+    string.push_u64(mut s, n)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 3))
@@ -49,9 +45,7 @@ pub fn json_print_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
         let mut sum: u64 = 0
         for _ in 0u64 .. 32 {
             let mut output = string.new()
-            if let Error(_) = std.json.push_json(mut output, doc) {
-                return Error(Exit(status: 2))
-            }
+            std.json.push_json(mut output, doc)
             sum += list.sum_bytes(string.as_bytes(output))
         }
         show(out, sum)
@@ -76,18 +70,25 @@ pub fn json_capacity_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
         Ok(take s) => take s,
         Error(_) => return Error(Exit(status: 2))
     }
-    let refused: u64 = result.unwrap(bound bytes 0 {
-        region r {
-            match std.json.parse(r, input) {
-                Error(Build(Capacity(c))) => if c.available == 0 {
-                    c.requested
-                } else {
-                    0
-                },
-                _ => 0,
+    let caught = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            region r {
+                let _ = std.json.parse(r, input)
             }
+            0
         }
     })
+    let mut refused: u64 = 0
+    if let Ok(Error(causes)) = caught {
+        for c in causes {
+            if let Capacity(k) = c.kind {
+                if k.available == 0 {
+                    refused = k.requested
+                }
+            }
+            break
+        }
+    }
     show(out, refused)
 }
 

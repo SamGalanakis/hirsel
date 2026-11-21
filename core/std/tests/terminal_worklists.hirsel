@@ -1,45 +1,39 @@
 // A resumable counted parent must free each terminal buffer without a frame.
 // expect: run counted_string_buffer() = 3
 fn counted_string_buffer() -> u64 {
-    let r = result.unwrap(rc.new(result.unwrap(string.from("abc"))))
+    let r = rc.new(string.from("abc"))
     string.byte_len(r)
 }
 
 // expect: run counted_list_buffers() = 1
 fn counted_list_buffers() -> u64 {
-    let mut xs: List[String] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut xs, result.unwrap(string.from("abc"))))
-    let r = result.unwrap(rc.new(take xs))
+    let mut xs: List[String] = list.with_capacity(1)
+    list.push(mut xs, string.from("abc"))
+    let r = rc.new(take xs)
     list.len(r)
 }
 
 // expect: run counted_map_buffers() = 1
 fn counted_map_buffers() -> u64 {
     let mut m: Map[u64, String] = map.new()
-    result.unwrap(map.insert(mut m, 7u64, result.unwrap(string.from("abc"))))
-    let a = result.unwrap(arc.new(take m))
+    map.insert(mut m, 7u64, string.from("abc"))
+    let a = arc.new(take m)
     map.len(a)
 }
 
 fn released_shared_path(held: Arc[List[u64]]) -> bool {
-    let mut children: List[Arc[List[u64]]] = result.unwrap(list.with_capacity(4))
-    result.unwrap(list.push(mut children, arc.share(held)))
-    let mut data: List[u64] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut data, 11u64))
-    let unique = result.unwrap(arc.new(take data))
-    result.unwrap(list.push(mut children, take unique))
-    result.unwrap(list.push(mut children, arc.share(held)))
-    result.unwrap(list.push(mut children, arc.share(held)))
-    let parent = result.unwrap(arc.new(take children))
-    let _ = take parent
-    let probe_result: Result[List[u64], Capacity] = list.with_capacity(13)
-    match take probe_result {
-        Ok(take probe) => {
-            let words: List[u64] = take probe;
-            list.len(words) == 0
-        },
-        Error(_) => false
-    }
+    let mut children: List[Arc[List[u64]]] = list.with_capacity(4)
+    list.push(mut children, arc.share(held))
+    let mut data: List[u64] = list.with_capacity(1)
+    list.push(mut data, 11u64)
+    let unique = arc.new(take data)
+    list.push(mut children, take unique)
+    list.push(mut children, arc.share(held))
+    list.push(mut children, arc.share(held))
+    let parent = arc.new(take children)
+    drop(take parent)
+    let words: List[u64] = list.with_capacity(13)
+    list.len(words) == 0
 }
 
 // The held row costs 8+32=40 bytes. The dropped path costs 32 for four holders,
@@ -49,9 +43,9 @@ fn released_shared_path(held: Arc[List[u64]]) -> bool {
 // engine-fact: shared_child_release_preserves_exact_refund_order
 // expect: run shared_path_release_refunds_exactly() = true
 fn shared_path_release_refunds_exactly() -> bool {
-    let mut data: List[u64] = result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut data, 7u64))
-    let held = result.unwrap(arc.new(take data))
+    let mut data: List[u64] = list.with_capacity(1)
+    list.push(mut data, 7u64)
+    let held = arc.new(take data)
     let released = result.unwrap(bound bytes 104 {
         released_shared_path(held)
     })

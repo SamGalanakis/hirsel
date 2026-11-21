@@ -37,9 +37,35 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
     return rows
 
 
+def entry_grants(manifest, entry, directory):
+    """Read the selected crash entry's capability parameters from its input source."""
+    package_path, *modules, function = entry.split('/')
+    name, version = package_path.rsplit('@', 1)
+    packages = json.loads(manifest.read_text())['packages']
+    source = next(source for package in packages if package['package'] == {'name': name, 'version': version}
+                  for source in package['sources'] if source['modules'] == modules)
+    text = (manifest.parent / source['file']).read_text()
+    signature = re.search(rf'(?m)^\s*pub fn {re.escape(function)}\s*\(([^)]*)\)', text)
+    if signature is None:
+        raise ValueError(f'crash entry declaration missing: {entry}')
+    grants = []
+    for parameter in signature[1].split(','):
+        if not parameter.strip():
+            continue
+        _, capability = parameter.split(':', 1)
+        capability = capability.strip()
+        if capability == 'Dir':
+            grants.extend(['--dir', str(directory)])
+        elif capability == 'Net':
+            grants.extend(['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535'])
+        elif capability != 'Args':
+            grants.extend(['--grant', capability])
+    return grants
+
+
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                 entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
-                count_only=(), extra_grants=()):
+                count_only=()):
     build = work / (engine + '-crash')
     build.mkdir()
     if cc is None:
@@ -63,11 +89,7 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                '--entry', entry, '--backend',
                'llvm' if engine == 'llvm-release' else engine, '--runtime', str(runtime.resolve()),
                '--cc', str(wrapper), '--store', str(build / 'objects'), '--limit', str(64 * 1024 * 1024),
-               '--dir', str(build), '-o', str(executable), '--json']
-    for grant in ('Clock', 'Random', 'Tasks', 'Stderr', 'Stdout', *extra_grants):
-        command += ['--grant', grant]
-    if adapter == 'runner_crash.c':
-        command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
+               *entry_grants(manifest, entry, build), '-o', str(executable), '--json']
     if engine == 'llvm-release' or (engine == 'llvm' and adapter == 'runner_crash.c'):
         command.append('--release')
     result = checked(command, environment, engine=engine, case=f'{entry}:build')

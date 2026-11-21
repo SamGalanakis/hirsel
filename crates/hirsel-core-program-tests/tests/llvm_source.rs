@@ -12,8 +12,12 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 hirsel_guard::install!();
+#[path = "../../hirsel-core-rt/testdata/host_memory.rs"]
+mod host_memory;
 include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
+#[path = "support/llvm_codegen.rs"]
+mod llvm_codegen;
 
 #[test]
 fn scalar_record_calls_agree_with_evaluator() {
@@ -521,6 +525,346 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
     }
 }
 
+const RESET_COMPARISONS: [(&str, &str, &str, &str); 4] = [
+    ("lt", "0u64", "i < trips", "add"),
+    ("le", "1u64", "i <= trips", "add"),
+    ("gt", "trips", "i > 0u64", "sub"),
+    ("ge", "trips", "i >= 1u64", "sub"),
+];
+
+fn append_reset_loop(
+    source: &mut String,
+    name: &str,
+    ty: &str,
+    width: i64,
+    reset: i64,
+    (start, condition, direction): (&str, &str, &str),
+) {
+    let last = width - 1;
+    let widen = if ty == "i8" {
+        "let low: u8 = int.truncate(bits)\n        let word: u64 = int.widen(low)"
+    } else {
+        "let word: u64 = int.widen(bits)"
+    };
+    writeln!(
+        source,
+        r#"
+fn {name}(budget: u64, trips: u64) -> u64 {{
+    match (bound steps budget {{
+        let mut i = {start}
+        let mut pos = 0{ty}
+        let mut bits = 0{ty}
+        while {condition} {{
+            bits ^= 1{ty} << ({last}{ty} - pos)
+            pos += 1
+            if pos == {reset} {{ pos = 0 }}
+            i = int.wrapping_{direction}(i, 1u64)
+        }}
+        {widen}
+        word
+    }}) {{ Ok(word) => word, Error(e) => 65536u64 | e.steps }}
+}}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn seeded_scalar_counted_loops_agree_across_engines() {
+    // SEM-1 and MEM-30: the shift by 7 succeeds, a shift by 8 or -1 fails,
+    // and a checked u8 increment past 255 fails. Only completed back edges
+    // and calls spend steps, so a failure can occur with zero steps left.
+    let mut source = String::from(
+        r#"
+fn last_bit(budget: u64, end: u8) -> u64 {
+    match (bound steps budget {
+        let mut i = 7u8
+        let mut bits = 0u8
+        while i <= end {
+            bits ^= 1u8 << i
+            i += 1
+        }
+        let word: u64 = int.widen(bits)
+        word
+    }) { Ok(bits) => bits, Error(e) => 65536u64 + e.steps }
+}
+fn negative_shift(budget: u64, stop: i8) -> u64 {
+    match (bound steps budget {
+        let mut i = 2i8
+        let mut bits = 0i8
+        while i >= 0 {
+            if i == stop { return if bits == 3 { 41u64 } else { 42u64 } }
+            bits ^= 1i8 << (i - 1i8)
+            i -= 1
+        }
+        0u64
+    }) { Ok(bits) => bits, Error(e) => 65536u64 + e.steps }
+}
+fn stride_overflow(budget: u64, end: u8) -> u64 {
+    match (bound steps budget {
+        let mut i = 253u8
+        while i <= end { i += 2 }
+        let word: u64 = int.widen(i)
+        word
+    }) { Ok(i) => i, Error(e) => 65536u64 + e.steps }
+}
+"#,
+    );
+    let returned = |value| eval::Outcome::Returned(vec![value]);
+    let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
+    let mut sentinels = vec![
+        ("last_bit", [1, 6], returned(0)),
+        ("last_bit", [1, 7], returned(65537)),
+        ("last_bit", [2, 7], returned(128)),
+        ("last_bit", [0, 8], returned(65536)),
+        ("last_bit", [1, 8], overflow()),
+        ("negative_shift", [1, 0], returned(65537)),
+        ("negative_shift", [2, 0], returned(41)),
+        ("negative_shift", [2, 3], overflow()),
+        ("stride_overflow", [1, 254], returned(65537)),
+        ("stride_overflow", [2, 254], returned(255)),
+        ("stride_overflow", [1, 255], overflow()),
+    ];
+    // At reset 8, pos is 0..7 at the shift and 1..8 after incrementing.
+    // Nine trips XOR all eight bits then the high bit again, yielding 127.
+    // Each trip charges the wrapping call and the back edge, and widening
+    // charges one more. Resetting at 9 instead reaches 7 - 8 on trip nine.
+    let must_fold = [
+        "must_fold_lt",
+        "must_fold_le",
+        "must_fold_gt",
+        "must_fold_ge",
+    ];
+    for (name, (_, start, condition, direction)) in must_fold.into_iter().zip(RESET_COMPARISONS) {
+        append_reset_loop(&mut source, name, "u8", 8, 8, (start, condition, direction));
+        sentinels.push((name, [18, 9], returned(65536 | 18)));
+        sentinels.push((name, [19, 9], returned(127)));
+    }
+    append_reset_loop(
+        &mut source,
+        "must_keep",
+        "u8",
+        8,
+        9,
+        ("1u64", "i <= trips", "add"),
+    );
+    sentinels.push(("must_keep", [15, 9], returned(65536 | 15)));
+    sentinels.push(("must_keep", [16, 9], overflow()));
+    let mut calls: Vec<_> = sentinels
+        .iter()
+        .map(|(name, args, outcome)| (name.to_string(), args.to_vec(), Some(outcome)))
+        .collect();
+
+    // SplitMix64, with a fixed corpus size and a function name that identifies
+    // its seed, width and body. Bounds are literal so release can prove ranges.
+    const SEEDS: [u64; 2] = [0x1543, 0x9e37_79b9_7f4a_7c15];
+    for (ty, width) in [("u8", 8i64), ("i8", 8), ("u16", 16)] {
+        writeln!(source, "fn keep_{ty}(mut i: {ty}, value: {ty}) {{}}").unwrap();
+        writeln!(
+            source,
+            "fn write_{ty}(mut i: {ty}, value: {ty}) {{ i = value }}"
+        )
+        .unwrap();
+        for seed in SEEDS {
+            let mut state = seed ^ ((ty.as_bytes()[0] as u64) << 16) ^ width as u64;
+            let mut choose = |options: u64| {
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut x = state;
+                x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                (x ^ (x >> 31)) % options
+            };
+            let update = format!(
+                "let writer: fn(mut {ty}, {ty}) = if write_now {{ write_{ty} }} else {{ keep_{ty} }}"
+            );
+            let widen = if ty == "i8" {
+                "let low: u8 = int.truncate(bits)\n        let word: u64 = int.widen(low)"
+            } else {
+                "let word: u64 = int.widen(bits)"
+            };
+            for shape in ["plain", "reset", "write", "alias", "break", "return"] {
+                let name = format!("range_{seed:x}_{ty}_{shape}");
+                let (comparison, advance, direction) = match choose(4) {
+                    0 => ("<", "+=", 1),
+                    1 => ("<=", "+=", 1),
+                    2 => (">", "-=", -1),
+                    _ => (">=", "-=", -1),
+                };
+                let edge = if direction > 0 { width - 1 } else { 1 };
+                let start = edge - direction * 2 + choose(3) as i64 - 1;
+                let end = edge + choose(3) as i64 - 1;
+                let step = 1 + choose(3);
+                let offset = [" - 1", "", " + 1"][choose(3) as usize];
+                let reset = start - direction;
+                let (before_loop, action) = match shape {
+                    "plain" => ("", String::new()),
+                    "reset" => ("", format!("if i == at {{ at = 100; i = {reset}{ty} }}")),
+                    "write" => ("", "if i == at { at = 100; i = value }".into()),
+                    "alias" => (
+                        update.as_str(),
+                        "if i == at { at = 100; writer(mut i, value) }".into(),
+                    ),
+                    "break" => ("", "if i == at { break }".into()),
+                    "return" => ("", "if i == at { return 1000u64 }".into()),
+                    _ => unreachable!(),
+                };
+                writeln!(
+                    source,
+                    r#"
+fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
+    match (bound steps budget {{
+        let mut i = {start}{ty}
+        let mut at = trigger
+        let mut bits = 0{ty}
+        {before_loop}
+        while i {comparison} {end}{ty} {{
+            {action}
+            bits ^= 1{ty} << (i{offset})
+            i {advance} {step}{ty}
+        }}
+        {widen}
+        word
+    }}) {{ Ok(bits) => bits, Error(e) => 65536u64 + e.steps }}
+}}
+"#,
+                )
+                .unwrap();
+                // The one-shot mutation keeps the trip count bounded even if it
+                // moves the counter against the stride. Adjacent budgets expose
+                // both the successful and failing path's exact charged prefix.
+                let inputs: &[(i64, u64)] = match shape {
+                    "plain" => &[(100, 0)],
+                    "alias" => &[(100, 0), (start, 0), (start, 1)],
+                    _ => &[(100, 0), (start, 0)],
+                };
+                let replacement = match (direction, ty) {
+                    (1, _) => width as u64,
+                    (_, "i8") => u64::from(u8::MAX), // -1i8
+                    _ => 0,
+                };
+                for &(trigger, replace) in inputs {
+                    for budget in 0..=12 {
+                        calls.push((
+                            name.clone(),
+                            vec![budget, trigger as u64, replacement, replace],
+                            None,
+                        ));
+                    }
+                }
+            }
+            // The trip bound stays dynamic so an earlier unroller cannot
+            // resolve the recurring reset before CounterRangePass sees it.
+            for (comparison, start, condition, direction) in RESET_COMPARISONS {
+                let name = format!("range_{seed:x}_{ty}_cycle_{comparison}");
+                let reset = width - choose(2) as i64;
+                let trips = 7 + choose(5);
+                append_reset_loop(
+                    &mut source,
+                    &name,
+                    ty,
+                    width,
+                    reset,
+                    (start, condition, direction),
+                );
+                for budget in 0..=24 {
+                    calls.push((name.clone(), vec![budget, trips], None));
+                }
+            }
+        }
+    }
+
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+    let cases: Vec<_> = calls
+        .iter()
+        .map(|(name, args, _)| Case {
+            function: names[name],
+            args: args.clone(),
+            limit: 1_000_000,
+            injection: None,
+        })
+        .collect();
+    let mut exports: Vec<_> = cases.iter().map(|case| case.function).collect();
+    exports.sort_unstable_by_key(|f| f.0);
+    exports.dedup();
+    let evaluated: Vec<_> = cases
+        .iter()
+        .zip(&calls)
+        .map(|(case, (name, args, expected))| {
+            let run = eval::run(&program, case.function, &case.args, case.limit);
+            if let Some(expected) = expected {
+                assert_eq!(&run.outcome, *expected, "{name}{args:?}");
+            }
+            run
+        })
+        .collect();
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let (llvm, folds) =
+        program.llvm_program_with_counter_range_folds(Target::X86_64Linux, &exports);
+    let mut differences = Vec::new();
+    for (engine, optimization, object) in [
+        ("Cranelift dev", Optimization::None, cranelift),
+        ("LLVM release", Optimization::Speed, llvm),
+    ] {
+        let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+        assert_eq!(reports.len(), cases.len(), "{engine} report count");
+        for (((name, args, _), oracle), native) in calls.iter().zip(&evaluated).zip(reports) {
+            let sites: Vec<_> = oracle
+                .sites
+                .iter()
+                .map(|&anchor| anchor_word(&program.sites, anchor))
+                .collect();
+            if (&native.outcome, &native.sites) != (&oracle.outcome, &sites) {
+                differences.push(format!(
+                    "{engine} {name}{args:?}: got {:?} at {:?}, expected {:?} at {sites:?}",
+                    native.outcome, native.sites, oracle.outcome
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "counted-loop seeds {SEEDS:x?}, {} cases per engine",
+        cases.len()
+    );
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+
+    let folded = |name: &str| {
+        let symbol = symbol(&program, names[name]);
+        folds.get(symbol.as_bytes()).copied().unwrap_or(0)
+    };
+    // Count both compiled functions and their invocations. Budget sweeps
+    // must not let one function supply an entire seed's fold coverage.
+    const MIN_FOLD_PERCENT: usize = 25;
+    for seed in SEEDS {
+        let prefix = format!("range_{seed:x}_");
+        let tally = |names: &mut dyn Iterator<Item = &str>| {
+            names
+                .filter(|name| name.starts_with(&prefix))
+                .fold((0, 0), |(removed, total), name| {
+                    (removed + usize::from(folded(name) > 0), total + 1)
+                })
+        };
+        let (shapes_with_folds, shapes) = tally(&mut names.keys().map(String::as_str));
+        let (cases_with_folds, invocations) =
+            tally(&mut calls.iter().map(|(name, _, _)| name.as_str()));
+        eprintln!(
+            "seed {seed:#x}: {shapes_with_folds}/{shapes} shapes, {cases_with_folds}/{invocations} cases folded by CounterRangePass"
+        );
+        assert!(
+            shapes > 0 && shapes_with_folds * 100 >= shapes * MIN_FOLD_PERCENT,
+            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its shapes"
+        );
+        assert!(
+            invocations > 0 && cases_with_folds * 100 >= invocations * MIN_FOLD_PERCENT,
+            "seed {seed:#x} requires folds in at least {MIN_FOLD_PERCENT}% of its cases"
+        );
+    }
+    for name in must_fold {
+        let count = folded(name);
+        eprintln!("{name}: {count} checks folded by CounterRangePass");
+        assert!(count > 0, "{name} must fold at least one check on pos");
+    }
+}
+
 #[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
@@ -554,23 +898,23 @@ fn native_flow_corpus_agrees_with_the_owner_laws() {
 fn viewed_carrier_headers_thaw_after_success_error_and_failure() {
     let source = r#"
 fn inspect(xs: List[u64], mode: u64) -> Result[u64, Capacity] {
-    let mut scratch: List[u64] = result.unwrap(list.with_capacity(2))
-    let _ = result.unwrap(list.push(mut scratch, 7u64))
-    let _ = result.unwrap(list.push(mut scratch, 8u64))
+    let mut scratch: List[u64] = list.with_capacity(2)
+    let _ = list.push(mut scratch, 7u64)
+    let _ = list.push(mut scratch, 8u64)
     let before = list.len(xs)
     if mode == 1 { return Error(Capacity(requested: 1, available: 0)) }
     if mode == 2 { let _ = 1u64 / (mode - 2) }
     Ok(before + list.len(xs) + list.len(scratch))
 }
 fn probe(mode: u64) -> u64 {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(2))
-    let _ = result.unwrap(list.push(mut xs, 1u64))
-    let _ = result.unwrap(list.push(mut xs, 2u64))
+    let mut xs: List[u64] = list.with_capacity(2)
+    let _ = list.push(mut xs, 1u64)
+    let _ = list.push(mut xs, 2u64)
     let first = result.unwrap(isolate(scoped fn() -> u64 {
         match inspect(xs, mode) { Ok(n) => n, Error(_) => 900u64 }
     }))
     let before: u64 = match take first { Ok(n) => n, Error(take causes) => 901u64 }
-    let _ = result.unwrap(list.push(mut xs, 3u64))
+    let _ = list.push(mut xs, 3u64)
     let after = result.unwrap(inspect(xs, 0))
     before * 100u64 + after
 }
@@ -898,7 +1242,7 @@ fn cancelled_cold_word_call(target: Target, with_isolate: bool) {
     let source = r#"
 fn grow_then_check(mut xs: List[u64]) {
     for n in 0u64 .. 100 {
-        result.unwrap(list.push(mut xs, n))
+        list.push(mut xs, n)
     }
     task.check_cancel()
 }
@@ -916,7 +1260,7 @@ fn child(take x: u64) -> u64 {
 }
 
 fn cancelled(tasks: Tasks) -> u64 waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
+    let mut h = task.spawn(tasks, bytes 65536, 41u64, child)
     task.cancel(mut h)
     match task.join(take h) {
         Ok(n) => n,
@@ -1366,11 +1710,11 @@ fn step_counter_survives_inlined_mutations_and_exact_exhaustion() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let source = r#"
 fn append(mut xs: List[u64], n: u64) {
-    result.unwrap(list.push(mut xs, n))
+    list.push(mut xs, n)
 }
 fn probe(s: u64) -> u64 {
     match (bound steps s {
-        let mut xs: List[u64] = result.unwrap(list.with_capacity(8))
+        let mut xs: List[u64] = list.with_capacity(8)
         for i in 0u64 .. 8u64 { append(mut xs, i) }
         list.len(xs)
     }) {
@@ -1460,9 +1804,9 @@ fn purebits(s: u64, n: u64) -> u64 {
 fn probe(s: u64) -> u64 {
     match (bound steps s {
         let first = result.unwrap(isolate(fn() -> u64 {
-            let mut xs: List[u64] = result.unwrap(list.with_capacity(8))
+            let mut xs: List[u64] = list.with_capacity(8)
             for i in 0u64 .. 8u64 {
-                result.unwrap(list.push(mut xs, i))
+                list.push(mut xs, i)
                 let _ = 100u64 / (5u64 - i)
             }
             list.len(xs)
@@ -1503,10 +1847,10 @@ fn resetting(s: u64) -> u64 {
 }
 fn strided(s: u64, stride: u64) -> u64 {
     match (bound steps s {
-        let mut xs: List[u64] = result.unwrap(list.with_capacity(16))
+        let mut xs: List[u64] = list.with_capacity(16)
         let mut k = 1u64
         while k <= 10u64 {
-            result.unwrap(list.push(mut xs, k))
+            list.push(mut xs, k)
             k += stride
         }
         list.len(xs)
@@ -1635,17 +1979,17 @@ fn strided(s: u64, stride: u64) -> u64 {
         eval::run(&module, names["probe"], &[64], 1_000_000).outcome,
         eval::Outcome::Returned(vec![1019])
     );
-    // isolate call + user entry + two allocation calls, five full trips
-    // at three Steps, two calls in the failing trip, outer unwrap, seven latches.
-    // 1 + 1 + 2 + 5*3 + 2 + 1 + 7 = 29. Failure is caught before the tail.
-    for (s, want) in [(28, 28), (29, 1019)] {
+    // isolate call + user entry + list.with_capacity, five full trips
+    // at two Steps (push and latch), one push before division fails, outer
+    // unwrap and seven latches. 1 + 1 + 1 + 5*2 + 1 + 1 + 7 = 22.
+    for (s, want) in [(21, 21), (22, 1019)] {
         assert_eq!(
             eval::run(&module, names["probe"], &[s], 1_000_000).outcome,
             eval::Outcome::Returned(vec![want])
         );
     }
-    // Two setup calls, three Steps per checked-stride trip, then list.len.
-    for (s, stride, want) in [(33, 1, 1010), (18, 2, 1005), (15, 3, 1004)] {
+    // One setup call, two Steps per trip (push and latch), then list.len.
+    for (s, stride, want) in [(22, 1, 1010), (12, 2, 1005), (10, 3, 1004)] {
         assert_eq!(
             eval::run(&module, names["strided"], &[s, stride], 1_000_000).outcome,
             eval::Outcome::Returned(vec![want])
@@ -1741,13 +2085,11 @@ fn strided(s: u64, stride: u64) -> u64 {
 fn counted_reference_regions_keep_exact_bounds_and_mutation_prefixes() {
     let source = r#"
 type Cell { value: u64 }
-fn capacity_only(take r: Result[(), (Capacity, Arc[Cell])]) -> Result[(), Capacity] {
-    match r { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
-}
 fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Result[(), Capacity] {
     for i in 0u64 .. n {
         let held = arc.share(value)
-        capacity_only(list.push(mut xs, take held))?
+        list.try_reserve(mut xs, 1)?
+        list.push(mut xs, take held)
         if i == at { return Error(Capacity(requested: 1, available: 0)) }
     }
     Ok(())
@@ -1755,7 +2097,7 @@ fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Res
 fn probe(s: u64, n: u64, at: u64) -> u64 {
     let ran = bound steps s {
         let mut xs: List[Arc[Cell]] = list.new()
-        let value = result.unwrap(arc.new(Cell(value: 9u64)))
+        let value = arc.new(Cell(value: 9u64))
         let caught = share_loop(mut xs, value, n, at)
         for _ in 0u64 .. 3u64 {}
         let prefix = list.len(xs)
@@ -1778,6 +2120,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
         let (module, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
         let mut cases = Vec::new();
         for n in [0u64, 4, if atomic { 1024 } else { 16384 }] {
+            let total = 7 + 4 * n;
             let bounds = if n < 8 {
                 (0..=4 * n + 13).collect::<Vec<_>>()
             } else {
@@ -1790,6 +2133,9 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                     5,
                     13,
                     14,
+                    37,
+                    38,
+                    39,
                     41,
                     42,
                     65535,
@@ -1799,9 +2145,9 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                     65544,
                     65547,
                     65548,
-                    8 + 4 * n - 1,
-                    8 + 4 * n,
-                    8 + 4 * n + 1,
+                    total - 1,
+                    total,
+                    total + 1,
                 ]
             };
             let positions = [0, 7, n]
@@ -1809,10 +2155,10 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                 .collect::<std::collections::BTreeSet<_>>();
             for at in positions {
                 for &s in &bounds {
-                    // Three setup calls and the helper call cost four. Each
-                    // trip shares, pushes, unwraps Capacity and latches. An early
-                    // error skips its latch; the tail is three latches and len.
-                    let need = if at < n { 11 + 4 * at } else { 8 + 4 * n };
+                    // list.new, arc.new and share_loop cost three. Each trip
+                    // shares, reserves, pushes and latches. An early error
+                    // skips its latch. The tail is three latches and list.len.
+                    let need = if at < n { 10 + 4 * at } else { total };
                     let want = if s < need {
                         2000000000u64 + s * 100000
                     } else if at < n {
@@ -1995,8 +2341,8 @@ fn probe(n: u64, extra: u64, k: u64) -> u64 {
     let mut xs: List[List[u64]] = list.new()
     for _ in 0u64 .. 2u64 {
         let mut b: List[u64] = list.new()
-        result.unwrap(list.fill(mut b, n + extra, 3u64))
-        result.unwrap(list.push(mut xs, take b))
+        list.fill(mut b, n + extra, 3u64)
+        list.push(mut xs, take b)
     }
     walk(mut xs, 0u64, k, n) + list.len(xs[0]) * 100u64
 }
@@ -3172,50 +3518,6 @@ fn go(n: u64, cap: u64) -> u64 {
         }
     }
 }
-fn zero_after_poison(cap: u64) -> u64 {
-    let mut seen = 0u64
-    region r {
-        let made = build_stream_in(r, bytes cap, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-            let _ = writer.push(mut w, "ab")
-            seen = match writer.push(mut w, "") { Ok(()) => 1u64, Error(Overflow) => 2u64, Error(_) => 3u64 }
-            match writer.close(take w) {
-                Ok(child) => { seen += 10; Ok(child) },
-                Error(e) => { seen += 20; Error(e) },
-            }
-        })
-        match made {
-            Ok(take b) => 100u64 * seen + text.len(finish(take b)),
-            Error(Overflow) => 9000u64 + seen,
-            Error(_) => 9999u64,
-        }
-    }
-}
-fn prior_completed(cap: u64) -> u64 {
-    let mut seen = 0u64
-    region r {
-        let made = build_stream_in(r, bytes cap, fn(take w: Writer[IndexedSpan[Text], in r]) -> Result[Child[IndexedSpan[Text]], BuildError] {
-            writer.append(mut w, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-                writer.push(mut t, "ok")?
-                writer.close(take t)
-            })?
-            let old: Option[View[Text]] = writer.last_completed(w)
-            let old_len = match old { Some(t) => text.len(t), None => 0u64 }
-            let _ = writer.append(mut w, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-                writer.push(mut t, "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz")?
-                writer.close(take t)
-            })
-            let saved: Option[View[Text]] = writer.completed(w, 0)
-            let saved_len = match saved { Some(t) => text.len(t), None => 0u64 }
-            seen = 100u64 * old_len + saved_len
-            writer.close(take w)
-        })
-        match made {
-            Ok(take b) => seq.len(finish(take b)),
-            Error(Overflow) => 9000u64 + seen,
-            Error(_) => 9999u64,
-        }
-    }
-}
 fn metered(s: u64, n: u64, cap: u64) -> u64 {
     match (bound steps s { go(n, cap) }) {
         Ok(v) => v, Error(e) => 1000000000u64 + e.steps,
@@ -3255,9 +3557,6 @@ fn metered(s: u64, n: u64, cap: u64) -> u64 {
             loop_cases.push(("go", vec![n, cap], expected));
         }
     }
-    loop_cases.push(("prior_completed", vec![64], 9202));
-    loop_cases.push(("zero_after_poison", vec![9], 9022));
-    loop_cases.push(("zero_after_poison", vec![10], 1102));
     for (source, hand) in [
         (indexed, indexed_cases.as_slice()),
         (destination, destination_cases.as_slice()),
@@ -3342,23 +3641,29 @@ fn static_bytes_preserve_budget_law() {
     let source = include_str!("../../../core/front/cases/rules/MEM-28-static-bytes.hirsel");
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases = [
-        ("literal_refusal", vec![0], 1615),
-        ("literal_refusal", vec![1], 1615),
-        ("refund_after_handover", vec![0], 890),
-        ("refund_after_handover", vec![1], 890),
-        ("empty_is_free", vec![], 0),
-        ("cloned_and_counted", vec![], 18),
-        ("inline_capacity", vec![], 311),
+        ("literal_refusal", vec![0], 1615, 32),
+        ("literal_refusal", vec![1], 1615, 32),
+        ("refusal_after_handover", vec![0], 800, 32),
+        ("refusal_after_handover", vec![1], 800, 32),
+        ("refund_after_handover", vec![0], 90, 0),
+        ("refund_after_handover", vec![1], 90, 0),
+        ("empty_is_free", vec![], 0, 0),
+        ("cloned_and_counted", vec![], 18, 0),
+        ("inline_capacity", vec![], 311, 0),
     ];
-    let runs = cases.each_ref().map(|(name, args, _)| Case {
+    let runs = cases.each_ref().map(|(name, args, _, _)| Case {
         function: names[*name],
         args: args.clone(),
         limit: 4096,
         injection: None,
     });
-    for (report, (_, _, expected)) in execute(&program, &runs).iter().zip(cases) {
-        assert_eq!(report.outcome, eval::Outcome::Returned(vec![expected]));
-        assert_eq!(report.used, 0);
+    for (report, (name, args, expected, used)) in execute(&program, &runs).iter().zip(cases) {
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![expected]),
+            "{name}{args:?}"
+        );
+        assert_eq!(report.used, used, "{name}{args:?}");
     }
 }
 

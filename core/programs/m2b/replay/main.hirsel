@@ -4,21 +4,22 @@
 // Outcome 4, Extra 5; Full (an unexpected Capacity) is 999.
 fn double(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
-    list.append(mut out, b)?
-    list.append(mut out, b)?
+    list.append(mut out, b)
+    list.append(mut out, b)
     Ok(out)
 }
 
 fn triple(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out = double(b)?
-    list.append(mut out, b)?
+    list.append(mut out, b)
     Ok(out)
 }
 
 // Asks for more than any journal bound in these cases admits.
 fn big(b: Bytes) -> Result[Bytes, Capacity] {
-    let mut out: Bytes = list.with_capacity(100000)?
-    list.append(mut out, b)?
+    let mut out: Bytes = list.new()
+    list.try_reserve(mut out, 100000)?
+    list.append(mut out, b)
     Ok(out)
 }
 
@@ -42,10 +43,8 @@ fn value(take r: Result[u64, m2b.journal.Diverged]) -> u64 {
 
 fn text(s: String) -> Result[Bytes, m2b.journal.Diverged] {
     let mut b: Bytes = list.new()
-    match list.append(mut b, string.as_bytes(s)) {
-        Ok(()) => Ok(b),
-        Error(c) => Error(Full(c)),
-    }
+    list.append(mut b, string.as_bytes(s))
+    Ok(b)
 }
 
 fn ok(take r: Result[Bytes, Capacity]) -> Result[Bytes, m2b.journal.Diverged] {
@@ -94,10 +93,7 @@ pub fn outcome(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
         None => return Ok(1),
     }
     let mut changed: Bytes = list.new()
-    match list.push(mut changed, 0u8) {
-        Ok(()) => {},
-        Error((cap, _)) => return Error(Full(cap)),
-    }
+    list.push(mut changed, 0u8)
     let _ = list.set(mut j.entries, 1, m2b.journal.Entry(code: code1, arg: take arg1, outcome: take changed))
     let _ = session(mut j, c, "ab", code.describe(double))?
     Ok(0)
@@ -105,10 +101,8 @@ pub fn outcome(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
 
 fn copy_bytes(b: Bytes) -> Result[Bytes, m2b.journal.Diverged] {
     let mut out: Bytes = list.new()
-    match list.append(mut out, b) {
-        Ok(()) => Ok(out),
-        Error(c) => Error(Full(c)),
-    }
+    list.append(mut out, b)
+    Ok(out)
 }
 
 // Replay calls triple where double was recorded: a different identity at entry 1.
@@ -160,10 +154,7 @@ pub fn clock(c: Clock) -> Result[u64, m2b.journal.Diverged] {
         } else {
             0
         }
-        match list.push(mut seven, byte) {
-            Ok(()) => {},
-            Error((cap, _)) => return Error(Full(cap)),
-        }
+        list.push(mut seven, byte)
         i += 1
     }
     let _ = list.set(mut j.entries, 0, m2b.journal.Entry(code: code0, arg: list.new(), outcome: take seven))
@@ -220,14 +211,8 @@ pub fn refused() -> Result[u64, m2b.journal.Diverged] {
 // PROG-9's own example bytes for double, compared through code.identity.
 pub fn identity() -> Result[u64, m2b.journal.Diverged] {
     let mut want: Bytes = list.new()
-    match list.push(mut want, 1u8) {
-        Ok(()) => {},
-        Error((cap, _)) => return Error(Full(cap)),
-    }
-    match list.append(mut want, string.as_bytes("app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]")) {
-        Ok(()) => {},
-        Error(c) => return Error(Full(c)),
-    }
+    list.push(mut want, 1u8)
+    list.append(mut want, string.as_bytes("app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]"))
     let s: StaticFn[m2b.journal.Recorded] = code.describe(double)
     if code.identity(s) == want {
         Ok(1)
@@ -241,10 +226,7 @@ fn le(x: u64) -> Result[Bytes, m2b.journal.Diverged] {
     let mut i: u64 = 0
     while i < 8 {
         let byte: u8 = int.truncate(x >> (i * 8))
-        match list.push(mut b, byte) {
-            Ok(()) => {},
-            Error((cap, _)) => return Error(Full(cap)),
-        }
+        list.push(mut b, byte)
         i += 1
     }
     Ok(b)
@@ -351,12 +333,8 @@ pub fn main(out: Stdout, c: Clock, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, v) {
-        return Error(Exit(status: 3))
-    }
-    if let Error(_) = string.push(mut s, "\n") {
-        return Error(Exit(status: 3))
-    }
+    string.push_u64(mut s, v)
+    string.push(mut s, "\n")
     match stdout.write(out, s) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 2)),

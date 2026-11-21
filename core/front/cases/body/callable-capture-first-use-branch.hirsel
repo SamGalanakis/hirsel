@@ -68,25 +68,25 @@ fn looped() -> u64 {
 fn owning() -> u64 {
     let a: u64 = 3
     let b: u64 = 4
-    let f = result.unwrap(fn(x: u64) -> u64 {
+    let f = fn(x: u64) -> u64 {
         if x == 0 {
             a
         } else {
             b + x
         }
-    })
+    }
     f(1) + f(0)
 }
 
 fn owning_record() -> u64 {
     let p = Pair(a: 3, b: 4)
-    let f = result.unwrap(fn(x: u64) -> u64 {
+    let f = fn(x: u64) -> u64 {
         if x == 0 {
             p.a
         } else {
             p.b + x
         }
-    })
+    }
     f(1) + f(0)
 }
 

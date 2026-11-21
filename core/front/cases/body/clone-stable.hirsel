@@ -19,10 +19,10 @@
 // expect: run nested() = 40
 // expect: run own_list() = 60
 // expect: run own_box() = 20
-// expect: run asked() = 1
+// expect: run asked() = 1 used 32
 // native: run dequed() = 20
 // native: run heaped() = 20
-// native: run deque_asked() = 16
+// native: run deque_asked() = 16 used 32
 @compact(u32)
 type S: key + ordered {
     a: u8,
@@ -44,8 +44,8 @@ type H[in r] {
 fn bare() -> u64 {
     region r {
         let s = result.unwrap(make_s(r, 1, 20, 3))
-        let cloned: Result[S in r, Capacity] = clone(s)
-        result.unwrap(take cloned).b
+        let cloned: S in r = clone(s)
+        cloned.b
     }
 }
 
@@ -55,8 +55,8 @@ fn listed() -> u64 {
         let mut xs: List[S in r] = list.new()
         let _ = list.push(mut xs, s)
         let _ = list.push(mut xs, s)
-        let cloned: Result[List[S in r], Capacity] = clone(xs)
-        let mut e = result.unwrap(take cloned)
+        let cloned: List[S in r] = clone(xs)
+        let mut e = cloned
         option.unwrap(list.pop(mut e)).b + option.unwrap(list.pop(mut e)).b
     }
 }
@@ -65,8 +65,8 @@ fn optioned() -> u64 {
     region r {
         let s = result.unwrap(make_s(r, 1, 20, 3))
         let o: Option[S in r] = Some(s)
-        let cloned: Result[Option[S in r], Capacity] = clone(o)
-        option.unwrap(result.unwrap(take cloned)).b
+        let cloned: Option[S in r] = clone(o)
+        option.unwrap(take cloned).b
     }
 }
 
@@ -74,8 +74,8 @@ fn paired() -> u64 {
     region r {
         let s = result.unwrap(make_s(r, 1, 20, 3))
         let o: (S in r, u64) = (s, 5)
-        let cloned: Result[(S in r, u64), Capacity] = clone(o)
-        let (t, k) = result.unwrap(take cloned)
+        let cloned: (S in r, u64) = clone(o)
+        let (t, k) = cloned
         t.b + k
     }
 }
@@ -85,8 +85,8 @@ fn valued() -> u64 {
         let s = result.unwrap(make_s(r, 1, 20, 3))
         let mut m: Map[u64, S in r] = map.new()
         let _ = map.insert(mut m, 1, s)
-        let cloned: Result[Map[u64, S in r], Capacity] = clone(m)
-        let mut e = result.unwrap(take cloned)
+        let cloned: Map[u64, S in r] = clone(m)
+        let mut e = cloned
         option.unwrap(map.remove(mut e, 1)).b
     }
 }
@@ -98,8 +98,8 @@ fn keyed() -> u64 {
         let t = result.unwrap(make_s(r, 1, 20, 3))
         let mut m: Map[S in r, u64] = map.new()
         let _ = map.insert(mut m, s, 20)
-        let cloned: Result[Map[S in r, u64], Capacity] = clone(m)
-        let mut e = result.unwrap(take cloned)
+        let cloned: Map[S in r, u64] = clone(m)
+        let mut e = cloned
         option.unwrap(map.remove(mut e, t))
     }
 }
@@ -107,9 +107,9 @@ fn keyed() -> u64 {
 fn boxed() -> u64 {
     region r {
         let s = result.unwrap(make_s(r, 1, 20, 3))
-        let b: Box[S in r] = result.unwrap(box.new(s))
-        let cloned: Result[Box[S in r], Capacity] = clone(b)
-        let e = result.unwrap(take cloned)
+        let b: Box[S in r] = box.new(s)
+        let cloned: Box[S in r] = clone(b)
+        let e = cloned
         e.b
     }
 }
@@ -120,8 +120,8 @@ fn nested() -> u64 {
         let mut xs: List[H[in r]] = list.new()
         let _ = list.push(mut xs, H(s: s, xs: list.new()))
         let _ = list.push(mut xs, H(s: s, xs: list.new()))
-        let cloned: Result[List[H[in r]], Capacity] = clone(xs)
-        let mut e = result.unwrap(take cloned)
+        let cloned: List[H[in r]] = clone(xs)
+        let mut e = cloned
         option.unwrap(list.pop(mut e)).s.b + option.unwrap(list.pop(mut e)).s.b
     }
 }
@@ -131,38 +131,36 @@ fn own_list() -> u64 {
     let _ = list.push(mut xs, O(a: 1, b: 20, c: 3))
     let _ = list.push(mut xs, O(a: 1, b: 20, c: 3))
     let _ = list.push(mut xs, O(a: 1, b: 20, c: 3))
-    let cloned: Result[List[O], Capacity] = clone(xs)
-    let mut e = result.unwrap(take cloned)
+    let cloned: List[O] = clone(xs)
+    let mut e = cloned
     let x = option.unwrap(list.pop(mut e)).b
     let y = option.unwrap(list.pop(mut e)).b
     x + y + option.unwrap(list.pop(mut e)).b
 }
 
 fn own_box() -> u64 {
-    let b: Box[O] = result.unwrap(box.new(O(a: 1, b: 20, c: 3)))
-    let cloned: Result[Box[O], Capacity] = clone(b)
-    let e = result.unwrap(take cloned)
+    let b: Box[O] = box.new(O(a: 1, b: 20, c: 3))
+    let cloned: Box[O] = clone(b)
+    let e = cloned
     e.b
 }
 
 fn ask_refs[in r](xs: List[S in r]) -> u64 {
-    match (bound bytes 0 {
-        let c: Result[List[S in r], Capacity] = clone(xs)
-        c
-    }) {
-        Ok(Error(e)) => e.requested,
-        _ => 0
-    }
+    refused_request(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let c: List[S in r] = clone(xs)
+            0
+        }
+    }))
 }
 
 fn ask_owns(xs: List[O]) -> u64 {
-    match (bound bytes 0 {
-        let c: Result[List[O], Capacity] = clone(xs)
-        c
-    }) {
-        Ok(Error(e)) => e.requested,
-        _ => 0
-    }
+    refused_request(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let c: List[O] = clone(xs)
+            0
+        }
+    }))
 }
 
 // Each clone's first block, asked under a zero bound.
@@ -176,22 +174,20 @@ fn asked() -> u64 {
         let _ = list.push(mut os, O(a: 1, b: 20, c: 3))
         let _ = list.push(mut os, O(a: 1, b: 20, c: 3))
         let _ = list.push(mut os, O(a: 1, b: 20, c: 3))
-        let b: Box[O] = result.unwrap(box.new(O(a: 1, b: 20, c: 3)))
-        let q: Box[S in r] = result.unwrap(box.new(s))
-        let x = match (bound bytes 0 {
-            let c: Result[Box[O], Capacity] = clone(b)
-            c
-        }) {
-            Ok(Error(e)) => e.requested,
-            _ => 0
-        }
-        let y = match (bound bytes 0 {
-            let c: Result[Box[S in r], Capacity] = clone(q)
-            c
-        }) {
-            Ok(Error(e)) => e.requested,
-            _ => 0
-        }
+        let b: Box[O] = box.new(O(a: 1, b: 20, c: 3))
+        let q: Box[S in r] = box.new(s)
+        let x = refused_request(isolate(fn() -> Result[u64, Capacity] {
+            bound bytes 0 {
+                let c: Box[O] = clone(b)
+                0
+            }
+        }))
+        let y = refused_request(isolate(fn() -> Result[u64, Capacity] {
+            bound bytes 0 {
+                let c: Box[S in r] = clone(q)
+                0
+            }
+        }))
         if ask_refs(xs) == 32 && ask_owns(os) == 32 && x == 16 && y == 16 {
             1
         } else {
@@ -205,8 +201,8 @@ fn dequed() -> u64 {
         let s = result.unwrap(make_s(r, 1, 20, 3))
         let mut d: Deque[S in r] = deque.new()
         let _ = deque.push_back(mut d, s)
-        let cloned: Result[Deque[S in r], Capacity] = clone(d)
-        let mut e = result.unwrap(take cloned)
+        let cloned: Deque[S in r] = clone(d)
+        let mut e = cloned
         option.unwrap(deque.pop_front(mut e)).b
     }
 }
@@ -216,8 +212,8 @@ fn heaped() -> u64 {
         let s = result.unwrap(make_s(r, 1, 20, 3))
         let mut h: Heap[S in r] = heap.new()
         let _ = heap.push(mut h, s)
-        let cloned: Result[Heap[S in r], Capacity] = clone(h)
-        let mut e = result.unwrap(take cloned)
+        let cloned: Heap[S in r] = clone(h)
+        let mut e = cloned
         option.unwrap(heap.pop(mut e)).b
     }
 }
@@ -227,13 +223,13 @@ fn deque_asked() -> u64 {
         let s = result.unwrap(make_s(r, 1, 20, 3))
         let mut d: Deque[S in r] = deque.new()
         let _ = deque.push_back(mut d, s)
-        match (bound bytes 0 {
-            let c: Result[Deque[S in r], Capacity] = clone(d)
-            c
-        }) {
-            Ok(Error(e)) => e.requested,
-            _ => 0
-        }
+        let full = take d
+        refused_request(isolate(fn() -> Result[u64, Capacity] {
+            bound bytes 0 {
+                let c: Deque[S in r] = clone(full)
+                0
+            }
+        }))
     }
 }
 
@@ -242,7 +238,30 @@ fn make_s(r: Region, a: u8, b: u64, c: u8) -> Result[S in r, Capacity] {
         dest.put(mut d, S(a: a, b: b, c: c))
     }) {
         Ok(take built) => Ok(finish(take built)),
-        Error(Capacity(capacity)) => Error(capacity),
         Error(Overflow) => fail("fixed document size"),
+    }
+}
+
+// The bytes a caught refusal asked for, or 0.
+fn refused_request[R](take r: Result[Result[R, Causes], Capacity]) -> u64 {
+    match caught(take r) {
+        Some(e) => e.requested,
+        None => 0,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

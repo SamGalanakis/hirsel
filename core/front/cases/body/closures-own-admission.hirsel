@@ -1,41 +1,54 @@
-// T1.2: the error owns captures in first-naming order, requested charge excludes glue.
-// With 0 bytes available, capturing b:u8 then a:u64 requests round8(1+8)=16.
-// expect: run failed() = 35
+// T1.2: an owning closure admits its captures as one block; the requested charge excludes
+// glue. With 0 bytes available, capturing b:u8 then a:u64 raises Capacity requesting
+// round8(1+8)=16, with the caught cause cell still admitted.
+// expect: run failed() = 16 used 32
 // expect: run success() = 19
 fn failed() -> u64 {
-    let a: u64 = 7
-    let b: u8 = 3
-    let outer: Result[u64, Capacity] = bound bytes 0 {
-        let result: Result[own[send] fn() -> u64, (Capacity, (u8, u64))] = fn() -> u64 {
-            if b == 3 {
-                a + 12
-            } else {
-                0
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 0 {
+            let a: u64 = 7
+            let b: u8 = 3
+            let cb: own[send] fn() -> u64 = fn() -> u64 {
+                if b == 3 {
+                    a + 12
+                } else {
+                    0
+                }
             }
+            cb()
         }
-        match result {
-            Error((c, (first, second))) => c.requested + c.available + second + int.widen(first) + 9,
-            Ok(take cb) => cb(),
-        }
-    }
-    match outer {
-        Ok(n) => n,
-        Error(_) => 0
+    })
+    match caught(take outer) {
+        Some(c) => c.requested + c.available,
+        None => 0
     }
 }
 
 fn success() -> u64 {
     let a: u64 = 7
     let b: u8 = 3
-    let result: Result[own[send] fn() -> u64, (Capacity, (u8, u64))] = fn() -> u64 {
+    let cb: own[send] fn() -> u64 = fn() -> u64 {
         if b == 3 {
             a + 12
         } else {
             0
         }
     }
-    match result {
-        Ok(take cb) => cb(),
-        Error(_) => 0
+    cb()
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }

@@ -520,7 +520,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "bfs",
@@ -530,7 +531,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "generics",
@@ -540,7 +542,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "generics",
@@ -550,7 +553,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "lru",
@@ -560,7 +564,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "lru",
@@ -570,7 +575,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "files",
@@ -580,7 +586,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "files",
@@ -590,7 +597,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "json",
@@ -600,7 +608,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "json",
@@ -610,7 +619,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "pipeline",
@@ -620,7 +630,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args", "Tasks"]
     },
     {
       "workload": "pipeline",
@@ -630,7 +641,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args", "Tasks"]
     },
     {
       "workload": "request-scratch",
@@ -640,7 +652,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "request-scratch",
@@ -650,7 +663,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "rope",
@@ -660,7 +674,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "rope",
@@ -670,7 +685,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "versions",
@@ -680,7 +696,8 @@
         "version": "1"
       },
       "module": "main",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     },
     {
       "workload": "versions",
@@ -690,7 +707,8 @@
         "version": "1"
       },
       "module": "matched",
-      "function": "main"
+      "function": "main",
+      "parameters": ["Stdout", "Dir", "Args"]
     }
   ],
   "host_outcome_contract": {

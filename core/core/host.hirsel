@@ -6,6 +6,20 @@ pub fn read(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits
 
 pub fn write(mut f: HostFile, b: Bytes) -> Result[(), WriteError] waits
 
+pub fn open_dir(d: Dir, p: String) -> Result[Dir, IoError] waits
+
+pub fn entries(d: Dir) -> Result[HostEntries, IoError] waits
+
+pub fn next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
+
+pub fn stat(d: Dir, p: String) -> Result[Stat, IoError] waits
+
+pub fn stat_file(mut f: HostFile) -> Result[Stat, IoError] waits
+
+pub fn read_at(mut f: HostFile, at: u64, mut buf: Bytes) -> Result[u64, IoError] waits
+
+pub fn write_at(mut f: HostFile, at: u64, b: Bytes) -> Result[(), WriteError] waits
+
 pub fn close(take f: HostFile) -> Result[(), IoError] waits
 
 pub fn try_lock(mut f: HostFile) -> Result[bool, IoError] waits

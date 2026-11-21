@@ -6,7 +6,7 @@
 // expect: run field_len() = 1 evaluator-only:cranelift,llvm
 fn seed() -> Map[u64, u64] {
     let mut m: Map[u64, u64] = map.new()
-    result.unwrap(map.insert(mut m, 1u64, 7u64))
+    map.insert(mut m, 1u64, 7u64)
     m
 }
 
@@ -61,7 +61,7 @@ pub fn main() -> Result[(), Exit] {
 fn mut_map() -> u64 {
     let mut m: Map[u64, u64] = seed()
     match isolate(scoped fn() -> u64 {
-        result.unwrap(map.insert(mut m, 2u64, 8u64))
+        map.insert(mut m, 2u64, 8u64)
         0u64
     }) {
         _ => 0,

@@ -29,24 +29,15 @@ fn sum_arc(c: Arc[C]) -> u64 {
 }
 
 fn boxed(k: u64) -> u64 {
-    match box.new(C(a: k, b: 7, i: I(v: 40))) {
-        Ok(h) => sum_box(h),
-        Error(_) => 999
-    }
+    sum_box(box.new(C(a: k, b: 7, i: I(v: 40))))
 }
 
 fn counted(k: u64) -> u64 {
-    match rc.new(C(a: k, b: 7, i: I(v: 40))) {
-        Ok(h) => sum_rc(h),
-        Error(_) => 999
-    }
+    sum_rc(rc.new(C(a: k, b: 7, i: I(v: 40))))
 }
 
 fn shared(k: u64) -> u64 {
-    match arc.new(C(a: k, b: 7, i: I(v: 40))) {
-        Ok(h) => sum_arc(h),
-        Error(_) => 999
-    }
+    sum_arc(arc.new(C(a: k, b: 7, i: I(v: 40))))
 }
 
 // rope's `p.chunk.value`: a counted field of a record, its String read as a view.
@@ -85,25 +76,17 @@ fn left_key(root: Option[Arc[Node]]) -> u64 {
 }
 
 fn piece(x: u64) -> u64 {
-    match rc.new(Chunk(id: x, value: "abc")) {
-        Ok(c) => chunk_len(Piece(chunk: take c, lo: 4)),
-        Error(_) => 999
-    }
+    let c = rc.new(Chunk(id: x, value: "abc"))
+    chunk_len(Piece(chunk: take c, lo: 4))
 }
 
 fn tree(k: u64) -> u64 {
-    let Ok(l) = arc.new(Node(key: k, left: None)) else {
-        return 999
-    }
-    let Ok(r) = arc.new(Node(key: 10, left: Some(take l))) else {
-        return 998
-    }
+    let l = arc.new(Node(key: k, left: None))
+    let r = arc.new(Node(key: 10, left: Some(take l)))
     left_key(Some(take r))
 }
 
 fn lone(x: u64) -> u64 {
-    let Ok(r) = arc.new(Node(key: 10, left: None)) else {
-        return 998
-    }
+    let r = arc.new(Node(key: 10, left: None))
     left_key(Some(take r))
 }

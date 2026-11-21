@@ -1,5 +1,5 @@
 fn span(start: u64, end: u64) -> http1.Span {
-    http1.Span(start: start, end: end)
+    http1.Span(start, end)
 }
 
 fn full(text: String) -> http1.Span {
@@ -9,7 +9,7 @@ fn full(text: String) -> http1.Span {
 fn recomposes(text: String) -> bool {
     let u = result.unwrap(uri.parse(text))
     let mut out = string.new()
-    result.unwrap(uri.push(mut out, text, u))
+    uri.push(mut out, text, u)
     out == text
 }
 
@@ -30,14 +30,14 @@ fn shifted(u: uri.Uri, by: u64) -> uri.Uri {
         Some(Ip6(p)) => Some(Ip6(shift(p, by))),
         None => None
     }
-    uri.Uri(scheme: shift_optional(u.scheme, by), userinfo: shift_optional(u.userinfo, by), host: host, port: shift_optional(u.port, by), path: shift(u.path, by), query: shift_optional(u.query, by), fragment: shift_optional(u.fragment, by))
+    uri.Uri(scheme: shift_optional(u.scheme, by), userinfo: shift_optional(u.userinfo, by), host, port: shift_optional(u.port, by), path: shift(u.path, by), query: shift_optional(u.query, by), fragment: shift_optional(u.fragment, by))
 }
 
 fn resolved(base_text: String, reference: String, expected: String, prefix: String) -> bool {
     let base = result.unwrap(uri.parse(base_text))
     let r = result.unwrap(uri.parse(reference))
     let want = result.unwrap(uri.parse(expected))
-    let mut out = result.unwrap(string.from(prefix))
+    let mut out = string.from(prefix)
     let target = result.unwrap(uri.resolve(base_text, base, reference, r, mut out))
     let at = string.byte_len(prefix)
     recomposes(reference) && recomposes(expected) && target == shifted(want, at) && string.slice(out, 0, at) == prefix && string.slice(out, at, string.byte_len(out)) == expected
@@ -199,9 +199,9 @@ fn zig_components() -> bool {
     let text = "foo://example.com:8042/over/there?name=ferret#nose"
     let u = result.unwrap(uri.parse(text))
     let user = result.unwrap(uri.parse("scheme://username::@a"))
-    let long_host = result.unwrap(string.repeat("Z", 256))
-    let mut long_uri = result.unwrap(string.from("http://"))
-    result.unwrap(string.push(mut long_uri, long_host))
+    let long_host = string.repeat("Z", 256)
+    let mut long_uri = string.from("http://")
+    string.push(mut long_uri, long_host)
     u.scheme == Some(span(0, 3)) && u.host == Some(Name(span(6, 17))) && u.port == Some(span(18, 22)) && uri.port_number(text, u) == Some(8042u16) && u.path == span(22, 33) && u.query == Some(span(34, 45)) && u.fragment == Some(span(46, 50)) && user.userinfo == Some(span(9, 19)) && host_is("scheme://username::@a", "a") &&
     // Userinfo stays one component and a present empty host retains its span.
     host_is("scheme://userinfo@", "") && host_is("foobar://", "") && host_is("file:///", "") && host_is("file:///an/absolute/path/to/something", "") && host_is("file://localhost/an/absolute/path/to/another/thing/", "localhost") &&
@@ -254,14 +254,14 @@ fn quote_table(set: uri.Set, oracle: String) -> bool {
     let mut at: u64 = 0
     for i in 0u64 .. 256 {
         list.clear(mut raw)
-        result.unwrap(list.push(mut raw, int.narrow(i)))
+        list.push(mut raw, int.narrow(i))
         string.truncate(mut coded, 0)
         list.clear(mut decoded)
         let end = match string.find(oracle, at, "|") {
             Some(p) => p,
             None => string.byte_len(oracle)
         }
-        result.unwrap(uri.encode(mut coded, raw, set))
+        uri.encode(mut coded, raw, set)
         if coded != string.slice(oracle, at, end) {
             return false
         }
@@ -324,7 +324,7 @@ fn decoded_text(raw: String, expected: String) -> bool {
 }
 
 fn bad_utf8(raw: String, at: u64) -> bool {
-    let mut out = result.unwrap(string.from("pre"))
+    let mut out = string.from("pre")
     let refused = match uri.decode_text(raw, full(raw), mut out) {
         Error(NotUtf8(i)) => i == at,
         _ => false
@@ -337,7 +337,7 @@ fn bad_utf8(raw: String, at: u64) -> bool {
 // expect: run decode_utf8() = true
 fn decode_utf8() -> bool {
     // The byte decoder also accepts input that cannot be a String.
-    let raw_bytes = result.unwrap(b"\xFF%2B")
+    let raw_bytes = b"\xFF%2B"
     let (literal, next) = result.unwrap(uri.decode_next(raw_bytes, 0, 4))
     let (plus, end) = result.unwrap(uri.decode_next(raw_bytes, next, 4))
     if literal != 0xff || next != 1 || plus != b'+' || end != 4 {
@@ -346,7 +346,7 @@ fn decode_utf8() -> bool {
     let raw = "x%FF#"
     let mut raw_out: Bytes = list.new()
     result.unwrap(uri.decode(raw, span(1, 4), mut raw_out))
-    raw_out == result.unwrap(b"\xFF") && recomposes(raw) && decoded_text("a+b", "a+b") && decoded_text("a%2Bb", "a+b") && decoded_text("%e2%82%ac", "€") && decoded_text("é%F0%9F%98%80", "é😀") && decoded_text("%00", "\0") && bad_utf8("%FF", 0) && bad_utf8("x%FF", 1) && bad_utf8("ab%e2%82x", 2) && bad_utf8("%e2%82", 0) && bad_utf8("%c0%80", 0) && bad_utf8("%e0%80%80", 0) && bad_utf8("%ed%a0%80", 0) && bad_utf8("%f4%90%80%80", 0)
+    raw_out == b"\xFF" && recomposes(raw) && decoded_text("a+b", "a+b") && decoded_text("a%2Bb", "a+b") && decoded_text("%e2%82%ac", "€") && decoded_text("é%F0%9F%98%80", "é😀") && decoded_text("%00", "\0") && bad_utf8("%FF", 0) && bad_utf8("x%FF", 1) && bad_utf8("ab%e2%82x", 2) && bad_utf8("%e2%82", 0) && bad_utf8("%c0%80", 0) && bad_utf8("%e0%80%80", 0) && bad_utf8("%ed%a0%80", 0) && bad_utf8("%f4%90%80%80", 0)
 }
 
 // U5. Zig Uri.zig:793-834 and RFC 3986 §2.1, rfc3986.txt:643-653.
@@ -355,8 +355,8 @@ fn decode_utf8() -> bool {
 fn decode_rejects_atomically() -> bool {
     // RFC 3986 rejects the dangling '%' that Zig copied literally.
     let raw = "/abc%"
-    let mut raw_out = result.unwrap(b"pre")
-    let mut out = result.unwrap(string.from("pre"))
+    let mut raw_out = b"pre"
+    let mut out = string.from("pre")
     let bad_bytes = match uri.decode(raw, full(raw), mut raw_out) {
         Error(Invalid(4)) => true,
         _ => false
@@ -366,7 +366,7 @@ fn decode_rejects_atomically() -> bool {
         _ => false
     }
     let many = "%5C%C3%B6%2F%20%C3%A4%C3%B6%C3%9F%20~~.adas-https%3A%2F%2Fcanvas%3A123%2F%23ads%26%26sad"
-    bad_bytes && bad_text && raw_out == result.unwrap(b"pre") && out == "pre" && decoded_text(many, "\\ö/ äöß ~~.adas-https://canvas:123/#ads&&sad")
+    bad_bytes && bad_text && raw_out == b"pre" && out == "pre" && decoded_text(many, "\\ö/ äöß ~~.adas-https://canvas:123/#ads&&sad")
 }
 
 fn query_row(text: String, expected: String) -> bool {
@@ -471,20 +471,23 @@ fn output_spans() -> bool {
 
 // U8. uri.resolve's reserve contract and MEM-24 in docs/spec/budgets.md.
 // A 3-byte prefix plus the 20-byte reserve requests a 24-byte charge.
-// Mutants: write before reserving or reserve just enough for the resolved target.
+// Mutant: reserve just enough for the resolved target.
 // expect: run resolve_capacity_is_atomic() = true
 fn resolve_capacity_is_atomic() -> bool {
     let base_text = "s://a/bbbbbbbbbbb"
     let r = result.unwrap(uri.parse("/g"))
     let base = result.unwrap(uri.parse(base_text))
-    let mut out = "pre"
-    result.unwrap(bound bytes 23 {
-        let refused = match uri.resolve(base_text, base, "/g", r, mut out) {
-            Error(Capacity(c)) => c.requested == 24 && c.available == 23,
-            _ => false
+    let out = isolate(fn() -> Result[bool, Capacity] {
+        let mut target = "pre"
+        bound bytes 23 {
+            let _ = uri.resolve(base_text, base, "/g", r, mut target)
+            false
         }
-        refused && out == "pre"
     })
+    match caught(take out) {
+        Some(c) => c.requested == 24 && c.available == 23,
+        None => false,
+    }
 }
 
 // U8. RFC 3986 §5.2.2, rfc3986.txt:1745-1796, and uri.resolve's base contract.
@@ -501,22 +504,18 @@ fn base_must_be_absolute() -> bool {
     refused && out == "pre"
 }
 
-// RFC 3986 sections 2.1 and 3.3. A slash inside a segment is %2F.
-// expect: run encode_refusal_retries() = true
-fn encode_refusal_retries() -> bool {
-    let mut out = string.new()
-    result.unwrap(string.reserve(mut out, 8))
-    result.unwrap(string.push(mut out, "route=/"))
-    let raw = result.unwrap(b"/")
-    let denied = result.unwrap(bound bytes 0 {
-        uri.encode(mut out, raw, Segment)
-    })
-    if let Ok(_) = denied {
-        return false
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
     }
-    if out != "route=/" {
-        return false
-    }
-    result.unwrap(uri.encode(mut out, raw, Segment))
-    out == "route=/%2F"
 }

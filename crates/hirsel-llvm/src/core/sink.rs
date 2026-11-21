@@ -82,6 +82,8 @@ pub(super) enum Local {
 impl Local {
     pub const CONTEXT: Self = Self::Named("context");
     pub const DEST: Self = Self::Named("dest");
+    /// A `Result` register body's slot for its other case (abi::Return::ok).
+    pub const COLD: Self = Self::Named("cold");
     pub const CALLER_SITE: Self = Self::Named("caller_site");
     pub const SRET: Self = Self::Named("sret");
     pub const PAYLOAD: Self = Self::Named("payload");
@@ -716,7 +718,6 @@ pub(super) enum Operation<'a> {
 pub(super) trait Sink {
     fn global(&mut self, global: &Global);
     fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs);
-    fn module_asm(&mut self, text: &str);
     fn metadata(&mut self, id: usize, node: &Metadata);
     fn named_metadata(&mut self, name: &str, ids: &[usize]);
     fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs);
@@ -916,9 +917,6 @@ impl Sink for TextSink {
         out.push(')');
         function_attrs(out, attrs);
         out.push('\n');
-    }
-    fn module_asm(&mut self, text: &str) {
-        writeln!(self.text, "module asm \"{text}\"").unwrap();
     }
     fn metadata(&mut self, id: usize, node: &Metadata) {
         let out = &mut self.metadata;

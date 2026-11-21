@@ -250,9 +250,8 @@ workload's seed interval. A wrong receipt fails the sample.
 | `sockets64`, `sockets1024` | One TCP request. Each connection sends a little-endian seed and gets the transformed u64 back. A disjoint Tokio generator connects all sockets before releasing the closed-loop request stream. Report request-phase throughput and nearest-rank p50/p99 round trip latency. The server and generator verify the same receipt. |
 | `checkbox` | One Returned toggle under `wire-load converge` with 64 clients, 200 toggles per client and pace 1,000. Grain stays native to the checkbox application. The checksum is the sum of bytes of the final board. The loader checks each subscriber and the fresh snapshot against the XOR oracle and the runner checks the receipt against the prescribed input bits. |
 
-Use the release compiler and testing archive from the build below. The same
-archive runs untaped at all widths and reports pool counters when width exceeds
-one. Recorded pairs, fan-in, pipeline and spawn cases use a recording build
+Use the release compiler and the two testing archives from the build below.
+Both report pool counters when width exceeds one. Recorded pairs, fan-in, pipeline and spawn cases use a recording build
 (`hirsel build --recording` / `hirsel run --record` and `hirsel replay`). With
 the recording build, width 1 writes chooser 0 and widths above 1 write chooser
 2. The Tokio comparison remains untaped. The checkout's checkbox entry has no
@@ -262,9 +261,11 @@ graceful completion for sealing a recording, so the service row runs untaped.
 taskset -c "$build_cpus" python3 tools/buck2/prepare.py
 taskset -c "$build_cpus" .buck2/bin/buck2 build -j2 \
   --target-platforms //tools/buck2:release --show-full-output \
-  //:hirsel-core-driver-bin-hirsel //:hirsel-core-rt-test-pool-archives
+  //:hirsel-core-driver-bin-hirsel //:hirsel-core-rt-test-pool-archives \
+  //:hirsel-core-rt-test-pool-record-archives
 taskset -c "$build_cpus" ./bench/multicore/build.py --regimes \
-  --out "$benchmark_bins" --hirsel "$release_driver" --runtime "$test_pool_archive" --go "$go"
+  --out "$benchmark_bins" --hirsel "$release_driver" --runtime "$test_pool_archive" \
+  --recording-runtime "$test_pool_record_archive" --go "$go"
 
 # Use the lane's assigned values. Build and measurement run sequentially.
 rounds=(0 64 640 6400 64000)

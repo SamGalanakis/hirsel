@@ -589,15 +589,22 @@ impl<'a> Resolver<'a, '_> {
         }
     }
     fn missing(&mut self, n: NodeId) -> Target {
+        self.missing_name(n, None)
+    }
+    fn missing_name(&mut self, n: NodeId, lookup: Option<(Symbol, NameScope)>) -> Target {
         let path = path_tokens(self.item, n)
             .map(|t| self.index.symbols.text(self.name(t)))
             .collect::<Vec<_>>()
             .join(".");
-        self.out.diagnostics.push(Refusal::new(
+        let mut refusal = Refusal::new(
             "LANG-7",
             self.site(n),
             format!("name `{path}` was not found"),
-        ));
+        );
+        if let Some((written, scope)) = lookup {
+            refusal = refusal.with_unresolved(self.index.symbols.text(written), scope);
+        }
+        self.out.diagnostics.push(refusal);
         Target::Missing
     }
     fn qualified_member(
@@ -774,7 +781,23 @@ impl<'a> Resolver<'a, '_> {
             }
             let value = self
                 .qualified_member(n, module, t, Namespace::Value, false)
-                .unwrap_or_else(|| self.missing(n));
+                .unwrap_or_else(|| {
+                    self.missing_name(
+                        n,
+                        Some((
+                            symbol,
+                            NameScope::ModulePrefix {
+                                module: self.index.module_path(module),
+                                children_of: self.index.module_path(scope),
+                                namespace: if TYPE_CONTEXT {
+                                    Namespace::Type
+                                } else {
+                                    Namespace::Value
+                                },
+                            },
+                        )),
+                    )
+                });
             if let Target::Definition(id) = value {
                 match self.index.get(id).kind {
                     DefinitionKind::Function => return self.function_head(n, t, id),
@@ -795,7 +818,19 @@ impl<'a> Resolver<'a, '_> {
             Namespace::Value
         };
         self.qualified_member(n, module, last, ns, CONSTRUCT)
-            .unwrap_or_else(|| self.missing(n))
+            .unwrap_or_else(|| {
+                self.missing_name(
+                    n,
+                    Some((
+                        self.name(last),
+                        NameScope::ModuleMember {
+                            module: self.index.module_path(module),
+                            namespace: ns,
+                            constructor: CONSTRUCT,
+                        },
+                    )),
+                )
+            })
     }
     fn use_path<const TYPE_CONTEXT: bool, const CONSTRUCT: bool>(&mut self, n: NodeId) {
         let type_context = TYPE_CONTEXT;
@@ -969,7 +1004,9 @@ impl<'a> Resolver<'a, '_> {
                     self.bind(n, t, BinderKind::Local);
                 }
             }
-            NodeKind::TakePattern => self.bind(n, token.unwrap(), BinderKind::Local),
+            NodeKind::TakePattern | NodeKind::MutPattern => {
+                self.bind(n, token.unwrap(), BinderKind::Local)
+            }
             NodeKind::ConstructorPattern => {
                 let c = self.children(n);
                 if let Some((&path, fields)) = c.split_first() {

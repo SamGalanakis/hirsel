@@ -29,7 +29,7 @@ pub fn own[T: codec](x: T) -> T {
     let c: std.codec.Codec[T] = std.codec.of()
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(c, x, mut b))
-    result.unwrap(result.unwrap(std.codec.decode(c, b)))
+    result.unwrap(std.codec.decode(c, b))
 }
 
 pub fn from_runner(x: runner.Outcome) -> Outcome {
@@ -37,14 +37,14 @@ pub fn from_runner(x: runner.Outcome) -> Outcome {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(cr, x, mut b))
-    result.unwrap(result.unwrap(std.codec.decode(co, b)))
+    result.unwrap(std.codec.decode(co, b))
 }
 
 pub fn remember(mut runs: Runs, r: Run) {
     let k = key(0u64, r.stream, r.p)
     let mut values = match map.remove(mut runs, k) { Some(take old) => take old, None => list.new() }
-    result.unwrap(list.push(mut values, own(r)))
-    result.unwrap(map.insert(mut runs, take k, take values))
+    list.push(mut values, own(r))
+    map.insert(mut runs, take k, take values)
 }
 
 pub fn identity(c: Count, answers: List[Identity], runs: Runs, h: Header) -> Verdict {
@@ -145,9 +145,9 @@ pub fn wire_state() -> State {
 
 pub fn key(conn: u64, stream: Bytes, p: u64) -> Bytes {
     let mut b: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(conn, mut b))
+    std.codec.put_u64(conn, mut b)
     result.unwrap(std.codec.put_list(stream, std.codec.of_u8(), mut b))
-    result.unwrap(std.codec.put_u64(p, mut b))
+    std.codec.put_u64(p, mut b)
     b
 }
 
@@ -161,16 +161,16 @@ pub fn step(mut s: State, e: Obs) {
             let k = key(a.conn, a.stream, a.p)
             let n = number(s.pending, k)
             let row = list.len(s.sends)
-            result.unwrap(list.push(mut s.sends, Tracked(key: own(k), at: s.index, done: false, slot: key(0u64, a.stream, a.p), digest: result.unwrap(clone(a.digest)), deadline: a.deadline)))
+            list.push(mut s.sends, Tracked(key: own(k), at: s.index, done: false, slot: key(0u64, a.stream, a.p), digest: clone(a.digest), deadline: a.deadline))
             let mut rows = match map.remove(mut s.by_conn, a.conn) { Some(take old) => take old, None => list.new() }
-            result.unwrap(list.push(mut rows, row))
-            result.unwrap(map.insert(mut s.by_conn, a.conn, take rows))
+            list.push(mut rows, row)
+            map.insert(mut s.by_conn, a.conn, take rows)
             let mut q = match map.remove(mut s.waiting, k) { Some(take old) => take old, None => deque.new() }
-            result.unwrap(deque.push_back(mut q, Pending(at: s.index, deadline: a.deadline, issued: a.at, row: row)))
-            result.unwrap(map.insert(mut s.waiting, own(k), take q))
-            result.unwrap(map.insert(mut s.pending, take k, n + 1u64))
+            deque.push_back(mut q, Pending(at: s.index, deadline: a.deadline, issued: a.at, row: row))
+            map.insert(mut s.waiting, own(k), take q)
+            map.insert(mut s.pending, take k, n + 1u64)
             let total = number(s.connections, a.conn)
-            result.unwrap(map.insert(mut s.connections, a.conn, total + 1u64))
+            map.insert(mut s.connections, a.conn, total + 1u64)
             s.delivery.hits += 1u64
             s.delivery.pending += 1u64
         },
@@ -206,18 +206,18 @@ pub fn step(mut s: State, e: Obs) {
                                     i += 1u64
                                 }
                             }
-                            result.unwrap(map.insert(mut s.by_conn, a.conn, take rows))
+                            map.insert(mut s.by_conn, a.conn, take rows)
                         }
                     }
                     let accepted = match a.outcome { ObsReturned(_) => true, _ => false }
                     if accepted {
                         s.identity.hits += 1u64
-                        result.unwrap(list.push(mut s.answers, Identity(slot: own(s.sends[p.row].slot), key: own(s.sends[p.row].key), digest: own(s.sends[p.row].digest), version: a.version, from: p.at, to: s.index)))
+                        list.push(mut s.answers, Identity(slot: own(s.sends[p.row].slot), key: own(s.sends[p.row].key), digest: own(s.sends[p.row].digest), version: a.version, from: p.at, to: s.index))
                     }
                     let mismatched = match a.outcome { ObsRefused(ObsRequestMismatch) => true, _ => false }
                     if mismatched {
                         s.mismatch.hits += 1u64
-                        result.unwrap(list.push(mut s.mismatches, Identity(slot: own(s.sends[p.row].slot), key: own(s.sends[p.row].key), digest: own(s.sends[p.row].digest), version: a.version, from: p.at, to: s.index)))
+                        list.push(mut s.mismatches, Identity(slot: own(s.sends[p.row].slot), key: own(s.sends[p.row].key), digest: own(s.sends[p.row].digest), version: a.version, from: p.at, to: s.index))
                     }
                     if abandoned {
                         s.deadline.hits += 1u64
@@ -228,12 +228,12 @@ pub fn step(mut s: State, e: Obs) {
                 },
                 None => (),
             }
-            result.unwrap(map.insert(mut s.waiting, own(k), take q))
+            map.insert(mut s.waiting, own(k), take q)
             if n > 0u64 {
-                result.unwrap(map.insert(mut s.pending, take k, n - 1u64))
+                map.insert(mut s.pending, take k, n - 1u64)
                 let total = number(s.connections, a.conn)
                 if total > 0u64 {
-                    result.unwrap(map.insert(mut s.connections, a.conn, total - 1u64))
+                    map.insert(mut s.connections, a.conn, total - 1u64)
                     s.delivery.pending -= 1u64
                 }
             }
@@ -241,11 +241,11 @@ pub fn step(mut s: State, e: Obs) {
         Closed(a) => {
             if a.code == 1008u64 {
                 s.after_close.hits += 1u64
-                result.unwrap(map.insert(mut s.closed, a.conn, s.index))
+                map.insert(mut s.closed, a.conn, s.index)
             }
             let n = number(s.connections, a.conn)
             s.delivery.pending -= n
-            result.unwrap(map.insert(mut s.connections, a.conn, 0u64))
+            map.insert(mut s.connections, a.conn, 0u64)
             if let Some(take rows) = map.remove(mut s.by_conn, a.conn) {
                 for row in rows {
                     s.sends[row].done = true
@@ -258,11 +258,11 @@ pub fn step(mut s: State, e: Obs) {
         Ran(r) => {
             remember(mut s.runs, r)
             let k = key(0u64, r.stream, r.p)
-            if !map.contains(s.bindings, k) { result.unwrap(map.insert(mut s.bindings, take k, own(r.digest))) }
+            if !map.contains(s.bindings, k) { map.insert(mut s.bindings, take k, own(r.digest)) }
         },
         Pos(p) => {
             let k = key(0u64, p.stream, p.latest)
-            if !map.contains(s.bindings, k) { result.unwrap(map.insert(mut s.bindings, take k, own(p.digest))) }
+            if !map.contains(s.bindings, k) { map.insert(mut s.bindings, take k, own(p.digest)) }
         },
         _ => (),
     }
@@ -271,8 +271,8 @@ pub fn step(mut s: State, e: Obs) {
 
 pub fn finish(s: State, h: Header) -> List[Verdict] {
     let mut vs: List[Verdict] = list.new()
-    result.unwrap(list.push(mut vs, identity(s.identity, s.answers, s.runs, h)))
-    result.unwrap(list.push(mut vs, verdict(s.once, h)))
+    list.push(mut vs, identity(s.identity, s.answers, s.runs, h))
+    list.push(mut vs, verdict(s.once, h))
     let mut delivery = verdict(s.delivery, h)
     if h.complete && s.delivery.pending > 0u64 {
         for p in s.sends {
@@ -282,17 +282,17 @@ pub fn finish(s: State, h: Header) -> List[Verdict] {
             }
         }
     }
-    result.unwrap(list.push(mut vs, take delivery))
-    result.unwrap(list.push(mut vs, verdict(s.after_close, h)))
-    result.unwrap(list.push(mut vs, verdict(s.deadline, h)))
-    result.unwrap(list.push(mut vs, mismatches(s.mismatch, s.mismatches, s.bindings, h)))
+    list.push(mut vs, take delivery)
+    list.push(mut vs, verdict(s.after_close, h))
+    list.push(mut vs, verdict(s.deadline, h))
+    list.push(mut vs, mismatches(s.mismatch, s.mismatches, s.bindings, h))
     vs
 }
 
 pub fn law_prefix() -> bool {
     let mut trace: List[Obs] = list.new()
-    result.unwrap(list.push(mut trace, Sent(Send(conn: 0u64, stream: list.new(), p: 0u64, digest: list.new(), deadline: 10u64, at: 0u64))))
-    result.unwrap(list.push(mut trace, Got(Reply(conn: 0u64, stream: list.new(), p: 0u64, version: 0u64, outcome: ObsAbandoned, at: 10u64))))
+    list.push(mut trace, Sent(Send(conn: 0u64, stream: list.new(), p: 0u64, digest: list.new(), deadline: 10u64, at: 0u64)))
+    list.push(mut trace, Got(Reply(conn: 0u64, stream: list.new(), p: 0u64, version: 0u64, outcome: ObsAbandoned, at: 10u64)))
     let mut s = state()
     for i in 0u64 .. list.len(trace) / 2u64 { step(mut s, trace[i]) }
     let h = Header(has_clock: true, has_digest: false, has_ran: false, complete: false)
@@ -310,12 +310,12 @@ fn remove_send(mut q: Deque[Pending], newest: bool, earliest: bool) -> Option[Pe
     for i in 0u64 .. n {
         let p = option.unwrap(deque.pop_front(mut q))
         if p.deadline < deadline { deadline = p.deadline; chosen = i }
-        result.unwrap(deque.push_back(mut q, take p))
+        deque.push_back(mut q, take p)
     }
     let mut selected: Option[Pending] = None
     for i in 0u64 .. n {
         let p = option.unwrap(deque.pop_front(mut q))
-        if i == chosen { selected = Some(take p) } else { result.unwrap(deque.push_back(mut q, take p)) }
+        if i == chosen { selected = Some(take p) } else { deque.push_back(mut q, take p) }
     }
     selected
 }

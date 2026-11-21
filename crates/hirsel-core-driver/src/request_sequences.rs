@@ -9,7 +9,7 @@
 // other bytes, so a store that publishes on the second request with one shape holds
 // a generation before B. Cases: the programs of option-l-review-1034, the request
 // sequences of l-body-review-1036 and the shapes of l-body-review-1039 (fixtures
-// and RUN receipts under /workspace/code/hirsel-briefs/<review>/).
+// and RUN receipts in the corresponding review's evidence directory).
 
 /// A source's text: literal, or a file of this checkout with one replacement
 /// (`find` empty: `with` appended).
@@ -808,6 +808,33 @@ const K:R=R(x:1u64)"###)), src("b", "b.hirsel", false, lit(r###"pub type V = R(u
         check(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn f(x:u8=2u8)->u8{x}"###)), src("b", "b.hirsel", false, lit(r###"fn use()->u8{a.f()}"###))])])]),
+        // The anchor names a parameter, so swapping the bindings' names moves
+        // the result's anchor from the first argument to the second: the reader
+        // that writes its first argument under the view is refused, then not.
+        seq("parameter_anchor_swapped", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type P{a:u64}
+pub fn touch(mut p:P){}
+pub fn pick(x:P, y:P)->View[P] in x {view x}"###)), src("b", "b.hirsel", false, lit(r###"fn use(mut q:a.P, r:a.P){let v=a.pick(q, r); a.touch(mut q); let _=v}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type P{a:u64}
+pub fn touch(mut p:P){}
+pub fn pick(y:P, x:P)->View[P] in x {view x}"###)), src("b", "b.hirsel", false, lit(r###"fn use(mut q:a.P, r:a.P){let v=a.pick(q, r); a.touch(mut q); let _=v}"###))])])]),
+        // `bad` is the last item and gains the line break that ends it when an
+        // item follows: its record is reused and its refusal still renders at
+        // `false`, byte 23 of the file (line 2, column 14).
+        seq("trailing_line_added", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn ok(){}
+fn bad()->u8{false}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn ok(){}
+fn bad()->u8{false}
+fn more(){}"###))])])]),
         seq("doc_trivia", vec![
         check(vec![
             core(vec![]),
@@ -1895,6 +1922,7 @@ const GATES: &[(&str, Gate)] = &[
     ("new_body_refusal", Gate::Fast),
     ("opaque_private_field", Gate::Fallback),
     ("optimization", Gate::Fast),
+    ("parameter_anchor_swapped", Gate::Fallback),
     ("parse_mode_changed", Gate::Fallback),
     ("prelude_negative_type", Gate::Fallback),
     ("private_alias", Gate::Fallback),
@@ -1922,6 +1950,7 @@ const GATES: &[(&str, Gate)] = &[
     ("test_header_flip", Gate::Fallback),
     ("test_signature_before_reference_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("test_signature_reference_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("trailing_line_added", Gate::Fallback),
     ("two_body_refusals_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("unchanged_body_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("unpublished_temp", Gate::Fast),
@@ -1945,6 +1974,144 @@ fn request_sequences_answer_as_an_empty_store() {
     assert!(stale.is_empty(), "gate classes of no sequence: {stale:?}");
     run_sequences(seqs, None, UNEQUAL_ROOTS);
 }
+
+enum Edit {
+    /// Whitespace inside an item rechecks it: its record's sites and its IR
+    /// instructions' anchors are byte offsets from the item's first token.
+    Trivia(&'static str),
+    Body(&'static str),
+    HeaderSameType(&'static str),
+    HeaderNewType {
+        body: &'static str,
+        readers: &'static [&'static str],
+    },
+    Add(&'static str),
+    Delete,
+    Rename(&'static str),
+    Move,
+}
+
+impl Edit {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Trivia(_) => "trivia",
+            Self::Body(_) => "body",
+            Self::HeaderSameType(_) => "header-same-type",
+            Self::HeaderNewType { .. } => "header-new-type",
+            Self::Add(_) => "add",
+            Self::Delete => "delete",
+            Self::Rename(_) => "rename",
+            Self::Move => "move",
+        }
+    }
+
+    fn violation(&self, checked: &CheckProduct) -> Option<String> {
+        let actual = checked.rechecked_paths();
+        let path = |name| DefPath::from_full(name).unwrap();
+        let expected = match self {
+            Self::Delete | Self::Move => BTreeSet::new(),
+            Self::Trivia(body)
+            | Self::Body(body)
+            | Self::HeaderSameType(body)
+            | Self::Add(body)
+            | Self::Rename(body) => BTreeSet::from([path(body)]),
+            Self::HeaderNewType { body, readers } => {
+                readers.iter().copied().chain([*body]).map(path).collect()
+            }
+        };
+        let matches = if matches!(self, Self::HeaderNewType { .. }) {
+            expected.iter().all(|path| actual.contains(path))
+        } else {
+            expected.iter().eq(actual)
+        };
+        (!matches).then(|| format!("expected {expected:?}, rechecked {:?}", checked.rechecked))
+    }
+}
+
+#[test]
+fn request_sequences_recheck_edit_paths() {
+    const VALUE: &str = "app@1/api/value";
+    const READERS: &[&str] = &["app@1/read/first", "app@1/read/second"];
+    const BASE: &str = "pub fn value(x: u8) -> u8 { 1u8 }\nfn old() {}";
+    const TRIVIA: &str = "pub fn value(x: u8) -> u8 {    1u8 }\nfn old() {}";
+    const BODY: &str = "pub fn value(x: u8) -> u8 {    2u8 }\nfn old() {}";
+    const SAME_TYPE: &str = "pub fn value(y: u8) -> u8 {    2u8 }\nfn old() {}";
+    const NEW_TYPE: &str = "pub fn value(y: u8) -> u64 {    2u64 }\nfn old() {}";
+    const ADDED: &str = "pub fn value(y: u8) -> u64 {    2u64 }\nfn old() {}\nfn extra() {}";
+    const RENAMED: &str = "pub fn value(y: u8) -> u64 {    2u64 }\nfn new() {}";
+    let edits = [
+        (Edit::Trivia(VALUE), "api.hirsel", TRIVIA),
+        (Edit::Body(VALUE), "api.hirsel", BODY),
+        (Edit::HeaderSameType(VALUE), "api.hirsel", SAME_TYPE),
+        (
+            Edit::HeaderNewType {
+                body: VALUE,
+                readers: READERS,
+            },
+            "api.hirsel",
+            NEW_TYPE,
+        ),
+        (Edit::Add("app@1/api/extra"), "api.hirsel", ADDED),
+        (Edit::Delete, "api.hirsel", NEW_TYPE),
+        (Edit::Rename("app@1/api/new"), "api.hirsel", RENAMED),
+        (Edit::Move, "moved.hirsel", RENAMED),
+    ];
+    let req = |file, text| {
+        check(app(&[
+            (file, "api", text),
+            (
+                "read.hirsel",
+                "read",
+                "fn first() { let _ = api.value(0u8) }\nfn second() { let _ = api.value(1u8) }",
+            ),
+            ("spare.hirsel", "spare", "fn value() -> u8 { 9u8 }"),
+        ]))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    let mut written = BTreeSet::new();
+    let mut resident = Driver::default();
+    for (edit, req) in std::iter::once((None, req("api.hirsel", BASE))).chain(
+        edits
+            .iter()
+            .map(|(edit, file, text)| (Some(edit), req(file, text))),
+    ) {
+        let inputs = materialize(&req, false, dir.path(), &mut written);
+        for (store, driver) in [
+            ("resident", &mut resident),
+            ("disk", &mut Driver::default()),
+        ] {
+            let checked = driver
+                .check(
+                    CheckRequest {
+                        manifest: None,
+                        inputs: inputs.clone(),
+                        store: dir.path().join(store),
+                        library: LibraryInput::Sources,
+                        entry: None,
+                    },
+                    &mut Meter::new(false),
+                )
+                .unwrap();
+            assert!(
+                checked.accepted(),
+                "{store}: {}",
+                serde_json::json!({
+                    "diagnostics": checked.machine_diagnostics().unwrap(),
+                    "incomplete": checked.machine_incomplete().unwrap(),
+                    "resources": checked.machine_resources().unwrap(),
+                })
+            );
+            if let Some(edit) = edit
+                && let Some(violation) = edit.violation(&checked)
+            {
+                failures.push(format!("{} ({store}): {violation}", edit.name()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 #[ignore = "explicit native integration target"]
 fn request_sequences_build_as_an_empty_store() {

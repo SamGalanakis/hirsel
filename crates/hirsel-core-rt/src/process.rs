@@ -48,6 +48,65 @@ pub struct Config {
 
 pub const NOT_STARTED: u8 = 103;
 
+/// Arm the serving or preparing child's exit before it can acquire store
+/// authority. Check the parent after arming to close the fork-to-arm race.
+pub(crate) fn arm_host_parent() -> std::io::Result<()> {
+    let Some(parent) = std::env::var_os("HIRSEL_HOST_PID") else {
+        return Ok(());
+    };
+    let expected = parent
+        .to_str()
+        .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+        .filter(|pid| *pid > 1)
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: these calls take no memory arguments and affect only this child.
+    unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() != expected {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+    }
+    Ok(())
+}
+
+/// Take the place control socket once (field 0) or read the scratch grant (1).
+/// # Safety
+/// The context and its configuration are pinned for the current run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_launch_handle(context: *mut Context, field: u64) -> u64 {
+    #[cfg(feature = "record")]
+    {
+        let _commit = crate::sequencer::enter();
+        // SAFETY: the run pins Files and the sequencer serializes handle transfers.
+        let managed = unsafe { &mut (*(*context).host_files).managed_control };
+        if managed.1 != 0 {
+            return match field {
+                0 => std::mem::take(&mut managed.0),
+                1 => managed.1,
+                _ => 0,
+            };
+        }
+    }
+    let Some(host) = (unsafe { crate::entry::launch_host((*context).run) }) else {
+        return 0;
+    };
+    match field {
+        0 => {
+            let _commit = crate::sequencer::enter();
+            let control = host.control.lock().unwrap().take();
+            control
+                .and_then(|fd| unsafe {
+                    crate::os_net::adopt_socket(&raw mut (*(*context).host_files).sockets, fd).ok()
+                })
+                .unwrap_or(0)
+        }
+        1 => host.scratch,
+        _ => 0,
+    }
+}
+
 /// Private runner metadata transport. Missing metadata is source-only identity.
 /// # Safety
 /// The context and its configuration are pinned for the current run.

@@ -1,0 +1,68 @@
+// Virtual providers (core.md, Provide; CAP-2). Each returns a capability whose
+// provider is the run itself: its reads answer at once, and its waits are
+// readied only by the program (`clock.advance_to`, `process.trigger`) or by
+// quiescence (`clock.idle`).
+pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
+
+pub fn random(seed: u64) -> Random
+
+pub fn process() -> (Process, StopTrigger)
+
+// Served ports. Each operation on the capability waits after issue as a Call
+// queued on the port; `next` takes the oldest, and returns None only once
+// every task waits. A Call's Op holds scalars: a data field is its byte
+// length, which `payload` appends to `out`.
+pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
+
+pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
+
+pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
+
+pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
+
+// Word `i` of the call's Op: 0 is its variant, then its fields.
+fn word[Op](c: Call[Op], i: u64) -> u64
+
+pub fn stream_op(c: Call[StreamOp]) -> StreamOp {
+    Write(len: word(c, 1))
+}
+
+// The provider's answer: a variant and up to three scalars.
+pub opaque type Reply[Op] {
+    tag: u64,
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+// The run time's error tag and code for an IoError.
+fn io_words(e: IoError) -> (u64, u64) {
+    match e {
+        NotFound => (1, 0),
+        Denied => (2, 0),
+        Exists => (3, 0),
+        Closed => (4, 0),
+        Other(code) => (5, int.widen(code)),
+    }
+}
+
+pub fn stream_reply(r: StreamReply) -> Reply[StreamOp] {
+    match r {
+        Done => Reply(tag: 0, a: 0, b: 0, c: 0),
+        WriteFailed(e) => {
+            let (tag, code) = io_words(e.error)
+            Reply(tag: 1, a: e.written, b: tag, c: code)
+        },
+    }
+}
+
+// Settles the call with the reply's words; 1 when it was settled first.
+fn commit[Op](mut s: Served[Op], take c: Call[Op], tag: u64, a: u64, b: u64, d: u64) -> u64
+
+pub fn reply[Op](mut s: Served[Op], take c: Call[Op], take r: Reply[Op]) -> Result[(), Withdrawn] {
+    if commit(mut s, take c, r.tag, r.a, r.b, r.c) == 0 {
+        Ok(())
+    } else {
+        Error(Withdrawn())
+    }
+}

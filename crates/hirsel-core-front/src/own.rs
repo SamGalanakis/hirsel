@@ -50,7 +50,8 @@ pub(crate) enum PStep {
         collection: crate::types::TyId,
         value: Option<hirsel_core_ir::ValueId>,
     },
-    Any,
+    /// Field `.1` of variant `.0`: the payloads of two variants share storage.
+    Case(u32, u32),
 }
 
 /// A slot and a range of steps in the body's step arena.
@@ -82,6 +83,8 @@ pub(crate) fn overlap(steps: &[PStep], a: Place, b: Place) -> bool {
         match (x, y) {
             (PStep::Field(i), PStep::Field(j)) if i != j => return false,
             (PStep::Field(_), PStep::Field(_)) => {}
+            (PStep::Case(c, i), PStep::Case(d, j)) if c == d && i != j => return false,
+            (PStep::Case(c, _), PStep::Case(d, _)) if c == d => {}
             _ => return true,
         }
     }
@@ -109,6 +112,8 @@ pub(crate) enum Hold {
     CallMut(u32, u32),
     /// The place of an assignment, reserved while its right side is evaluated.
     Assign,
+    /// A place a `mut` pattern binding names, lent to the arm at this depth (OWN-15).
+    Lent(u32),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -132,7 +137,7 @@ pub(crate) enum Act {
 /// overlap (OWN-9), a view's freeze (OWN-10), an assignment's reservation (OWN-12).
 pub(crate) fn breaks(hold: Hold, act: Act) -> Option<&'static str> {
     match (hold, act) {
-        (Hold::CallMut(..), _) => Some("OWN-9"),
+        (Hold::CallMut(..) | Hold::Lent(_), _) => Some("OWN-9"),
         (_, Act::Read) => None,
         (Hold::CallView(..), Act::Write) => Some("OWN-9"),
         (Hold::View(_), Act::Write) => Some("OWN-10"),

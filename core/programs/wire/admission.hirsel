@@ -1,5 +1,5 @@
 type H: send { table: store.Table[u64, u32] }
-type Reg = store.runner.Registry[(), H]
+type Reg = store.runner.Registry[Random, H]
 
 fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     let codec: std.codec.Codec[u32] = std.codec.of()
@@ -26,14 +26,14 @@ fn large(mut tx: store.Tx, h: H, author: store.runner.Caller, take count: u32) -
     if let Error(_) = store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
-    for _ in 0u64 .. n { if let Error(_) = list.push(mut b, 1u8) { return Error(2u32) } }
+    for _ in 0u64 .. n { list.push(mut b, 1u8) }
     Ok(take b)
 }
 
 fn big(take count: u32) -> Result[Bytes, Capacity] {
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
-    for _ in 0u64 .. n { result.capacity_only(list.push(mut b, 2u8))? }
+    for _ in 0u64 .. n { list.push(mut b, 2u8) }
     Ok(take b)
 }
 
@@ -53,9 +53,9 @@ fn read(tx: store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capaci
 
 fn retired() -> Bytes {
     let mut key: Bytes = list.new()
-    result.unwrap(list.append(mut key, string.as_bytes("retired")))
-    result.unwrap(std.codec.put_u64(0u64, mut key))
-    result.unwrap(std.codec.put_u64(0u64, mut key))
+    list.append(mut key, string.as_bytes("retired"))
+    std.codec.put_u64(0u64, mut key)
+    std.codec.put_u64(0u64, mut key)
     key
 }
 
@@ -70,22 +70,25 @@ fn place(mut r: Reg) -> Result[(), store.runner.RegisterError] {
 
 type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[store.runner.Req], post: Sender[store.runner.PubIn] }
 
+fn bind_test(random: Random, credential: Bytes) -> Result[store.runner.Caller, ()] {
+    if list.len(credential) == 0u64 {
+        return Ok(store.Caller(issuer: 2u8, subject: store.ingress.credential(random)))
+    }
+    store.ingress.caller((), credential)
+}
+
 fn server(take seed: Server) -> () waits {
     let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
     let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
-    let (policy, take policy_handle) = result.unwrap(store.ingress.start(tasks, c, random, store.ingress.defaults(), 8388608u64))
-    let mut handle = take policy_handle
     let mut config = store.runner.wire_defaults(1048576u64, 1048576u64)
     config.socket.close_ms = 200u64
     if let Some(mode) = args.get(a, 0u64) {
         if mode == "welcome_with_small_budget" { config.budget = 65536u64 }
     }
-    let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), H]] = fn() -> store.runner.Service[store.runner.WireSession[(), H]] {
-        store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
+    let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[Random, H]] = fn() -> store.runner.Service[store.runner.WireSession[Random, H]] {
+        store.runner.wire_place_service(code.describe(place), random, Some(store.runner.wire(random, Some(code.describe(bind_test)), 4096u64, 65536u64)), head, c, tasks, config, a)
     }
-    let _ = store.runner.serve_admitted(take listener, tasks, c, post, config, 128u64, list.new(), policy, make)
-    task.cancel(mut handle)
-    let _ = task.join(take handle)
+    let _ = store.runner.serve(take listener, tasks, c, post, config, 128u64, list.new(), make)
 }
 
 // A callback fault ends the owner task under FAIL-14.
@@ -136,15 +139,14 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     // An admitted, unreplied position on the retained key exercises V5 on resend.
     // The key is the runner's own stream key for the client's fixed token and stream 77.
     let mut token: Bytes = list.new()
-    result.unwrap(list.append(mut token, string.as_bytes("anon:")))
-    for _ in 0u64 .. 16u64 { result.unwrap(list.push(mut token, 0u8)) }
-    let caller = option.unwrap(result.unwrap(store.ingress.caller(token)))
+    for _ in 0u64 .. 16u64 { list.push(mut token, 0u8) }
+    let caller = result.unwrap(store.ingress.caller((), token))
     let stream = result.unwrap(store.runner.stream_key(caller, 77u32))
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(retired(), list.new())))
-    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(64u64))
+    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(store.runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail))
-    let h = result.unwrap(task.spawn(tasks, bytes 1073741824u64, take seed, server))
+    let h = task.spawn(tasks, bytes 1073741824u64, take seed, server)
     let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)
     Ok(())

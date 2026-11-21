@@ -14,7 +14,10 @@ and removes a private store. Buck targets `//:core-m1-cranelift` and
 explicit integration gates and fail until every row passes.
 
 The runner supplies every source in the entry package and its package dependency
-closure. The driver builds the entry
+closure. Each manifest entry records the entry declaration's capability parameters
+under `parameters`. The runner uses them to supply grants, with `Dir` bound to
+the case's working directory and `Args` supplied by the launcher.
+The driver builds the entry
 once per engine, then runs every applicable case from its workload's
 `core/corpus/m1/<workload>/cases.json`. Each case gets a fresh working directory
 with a copy of its input, the relative input path and variant as arguments, and

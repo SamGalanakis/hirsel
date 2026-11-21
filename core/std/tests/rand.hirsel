@@ -72,9 +72,9 @@ fn go_shuffle() -> bool {
     let mut p = rand.new(1, 2)
     for i in 0u64 .. 20u64 {
         let (n, expected) = cases[i]
-        let mut xs: List[u64] = result.unwrap(list.with_capacity(n))
+        let mut xs: List[u64] = list.with_capacity(n)
         for j in 0u64 .. n {
-            result.unwrap(list.push(mut xs, j))
+            list.push(mut xs, j)
         }
         rand.shuffle(mut p, mut xs)
         for j in 0u64 .. n {

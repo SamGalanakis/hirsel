@@ -60,7 +60,7 @@ def main():
         command = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest),
                    '--entry', 'langarena@1/layout/numeric/pack/main', '--backend', engine,
                    '--runtime', str(args.runtime.resolve()), '--store', str(out / 'store'),
-                   '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--json', '-o', str(exe)]
+                   '--dir', str(host), '--grant', 'Stdout', '--json', '-o', str(exe)]
         if engine == 'llvm':
             command.append('--release')
         built = None

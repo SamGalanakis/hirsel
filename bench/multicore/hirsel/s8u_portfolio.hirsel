@@ -54,13 +54,13 @@ fn stage(take initial: Search, key: u64, target: u64) -> (Search, Option[Reply])
 pub fn main(tasks: Tasks, out: Stdout, clock: Clock) -> Result[(), Exit] waits {
     let start = host.mono_ns(clock)
     let mut f = flow.new()
-    let mut lanes: List[(Port[u64], Sink[Reply])] = result.unwrap(list.with_capacity(4))
+    let mut lanes: List[(Port[u64], Sink[Reply])] = list.with_capacity(4)
     for seed in SEEDS {
         let search = Search(random_state: seed, bits: 0, cost: 0)
         let (sink, into): (Sink[Reply], Into[Reply]) = result.unwrap(flow.sink(mut f))
         let input = result.unwrap(flow.stage(mut f, into, 1, bytes 0, steps 2000000, search, code.describe(stage)))
         let port = result.unwrap(flow.port(mut f, input, 1))
-        result.unwrap(list.push(mut lanes, (port, sink)))
+        list.push(mut lanes, (port, sink))
     }
 
     let mut iterations: u64 = 0
@@ -100,10 +100,10 @@ pub fn main(tasks: Tasks, out: Stdout, clock: Clock) -> Result[(), Exit] waits {
     let mut line = string.new()
     let fields: Inline[u64, 7] = [elapsed, iterations, TARGET, witness, 0, lag_bound, key]
     for field in fields {
-        result.unwrap(string.push_u64(mut line, field))
-        result.unwrap(string.push(mut line, " "))
+        string.push_u64(mut line, field)
+        string.push(mut line, " ")
     }
-    result.unwrap(string.push(mut line, "\n"))
+    string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
     Ok(())
 }

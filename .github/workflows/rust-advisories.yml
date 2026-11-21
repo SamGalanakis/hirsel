@@ -1,0 +1,16 @@
+name: Rust dependency advisories
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  rustsec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Report RustSec findings
+        run: python3 tools/buck2/supply_chain.py

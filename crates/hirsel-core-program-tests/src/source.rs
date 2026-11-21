@@ -249,6 +249,16 @@ impl SourceProgram {
     ) -> Vec<u8> {
         self.llvm_object_exported(target, true, debug, true, observe, Some(exports))
     }
+    pub fn llvm_program_with_counter_range_folds(
+        &self,
+        target: Target,
+        exports: &[FuncId],
+    ) -> (Vec<u8>, hirsel_llvm_lazy::CounterRangeFolds) {
+        self.llvm_composed(target, false, false, Some(exports), |units, exports| {
+            hirsel_llvm_lazy::emit_program_with_counter_range_folds_for_test(units, exports, target)
+        })
+        .unwrap()
+    }
     fn llvm_object_exported(
         &self,
         target: Target,
@@ -258,48 +268,61 @@ impl SourceProgram {
         observe: bool,
         exports: Option<&[FuncId]>,
     ) -> Vec<u8> {
-        let texts = if composed {
-            let refs = self.modules.iter().collect::<Vec<_>>();
-            let facts = hirsel_core_ir::roles::Facts::program(&refs, &[]);
-            self.modules
-                .iter()
-                .zip(&facts)
-                .map(|(module, facts)| {
-                    hirsel_llvm::core::emit_ir_for_test(module, target, observe, debug, Some(facts))
-                        .unwrap()
-                })
-                .collect()
-        } else {
-            self.llvm_texts(target, observe, debug)
-        };
         if composed {
-            let units = texts
-                .iter()
-                .map(|s| hirsel_llvm_lazy::Unit::Text(s))
-                .collect::<Vec<_>>();
-            let exports = exports
-                .map(|functions| functions.to_vec())
-                .unwrap_or_else(|| {
-                    self.joined
-                        .functions
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, f)| f.body.is_some())
-                        .map(|(i, _)| FuncId(i as u32))
-                        .collect()
-                });
-            let exports = exports
-                .into_iter()
-                .map(|f| hirsel_llvm::core::symbol(&self.joined, f))
-                .collect::<Vec<_>>();
-            hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap()
+            self.llvm_composed(target, debug, observe, exports, |units, exports| {
+                hirsel_llvm_lazy::emit_program_for_target(units, exports, target)
+            })
+            .unwrap()
         } else {
-            let objects = texts
+            let objects = self
+                .llvm_texts(target, observe, debug)
                 .iter()
                 .map(|s| hirsel_llvm_lazy::compile_ir_for_target(s, speed, target).unwrap())
                 .collect::<Vec<_>>();
             combine(&objects, target)
         }
+    }
+
+    fn llvm_composed<T>(
+        &self,
+        target: Target,
+        debug: bool,
+        observe: bool,
+        exports: Option<&[FuncId]>,
+        emit: impl FnOnce(&[hirsel_llvm_lazy::Unit<'_>], &[String]) -> T,
+    ) -> T {
+        let refs = self.modules.iter().collect::<Vec<_>>();
+        let facts = hirsel_core_ir::roles::Facts::program(&refs, &[]);
+        let texts = self
+            .modules
+            .iter()
+            .zip(&facts)
+            .map(|(module, facts)| {
+                hirsel_llvm::core::emit_ir_for_test(module, target, observe, debug, Some(facts))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let units = texts
+            .iter()
+            .map(|s| hirsel_llvm_lazy::Unit::Text(s))
+            .collect::<Vec<_>>();
+        let exports = exports.map_or_else(
+            || {
+                self.joined
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.body.is_some())
+                    .map(|(i, _)| FuncId(i as u32))
+                    .collect()
+            },
+            <[FuncId]>::to_vec,
+        );
+        let exports = exports
+            .into_iter()
+            .map(|f| hirsel_llvm::core::symbol(&self.joined, f))
+            .collect::<Vec<_>>();
+        emit(&units, &exports)
     }
 }
 fn combine(objects: &[Vec<u8>], target: Target) -> Vec<u8> {

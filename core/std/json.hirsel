@@ -61,8 +61,8 @@ pub fn size(s: String) -> Result[u64, Error] {
 /// Parses s into one document in r: `size(s)`, then a single admission of that many bytes,
 /// then each value written once at its final offset.
 /// The sizing pass checks depth before the document is admitted or written.
-/// Fails: as size; Error(Build(Capacity(c))) when r's limit refuses the admission,
-/// with nothing written; Error(Build(Overflow)) past 2^32 - 1 bytes.
+/// Fails: as size; Error(Build(Overflow)) past 2^32 - 1 bytes. Raises Capacity when r's
+/// limit refuses the admission, with nothing written.
 /// Alloc: one block of exactly size(s) bytes (rounded to 8) in r.
 /// Cost: two passes over s.
 /// Ex: `region r { let doc = std.json.parse(r, line)?; .. }`
@@ -101,10 +101,7 @@ pub fn list_of[T](s: String, mut c: Cursor, item: scoped fn(String, mut Cursor) 
     if !ends(s, mut c.at, b']') {
         loop {
             let v = item(s, mut c)?
-            match list.push(mut out, take v) {
-                Ok(()) => {},
-                Error((e, _)) => return Error(Build(Capacity(e))),
-            }
+            list.push(mut out, take v)
             if after_item(s, mut c.at, b']')? {
                 break
             }
@@ -165,9 +162,7 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
         ReadNumber => {
             let start = i
             let _ = result.map_err(read_number(s, mut i), wrap)?
-            let spelling = result.map_err(string.from(string.slice(s, start, i)), fn(take e: Capacity) -> E {
-                wrap(Build(Capacity(e)))
-            })?
+            let spelling = string.from(string.slice(s, start, i))
             Num(take spelling)
         },
         ReadString => {
@@ -181,9 +176,7 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
             if !ends(s, mut i, b']') {
                 loop {
                     let value = tree_value(s, mut i, before, make, wrap)?
-                    if let Error((e, _)) = list.push(mut values, take value) {
-                        return Error(wrap(Build(Capacity(e))))
-                    }
+                    list.push(mut values, take value)
                     if result.map_err(after_item(s, mut i, b']'), wrap)? {
                         break
                     }
@@ -198,9 +191,7 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
                     let (start, _, _) = result.map_err(member_name(s, mut i), wrap)?
                     let key = result.map_err(decode_string(s, start), wrap)?
                     let value = tree_value(s, mut i, before, make, wrap)?
-                    if let Error((e, _)) = map.insert(mut members, take key, take value) {
-                        return Error(wrap(Build(Capacity(e))))
-                    }
+                    map.insert(mut members, take key, take value)
                     if result.map_err(after_item(s, mut i, b'}'), wrap)? {
                         break
                     }
@@ -254,12 +245,9 @@ fn decode_string(s: String, start: u64) -> Result[String, Error] {
     let mut key = string.new()
     let mut i = start
     while at(s, i) != b'"' {
-        let append = match decoded_string_part(s, mut i)? {
+        match decoded_string_part(s, mut i)? {
             StringRun(from, end) => string.push(mut key, string.slice(s, from, end)),
             StringEscape(c) => string.push_char(mut key, c),
-        }
-        if let Error(e) = append {
-            return Error(Build(Capacity(e)))
         }
     }
     Ok(take key)
@@ -269,7 +257,7 @@ type EmitKind = Raw | Quoted | Key | Signed(i64) | Double(f64)
 
 /// A scoped serializer that appends directly to the caller's String.
 pub scoped type Writer {
-    emit: scoped fn(EmitKind, String) -> Result[(), Capacity],
+    emit: scoped fn(EmitKind, String),
     pretty: bool
 }
 
@@ -280,15 +268,15 @@ pub type Items {
 }
 
 /// Appends one value through build. Pretty uses two spaces per level.
-/// Capacity leaves the prefix of completed appends in out and stops writing.
+/// A refusal raises Capacity, leaving the prefix of completed appends in out.
 /// Alloc: GROWTH of out and allocations made by build. Cost: O(output bytes).
-pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer) -> Result[(), Capacity]) -> Result[(), Capacity] {
-    let w = Writer(emit: scoped fn(kind: EmitKind, s: String) -> Result[(), Capacity] {
+pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer)) {
+    let w = Writer(emit: scoped fn(kind: EmitKind, s: String) {
         match kind {
             Raw => string.push(mut out, s),
             Quoted => push_quoted(mut out, s),
             Key => {
-                push_quoted(mut out, s)?
+                push_quoted(mut out, s)
                 string.push(mut out, if pretty {
                     ": "
                 } else {
@@ -298,36 +286,36 @@ pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer) -> Res
             Signed(n) => string.push_i64(mut out, n),
             Double(n) => float.push_json_f64(mut out, n),
         }
-    }, pretty: pretty)
+    }, pretty)
     build(w)
 }
 
-fn raw(w: json.Writer, s: String) -> Result[(), Capacity] {
+fn raw(w: json.Writer, s: String) {
     (w.emit)(Raw, s)
 }
 
 /// Appends a quoted and escaped string.
-pub fn write_string_value(w: json.Writer, s: String) -> Result[(), Capacity] {
+pub fn write_string_value(w: json.Writer, s: String) {
     (w.emit)(Quoted, s)
 }
 
 /// Appends the original spelling of a number accepted by the JSON reader.
-pub fn write_number_spelling(w: json.Writer, spelling: String) -> Result[(), Capacity] {
+pub fn write_number_spelling(w: json.Writer, spelling: String) {
     raw(w, spelling)
 }
 
 /// Appends a signed integer as JSON.
-pub fn write_i64(w: json.Writer, n: i64) -> Result[(), Capacity] {
+pub fn write_i64(w: json.Writer, n: i64) {
     (w.emit)(Signed(n), "")
 }
 
 /// Appends a binary64 using float.push_json_f64, including null for nonfinite.
-pub fn write_f64(w: json.Writer, n: f64) -> Result[(), Capacity] {
+pub fn write_f64(w: json.Writer, n: f64) {
     (w.emit)(Double(n), "")
 }
 
 /// Appends the JSON spelling of a boolean.
-pub fn write_bool(w: json.Writer, b: bool) -> Result[(), Capacity] {
+pub fn write_bool(w: json.Writer, b: bool) {
     raw(w, if b {
         "true"
     } else {
@@ -336,55 +324,53 @@ pub fn write_bool(w: json.Writer, b: bool) -> Result[(), Capacity] {
 }
 
 /// Appends JSON null.
-pub fn write_null(w: json.Writer) -> Result[(), Capacity] {
+pub fn write_null(w: json.Writer) {
     raw(w, "null")
 }
 
-fn indent_line(w: json.Writer, depth: u64) -> Result[(), Capacity] {
-    raw(w, "\n")?
+fn indent_line(w: json.Writer, depth: u64) {
+    raw(w, "\n")
     for _ in 0u64 .. depth {
-        raw(w, "  ")?
+        raw(w, "  ")
     }
-    Ok(())
 }
 
-fn container(w: json.Writer, depth: u64, open: String, close: String, body: scoped fn(json.Writer, mut Items) -> Result[(), Capacity]) -> Result[(), Capacity] {
-    raw(w, open)?
+fn container(w: json.Writer, depth: u64, open: String, close: String, body: scoped fn(json.Writer, mut Items)) {
+    raw(w, open)
     let mut items = Items(depth: depth + 1, first: true)
-    body(w, mut items)?
+    body(w, mut items)
     if w.pretty && !items.first {
-        indent_line(w, depth)?
+        indent_line(w, depth)
     }
     raw(w, close)
 }
 
 /// Appends an array. The root depth is zero. The body calls element
 /// before each value and uses items.depth for nested containers.
-pub fn array(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items) -> Result[(), Capacity]) -> Result[(), Capacity] {
+pub fn array(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items)) {
     container(w, depth, "[", "]", body)
 }
 
 /// Appends an object with the same depth convention as array.
 /// The body calls write_member before each value.
-pub fn object(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items) -> Result[(), Capacity]) -> Result[(), Capacity] {
+pub fn object(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items)) {
     container(w, depth, "{", "}", body)
 }
 
 /// Writes the separator and any indentation before the next array value.
-pub fn element(w: json.Writer, mut items: Items) -> Result[(), Capacity] {
+pub fn element(w: json.Writer, mut items: Items) {
     if !items.first {
-        raw(w, ",")?
+        raw(w, ",")
     }
     if w.pretty {
-        indent_line(w, items.depth)?
+        indent_line(w, items.depth)
     }
     items.first = false
-    Ok(())
 }
 
 /// Writes the separator, escaped key, and colon before the next member value.
-pub fn write_member(w: json.Writer, mut items: Items, key: String) -> Result[(), Capacity] {
-    element(w, mut items)?
+pub fn write_member(w: json.Writer, mut items: Items, key: String) {
+    element(w, mut items)
     (w.emit)(Key, key)
 }
 
@@ -393,8 +379,8 @@ pub fn write_member(w: json.Writer, mut items: Items, key: String) -> Result[(),
 /// Fails: Error(Capacity) at the first refused append. Prefix: all earlier appends stay
 /// in s, possibly an unfinished JSON value; the refused append changes nothing.
 /// Alloc: GROWTH of s. Cost: O(encoded bytes). Ex: std.json.push_json(mut s, doc)?
-pub fn push_json(mut s: String, x: Json) -> Result[(), Capacity] {
-    write(mut s, false, scoped fn(w: json.Writer) -> Result[(), Capacity] {
+pub fn push_json(mut s: String, x: Json) {
+    write(mut s, false, scoped fn(w: json.Writer) {
         write_document(w, x, 0, false)
     })
 }
@@ -402,44 +388,41 @@ pub fn push_json(mut s: String, x: Json) -> Result[(), Capacity] {
 /// Appends JSON with two-space indentation and the ObjectIndex duplicate policy.
 /// Fails: Capacity, preserving all completed appends. Alloc: GROWTH of s and
 /// a temporary index for each object. Cost: O(encoded bytes) plus indexing.
-pub fn push_pretty(mut s: String, x: Json) -> Result[(), Capacity] {
-    write(mut s, true, scoped fn(w: json.Writer) -> Result[(), Capacity] {
+pub fn push_pretty(mut s: String, x: Json) {
+    write(mut s, true, scoped fn(w: json.Writer) {
         write_document(w, x, 0, true)
     })
 }
 
-fn write_document(w: json.Writer, x: Json, depth: u64, unique: bool) -> Result[(), Capacity] {
+fn write_document(w: json.Writer, x: Json, depth: u64, unique: bool) {
     match x {
         Null => write_null(w),
         False => write_bool(w, false),
         True => write_bool(w, true),
         Num(t) => write_number_spelling(w, text.as_string(t)),
         Str(t) => write_string_value(w, text.as_string(t)),
-        Arr(xs) => array(w, depth, scoped fn(w2: json.Writer, mut items: Items) -> Result[(), Capacity] {
+        Arr(xs) => array(w, depth, scoped fn(w2: json.Writer, mut items: Items) {
             for v in xs {
-                element(w2, mut items)?
-                write_document(w2, v, items.depth, unique)?
+                element(w2, mut items)
+                write_document(w2, v, items.depth, unique)
             }
-            Ok(())
         }),
         Obj(ms) => if unique {
-            let order = index(ms)?
-            object(w, depth, scoped fn(w2: json.Writer, mut items: Items) -> Result[(), Capacity] {
+            let order = index(ms)
+            object(w, depth, scoped fn(w2: json.Writer, mut items: Items) {
                 for i in 0u64 .. seq.len(ms) {
                     if let Some((key, value)) = shown(order, i) {
-                        write_member(w2, mut items, key)?
-                        write_document(w2, value, items.depth, true)?
+                        write_member(w2, mut items, key)
+                        write_document(w2, value, items.depth, true)
                     }
                 }
-                Ok(())
             })
         } else {
-            object(w, depth, scoped fn(w2: json.Writer, mut items: Items) -> Result[(), Capacity] {
+            object(w, depth, scoped fn(w2: json.Writer, mut items: Items) {
                 for m in ms {
-                    write_member(w2, mut items, text.as_string(m.key))?
-                    write_document(w2, m.value, items.depth, false)?
+                    write_member(w2, mut items, text.as_string(m.key))
+                    write_document(w2, m.value, items.depth, false)
                 }
-                Ok(())
             })
         },
     }
@@ -447,44 +430,44 @@ fn write_document(w: json.Writer, x: Json, depth: u64, unique: bool) -> Result[(
 
 // Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079: copy runs
 // between ASCII escapes. Each cut is a UTF-8 boundary, including after an escape.
-fn push_quoted(mut s: String, value: String) -> Result[(), Capacity] {
-    string.push(mut s, "\"")?
+fn push_quoted(mut s: String, value: String) {
+    string.push(mut s, "\"")
     let b = string.as_bytes(value)
     let mut start: u64 = 0
     for i in 0 .. list.len(b) {
         let c = b[i]
         if c < 0x20 || c == b'"' || c == b'\\' {
-            string.push(mut s, string.slice(value, start, i))?
+            string.push(mut s, string.slice(value, start, i))
             if c == b'"' {
-                string.push(mut s, "\\\"")?
+                string.push(mut s, "\\\"")
             } else if c == b'\\' {
-                string.push(mut s, "\\\\")?
+                string.push(mut s, "\\\\")
             } else if c == 8 {
-                string.push(mut s, "\\b")?
+                string.push(mut s, "\\b")
             } else if c == 9 {
-                string.push(mut s, "\\t")?
+                string.push(mut s, "\\t")
             } else if c == 10 {
-                string.push(mut s, "\\n")?
+                string.push(mut s, "\\n")
             } else if c == 12 {
-                string.push(mut s, "\\f")?
+                string.push(mut s, "\\f")
             } else if c == 13 {
-                string.push(mut s, "\\r")?
+                string.push(mut s, "\\r")
             } else {
                 // Commit the whole six-byte escape in one append.
-                string.reserve(mut s, 6)?
+                string.reserve(mut s, 6)
                 let mut hex: Inline[u8, 64] =[b'0'; 64]
                 let control: u64 = int.widen(c)
                 let _ = int.radix_digits(control, 16, mut hex)
-                string.push(mut s, "\\u00")?
+                string.push(mut s, "\\u00")
                 for j in 62u64 .. 64 {
                     let code: u32 = int.widen(hex[j])
-                    string.push_char(mut s, option.unwrap(char.from_u32(code)))?
+                    string.push_char(mut s, option.unwrap(char.from_u32(code)))
                 }
             }
             start = i + 1
         }
     }
-    string.push(mut s, string.slice(value, start, list.len(b)))?
+    string.push(mut s, string.slice(value, start, list.len(b)))
     string.push(mut s, "\"")
 }
 
@@ -515,20 +498,17 @@ pub opaque type ObjectIndex[in a] {
 /// admitted. Alloc: exactly 4 x seq.len(ms) bytes, in one list.
 /// Cost: O(m log m) key comparisons, each O(key length).
 /// Ex: `match doc { Obj(ms) => { let x = std.json.index(ms)?; .. }, _ => .. }`
-pub fn index[in a](ms: IndexedSpan[Member] in a) -> Result[ObjectIndex[in a], Capacity] {
+pub fn index[in a](ms: IndexedSpan[Member] in a) -> ObjectIndex[in a] {
     let n = seq.len(ms)
-    let mut ordinals: List[u32] = list.with_capacity(n)?
+    let mut ordinals: List[u32] = list.with_capacity(n)
     for i in 0 .. n {
         // The capacity is exactly n, so no push here admits anything.
-        match list.push(mut ordinals, int.narrow(i)) {
-            Ok(()) => {}
-            Error(_) => fail("json.index: a push past the reserved capacity"),
-        }
+        list.push(mut ordinals, int.narrow(i))
     }
     list.sort(mut ordinals, fn(x: u32, y: u32) -> Order {
         by_key(ms, x, y)
     })
-    Ok(ObjectIndex(members: ms, ordinals: take ordinals))
+    ObjectIndex(members: ms, ordinals: take ordinals)
 }
 
 /// The value of key k: the value of k's last member (the last-value rule; RFC 8259 leaves
@@ -1024,9 +1004,7 @@ fn write_value[in r](s: String, mut i: u64, take w: core.Writer[Json, in r]) -> 
     } else {
         // A number: its spelling, copied in one write.
         let start = i
-        while is_number_byte(at(s, i)) {
-            i += 1
-        }
+        i = number_end(s, start)
         emit(take w, Num(string.slice(s, start, i)))
     }
 }
@@ -1170,20 +1148,20 @@ pub type InputIssue = InvalidUtf8 | ExpectedValue | InvalidNumber | InvalidBase6
 
 /// Input offsets are byte offsets in the original JSON. Paths use RFC 6901
 /// JSON Pointer, with the empty string denoting the root.
-pub type TypedError = Input(u64, String, InputIssue) | Schema(u8, SchemaIssue) | Capacity(Capacity)
+pub type TypedError = Input(u64, String, InputIssue) | Schema(u8, SchemaIssue) | CodecFormat(codec.EncodeError) | LengthOverflow | Capacity(Capacity)
 
 /// Prepares the B-4 JSON profile of T. The format can be reused across values.
 pub fn typed[T: codec]() -> Result[Format[T], TypedError] {
     let binary: codec.Codec[T] = codec.of()
-    let description = typed_room(codec.describe(binary))?
+    let description = codec.describe(binary) ?=> CodecFormat
     let count = codec.schema_definitions(description)
-    let mut shapes: List[Shape] = typed_room(list.with_capacity(count))?
+    let mut shapes: List[Shape] = list.with_capacity(count)
     let mut pending: List[u64] = list.new()
     for _ in 0u64 .. count {
         shape_push(mut shapes, Atom(255))?
     }
     let mut seen: Bytes = list.new()
-    typed_room(list.fill(mut seen, count, 0))?
+    list.fill(mut seen, count, 0)
     let mut pos: u64 = 0
     let root = compile_shape(codec.schema_root(description), mut pos, mut shapes, mut seen, mut pending)?
     while let Some(node) = list.pop(mut pending) {
@@ -1192,21 +1170,12 @@ pub fn typed[T: codec]() -> Result[Format[T], TypedError] {
         let _ = list.set(mut shapes, node, take shape)
     }
     let facts = shape_facts(shapes)?
-    Ok(Format(binary: binary, plan: JsonPlan(description: take description, root: root, shapes: take shapes, facts: take facts)))
-}
-
-fn typed_room[T](take value: Result[T, Capacity]) -> Result[T, TypedError] {
-    match take value {
-        Ok(take x) => Ok(take x),
-        Error(e) => Error(Capacity(e)),
-    }
+    Ok(Format(binary, plan: JsonPlan(description: take description, root, shapes: take shapes, facts: take facts)))
 }
 
 fn shape_push[T](mut values: List[T], take x: T) -> Result[(), TypedError] {
-    match list.push(mut values, take x) {
-        Ok(()) => Ok(()),
-        Error((e, _)) => Error(Capacity(e)),
-    }
+    list.push(mut values, take x)
+    Ok(())
 }
 
 fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[u64, TypedError] {
@@ -1243,7 +1212,7 @@ fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[Shape], mut seen: Byte
 fn schema_name(b: Bytes, mut pos: u64) -> Result[String, TypedError] {
     let n = codec.schema_word(b, pos)
     pos += 4
-    let mut name: Bytes = typed_room(list.with_capacity(n))?
+    let mut name: Bytes = list.with_capacity(n)
     let _ = list.append(mut name, list.slice(b, pos, pos + n))
     pos += n
     match string.from_utf8(take name) {
@@ -1267,14 +1236,14 @@ fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pe
             let name = schema_name(b, mut pos)?
             if live {
                 let shape = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                shape_push(mut fields, Field(name: take name, shape: shape))?
+                shape_push(mut fields, Field(name: take name, shape))?
             } else {
                 pos = codec.schema_next(b, pos)
             }
         }
         return Ok(Record(take fields))
     }
-    let mut variants: List[Variant] = typed_room(list.with_capacity(n))?
+    let mut variants: List[Variant] = list.with_capacity(n)
     for _ in 0u64 .. n {
         let live = b[pos] == 0
         pos += 1
@@ -1290,7 +1259,7 @@ fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pe
                 pos = codec.schema_next(b, pos)
             }
         }
-        shape_push(mut variants, Variant(name: take name, fields: take fields, live: live))?
+        shape_push(mut variants, Variant(name: take name, fields: take fields, live))?
     }
     Ok(Sum(take variants))
 }
@@ -1324,12 +1293,12 @@ fn shape_fact(shapes: List[Shape], mut facts: List[ShapeFact], node: u64) -> Res
         },
         _ => {},
     }
-    facts[node] = ShapeFact(form: form, empty: empty, state: 2)
+    facts[node] = ShapeFact(form, empty, state: 2)
     Ok(())
 }
 
 fn shape_facts(shapes: List[Shape]) -> Result[List[ShapeFact], TypedError] {
-    let mut facts: List[ShapeFact] = typed_room(list.with_capacity(list.len(shapes)))?
+    let mut facts: List[ShapeFact] = list.with_capacity(list.len(shapes))
     for i in 0u64 .. list.len(shapes) {
         shape_push(mut facts, ShapeFact(form: i, empty: false, state: 0))?
     }
@@ -1399,7 +1368,7 @@ fn decode_profile[T](format: Format[T], s: String) -> Result[T, TypedError] {
         let stop = d.pos
         return input_error(mut d, stop, ExpectedValue)
     }
-    match typed_room(codec.decode(format.binary, out))? {
+    match codec.decode(format.binary, out) {
         Ok(take value) => Ok(take value),
         Error(e) => codec_input_error(d, start, e),
     }
@@ -1413,7 +1382,7 @@ fn codec_input_error[T](d: ReadTyped, start: u64, e: codec.DecodeError) -> Resul
     }
     for mark in d.marks {
         if mark.pos == pos && mark.key == key {
-            let path = typed_room(string.from(mark.path))?
+            let path = string.from(mark.path)
             return Error(Input(mark.source, take path, CodecValue(e)))
         }
     }
@@ -1430,38 +1399,39 @@ fn read_error[T](take r: Result[T, Error], mut d: ReadTyped) -> Result[T, TypedE
         Ok(take x) => Ok(take x),
         Error(Syntax(pos)) => input_error(mut d, pos, ExpectedValue),
         Error(NotFinite(pos)) => input_error(mut d, pos, InvalidNumber),
-        Error(Build(Capacity(e))) => Error(Capacity(e)),
         _ => fail("typed JSON uses lexical readers"),
     }
 }
 
 fn field_path(mut d: ReadTyped, name: String) -> Result[(), TypedError] {
-    typed_room(string.push(mut d.path, "/"))?
+    string.push(mut d.path, "/")
     let mut start: u64 = 0
     let b = string.as_bytes(name)
     for i in 0u64 .. list.len(b) {
         if b[i] == b'~' || b[i] == b'/' {
-            typed_room(string.push(mut d.path, string.slice(name, start, i)))?
-            typed_room(string.push(mut d.path, if b[i] == b'~' {
+            string.push(mut d.path, string.slice(name, start, i))
+            string.push(mut d.path, if b[i] == b'~' {
                 "~0"
             } else {
                 "~1"
-            }))?
+            })
             start = i + 1
         }
     }
-    typed_room(string.push(mut d.path, string.slice(name, start, list.len(b))))
+    string.push(mut d.path, string.slice(name, start, list.len(b)))
+    Ok(())
 }
 
 fn index_path(mut d: ReadTyped, n: u64) -> Result[(), TypedError] {
-    typed_room(string.push(mut d.path, "/"))?
-    typed_room(string.push_u64(mut d.path, n))
+    string.push(mut d.path, "/")
+    string.push_u64(mut d.path, n)
+    Ok(())
 }
 
 fn source_mark(mut d: ReadTyped, pos: u64, key: bool) -> Result[(), TypedError] {
-    let path = typed_room(string.from(d.path))?
+    let path = string.from(d.path)
     let source = d.pos
-    shape_push(mut d.marks, SourceMark(pos: pos, source: source, path: take path, key: key))
+    shape_push(mut d.marks, SourceMark(pos, source, path: take path, key))
 }
 
 const TYPED_DEPTH: u64 = 64
@@ -1508,14 +1478,15 @@ fn typed_name(s: String, mut d: ReadTyped) -> Result[String, TypedError] {
 fn put_typed_count(n: u64, mut out: Bytes) -> Result[(), TypedError] {
     let narrowed: Option[u32] = int.try_narrow(n)
     let Some(count) = narrowed else {
-        return Error(Capacity(Capacity(requested: n, available: 4294967295)))
+        return Error(LengthOverflow)
     }
-    typed_room(codec.put_u32(count, mut out))
+    codec.put_u32(count, mut out)
+    Ok(())
 }
 
 fn patch_typed_count(mut out: Bytes, start: u64, n: u64) -> Result[(), TypedError] {
     if n > 4294967295 {
-        return Error(Capacity(Capacity(requested: n, available: 4294967295)))
+        return Error(LengthOverflow)
     }
     for i in 0u64 .. 4 {
         out[start + i] = int.truncate(n >> (8 * i))
@@ -1541,9 +1512,10 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
             if at(s, d.pos) == b'n' {
                 let parsed = literal(s, mut d.pos, "null")
                 read_error(take parsed, mut d)?
-                typed_room(codec.put_tag(0, mut out))
+                codec.put_tag(0, mut out)
+                Ok(())
             } else {
-                typed_room(codec.put_tag(1, mut out))?
+                codec.put_tag(1, mut out)
                 read_shape(plan, item, s, depth, mut d, mut out)
             }
         },
@@ -1557,17 +1529,18 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
 fn read_base64(s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
     let spelling = typed_string(s, mut d)?
-    let Some(decoded) = typed_room(base64.decode(string.as_bytes(spelling)))? else {
+    let Some(decoded) = base64.decode(string.as_bytes(spelling)) else {
         return input_error(mut d, start, InvalidBase64)
     }
     put_typed_count(list.len(decoded), mut out)?
-    typed_room(list.append(mut out, decoded))
+    list.append(mut out, decoded)
+    Ok(())
 }
 
 fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     open_typed(s, depth, b'[', mut d)?
     let start = list.len(out)
-    typed_room(codec.put_u32(0, mut out))?
+    codec.put_u32(0, mut out)
     let mut n: u64 = 0
     let path = string.byte_len(d.path)
     if !ends(s, mut d.pos, b']') {
@@ -1622,10 +1595,10 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
     let path = string.byte_len(d.path)
     field_path(mut d, name)?
     if name == "ok" {
-        typed_room(codec.put_tag(0, mut out))?
+        codec.put_tag(0, mut out)
         read_shape(plan, ok, s, depth + 1, mut d, mut out)?
     } else if name == "error" {
-        typed_room(codec.put_tag(1, mut out))?
+        codec.put_tag(1, mut out)
         read_shape(plan, err, s, depth + 1, mut d, mut out)?
     } else {
         return input_error(mut d, start, UnknownMember)
@@ -1655,7 +1628,7 @@ fn field_index(fields: List[Field], name: String) -> Option[u64] {
 fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     open_typed(s, depth, b'{', mut d)?
     let count = list.len(fields)
-    let mut parts: List[Option[RecordPart]] = typed_room(list.with_capacity(count))?
+    let mut parts: List[Option[RecordPart]] = list.with_capacity(count)
     for _ in 0u64 .. count {
         shape_push(mut parts, None)?
     }
@@ -1678,7 +1651,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             read_shape(plan, fields[i].shape, s, depth + 1, mut d, mut staged)?
             let end = list.len(staged)
             let mark_end = list.len(d.marks)
-            parts[i] = Some(RecordPart(start: start, end: end, marks: marks, mark_end: mark_end))
+            parts[i] = Some(RecordPart(start, end, marks, mark_end))
             string.truncate(mut d.path, path)
             if after_typed(s, b'}', mut d)? {
                 break
@@ -1688,19 +1661,19 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
     for i in 0u64 .. count {
         if let Some(part) = parts[i] {
             let dest = list.len(out)
-            typed_room(list.append(mut out, list.slice(staged, part.start, part.end)))?
+            list.append(mut out, list.slice(staged, part.start, part.end))
             for mark in part.marks .. part.mark_end {
                 d.marks[mark].pos = dest + (d.marks[mark].pos - part.start)
             }
         } else if let Some(value) = codec.schema_default(plan.description, definition, fields[i].name) {
-            typed_room(list.append(mut out, value))?
+            list.append(mut out, value)
         } else if let Optional(_) = plan.shapes[plan.facts[fields[i].shape].form] {
             if fields[i].shape != plan.facts[fields[i].shape].form {
                 field_path(mut d, fields[i].name)?
                 source_mark(mut d, list.len(out), false)?
                 string.truncate(mut d.path, path)
             }
-            typed_room(codec.put_tag(0, mut out))?
+            codec.put_tag(0, mut out)
         } else {
             field_path(mut d, fields[i].name)?
             let close = d.pos - 1
@@ -1773,7 +1746,8 @@ fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), 
                 "false"
             })
             read_error(take parsed, mut d)?
-            typed_room(codec.put_bool(yes, mut out))
+            codec.put_bool(yes, mut out)
+            Ok(())
         },
         2 => {
             let text = typed_string(s, mut d)?
@@ -1783,13 +1757,15 @@ fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), 
             if end != string.byte_len(text) {
                 return input_error(mut d, start, ExpectedValue)
             }
-            typed_room(codec.put_char(scalar, mut out))
+            codec.put_char(scalar, mut out)
+            Ok(())
         },
         11 => read_float(op, s, mut d, mut out),
         12 => read_float(op, s, mut d, mut out),
         13 => {
             let text = typed_string(s, mut d)?
-            typed_room(codec.put_string(text, mut out))
+            codec.put_string(text, mut out) ?=> |_| LengthOverflow
+            Ok(())
         },
         20 => input_error(mut d, start, ExpectedValue),
         _ => read_integer(op, s, mut d, mut out),
@@ -1837,35 +1813,43 @@ fn put_integer(op: u8, spelling: String, start: u64, mut d: ReadTyped, mut out: 
     match op {
         3 => {
             let n = read_integer_value((int.parse(spelling) : Result[u8, ParseError]), start, mut d)?
-            typed_room(codec.put_u8(n, mut out))
+            codec.put_u8(n, mut out)
+            Ok(())
         },
         4 => {
             let n = read_integer_value((int.parse(spelling) : Result[u16, ParseError]), start, mut d)?
-            typed_room(codec.put_u16(n, mut out))
+            codec.put_u16(n, mut out)
+            Ok(())
         },
         5 => {
             let n = read_integer_value((int.parse(spelling) : Result[u32, ParseError]), start, mut d)?
-            typed_room(codec.put_u32(n, mut out))
+            codec.put_u32(n, mut out)
+            Ok(())
         },
         6 => {
             let n = read_integer_value((int.parse(spelling) : Result[u64, ParseError]), start, mut d)?
-            typed_room(codec.put_u64(n, mut out))
+            codec.put_u64(n, mut out)
+            Ok(())
         },
         7 => {
             let n = read_integer_value((int.parse(spelling) : Result[i8, ParseError]), start, mut d)?
-            typed_room(codec.put_i8(n, mut out))
+            codec.put_i8(n, mut out)
+            Ok(())
         },
         8 => {
             let n = read_integer_value((int.parse(spelling) : Result[i16, ParseError]), start, mut d)?
-            typed_room(codec.put_i16(n, mut out))
+            codec.put_i16(n, mut out)
+            Ok(())
         },
         9 => {
             let n = read_integer_value((int.parse(spelling) : Result[i32, ParseError]), start, mut d)?
-            typed_room(codec.put_i32(n, mut out))
+            codec.put_i32(n, mut out)
+            Ok(())
         },
         _ => {
             let n = read_integer_value((int.parse(spelling) : Result[i64, ParseError]), start, mut d)?
-            typed_room(codec.put_i64(n, mut out))
+            codec.put_i64(n, mut out)
+            Ok(())
         },
     }
 }
@@ -1897,9 +1881,11 @@ fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(),
             } else {
                 0
             }
-            return typed_room(codec.put_f32(float.from_bits32(negative | 0x7f800000 | nan), mut out))
+            codec.put_f32(float.from_bits32(negative | 0x7f800000 | nan), mut out)
+            return Ok(())
         }
-        return typed_room(codec.put_f64(float.from_bits64(bits), mut out))
+        codec.put_f64(float.from_bits64(bits), mut out)
+        return Ok(())
     }
     if op == 12 {
         let first = at(s, start)
@@ -1908,26 +1894,28 @@ fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(),
         }
         let parsed = read_number(s, mut d.pos)
         let value = read_error(take parsed, mut d)?
-        return typed_room(codec.put_f64(value, mut out))
+        codec.put_f64(value, mut out)
+        return Ok(())
     }
     let end = bare_number(s, mut d)?
     match float.parse32(string.slice(s, start, end)) {
-        Ok(v) => typed_room(codec.put_f32(v, mut out)),
+        Ok(v) => {
+            codec.put_f32(v, mut out)
+            Ok(())
+        },
         Error(Invalid(i)) => input_error(mut d, start + i, ExpectedValue),
         Error(_) => input_error(mut d, start, InvalidNumber),
     }
 }
 
-pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow | Capacity(Capacity)
+pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow
 
 scoped type TypedWriter {
-    byte: scoped fn(u8) -> Result[(), Capacity],
+    byte: scoped fn(u8),
     count_only: bool
 }
 
-fn ignore_output_byte(_byte: u8) -> Result[(), Capacity] {
-    Ok(())
-}
+fn ignore_output_byte(_byte: u8) {}
 
 /// Measures the canonical JSON of a value already encoded by format's codec.
 /// No bytes are written and the transcoder allocates nothing.
@@ -1938,8 +1926,8 @@ pub fn typed_length[T](format: Format[T], binary: Bytes) -> Result[u64, TypedWri
 
 /// Streams a codec value to send, one byte pos a time, and returns its length.
 /// Run typed_length first to check depth and obtain the length before writing.
-pub fn write_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8) -> Result[(), Capacity]) -> Result[u64, TypedWriteError] {
-    let w = TypedWriter(byte: scoped fn(x: u8) -> Result[(), Capacity] {
+pub fn write_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8)) -> Result[u64, TypedWriteError] {
+    let w = TypedWriter(byte: scoped fn(x: u8) {
         send(x)
     }, count_only: false)
     write_profile(format.plan, binary, w)
@@ -1948,26 +1936,18 @@ pub fn write_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8) -> R
 /// Encodes value into caller-owned scratch, measures it, then streams it. A
 /// caller can reserve scratch ahead of time and reuse it across calls. The
 /// length pass runs before start or send. No JSON buffer is allocated.
-pub fn encode_typed[T](format: Format[T], value: T, mut scratch: Bytes, start: scoped fn(u64) -> Result[(), Capacity], send: scoped fn(u8) -> Result[(), Capacity]) -> Result[u64, TypedWriteError] {
+pub fn encode_typed[T](format: Format[T], value: T, mut scratch: Bytes, start: scoped fn(u64), send: scoped fn(u8)) -> Result[u64, TypedWriteError] {
     list.clear(mut scratch)
-    write_room(codec.encode(format.binary, value, mut scratch))?
+    codec.encode(format.binary, value, mut scratch) ?=> |_| LengthOverflow
     let length = typed_length(format, scratch)?
-    write_room(start(length))?
+    start(length)
     write_typed(format, scratch, send)
 }
 
-fn write_room(take r: Result[(), Capacity]) -> Result[(), TypedWriteError] {
-    match r {
-        Ok(()) => Ok(()),
-        Error(e) => Error(Capacity(e)),
-    }
-}
-
-fn binary_read[T](take r: Result[T, codec.Stop]) -> Result[T, TypedWriteError] {
+fn binary_read[T](take r: Result[T, codec.DecodeError]) -> Result[T, TypedWriteError] {
     match take r {
-        Ok(take v) => Ok(take v),
-        Error(Bad(e)) => Error(Binary(e)),
-        Error(Full(e)) => Error(Capacity(e)),
+        Ok(take value) => Ok(take value),
+        Error(e) => Error(Binary(e)),
     }
 }
 
@@ -1982,7 +1962,7 @@ fn output_count(mut length: u64, add: u64) -> Result[(), TypedWriteError] {
 fn output_byte(w: TypedWriter, mut length: u64, b: u8) -> Result[(), TypedWriteError] {
     output_count(mut length, 1)?
     if !w.count_only {
-        write_room((w.byte)(b))?
+        (w.byte)(b)
     }
     Ok(())
 }
@@ -1992,7 +1972,7 @@ fn output_literal(w: TypedWriter, mut length: u64, s: String) -> Result[(), Type
     output_count(mut length, list.len(b))?
     if !w.count_only {
         for x in b {
-            write_room((w.byte)(x))?
+            (w.byte)(x)
         }
     }
     Ok(())

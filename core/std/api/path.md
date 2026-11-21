@@ -15,7 +15,7 @@ path from it. Operations allocate nothing except `join`, which grows a caller-ow
 ## Types
 
 ```
-pub type Error = Invalid(u64) | Capacity(Capacity)
+pub type Error = Invalid(u64)
 ```
 
 `Invalid(i)` gives the byte offset in the argument where the path stops being valid: the start

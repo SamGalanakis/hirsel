@@ -1114,6 +1114,8 @@ impl Parser<'_> {
         let s = self.pos;
         let mut left = self.primary()?;
         let mut nonassoc = None;
+        // LANG-18: a mapping propagate ends its postfix chain.
+        let mut mapped = false;
         loop {
             let word = self.word(0);
             if word == sym::IN && (self.whitespace > 0 || !self.newline()) {
@@ -1135,6 +1137,12 @@ impl Parser<'_> {
                 if self.bare_exit(left) {
                     return self.fail("LANG-4", "a bare exit is complete at its newline");
                 }
+            }
+            if mapped && minimum <= 12 && !matches!(next, Continuation::Binary(..)) {
+                return self.fail(
+                    "LANG-5",
+                    "`?=>` ends its postfix chain; write `(e ?=> m)` to continue it",
+                );
             }
             match next {
                 Continuation::Call if minimum <= 12 => {
@@ -1198,6 +1206,12 @@ impl Parser<'_> {
                     self.bump();
                     left = self.node(s, NodeKind::Try, None, &[left]);
                 }
+                Continuation::TryMap if minimum <= 12 => {
+                    let op = self.bump();
+                    let mapper = self.required(|p| p.mapper())?;
+                    left = self.node(s, NodeKind::Try, Some(op), &[left, mapper]);
+                    mapped = true;
+                }
                 Continuation::Binary(prec, na) if prec >= minimum => {
                     if na && nonassoc == Some(prec) {
                         return self.fail("LANG-5", "nonassociative operators do not chain");
@@ -1213,6 +1227,23 @@ impl Parser<'_> {
             }
         }
         Ok(left)
+    }
+    /// LANG-18's mapper: a path, or an inline arm `|p| v` over the error payload.
+    fn mapper(&mut self) -> Parsed<NodeId> {
+        let s = self.pos;
+        if self.eat(sym::PIPE) {
+            let pattern = self.pattern()?;
+            self.expect(sym::PIPE)?;
+            let value = self.required(|p| p.expr(11))?;
+            return Ok(self.node(s, NodeKind::Arm, None, &[pattern, value]));
+        }
+        if self.token(0).kind == TokenKind::Ident {
+            return self.path_inner(NodeKind::Path, true);
+        }
+        self.fail(
+            "LANG-5",
+            "a `?=>` mapper is a variant or callable path, or an arm `|p| v`",
+        )
     }
     #[inline(always)]
     fn primary(&mut self) -> Parsed<NodeId> {
@@ -1514,6 +1545,10 @@ impl Parser<'_> {
         if self.eat(sym::TAKE) {
             let n = self.name()?;
             return Ok(self.node(s, NodeKind::TakePattern, Some(n), &[]));
+        }
+        if self.eat(sym::MUT) {
+            let n = self.name()?;
+            return Ok(self.node(s, NodeKind::MutPattern, Some(n), &[]));
         }
         if self.eat(sym::LPAREN) {
             let c = self.list(sym::RPAREN, |p| p.pattern())?;

@@ -324,13 +324,17 @@ fn vacant_slot_hits_and_misses_preserve_charges_events_and_refusal_site() {
             const REFUSAL_SITE: u64 = 18;
             let warm = input.cast::<bool>().read();
             if warm {
-                assert!(!hirsel_core_limit_enter(context, 32).pointer.is_null());
-                hirsel_core_limit_exit(context);
+                // The second descent reuses slots returned to the cache and
+                // to the forest after the first descent.
+                for _ in 0..2 {
+                    for _ in 0..96 {
+                        assert!(!hirsel_core_limit_enter(context, 32).pointer.is_null());
+                    }
+                    for _ in 0..96 {
+                        hirsel_core_limit_exit(context);
+                    }
+                }
             }
-            assert_eq!(
-                crate::limit::Funding::vacant_count(),
-                if warm { 16 } else { 0 }
-            );
             let before = (*context).available();
             assert!(!hirsel_core_limit_enter(context, 32).pointer.is_null());
             let block = Block::new(&*context, Some(24), 24, 8).unwrap();

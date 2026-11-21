@@ -1,6 +1,5 @@
 // FIPS 180-4 sections 5 and 6.2: padding and streaming over the core
 // compression `sha256.blocks` and `sha256.block`, which this module extends.
-
 pub opaque type Sha256 {
     h: Inline[u32, 8],
     pending: Inline[u8, 64],
@@ -11,6 +10,14 @@ pub opaque type Sha256 {
 /// Initial SHA-256 state. Alloc: none. Cost: O(1).
 pub fn start() -> Sha256 {
     Sha256(h:[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], pending:[0; 64], used: 0, total: 0)
+}
+
+/// Start with one full block and an empty pending buffer. Alloc: none. Cost: O(1).
+pub fn start_block(b: Inline[u8, 64]) -> Sha256 {
+    let mut s = start()
+    sha256.block(mut s.h, b)
+    s.total = 64
+    s
 }
 
 /// Append input[lo,hi), with list.slice's checked range semantics.

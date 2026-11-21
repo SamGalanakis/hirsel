@@ -649,7 +649,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn anchor_root(&mut self, place: Place) -> Fact {
+        // A place of a `mut` pattern binding is a place of its scrutinee (OWN-15).
+        let place = match self.var(place.slot).lent {
+            Some(lent) => self.unalias(place, lent),
+            None => place,
+        };
         self.anchors.node(Node::Root(Root::Place(place)))
+    }
+    /// A `mut` pattern binding is held as a `mut` parameter is: what is installed
+    /// through it reads only the anchors its scrutinee place has (OWN-11, OWN-15).
+    pub(super) fn lend_anchors(&mut self, slot: u32, fact: Fact) {
+        self.replace_slot_anchors(slot, fact);
+        self.anchors.mut_params.insert(slot, fact);
+        self.vars[slot as usize].as_mut().unwrap().mut_anchor = true;
     }
     pub(super) fn anchor_read(&mut self, at: At) -> Fact {
         if matches!(
@@ -678,7 +690,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let component = match self.steps[i as usize] {
                 PStep::Field(i) => Component::Field(i),
                 PStep::Index { .. } => Component::Element(None),
-                PStep::Payload | PStep::Any => continue,
+                PStep::Payload | PStep::Case(..) => continue,
             };
             fact = self.anchors.project(fact, component);
         }
@@ -763,7 +775,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match self.steps[i as usize] {
                 PStep::Field(i) => path.push(Component::Field(i)),
                 PStep::Index { .. } => path.push(Component::Element(None)),
-                PStep::Payload | PStep::Any => {}
+                PStep::Payload | PStep::Case(..) => {}
             }
         }
         let fact = self

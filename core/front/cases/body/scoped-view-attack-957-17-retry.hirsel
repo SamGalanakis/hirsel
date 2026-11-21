@@ -1,7 +1,7 @@
 // A retry policy over isolate's Causes: retry while the primary cause is Fail, stop on any other.
 fn attempt(n: u64) -> u64 {
     if n < 2 {
-        fail(result.unwrap(string.from("busy")))
+        fail(string.from("busy"))
     }
     if n == 5 {
         let none: Option[u64] = None

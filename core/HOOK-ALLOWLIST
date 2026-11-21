@@ -1,9 +1,8 @@
 # The frozen allowlist of the M4 deciding experiment (M4-PLAN §3, W5): the core
 # declarations and glue operations the hook libraries (codec, fault, store,
 # runner, record) may reach. It is core as of 2026-11-15 (main db332188) and
-# grows only by an addition recorded as a ruling in
-# /workspace/code/hirsel-briefs/DECISIONS.md: the lane that adds the core
-# declaration adds its entry, with a comment naming the ruling and its date.
+# grows only by an addition recorded as a ruling in DECISIONS.md. The lane that
+# adds the core declaration adds its entry and cites the ruling and its date.
 #
 # //:hirsel-core-driver-unittest, case gated_libraries_reach_only_allowlisted_core,
 # is red when an entry is not a core declaration, or when a gated library
@@ -39,6 +38,11 @@ core@1/channel/try_send
 core@1/channel/try_receive
 core@1/char/from_u32
 core@1/char/to_u32
+# DECISIONS.md 2026-11-21 (std check XXH3 kernels)
+core@1/check/xxh3_short
+core@1/check/xxh3_short_inline
+core@1/check/xxh3_stripe
+core@1/check/xxh3_stripes
 core@1/code/callable
 core@1/code/describe
 core@1/code/identity
@@ -70,10 +74,12 @@ core@1/core/FloatError
 # DECISIONS.md 2026-11-18 (HTTP static bytes)
 core@1/core/FrozenBytes
 core@1/core/Heap
+core@1/core/HostEntries
 core@1/core/HostFile
 core@1/core/IndexedSpan
 core@1/core/IoError
 core@1/core/JoinError
+core@1/core/Kind
 core@1/core/Link
 core@1/core/List
 core@1/core/Log
@@ -99,12 +105,11 @@ core@1/core/SeqSpan
 core@1/core/Site
 core@1/core/SpanBuilder
 core@1/core/StaticFn
+core@1/core/Stat
 core@1/core/Stderr
 core@1/core/Stdin
 core@1/core/Stdout
 core@1/core/String
-# DECISIONS.md 2026-11-16 ruling: replay core (REPLAY-SPEC v2 §9)
-core@1/core/Tape
 core@1/core/OutOfTime
 core@1/core/Task
 core@1/core/Tasks
@@ -186,17 +191,23 @@ core@1/heap/slots_shift
 core@1/heap/slots_take
 core@1/heap/slots_view
 core@1/host/close
+core@1/host/entries
 core@1/host/mkdir
 core@1/host/mkdtemp
 core@1/host/mono_ns
+core@1/host/next_entries
 core@1/host/open
+core@1/host/open_dir
 core@1/host/read
+core@1/host/read_at
 core@1/host/remove
 core@1/host/remove_tree
 core@1/host/rename
 # DECISIONS.md 2026-11-16 (CAP-5 / CAP-8, S5c)
 core@1/host/random
 core@1/host/sleep_until
+core@1/host/stat
+core@1/host/stat_file
 # DECISIONS.md 2026-11-18 (service-ops host stop source): the store runner
 # waits for the recorded stop through its Process grant (RUNNER-SPEC §12.4).
 core@1/host/stopped
@@ -206,6 +217,7 @@ core@1/host/try_lock
 core@1/host/unlock
 core@1/host/wall_ms
 core@1/host/write
+core@1/host/write_at
 core@1/indexed/get
 # DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
 core@1/inline/word_be
@@ -361,15 +373,6 @@ core@1/task/cancel
 core@1/task/check_cancel
 core@1/task/join
 core@1/task/spawn
-# DECISIONS.md 2026-11-16 ruling: replay core (REPLAY-SPEC v2 §9)
-core@1/tape/across
-core@1/tape/args
-core@1/tape/clock
-core@1/tape/dir
-core@1/tape/end
-core@1/tape/open
-core@1/tape/stderr
-core@1/tape/stdout
 core@1/text/as_string
 core@1/text/copy_in
 core@1/text/len
@@ -395,6 +398,14 @@ core@1/core/NetError
 core@1/core/Socket
 core@1/core/Until
 core@1/host/accept
+# DECISIONS.md 2026-11-21 (main-reds-1523, store control socket and NetError.Tls).
+core@1/core/ReadHalf
+core@1/core/WriteHalf
+core@1/net/split
+core@1/host/recv_bounded
+core@1/host/send_pair
+core@1/core/TlsFailure
+core@1/core/CertFailure
 # DECISIONS.md 2026-11-17: W3d's loopback wire client and fixture listeners.
 core@1/host/connect
 core@1/host/listen

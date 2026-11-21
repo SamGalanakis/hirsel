@@ -819,7 +819,7 @@ b0(v0: ptr):
 "#,
     )
     .unwrap();
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let object = emit_object_for_test(
         &module,
@@ -832,7 +832,7 @@ b0(v0: ptr):
         hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
-    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
     let source = format!(
         r#"
 #include <stdint.h>
@@ -921,7 +921,7 @@ b0:
 "#,
     )
     .unwrap();
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let object = emit_object_with_layouts(
         &module,
@@ -934,7 +934,7 @@ b0:
         hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
-    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
     // Script just the C row to exercise both outcomes deterministically. The
     // real scheduler owns cancellation requests and has its own runtime tests.
     let source = format!(
@@ -998,7 +998,7 @@ b3:
         "  v4: ptr, v5: u64 = call rt.spawn[t1, t2] g2 (v1, &a1, v3, v1)\n  call rt.cancel g16 (v4)",
     );
     let module = text::parse(&source).unwrap();
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let object = emit_object_with_layouts(
         &module,
@@ -1011,7 +1011,7 @@ b3:
         hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
-    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
     let source = format!(
         r#"
 #define HIRSEL_TEST_WRAP_SPAWN
@@ -1141,7 +1141,7 @@ fn inlined_arc_updates_keep_the_provider_event_order() {
 "#,
     )
     .unwrap();
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let object = emit_object_with_layouts(
         &module,
@@ -1154,7 +1154,7 @@ fn inlined_arc_updates_keep_the_provider_event_order() {
         hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
-    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
     let source = format!(
         r#"
 #include <stdint.h>
@@ -1188,7 +1188,7 @@ int main(void) {{
 fn inlined_count_increment_overflow_is_the_runtime_stop() {
     for kind in ["rc", "arc"] {
         let module = text::parse(&format!("core v1\nsig g0 = (ptr) -> ()\ninst n0 = test@0/count/overflow [] []\nfn f0 = n0 g0 {{\nb0(v0: ptr):\n  share v0 {kind}\n  return\n}}\n")).unwrap();
-        let scratch = Scratch::new();
+        let scratch = NativeArtifacts::new();
         let object = emit_object(
             &module,
             &Options {
@@ -1199,7 +1199,7 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
             hirsel_core_ids::ContentHash([0x90; 32]),
         )
         .unwrap();
-        fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+        fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
         // Arc share reads the live context to choose its replay path, so the
         // caller passes one, as every instance's entry ABI requires.
         let name = module.identity(hirsel_core_ir::InstanceId(0)).symbol();

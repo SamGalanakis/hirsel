@@ -75,16 +75,9 @@ fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: s
     std.wsock.hello_accepted(take slot)
     let mut writer = take initial_writer
     let mut output = std.wsock.outbound(Server, config, None)?
-    let channel_pair: Result[(Sender[Notice], Receiver[Notice]), Capacity] = channel.new(1)
-    let (tx, rx) = match channel_pair {
-        Ok(take pair) => take pair,
-        Error(c) => return Error(Allocation(c))
-    }
+    let (tx, rx): (Sender[Notice], Receiver[Notice]) = channel.new(1)
     let reading = Reading(reader: take input, tx: channel.sender(tx), clock: clock, config: config)
-    let mut child = match task.spawn(tasks, bytes 100663296, take reading, reader) {
-        Ok(take handle) => take handle,
-        Error((c, _)) => return Error(Allocation(c))
-    }
+    let mut child = task.spawn(tasks, bytes 100663296, take reading, reader)
     let mut alarm: Option[Task[()]] = None
     let mut closing = false
     let mut closed = false
@@ -192,12 +185,8 @@ fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: s
                 Never => host.mono_ns(clock)
             }
             let job = Closing(tx: channel.sender(tx), clock: clock, deadline: end)
-            match task.spawn(tasks, bytes 4096, take job, close_timer) {
-                Ok(take handle) => {
-                    alarm = Some(take handle)
-                },
-                Error(_) => break
-            }
+            let handle = task.spawn(tasks, bytes 4096, take job, close_timer)
+            alarm = Some(take handle)
         }
         if std.wsock.due(mut time, host.mono_ns(clock)) == Expired {
             break
@@ -206,7 +195,7 @@ fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: s
             let frame: Option[Bytes] = match replace(mut close, None) {
                 Some(payload) => {
                     let mut payload_bytes: Bytes = list.new()
-                    result.unwrap(std.websocket.control(payload, mut payload_bytes))
+                    std.websocket.control(payload, mut payload_bytes)
                     closing_frame = true
                     Some(std.wsock.encode(mut output, true, 8, payload_bytes)?)
                 },
@@ -360,7 +349,7 @@ pub fn client_probe(n: Net, clock: Clock, random: Random) -> Result[(), std.wsoc
     }
     let payload = close_code(1000)
     let mut b: Bytes = list.new()
-    result.unwrap(std.websocket.control(payload, mut b))
+    std.websocket.control(payload, mut b)
     let frame = std.wsock.encode(mut encoder, true, 8, b)?
     let _ = std.wsock.stage(mut writing, take frame)
     std.wsock.closing(mut timer, host.mono_ns(clock), false)

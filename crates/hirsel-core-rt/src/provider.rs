@@ -211,6 +211,37 @@ unsafe fn drive_with(
     issued: Option<&mut Option<Outcome>>,
     authorize: impl FnOnce(&Provider, &mut Request) -> bool,
 ) -> Outcome {
+    // SAFETY: forwarded; the stackful form always ends with an outcome.
+    unsafe {
+        admit::<false>(context, provider, request, issued, authorize)
+            .unwrap_or_else(|| unreachable!("a stackful operation never returns parked"))
+    }
+}
+/// A Net operation in the returnable form (`net::returnable_op`): the same
+/// entry, replay boundary, cancellation, bounds and authorization as
+/// `hirsel_core_host`, once. None means it parked in the task's frame record.
+/// # Safety
+/// As `hirsel_core_host`; the request lives in the current task's frame record.
+pub(crate) unsafe fn returnable(
+    context: *mut Context,
+    provider: *const Provider,
+    request: *mut Request,
+) -> Option<Outcome> {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        admit::<true>(context, provider, request, None, |provider, request| {
+            crate::net::authorize(provider, request)
+        })
+    }
+}
+#[inline(always)]
+unsafe fn admit<const RETURNABLE: bool>(
+    context: *mut Context,
+    provider: *const Provider,
+    request: *mut Request,
+    issued: Option<&mut Option<Outcome>>,
+    authorize: impl FnOnce(&Provider, &mut Request) -> bool,
+) -> Option<Outcome> {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
         crate::process::deny_describe_capability(context);
@@ -219,7 +250,7 @@ unsafe fn drive_with(
         let operation = (*request).operation;
         if cancellation_point(operation) {
             if crate::tasks::check_cancel(context, site) != 0 {
-                return CANCELLED;
+                return Some(CANCELLED);
             }
             let request = &*request;
             if (operation == MKDTEMP
@@ -233,21 +264,25 @@ unsafe fn drive_with(
                         .is_none())
             {
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
-                return CANCELLED;
+                return Some(CANCELLED);
             }
         }
         if (operation == READ_AT && !matches!((*request).mode, 0 | 4))
             || (operation == WRITE_AT && !matches!((*request).mode, 1 | 3 | 4))
         {
-            return Outcome {
+            return Some(Outcome {
                 error: IoError::from_errno(libc::EACCES),
                 ..Outcome::default()
-            };
+            });
         }
         if !authorize(&*provider, &mut *request) {
-            return crate::net::DENIED;
+            return Some(crate::net::DENIED);
         }
-        crate::tasks::provider_operation(context, &*provider, request, issued)
+        if RETURNABLE {
+            crate::tasks::provider_operation_returnable(context, &*provider, request)
+        } else {
+            Some(crate::tasks::provider_operation(context, &*provider, request, issued))
+        }
     }
 }
 

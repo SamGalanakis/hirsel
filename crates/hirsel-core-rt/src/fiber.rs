@@ -158,6 +158,23 @@ impl Stack {
             start
         }
     }
+    /// Overwrite what a fiber that returned its stack left above `sp`, so a
+    /// pointer into the released stack reads garbage in debug and checker
+    /// builds instead of the stale frame (the returnable form keeps none).
+    #[cfg(any(test, debug_assertions, feature = "testing"))]
+    pub(crate) fn poison_above(&self, sp: *mut u8) {
+        let top = self.top();
+        // SAFETY: the stack is idle; [low, top - HEADER) is writable, and the
+        // red zone below `sp` is inside it.
+        unsafe {
+            let low = (*low_word(top)).max(sp.addr().saturating_sub(128));
+            std::ptr::write_bytes(
+                std::ptr::with_exposed_provenance_mut::<u8>(low),
+                0xA5,
+                top - HEADER - low,
+            );
+        }
+    }
     /// The end of the reservation, where the low-water word sits.
     fn top(&self) -> usize {
         self.base.as_ptr().addr() + self.len

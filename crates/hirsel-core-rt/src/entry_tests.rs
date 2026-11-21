@@ -214,6 +214,14 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
             index: 0,
         },
         Requirement {
+            kind: ENV,
+            index: 0,
+        },
+        Requirement {
+            kind: STDIN,
+            index: 0,
+        },
+        Requirement {
             kind: TASKS,
             index: 0,
         },
@@ -274,17 +282,32 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
                 hirsel_core_capability_provider(&context, operand),
                 (*process).provider
             );
-            if kind == NET {
-                let rules = &*(hirsel_core_capability_handle(&context, operand)
-                    as *const crate::net::Rules);
-                let decoded = rules
-                    .as_slice()
-                    .iter()
-                    .map(|rule| rule.address)
-                    .collect::<Vec<_>>();
-                assert_eq!(decoded, [net_rule.address]);
-            } else {
-                assert_eq!(hirsel_core_capability_handle(&context, operand), 0);
+            let handle = hirsel_core_capability_handle(&context, operand);
+            match kind {
+                NET => {
+                    assert_ne!(handle, 0);
+                    let rules = &*(handle as *const crate::net::Rules);
+                    let decoded = rules
+                        .as_slice()
+                        .iter()
+                        .map(|rule| rule.address)
+                        .collect::<Vec<_>>();
+                    assert_eq!(decoded, [net_rule.address]);
+                }
+                ENV => {
+                    assert_ne!(handle, 0);
+                    let outside = b"OUTSIDE_FIXTURE";
+                    let name = Buffer {
+                        data: outside.as_ptr().cast_mut(),
+                        len: outside.len(),
+                        capacity: 0,
+                    };
+                    let report = crate::env::hirsel_core_env_get(&mut context, operand, &name, 0);
+                    assert_eq!(report.error, IoError { tag: 1, code: 0 });
+                    assert_eq!(report.value, 0);
+                }
+                STDIN => assert_ne!(handle, 0),
+                _ => assert_eq!(handle, 0),
             }
         }
         let args = hirsel_core_entry_grant(process, ARGS, 0);

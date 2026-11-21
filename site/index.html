@@ -962,38 +962,58 @@ SC.authority = (g) => {
 
 /* an agent: the hill's working dog, a border collie, in its working crouch, seen side on as the
    ram-mark is. Same flat ink and the same construction: bands of even width bent at bevelled
-   corners, legs as wide as a ram's. A level back, a deep chest, the head carried low and forward,
-   a small ear, front legs splayed, hind legs gathered under, the tail out low. Feet on y, chest
-   over x, nose toward face (1 right, -1 left); s is a ram's size. o: crouch (0..1, a shade
+   corners, legs as wide as a ram's. A level back, a deep ruffed chest, the head carried low and
+   forward with a short broad muzzle below a marked stop, small tipped ears, front legs splayed,
+   hind legs gathered under, the tail out low and sweeping up at the tip. Its white is the page's
+   cream: always the collar round the neck and the tail tip, the marks that say collie at any size;
+   the blaze, the ruff and the front socks once it is drawn large enough to hold them. Feet on y,
+   chest over x, nose toward face (1 right, -1 left); s is a ram's size. o: crouch (0..1, a shade
    lower), tail (-1..1, a flick of the tip), step (-1..1, legs swinging as it travels).
    Returns its nose and the top of its head, for its view and its label. */
 function dog(x, y, s, face, a, o) {
   o = o || {};
   const f = face > 0 ? 1 : -1, c = (o.crouch || 0) * .035, tl = (o.tail || 0) * .06, sw = (o.step || 0) * .07;
   const P = (X, Y) => [x + f * X * s, y + Y * s];
-  const hc = c * 1.3 + .07, nose = P(.8, -.29 + hc), head = P(.5, -.56 + hc);
+  const hc = c * 1.3 + .07, nose = P(.77, -.38 + hc), head = P(.5, -.56 + hc);
   if (a <= .01) return { nose, head };
   const band = (w, pts) => { ctx.lineWidth = w * s; ctx.beginPath(); pts.forEach((q, j) => { const p = P(q[0], q[1]); j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.stroke(); };
-  const poly = pts => { ctx.beginPath(); pts.forEach((q, j) => { const p = P(q[0], q[1]); j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.closePath(); ctx.fill(); };
-  ctx.save(); ctx.globalAlpha = a * .085; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x, y + s * .02, s * .62, s * .095, 0, 0, Math.PI * 2); ctx.fill();
+  const poly = (pts, dy) => { ctx.beginPath(); pts.forEach((q, j) => { const p = P(q[0], q[1] + (dy || 0)); j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.closePath(); ctx.fill(); };
+  const mix = (A, B, u) => [lerp(A[0], B[0], u), lerp(A[1], B[1], u)];
+  const big = s > 40;
+  ctx.save(); ctx.globalAlpha = a * .085; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x, y + s * .02, s * .64, s * .095, 0, 0, Math.PI * 2); ctx.fill();
   ctx.globalAlpha = a; ctx.fillStyle = ctx.strokeStyle = INK; ctx.lineJoin = 'bevel'; ctx.lineCap = 'butt';
   /* legs: front pair splayed, one reaching; hind pair gathered under, bent at the hock */
-  band(.1, [[.25, -.36 + c], [.37 + sw, 0]]);
-  band(.1, [[.1, -.36 + c], [.05 - sw, 0]]);
+  const fl = [[[.25, -.36 + c], [.37 + sw, 0]], [[.1, -.36 + c], [.05 - sw, 0]]];
+  fl.forEach(L => band(.1, L));
   band(.1, [[-.32, -.36 + c], [-.46 + sw * .5, -.15], [-.39 + sw, 0]]);
   band(.1, [[-.2, -.36 + c], [-.33 - sw * .5, -.15], [-.26 - sw, 0]]);
-  /* body, level, with the chest deepening at the front */
-  band(.21, [[-.5, -.415 + c], [.26, -.415 + c]]);
-  poly([[.02, -.5 + c], [.3, -.5 + c], [.33, -.27 + c], [.06, -.29 + c]]);
-  /* neck running down from the withers, the head carried low, the muzzle */
-  band(.17, [[.16, -.44 + c], [.47, -.38 + hc]]);
-  poly([[.4, -.47 + hc], [.56, -.47 + hc], [.62, -.42 + hc], [.8, -.35 + hc], [.8, -.27 + hc], [.6, -.25 + hc], [.42, -.29 + hc]]);
-  /* a small ear, set back on the skull */
-  poly([[.42, -.46 + hc], [.45, -.56 + hc], [.53, -.53 + hc], [.53, -.46 + hc]]);
-  /* the tail, out low behind, the tip lifting a hair */
-  band(.08, [[-.49, -.48 + c], [-.72, -.3 + c * .5], [-.84, -.31 + c * .5 - tl]]);
-  /* the collie's white: a ruff down the front of the chest */
-  if (s > 26) { ctx.fillStyle = BG; ctx.globalAlpha = a * .95; poly([[.26, -.39 + c], [.36, -.37 + c], [.335, -.27 + c], [.24, -.285 + c]]); }
+  /* body, level, and the chest deep with its ruff */
+  band(.21, [[-.5, -.415 + c], [.24, -.415 + c]]);
+  poly([[0, -.52], [.28, -.52], [.37, -.37], [.33, -.24], [.06, -.27]], c);
+  /* the neck running down from the withers to the head, carried low */
+  const N0 = [.14, -.45 + c], N1 = [.44, -.39 + hc];
+  band(.18, [N0, N1]);
+  /* the skull, the stop, and the short broad muzzle */
+  poly([[.38, -.46], [.42, -.535], [.555, -.54], [.595, -.47], [.73, -.445], [.77, -.405], [.76, -.345], [.61, -.31], [.44, -.3]], hc);
+  /* the ears, small, half up, their tips folded forward */
+  poly([[.415, -.5], [.43, -.585], [.46, -.615], [.535, -.61], [.575, -.565], [.52, -.57], [.51, -.5]], hc);
+  /* the tail, out low behind, sweeping up at the tip */
+  const T = [[-.48, -.47 + c], [-.66, -.3 + c * .5], [-.79, -.26 + c * .5], [-.91, -.32 + c * .5 - tl]];
+  band(.09, T);
+  /* the white */
+  ctx.strokeStyle = ctx.fillStyle = BG;
+  /* the collar: a ring across the neck, from the nape down through the throat into the chest */
+  const M = mix(N0, N1, .5), dx = N1[0] - N0[0], dy = N1[1] - N0[1], dl = Math.hypot(dx, dy), nx = -dy / dl, ny = dx / dl;
+  band(big ? .12 : .17, [[M[0] - nx * .09, M[1] - ny * .09], [M[0] + nx * .15, M[1] + ny * .15]]);
+  /* the tail's white tip */
+  band(.09, [mix(T[2], T[3], .3), T[3]]);
+  if (big) {
+    /* the ruff down the chest, the blaze down the face, the nose black at its end, white socks */
+    poly([[.27, -.4], [.36, -.37], [.325, -.25], [.2, -.265]], c);
+    poly([[.53, -.54], [.558, -.54], [.597, -.468], [.715, -.443], [.715, -.38], [.752, -.352], [.62, -.318], [.605, -.42], [.57, -.47]], hc);
+    ctx.fillStyle = INK; poly([[.71, -.445], [.735, -.44], [.772, -.405], [.768, -.365], [.71, -.375]], hc);
+    fl.forEach(L => band(.1, [mix(L[0], L[1], .74), L[1]]));
+  }
   ctx.restore();
   return { nose, head };
 }

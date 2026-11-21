@@ -1,4 +1,4 @@
-//! Part 3 Tokio twin of bench/units/session.hirsel (S1 shape): sessions,
+//! Part 3 Tokio twin of bench/units/session_u.hirsel (S1 shape): sessions,
 //! P partition committers with group commit, and the shared service are
 //! tasks; nothing runs on the main thread (it only waits). The partition
 //! write runs on the committer's worker; fdatasync runs on one of `syncs`

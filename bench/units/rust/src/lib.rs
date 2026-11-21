@@ -26,7 +26,7 @@ pub fn kernel(seed: u64, rounds: u64) -> u64 {
 }
 
 // ---- Part 3 session workload: shared definitions (load generator, tool
-// server, Tokio twin). The hirsel server (bench/units/session.hirsel) speaks
+// server, Tokio twin). The hirsel server (bench/units/session_u.hirsel) speaks
 // the same wire format.
 
 pub const REQ: usize = 48;

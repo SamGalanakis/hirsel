@@ -102,15 +102,14 @@ SPAN_KINDS = {'Internal': 1, 'Server': 2, 'Client': 3, 'Producer': 4, 'Consumer'
 SPAN_STATUS = {'Unset': 0, 'Success': 1, 'Error': 2}
 
 
-def span_record(name, start, end, span_kind, attrs, trace_id, span_id, parent_span_id=None, links=None, status='Unset'):
+def span_record(name, start, end, span_kind, attrs, trace_id, span_id, parent_span_id=None, links=(), status='Unset'):
     """One OTLP Span; std.trace's encoder is checked against this shape."""
     require(span_kind in SPAN_KINDS, 'invalid span kind')
     record = dict(name=text(name), startTimeUnixNano=start, endTimeUnixNano=end, kind=SPAN_KINDS[span_kind],
                   attributes=attrs, traceId=identity(trace_id, 16), spanId=identity(span_id, 8))
     if parent_span_id is not None:
         record['parentSpanId'] = identity(parent_span_id, 8)
-    links = [] if links is None else links
-    require(isinstance(links, list) and len(links) <= 128, 'too many span links')
+    require(isinstance(links, (list, tuple)) and len(links) <= 128, 'too many span links')
     record['links'] = [dict(traceId=identity(link['trace_id'], 16),
                             spanId=identity(link['span_id'], 8)) for link in links]
     require(status in SPAN_STATUS, 'span outcome must be explicit')

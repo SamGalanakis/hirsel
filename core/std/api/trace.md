@@ -37,7 +37,8 @@ pub opaque type Ended               // as `finish` returns it
 - **Refusals.** `context` refuses an all-zero trace id (`ZeroTrace`) and a zero span id
   (`ZeroSpan`), which OTLP calls invalid, so no `Context` holds one. `start_with` refuses a
   claimed parent that does not fit the span: a parent in another trace (`OtherTrace`), or
-  the span itself (`SelfParent`).
+  the span itself (`SelfParent`). A child that claims a parent without a parent context
+  cannot be written: the parent is an `Option[Context]`, and no `Context` is zero.
 - **Attributes** are kept sorted by key bytes, one value per key, and setting a key again
   replaces its value. That is the order `obs_export.py`'s `attributes` produces. Resource
   attributes keep the caller's list order.

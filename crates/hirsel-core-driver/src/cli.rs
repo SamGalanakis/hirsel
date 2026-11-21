@@ -23,6 +23,13 @@ pub enum OptionId {
     Grant,
     Filter,
     TestJobs,
+    Interface,
+    Dependents,
+    Transitive,
+    AffectedTests,
+    Unused,
+    InspectLibrary,
+    InspectStd,
     TestTimeout,
     Rerun,
     Release,
@@ -101,6 +108,7 @@ commands! {
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] --limit BYTES --runtime ARCHIVE [options]", "Run each discovered @test in an independent process.";
+    "inspect", "inspect [package-dir | --std] (--interface [--json] | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
@@ -117,6 +125,55 @@ macro_rules! option {
     }
 }
 static OPTIONS: &[OptionSpec] = &[
+    option!(
+        Interface,
+        ["--interface"],
+        None,
+        ["inspect"],
+        "Print public declarations."
+    ),
+    option!(
+        Dependents,
+        ["--dependents"],
+        Some("DEF"),
+        ["inspect"],
+        "List definitions that use DEF. Use a full or package-relative definition path."
+    ),
+    option!(
+        Transitive,
+        ["--transitive"],
+        None,
+        ["inspect"],
+        "Follow indirect users with --dependents."
+    ),
+    option!(
+        AffectedTests,
+        ["--affected-tests"],
+        Some("DEF"),
+        ["inspect"],
+        "List cache-eligible tests a semantic edit to DEF may rerun."
+    ),
+    option!(
+        Unused,
+        ["--unused"],
+        None,
+        ["inspect"],
+        "List unreachable definitions. An app starts at main and its tests. A library starts at its public items."
+    ),
+    option!(
+        InspectLibrary,
+        ["--library"],
+        None,
+        ["inspect"],
+        "Use library roots for --unused even if the package has a main function."
+    ),
+    option!(
+        InspectStd,
+        ["--std"],
+        None,
+        ["inspect"],
+        "Inspect the source standard library from --libraries or the checkout."
+    ),
     option!(
         Recipe,
         ["--recipe"],
@@ -381,6 +438,7 @@ static OPTIONS: &[OptionSpec] = &[
             "run",
             "replay",
             "test",
+            "inspect",
             "core-product",
             "std-product",
             "env",
@@ -392,7 +450,9 @@ static OPTIONS: &[OptionSpec] = &[
         SourceCore,
         ["--source-core"],
         None,
-        ["check", "build", "publish", "run", "replay", "test", "sdk"],
+        [
+            "check", "build", "publish", "run", "replay", "test", "inspect", "sdk"
+        ],
         "Check supplied core and std sources."
     ),
     option!(
@@ -576,7 +636,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--libraries"],
         Some("ROOT"),
         [
-            "check", "image", "build", "publish", "run", "replay", "test", "sdk"
+            "check", "image", "build", "publish", "run", "replay", "test", "inspect", "sdk"
         ],
         "Select a root containing core/ and std/."
     ),
@@ -592,6 +652,7 @@ static OPTIONS: &[OptionSpec] = &[
             "run",
             "replay",
             "test",
+            "inspect",
             "core-product",
             "std-product",
             "sdk"

@@ -54,7 +54,7 @@ pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits
     }
 }
 fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
-    let invocation = match crate::cli::parse(args.into_iter())? {
+    let mut invocation = match crate::cli::parse(args.into_iter())? {
         crate::cli::Action::Help(help) => {
             print!("{help}");
             std::process::exit(0);
@@ -155,6 +155,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         )?;
         std::process::exit(0);
     }
+    let inspection = (command == "inspect")
+        .then(|| crate::inspect::Inspection::read(&mut invocation))
+        .transpose()?;
+    let inspect_std = inspection.as_ref().is_some_and(|option| option.std);
     let dir = invocation.positional.map(PathBuf::from);
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut libraries_explicit = false;
@@ -165,7 +169,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut image_path = None;
     let mut install_root = None;
     let mut core_product = None;
-    let mut source_core = false;
+    let mut source_core = inspect_std;
     let mut source_std = false;
     let mut product_name = None;
     let mut entry = None;
@@ -348,6 +352,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::ProfileFront => profile_front = true,
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help
+            | Opt::Interface
+            | Opt::Dependents
+            | Opt::Transitive
+            | Opt::AffectedTests
+            | Opt::Unused
+            | Opt::InspectLibrary
+            | Opt::InspectStd
             | Opt::IncludeCredentials
             | Opt::Lib
             | Opt::FmtCheck
@@ -705,13 +716,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             library: image.map_or(LibraryInput::Sources, LibraryInput::Image),
             entry: None,
         }
+    } else if inspect_std {
+        CheckRequest::libraries(&libraries, &store)?
     } else if command == "image" {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
     } else if let Some(image) = image {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
     } else if let Some(image) = installed_std {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if native_command || installed.is_some() {
+    } else if native_command || installed.is_some() || inspection.is_some() {
         CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?
     } else {
         CheckRequest::directory(&dir.ok_or("missing package directory")?, &libraries, &store)?
@@ -781,7 +794,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // options or toolchain cannot be read goes on without one and meets
     // that error where it always has.
     let record = match &mut prepared {
-        _ if command == "image" || test_command || recipe_command => None,
+        _ if command == "image" || test_command || recipe_command || inspection.is_some() => None,
         Some(Ok(options)) if options.logical_charge_report.is_none() => {
             crate::request_record::Request::new(
                 command,
@@ -855,6 +868,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
+    if accepted && let Some(inspection) = inspection {
+        inspection.write(&product, json)?;
+        std::process::exit(0);
+    }
     let native_options = if native_command && (test_command || accepted) {
         let options = prepared.expect("a native command prepares its options")?;
         if options.logical_charge_report.is_some() {

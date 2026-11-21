@@ -408,6 +408,10 @@ impl TestBatch<'_> {
     }
 }
 
+pub(crate) fn parameterless_test(decl: &Result<EntryDecl, String>) -> Option<&EntryDecl> {
+    decl.as_ref().ok().filter(|decl| decl.parameters.is_empty())
+}
+
 impl CheckProduct {
     /// Tests declared in this request's source modules. Published dependencies
     /// retain their reference restrictions but are not rediscovered as local tests.
@@ -477,7 +481,7 @@ impl CheckProduct {
                 "{test} is not a discovered @test"
             )));
         };
-        let parameterless = decl.as_ref().ok().filter(|decl| decl.parameters.is_empty());
+        let parameterless = parameterless_test(decl);
         // PROG-4 grants the test's parameters. An unused launch grant can
         // otherwise touch host state before a parameterless test starts.
         let mut effective_options;

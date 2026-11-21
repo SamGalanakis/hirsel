@@ -400,6 +400,56 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, usize)>, Vec<Siblings>) {
     }
     (forms, siblings)
 }
+
+fn codec_reads(index: &NameIndex) -> impl Iterator<Item = Option<DefinitionId>> + '_ {
+    let std = index.symbols.find("std");
+    let codec = index.symbols.find("codec");
+    index
+        .packages
+        .iter()
+        .filter(move |p| Some(p.name) == std && codec.is_some())
+        .flat_map(move |p| {
+            let module = codec.and_then(|name| index.child(p.root, name));
+            hirsel_core_front::STRUCTURAL_CODECS
+                .iter()
+                .map(|(_, maker)| *maker)
+                .chain([hirsel_core_front::BYTES_CODEC])
+                .chain(hirsel_core_front::TUPLE_CODEC_READS)
+                .map(move |maker| index.definition(module?, index.symbols.find(maker)?))
+        })
+}
+
+impl Siblings {
+    fn inputs<'a>(
+        &'a self,
+        index: &'a NameIndex,
+    ) -> impl Iterator<Item = Option<DefinitionId>> + 'a {
+        hirsel_core_front::SIBLING_READS[self.row]
+            .3
+            .iter()
+            .map(|name| index.definition(self.module, index.symbols.find(name)?))
+    }
+}
+
+/// Signature inputs for lowering that have no explicit source reference.
+pub(crate) fn implicit_reads(
+    index: &NameIndex,
+) -> (Vec<DefinitionId>, BTreeMap<DefinitionId, Vec<DefinitionId>>) {
+    let prelude = prelude(index)
+        .into_iter()
+        .map(|id| DefinitionId(id as u32))
+        .chain(codec_reads(index).flatten())
+        .collect();
+    let (forms, siblings) = forms(index);
+    let mut by_form = BTreeMap::<_, Vec<_>>::new();
+    for (form, row) in forms {
+        by_form
+            .entry(form)
+            .or_default()
+            .extend(siblings[row].inputs(index).flatten());
+    }
+    (prelude, by_form)
+}
 /// The gate's inputs (OPTION-L L2): the environment, and every module's
 /// identity and item header digests in order. Both read the manifests and the
 /// parse, and a module's path from the index, never a resolution, so the gate
@@ -902,29 +952,9 @@ impl Keys {
             return Ok(*hash);
         }
         let prelude = self.prelude_closure(index)?;
-        let mut makers = vec![];
-        if let (Some(std), Some(codec)) = (index.symbols.find("std"), index.symbols.find("codec")) {
-            for p in index.packages.iter().filter(|p| p.name == std) {
-                let module = index.child(p.root, codec);
-                for maker in hirsel_core_front::STRUCTURAL_CODECS
-                    .iter()
-                    .map(|(_, maker)| *maker)
-                    .chain([hirsel_core_front::BYTES_CODEC])
-                    .chain(hirsel_core_front::TUPLE_CODEC_READS)
-                {
-                    let id = module.and_then(|m| {
-                        index
-                            .symbols
-                            .find(maker)
-                            .and_then(|name| index.definition(m, name))
-                    });
-                    makers.push(match id {
-                        Some(id) => Some(self.closure(index, id.0 as usize)?),
-                        None => None,
-                    });
-                }
-            }
-        }
+        let makers: Vec<_> = codec_reads(index)
+            .map(|id| id.map(|id| self.closure(index, id.0 as usize)).transpose())
+            .collect::<io::Result<_>>()?;
         // Without std the component is the prelude's own hash.
         let hash = match makers.is_empty() {
             true => prelude,
@@ -1042,20 +1072,10 @@ impl Keys {
         if let Some(hash) = siblings.hash.get() {
             return Ok(*hash);
         }
-        let names = hirsel_core_front::SIBLING_READS[siblings.row].3;
-        let mut reads = Vec::with_capacity(names.len());
-        for name in names {
-            reads.push(
-                match index
-                    .symbols
-                    .find(name)
-                    .and_then(|name| index.definition(siblings.module, name))
-                {
-                    Some(id) => Some(self.closure(index, id.0 as usize)?),
-                    None => None,
-                },
-            );
-        }
+        let reads: Vec<_> = siblings
+            .inputs(index)
+            .map(|id| id.map(|id| self.closure(index, id.0 as usize)).transpose())
+            .collect::<io::Result<_>>()?;
         let hash = ContentHash::of_parts(
             "hirsel.sibling-reads.v1",
             [&encode(&(siblings.row, reads))?[..]],

@@ -1964,6 +1964,113 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
     assert_ne!(code, Some(0), "mismatched --expect-verdict must fail");
 
     test_pass_cache_cli();
+    inspect_cli();
+}
+
+fn inspect_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let file = app.join("main.hirsel");
+    let source = r#"
+pub opaque type Token {
+    private_word: u64,
+}
+pub fn echo[T: plain](x: T, output: Stdout) -> T waits {
+    result.unwrap(stdout.write(output, "echo"))
+    x
+}
+
+fn base() -> u64 { 7u64 }
+fn middle() -> u64 { base() }
+const ANSWER: u64 = 11u64
+fn folded() -> u64 { ANSWER }
+fn orphan() {}
+
+pub fn main() -> Result[(), Exit] { Ok(()) }
+
+@test fn from_base() -> Result[(), ()] {
+    if middle() >= 7u64 { Ok(()) } else { Error(()) }
+}
+@test fn from_constant() -> Result[(), ()] {
+    if folded() >= 11u64 { Ok(()) } else { Error(()) }
+}
+@test fn independent() -> Result[(), ()] { Ok(()) }
+"#;
+    std::fs::write(&file, source).unwrap();
+    let runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap());
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let command = |name: &str, args: &[&str]| {
+        let mut invocation = vec![
+            name.into(),
+            app.display().to_string(),
+            "--libraries".into(),
+            root.join("core").display().to_string(),
+            "--source-core".into(),
+        ];
+        invocation.extend(args.iter().map(|s| (*s).to_owned()));
+        let output = process::tape_request_command(&invocation, dir.path())
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .output()
+            .unwrap();
+        let out = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{invocation:?}\n{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        out.split_once(process::CHILD_MARK).unwrap().1.to_owned()
+    };
+    let inspect = |args| command("inspect", args);
+    let interface: serde_json::Value =
+        serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
+    assert_eq!(interface, serde_json::json!({
+        "version": 1,
+        "package": {"name": "app", "version": "1"},
+        "modules": [{"path": ["main"], "extends_core": false, "items": [
+            {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
+            {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
+            {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
+        ]}],
+    }));
+    assert_eq!(inspect(&["--dependents", "main/base"]), "app@1/main/middle\n");
+    assert_eq!(
+        inspect(&["--dependents", "app@1/main/base", "--transitive"]),
+        "app@1/main/from_base\napp@1/main/middle\n",
+    );
+    assert_eq!(
+        inspect(&["--unused"]),
+        "app@1/main/Token\napp@1/main/echo\napp@1/main/orphan\n",
+    );
+    let library = inspect(&["--unused", "--library"]);
+    assert!(library.lines().any(|line| line == "app@1/main/orphan"));
+    assert!(!library.lines().any(|line| line == "app@1/main/echo"));
+
+    let executed = || {
+        let clang = llvm.join("bin/clang");
+        let output: serde_json::Value = serde_json::from_str(&command("test", &[
+            "--json", "--limit", "1048576", "--runtime", runtime.to_str().unwrap(),
+            "--cc", clang.to_str().unwrap(),
+        ])).unwrap();
+        let tests = output["tests"].as_array().unwrap();
+        assert_eq!(tests.len(), 3);
+        tests.iter()
+            .filter(|row| row["source"] == "executed")
+            .map(|row| row["definition"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(executed(), ["app@1/main/from_base", "app@1/main/from_constant", "app@1/main/independent"]);
+
+    let affected = inspect(&["--affected-tests", "main/base"]);
+    assert_eq!(affected, "app@1/main/from_base\n");
+    let edited = source.replace("7u64 }", "8u64 }");
+    std::fs::write(&file, &edited).unwrap();
+    assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
+
+    let affected = inspect(&["--affected-tests", "main/ANSWER"]);
+    assert_eq!(affected, "app@1/main/from_constant\n");
+    std::fs::write(&file, edited.replace("= 11u64", "= 12u64")).unwrap();
+    assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
 }
 
 fn test_pass_cache_cli() {

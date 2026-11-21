@@ -11,6 +11,7 @@ mod host;
 mod image;
 mod image_index;
 mod image_unit;
+mod inspect;
 pub mod installation;
 mod product;
 pub mod sdk;

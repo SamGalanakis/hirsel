@@ -128,7 +128,7 @@ else is done. A provider operation that has been issued completes and delivers a
 while it waits in progress for readiness, through its provider's abort, whose result is the
 operation's `Aborted` error; the request stays pending and is observed at the next
 cancellation point. An operation that does not wait after issue is reached only at issue,
-and no host operation of v1 waits after issue.
+and in v1 only the socket operations and `stdin.read` wait after issue.
 A user function declared `waits` is not itself a cancellation point. A flow operation ends at its closure within the stages' step bounds and observes no cancellation. A task looping over flow operations observes cancellation only where it reaches an explicit cancellation point. Observing a request is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
 cancelled. A step bound may stop it, and the scheduler may run another task at its slice

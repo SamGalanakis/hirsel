@@ -36,7 +36,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
-| `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |
+| `args`, `env`, `host`, `stdin`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [env](../../core/core/env.hirsel), [host](../../core/core/host.hirsel), [stdin](../../core/core/stdin.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5, CAP-7 |
 
 A library module may extend a core module by name (LANG-7).
 
@@ -378,8 +378,24 @@ operations it names; nothing else about them may be inferred from an implementat
   the replay point at issue and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)),
   and a simulation supplies its own.
   `host.stopped(p: Process) waits` observes the first SIGTERM or SIGINT
-  ([CAP-5](capabilities.md#cap-5-provider-operations)). `Stdin` and `Env` have no
-  operations in v1.
+  ([CAP-5](capabilities.md#cap-5-provider-operations)).
+  `stdin.read(i, mut buf, until)` appends at most the spare capacity of `buf` from the
+  run's standard input and returns the count, `Ok(0)` at end of input or when `buf` has no
+  spare capacity. Each byte the host supplies is delivered by exactly one read, whichever
+  copy of `Stdin` issued it. Like the socket operations of [NET-1](net.md#net-1-socket-operation-declarations), it
+  waits after issue for readiness: it is a cancellation point at issue and while it waits, and gives `Aborted` when cancellation
+  reaches it there and `TimedOut` when `until` passes, in both cases having appended
+  nothing. Bytes the host supplies afterwards go to the next read. The provider never
+  changes the flags of the inherited descriptor
+  ([stdin](../../core/std/api/stdin.md)). An `Env` designates name patterns over a
+  snapshot of the environment that the launcher takes before `main`. The snapshot holds
+  the covered variables whose names are UTF-8, lives outside every limit and never
+  changes. `env.get` gives `Denied` for a name no pattern covers, `None` for a covered
+  name that is not set, and `NotUtf8` for a value that is not UTF-8. `env.len` and
+  `env.name` list the covered names bytewise, and `env.narrow` intersects patterns
+  ([CAP-7](capabilities.md#cap-7-attenuation), [env](../../core/std/api/env.md)). They
+  are not provider operations: the snapshot enters with the entry's grants
+  ([CAP-8](capabilities.md#cap-8-the-replay-point)).
 - **Other results.** `box.unbox` returns the payload and refunds the node. `ParseError`'s
   `Invalid` holds a byte position. A
   `Box`, `Rc` or `Arc` is read through its payload where its own type does not fit

@@ -62,9 +62,11 @@ hirsel run app --dir . --grant Stdout -- input.txt normal
 
 `main` receives its authority as parameters ([CAP-4](spec/capabilities.md#cap-4-entry-grants)).
 `--dir PATH` grants a confined directory, one per Dir parameter in order, and
-`--grant KIND` grants Clock, Random, Stdout, Stderr, Stdin, Env, Process or
+`--grant KIND` grants Clock, Random, Stdout, Stderr, Stdin, Process or
 Tasks. Net requires `--grant 'Net=<dir> <prefix>/<len> <lo>-<hi>[;<rule>]'`
-with explicit rules ([Net sockets](spec/net.md)). A missing grant is refused before native code is emitted, naming the parameter
+with explicit rules ([Net sockets](spec/net.md)). Env requires
+`--grant 'Env=<pattern>[,<pattern>]'`, where a pattern is a variable name or a prefix
+followed by `*` ([Env](../core/std/api/env.md)). A missing grant is refused before native code is emitted, naming the parameter
 and the option it needs. Everything after `--` is passed to the program as `Args`.
 
 The installation links with its own `bin/ld.lld` through the C driver it recorded at

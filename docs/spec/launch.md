@@ -161,8 +161,8 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   registry and reports it on the status route.
 - `grants` is every grant baked into the executable, one canonical string each,
   sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
-  `Net=` followed by the rule text `--grant` takes, and `Dir=` followed by the
-  path `--dir` took. The strings are a display of the recipe's grant bindings
+  `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, and `Dir=`
+  followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
   (below), which say which parameter receives each one. A directory path stays as
   given. It is resolved against the launch's working directory at startup, which
   the manifest does not know.

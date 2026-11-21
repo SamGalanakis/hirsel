@@ -159,7 +159,8 @@ replay point and no value depends on it ([SEM-5](semantics.md#sem-5-maps)).
 
 A capability can be narrowed by its module's functions: a `Dir` to a subdirectory or to
 read-only access, a `Net` to a subset of its rules (including its `Tls` rules,
-[TLS-3](tls.md#tls-3-authority)), a `Secret` to fewer destination names, a `Tasks` to a
+[TLS-3](tls.md#tls-3-authority)), a `Secret` to fewer destination names, an `Env` to fewer
+variable names ([env](../../core/std/api/env.md)), a `Tasks` to a
 child limit. A narrowed
 capability never permits more than its source. No operation widens a capability or
 combines two into more than either.

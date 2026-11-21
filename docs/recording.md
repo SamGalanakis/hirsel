@@ -83,6 +83,14 @@ both offered buffers and the absolute deadline, and its delivery how many bytes 
 committed. A final readiness attempt at a deadline can deliver a successful receive,
 including its bytes.
 
+**Standard input and environment.** Each `stdin.read` issue holds the spare capacity of
+its buffer and its deadline. Its delivery holds the bytes in their original fragment
+sizes, or `Aborted`, `TimedOut` or the host error. An Env grant is recorded in the grant
+snapshot with its patterns and the launcher's snapshot of the covered names and values.
+`env.get`, `env.len` and `env.name` read that snapshot and add no frames. A replay
+supplies both from the recording and reads neither the host's standard input nor its
+environment.
+
 **TLS sessions.** A TLS stream is recorded through the `Net` grant it runs over.
 
 | operation | at issue (checked on replay) | at delivery (supplied on replay) |
@@ -163,7 +171,7 @@ then exits 1. A `Sealed` replay exits 0.
 
 A recording holds what servers sent to the run, exactly as received, so a recording of a
 run that used a `Net` grant for a TLS session, sent through a `Secret`, or received minted
-tokens, `Authorization` headers or `Random` bytes holds credentials. Every recording is
+tokens, `Authorization` headers, `Random` bytes or environment values holds credentials. Every recording is
 treated as **credential-bearing**:
 
 - its file is created readable only by its owner, at a path that does not exist yet;

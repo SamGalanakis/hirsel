@@ -28,3 +28,44 @@ fn keep_copy(p: foreign.Ptr[Obj]) { let q = p }
 // expect: refuse LANG-11 at 18:57
 // expect: emit keep
 // expect: emit keep_copy
+
+fn allocate_while_parked(take n: u64) -> u64 {
+    let mut count = 0u64
+    for _ in 0u64 .. n {
+        let mut scratch: Bytes = list.with_capacity(16)
+        list.push(mut scratch, 1u8)
+        count = count + list.len(scratch)
+    }
+    count
+}
+
+@test
+fn fl5_mutable_loan(f: Foreign[Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let mut d: Bytes = list.with_capacity(4)
+    list.fill(mut d, 4, 0)
+    let child = task.spawn(tasks, bytes 65536, 10000u64, allocate_while_parked)
+    let written = native.mark_w(f, mut d)
+    let allocations = result.unwrap(task.join(take child))
+    if written != 4 || allocations != 10000 || list.len(d) != 4 { return Error(()) }
+    for byte in d {
+        if byte != 0xABu8 { return Error(()) }
+    }
+    Ok(())
+}
+
+@test
+fn fl5_immutable_slice(f: Foreign[Laws]) -> Result[(), ()] {
+    let mut c: Bytes = list.with_capacity(12)
+    for i in 0u64 .. 12u64 {
+        let byte: u8 = int.narrow(i)
+        list.push(mut c, byte)
+    }
+    let middle = list.slice(c, 4, 8)
+    let len = native.loan_length(f, middle)
+    let sum = native.loan_sum(f, middle)
+    if len == 4 && sum == 22 { Ok(()) } else { Error(()) }
+}
+
+// expect: call fl5_mutable_loan ffi_laws@1/native/mark_w
+// expect: call fl5_immutable_slice ffi_laws@1/native/loan_length
+// expect: call fl5_immutable_slice ffi_laws@1/native/loan_sum

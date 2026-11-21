@@ -9,3 +9,7 @@ pub fn replace(f: Foreign[laws.Laws], take p: foreign.Ptr[laws.Obj], x: u64) -> 
 // expect: refuse FFI-5 at 4:40
 // expect: refuse FFI-5 at 5:38
 // expect: refuse FFI-5 at 6:8
+
+pub fn mark_w(f: Foreign[laws.Laws], mut b: Bytes) -> u64 waits
+pub fn loan_length(f: Foreign[laws.Laws], b: Bytes) -> u64
+pub fn loan_sum(f: Foreign[laws.Laws], b: Bytes) -> u64

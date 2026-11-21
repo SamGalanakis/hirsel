@@ -1547,7 +1547,14 @@ fn foreign_case(name: &str) {
                     let path = DefPath::from_full(&format!("{module}/{name}")).unwrap();
                     let body = &checked.definitions[&path];
                     let ir = body.ir().unwrap();
-                    let function = &ir.functions[body.check.function.unwrap().index()];
+                    let function = body.check.function.unwrap_or_else(|| {
+                        panic!(
+                            "{path} did not emit: {:?}; {}",
+                            body.check.gaps,
+                            serde_json::to_string(&diagnostics).unwrap()
+                        )
+                    });
+                    let function = &ir.functions[function.index()];
                     let target = DefPath::from_full(callee).unwrap();
                     let body = function.body.as_ref().unwrap();
                     let anchor = body

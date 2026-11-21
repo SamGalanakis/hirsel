@@ -118,6 +118,13 @@ fn identity_unavailable() {
 
 #[test]
 fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
+    // The descriptor table is process-wide. Other tests can open and close
+    // descriptors between these snapshots.
+    if crate::test_process::run_isolated(
+        "entry_tests::describe_launch_skips_directory_grants_and_owns_only_transport_fds",
+    ) {
+        return;
+    }
     let scratch = tempfile::tempdir().unwrap();
     let path = scratch.path().join("describe.out");
     let out = File::create(&path).unwrap();

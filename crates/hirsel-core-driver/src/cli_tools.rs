@@ -84,11 +84,22 @@ fn print_format_refusal(
     }
 }
 
+/// docs/PRIMER.md, which `hirsel primer` and `hirsel explain primer` print.
+pub const PRIMER: &str = include_str!("../../../docs/PRIMER.md");
+
 pub fn explain(
     rule: Option<&str>,
     list: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if rule == Some("primer") && !list {
+        if json {
+            println!("{}", serde_json::json!({"name": "primer", "text": PRIMER}));
+        } else {
+            print!("{PRIMER}");
+        }
+        return Ok(());
+    }
     if rule == Some("debug-lines") && !list {
         let statement = "--debug-lines on|off controls native line tables for build, run and test. Line tables default to off on every profile and both engines; pass --debug-lines on to opt in. It changes native object and link cache identities. Failure-site symbols, current source tables and file:line:column failure reports are always enabled. A line-only edit recompiles no existing native object; with rows on, the link-time writer rebinds current debug coordinates.";
         if json {

@@ -135,9 +135,8 @@ fn f(take s: String) -> String { let t = s; s }           // refused: OWN-5, s m
 ```
 
 A counted payload is immutable except through `rc.with_unique` and `arc.with_unique`, so
-sharing is safe (MEM-14, MEM-15). A scoped value
-cannot be stored in an own type's field, put in a collection or returned past what it
-reads (OWN-19).
+sharing is safe (MEM-14, MEM-15). A scoped value cannot be stored in an own type's field,
+put in a collection or returned past what it reads (OWN-19).
 
 ## 5. Views, `mut` and `take`
 
@@ -189,8 +188,8 @@ fn quarter(n: u64) -> Result[u64, ParseError] { half(n); Ok(0) }   // refused: L
 Discard a result explicitly with `let _ = e`. A **failure** is not a value. Integer
 overflow, an index out of bounds, `fail("msg")`, `option.unwrap(None)` and a refused
 allocation (`Capacity`) each clean every scope and end the task. A failure in `main`'s
-task exits 101 and prints the cause chain (FAIL-1, PROG-3). `isolate(fn() -> R { .. })` catches a failure as
-`Ok(Error(causes))`, and it undoes nothing (FAIL-16).
+task exits 101 and prints the cause chain (FAIL-1, PROG-3). `isolate(fn() -> R { .. })`
+catches a failure as `Ok(Error(causes))`, and it undoes nothing (FAIL-16).
 
 ## 7. Memory: `bound bytes`, `region` and `@compact`
 
@@ -337,7 +336,7 @@ hirsel check                       # prints file:line:col: RULE message
 hirsel explain OWN-7               # the rule a refusal cites, with an example
 hirsel test                        # every @test, each in its own process
 hirsel run --grant Stdout -- a b   # build and run; grants are explicit
-hirsel build --release -o app      # a native executable
+hirsel build --release -o program  # a native executable
 hirsel inspect --std --interface   # every public std declaration
 hirsel fmt .                       # canonical formatting
 ```

@@ -859,7 +859,7 @@ impl Host {
                     self.records.write_deploy(&record)?;
                     self.records.clear_pending(record.attempt)?;
                     report.activation = Some(at);
-                    report.pause_ms = pause.elapsed().as_millis();
+                    report.pause_ms = pause.elapsed().as_nanos().div_ceil(1_000_000);
                     live.wait_retired(START_TIMEOUT)?;
                     self.collect(observed.store, retain_from)?;
                     *old = Running {

@@ -272,7 +272,7 @@ fn routes(h: Latest[Config]) -> u64 { let c = latest.read(h); list.len(c.routes)
 
 A **flow** is a resource, held by the task that made it (its **owner**), that runs a fixed graph of
 **stages** joined by **ports**. Items, and the state of each stage, are `plain + codec`
-([OWN-4](ownership.md#own-4-bounds)) and hold nothing ([OWN-2](ownership.md#own-2-type-summaries)), whatever
+([OWN-4](ownership.md#own-4-bounds)), so `inert`: they hold nothing ([OWN-2](ownership.md#own-2-type-summaries)), whatever
 their `via`. A type argument that holds something is refused. A port moves an item by copying its plain
 representation.
 

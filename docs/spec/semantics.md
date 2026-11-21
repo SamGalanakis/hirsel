@@ -293,8 +293,9 @@ String }`. So only the declaring module can write it, as only it can declare the
 `R`, the type after `via`, must be `codec`, checked as a field's type is against the
 declaration's bounds ([OWN-4](ownership.md#own-4-bounds)). A `via` codec encodes only `R`.
 The actual fields need no codec of their own. OWN-4 still governs which types can
-declare `codec` and requires the actual fields to have an empty holds set
-([OWN-2](ownership.md#own-2-type-summaries)).
+declare `codec` and requires the actual fields to be `inert` (an empty holds set,
+[OWN-2](ownership.md#own-2-type-summaries)), so a decoded value holds no capability or
+other authority.
 `to` and `from` name functions of the declaring module: `to` takes the value as a view and
 returns a view of an `R` it holds, `fn text(e: Email) -> View[String] in e`, and `from` is
 `fn(take R) -> Result[T, E]` for some `E`. Encoding writes `to`'s `R` with R's codec, so a

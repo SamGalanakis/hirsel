@@ -215,7 +215,7 @@ generics    = "[", nonempty(generic), "]" ;
 generic     = name, [ ":", bounds ] | "in", name ;
 bounds      = bound-name, { "+", bound-name } ;
 bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "float"
-            | "packed" | "streamable" | "codec" ;
+            | "packed" | "streamable" | "codec" | "inert" ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
 type-def    = [ "resource" | "scoped" ], "type", name, [ generics ],
               [ ":", bounds, [ via ] ], [ "grant", "bytes", integer ],

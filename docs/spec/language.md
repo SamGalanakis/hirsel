@@ -481,7 +481,9 @@ type holds no resource, no capability, no view, no scoped value and no region re
 any depth, as its type
 summary records ([OWN-2](ownership.md#own-2-type-summaries)): plain values other than
 capabilities, own values, counted holders of such values, and nothing whose summary may
-hold a capability, such as a type parameter or `Wrap[T]` for `type Wrap[T: plain] { item: T }`. Resources and capabilities reach a closure as call arguments. The environment
+hold a capability, such as a type parameter or `Wrap[T]` for `type Wrap[T: plain] { item: T }`,
+unless its bounds include `inert` or `codec`, which implies it
+([OWN-4](ownership.md#own-4-bounds)): `T: inert` and `Wrap[T]` for `T: codec` may be captured. Resources and capabilities reach a closure as call arguments. The environment
 holds the captures in the order the body first names them, and cleaning it cleans them in
 reverse.
 

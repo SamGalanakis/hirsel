@@ -92,7 +92,7 @@ a group holds the union of what the group's fields hold directly and what the ot
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
 holding every category its bounds do not exclude: `plain` excludes resource, scoped value,
 region reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
-capability. A generic declaration's summary is stated
+capability; `inert` (OWN-4) excludes every category, and so does `codec`, which implies it. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
 parameter that no field **mentions** contributes nothing to it: a field mentions `T` when its
 type is `T`, or names a type whose summary lets that argument position condition something,
@@ -162,15 +162,23 @@ The bounds are:
   and build its values from decoded bytes, so for an opaque type decoding is a
   construction outside its module that its owner has allowed. With `via`
   ([SEM-10](semantics.md#sem-10-codecs)), the type after it must have `codec` and every
-  decode passes the owner's `from`. Each actual field must still hold nothing
-  (OWN-2), including after substituting type arguments.
+  decode passes the owner's `from`. `codec` implies `inert`, on the type's own fields,
+  `via` or not: each actual field must hold nothing (OWN-2), including after substituting
+  type arguments, and a `via` type whose field holds anything is refused at that field. So
+  decoding never builds authority, and a body may rely on `inert` for `T: codec`.
+- `inert`: exactly the types whose holds set (OWN-2) is empty: no resource, capability,
+  scoped value, region reference or opaque owner at any depth. It is computed from the
+  summary, like `plain`, and independent of it: `List[u64]` is inert and not plain, and a
+  `Dir` is plain and not inert. On a type parameter it is a bound the argument must have,
+  and a body may rely on it: a value of type `T: inert` carries no authority, so an owning
+  closure may capture it ([LANG-14](language.md#lang-14-captures)).
 - `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
   only on the type parameters of core declarations ([core](core.md)), and are refused
   anywhere else: numeric generics are not in v1
   ([reserved](reserved.md#not-in-v1)). Each implies every bound that all the types it admits
   have, so a body may rely on those and an instance needs no further check: `T: integer` is
-  also `plain`, `shareable`, `send`, `key`, `ordered`, `codec`, `packed` and `streamable`, and `T:
-  float` is `plain`, `shareable`, `send`, `codec`, `packed` and `streamable` but neither
+  also `plain`, `shareable`, `send`, `key`, `ordered`, `codec`, `inert`, `packed` and `streamable`, and `T:
+  float` is `plain`, `shareable`, `send`, `codec`, `inert`, `packed` and `streamable` but neither
   `key` nor `ordered`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
   }` copies and compares, and `fn same[T: float](a: T, b: T) -> bool { a == b }` is refused
   by [LANG-21](language.md#lang-21-operators).
@@ -190,7 +198,9 @@ instance has a declared bound exactly when each type argument that the fields me
 same rule gives the built-in rows of [core](core.md#built-in-types) their "when T", and an
 opaque type's published summary carries which parameters condition each bound, without
 its fields. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key`, `ordered` or `codec` does
-not have it, plain types' `shareable` and `send` excepted. `plain`, `packed` and `streamable` are never declared.
+not have it, plain types' `shareable` and `send` excepted. `plain`, `inert`, `packed` and `streamable` are never
+declared on a type: they are computed, and one written after a type's name is refused here, at
+that bound.
 
 ```hirsel
 type Leaf: shareable + send { n: List[u64] }
@@ -223,6 +233,19 @@ resource type Lease: codec { n: u64 }                 // refused: OWN-4, a resou
 ```
 ```hirsel
 fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, integer outside core
+```
+```hirsel unbuilt
+fn equals[T: inert + key](take x: T) -> Result[own fn(T) -> bool, (Capacity, T)] { fn(y: T) -> bool { y == x } }
+fn same[T: codec + key](take x: T) -> Result[own fn(T) -> bool, (Capacity, T)] { fn(y: T) -> bool { y == x } }
+```
+```hirsel unbuilt
+type Tagged: inert { n: u64 }                             // refused: OWN-4, inert is computed
+```
+```hirsel unbuilt
+type DoorWire: codec { n: u64 }
+pub opaque type Door: codec via DoorWire (to: wire, from: open) { w: DoorWire, dir: Dir }   // refused: OWN-4, at dir: codec implies inert
+fn wire(d: Door) -> View[DoorWire] in d { view d.w }
+fn open(take w: DoorWire) -> Result[Door, ()] { Error(()) }
 ```
 
 ### OWN-5: Availability

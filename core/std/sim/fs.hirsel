@@ -1,0 +1,767 @@
+/// A filesystem image. Its histories keep file bytes and directory entries
+/// independently durable. Open handles belong to a single serving session.
+pub opaque type Fs: send {
+    nodes: List[Inode],
+    sequence: u64
+}
+
+type Inode: send {
+    directory: bool,
+    history: List[Version]
+}
+
+type Version: send {
+    sequence: u64,
+    modified: i64,
+    data: Bytes,
+    names: Map[String, u64]
+}
+
+type OpenFile {
+    node: u64,
+    readable: bool,
+    writable: bool,
+    append: bool,
+    cursor: u64
+}
+
+type Listing {
+    records: List[Bytes],
+    next: u64
+}
+
+type Session {
+    next_id: u64,
+    site: u64,
+    dirs: Map[u64, u64],
+    files: Map[u64, OpenFile],
+    locks: Map[u64, u64],
+    listings: Map[u64, Listing]
+}
+
+fn empty() -> Version {
+    Version(sequence: 0, modified: 0, data: list.new(), names: map.new())
+}
+
+fn inode(directory: bool) -> Inode {
+    let mut history: List[Version] = list.with_capacity(1)
+    list.push(mut history, empty())
+    Inode(directory: directory, history: take history)
+}
+
+/// Creates an empty filesystem. A new port from provide.dir mounts its root.
+pub fn new() -> Fs {
+    let mut nodes: List[Inode] = list.with_capacity(1)
+    list.push(mut nodes, inode(true))
+    Fs(nodes: take nodes, sequence: 0)
+}
+
+fn current(node: Inode) -> View[Version] in node {
+    node.history[list.len(node.history) - 1]
+}
+
+fn retain(mut node: Inode, at: u64) {
+    let saved = list.set(mut node.history, at, empty())
+    list.clear(mut node.history)
+    list.push(mut node.history, take saved)
+}
+
+/// Keeps every synced version plus the operations at or before one seeded
+/// cut. An unsynced rename's two edits have the same sequence number.
+pub fn crash(mut fs: Fs, mut plan: sim.world.Plan) {
+    let cut = sim.world.pick(mut plan, fs.sequence + 1)
+    for i in 0u64 .. list.len(fs.nodes) {
+        let mut at = list.len(fs.nodes[i].history) - 1
+        while at > 0 && fs.nodes[i].history[at].sequence > cut {
+            at -= 1
+        }
+        retain(mut fs.nodes[i], at)
+    }
+    fs.sequence = 0
+}
+
+fn lookup(node: Inode, name: String) -> Option[u64] {
+    match map.get(current(node).names, name) {
+        Some(id) => Some(id),
+        None => None
+    }
+}
+
+fn parent(fs: Fs, start: u64, p: String) -> Result[u64, IoError] {
+    if !path.is_valid(p) {
+        return Error(Denied)
+    }
+    let end = string.byte_len(p)
+    let mut at: u64 = 0
+    let mut dir = start
+    while let Some((part, next)) = string.next_split(p, at, "/") {
+        if next > end {
+            return Ok(dir)
+        }
+        dir = match lookup(fs.nodes[dir], part) {
+            Some(id) => id,
+            None => return Error(NotFound)
+        }
+        if !fs.nodes[dir].directory {
+            return Error(Denied)
+        }
+        at = next
+    }
+    Error(Denied)
+}
+
+fn target(fs: Fs, dir: u64, name: String) -> Result[u64, IoError] {
+    let root = parent(fs, dir, name)?
+    match lookup(fs.nodes[root], path.name(name)) {
+        Some(id) => Ok(id),
+        None => Error(NotFound)
+    }
+}
+
+fn payload(c: Call[DirOp], field: u64, n: u64) -> Result[Bytes, IoError] {
+    let mut data: Bytes = list.with_capacity(n)
+    provide.payload(c, field, mut data)
+    if list.len(data) == n {
+        Ok(take data)
+    } else {
+        Error(Closed)
+    }
+}
+
+fn read_name(c: Call[DirOp], field: u64, n: u64) -> Result[String, IoError] {
+    let raw = payload(c, field, n)?
+    match string.from_utf8(take raw) {
+        Ok(take text) => Ok(take text),
+        Error(_) => Error(Denied)
+    }
+}
+
+fn answer(mut s: Served[DirOp], take c: Call[DirOp], r: DirReply) -> bool {
+    match provide.reply(mut s, take c, provide.dir_reply(r)) {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+fn written_error(e: IoError) -> DirReply {
+    WriteFailed(WriteError(written: 0, error: e))
+}
+
+fn stat(node: Inode) -> DirReply {
+    let v = current(node)
+    Stat(Stat(kind: if node.directory {
+        Directory
+    } else {
+        File
+    }, size: list.len(v.data), modified_ns: v.modified))
+}
+
+fn close(mut session: Session, id: u64) {
+    let _ = map.remove(mut session.listings, id)
+    if let Some(f) = map.remove(mut session.files, id) {
+        if lock_holder(session, f.node) == Some(id) {
+            let _ = map.remove(mut session.locks, f.node)
+        }
+    }
+}
+
+fn edit(mut fs: Fs, id: u64, take v: Version) {
+    list.push(mut fs.nodes[id].history, take v)
+}
+
+fn revised(v: Version, seq: u64, modified: i64) -> Version {
+    Version(sequence: seq, modified: modified, data: clone(v.data), names: clone(v.names))
+}
+
+fn insert_node(mut fs: Fs, dir: u64, take v: Version, take node: Inode) {
+    fs.sequence = v.sequence
+    edit(mut fs, dir, take v)
+    list.push(mut fs.nodes, take node)
+}
+
+fn file_handle(session: Session, id: u64) -> OpenFile {
+    match map.get(session.files, id) {
+        Some(f) => f,
+        None => fail("unknown simulated file")
+    }
+}
+
+fn dir_handle(session: Session, id: u64) -> u64 {
+    if id == 0 {
+        return 0
+    }
+    match map.get(session.dirs, id) {
+        Some(dir) => dir,
+        None => fail("unknown simulated directory")
+    }
+}
+
+fn lock_holder(session: Session, node: u64) -> Option[u64] {
+    match map.get(session.locks, node) {
+        Some(id) => Some(id),
+        None => None
+    }
+}
+
+fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let base = match parent(fs, dir, p) {
+        Ok(id) => id,
+        Error(e) => {
+            let _ = answer(mut s, take c, Failed(e));
+            return
+        }
+    }
+    let leaf = path.name(p)
+    let id = session.next_id
+    let (readable, writable, append, create, truncate) = match mode {
+        Read => (true, false, false, false, false),
+        Write => (false, true, false, false, true),
+        ReadWrite => (true, true, false, false, false),
+        Append => (false, true, true, false, false),
+        CreateNew => (false, true, false, true, false)
+    }
+    let existing = lookup(fs.nodes[base], leaf)
+    let node = match existing {
+        Some(node) => {
+            if create || fs.nodes[node].directory {
+                let e: IoError = if create {
+                    Exists
+                } else {
+                    Denied
+                }
+                let _ = answer(mut s, take c, Failed(e))
+                return
+            }
+            node
+        },
+        None => {
+            if !writable {
+                let _ = answer(mut s, take c, Failed(NotFound))
+                return
+            }
+            list.len(fs.nodes)
+        }
+    }
+    map.reserve(mut session.files, 1)
+    let seq = fs.sequence + 1
+    if existing == None {
+        let mut entry = revised(current(fs.nodes[base]), seq, modified)
+        map.insert(mut entry.names, string.from(leaf), node)
+        let mut created = inode(false)
+        created.history[0].modified = modified
+        list.reserve(mut fs.nodes, 1)
+        list.reserve(mut fs.nodes[base].history, 1)
+        if !answer(mut s, take c, File(id)) {
+            return
+        }
+        insert_node(mut fs, base, take entry, take created)
+    } else if truncate {
+        list.reserve(mut fs.nodes[node].history, 1)
+        let v = Version(sequence: seq, modified: modified, data: list.new(), names: map.new())
+        if !answer(mut s, take c, File(id)) {
+            return
+        }
+        edit(mut fs, node, take v)
+        fs.sequence = seq
+    } else {
+        if !answer(mut s, take c, File(id)) {
+            return
+        }
+    }
+    session.next_id += 1
+    map.insert(mut session.files, id, OpenFile(node: node, readable: readable, writable: writable, append: append, cursor: 0))
+}
+
+fn read(fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u64, mut s: Served[DirOp], take call: Call[DirOp]) {
+    let mut c = take call
+    let f = file_handle(session, id)
+    if !f.readable {
+        let _ = answer(mut s, take c, Failed(Denied))
+        return
+    }
+    let data = current(fs.nodes[f.node]).data
+    let at = match offset {
+        Some(at) => at,
+        None => f.cursor
+    }
+    let end = list.len(data)
+    let count: u64 = if at >= end {
+        0
+    } else {
+        provide.fill(mut s, mut c, list.slice(data, at, at + order.min(room, end - at)))
+    }
+    let committed = answer(mut s, take c, Count(count))
+    if committed && offset == None {
+        let _ = map.update(mut session.files, id, scoped fn(mut file: OpenFile) {
+            file.cursor += count
+        })
+    }
+}
+
+fn write(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], take data: Bytes, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let f = file_handle(session, id)
+    if !f.writable || (f.append && offset != None) {
+        let _ = answer(mut s, take c, written_error(Denied))
+        return
+    }
+    let n = list.len(data)
+    if n == 0 {
+        let _ = answer(mut s, take c, Done)
+        return
+    }
+    let seq = fs.sequence + 1
+    let mut v = revised(current(fs.nodes[f.node]), seq, modified)
+    let at = if f.append {
+        list.len(v.data)
+    } else {
+        match offset {
+            Some(at) => at,
+            None => f.cursor
+        }
+    }
+    let end = match int.checked_add(at, n) {
+        Some(end) => end,
+        None => {
+            let _ = answer(mut s, take c, written_error(Other(27)));
+            return
+        }
+    }
+    let extra = int.saturating_sub(end, list.len(v.data))
+    list.fill(mut v.data, extra, 0)
+    list.copy_from_slice(mut v.data, at, data)
+    list.reserve(mut fs.nodes[f.node].history, 1)
+    if answer(mut s, take c, Done) {
+        edit(mut fs, f.node, take v)
+        fs.sequence = seq
+        if offset == None {
+            let _ = map.update(mut session.files, id, scoped fn(mut file: OpenFile) {
+                file.cursor = end
+            })
+        }
+    }
+}
+
+fn make_dir(mut fs: Fs, mut session: Session, dir: u64, p: String, suffix: Option[View[Bytes]], modified: i64, mut s: Served[DirOp], take call: Call[DirOp]) {
+    let mut c = take call
+    let base = match parent(fs, dir, p) {
+        Ok(id) => id,
+        Error(e) => {
+            let _ = answer(mut s, take c, Failed(e));
+            return
+        }
+    }
+    let leaf = path.name(p)
+    if lookup(fs.nodes[base], leaf) != None {
+        let _ = answer(mut s, take c, Failed(Exists))
+        return
+    }
+    let node = list.len(fs.nodes)
+    let mut entry = revised(current(fs.nodes[base]), fs.sequence + 1, modified)
+    map.insert(mut entry.names, string.from(leaf), node)
+    let mut created = inode(true)
+    created.history[0].modified = modified
+    list.reserve(mut fs.nodes, 1)
+    list.reserve(mut fs.nodes[base].history, 1)
+    let id = session.next_id
+    let reply: DirReply = match suffix {
+        Some(raw) => {
+            map.reserve(mut session.dirs, 1)
+            let _ = provide.fill(mut s, mut c, raw)
+            Dir(id)
+        },
+        None => Done
+    }
+    let needs_handle = match suffix {
+        Some(_) => true,
+        None => false
+    }
+    if answer(mut s, take c, reply) {
+        insert_node(mut fs, base, take entry, take created)
+        if needs_handle {
+            session.next_id += 1
+            map.insert(mut session.dirs, id, node)
+        }
+    }
+}
+
+fn remove(mut fs: Fs, dir: u64, p: String, tree: bool, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let base = match parent(fs, dir, p) {
+        Ok(id) => id,
+        Error(e) => {
+            let _ = answer(mut s, take c, Failed(e));
+            return
+        }
+    }
+    let leaf = path.name(p)
+    let node = match lookup(fs.nodes[base], leaf) {
+        Some(id) => id,
+        None => {
+            let _ = answer(mut s, take c, Failed(NotFound));
+            return
+        }
+    }
+    if tree && !fs.nodes[node].directory {
+        let _ = answer(mut s, take c, Failed(Denied))
+        return
+    }
+    if !tree && map.len(current(fs.nodes[node]).names) != 0 {
+        let _ = answer(mut s, take c, Failed(Other(39)))
+        return
+    }
+    let mut v = revised(current(fs.nodes[base]), fs.sequence + 1, modified)
+    let _ = map.remove(mut v.names, leaf)
+    list.reserve(mut fs.nodes[base].history, 1)
+    if answer(mut s, take c, Done) {
+        fs.sequence = v.sequence
+        edit(mut fs, base, take v)
+    }
+}
+
+fn rename(mut fs: Fs, dir: u64, from: String, to: String, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let bases = (parent(fs, dir, from), parent(fs, dir, to))
+    let (old_base, new_base) = match bases {
+        (Ok(old), Ok(dest)) => (old, dest),
+        (Error(e), _) => {
+            let _ = answer(mut s, take c, Failed(e));
+            return
+        },
+        (_, Error(e)) => {
+            let _ = answer(mut s, take c, Failed(e));
+            return
+        }
+    }
+    let old_name = path.name(from)
+    let new_name = path.name(to)
+    let node = match lookup(fs.nodes[old_base], old_name) {
+        Some(id) => id,
+        None => {
+            let _ = answer(mut s, take c, Failed(NotFound));
+            return
+        }
+    }
+    let destination = lookup(fs.nodes[new_base], new_name)
+    let dest_is_dir = match destination {
+        Some(id) => fs.nodes[id].directory,
+        None => false
+    }
+    if fs.nodes[node].directory || dest_is_dir {
+        let _ = answer(mut s, take c, Failed(Denied))
+        return
+    }
+    if destination == Some(node) {
+        let _ = answer(mut s, take c, Done)
+        return
+    }
+    let seq = fs.sequence + 1
+    let mut source = revised(current(fs.nodes[old_base]), seq, modified)
+    let _ = map.remove(mut source.names, old_name)
+    list.reserve(mut fs.nodes[old_base].history, 1)
+    if old_base == new_base {
+        map.insert(mut source.names, string.from(new_name), node)
+        if answer(mut s, take c, Done) {
+            edit(mut fs, old_base, take source)
+            fs.sequence = seq
+        }
+    } else {
+        let mut dest = revised(current(fs.nodes[new_base]), seq, modified)
+        map.insert(mut dest.names, string.from(new_name), node)
+        list.reserve(mut fs.nodes[new_base].history, 1)
+        if answer(mut s, take c, Done) {
+            edit(mut fs, old_base, take source)
+            edit(mut fs, new_base, take dest)
+            fs.sequence = seq
+        }
+    }
+}
+
+fn listing(fs: Fs, dir: u64) -> Listing {
+    let names = current(fs.nodes[dir]).names
+    let mut rows: List[Bytes] = list.with_capacity(map.len(names))
+    for (name, id) in names {
+        let len = string.byte_len(name)
+        let mut row: Bytes = list.with_capacity(3 + len)
+        list.push(mut row, if fs.nodes[id].directory {
+            1u8
+        } else {
+            0u8
+        })
+        let size: u16 = int.truncate(len)
+        list.put_word_le(mut row, size)
+        list.append(mut row, string.as_bytes(name))
+        list.push(mut rows, take row)
+    }
+    Listing(records: take rows, next: 0)
+}
+
+fn next_entries(mut session: Session, id: u64, room: u64, mut s: Served[DirOp], take call: Call[DirOp]) {
+    let mut c = take call
+    let start = match map.get(session.listings, id) {
+        Some(rows) => rows.next,
+        None => fail("unknown simulated listing")
+    }
+    let mut next = start
+    {
+        let Some(l) = map.get(session.listings, id) else {
+            fail("unknown simulated listing")
+        }
+        let mut used: u64 = 0
+        while next < list.len(l.records) {
+            let row = l.records[next]
+            let n = list.len(row)
+            if n > room - used {
+                break
+            }
+            if provide.fill(mut s, mut c, row) != n {
+                break
+            }
+            used += n
+            next += 1
+        }
+    }
+    let count = next - start
+    if answer(mut s, take c, Count(count)) {
+        let _ = map.update(mut session.listings, id, scoped fn(mut cursor: Listing) {
+            cursor.next = next
+        })
+    }
+}
+
+fn sync(mut fs: Fs, node: u64, error: bool, advanced: bool, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let r: DirReply = if error {
+        Failed(Other(5))
+    } else {
+        Done
+    }
+    if answer(mut s, take c, r) && advanced {
+        let at = list.len(fs.nodes[node].history) - 1
+        retain(mut fs.nodes[node], at)
+    }
+}
+
+fn fault_present(fault: Option[sim.world.Fault]) -> bool {
+    match fault {
+        Some(_) => true,
+        None => false
+    }
+}
+
+fn sync_commits(mut plan: sim.world.Plan, fault: Option[sim.world.Fault]) -> bool {
+    match fault {
+        None => true,
+        Some(SyncUnknown) => sim.world.pick(mut plan, 2) == 1,
+        Some(Eio) => false
+    }
+}
+
+fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let op = provide.dir_op(c)
+    if let Released(id: id) = op {
+        close(mut session, id)
+        return
+    }
+    let site = session.site
+    session.site += 1
+    let fault = sim.world.take_fault(mut plan, site)
+    let barrier = match op {
+        Sync(..) => true,
+        SyncDir(..) => true,
+        _ => false
+    }
+    if fault_present(fault) && !barrier {
+        let r: DirReply = match op {
+            Write(..) => written_error(Other(5)),
+            WriteAt(..) => written_error(Other(5)),
+            Close(file: id) => {
+                close(mut session, id);
+                Failed(Other(5))
+            },
+            _ => Failed(Other(5))
+        }
+        let _ = answer(mut s, take c, r)
+        return
+    }
+    match op {
+        Open(dir: dir, path: n, mode: mode) => {
+            match read_name(c, 1, n) {
+                Ok(take p) => {
+                    let base = dir_handle(session, dir)
+                    open(mut fs, mut session, base, p, mode, modified, mut s, take c)
+                },
+                Error(e) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        OpenDir(dir: dir, path: n) => {
+            let found = match read_name(c, 1, n) {
+                Ok(take p) => target(fs, dir_handle(session, dir), p),
+                Error(e) => Error(e)
+            }
+            match found {
+                Ok(node) if fs.nodes[node].directory => {
+                    let id = session.next_id
+                    map.reserve(mut session.dirs, 1)
+                    if answer(mut s, take c, Dir(id)) {
+                        session.next_id += 1
+                        map.insert(mut session.dirs, id, node)
+                    }
+                },
+                Ok(_) => {
+                    let _ = answer(mut s, take c, Failed(Denied))
+                },
+                Error(e) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        Mkdtemp(dir: dir, prefix: n, ..) => {
+            match read_name(c, 1, n) {
+                Ok(take prefix) => {
+                    if string.find(prefix, 0, "/") != None || string.find(prefix, 0, "\0") != None {
+                        let _ = answer(mut s, take c, Failed(Denied))
+                    } else {
+                        let base = dir_handle(session, dir)
+                        let mut serial = list.len(fs.nodes)
+                        let (suffix, p) = loop {
+                            let mut suffix = string.from("sim")
+                            string.push_u64(mut suffix, serial)
+                            let mut p = string.from(prefix)
+                            string.push(mut p, suffix)
+                            if lookup(fs.nodes[base], p) == None {
+                                break (take suffix, take p)
+                            }
+                            serial += 1
+                        }
+                        make_dir(mut fs, mut session, base, p, Some(string.as_bytes(suffix)), modified, mut s, take c)
+                    }
+                },
+                Error(e) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        Stat(dir: dir, path: n) => {
+            let found = match read_name(c, 1, n) {
+                Ok(take p) => target(fs, dir_handle(session, dir), p),
+                Error(e) => Error(e)
+            }
+            let r: DirReply = match found {
+                Ok(id) => stat(fs.nodes[id]),
+                Error(e) => Failed(e)
+            }
+            let _ = answer(mut s, take c, r)
+        },
+        Mkdir(dir: dir, path: n) => {
+            match read_name(c, 1, n) {
+                Ok(take p) => {
+                    let base = dir_handle(session, dir)
+                    make_dir(mut fs, mut session, base, p, None, modified, mut s, take c)
+                },
+                Error(e) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        Remove(dir: dir, path: n) => {
+            match read_name(c, 1, n) {
+                Ok(take p) => remove(mut fs, dir_handle(session, dir), p, false, modified, mut s, take c),
+                Error(e) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        RemoveTree(dir: dir, path: n) => {
+            match read_name(c, 1, n) {
+                Ok(take p) => remove(mut fs, dir_handle(session, dir), p, true, modified, mut s, take c),
+                Error(e) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        Rename(dir: dir, from: a, to: b) => {
+            match (read_name(c, 1, a), read_name(c, 2, b)) {
+                (Ok(take from), Ok(take to)) => rename(mut fs, dir_handle(session, dir), from, to, modified, mut s, take c),
+                (Error(e), _) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                },
+                (_, Error(e)) => {
+                    let _ = answer(mut s, take c, Failed(e))
+                }
+            }
+        },
+        SyncDir(dir: dir) => {
+            let advanced = sync_commits(mut plan, fault)
+            sync(mut fs, dir_handle(session, dir), fault_present(fault), advanced, mut s, take c)
+        },
+        Sync(file: id) => {
+            let advanced = sync_commits(mut plan, fault)
+            sync(mut fs, file_handle(session, id).node, fault_present(fault), advanced, mut s, take c)
+        },
+        Entries(dir: dir) => {
+            let rows = listing(fs, dir_handle(session, dir))
+            let id = session.next_id
+            map.reserve(mut session.listings, 1)
+            if answer(mut s, take c, Entries(id)) {
+                session.next_id += 1
+                map.insert(mut session.listings, id, take rows)
+            }
+        },
+        Read(file: id, room: room) => {
+            read(fs, mut session, id, None, room, mut s, take c)
+        },
+        ReadAt(file: id, at: at, room: room) => {
+            read(fs, mut session, id, Some(at), room, mut s, take c)
+        },
+        Write(file: id, len: len) => {
+            match payload(c, 1, len) {
+                Ok(take data) => write(mut fs, mut session, id, None, take data, modified, mut s, take c),
+                Error(e) => {
+                    let _ = answer(mut s, take c, written_error(e))
+                }
+            }
+        },
+        WriteAt(file: id, at: at, len: len) => {
+            match payload(c, 2, len) {
+                Ok(take data) => write(mut fs, mut session, id, Some(at), take data, modified, mut s, take c),
+                Error(e) => {
+                    let _ = answer(mut s, take c, written_error(e))
+                }
+            }
+        },
+        StatFile(file: id) => {
+            let _ = answer(mut s, take c, stat(fs.nodes[file_handle(session, id).node]))
+        },
+        TryLock(file: id) => {
+            let node = file_handle(session, id).node
+            let holder = lock_holder(session, node)
+            let locked = holder == None || holder == Some(id)
+            map.reserve(mut session.locks, 1)
+            if answer(mut s, take c, Locked(locked)) && locked {
+                map.insert(mut session.locks, node, id)
+            }
+        },
+        Unlock(file: id) => {
+            let node = file_handle(session, id).node
+            if answer(mut s, take c, Done) && lock_holder(session, node) == Some(id) {
+                let _ = map.remove(mut session.locks, node)
+            }
+        },
+        Close(file: id) => {
+            close(mut session, id)
+            let _ = answer(mut s, take c, Done)
+        },
+        NextEntries(entries: id, room: room) => next_entries(mut session, id, room, mut s, take c),
+        Released(..) => ()
+    }
+}
+
+/// Runs a mounted filesystem until quiescence. Fault sites are the zero-based
+/// order in which operations are taken from this port, excluding releases.
+pub fn serve(mut fs: Fs, mut plan: sim.world.Plan, c: Clock, take port: Served[DirOp]) waits {
+    let mut s = take port
+    let mut session = Session(next_id: 1, site: 0, dirs: map.new(), files: map.new(), locks: map.new(), listings: map.new())
+    while let Some(take call) = provide.next(mut s) {
+        let modified: i64 = int.truncate(order.min(host.mono_ns(c), 9223372036854775807))
+        request(mut fs, mut session, mut plan, modified, mut s, take call)
+    }
+}

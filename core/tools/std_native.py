@@ -424,8 +424,11 @@ def source_manifest(root, package, modules, source, *, replace=False):
     core = {'name': 'core', 'version': '1'}
     std = {'name': 'std', 'version': '1'}
     def sources(directory, signatures):
-        return [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': signatures}
-                for p in sorted(directory.glob('*.hirsel'))]
+        return [
+            {'file': str(p.resolve()), 'modules': list(relative.with_suffix('').parts), 'signatures': signatures}
+            for p in sorted(directory.rglob('*.hirsel'))
+            if (relative := p.relative_to(directory)).parts[0] != 'tests'
+        ]
     packages = [
         {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': sources(root / 'core/std', False), 'dependencies': [core]}]

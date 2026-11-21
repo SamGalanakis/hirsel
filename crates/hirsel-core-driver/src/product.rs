@@ -44,7 +44,7 @@ impl PackageProduct {
                         test: false,
                     }),
                     file: root.join(format!("{module}.hirsel")),
-                    modules: vec![(*module).into()],
+                    modules: module.split('/').map(str::to_owned).collect(),
                     signatures: true,
                 })
                 .collect(),
@@ -332,15 +332,21 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
     let mut selected = Vec::with_capacity(input.sources.len());
     let mut bytes = Vec::new();
     for source in &input.sources {
-        if !source.signatures || source.foreign || source.modules.len() != 1 {
+        if !source.signatures || source.foreign {
             return None;
         }
-        let name = source.modules[0].as_str();
+        let name = source.modules.join("/");
         let at = bundled::STD_SOURCES
-            .binary_search_by_key(&name, |(module, _)| module)
+            .binary_search_by_key(&name.as_str(), |(module, _)| module)
             .ok()?;
         let expected = bundled::STD_SOURCES[at];
-        if !matches_source(source, expected.1, &mut bytes) {
+        if source
+            .modules
+            .iter()
+            .map(String::as_str)
+            .ne(expected.0.split('/'))
+            || !matches_source(source, expected.1, &mut bytes)
+        {
             return None;
         }
         selected.push(expected);
@@ -364,16 +370,24 @@ fn matches_bundle(
     {
         return false;
     }
-    let mut selected = input.sources.iter().collect::<Vec<_>>();
-    selected.sort_by(|a, b| a.modules.cmp(&b.modules));
+    let mut selected = input
+        .sources
+        .iter()
+        .map(|source| (source.modules.join("/"), source))
+        .collect::<Vec<_>>();
+    selected.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut bytes = Vec::new();
     selected
         .into_iter()
         .zip(sources)
-        .all(|(source, (module, text))| {
+        .all(|((_, source), (module, text))| {
             source.signatures
                 && !source.foreign
-                && source.modules == [*module]
+                && source
+                    .modules
+                    .iter()
+                    .map(String::as_str)
+                    .eq(module.split('/'))
                 && matches_source(source, text, &mut bytes)
         })
 }

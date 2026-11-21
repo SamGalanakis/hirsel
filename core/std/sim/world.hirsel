@@ -1,0 +1,83 @@
+/// The clock controller and the initial stream for a simulation.
+pub opaque type World: send {
+    seed: u64,
+    hand: ClockHand,
+    plan: Plan
+}
+
+/// An owned stream and one-shot faults. Give each server its own plan at setup
+/// so scheduling between servers cannot change which server consumes a draw.
+pub opaque type Plan: send {
+    state: u64,
+    faults: Map[u64, Fault]
+}
+
+/// A scripted I/O failure. SyncUnknown may commit a barrier before reporting EIO.
+pub type Fault = Eio | SyncUnknown
+
+/// Starts a virtual clock and seeds the decision stream.
+pub fn new(seed: u64, start_mono_ns: u64, start_wall_ms: u64) -> (World, Clock) {
+    let (c, h) = provide.clock(start_mono_ns, start_wall_ms)
+    (World(seed: seed, hand: take h, plan: plan(seed)), c)
+}
+
+pub fn initial_seed(w: World) -> u64 {
+    w.seed
+}
+
+/// An independent decision stream beginning at seed.
+pub fn plan(seed: u64) -> Plan {
+    Plan(state: seed, faults: map.new())
+}
+
+fn draw(mut p: Plan) -> u64 {
+    p.state = int.wrapping_add(p.state, 0x9e3779b97f4a7c15)
+    let a = int.wrapping_mul(p.state ^ (p.state >> 30), 0xbf58476d1ce4e5b9)
+    let b = int.wrapping_mul(a ^ (a >> 27), 0x94d049bb133111eb)
+    b ^ (b >> 31)
+}
+
+/// Chooses an index in [0, n) from SplitMix64. n must be positive.
+pub fn pick(mut p: Plan, n: u64) -> u64 {
+    let threshold = int.wrapping_neg(n) % n
+    loop {
+        let (high, low) = int.mul_wide(draw(mut p), n)
+        if low >= threshold {
+            return high
+        }
+    }
+}
+
+pub fn choose(mut w: World, n: u64) -> u64 {
+    pick(mut w.plan, n)
+}
+
+/// Sets a one-shot fault at a site. A later setting for that site replaces it.
+pub fn script(mut p: Plan, site: u64, f: Fault) {
+    map.insert(mut p.faults, site, f)
+}
+
+pub fn fault(mut w: World, site: u64, f: Fault) {
+    script(mut w.plan, site, f)
+}
+
+pub fn take_fault(mut p: Plan, site: u64) -> Option[Fault] {
+    map.remove(mut p.faults, site)
+}
+
+/// Moves the decision stream and its faults to a server. Future world draws
+/// start from a new stream derived from the current one.
+pub fn detach(mut w: World) -> Plan {
+    let next = draw(mut w.plan)
+    replace(mut w.plan, plan(next))
+}
+
+/// Drives virtual timers at quiescence. Returns when no timer remains.
+pub fn run(mut w: World) waits {
+    loop {
+        match clock.idle(mut w.hand) {
+            Some(at) => clock.advance_to(mut w.hand, at),
+            None => return
+        }
+    }
+}

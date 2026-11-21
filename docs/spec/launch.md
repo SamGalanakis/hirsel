@@ -194,9 +194,12 @@ version and these parts:
   of hash;
 - every body in that closure, as its hash and byte length with its annex's hash and byte
   length, in strictly ascending order of body hash;
-- the **foreign archives** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
-  each admitted archive's SHA-256, byte length and symbol prefix, in strictly ascending order
-  of hash; an archive's bytes are a code-store object named by that SHA-256;
+- the **foreign modules** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
+  one foreign leaf per reached foreign module, with its identity, symbol prefix, whole archive
+  table and reached functions, in strictly ascending order of module identity;
+- the **foreign archives** (FFI-3): the distinct archives the leaves select for the recipe's
+  target, each its SHA-256 and byte length, in strictly ascending order of hash; an archive's
+  bytes are a code-store object named by that SHA-256;
 - the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
   `n_place`, and the **grant bindings**.
 
@@ -208,7 +211,7 @@ manifest's sorted `grants` strings are derived from the bindings for display and
 nothing is assembled or launched from them.
 
 Its root is `R = H("hirsel.release-recipe.v2", recipe)`; the version is 2, and version 1, which
-had no foreign archives part, is never read or written. A place's `place`, `migrate`, handle
+had no foreign parts, is never read or written. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. R does not
 cover the host's toolchain: one R can assemble to different bytes under another toolchain, and
@@ -263,12 +266,22 @@ objects it lacks.
    A body in a different normal-form version is `Unsupported`. Republish from source.
    Invalid frames are `Malformed`.
 6. The closure walked from the entry through the groups' `External` bindings, compared as typed
-   sets of groups, bodies and the annex paired with each body, equals the listed objects
-   exactly (`Missing`, `Extra`).
+   sets of groups, bodies, the annex paired with each body, foreign leaves and foreign
+   archives, equals the listed objects exactly (`Missing`, `Extra`). An `External` address
+   that is no listed group's member is resolved to a foreign function by recomputing FFI-9's
+   address from each foreign leaf: its archive-set digest from the leaf's table, and each
+   function's address from its identity, header text and C symbol, the leaf's prefix followed
+   by the function's name. An address that neither a group nor a leaf gives is `Missing`. A
+   leaf, or a function of one, that no slot reaches is `Extra`. Each leaf's table has a row
+   for the recipe's target (`Missing` otherwise), and the foreign archives part is exactly the
+   set of those selected rows' pins and lengths (`Missing`, `Extra`).
 7. Every slot's identity equals the bound member's or builtin's identity, every `Internal`
    index is in range, each group's members form one strongly connected component, the entry's
    identity matches, and the closure has one address per identity with every slot's signature
-   equal to its target's (PROG-10) (`Binding`, `Conflict(identity)`).
+   equal to its target's (PROG-10), a foreign function's signature being the one its header
+   text states (`Binding`, `Conflict(identity)`). No two leaves have one prefix
+   (`Conflict(identity)`, the second leaf's). Before anything is linked, each foreign archive
+   passes FFI-3's format and symbol checks for the leaves that select it.
 8. Every `Builtin(n)` and every engine-operation tag is one the recipe's backend implements at
    exactly that number (`Unsupported`).
 

@@ -84,10 +84,14 @@ archives = [
 - `archives` is the **archive table**. It has one row per full target triple, for example
   `x86_64-unknown-linux-gnu`. The libc is part of the triple, so a later
   `x86_64-unknown-linux-musl` row is a new row with its own archive and digest, and the table's
-  format does not change. Two rows with one target are refused, at the second row. `file`
-  follows the path rules of the packages chapter, except that it ends in `.a` instead of
-  `.hirsel`, and it is read through the same symlink rule. `sha256` is the SHA-256 of the
-  file's raw bytes.
+  format does not change. A target is 1 to 64 bytes of `[a-z0-9_.-]`. Two rows with one target
+  are refused, at the second row. The table's order in the manifest means nothing: the rows
+  are taken, encoded and listed in diagnostics in ascending order of target bytewise. `file`
+  follows the path rules of the packages chapter, ends in `.a`, and is read and captured
+  through the same reading rule, for every row whatever the build's target
+  ([packages](packages.md#1-canonical-library-content)). One file is named by one row of the
+  package, and the source and archive paths of a package form one case-folded tree. `sha256` is
+  the SHA-256 of the file's raw bytes.
 - A `[foreign]` key that names no module of `[sources]`, a module formed by more than one
   file, or a module that a test-only file joins is refused as a bad field
   ([packages](packages.md#9-diagnostics)), for example
@@ -95,7 +99,8 @@ archives = [
 
 A published library's content `C` holds each foreign module's prefix, its archive table and
 the archives' bytes ([packages](packages.md#1-canonical-library-content)), so its root pins
-exactly the audited archives. Until the built `hirsel` reads `hirsel.toml`, the same table sits
+exactly the audited archives. The pin covers every byte the linker reads, because FFI-3 admits
+only self-contained archives whose members are inside those bytes. Until the built `hirsel` reads `hirsel.toml`, the same table sits
 in `manifest.json` as a `"foreign": {"symbols", "archives": [{"target", "file", "sha256"}]}`
 object on the module's source entry, with the same rules.
 
@@ -131,32 +136,55 @@ identity, and refuses the build at the first failed check:
 
 | check | refused with (site: the archive row, or the `[foreign]` table when no row exists) |
 |---|---|
-| the table has a row for the build's full target | `FFI-3: P has no archive for target T; its archives are for T1, T2` (all the targets, in table order; `none` when the table is empty) |
-| the file can be read | `FFI-3: archive F of P for T cannot be read: R` |
+| the table has a row for the build's full target | `FFI-3: P has no archive for target T; its archives are for T1, T2` (all the targets, in ascending order; `none` when the table is empty) |
 | its SHA-256 equals the pin | `FFI-3: archive F of P for T does not match its pin: expected sha256 E, found sha256 O` |
-| it is an `ar` archive with a symbol index | `FFI-3: archive F of P for T is not an indexed ar archive` |
-| its index defines the symbol of every foreign function of `M` that the build reaches | `FFI-3: archive F of P for T does not define S, declared at SITE` |
+| it is not a thin archive: it does not start with `!<thin>\n` | `FFI-3: archive F of P for T is a thin archive; its members are not inside the pinned bytes` |
+| it is a self-contained `ar` archive with a symbol index: it starts with `!<arch>\n`, every member's header and data lie inside its bytes, its first member is a GNU or BSD symbol index, and no member name refers to another file | `FFI-3: archive F of P for T is not an indexed ar archive` |
+| every member other than the symbol index and the long-name table is an ELF relocatable object (`ET_REL`) whose class, byte order, machine and OS ABI are T's; LLVM bitcode, a nested archive, a linker script or any other content is refused, so nothing in the archive makes the linker look up another file or load a plug-in | `FFI-3: archive F of P for T: member N is not a relocatable object for T` |
+| for every foreign function of `M` that the build reaches, its symbol S is defined in one member's own symbol table as a global function (`STB_GLOBAL`, `STT_FUNC`, default visibility, in a section of that member, not common), and the index's entry for S names that member | `FFI-3: archive F of P for T does not define S, declared at SITE` |
 | no global symbol it defines is also defined by another admitted archive or by the runtime | `FFI-3: symbol S is defined by archive F1 of P1 and by G` (`G` an archive or `the runtime`) |
 
 `P` is the module's definition path (`sqlite@1/native`), `T` the target triple, `F` the
-row's `file` and `R` the host's error text. The digest is checked first. So a file that is
-not an archive but carries a wrong pin is reported as a wrong pin, and the driver parses no
-bytes that do not match the pin.
+row's `file` and `N` the member's name. The digest is checked first. So a file that is not an
+archive but carries a wrong pin is reported as a wrong pin, and the driver parses no bytes that
+do not match the pin. The member and symbol checks read the members' own ELF headers and symbol
+tables, never the index alone, so an index that names a symbol no member defines is refused.
+Two modules whose selected rows have one pin select one archive: it is checked, staged and
+linked once, and the symbol check compares distinct archives only. Which object features an
+admitted member may hold beyond these, such as initializer sections, is FFI-1's audit rule.
 
-The driver checks the bytes it links. It reads the file once into a private staging
-directory, mode `0700`, that it created for this build. It hashes the staged copy, and the
-linker is given only that copy. A change to the original path after the read cannot reach
-the link. A build from a code store links the store's object (see below) the same way, after
-it has checked the object's hash.
+The driver links the bytes it checked, and nothing else. The bytes are taken from the capture
+the package resolution made ([packages](packages.md#1-canonical-library-content)): a member's
+captured file, the archive bytes of a published package's verified `C`, or, for a build from a
+code store, the store's object after its hash is checked. No row's path is opened again. The
+driver writes the bytes into a memory file it creates for this build and seals it against every
+write, shrink and grow (on Linux a `memfd` with `F_SEAL_WRITE`, `F_SEAL_SHRINK`, `F_SEAL_GROW`
+and `F_SEAL_SEAL`). It runs the checks above on the sealed file, hashes it, and gives the
+linker that file alone, by its descriptor path. So no process, the build user's own included,
+can change what the linker reads after the check. A host that cannot seal a file refuses a
+foreign-reaching build with `FFI-3: this host cannot seal staged archives`, before writing
+any object.
 
-The **release recipe** ([launch](launch.md#release-recipe-and-host-assembly)) gains a part,
-the **foreign archives**: for each admitted archive, its SHA-256, its byte length and its
-symbol prefix, in strictly ascending order of hash. The archive's bytes are an object of the
-code store, named by that SHA-256. With this part the recipe is version 2, and its root is
+The **release recipe** ([launch](launch.md#release-recipe-and-host-assembly)) gains two parts.
+The **foreign modules** part has one record, a **foreign leaf**, per foreign module that the
+entry's closure reaches, in strictly ascending order of the module's identity encoding. A
+leaf holds the module's identity encoding, its symbol prefix as a text, its whole archive
+table, and its reached functions. The table is the number of rows and then each row in
+ascending order of target, as the target text, the 32-byte pin and the byte length as a
+number, which are exactly the bytes FFI-9's archive-set digest is taken over. The reached
+functions are their number and then each function, in strictly ascending order of identity
+encoding, as that encoding and its PROG-9 header text `S` as a text. So a reader with no
+source recomputes every foreign function's address from the leaf, and selects the row for
+the recipe's target from it. The **foreign archives** part lists the distinct pins of the
+rows the leaves select for the recipe's target, each as its SHA-256 and byte length, in
+strictly ascending order of hash. An archive's bytes are an object of the code store, named
+by that SHA-256, and they are transferred, reserved, collected and reassembled as the
+recipe's other objects are. With these parts the recipe is version 2, and its root is
 `R = H("hirsel.release-recipe.v2", recipe)`. The version-1 domain is never reused for the new
-encoding. A program that reaches no foreign function has an empty part, and it still uses
-version 2. So `hirsel build --recipe R` links exactly the pinned bytes, and two programs
-that differ only in an archive have different roots.
+encoding. A program that reaches no foreign function has two empty parts, and it still uses
+version 2. Recipe admission walks the leaves as launch's admission steps 6 and 7 say. So
+`hirsel build --recipe R` links exactly the pinned bytes the addresses select, and two
+programs that differ only in an archive have different roots.
 
 ### FFI-4: The Foreign capability
 
@@ -629,8 +657,10 @@ interface is `Laws`.
 | **FL9** SQLite release paths | an explicit `close` or `finalize` whose finalizer runs as well, or a busy close | Four tests, each preparing `s` from `select 1` on a fresh connection `db`: (a) `finalize(take s)` then `close(take db)`; (b) `close(take db)` then `finalize(take s)`; (c) `close(take db)` with `s` dropped at scope end; (d) both dropped at scope end, in either order. Every explicit call returns `Ok(())`, because `sqlite3_close_v2` returns `SQLITE_OK` with a statement pending. Every test passes with no cause, so no finalizer met a consumed handle. |
 | **FL10** no ambient input | the OS layer reading the clock or the host's randomness | `select random()` returns the same value in two runs of a fresh process. `select date('now')` returns `NULL`. `attach ':memory:' as x` fails with `SQLITE_AUTH` (23). |
 | **FL11** directory confinement (slice 2) | a sidecar, temp file or attach outside the grant | In a granted scratch `Dir` whose parent holds a sentinel directory: open `a.db`, run a WAL transaction from two connections, then a rollback-journal transaction. The files created are exactly `a.db`, `a.db-wal` and `a.db-shm` (WAL), and `a.db-journal` only while the journal transaction runs. The parent and the sentinel are unchanged. `open(f, d, "../x")` and `open(f, d, "file:a.db?vfs=unix")` give code 14 before C runs. A journal whose super-journal name is `/tmp/evil` fails recovery with `SQLITE_CANTOPEN`. A `sort` over 10⁶ rows creates no file. |
+| **FL12** an archive whose code is outside its pin | a thin archive, or a member that is not a relocatable object, admitted because its digest matches | `ffi_laws`' x86_64 row names an indexed thin archive made with `ar --thin` from the adapter's `laws.o`, which lies beside it, pinned to the thin archive's true SHA-256. `hirsel build` of the FL1 entry is refused with `FFI-3: archive F of ffi_laws@1/native for x86_64-unknown-linux-gnu is a thin archive; its members are not inside the pinned bytes`, and the linker is never started. With the row naming a regular archive whose one member is `laws.o` compiled for `aarch64`, again with its true pin, the refusal is `… member laws.o is not a relocatable object for x86_64-unknown-linux-gnu`. With a regular x86_64 archive whose index lists `hfl_make` but whose member does not define it, the refusal is `… does not define hfl_make, declared at SITE`. |
+| **FL13** a recipe-only build of a foreign program | a recipe from which a reader cannot recompute the foreign address, or one that links archives the leaves do not select | `ffi_laws` gets a second row, `aarch64-unknown-linux-gnu`, naming any file with its true pin. `hirsel publish` of the FL1 entry for x86_64 prints R. Delete the package's directory: `hirsel build --recipe R --code-store DIR` succeeds, and the executable's `native.make` call works. Change only the aarch64 row's bytes and pin and publish again: the new R differs from R (FFI-9), and it builds from the code store alone the same way. A recipe made from R's bytes by removing the x86_64 archive's entry from its foreign archives part, with its objects in the store, is refused as `Missing`, and one made by adding the aarch64 archive's entry as `Extra`. |
 
 ## Build slices
 
-1. FFI-1 to FFI-9 with the in-memory `sqlite` package (slice 1), and laws FL1 to FL10.
+1. FFI-1 to FFI-9 with the in-memory `sqlite` package (slice 1), and laws FL1 to FL10, FL12 and FL13.
 2. The `Dir` ABI form and the `hirsel-dir` VFS (slice 2), and law FL11.

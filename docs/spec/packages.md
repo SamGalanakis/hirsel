@@ -30,7 +30,9 @@ SHA-256 and is never shortened.
 **Encoding.** In `C`, a number is unsigned LEB128 with no redundant byte, and a text is its
 byte length as such a number followed by its UTF-8 bytes. `C` holds, in order:
 
-1. the encoding version, the number 1;
+1. the encoding version, the number 1. Version 1 has held item 6 from its start: bytes that
+   end before the foreign-module count are a truncated encoding and are refused, and since no
+   library was published before item 6, nothing needs republishing;
 2. the package's name, a text, and its major, a number;
 3. its charge policy (PROG-1), a text, which in v1 is `charge-v1`;
 4. its **bindings**: their count, then each binding, sorted by name bytewise and then by
@@ -40,11 +42,16 @@ byte length as such a number followed by its UTF-8 bytes. `C` holds, in order:
 5. its **files**: their count, then each file, sorted by path bytewise. A file is its path (a
    text), its module path (the number of components, then each component as a text), and its
    bytes (their length as a number, then the raw bytes);
-6. its **foreign modules** ([FFI-2](foreign.md#ffi-2-foreign-modules)): their count, then each,
-   sorted by module path bytewise. One is its module path, its symbol prefix (a text) and its
-   archive rows: their count, then each row, sorted by target bytewise, as the target (a text),
-   the file's path (a text), the 32-byte pin, and the archive's bytes (their length as a
-   number, then the raw bytes).
+6. its **foreign modules** ([FFI-2](foreign.md#ffi-2-foreign-modules)): their count, then each.
+   One is its module path, encoded as in item 5, its symbol prefix (a text) and its archive
+   rows: their count, then each row, as the target (a text), the file's path (a text), the
+   32-byte pin, and the archive's bytes (their length as a number, then the raw bytes).
+
+Foreign modules are in strictly ascending order of module path, compared component by
+component, each component by its UTF-8 bytes bytewise, and a path that is a proper prefix of
+another first. The framed bytes are never compared: `aa` comes before `b`, although the frame
+of `b` is the smaller byte string. A module's rows are in strictly ascending order of target
+bytewise. Bindings and files are likewise strictly ascending, so no two are equal.
 
 `core@1` is bound in every package and is never written as a binding. `std@1` is a toolchain
 package (section 2) and is written with tag `0`, so a library root says which std major it
@@ -53,51 +60,100 @@ Its content is the toolchain's and enters every key through the compiler and the
 identity, as it does today.
 
 **Inventory.** The files of `C` are exactly the package's `[sources]` (section 2), with their
-modules, and its archives are exactly the rows of its `[foreign]` tables. Nothing else in the package directory enters: not `[tests]` sources, `[program]`,
-`[tool]`, `hirsel.lock`, any other manifest field, a build or cache directory, or a file the
-manifest does not list. A test-only file that joins a library module, as `assembly_laws.hirsel`
-joins module `store`, is left out, and the module keeps exactly its `[sources]` files. The manifest enters only through items 2
-to 4, after the workspace's inherited values are expanded (section 4) and each member binding
-is replaced by that member's root (section 6). File bytes are kept exactly, line endings
-included. Permissions, timestamps, ownership and the order of the directory listing never
-enter.
+modules, and its archives are exactly the rows of its `[foreign]` tables, for every target.
+Nothing else in the package directory enters: not `[tests]` sources, `[program]`, `[tool]`,
+`hirsel.lock`, any other manifest field, a build or cache directory, or a file the manifest
+does not list. A test-only file that joins a library module, as `assembly_laws.hirsel` joins
+module `store`, is left out, and the module keeps exactly its `[sources]` files. The manifest
+enters only through items 2 to 6: identity, charge, bindings, the `[sources]` mapping of files
+to modules, and the `[foreign]` tables, after the workspace's inherited values are expanded
+(section 4) and each member binding is replaced by that member's root (section 6). File bytes
+are kept exactly, line endings included. Permissions, timestamps, ownership and the order of
+the directory listing never enter.
 
-**Path rules.** A listed path is relative to the package directory. It is one or more
-components joined by `/`. Each component matches `[A-Za-z0-9_][A-Za-z0-9_.-]*` and is at
-most 255 bytes, so it is never empty, `.` or `..`, and never starts with a dot. The whole
-path is at most 1024 bytes and ends in `.hirsel`. No two listed paths of one package are
-equal after ASCII lower-casing, so a package that checks on a case-sensitive file system
-unpacks the same way on a case-insensitive one. A module path is one or more identifiers
+**Path rules.** A listed path, a source or an archive's `file`, is relative to the package
+directory. It is one or more components joined by `/`. Each component matches
+`[A-Za-z0-9_][A-Za-z0-9_.-]*` and is at most 255 bytes, so it is never empty, `.` or `..`, and
+never starts with a dot. The whole path is at most 1024 bytes. A source path ends in
+`.hirsel` and an archive path in `.a`. The listed paths of one package, sources and archives
+together, form one **tree**, compared after ASCII lower-casing: no two paths are equal, no
+path is a proper component prefix of another (so `a.hirsel` cannot also be the directory of
+`a.hirsel/b.hirsel`), and two paths that share a directory component after lower-casing spell
+it identically. So `Data.hirsel` beside `data.hirsel/x.hirsel` is refused, and so is
+`native/Lib.a` beside `native/lib.a` in another target's row. One file is named by one row: two
+rows never name one path. A package that checks on a case-sensitive file system therefore
+unpacks to the same tree on one that folds ASCII case, such as macOS's default. v1 promises
+nothing for file systems with further name rules: Windows device names such as `CON` and
+components with trailing dots are not refused. A module path is one or more identifiers
 ([syntax](syntax.md)) and is written in the manifest with `.` between components.
 
-**Symlinks.** A listed path may pass through symbolic links, in any component. The tool
-resolves the path completely, and the result must be a regular file whose resolved path lies
-inside the resolved package directory. Then `C` holds that file's bytes under the listed path,
-and records nothing about the link. A path that resolves to anything else is refused (section
-9): one that resolves outside the package, to a directory, or to nothing, or one with a link
-loop. The rule holds for every member of a workspace whenever its files are read, not only at
-publication. So the bytes a member is checked with are the bytes it would publish. The
-directory convention below keeps its own walk, which follows a source symlink wherever it
-points, because a directory-convention package is never a dependency and never published.
+**Reading member files.** The tool reads a member's manifest, its listed sources and its listed
+archives through a handle on the member's directory, never by re-resolving a pathname. It
+opens each path one component at a time relative to the directory handle it holds (as
+`openat` does), and checks every opened object on its handle (as `fstat` does). A component
+may be a symbolic link. The tool follows it by resolving its target the same way, from the
+package directory, and the walk must never leave the package directory. The final object must
+be a regular file. Then the listed path names that file's bytes, and nothing about the link is
+recorded. A path is refused (section 9) when it leaves the package, when it ends at a
+directory or at nothing, when it meets a link loop, and when the host cannot open relative to
+a held directory handle, because then containment cannot be established. A member's directory
+is opened the same way from the workspace root's directory handle, so a member directory that
+is a link to a place outside the workspace is refused, and the lock's `member:<dir>` names
+the directory actually read.
 
-**Limits.** One `C` is at most 64 MiB and holds at most 65 536 files.
+What the tool reads it **captures**: the manifest bytes, each source's bytes and each
+archive's bytes, under their listed names, read once in resolution steps 1 and 2 (section 5).
+Every later use takes the capture and never the file system: computing a root, checking,
+packing, test configuration, staging a native archive for the linker (FFI-3), and rendering a
+diagnostic with its line numbers. So the bytes a member is checked with are the bytes it would
+publish, and a file replaced while a command runs cannot reach it. The directory convention
+below keeps its own walk, which follows a source symlink wherever it points, because a
+directory-convention package is never a dependency and never published. It captures what it
+reads in the same way.
 
-**Decoding.** A reader accepts `C` only in this exact encoding. It refuses an unknown
-version, a redundant LEB128 byte, a text that is not UTF-8, a path or module path that breaks
-the rules above, bindings or files out of order or repeated, a tag other than 0 or 1, a tag
-`0` on a name other than `std`, a foreign module that is not a module of its files, an archive
-whose bytes do not match its pin, a binding of `core`, bytes left over at the end, and an
-encoding over the limits. So decoding and re-encoding give the same bytes, and two packages
-with one root have one meaning.
+**Limits.** One `C` is at most 64 MiB and holds at most 65 536 files and archive rows
+together.
+
+**Decoding.** A reader accepts `C` only when it is the encoding of a package that a valid
+effective manifest describes, with every binding a tag 0 or a root. It applies the same checks
+to every `C`, whether it comes from an archive's head, an archive's other entry or the package
+store. It refuses, and its first failure is reported in these words:
+
+| refused | first decoding failure |
+|---|---|
+| a version other than 1 | `unknown version <n>` |
+| a number with a redundant byte, or above its range (a major above 4294967295) | `bad number at byte <offset>` |
+| a text that is not UTF-8 | `bad text at byte <offset>` |
+| a package or binding name outside `[a-z][a-z0-9_]*` or over 64 bytes, a package named `core` or `std` | `bad package name "<name>"` |
+| a charge policy other than `charge-v1` | `unknown charge policy "<text>"` |
+| a binding of `core`; a tag other than 0 or 1; a tag 0 on anything but `std` major 1; a tag 1 on `std` | `bad binding <name>@<major>` |
+| two bindings with one name, at any majors, since source names a dependency by name alone | `two bindings of <name>` |
+| bindings, files, foreign modules or rows out of order or repeated | `<part> out of order at <the later item>`, with part `bindings`, `files`, `foreign modules` or `archive rows` |
+| no files | `no files` |
+| a path or module path that breaks the rules above, including the tree rule | `bad path "<path>": <which rule>` |
+| a foreign module that is not formed by exactly one file of item 5 | `foreign module <m> is formed by <k> files` |
+| a symbol prefix outside FFI-2's form, or two foreign modules with one prefix | `bad symbol prefix "<prefix>" of <m>` |
+| a target that is not 1 to 64 bytes of `[a-z0-9_.-]` | `bad target "<target>" of <m>` |
+| an archive whose bytes do not hash to its pin | `archive "<path>" of <m> for <target> does not match its pin` |
+| bytes that end inside an item | `truncated at <offset>` |
+| bytes left over at the end | `trailing bytes at <offset>` |
+| an encoding over the limits | `over the limit of <limit>` |
+
+A `<name>` is written as in the manifest, a module path `<m>` with `.` between components, and
+an offset counts bytes from the start of `C`. So decoding and re-encoding give the same bytes,
+two packages with one root have one meaning, and a reader never admits a package that no
+manifest could publish. The decoder does not parse an archive's bytes: whether they are an
+indexed `ar` archive is FFI-3's check at link time.
 
 **What the compiler reads.** A published package's sources are the file bytes of the `C`
-whose root was checked against its pin (section 7), decoded in memory. The compiler is handed
-those bytes, never a path to re-read. A member's sources are read once, through the symlink
-rule, and the bytes read are the bytes parsed. The compiler names a published package's file
-`name@major/path` in diagnostics, sites and annexes (`json@1/json.hirsel`). It names a
-member's file by its path relative to the directory of the member the command was given, as
-today's manifest-relative names do. So no name depends on where the package store or the
-workspace sits on disk.
+whose root was checked against its pin (section 7), decoded in memory. A member's sources are
+its capture. The compiler is handed those bytes, never a path to re-read. The compiler names
+the files of the member the command was given by their package-relative paths, as today's
+manifest-relative names do (`json.hirsel`). It names every other package's file
+`name@major/path` (`json@1/json.hirsel`), in diagnostics, sites and annexes, whether the
+package is published or a member. So a file's name is the same whether a dependency is a
+member, a coalesced member or a published library, and no name depends on where the package
+store or the workspace sits on disk.
 
 ## 2. `hirsel.toml`
 
@@ -158,7 +214,8 @@ states its charge policy (PROG-1), and `charge-v1` is the only value v1 accepts.
 **`[sources]`.** Each key is a file and its value is the module the file belongs to, so each
 file is one module and several files may form one module. The path rules of section 1 apply
 to every key. The listed files are the package's sources in every build. In a published
-library they are its whole inventory.
+library they are its whole inventory. A package manifest without `[sources]`, or with an empty
+one, is refused: the directory walk below is only for a directory with no manifest.
 
 **`[dependencies]`.** Each key is a dependency's package name, so a package names at most one
 major of each name. Each value has exactly one of these forms. `major` is required in all but
@@ -171,10 +228,14 @@ the last.
   this name and major.
 - `{ major, root }`, with at most one of `url` or `archive`, binds a published library. `root`
   pins its content. `url` is an `https://` URL of a package archive (section 7). `archive` is a
-  package archive's path relative to this manifest's directory. It is never absolute, and
-  resolved against that directory it must lie inside the workspace root, so the lock can name
-  it relative to the root. With neither, the root must
-  already be in the package store. The source says where content may come from, and the root
+  package archive's path relative to this manifest's directory, `/`-separated. It is never
+  absolute. It is resolved **lexically**: it is appended to the declaring manifest's directory,
+  written relative to the workspace root, and each `..` then removes the component before it,
+  as text, without looking at the file system. The result must have no `..` left, so it lies
+  inside the workspace root, and it is the archive's one spelling: the lock writes it, and a
+  fetch opens exactly that path from the root's directory handle under the reading rule of
+  section 1, so a link on the way cannot make one spelling name two files. With neither, the
+  root must already be in the package store. The source says where content may come from, and the root
   says what it must be: the root enters the package's own `C` and the source never does.
 - `{ workspace = true }` alone inherits the workspace's declaration of this name (section 4).
 
@@ -193,7 +254,12 @@ package does not have is refused. A dependency's `[tests]` is never read and nev
 
 **`[foreign]`.** Each key is a module of `[sources]` that is a foreign module, with its symbol
 prefix and archive table. [FFI-2](foreign.md#ffi-2-foreign-modules) defines the fields and their
-refusals.
+refusals. Every row's file is read and captured in resolution step 2, for every target, not
+only the build's: a missing, escaping or non-regular archive file is refused like a source
+file. A member's archive whose bytes do not match its pin is refused when the member's root is
+computed (section 6), and FFI-3 refuses it when a build links it; a check that links nothing
+does not refuse it. Every key that depends on a foreign module holds the SHA-256 of the
+captured bytes as well as the pin (section 10).
 
 **`[tool]`.** This table is for other tools: hirsel ignores its contents, and they never
 enter `C`, the lock or any key.
@@ -203,8 +269,11 @@ enter `C`, the lock or any key.
 `core@1` and `std@1`, and its entry is `main` in module `main`, as today. It has no lock, binds
 nothing else, and cannot be a member or a dependency. `--inputs FILE` stays the explicit
 compiler input for measurements: it names packages, files and dependency identities directly,
-binds nothing, and reads no manifest or lock. Every check of its packages reads their files as
-member files.
+binds nothing, and reads no manifest or lock. Its files keep the names the JSON gives them,
+which may lie outside the JSON file's directory, and each is read and captured once, as a
+member's is, but without the containment rule, because an explicit corpus has no package
+directory. Neither the directory convention nor `--inputs` has a lock, so `--locked` and
+`--frozen` are refused with either (section 11).
 
 ## 3. Finding the workspace
 
@@ -223,7 +292,8 @@ workspace as follows:
    needs one package (check, build, publish, run, test, inspect, pack) is refused there.
    `lock` and `fetch` act on the whole workspace.
 
-The lock is `hirsel.lock` in the workspace root's directory.
+The lock is `hirsel.lock` in the workspace root's directory. Directories are compared by the
+identity of the directory opened (device and inode), never by the spelling of a path.
 
 ## 4. Workspaces
 
@@ -247,7 +317,11 @@ with `..`. Each member directory holds a manifest with `[package]` and without `
 A root manifest that also has `[package]` is itself a member, and `.` is never listed. No
 member is listed twice, and no two members share a `name@major`. Members are listed exactly:
 there are no globs, and a directory is never a member because it sits under the root or
-because a member names it by path.
+because a member names it by path. Each listed member's directory must find this root by step 2
+of section 3: the nearest manifest with `[workspace]` at or above the member's directory, other
+than the member's own, is this root's. A member that a nearer workspace root would claim is
+refused before inheritance or lock derivation, so one member directory is never expanded under
+two roots.
 
 **Inheritance.** A member inherits only what it asks for, by name:
 `charge.workspace = true` takes `[workspace.package].charge`, and `name = { workspace = true }`
@@ -538,6 +612,25 @@ reuse within one pin, because a root never changes. A member contributes no root
 reach every key through their bytes, exactly as a package's do today, so editing a member does
 not invalidate every record of the workspace.
 
+**Foreign inputs.** A package's foreign metadata is not in its source files, so it enters the
+keys on its own, for members and published packages alike. Each package's namespace in the
+environment holds its **foreign stamp**: the number of its foreign modules, then for each, in
+the order of item 6, its module path, its symbol prefix and its rows in ascending order of
+target, each the target, the pin, the byte length and the SHA-256 of the captured bytes. A
+package with no foreign module has the stamp of count zero, so removing a module's `[foreign]`
+marking, changing a prefix, adding a row or replacing an archive's bytes changes the
+environment even when every `.hirsel` file is unchanged. The stamp is computed from the
+capture of resolution step 2, or from the decoded `C`, never from a pathname. Every reuse
+point that can answer without checking again holds the environment, including a whole-request
+record that answers before any definition key is built, an image key and the reach record. A
+reach record also holds its foreign summary (FFI-8), under a record version that every record
+without a summary lacks, so a record written before the summary existed is never read as one
+with an empty summary. A compiled object whose code calls a foreign function is keyed by that
+function's address, which covers the C symbol it relocates against, never by the caller's body
+alone. A build that reuses any of these still takes the archive bytes it links from this
+command's capture and checks them against the pin (FFI-3), so a replaced archive behind an
+unchanged pin is refused on a warm build exactly as on a cold one.
+
 **Test results.** A reused pass is keyed by the test's code address
 ([PROG-10](programs.md#prog-10-code-addresses)) and its run configuration (PROG-4). The
 address covers the checked IR of every instance the test reaches, in any package, so a
@@ -555,8 +648,9 @@ definition of that package. So after a lock change from `json@1 sha256:A` to `sh
 
 **The recipe.** R already covers everything a dependency contributes to an executable: every
 reached body and its annex is in the recipe, and a body's hash covers its checked IR. The
-recipe's foreign-archives part ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking))
-holds each linked archive by its digest. A dependency's file names in annexes are `name@major/path`
+recipe's foreign parts ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking))
+hold a foreign leaf for each reached foreign module, from which a reader recomputes its
+addresses, and each linked archive by its digest. A dependency's file names in annexes are `name@major/path`
 (section 1), so R never depends on where the package store is. Two builds of one program
 over one closure give one R, on any machine and with any store path.
 
@@ -630,6 +724,73 @@ little-endian 72 and the 72 bytes. `hirsel pack jx --out jx.hpkg` prints
 `json@1 <X>` and `hirsel pack jy --out jy.hpkg` prints `json@1 <Y>`. This law catches any
 encoding drift: a wrong order, a missing frame, a hash over the archive instead of over `C`,
 or a shortened root.
+
+**Known roots with foreign modules.** Package `demo@1` has no bindings and these files, each
+ending in one line feed: `api.hirsel` (module `api`) is `pub opaque type A {}` and
+`pub opaque type B {}` on two lines (42 bytes), `aa.hirsel` (module `aa`) is
+`pub fn ping(f: Foreign[api.A]) -> u64` (38 bytes) and `b.hirsel` (module `b`) is
+`pub fn pong(f: Foreign[api.B]) -> u64` (38 bytes). Its manifest adds
+
+```text
+[foreign.aa]
+symbols = "ha_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "native/aa-x86.a", sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+  { target = "aarch64-unknown-linux-gnu", file = "native/aa-arm.a", sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+]
+
+[foreign.b]
+symbols = "hb_"
+archives = [{ target = "x86_64-unknown-linux-gnu", file = "native/b.a", sha256 = "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d" }]
+```
+
+where `native/aa-x86.a` is the ASCII bytes `abc`, `native/aa-arm.a` is empty and
+`native/b.a` is the one byte `b`, each pinned by its FIPS 180-2 SHA-256. Its `C` is 422 bytes,
+and its item 6 is, grouped by field:
+
+```text
+02                                  two foreign modules
+01 02 6161                          module path aa
+03 68615f                           prefix "ha_"
+02                                  two rows
+19 616172636836342d756e6b6e6f776e2d6c696e75782d676e75    target aarch64-unknown-linux-gnu
+0f 6e61746976652f61612d61726d2e61   file "native/aa-arm.a"
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855    pin
+00                                  no bytes
+18 7838365f36342d756e6b6e6f776e2d6c696e75782d676e75      target x86_64-unknown-linux-gnu
+0f 6e61746976652f61612d7838362e61   file "native/aa-x86.a"
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad    pin
+03 616263                           bytes "abc"
+01 01 62                            module path b
+03 68625f                           prefix "hb_"
+01                                  one row
+18 7838365f36342d756e6b6e6f776e2d6c696e75782d676e75      target x86_64-unknown-linux-gnu
+0a 6e61746976652f622e61             file "native/b.a"
+3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d    pin
+01 62                               bytes "b"
+```
+
+Its root is D = `sha256:e073ce479e0454fe08a3b357087e8de69af0e172a90afa5419faf4307f3b8a75`,
+and `hirsel pack demo --out demo.hpkg` prints `demo@1 <D>`. Module `aa` precedes `b` by
+component bytes although its frame `01 02 61 61` is bytewise greater than `01 01 62`, and the
+manifest's row order does not matter. These are wire vectors: the archive bytes are not `ar`
+archives, and only FFI-3 at link time asks that they be. The decoder refuses three variants,
+each reported as `hirsel: demo@1: archive:demo.hpkg is not a package archive: <failure>` when
+it is the head of an archive `app` binds by `{ major = 1, root = "<its own root>", archive =
+"demo.hpkg" }`:
+
+- the same `C` with the two module entries swapped: `foreign modules out of order at aa`, whose
+  root, `sha256:b8b4134afbaded2a97a56700b11e35346406eb32701216283453befa2712b428`, a lenient
+  decoder would accept as a second package with D's meaning;
+- the same `C` with `aa`'s two rows swapped: `archive rows out of order at aarch64-unknown-linux-gnu`;
+- the same `C` with the byte of `native/b.a` changed to `c` and its pin kept:
+  `archive "native/b.a" of b for x86_64-unknown-linux-gnu does not match its pin`.
+
+So do two binding refusals on `jx`'s `C` with its no-bindings byte `00` replaced: by
+`02 04 7574696c 01 01 <X> 04 7574696c 02 01 <Y>` (`util@1` and `util@2`, each valid alone):
+`two bindings of util`; and by `01 03 737464 01 01 <X>` (a published `std@1`): `bad binding
+std@1`. The law catches a module order taken over framed bytes, a decoder that checks only
+what its own encoder sorts, and one that skips the pin of a row for another target.
 
 **L1. Diamond refusal.** The workspace root manifest has `members = ["app", "a", "b"]` and
 `vendor/` holds `jx.hpkg` and `jy.hpkg` from above. `a` binds
@@ -722,3 +883,25 @@ binds X.
   check of `app` under Y reuses no record, `json@1`'s included, even though `json.hirsel`'s
   bytes differ in one body only.
 - `hirsel publish` of a program over X prints the same R from a store at two different paths.
+
+**L8. Foreign metadata reaches every reuse key.** Workspace members `app` and `math`; `app`
+binds `math = { major = 1, path = "../math" }`, and its entry calls `math.ping`, a wrapper in
+module `math` over the foreign module `native` (prefix `hm_`, one x86_64 row whose file is a
+real indexed archive built from the FFI law adapter, with its pin). Every step below runs
+with one private cache and one code store kept across the steps, and is compared with the
+same command run cold, with an empty cache and an empty code store, on the same files.
+
+- `hirsel check app` passes. Delete `[foreign.native]` from `math/hirsel.toml` and leave every
+  `.hirsel` file unchanged: the warm `hirsel check app` is refused, as the cold one is,
+  because `native`'s bodyless headers now stand in an ordinary module.
+- Restore the table and change only the prefix to `hn_`: the warm `hirsel publish app` prints
+  the cold run's R, which differs from the R printed before the change.
+- Restore the prefix and add an `aarch64-unknown-linux-gnu` row: the warm `hirsel publish app`
+  for x86_64 prints the cold run's R, which differs from the R before (FFI-9).
+- Replace the x86_64 archive's bytes with other bytes and keep the pin: the warm `hirsel build
+  app` is refused with exactly the cold run's `FFI-3: archive … does not match its pin: …`
+  text, and the linker is never started.
+
+The law catches a whole-request record, image key or definition key that hashes only source
+files, and a warm build that links an archive without checking it.
+

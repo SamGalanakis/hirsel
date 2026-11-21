@@ -15,7 +15,7 @@ fn share(root: Option[Arc[Node]]) -> Option[Arc[Node]] {
 
 fn node(key: u64, value: u64, take left: Option[Arc[Node]], take right: Option[Arc[Node]], mut serial: u64) -> Result[Option[Arc[Node]], m1.support.Error] {
     serial += 1
-    let n = Node(id: serial, key: key, value: value, left: take left, right: take right)
+    let n = Node(id: serial, key, value, left: take left, right: take right)
     Ok(Some(m1.support.mem(result.capacity_only(arc.new(take n)))?))
 }
 

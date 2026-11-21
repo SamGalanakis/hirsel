@@ -36,7 +36,7 @@ pub fn parse_prefix(s: String) -> Option[Prefix] {
     if bits > maximum {
         return None
     }
-    Some(Prefix(ip: ip, bits: bits))
+    Some(Prefix(ip, bits))
 }
 
 fn contains(prefix: Prefix, ip: Ip) -> bool {
@@ -267,7 +267,7 @@ pub type Due: key + send = Wait | SendPing | SendClose | Expired
 
 /// Absolute Hello and idle deadlines begin at completion of the 101 response.
 pub fn timers(config: Config, now: u64) -> Timers {
-    Timers(config: config, hello: Some(after(now, config.hello_ms)), idle: after(now, config.idle_ms), probing: false, close: None, peer_closed: false, close_sent: false)
+    Timers(config, hello: Some(after(now, config.hello_ms)), idle: after(now, config.idle_ms), probing: false, close: None, peer_closed: false, close_sent: false)
 }
 
 /// Called only after Hello is accepted; unrelated frames never extend Hello.
@@ -392,7 +392,7 @@ pub fn outbound(role: websocket.Role, config: Config, random: Option[Random]) ->
             Some(_) => {}
         }
     }
-    Ok(Outbound(encoder: websocket.encoder(role, config.max_frame), role: role, max: config.max_frame, random: random))
+    Ok(Outbound(encoder: websocket.encoder(role, config.max_frame), role, max: config.max_frame, random))
 }
 
 /// Encodes exactly one frame into capacity payload+14, avoiding geometric
@@ -743,7 +743,7 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
             return Error(Network(TimedOut))
         }
         let status: u16 = match http1.resume(input, mut head, mut cursor) {
-            Complete => return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, deadline: deadline)),
+            Complete => return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, deadline)),
             Partial => 0,
             Bad => 400,
             TooLarge => 431,
@@ -776,7 +776,7 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
                 Ok(take text) => take text,
                 Error(c) => return Error(Allocation(c)),
             }
-            let Request(writer: take output, deadline: deadline, ..) = take request
+            let Request(writer: take output, deadline, ..) = take request
             let mut writer = take output
             send_response(mut writer, string.as_bytes(header), string.as_bytes(body), deadline)?
             return Ok(None)
@@ -796,7 +796,7 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
     } else {
         None
     }
-    let Request(writer: take output, deadline: deadline, ..) = take request
+    let Request(writer: take output, deadline, ..) = take request
     let mut writer = take output
     let Some(take selected) = take asset else {
         refuse(mut writer, 404, deadline)?
@@ -837,7 +837,7 @@ fn static_head(ready: bool, content_type: String, size: u64) -> Result[String, C
 }
 
 fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
-    let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline: deadline) = take request
+    let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline) = take request
     let mut writer = take output
     let upgraded = match websocket.server_head(input, head) {
         Ok(take value) => take value,
@@ -857,7 +857,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
                 return Error(Http(503))
             }
             send_response(mut writer, response, string.as_bytes(""), deadline)?
-            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame), clock: clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
         Refused(code) => {
             let _ = refuse(mut writer, code, deadline)
@@ -908,7 +908,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
             Error(c) => return Error(Allocation(c))
         }
         match checked {
-            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock: clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
+            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
             Ready(_, false) => return Error(Http(400)),
             Failed(code) => return Error(Http(code)),
             Pending => {}

@@ -133,7 +133,7 @@ type Planet {
 const SOLAR: f64 = 4.0 * 3.141592653589793 * 3.141592653589793
 
 fn planet(x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64, mass: f64) -> Planet {
-    Planet(x: x, y: y, z: z, vx: vx * 365.24, vy: vy * 365.24, vz: vz * 365.24, mass: mass * SOLAR)
+    Planet(x, y, z, vx: vx * 365.24, vy: vy * 365.24, vz: vz * 365.24, mass: mass * SOLAR)
 }
 
 fn energy(b: Inline[Planet, 5]) -> f64 {

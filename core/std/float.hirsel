@@ -255,7 +255,7 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
             return Ok(long(b, negative, at, written))
         }
     }
-    Ok(Scanned(negative: negative, mantissa: mantissa, exponent: add_written(exponent, written), many: false, at: at, written: written))
+    Ok(Scanned(negative, mantissa, exponent: add_written(exponent, written), many: false, at, written))
 }
 
 /// The digits of b from i accumulated onto x, wrapping (the caller rescans past 19
@@ -326,7 +326,7 @@ fn long(b: Bytes, negative: bool, at: u64, written: WrittenExponent) -> Scanned 
         let places: i64 = int.narrow(i - first)
         exponent = -places
     }
-    Scanned(negative: negative, mantissa: x, exponent: add_written(exponent, written), many: true, at: at, written: written)
+    Scanned(negative, mantissa: x, exponent: add_written(exponent, written), many: true, at, written)
 }
 
 /// The rounded (mantissa, biased exponent) of a scanned number that missed the exact fast

@@ -505,7 +505,7 @@ fn attach_halves(take input: ReadHalf, take output: WriteHalf, authority: String
     }
     let wire = reader()?
     let encoding = storage(8192)?
-    let mut c = Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock: clock, deadline: deadline_ns, phase: Idle, upload: Fixed(0), head_request: false, close_after: false)
+    let mut c = Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock, deadline: deadline_ns, phase: Idle, upload: Fixed(0), head_request: false, close_after: false)
     start(mut c, req, deadline_ns)?
     Ok(take c)
 }

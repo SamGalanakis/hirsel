@@ -51,7 +51,7 @@ fn tally(mut c: Counts, s: String) -> Result[(), m1.support.Error] {
     let lo: u32 = int.narrow(string.byte_len(c.storage))
     m1.support.add(mut c.storage, s)?
     let hi: u32 = int.narrow(string.byte_len(c.storage))
-    m1.support.push(mut c.entries, Count(lo: lo, hi: hi, count: 1))?
+    m1.support.push(mut c.entries, Count(lo, hi, count: 1))?
     let _ = list.set(mut c.buckets, slot, list.len(c.entries))
     Ok(())
 }

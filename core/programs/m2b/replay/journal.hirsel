@@ -31,7 +31,7 @@ pub type Recorded = fn(Bytes) -> Result[Bytes, Capacity]
 
 // A journal in record mode; each recorded call runs under `bound bytes limit`.
 pub fn recording(limit: u64) -> Journal {
-    Journal(entries: list.new(), replay: false, at: 0, limit: limit)
+    Journal(entries: list.new(), replay: false, at: 0, limit)
 }
 
 // Switches to replay from the first entry.
@@ -112,7 +112,7 @@ fn outcome_bytes(r: Result[Bytes, Capacity]) -> Result[Bytes, Diverged] {
 }
 
 fn record(mut j: Journal, code: Code, arg: Bytes, take outcome: Bytes) -> Result[(), Diverged] {
-    let e = Entry(code: code, arg: owned(arg)?, outcome: take outcome)
+    let e = Entry(code, arg: owned(arg)?, outcome: take outcome)
     match list.push(mut j.entries, take e) {
         Ok(()) => Ok(()),
         Error((c, _)) => Error(Full(c)),

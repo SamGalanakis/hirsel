@@ -76,7 +76,7 @@ pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)] {
             }
         }
         p.live += 1
-        return Ok(Id(pool: p.me, index: index, generation: 0))
+        return Ok(Id(pool: p.me, index, generation: 0))
     }
     let index = p.free
     let (generation, free_next) = match p.slots[index] {
@@ -86,7 +86,7 @@ pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)] {
     let _ = list.set(mut p.slots, index, Occupied(generation, take x))
     p.free = free_next
     p.live += 1
-    Ok(Id(pool: p.me, index: index, generation: generation))
+    Ok(Id(pool: p.me, index, generation))
 }
 
 /// A view of h's value. Fails: Error(Stale). View: anchored to p; FREEZE p. Cost: O(1).

@@ -27,7 +27,7 @@ resource type DropLog {
 fn drop_ring(out: Stdout, n: u64, head: u64, broken: bool) -> u64 {
     let mut d: Deque[DropLog] = deque.new()
     for i in 0u64 .. n {
-        result.unwrap(deque.push_back(mut d, result.unwrap(DropLog(out: out, id: i, broken: broken, armed: true))))
+        result.unwrap(deque.push_back(mut d, result.unwrap(DropLog(out, id: i, broken, armed: true))))
     }
     for _ in 0u64 .. head {
         let x = option.unwrap(deque.pop_front(mut d))
@@ -124,13 +124,13 @@ fn failed_four3(out: Stdout) -> u64 {
 fn drop_partial(out: Stdout, cap: u64, count: u64, head: u64, broken: bool) -> u64 {
     let mut d: Deque[DropLog] = deque.new()
     for i in 0u64 .. cap {
-        result.unwrap(deque.push_back(mut d, result.unwrap(DropLog(out: out, id: i, broken: false, armed: false))))
+        result.unwrap(deque.push_back(mut d, result.unwrap(DropLog(out, id: i, broken: false, armed: false))))
     }
     while deque.len(d) != 0 {
         let _ = deque.pop_back(mut d)
     }
     for i in 0u64 .. count {
-        result.unwrap(deque.push_back(mut d, result.unwrap(DropLog(out: out, id: i, broken: broken, armed: true))))
+        result.unwrap(deque.push_back(mut d, result.unwrap(DropLog(out, id: i, broken, armed: true))))
     }
     for _ in 0u64 .. head {
         let x = option.unwrap(deque.pop_front(mut d))

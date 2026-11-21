@@ -75,7 +75,7 @@ fn piece(mut s: Store, value: String) -> Result[Piece, m1.support.Error] {
         id
     }
     s.live += 1
-    Ok(Piece(id: id, lo: 0, hi: hi))
+    Ok(Piece(id, lo: 0, hi))
 }
 
 fn length(root: List[Piece]) -> u64 {

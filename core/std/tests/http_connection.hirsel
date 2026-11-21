@@ -66,7 +66,7 @@ fn echo(req: http.Request, scratch: Region, mut b: http.Body, state: EchoState) 
 }
 
 fn test_server(take server: TestServer) waits {
-    let TestServer(listener: take l, c: c, tasks: tasks, cfg: take cfg, routes: take routes) = take server
+    let TestServer(listener: take l, c, tasks, cfg: take cfg, routes: take routes) = take server
     let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
     result.unwrap(list.push(mut listeners, take l))
     result.unwrap(http.serve(take listeners, c, tasks, take cfg, take routes, EchoState(clock: c)))
@@ -82,7 +82,7 @@ fn listen_for_law(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config) -> (Tas
 fn listen_with_routes(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, take routes: router.Router[EchoState]) -> (Task[()], Addr) waits {
     let addr = Addr(ip: V4(2130706433), port: 0)
     let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
-    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg, routes: take routes)
+    let job = TestServer(listener: take listener, c, tasks, cfg: take cfg, routes: take routes)
     (result.unwrap(task.spawn(tasks, bytes 262144, take job, test_server)), where_to)
 }
 
@@ -139,7 +139,7 @@ type Drip: send {
 }
 
 fn drip(take plan: Drip) waits {
-    let Drip(w: take w, c: c, start: start, first_ms: first_ms, every_ms: every_ms) = take plan
+    let Drip(w: take w, c, start, first_ms, every_ms) = take plan
     let mut output = take w
     let raw = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
     for i in 0u64 .. list.len(raw) {
@@ -164,7 +164,7 @@ fn http_absolute_deadlines(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let socket = result.unwrap(host.connect(n, addr, Never))
     let (r, w) = net.split(take socket)
     let mut input = take r
-    let sender = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take w, c: c, start: accepted, first_ms: 8, every_ms: 4), drip))
+    let sender = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take w, c, start: accepted, first_ms: 8, every_ms: 4), drip))
     let mut received: Bytes = result.unwrap(list.with_capacity(512))
     if client_head(mut input, mut received, c, after_ms(accepted, 60)) != 408 || !within_wake(host.mono_ns(c) - accepted, 16, 4) {
         return false
@@ -183,7 +183,7 @@ fn http_absolute_deadlines(n: Net, c: Clock, tasks: Tasks) -> bool waits {
         return false
     }
     let previous = host.mono_ns(c)
-    let later = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take output2, c: c, start: previous, first_ms: 5, every_ms: 5), drip))
+    let later = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take output2, c, start: previous, first_ms: 5, every_ms: 5), drip))
     list.clear(mut received)
     client_head(mut input2, mut received, c, after_ms(previous, 60)) == 408 && within_wake(host.mono_ns(c) - previous, 25, 5)
 }
@@ -252,7 +252,7 @@ type ClientJob: send {
 }
 
 fn client_write(take job: ClientJob) waits {
-    let ClientJob(w: take w, raw: take raw, until: until) = take job
+    let ClientJob(w: take w, raw: take raw, until) = take job
     let mut output = take w
     let _ = client_send(mut output, raw, until)
 }
@@ -555,7 +555,7 @@ fn asset_reply(req: http.Request, scratch: Region, mut out: http.Responder, stat
 }
 
 fn serve_asset_law(take job: AssetServer) waits {
-    let AssetServer(listener: take listener, c: clock, tasks: tasks, entries: take state) = take job
+    let AssetServer(listener: take listener, c: clock, tasks, entries: take state) = take job
     let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
     result.unwrap(list.push(mut listeners, take listener))
     let mut routes: router.Builder[assets.Manifest] = router.builder()
@@ -620,7 +620,7 @@ fn asset_wire(n: Net, c: Clock, addr: Addr, request: String, status: u16, tag: S
 // expect: run http_asset_validators(network) = true
 fn http_asset_validators(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
-    let job = AssetServer(listener: take listener, c: c, tasks: tasks, entries: asset_manifest())
+    let job = AssetServer(listener: take listener, c, tasks, entries: asset_manifest())
     let server = result.unwrap(task.spawn(tasks, bytes 262144, take job, serve_asset_law))
     asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, gzip_tag(), "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, gzip_tag(), "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes(""))
 }
@@ -665,7 +665,7 @@ type StopServer: send {
 }
 
 fn stop_server(take job: StopServer) waits {
-    let StopServer(listener: take listener, c: c, tasks: tasks, stop: take stop) = take job
+    let StopServer(listener: take listener, c, tasks, stop: take stop) = take job
     let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
     result.unwrap(list.push(mut listeners, take listener))
     let mut routes: router.Builder[EchoState] = router.builder()
@@ -687,7 +687,7 @@ fn stop_fixture(n: Net, c: Clock, tasks: Tasks) -> (Task[()], Addr, Sender[u64])
     let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let stops: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1)
     let (stop, receive_stop) = result.unwrap(take stops)
-    let server = result.unwrap(task.spawn(tasks, bytes 262144, StopServer(listener: take listener, c: c, tasks: tasks, stop: take receive_stop), stop_server))
+    let server = result.unwrap(task.spawn(tasks, bytes 262144, StopServer(listener: take listener, c, tasks, stop: take receive_stop), stop_server))
     (take server, addr, take stop)
 }
 
@@ -1337,7 +1337,7 @@ fn listen_with_budget(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, bud
     result.unwrap(router.add(mut routes, "POST", "/{tail...}", router.raw(echo)))
     let addr = Addr(ip: V4(2130706433), port: 0)
     let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
-    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg, routes: result.unwrap(router.build(take routes)))
+    let job = TestServer(listener: take listener, c, tasks, cfg: take cfg, routes: result.unwrap(router.build(take routes)))
     (result.unwrap(task.spawn(tasks, bytes budget, take job, test_server)), where_to)
 }
 

@@ -61,7 +61,7 @@ fn wait_cancel_gate(tx: Sender[()]) {
 }
 
 fn batch(id: u64, take rows: List[String], released: Sender[u64]) -> Result[Batch, m1.support.Error] {
-    m1.support.mem(result.capacity_only(Batch(id: id, rows: take rows, released: channel.sender(released))))
+    m1.support.mem(result.capacity_only(Batch(id, rows: take rows, released: channel.sender(released))))
 }
 
 fn publish(tx: Sender[Batch], take b: Batch) -> bool waits {
@@ -128,7 +128,7 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
     if !full {
         let _ = channel.try_send(s.ready, ())
     }
-    Ok(SourceResult(sent: sent, full: full))
+    Ok(SourceResult(sent, full))
 }
 
 fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
@@ -178,7 +178,7 @@ fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] wai
             // Cancellation wins at the next receive, even when the last sender closed.
         }
     }
-    Ok(TransformResult(completed: completed, error: None, retained: None))
+    Ok(TransformResult(completed, error: None, retained: None))
 }
 
 fn output_charge(rows: List[String]) -> u64 {

@@ -52,7 +52,7 @@ fn request(block: String, variant: String, number: u64, take config: Arc[Config]
             let name_hi: u32 = int.narrow(string.byte_len(arena))
             m1.support.add(mut arena, string.slice(row, colon + 2, string.byte_len(row)))?
             let value_hi: u32 = int.narrow(string.byte_len(arena))
-            let value = Header(name_lo: name_lo, name_hi: name_hi, value_lo: name_hi, value_hi: value_hi)
+            let value = Header(name_lo, name_hi, value_lo: name_hi, value_hi)
             m1.support.mem(result.capacity_only(span.push(mut headers, value)))?
         }
         let hs = span.finish(take headers)

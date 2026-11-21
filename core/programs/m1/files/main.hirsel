@@ -134,7 +134,7 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
 fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender[Event], take rx: Receiver[Event]) -> Result[(), m1.support.Error] waits {
     let mut name = m1.support.mem(string.with_capacity(32))?
     let directory = io(std.dir.create_temp(parent, mut name), "Io@temp")?
-    let temporary = match Temp(parent: parent, name: take name) {
+    let temporary = match Temp(parent, name: take name) {
         Ok(take t) => t,
         Error((c, (owner, take returned_name))) => {
             let _ = std.dir.remove_all(owner, returned_name)

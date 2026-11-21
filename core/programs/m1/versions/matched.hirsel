@@ -48,7 +48,7 @@ fn release(mut s: Store, root: Option[u32]) {
 }
 
 fn node(mut s: Store, key: u32, value: u64, left: Option[u32], right: Option[u32]) -> Result[Option[u32], m1.support.Error] {
-    let n = Node(key: key, value: value, left: left, right: right, refs: 1)
+    let n = Node(key, value, left, right, refs: 1)
     let h: u32 = if let Some(i) = s.free {
         let next = match s.slots[int.widen(i)] {
             Free(next) => next,

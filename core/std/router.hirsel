@@ -7,7 +7,7 @@ pub type Route[S: shareable + send]: shareable + send {
 }
 
 pub fn raw[S: shareable + send](handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits) -> Route[S] {
-    Route(handler: handler, body_max: None, upgrade_bytes: None, stream_bytes: None, steps: None)
+    Route(handler, body_max: None, upgrade_bytes: None, stream_bytes: None, steps: None)
 }
 
 type Segment: shareable + send = Literal(String) | Capture(String)
@@ -109,7 +109,7 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
                 }
             }
             let mut literal = string.new()
-            match uri.decode_text(pattern, http1.Span(start: start, end: end), mut literal) {
+            match uri.decode_text(pattern, http1.Span(start, end), mut literal) {
                 Ok(()) => {},
                 Error(Capacity(e)) => return Error(Allocation(e)),
                 Error(_) => return Error(InvalidPattern),

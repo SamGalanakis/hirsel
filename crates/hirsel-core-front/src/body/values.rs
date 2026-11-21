@@ -896,6 +896,47 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         self.construct(n, d, case, fields, labelled, args, want)
     }
+    /// Resolve the label against the field and return the ordinary operand.
+    pub(super) fn constructor_argument(
+        &mut self,
+        arg: NodeId,
+        field: &crate::decls::FieldDecl,
+        labelled: bool,
+    ) -> Option<NodeId> {
+        let kind = self.kind(arg);
+        if !labelled {
+            if kind == NodeKind::LabelledArgument {
+                self.refuse_label(arg, None, "this payload is not labelled".to_owned());
+                return None;
+            }
+            return Some(arg);
+        }
+        let name = &field.name;
+        if kind == NodeKind::LabelledArgument {
+            if self.token_text(arg) == name {
+                return Some(self.kids(arg)[0]);
+            }
+            self.refuse_label(arg, Some(name), format!("expected the field `{name}` here"));
+        } else if kind == NodeKind::Path
+            && self.item.tree.node(arg).origin.tokens.len() == 1
+            && matches!(self.p.target(self.at, arg), Some(Target::Binder(_)))
+        {
+            let written = self.token_text(arg);
+            if written == name {
+                return Some(arg);
+            }
+            self.refuse_compared(
+                "LANG-9",
+                arg,
+                format!("{written}:"),
+                format!("{name}:"),
+                format!("expected the field `{name}` here"),
+            );
+        } else {
+            self.refuse_label(arg, Some(name), format!("the field `{name}` is labelled"));
+        }
+        None
+    }
     /// Check and build a value of declaration `d` (case `case` of a variant) from
     /// `args`, one per field in declaration order, labelled exactly when `labelled`
     /// (LANG-9). Type parameters are found as a call's are (LANG-11): the expected
@@ -975,41 +1016,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut field_places = Vec::new();
         let can_place_fields = self.expression_destination(n).is_none() || !self.may_return(n);
         for (i, (&a, f)) in args.iter().zip(fields).enumerate() {
-            let e = match (self.kind(a), labelled) {
-                (NodeKind::LabelledArgument, true) if self.token_text(a) == f.name => {
-                    self.kids(a)[0]
-                }
-                (NodeKind::LabelledArgument, true) => {
-                    let name = &f.name;
-                    self.refuse_label(a, Some(name), format!("expected the field `{name}` here"));
-                    return (ERROR, None);
-                }
-                (NodeKind::LabelledArgument, false) => {
-                    self.refuse_label(a, None, "this payload is not labelled".to_owned());
-                    return (ERROR, None);
-                }
-                (NodeKind::StepsArgument, _) => {
+            let Some(e) = self.constructor_argument(a, f, labelled) else {
+                return (ERROR, None);
+            };
+            let e = match self.kind(e) {
+                NodeKind::StepsArgument if !labelled => {
                     self.refuse_compared(
                         "OWN-7",
-                        a,
+                        e,
                         "steps",
                         "take",
                         "a payload takes no `steps` mark",
                     );
-                    self.kids(a)[0]
+                    self.kids(e)[0]
                 }
-                // A payload is a `take` parameter, never a `bytes` one (OWN-7).
-                (NodeKind::BytesArgument, _) => {
-                    let message = "a payload takes no `bytes` mark";
-                    self.refuse_compared("OWN-7", a, "bytes", "take", message);
-                    self.kids(a)[0]
+                NodeKind::BytesArgument if !labelled => {
+                    self.refuse_compared(
+                        "OWN-7",
+                        e,
+                        "bytes",
+                        "take",
+                        "a payload takes no `bytes` mark",
+                    );
+                    self.kids(e)[0]
                 }
-                (_, true) => {
-                    let name = &f.name;
-                    self.refuse_label(a, Some(name), format!("the field `{name}` is labelled"));
-                    return (ERROR, None);
-                }
-                (_, false) => a,
+                _ => e,
             };
             if !self.synthesises(e) {
                 later.push((i, e));

@@ -8,7 +8,7 @@ pub opaque type Representation: shareable + send {
 
 pub fn representation(coding: Coding, take body: Bytes, take etag: String) -> Result[Representation, Capacity] {
     let stored = result.capacity_only(arc.new(take body))?
-    Ok(Representation(coding: coding, body: take stored, etag: take etag))
+    Ok(Representation(coding, body: take stored, etag: take etag))
 }
 
 pub type Entry: shareable + send {

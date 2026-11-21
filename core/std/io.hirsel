@@ -55,7 +55,7 @@ pub fn lines(take f: HostFile, cap: u64) -> Result[Lines, (Capacity, HostFile)] 
         Ok(take b) => take b,
         Error(c) => return Error((c, take f)),
     }
-    Ok(Lines(file: take f, buffer: take buffer, at: 0, pending: take accumulated, cap: cap, eof: false, completed: false))
+    Ok(Lines(file: take f, buffer: take buffer, at: 0, pending: take accumulated, cap, eof: false, completed: false))
 }
 
 /// Raw bytes accumulated for the current line, including any trailing partial scalar.
@@ -135,7 +135,7 @@ pub fn read_line(mut l: Lines, mut line: String) -> Result[bool, Error] waits {
             } else {
                 ((l.cap + 1 + 7) / 8) * 8
             }
-            return Error(Capacity(Capacity(requested: requested, available: l.cap)))
+            return Error(Capacity(Capacity(requested, available: l.cap)))
         }
     }
 }

@@ -1546,6 +1546,40 @@ fn list_set_transfers_the_indexed_element() {
 }
 
 #[test]
+fn field_puns() {
+    let failures: Vec<_> = [
+        "LANG-9-17-field-puns.hirsel",
+        "LANG-9-17-field-puns-refused.hirsel",
+    ]
+    .into_iter()
+    .flat_map(|name| run_case(&root().join("cases/rules").join(name)))
+    .collect();
+
+    let address = |source: &str| {
+        let path = DefPath::from_full("app@1/main/probe").unwrap();
+        let request = Checked::source(source, None);
+        let identity = Identity::plain(path);
+        request
+            .product
+            .units([identity.clone()], 256)
+            .unwrap()
+            .address(&identity)
+            .unwrap()
+    };
+    let ty = "type Point { x: u64, y: u64 }\n";
+    let make = format!("{ty}fn probe(x: u64, y: u64) -> Point {{ Point(x, y) }}");
+    let read = format!("{ty}fn probe(p: Point) -> u64 {{ let Point(x, y) = p; x - y }}");
+    let construction_equal =
+        address(&make) == address(&make.replace("Point(x, y)", "Point(x: x, y: y)"));
+    let pattern_equal =
+        address(&read) == address(&read.replace("Point(x, y)", "Point(x: x, y: y)"));
+    assert!(
+        failures.is_empty() && construction_equal && pattern_equal,
+        "field pun conformance: {failures:?}; equal construction code addresses: {construction_equal}; equal pattern code addresses: {pattern_equal}",
+    );
+}
+
+#[test]
 fn aggregate_constants_publish_values_and_use_read_only_tables() {
     let failures = run_case(&root().join("cases/body/constant-aggregates.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");

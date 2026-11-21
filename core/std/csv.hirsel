@@ -122,7 +122,7 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
         if next == Need {
             return Ok(Need)
         }
-        if let Error((c, _)) = list.push(mut fields, Field(span: http1.Span(start: start, end: stop), quoted: quoted)) {
+        if let Error((c, _)) = list.push(mut fields, Field(span: http1.Span(start, end: stop), quoted)) {
             return Error(Capacity(c))
         }
         if !more {
@@ -211,7 +211,7 @@ pub fn field_text(text: Bytes, f: Field, mut out: String) -> Result[(), Error] {
 /// Ex: `let mut w = csv.writer(csv.Dialect(delimiter: 44, crlf: false))`.
 pub fn writer(d: Dialect) -> Writer {
     check_delimiter(d)
-    Writer(d: d, fields: 0, empty_first: false)
+    Writer(d, fields: 0, empty_first: false)
 }
 
 /// Appends a delimiter after the first field, then value. Quotes fields

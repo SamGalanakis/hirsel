@@ -45,7 +45,7 @@ pub fn parse(s: String) -> Result[Uuid, Error] {
     if len != 36 {
         return Error(Invalid(i))
     }
-    Ok(Uuid(hi: hi, lo: lo))
+    Ok(Uuid(hi, lo))
 }
 
 /// Appends the lowercase RFC 9562 section 4 text in 8-4-4-4-12 form.

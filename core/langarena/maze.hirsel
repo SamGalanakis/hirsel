@@ -57,7 +57,7 @@ fn make(width: u64, height: u64, mut g: helper.Lcg) -> Result[Maze, helper.Error
                 4
             } else {
                 0
-            }, neighbors: neighbors, x: x, y: y))?
+            }, neighbors, x, y))?
         }
         push(mut cells, take row)?
     }

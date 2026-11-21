@@ -69,7 +69,7 @@ fn parse(source: String) -> Result[List[Point], helper.Error] {
         let x = number(source, fields[1])?
         let z = number(source, fields[3])?
         let y = number(source, fields[5])?
-        match list.push(mut points, Point(x: x, y: y, z: z)) {
+        match list.push(mut points, Point(x, y, z)) {
             Ok(()) => {},
             Error((c, _)) => return Error(Capacity(c)),
         }

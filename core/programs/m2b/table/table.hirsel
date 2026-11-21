@@ -102,5 +102,5 @@ fn decode_account(b: Bytes, mut at: u64) -> Result[Option[Account], Capacity] {
         Error(_) => return Ok(None),
     }
     at = p + n
-    Ok(Some(Account(id: id, owner: take owner, balance: int.truncate(bal))))
+    Ok(Some(Account(id, owner: take owner, balance: int.truncate(bal))))
 }

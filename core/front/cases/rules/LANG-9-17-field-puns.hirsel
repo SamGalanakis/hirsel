@@ -1,0 +1,30 @@
+// expect: accept
+// expect: run projected(3,4) = 5
+// expect: run rect(3,4) = 12
+type Point {
+    x: i64,
+    y: i64
+}
+
+fn up(x: i64, y: i64) -> Point {
+    Point(x, y: y + 1)
+}
+
+fn projected(a: i64, b: i64) -> i64 {
+    let Point(x, ..) = up(a, b)
+    let Point(y, ..) = up(b, x)
+    y + 1
+}
+
+type Shape = Circle(f64) | Rect(w: f64, h: f64)
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.14 * r * r,
+        Rect(w, h) => w * h
+    }
+}
+
+fn rect(w: f64, h: f64) -> f64 {
+    area(Rect(w, h))
+}

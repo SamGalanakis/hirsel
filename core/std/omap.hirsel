@@ -174,7 +174,7 @@ fn load_branch[K: ordered + shareable + send, V: shareable + send](id: u64, low_
         result.capacity_only(list.push(mut cs, arc.share(n)))?
     }
     let lows = result.capacity_only(arc.new(take ks))?
-    result.capacity_only(arc.new(Node(stamp: id, depth: depth, size: size, rows: list.new(), kids: take cs, lows: Some(take lows))))
+    result.capacity_only(arc.new(Node(stamp: id, depth, size, rows: list.new(), kids: take cs, lows: Some(take lows))))
 }
 
 /// Bottom-up build from strictly increasing keys and equally many values.
@@ -451,7 +451,7 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
                 1u64
             }
             ids += 1
-            let h: Arc[Node[K, V]] = result.capacity_only(arc.new(Node(stamp: ids, depth: n.depth, size: size, rows: list.new(), kids: take cs, lows: take lows)))?
+            let h: Arc[Node[K, V]] = result.capacity_only(arc.new(Node(stamp: ids, depth: n.depth, size, rows: list.new(), kids: take cs, lows: take lows)))?
             return Ok(Pieces(first: take h, second: None))
         }
         split_branches(mut ids, take cs)
@@ -460,7 +460,7 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
 
 fn pack_leaf[K: ordered + shareable + send, V: shareable + send](id: u64, take rows: List[Arc[Entry[K, V]]]) -> Result[Arc[Node[K, V]], Capacity] {
     let size = list.len(rows)
-    result.capacity_only(arc.new(Node(stamp: id, depth: 0, size: size, rows: take rows, kids: list.new(), lows: None)))
+    result.capacity_only(arc.new(Node(stamp: id, depth: 0, size, rows: take rows, kids: list.new(), lows: None)))
 }
 
 fn fresh_branch[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take cs: List[Arc[Node[K, V]]]) -> Result[Arc[Node[K, V]], Capacity] {
@@ -540,7 +540,7 @@ fn pack_branch[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
         size += c.size
     }
     ids += 1
-    result.capacity_only(arc.new(Node(stamp: ids, depth: depth, size: size, rows: list.new(), kids: take cs, lows: take lows)))
+    result.capacity_only(arc.new(Node(stamp: ids, depth, size, rows: list.new(), kids: take cs, lows: take lows)))
 }
 
 // Transfer a temporary leaf's entries into the final halves. No payload clone.
@@ -828,7 +828,7 @@ fn split_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids:
         Some(fresh_keys(kids)?)
     }
     ids += 1
-    let right = Node(stamp: ids, depth: node.depth, size: size, rows: take rows, kids: take kids, lows: take lows)
+    let right = Node(stamp: ids, depth: node.depth, size, rows: take rows, kids: take kids, lows: take lows)
     result.capacity_only(arc.new(take right))
 }
 

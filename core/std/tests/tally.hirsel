@@ -152,7 +152,7 @@ type Parked: send {
 
 // Adds 7, tells the owner, then waits on a gate nobody opens until it is cancelled.
 fn parked_part(take p: Parked) waits {
-    let Parked(h: take h0, ready: ready, gate: gate) = take p
+    let Parked(h: take h0, ready, gate) = take p
     let mut h = take h0
     add(mut h, 7)
     result.unwrap(channel.send(ready, ()))
@@ -321,7 +321,7 @@ type Flusher: send {
 // Adds 3 and flushes, tells the owner, waits for the gate, then flushes 4 and leaves 5
 // for its cleanup.
 fn flushing_part(take p: Flusher) waits {
-    let Flusher(h: take h0, ready: ready, gate: gate) = take p
+    let Flusher(h: take h0, ready, gate) = take p
     let mut h = take h0
     add(mut h, 3)
     tally.flush(mut h)

@@ -73,7 +73,7 @@ fn batch(id: u64, take rows: List[String], released: Sender[u64]) -> Result[Batc
         m1.support.add(mut data, row)?
         m1.support.push(mut offsets, int.narrow(string.byte_len(data)))?
     }
-    m1.support.mem(result.capacity_only(Batch(id: id, data: take data, offsets: take offsets, released: channel.sender(released))))
+    m1.support.mem(result.capacity_only(Batch(id, data: take data, offsets: take offsets, released: channel.sender(released))))
 }
 
 fn publish(tx: Sender[Batch], take b: Batch) -> bool waits {
@@ -140,7 +140,7 @@ fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
     if !full {
         let _ = channel.try_send(s.ready, ())
     }
-    Ok(SourceResult(sent: sent, full: full))
+    Ok(SourceResult(sent, full))
 }
 
 fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
@@ -186,7 +186,7 @@ fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] wai
             // Cancellation wins at the next receive, even when the last sender closed.
         }
     }
-    Ok(TransformResult(completed: completed, error: None, retained: None))
+    Ok(TransformResult(completed, error: None, retained: None))
 }
 
 fn sink(take s: Sink) -> Stats waits {

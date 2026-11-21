@@ -34,7 +34,7 @@ pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Boun
         take block
     }
     match take made {
-        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room: room, driver: driver)),
+        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, driver)),
         Error(e) => Error(Allocation(e)),
     }
 }
@@ -69,12 +69,12 @@ pub type Offer: send {
 }
 
 pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppress: bool, at: u64, pre_head: u64) -> Offer {
-    let Spec(status: _, fields: _, block: take owned, state_at: state_at, room: room, driver: driver) = take s
+    let Spec(status: _, fields: _, block: take owned, state_at, room, driver) = take s
     let mut block = take owned
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
-    Offer(block: take block, head_len: list.len(head), state_at: state_at, room: room, driver: driver, chunked: chunked, heartbeat: heartbeat, suppress: suppress, at: at, pre_head: pre_head)
+    Offer(block: take block, head_len: list.len(head), state_at, room, driver, chunked, heartbeat, suppress, at, pre_head)
 }
 
 type Delivery: send = Item(Bytes) | Staged(Bytes) | Committed | Sent(SentUnit) | WriteFailed | ReadEnd | Tick | SourceEnded | Stop
@@ -112,7 +112,7 @@ fn next_event[P: codec + send, E](take previous: P, room: Bounds, next: fn(mut P
 }
 
 pub fn produce[P: codec + send, E](take seed: Seed, next: fn(mut P) -> Result[Option[Bytes], E] waits) waits {
-    let Seed(block: take block, at: at, inbox: take inbox, credits: take credits, room: room) = take seed
+    let Seed(block: take block, at, inbox: take inbox, credits: take credits, room) = take seed
     let decoded = codec.decode_at((codec.of() : codec.Codec[P]), block, at)
     discard(take block)
     if let Ok(Ok(take initial)) = take decoded {
@@ -206,7 +206,7 @@ fn monitor(take job: Monitor) -> ReadHalf waits {
 }
 
 fn alarm(take job: Alarm) waits {
-    let Alarm(clock: c, from: start, interval: period, pre_head: pre_head, inbox: take inbox) = take job
+    let Alarm(clock: c, from: start, interval: period, pre_head, inbox: take inbox) = take job
     let mut next = clock.deadline_after_ms(start, period)
     let mut pending = pre_head
     loop {
@@ -275,7 +275,7 @@ fn write_head(mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u
 }
 
 fn writer(take job: Writer) -> WriteHalf waits {
-    let Writer(half: take half, block: take block, size: size, out_cap: capacity, chunked: chunked, suppressed: suppressed, clock: c, pre_head: pre_head, write_ms: ms, stop: take signal, inbox: take inbox, units: take units) = take job
+    let Writer(half: take half, block: take block, size, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, stop: take signal, inbox: take inbox, units: take units) = take job
     let mut socket = take half
     let mut scratch: Bytes = result.unwrap(list.with_capacity(capacity))
     let _ = list.append(mut scratch, list.slice(block, 0, size))
@@ -352,12 +352,12 @@ fn stop_producer(mut running: Option[Task[()]]) {
 }
 
 pub fn drive(take job: Work) waits {
-    let Work(transport: take transport, tasks: tasks, control: take control) = take job
-    let Transfer(reader: take input, writer: take output, offer: take offer, buffered: buffered, clock: c, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
+    let Work(transport: take transport, tasks, control: take control) = take job
+    let Transfer(reader: take input, writer: take output, offer: take offer, buffered, clock: c, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
     if buffered > allowance {
         return
     }
-    let Offer(block: take block, head_len: head_len, state_at: state_at, room: room, driver: driver, chunked: chunked, heartbeat: heartbeat, suppress: suppress, at: at, pre_head: pre_head) = take offer
+    let Offer(block: take block, head_len, state_at, room, driver, chunked, heartbeat, suppress, at, pre_head) = take offer
     let messages: Result[(Sender[Delivery], Receiver[Delivery]), Capacity] = channel.new(6)
     let (tx, rx) = result.unwrap(take messages)
     if let Some(owner) = control {
@@ -373,9 +373,9 @@ pub fn drive(take job: Work) waits {
     let _ = channel.try_send(give, ())
     let _ = channel.try_send(give, ())
     let mut queue: List[Bytes] = result.unwrap(list.with_capacity(2))
-    let writing = Writer(half: take output, block: take block, size: head_len, out_cap: capacity, chunked: chunked, suppressed: suppress, clock: c, pre_head: pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes)
+    let writing = Writer(half: take output, block: take block, size: head_len, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes)
     let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(tx))
-    let waking = Alarm(clock: c, from: at, interval: period, pre_head: pre_head, inbox: channel.sender(tx))
+    let waking = Alarm(clock: c, from: at, interval: period, pre_head, inbox: channel.sender(tx))
     let mut write_task = result.unwrap(task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer))
     let mut read_task = result.unwrap(task.spawn(tasks, bytes 64, take watching, monitor))
     let mut alarm_task = result.unwrap(task.spawn(tasks, bytes 4096, take waking, alarm))
@@ -426,7 +426,7 @@ pub fn drive(take job: Work) waits {
                             discard(take packet)
                         } else {
                             let receiver = option.unwrap(replace(mut credit, None))
-                            let seed = Seed(block: take packet, at: state_at, inbox: channel.sender(tx), credits: take receiver, room: room)
+                            let seed = Seed(block: take packet, at: state_at, inbox: channel.sender(tx), credits: take receiver, room)
                             producer = Some(result.unwrap(task.spawn(tasks, bytes room.producer_bytes, take seed, driver)))
                         }
                         let _ = channel.try_send(units, Head)

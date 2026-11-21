@@ -31,7 +31,7 @@ fn prepare(n: u64) -> Result[Document, helper.Error] {
         let mut opts: Map[String, (i32, bool)] = map.new()
         let key = helper.mem(string.from("1"))?
         helper.mem(result.capacity_only(map.insert(mut opts, take key, (1i32, true))))?
-        helper.mem(result.capacity_only(list.push(mut coordinates, NamedCoordinate(point: Coordinate(x: x, y: y, z: z), name: take name, opts: take opts))))?
+        helper.mem(result.capacity_only(list.push(mut coordinates, NamedCoordinate(point: Coordinate(x, y, z), name: take name, opts: take opts))))?
     }
     Ok(Document(coordinates: take coordinates, info: "some info"))
 }
@@ -115,7 +115,7 @@ fn coordinate(j: std.json.Json) -> Result[Coordinate, helper.Error] {
                 }
             }
         }
-        Ok(Coordinate(x: x, y: y, z: z))
+        Ok(Coordinate(x, y, z))
     } else {
         Error(Config)
     }

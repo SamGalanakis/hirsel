@@ -361,7 +361,7 @@ resource type UnstableSortAudit {
 }
 
 fn sort_law_fail_at(n: u64, shape: u64, k: u64) {
-    let mut audit = result.unwrap(UnstableSortAudit(items: sort_law_input(n, shape), n: n, shape: shape))
+    let mut audit = result.unwrap(UnstableSortAudit(items: sort_law_input(n, shape), n, shape))
     let mut calls: u64 = 0
     list.sort(mut audit.items, scoped fn(a: SortLawItem, b: SortLawItem) -> Order {
         calls += 1

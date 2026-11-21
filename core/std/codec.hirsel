@@ -1074,7 +1074,7 @@ pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Resul
     let mut value: Bytes = list.new()
     (c.encoder)(v, mut value)?
     let copied = string.from(path)?
-    match list.push(mut s.defaults, Default(def: def, field: take copied, value: take value)) {
+    match list.push(mut s.defaults, Default(def, field: take copied, value: take value)) {
         Ok(()) => Ok(()),
         Error((f, _)) => Error(f)
     }
@@ -1858,7 +1858,7 @@ pub fn resolve[T](c: Codec[T], writer: Bytes) -> Result[Result[Reader[T], Decode
     let mut s = built(c)?
     let mine = finish(s)?
     if mine == writer {
-        return Ok(Ok(Reader(c: c, same: true, ops: list.new(), defaults: list.new())))
+        return Ok(Ok(Reader(c, same: true, ops: list.new(), defaults: list.new())))
     }
     let wlen = list.len(writer)
     let mut all: Bytes = list.with_capacity(wlen + list.len(mine))?
@@ -1875,7 +1875,7 @@ pub fn resolve[T](c: Codec[T], writer: Bytes) -> Result[Result[Reader[T], Decode
         Error(e) => return Ok(Error(Schema(e)))
     }
     let defaults = replace(mut s.defaults, list.new())
-    let mut p = Plan(all: take all, wlen: wlen, wdefs: take wdefs, rdefs: take rdefs, ops: list.new(), memo: map.new(), tasks: list.new(), defaults: take defaults, has_never: false)
+    let mut p = Plan(all: take all, wlen, wdefs: take wdefs, rdefs: take rdefs, ops: list.new(), memo: map.new(), tasks: list.new(), defaults: take defaults, has_never: false)
     if let Error(e) = compile(mut p, wroot, rroot)? {
         return Ok(Error(Schema(e)))
     }
@@ -1884,7 +1884,7 @@ pub fn resolve[T](c: Codec[T], writer: Bytes) -> Result[Result[Reader[T], Decode
     }
     let ops = replace(mut p.ops, list.new())
     let kept = replace(mut p.defaults, list.new())
-    Ok(Ok(Reader(c: c, same: false, ops: take ops, defaults: take kept)))
+    Ok(Ok(Reader(c, same: false, ops: take ops, defaults: take kept)))
 }
 
 // A compound item being read: a List's or Map's entries, a tuple's or variant's fields,
@@ -1955,7 +1955,7 @@ type Frame {
 }
 
 fn frame(kind: u64, node: u64, n: u64, before: u64) -> Frame {
-    Frame(kind: kind, node: node, i: 0, n: n, before: before, key_at: 0, keyed: false, runs: list.new(), keys: map.new())
+    Frame(kind, node, i: 0, n, before, key_at: 0, keyed: false, runs: list.new(), keys: map.new())
 }
 
 fn push_frame(mut stack: List[Frame], take f: Frame) -> Result[(), Stop] {

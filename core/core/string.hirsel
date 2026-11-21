@@ -331,7 +331,7 @@ pub fn utf8_head(b: u8) -> Option[Utf8Head] {
     } else {
         0xbf
     }
-    Some(Utf8Head(width: width, low: low, high: high))
+    Some(Utf8Head(width, low, high))
 }
 
 /// Validates the continuation bytes of one unit, with available bytes including

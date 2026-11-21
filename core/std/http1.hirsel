@@ -458,7 +458,7 @@ fn status_line(b: Bytes, mut at: u64, mut h: Head) -> Result[(), Stop] {
         }
         at += 1
     }
-    h.reason = Span(start: start, end: at)
+    h.reason = Span(start, end: at)
     newline(b, mut at)
 }
 

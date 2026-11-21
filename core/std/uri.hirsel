@@ -17,7 +17,7 @@ pub type Set: key = Segment | Path | Query | QueryPart | UserInfo
 pub type Error = Invalid(u64) | NotUtf8(u64) | Relative | Capacity(Capacity)
 
 fn span(start: u64, end: u64) -> http1.Span {
-    http1.Span(start: start, end: end)
+    http1.Span(start, end)
 }
 
 fn width(s: http1.Span) -> u64 {
@@ -211,7 +211,7 @@ pub fn parse(text: String) -> Result[Uri, Error] {
         }
         fragment = Some(span(start, end))
     }
-    Ok(Uri(scheme: scheme, userinfo: userinfo, host: host, port: port, path: path, query: query, fragment: fragment))
+    Ok(Uri(scheme, userinfo, host, port, path, query, fragment))
 }
 
 /// Reads the port value. An absent or empty port gives None. Alloc: nothing.
@@ -434,7 +434,7 @@ fn resolve_reserved(base_text: String, base: Uri, base_scheme: http1.Span, ref_t
         optional_piece(ref_text, r.query, "?", mut out)?
     }
     let fragment = optional_piece(ref_text, r.fragment, "#", mut out)?
-    Ok(Uri(scheme: Some(scheme), userinfo: userinfo, host: host, port: port, path: path, query: query, fragment: fragment))
+    Ok(Uri(scheme: Some(scheme), userinfo, host, port, path, query, fragment))
 }
 
 fn capacity_result[T](take r: Result[T, Capacity]) -> Result[T, Error] {

@@ -61,9 +61,9 @@ fn sort_audit(out: Stdout) -> SortAudit {
         } else {
             1
         }
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: key))))
+        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out, id: i, key))))
     }
-    result.unwrap(SortAudit(out: out, values: take xs))
+    result.unwrap(SortAudit(out, values: take xs))
 }
 
 fn sort_fail_at(out: Stdout, failure: u64) -> u64 {
@@ -216,9 +216,9 @@ fn seven_fail_at(out: Stdout, failure: u64) -> u64 {
         } else {
             7 - i
         }
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: key))))
+        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out, id: i, key))))
     }
-    let mut audit = result.unwrap(SevenAudit(out: out, values: take xs))
+    let mut audit = result.unwrap(SevenAudit(out, values: take xs))
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
         calls += 1
@@ -447,9 +447,9 @@ resource type MergeAudit {
 fn merge_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
     let mut xs: List[SortItem] = list.new()
     for i in 0u64 .. count {
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: merge_key(count, i)))))
+        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out, id: i, key: merge_key(count, i)))))
     }
-    let mut audit = result.unwrap(MergeAudit(out: out, values: take xs, count: count))
+    let mut audit = result.unwrap(MergeAudit(out, values: take xs, count))
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
         calls += 1
@@ -777,7 +777,7 @@ fn sweep_fail_at(count: u64, failure: u64) -> bool {
     for i in 0u64 .. count {
         result.unwrap(list.push(mut xs, SweepItem(id: i, key: merge_key(count, i))))
     }
-    let mut audit = result.unwrap(SweepAudit(values: take xs, count: count))
+    let mut audit = result.unwrap(SweepAudit(values: take xs, count))
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut audit.values, fn(a: SweepItem, b: SweepItem) -> Order {
         calls += 1

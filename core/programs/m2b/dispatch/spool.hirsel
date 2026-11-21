@@ -32,7 +32,7 @@ pub fn stats() -> Stats {
 
 // Each handler runs under `bound bytes limit`; a refusal is the reply Refused.
 pub fn registry(limit: u64) -> Registry {
-    Registry(handlers: map.new(), limit: limit)
+    Registry(handlers: map.new(), limit)
 }
 
 fn full[T](take r: Result[T, Capacity]) -> Result[T, Failure] {
@@ -200,7 +200,7 @@ pub fn parse_reply(b: Bytes) -> Result[Reply, Failure] {
     }
     if tag == 3 && list.len(b) == 20 {
         match (get_u64(b, 4), get_u64(b, 12)) {
-            (Some(requested), Some(available)) => return Ok(Refused(Capacity(requested: requested, available: available))),
+            (Some(requested), Some(available)) => return Ok(Refused(Capacity(requested, available))),
             _ => return Error(Garbled),
         }
     }

@@ -7,7 +7,7 @@ fn frame_case(raw: Bytes, limit: u64, expected: Result[http.Framing, http.BodyEr
 }
 
 fn refused(status: u16) -> Result[http.Framing, http.BodyError] {
-    Error(http.BodyError(status: status, close: true))
+    Error(http.BodyError(status, close: true))
 }
 
 // WHATWG dispatches at a blank line only when at least one data field was read.

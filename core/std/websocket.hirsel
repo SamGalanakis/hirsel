@@ -267,7 +267,7 @@ fn check_max(max_frame: u64) {
 /// No allocation until payload bytes arrive. Ex: `websocket.decoder(Server, 262144)`.
 pub fn decoder(role: Role, max_frame: u64) -> Decoder {
     check_max(max_frame)
-    Decoder(role: role, max: max_frame, header:[0; 14], have: 0, need: 2, length_end: 2, ready: false, length: 0, received: 0, opcode: 0, fin: false, masked: false, fragmented: false, message: list.new(), text: false, utf8: fresh_utf8(), control: Control(data:[0; 125], len: 0), frames: 0, ended: false)
+    Decoder(role, max: max_frame, header:[0; 14], have: 0, need: 2, length_end: 2, ready: false, length: 0, received: 0, opcode: 0, fin: false, masked: false, fragmented: false, message: list.new(), text: false, utf8: fresh_utf8(), control: Control(data:[0; 125], len: 0), frames: 0, ended: false)
 }
 
 /// Completed physical frames, including non-final data fragments. O(1), no
@@ -643,7 +643,7 @@ pub opaque type Encoder: send {
 /// Ex: `websocket.encoder(Client, 262144)`.
 pub fn encoder(role: Role, max_frame: u64) -> Encoder {
     check_max(max_frame)
-    Encoder(role: role, max: max_frame, fragmented: false, total: 0, text: false, utf8: fresh_utf8(), closed: false)
+    Encoder(role, max: max_frame, fragmented: false, total: 0, text: false, utf8: fresh_utf8(), closed: false)
 }
 
 /// Appends one frame to out; validates the opcode, fragmentation, close and

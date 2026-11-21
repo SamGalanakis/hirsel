@@ -53,7 +53,7 @@ pub fn main() -> Result[(), Exit] {
     let mut tx = Tx(base: view base, writes: 0u64)
     let mut arg: Bytes = list.new()
     result.unwrap(std.codec.put_u32(5u32, mut arg))
-    let Slot(run: run) = take s
+    let Slot(run) = take s
     let o = run(mut tx, arg)
     match o {
         Returned(_) => {

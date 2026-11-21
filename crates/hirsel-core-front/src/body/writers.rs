@@ -663,30 +663,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.store_at(blob, at, tag, a);
             }
             for (i, (&e, f)) in args.iter().zip(fields).enumerate() {
-                let e = match (self.kind(e), labelled) {
-                    (NodeKind::LabelledArgument, true) if self.token_text(e) == f.name => {
-                        self.kids(e)[0]
-                    }
-                    (NodeKind::LabelledArgument, true) => {
-                        let name = &f.name;
-                        self.refuse_label(
-                            e,
-                            Some(name),
-                            format!("expected the field `{name}` here"),
-                        );
-                        return None;
-                    }
-                    (NodeKind::LabelledArgument, false) => {
-                        self.refuse_label(e, None, "this payload is not labelled".to_owned());
-                        return None;
-                    }
-                    (_, true) => {
-                        let name = &f.name;
-                        self.refuse_label(e, Some(name), format!("the field `{name}` is labelled"));
-                        return None;
-                    }
-                    (_, false) => e,
-                };
+                let e = self.constructor_argument(e, f, labelled)?;
                 self.write_operand(state, writer, ftys[i], e, sinks)?;
             }
             return Some(());
@@ -1467,26 +1444,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let mut out = Vec::with_capacity(k);
         for (&e, f) in args.iter().zip(fields) {
-            out.push(match (self.kind(e), labelled) {
-                (NodeKind::LabelledArgument, true) if self.token_text(e) == f.name => {
-                    self.kids(e)[0]
-                }
-                (NodeKind::LabelledArgument, true) => {
-                    let name = &f.name;
-                    self.refuse_label(e, Some(name), format!("expected the field `{name}` here"));
-                    return None;
-                }
-                (NodeKind::LabelledArgument, false) => {
-                    self.refuse_label(e, None, "this payload is not labelled".to_owned());
-                    return None;
-                }
-                (_, true) => {
-                    let name = &f.name;
-                    self.refuse_label(e, Some(name), format!("the field `{name}` is labelled"));
-                    return None;
-                }
-                (_, false) => e,
-            });
+            out.push(self.constructor_argument(e, f, labelled)?);
         }
         Some(out)
     }

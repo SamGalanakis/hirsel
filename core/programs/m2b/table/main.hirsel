@@ -1,7 +1,7 @@
 // M2b slice 1 cases. Each case returns a hand-derived u64 (core/corpus/m2b/table/SPEC.md);
 // main runs the case named by its first argument and prints the value.
 fn account(id: u64, owner: String, balance: i64) -> Result[m2b.table.Account, Capacity] {
-    Ok(m2b.table.Account(id: id, owner: string.from(owner)?, balance: balance))
+    Ok(m2b.table.Account(id, owner: string.from(owner)?, balance))
 }
 
 fn fill(mut t: m2b.table.Table[m2b.table.Account], take a: m2b.table.Account) -> Result[(), Capacity] {

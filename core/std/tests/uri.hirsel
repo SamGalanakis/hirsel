@@ -1,5 +1,5 @@
 fn span(start: u64, end: u64) -> http1.Span {
-    http1.Span(start: start, end: end)
+    http1.Span(start, end)
 }
 
 fn full(text: String) -> http1.Span {
@@ -30,7 +30,7 @@ fn shifted(u: uri.Uri, by: u64) -> uri.Uri {
         Some(Ip6(p)) => Some(Ip6(shift(p, by))),
         None => None
     }
-    uri.Uri(scheme: shift_optional(u.scheme, by), userinfo: shift_optional(u.userinfo, by), host: host, port: shift_optional(u.port, by), path: shift(u.path, by), query: shift_optional(u.query, by), fragment: shift_optional(u.fragment, by))
+    uri.Uri(scheme: shift_optional(u.scheme, by), userinfo: shift_optional(u.userinfo, by), host, port: shift_optional(u.port, by), path: shift(u.path, by), query: shift_optional(u.query, by), fragment: shift_optional(u.fragment, by))
 }
 
 fn resolved(base_text: String, reference: String, expected: String, prefix: String) -> bool {

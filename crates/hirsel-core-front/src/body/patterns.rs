@@ -279,21 +279,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let order_start = self.patterns.order.len();
         self.patterns.order.resize(order_start + fs.len(), 0);
         let mut order_len = 0;
-        let mut rest = false;
+        let mut require_all = true;
         let mut positional = 0;
         for &arg in args {
             if self.kind(arg) == NodeKind::RestPattern {
-                rest = true;
+                require_all = false;
                 continue;
             }
+            let child = self.kids(arg)[0];
             let label = self.item.tree.node(arg).token.is_some();
             let i = if labelled {
-                if !label {
+                let name = if label {
+                    self.token_text(arg)
+                } else if self.kind(child) == NodeKind::BindPattern {
+                    self.token_text(child)
+                } else {
                     self.refuse("LANG-17", arg, "this pattern field needs its label");
                     continue;
-                }
-                let Some(i) = fs.iter().position(|f| f.name == self.token_text(arg)) else {
+                };
+                let Some(i) = fs.iter().position(|f| f.name == name) else {
                     self.refuse("LANG-17", arg, "unknown pattern field");
+                    require_all = false;
                     continue;
                 };
                 i
@@ -315,12 +321,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             let t = self.pattern_field_ty(ty, case, i);
-            let child = self.pattern(self.kids(arg)[0], t);
+            let child = self.pattern(child, t);
             self.patterns.fields[index] = child;
             self.patterns.order[order_start + order_len] = i as u32;
             order_len += 1;
         }
-        if !rest && (0..fs.len()).any(|i| self.patterns.fields[fields.start as usize + i] == 0) {
+        if require_all && order_len != fs.len() {
             self.refuse("LANG-17", n, "a pattern names every field, or ends in `..`");
         }
         let id = self.pat_push(n, ty, Head::Product(case), fields);

@@ -298,7 +298,7 @@ pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer) -> Res
             Signed(n) => string.push_i64(mut out, n),
             Double(n) => float.push_json_f64(mut out, n),
         }
-    }, pretty: pretty)
+    }, pretty)
     build(w)
 }
 
@@ -1192,7 +1192,7 @@ pub fn typed[T: codec]() -> Result[Format[T], TypedError] {
         let _ = list.set(mut shapes, node, take shape)
     }
     let facts = shape_facts(shapes)?
-    Ok(Format(binary: binary, plan: JsonPlan(description: take description, root: root, shapes: take shapes, facts: take facts)))
+    Ok(Format(binary, plan: JsonPlan(description: take description, root, shapes: take shapes, facts: take facts)))
 }
 
 fn typed_room[T](take value: Result[T, Capacity]) -> Result[T, TypedError] {
@@ -1267,7 +1267,7 @@ fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pe
             let name = schema_name(b, mut pos)?
             if live {
                 let shape = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                shape_push(mut fields, Field(name: take name, shape: shape))?
+                shape_push(mut fields, Field(name: take name, shape))?
             } else {
                 pos = codec.schema_next(b, pos)
             }
@@ -1290,7 +1290,7 @@ fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pe
                 pos = codec.schema_next(b, pos)
             }
         }
-        shape_push(mut variants, Variant(name: take name, fields: take fields, live: live))?
+        shape_push(mut variants, Variant(name: take name, fields: take fields, live))?
     }
     Ok(Sum(take variants))
 }
@@ -1324,7 +1324,7 @@ fn shape_fact(shapes: List[Shape], mut facts: List[ShapeFact], node: u64) -> Res
         },
         _ => {},
     }
-    facts[node] = ShapeFact(form: form, empty: empty, state: 2)
+    facts[node] = ShapeFact(form, empty, state: 2)
     Ok(())
 }
 
@@ -1461,7 +1461,7 @@ fn index_path(mut d: ReadTyped, n: u64) -> Result[(), TypedError] {
 fn source_mark(mut d: ReadTyped, pos: u64, key: bool) -> Result[(), TypedError] {
     let path = typed_room(string.from(d.path))?
     let source = d.pos
-    shape_push(mut d.marks, SourceMark(pos: pos, source: source, path: take path, key: key))
+    shape_push(mut d.marks, SourceMark(pos, source, path: take path, key))
 }
 
 const TYPED_DEPTH: u64 = 64
@@ -1678,7 +1678,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             read_shape(plan, fields[i].shape, s, depth + 1, mut d, mut staged)?
             let end = list.len(staged)
             let mark_end = list.len(d.marks)
-            parts[i] = Some(RecordPart(start: start, end: end, marks: marks, mark_end: mark_end))
+            parts[i] = Some(RecordPart(start, end, marks, mark_end))
             string.truncate(mut d.path, path)
             if after_typed(s, b'}', mut d)? {
                 break

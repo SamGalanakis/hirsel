@@ -1,6 +1,6 @@
 // test-vectors
 fn dialect(delimiter: u8, crlf: bool) -> csv.Dialect {
-    csv.Dialect(delimiter: delimiter, crlf: crlf)
+    csv.Dialect(delimiter, crlf)
 }
 
 fn read_is(text: Bytes, d: csv.Dialect, expected: List[List[String]]) -> bool {

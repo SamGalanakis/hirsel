@@ -10,7 +10,7 @@ type Piece {
 }
 
 fn piece(s: String, id: u64) -> Result[Piece, m1.support.Error] {
-    let c = Chunk(id: id, value: m1.support.mem(string.from(s))?)
+    let c = Chunk(id, value: m1.support.mem(string.from(s))?)
     let h = m1.support.mem(result.capacity_only(rc.new(take c)))?
     Ok(Piece(chunk: take h, lo: 0, hi: string.byte_len(s)))
 }

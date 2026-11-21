@@ -112,7 +112,7 @@ fn read_and_drop(take h: Latest[u64]) -> u64 {
 }
 
 fn child_loop(take input: Reader) -> u64 waits {
-    let Reader(handles: handles, done: done) = take input
+    let Reader(handles, done) = take input
     let mut n: u64 = 0
     while let Ok(h) = channel.receive(handles) {
         result.unwrap(channel.send(done, read_and_drop(take h)))

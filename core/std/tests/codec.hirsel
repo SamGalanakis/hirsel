@@ -64,7 +64,7 @@ pub fn ts_hirsel_differential() -> bool {
         } else {
             "x"
         }
-        let ts_sample = TsRow(n: (state << 32) | i, label: result.unwrap(string.from(label)), nested: nested)
+        let ts_sample = TsRow(n: (state << 32) | i, label: result.unwrap(string.from(label)), nested)
         let encoded = enc(c, ts_sample)
         let start = at
         match codec.take_with(supplied, mut at, c) {
@@ -448,7 +448,7 @@ fn row_decode(b: Bytes, mut at: u64) -> Result[Row, codec.Stop] {
     let id = codec.take_u64(b, mut at)?
     let name = codec.take_string(b, mut at)?
     let score = codec.take_i64(b, mut at)?
-    Ok(Row(id: id, name: take name, score: score))
+    Ok(Row(id, name: take name, score))
 }
 
 fn row_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
@@ -645,7 +645,7 @@ fn schema_bytes(w: fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), Capacity
 }
 
 fn row(id: u64, name: String) -> Row {
-    Row(id: id, name: result.unwrap(string.from(name)), score: 3)
+    Row(id, name: result.unwrap(string.from(name)), score: 3)
 }
 
 // Reads b, written under the schema `writer`, as c's type; the value or the error code.
@@ -1085,10 +1085,10 @@ fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
         let n = codec.take_count(b, mut at, 12)?
         if n > 0 {
             let kids: List[Tree] = codec.room(n)?
-            codec.full(list.push(mut stack, TreeFrame(label: label, kids: take kids, left: n)))?
+            codec.full(list.push(mut stack, TreeFrame(label, kids: take kids, left: n)))?
             continue
         }
-        let mut done = Tree(label: label, kids: list.new())
+        let mut done = Tree(label, kids: list.new())
         loop {
             let mut f = match list.pop(mut stack) {
                 Some(top) => take top,
@@ -1323,7 +1323,7 @@ fn wire(r: Range) -> View[RangeWire] in r {
 
 fn check(take w: RangeWire) -> Result[Range, ()] {
     if w.lo <= w.hi {
-        Ok(Range(w: w))
+        Ok(Range(w))
     } else {
         Error(())
     }
@@ -1337,7 +1337,7 @@ fn range_wire_encode(x: RangeWire, mut out: Bytes) -> Result[(), Capacity] {
 fn range_wire_decode(b: Bytes, mut at: u64) -> Result[RangeWire, codec.Stop] {
     let lo = codec.take_u64(b, mut at)?
     let hi = codec.take_u64(b, mut at)?
-    Ok(RangeWire(lo: lo, hi: hi))
+    Ok(RangeWire(lo, hi))
 }
 
 fn range_wire_schema(mut s: codec.Schema, c: codec.Codec[RangeWire]) -> Result[(), Capacity] {
@@ -2123,7 +2123,7 @@ fn dwire(r: DRange) -> View[DRangeWire] in r {
 
 fn dcheck(take w: DRangeWire) -> Result[DRange, ()] {
     if w.lo <= w.hi {
-        Ok(DRange(w: w))
+        Ok(DRange(w))
     } else {
         Error(())
     }
@@ -2140,7 +2140,7 @@ fn dord_pair[T: ordered](o: DOrdered[T]) -> View[DPair[T]] in o {
 
 fn dordered[T: ordered](take p: DPair[T]) -> Result[DOrdered[T], ()] {
     if p.left <= p.right {
-        Ok(DOrdered(p: p))
+        Ok(DOrdered(p))
     } else {
         Error(())
     }
@@ -2238,7 +2238,7 @@ fn sample() -> SHold {
     let mut n: List[Option[String]] = list.new()
     result.unwrap(list.push(mut n, Some(result.unwrap(string.from("a")))))
     result.unwrap(list.push(mut n, None))
-    SHold(xs: xs, o: Some(result.unwrap(string.from("hé"))), m: m, r: Error(result.unwrap(string.from("x"))), b: b, n: n)
+    SHold(xs, o: Some(result.unwrap(string.from("hé"))), m, r: Error(result.unwrap(string.from("x"))), b, n)
 }
 
 // Each field of sample() through `of` at its type, by hand: List[u64] [1, 2]; Option[String]
@@ -2378,7 +2378,7 @@ fn dpt_wire(o: DPt) -> View[(u64, String)] in o {
 }
 
 fn dpt(take w: (u64, String)) -> Result[DPt, ()] {
-    Ok(DPt(w: w))
+    Ok(DPt(w))
 }
 
 // expect: run derived_via_tuple() = (true, true, true)

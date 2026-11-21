@@ -145,7 +145,7 @@ pub fn from_unix(secs: i64, ns: u32) -> Option[Timestamp] {
     if secs < MIN_SEC || secs > MAX_SEC || ns >= 1000000000 {
         return None
     }
-    Some(Timestamp(secs: secs, nanos: ns))
+    Some(Timestamp(secs, nanos: ns))
 }
 
 /// Converts the epoch milliseconds from host.wall_ms or CallInfo.at.

@@ -64,7 +64,7 @@ pub fn new[T: send](n: u64, start: fn() -> T, combine: fn(take T, take T) -> T) 
         n
     })?
     let slots: List[Option[T]] = list.with_capacity(n)?
-    Ok(Tally(tx: take tx, rx: take rx, slots: take slots, cap: n, start: start, combine: combine))
+    Ok(Tally(tx: take tx, rx: take rx, slots: take slots, cap: n, start, combine))
 }
 
 /// Issues the next handle, its partial start(); its index is the number issued before it.

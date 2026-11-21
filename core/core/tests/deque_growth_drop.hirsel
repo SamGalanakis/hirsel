@@ -20,13 +20,13 @@ resource type GrowthDrop {
 fn owned_growth(out: Stdout, head: u64, front: bool) -> u64 {
     let mut d: Deque[GrowthDrop] = deque.new()
     for i in 0u64 .. 4 {
-        result.unwrap(deque.push_back(mut d, result.unwrap(GrowthDrop(out: out, id: i))))
+        result.unwrap(deque.push_back(mut d, result.unwrap(GrowthDrop(out, id: i))))
     }
     for _ in 0u64 .. head {
         let x = option.unwrap(deque.pop_front(mut d))
         result.unwrap(deque.push_back(mut d, take x))
     }
-    let x = result.unwrap(GrowthDrop(out: out, id: 4))
+    let x = result.unwrap(GrowthDrop(out, id: 4))
     if front {
         result.unwrap(deque.push_front(mut d, take x))
     } else {

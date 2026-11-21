@@ -91,7 +91,7 @@ fn bwt_encode(input: Bytes) -> Result[Bwt, helper.Error] {
             transformed[i] = input[suffix - 1]
         }
     }
-    Ok(Bwt(transformed: take transformed, original: original))
+    Ok(Bwt(transformed: take transformed, original))
 }
 
 fn bwt_decode(encoded: Bwt) -> Result[Bytes, helper.Error] {
@@ -201,7 +201,7 @@ fn table(frequencies: List[i32]) -> Result[Table, helper.Error] {
         total += frequencies[i];
         high[i] = total
     }
-    Ok(Table(low: take low, high: take high, total: total))
+    Ok(Table(low: take low, high: take high, total))
 }
 
 fn write_bit(mut out: Bits, bit: u8) -> Result[(), helper.Error] {
@@ -415,7 +415,7 @@ type HuffEncoded {
 }
 
 fn node(frequency: i32, byte: u8, leaf: bool, take left: Option[Box[Huff]], take right: Option[Box[Huff]]) -> Result[Box[Huff], helper.Error] {
-    match box.new(Huff(frequency: frequency, byte: byte, leaf: leaf, left: take left, right: take right)) {
+    match box.new(Huff(frequency, byte, leaf, left: take left, right: take right)) {
         Ok(take n) => Ok(take n),
         Error((c, _)) => Error(Capacity(c)),
     }
@@ -513,7 +513,7 @@ fn huff_encode(input: Bytes) -> Result[HuffEncoded, helper.Error] {
     if pos > 0 {
         push(mut out, current)?
     }
-    Ok(HuffEncoded(data: take out, bits: bits, frequencies: take frequencies))
+    Ok(HuffEncoded(data: take out, bits, frequencies: take frequencies))
 }
 
 fn huff_read(encoded: HuffEncoded, root: Box[Huff]) -> Result[Bytes, helper.Error] {

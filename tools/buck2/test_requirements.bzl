@@ -38,6 +38,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::tape_code_revision_is_the_entry_revision",
         "native::tests::tape_http_replays_both_native_engines",
         "native::tests::rl3_replays_tls_offline",
+        "native::tests::a_program_over_a_separate_std_records_what_it_records_whole",
         "native::tests::rl4_rl5_replays_tls_without_secret_sources",
         "native::tests::simd_versions_preserve_run_tape_and_revision",
         "native::tests::rl1_recording_changes_nothing",

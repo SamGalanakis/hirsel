@@ -203,7 +203,7 @@ impl CheckProduct {
             &mut modules,
             reached,
             materialized,
-            entry,
+            crate::callable_variants::Roots::Entry(entry),
             options.instance_limit,
         )?;
         // Exact Step planning needs the same helper bodies LLVM will optimize.
@@ -224,6 +224,7 @@ impl CheckProduct {
             runtime,
             store,
             closed_executable,
+            None,
         )
     }
 }
@@ -277,7 +278,13 @@ pub(super) fn emit_release_image(
     runtime: ContentHash,
     store: &Store,
     closed_executable: bool,
+    std: Option<(
+        &BTreeMap<ContentHash, hirsel_core_ir::step_contexts::Summary>,
+        ContentHash,
+    )>,
 ) -> Result<Emitted, NativeStop> {
+    let no_summaries = BTreeMap::new();
+    let (summaries, std_key) = std.map_or((&no_summaries, None), |(s, k)| (s, Some(k)));
     let jobs = hirsel_guard::jobs() as u32;
     let entry = &instance.definition;
     let compiler = compiler_identity()?;
@@ -285,17 +292,29 @@ pub(super) fn emit_release_image(
     // The unit holds every body the program can run, so a blob's `W` that every
     // root reaching its type writes alike is a constant; the unit key below
     // reads the module after this.
-    hirsel_core_ir::widths::resolve(&mut joined);
+    // A program beside a separately lowered std does not hold every body that
+    // writes a blob's `W`, so its widths stay dynamic.
+    if std_key.is_none() {
+        hirsel_core_ir::widths::resolve(&mut joined);
+    }
     // In a launched executable every code pointer comes from a function or
     // descriptor reference in the image: the launcher supplies only
     // capabilities, and spawn, flow, cleanup and the task entry adapters
     // call back into the same image. Drop glue calls finalizers by type.
-    let contained = closed_executable && hirsel_core_ir::step_contexts::self_contained(&joined);
+    // The std's step summaries stand for the bodies the program calls in it.
+    let contained = closed_executable
+        && hirsel_core_ir::step_contexts::self_contained_over(&joined, summaries);
     if contained {
-        hirsel_core_ir::step_contexts::specialize(&mut joined, entry_function);
+        hirsel_core_ir::step_contexts::specialize_over(&mut joined, entry_function, summaries);
     }
     // The separate result cleanup is considered when selecting the entry plan.
     let launch_digest_unused = contained
+        && !joined.functions.iter().enumerate().any(|(f, function)| {
+            function.body.is_none()
+                && summaries
+                    .get(&joined.code_identity(FuncId(f as u32)))
+                    .is_some_and(|summary| summary.launches)
+        })
         && !joined
             .functions
             .iter()
@@ -311,8 +330,14 @@ pub(super) fn emit_release_image(
     // All shape-owner modules used by generic materialization are in this
     // ordered closure. Entry and compiler identify the deterministic callable
     // preparation above, including appended private units.
-    let facts_key =
-        crate::native_facts::key(compiler, entry, body_identities, reached, &[], contained)?;
+    let facts_key = crate::native_facts::key(
+        compiler,
+        entry,
+        body_identities,
+        reached,
+        std_key.as_slice(),
+        contained,
+    )?;
     let crate::native_facts::ProgramFacts { facts, consumed } =
         crate::native_facts::get(store, facts_key, &refs, &[])?;
     let target =
@@ -326,6 +351,7 @@ pub(super) fn emit_release_image(
             runtime,
             instance,
             closed_executable,
+            std_key,
             &refs,
         ),
         &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
@@ -357,7 +383,7 @@ pub(super) fn emit_release_image(
         sites = std::mem::take(&mut release.sites);
         let key = crate::native::key(
             "hirsel.core-release-ir.v2",
-            &(&generator, runtime, instance, release.ir_key()),
+            &(&generator, runtime, instance, std_key, release.ir_key()),
         )?;
         if let Some((mut record, objects)) = load_parts(store, &shared, key)? {
             record.sites.clone_from(&sites);

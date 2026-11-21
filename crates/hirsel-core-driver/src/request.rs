@@ -962,7 +962,30 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     let recipe = release_manifest
                         .as_ref()
                         .map(|_| publication.recipe.clone());
-                    let built = publication.assemble(options, reached.counters);
+                    // The separate release std (std-reuse-1520 S1) stays
+                    // behind this selector until Guard B passes.
+                    let std = (std::env::var_os("HIRSEL_STD_SEPARATE").is_some()
+                        && options.optimize
+                        && matches!(options.backend, crate::native::Backend::Llvm))
+                    .then(|| {
+                        let runtime = match &options.observed {
+                            Some(observed) => observed.0.runtime,
+                            None => {
+                                crate::tool_inputs::toolchain(
+                                    &options.link,
+                                    &options.target,
+                                    &options.runtime,
+                                )?
+                                .0
+                                .runtime
+                            }
+                        };
+                        product.std_side(options, runtime)
+                    })
+                    .transpose();
+                    let built = std.and_then(|std| {
+                        publication.assemble_with(options, reached.counters, std)
+                    });
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, recipe)
                     {

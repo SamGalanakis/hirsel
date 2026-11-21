@@ -10,9 +10,10 @@ use hirsel_core_ir::{
     address::{Binding, Group, builtin_semantics_number},
     decode::DecodeBudget,
     normal::{self, Annex, Site, Slot},
-    release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, Recipe},
+    release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, ObjectRef, Recipe},
     source::{ItemSource, SourceFile, SourceMap, anchored_items},
 };
+use super::std_release::StdSide;
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
@@ -38,11 +39,59 @@ impl AssemblyRecord {
     }
 }
 
-struct Unit {
+pub(super) struct Unit {
     code: BodyRef,
-    module: Module,
+    pub(super) module: Module,
     annex: Annex,
     builtins: Vec<u32>,
+}
+
+impl Unit {
+    /// The owner of the unit's private callable variants: its body.
+    pub(super) fn owner(&self) -> io::Result<ContentHash> {
+        key(
+            "hirsel.recipe-release-body.v1",
+            &(self.code.body.hash, self.code.annex.hash, &self.builtins),
+        )
+    }
+}
+
+/// A reached instance's unit, as a recipe names its body and annex.
+pub(super) fn prepare_unit(
+    original: &Module,
+    function: FuncId,
+    sources: &hirsel_core_ir::source::SourcePositions<'_>,
+) -> Unit {
+    let (body, annex, module) = normal::prepare_assembly(original, function, sources);
+    unit(original, body, annex, module)
+}
+
+fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Module) -> Unit {
+    let builtins = body
+        .slots
+        .iter()
+        .map(|slot| slot.identity(original))
+        .filter_map(|identity| builtin_semantics_number(&identity.definition))
+        .collect();
+    let code = BodyRef {
+        body: ObjectRef {
+            hash: ObjectKind::Body.hash(&body.bytes),
+            len: body.bytes.len() as u64,
+        },
+        annex: {
+            let bytes = annex.encode();
+            ObjectRef {
+                hash: ObjectKind::Annex.hash(&bytes),
+                len: bytes.len() as u64,
+            }
+        },
+    };
+    Unit {
+        code,
+        module,
+        annex,
+        builtins,
+    }
 }
 
 pub struct Publication {
@@ -502,8 +551,19 @@ fn anchor<'a>(
     })
 }
 
-fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, NativeStop> {
+/// Bind each unit's annex sites to source items, and the source map of every
+/// site the units and `extra` (a separately lowered std's sites) name.
+pub(super) fn bind_annexes(
+    units: &mut BTreeMap<Identity, Unit>,
+    extra: &BTreeMap<String, Vec<(u32, u32)>>,
+) -> Result<SourceMap, NativeStop> {
     let mut points = BTreeMap::<String, BTreeSet<(u32, u32)>>::new();
+    for (file, at) in extra {
+        points
+            .entry(file.clone())
+            .or_default()
+            .extend(at.iter().copied());
+    }
     for unit in units.values() {
         for hints in unit.annex.0.iter().flatten() {
             for site in hints
@@ -615,11 +675,32 @@ fn object(
 
 impl Publication {
     pub fn assemble(
-        mut self,
+        self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
     ) -> Result<BuildProduct, NativeStop> {
-        let sources = bind_annexes(&mut self.units)?;
+        self.assemble_with(options, counters, None)
+    }
+
+    /// [`Self::assemble`], with the program's plain std units taken from
+    /// `std` (a separately lowered release std) when given: the program holds
+    /// none of their bodies and calls each by its exported symbol.
+    pub(crate) fn assemble_with(
+        mut self,
+        options: &NativeOptions,
+        counters: crate::reach::ReachCounters,
+        std: Option<StdSide>,
+    ) -> Result<BuildProduct, NativeStop> {
+        let entry_identity = self.recipe.entry.clone();
+        if let Some(std) = &std {
+            self.units
+                .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
+        }
+        let no_points = BTreeMap::new();
+        let sources = bind_annexes(
+            &mut self.units,
+            std.as_ref().map_or(&no_points, |std| &std.points),
+        )?;
         let entry = &self.recipe.entry;
         let root = &self.units[entry];
         let names = root.annex.1.as_deref().ok_or_else(|| {
@@ -657,6 +738,7 @@ impl Publication {
         let fingerprint = key(
             "hirsel.assembly-environment.v1",
             &(
+                std.as_ref().map(|std| std.key),
                 emitter,
                 tools.image,
                 tools.runtime,
@@ -684,14 +766,10 @@ impl Publication {
                 let body_keys = crate::callable_variants::prepare_inputs(
                     &mut modules,
                     &reached,
-                    &entry.definition,
+                    crate::callable_variants::Roots::Entry(&entry.definition),
                     options.instance_limit,
                     |identity| {
-                        let unit = &self.units[identity];
-                        let owner = key(
-                            "hirsel.recipe-release-body.v1",
-                            &(unit.code.body.hash, unit.code.annex.hash, &unit.builtins),
-                        )?;
+                        let owner = self.units[identity].owner()?;
                         Ok((
                             FuncId(0),
                             owner,
@@ -709,13 +787,14 @@ impl Publication {
                     tools.runtime,
                     &store,
                     link.uses_hirsel_launcher(),
+                    std.as_ref().map(|std| (&std.summaries, std.key)),
                 )?;
                 release_sites = emitted.release_sites;
-                (
-                    emitted.objects,
-                    emitted.closed_image,
-                    emitted.launch_digest_unused,
-                )
+                let mut objects = emitted.objects;
+                if let Some(std) = std {
+                    objects.extend(std.objects);
+                }
+                (objects, emitted.closed_image, emitted.launch_digest_unused)
             } else {
                 let objects = self
                     .units

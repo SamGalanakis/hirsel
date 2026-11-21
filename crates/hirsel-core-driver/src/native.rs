@@ -14,6 +14,8 @@ mod cleanup;
 pub(crate) mod recipe_build;
 #[path = "release_native.rs"]
 mod release;
+#[path = "std_release.rs"]
+pub(crate) mod std_release;
 use cleanup::result_cleanup;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
@@ -1826,6 +1828,7 @@ mod tests {
     include!("instance_record_native.rs");
     include!("prebuild_native.rs");
     include!("image_unit_native.rs");
+    include!("std_release_native.rs");
     include!("reach_native.rs");
     include!("link_closure_native.rs");
     include!("recording_build_native.rs");

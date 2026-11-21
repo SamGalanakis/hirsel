@@ -17,7 +17,7 @@ mod debug;
 pub use debug::finish_native_object;
 mod split;
 mod step_free;
-pub use split::split_native_object;
+pub use split::{strong_definitions, rename_symbols, split_native_object};
 mod empty;
 mod expose;
 mod fast;

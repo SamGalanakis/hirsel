@@ -745,6 +745,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-record-runtime-pic", library=":hirsel-core-rt-record"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-observed-runtime-pic", library=":hirsel-core-rt-observed"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
     if unguarded:
         raise SystemExit("these binary and test roots do not install the memory guard; add "

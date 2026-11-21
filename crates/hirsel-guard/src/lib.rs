@@ -50,7 +50,7 @@ pub fn with_instance_context<R>(name: String, work: impl FnOnce() -> R) -> R {
 pub const DEFAULT_LIMIT: u64 = 4 << 30;
 /// Exit status of a process that reached its limit (sysexits' `EX_OSERR`).
 pub const EXIT_STATUS: i32 = 71;
-/// Exit status of a malformed `HIRSEL_MEMORY_LIMIT`.
+/// Exit status of a malformed resource limit.
 const USAGE_STATUS: i32 = 2;
 /// Exit status of a debug build that allocated or freed inside a section (sysexits'
 /// `EX_SOFTWARE`).
@@ -321,6 +321,27 @@ pub fn sanitized(command: &mut std::process::Command) -> &mut std::process::Comm
             }
             Ok(())
         })
+    }
+}
+
+/// The worker count allowed by the process's available CPUs and `HIRSEL_JOBS`.
+/// An unset variable leaves the CPU count as the limit. A malformed or zero
+/// value exits with status 2.
+pub fn jobs() -> usize {
+    let available = std::thread::available_parallelism().map_or(1, |n| n.get());
+    match std::env::var("HIRSEL_JOBS") {
+        Err(std::env::VarError::NotPresent) => available,
+        Ok(text) => match text.parse::<usize>() {
+            Ok(jobs) if jobs > 0 => jobs.min(available),
+            _ => {
+                eprintln!("hirsel: HIRSEL_JOBS={text} is not a positive count of workers");
+                std::process::exit(USAGE_STATUS);
+            }
+        },
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("hirsel: HIRSEL_JOBS is not a positive count of workers");
+            std::process::exit(USAGE_STATUS);
+        }
     }
 }
 

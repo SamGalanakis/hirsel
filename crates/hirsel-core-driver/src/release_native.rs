@@ -278,6 +278,7 @@ pub(super) fn emit_release_image(
     store: &Store,
     closed_executable: bool,
 ) -> Result<Emitted, NativeStop> {
+    let jobs = hirsel_guard::jobs() as u32;
     let entry = &instance.definition;
     let compiler = compiler_identity()?;
     let llvm = crate::tool_inputs::llvm_library()?;
@@ -380,8 +381,6 @@ pub(super) fn emit_release_image(
             .collect::<Vec<_>>();
         let mut parts = Vec::new();
         let mut failure = None;
-        // One code generator thread per CPU this process may run on.
-        let jobs = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
         let mut reuse = SharedParts {
             generator: &generator,
             shared: &shared,

@@ -549,8 +549,7 @@ def drain_deadline(args, root, work, engine, name, runner=None, activation=False
     return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
                        entry='store@1/runner_crash/' + ('main' if activation else 'stop_main'), adapter='runner_crash.c',
                        scenarios=('runner-activation', 'runner-activation-genesis') if activation else (),
-                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else stop_cases,
-                       extra_grants=() if activation else ('Process',))
+                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else stop_cases)
 
 
 def add_legacy_activation(root, work, manifest_path, revision):

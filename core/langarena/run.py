@@ -22,7 +22,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
-from langarena import inputs
+from langarena import grant_args, inputs
 from std_native import wait_load
 import measurement_artifacts
 
@@ -274,7 +274,7 @@ def build_samples(args):
                 command += ['--core-product', str(cache_home / 'hirsel/core-packages')]
             if operation == 'build':
                 command += ['--backend', args.backend, '--runtime', str(args.runtime.resolve()),
-                            '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '-o', str(scratch / 'hirsel')]
+                            *grant_args(args.module, host), '-o', str(scratch / 'hirsel')]
                 if args.backend == 'llvm': command.append('--release')
             samples = {side: value for side, value in prior['samples'].items() if value.get('status') == 'ok' and (side != 'hirsel' or previous.get('toolchain') == args.toolchain)} if prior else {}
             row = {'scenario': scenario, 'samples': samples, 'ratios': {}, 'toolchain': args.toolchain,
@@ -396,7 +396,7 @@ def main():
             build = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest), '--entry',
                      f'langarena@1/{args.module}/main', '--backend', args.backend,
                      '--runtime', str(args.runtime.resolve()), '--store', str(host / 'store'),
-                     '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--limit', str(args.limit), '--json', '-o', str(binary)]
+                     *grant_args(args.module, host), '--limit', str(args.limit), '--json', '-o', str(binary)]
             if args.backend == 'llvm':
                 build.append('--release')
             if 'hirsel' not in report['samples'] or args.profile_always:

@@ -33,6 +33,15 @@ def inputs(root, module, source=None):
         {'package': app, 'sources': ports, 'dependencies': [core, std]}]}
 
 
+def grant_args(module, directory):
+    grants = ['--grant', 'Stdout']
+    if module != 'tests/io/write':
+        grants.extend(['--dir', str(directory)])
+    if module in ('suite', 'matmul', 'tests/waiting'):
+        grants.extend(['--grant', 'Tasks'])
+    return grants
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
@@ -68,7 +77,9 @@ def main():
             command = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest), '--entry',
                        f'langarena@1/{args.module}/{function}', '--backend', engine,
                        '--runtime', str(args.runtime.resolve()), '--store', str(scratch / 'store'),
-                       '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--json', '-o', str(binary)]
+                       '--json', '-o', str(binary)]
+            if not args.helper_laws:
+                command.extend(grant_args(args.module, host))
             if engine == 'llvm':
                 command.append('--release')
             wait_load()

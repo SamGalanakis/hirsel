@@ -58,6 +58,16 @@ def load_manifest(path, root=ROOT):
     return manifest
 
 
+def grant_args(entry):
+    arguments = []
+    for capability in entry['parameters']:
+        if capability == 'Dir':
+            arguments.extend(['--dir', '.'])
+        elif capability != 'Args':
+            arguments.extend(['--grant', capability])
+    return arguments
+
+
 def first_stop(product, entry):
     prefix = f"{entry['package']['name']}@{entry['package']['version']}/"
     rows = [(d, d['rule']) for d in product.get('diagnostics', [])]
@@ -215,6 +225,10 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
             if not cases:
                 raise ValueError(f'entry has no applicable cases: {entry}')
             selected_inputs = inputs_for(manifest, entry, root)
+            grants = grant_args(entry)
+            # Use the compiler's default cache inside the runner's store.
+            build_dir = store / entry['workload'] / entry['variant']
+            build_dir.mkdir(parents=True, exist_ok=True)
             files = {}
             for package in selected_inputs['packages']:
                 for source in package['sources']:
@@ -237,9 +251,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 path = entry['package']
                 entry_path = f"{path['name']}@{path['version']}/{entry['module']}/{entry['function']}"
                 command = [str(compiler), 'build', '--inputs', str(inputs), '--entry', entry_path,
-                           '--backend', engine, '--runtime', str(runtime),
-                           '--dir', '.', '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Tasks', '--store',
-                           str(store / entry['workload'] / entry['variant']), '--json', '-o', str(binary)]
+                           '--backend', engine, '--runtime', str(runtime), *grants, '--json', '-o', str(binary)]
                 if engine == 'llvm':
                     command.append('--release')
                 if debug_lines is not None:
@@ -248,7 +260,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                     command.extend(['--target', target])
                 if cc:
                     command.extend(['--cc', str(cc)])
-                build = run_case(f'{name}:build', engine, command, cwd=root, capture_output=True)
+                build = run_case(f'{name}:build', engine, command, cwd=build_dir, capture_output=True)
                 row = dict(program=entry['workload'], variant=entry['variant'], engine=engine,
                            checked=False, artifact_linked=False, built=False, passed=0, cases=len(cases), first_failure=None,
                            stopped=None, case_outcomes=[])

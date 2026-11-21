@@ -73,7 +73,7 @@ def training(out):
         file = out / f'{tag}.json'
         file.write_text(json.dumps(m1.inputs_for(manifest, e, ROOT)))
         jobs.append((tag, ['--inputs', str(file), '--entry', f"{e['package']['name']}@1/{e['module']}/{e['function']}",
-                           '--dir', '.', '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Tasks']))
+                           *m1.grant_args(e)]))
     jobs.append(layout(out, 'documents'))
     return jobs
 

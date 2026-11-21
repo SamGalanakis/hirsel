@@ -245,7 +245,9 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
             common.append("--release")
         if regimes:
             common += ["--debug-lines", "on"]
-        grants = ["--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", "268435456"]
+        grants = ["--grant", "Stdout", "--grant", "Tasks", "--limit", "268435456"]
+        if case in {"knucleotide", "regimes"}:
+            grants += ["--dir", out]
         if case == "mandelbrot" or regimes:
             grants += ["--grant", "Clock", "--grant", "Stderr"]
         elif s8u:

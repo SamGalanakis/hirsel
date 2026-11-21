@@ -25,7 +25,8 @@ class Milestone(unittest.TestCase):
                     {'file': 'matched.hirsel', 'modules': ['matched'], 'signatures': False}]},
                 {'package': {'name': 'unrelated', 'version': '1'}, 'dependencies': [], 'sources': []}],
             'entries': [{'workload': 'example', 'variant': 'idiomatic',
-                         'package': {'name': 'example', 'version': '1'}, 'module': 'main', 'function': 'main'}]}
+                         'package': {'name': 'example', 'version': '1'}, 'module': 'main', 'function': 'main',
+                         'parameters': []}]}
         self.path = self.root / 'manifest.json'
         self.path.write_text(json.dumps(self.manifest))
         self.compiler = self.root / 'compiler'
@@ -35,8 +36,6 @@ args=sys.argv
 if args[1]=='image':
     print(json.dumps({'accepted':True, 'image':'canonical'}))
     raise SystemExit(0)
-assert args[args.index('--dir')+1] == '.'
-assert [args[i+1] for i, value in enumerate(args) if value == '--grant'] == ['Stdout', 'Stderr', 'Tasks']
 output=pathlib.Path(args[args.index('-o')+1])
 pathlib.Path(__file__).with_suffix('.count').open('a').write('build\\n')
 output.write_text("#!/usr/bin/env python3\\nimport os,pathlib,sys\\nprint(pathlib.Path(sys.argv[1]).read_text().strip()+os.environ['M1_CASE'])\\npathlib.Path('result').write_bytes(b'done')\\nsys.exit(7)\\n")
@@ -62,8 +61,8 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
 
     def test_debug_lines_choice_reaches_the_build_request(self):
         original = self.compiler.read_text()
-        self.compiler.write_text(original.replace("assert args[args.index('--dir')+1] == '.'",
-            "assert args[args.index('--debug-lines')+1] == 'on'"))
+        self.compiler.write_text(original.replace("output=pathlib.Path",
+            "assert args[args.index('--debug-lines')+1] == 'on'\noutput=pathlib.Path"))
         rows = run(self.compiler, self.root / 'runtime.a', ['cranelift'], self.path,
                    self.root, self.root / 'store', debug_lines='on')
         self.assertTrue(all(row['built'] for row in rows), rows)

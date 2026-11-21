@@ -1,4 +1,4 @@
-//! Task-local paged limit table. Bytes retain payer slots; only scope handles
+//! Task-local limit table. Bytes retain payer slots; only scope handles
 //! and union edges use structural pins. The free list retains each unused slot's
 //! pin for its next scope. Remote events never touch local fields.
 //! Native balance updates wrap because admission/refund invariants already prove
@@ -54,7 +54,7 @@ struct Links {
 #[repr(C, align(32))]
 pub(crate) struct Slot {
     local: UnsafeCell<LimitRecord>,
-    /// Frozen at SLOT_DOMAIN. Set when the forest page is made and never
+    /// Frozen at SLOT_DOMAIN. Set before the slot is published and never
     /// changed, so a live payer word always leads to its domain.
     domain: NonNull<Domain>,
     links: UnsafeCell<Links>,
@@ -69,8 +69,43 @@ pub(crate) struct Slot {
 const _: () = assert!(std::mem::offset_of!(Slot, local) == crate::abi_layout::LIMIT_AVAILABLE);
 const _: () = assert!(std::mem::offset_of!(Slot, domain) == crate::abi_layout::SLOT_DOMAIN);
 const _: () = assert!(std::mem::offset_of!(Domain, pending) == crate::abi_layout::DOMAIN_PENDING);
+
+impl Slot {
+    fn vacant(domain: NonNull<Domain>, id: usize) -> Self {
+        Self {
+            local: UnsafeCell::new(LimitRecord {
+                available: 0,
+                outstanding: 0,
+            }),
+            links: UnsafeCell::new(Links {
+                refs: 1,
+                parent: None,
+                rank: 0,
+                live: Live::EMPTY,
+                next_free: None,
+                #[cfg(any(test, feature = "testing"))]
+                occupied: false,
+            }),
+            pending: AtomicU64::new(0),
+            pending_zeros: AtomicUsize::new(0),
+            next_pending: UnsafeCell::new(None),
+            queue: UnsafeCell::new(Queue::EMPTY),
+            handover: Cell::new(None),
+            domain,
+            id,
+        }
+    }
+}
+
+const PAGE_LEN: usize = 64;
+
 struct Forest {
-    pages: Vec<Box<[Slot; 64]>>,
+    // Points to the first slot in the same domain allocation.
+    first: NonNull<Slot>,
+    // Each small chunk starts at the ID equal to its length. Together with
+    // the inline first slot they fill the ID range of one page.
+    small: [Option<Box<[Slot]>>; PAGE_LEN.ilog2() as usize],
+    pages: Vec<Box<[Slot]>>,
     length: usize,
     free: Option<NonNull<Slot>>,
     // Read/written only after the last local handle retires.
@@ -84,7 +119,15 @@ struct Forest {
 impl Forest {
     #[inline(always)]
     fn slot(&self, id: usize) -> &Slot {
-        &self.pages[id / 64][id % 64]
+        if id >= PAGE_LEN {
+            &self.pages[id / PAGE_LEN - 1][id % PAGE_LEN]
+        } else if id == 0 {
+            // SAFETY: the enclosing domain owns this slot and outlives the forest.
+            unsafe { self.first.as_ref() }
+        } else {
+            let chunk = id.ilog2() as usize;
+            &self.small[chunk].as_ref().unwrap()[id - (1 << chunk)]
+        }
     }
     #[inline(always)]
     fn record(&self, id: usize) -> &Links {
@@ -138,41 +181,29 @@ impl Forest {
     #[cold]
     fn fresh(&mut self, domain: NonNull<Domain>) -> NonNull<Slot> {
         let id = self.length;
-        if id.is_multiple_of(64) {
-            self.pages.push(Box::new(std::array::from_fn(|i| Slot {
-                local: UnsafeCell::new(LimitRecord {
-                    available: 0,
-                    outstanding: 0,
-                }),
-                links: UnsafeCell::new(Links {
-                    refs: 1,
-                    parent: None,
-                    rank: 0,
-                    live: Live::EMPTY,
-                    next_free: None,
-                    #[cfg(any(test, feature = "testing"))]
-                    occupied: false,
-                }),
-                pending: AtomicU64::new(0),
-                pending_zeros: AtomicUsize::new(0),
-                next_pending: UnsafeCell::new(None),
-                queue: UnsafeCell::new(Queue::EMPTY),
-                handover: Cell::new(None),
-                domain,
-                id: id + i,
-            })));
+        if id >= PAGE_LEN && id.is_multiple_of(PAGE_LEN) {
+            self.pages.push(Self::allocate_slots(domain, id, PAGE_LEN));
+        } else if id < PAGE_LEN && id.is_power_of_two() {
+            self.small[id.ilog2() as usize] = Some(Self::allocate_slots(domain, id, id));
         }
         self.length += 1;
         NonNull::from(self.slot(id))
     }
-    fn take_vacant(&mut self, domain: NonNull<Domain>) -> NonNull<Slot> {
-        if let Some(slot) = self.free {
-            // SAFETY: sequencer custody uniquely owns each vacant slot.
-            self.free = unsafe { (*slot.as_ref().links.get()).next_free };
-            slot
-        } else {
-            self.fresh(domain)
+
+    fn allocate_slots(domain: NonNull<Domain>, start: usize, count: usize) -> Box<[Slot]> {
+        let mut slots = Box::new_uninit_slice(count);
+        for (i, slot) in slots.iter_mut().enumerate() {
+            slot.write(Slot::vacant(domain, start + i));
         }
+        // SAFETY: the loop initialized every element in the allocation.
+        unsafe { slots.assume_init() }
+    }
+
+    fn pop_vacant(&mut self) -> Option<NonNull<Slot>> {
+        let slot = self.free?;
+        // SAFETY: sequencer custody uniquely owns each vacant slot.
+        self.free = unsafe { (*slot.as_ref().links.get()).next_free };
+        Some(slot)
     }
 
     fn return_vacant(&mut self, slot: NonNull<Slot>) {
@@ -188,19 +219,15 @@ impl Forest {
                 cached
                     .as_mut()
                     .filter(|cache| cache.domain == domain)
-                    .map(|cache| {
+                    .and_then(|cache| {
                         if cache.slots.is_empty() {
-                            for _ in 0..SLOT_BATCH {
-                                cache.slots.push(self.take_vacant(domain));
-                            }
-                            cache.stats.transfers += 1;
-                            cache.stats.leased += SLOT_BATCH;
-                            cache.stats.peak = cache.stats.peak.max(cache.slots.len());
+                            cache.refill(self);
                         }
-                        cache.slots.pop().unwrap()
+                        cache.slots.pop()
                     })
             })
-            .unwrap_or_else(|| self.take_vacant(domain));
+            .or_else(|| self.pop_vacant())
+            .unwrap_or_else(|| self.fresh(domain));
         Self::initialize(slot, live)
     }
     #[inline(always)]
@@ -219,9 +246,6 @@ impl Forest {
             r.occupied = true;
         }
         Payer(slot)
-    }
-    fn insert(&mut self, domain: NonNull<Domain>, live: Live) -> usize {
-        self.take(domain, live).slot().id
     }
     fn root(&self, mut id: usize) -> usize {
         while let Some(parent) = self.record(id).parent {
@@ -333,6 +357,7 @@ struct Domain {
     owner: Option<usize>,
     remote: Mutex<Remote>,
     reap_inboxes: Cell<Option<NonNull<Inbox>>>,
+    first: UnsafeCell<Slot>,
 }
 #[derive(Clone, Copy)]
 struct Binding {
@@ -376,6 +401,22 @@ pub(crate) struct SlotStats {
 }
 
 impl VacantSlots {
+    fn refill(&mut self, forest: &mut Forest) {
+        // Lease only records already returned to the forest. A cache miss
+        // with no vacancies creates just the requested record.
+        while self.slots.len() < SLOT_BATCH
+            && let Some(slot) = forest.pop_vacant()
+        {
+            self.slots.push(slot);
+        }
+        let count = self.slots.len();
+        if count != 0 {
+            self.stats.transfers += 1;
+            self.stats.leased += count;
+            self.stats.peak = self.stats.peak.max(count);
+        }
+    }
+
     fn return_batch(&mut self, forest: &mut Forest, count: usize) {
         if count != 0 {
             self.stats.transfers += 1;
@@ -596,7 +637,7 @@ impl Payer {
         // SAFETY: this reservation draws from the payer's current owner.
         unsafe { (*f.balance(parent.slot().id)).outstanding -= bytes };
         f.retain(parent.slot().id);
-        let id = f.insert(
+        let payer = f.take(
             self.slot().domain,
             Live {
                 owner: f.record(parent.slot().id).live.owner,
@@ -607,7 +648,7 @@ impl Payer {
         );
         self.domain().handles.set(self.domain().handles.get() + 1);
         Funding {
-            payer: Cell::new(Self(NonNull::from(f.slot(id)))),
+            payer: Cell::new(payer),
         }
     }
 
@@ -673,8 +714,10 @@ impl Funding {
         let inbox = remote.inbox(owner);
         let domain = Box::new(Domain {
             forest: UnsafeCell::new(Forest {
+                first: NonNull::dangling(),
+                small: Default::default(),
                 pages: Vec::new(),
-                length: 0,
+                length: 1,
                 free: None,
                 retired_bytes: 0,
                 zeros: 0,
@@ -688,12 +731,20 @@ impl Funding {
             remote: Mutex::new(remote),
             pending: AtomicBool::new(false),
             reap_inboxes: Cell::new(None),
+            first: UnsafeCell::new(Slot::vacant(NonNull::dangling(), 0)),
         });
         let domain = NonNull::from(Box::leak(domain));
-        // SAFETY: the fresh domain is exclusively owned until its first handle returns.
-        let f = unsafe { &mut *domain.as_ref().forest.get() };
-        let id = f.insert(
-            domain,
+        // SAFETY: nothing refers to this fresh domain yet. The slot and its
+        // back pointer are initialized in their final locations before use.
+        let first = unsafe {
+            let domain_ref = domain.as_ref();
+            let first = NonNull::new_unchecked(domain_ref.first.get());
+            (*first.as_ptr()).domain = domain;
+            (*domain_ref.forest.get()).first = first;
+            first
+        };
+        let payer = Forest::initialize(
+            first,
             Live {
                 owner,
                 inbox,
@@ -702,7 +753,7 @@ impl Funding {
             },
         );
         Self {
-            payer: Cell::new(Payer(NonNull::from(f.slot(id)))),
+            payer: Cell::new(payer),
         }
     }
     pub(crate) fn native(&self) {
@@ -742,11 +793,6 @@ impl Funding {
     /// worker's lifetime. The run joins all workers before dropping the root.
     pub(crate) fn cache_domain(&self) -> CacheDomain {
         CacheDomain(self.payer.get().slot().domain)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn vacant_count() -> usize {
-        VACANT.with_borrow(|cache| cache.as_ref().map_or(0, |cache| cache.slots.len()))
     }
 
     pub(crate) fn return_vacant() -> SlotStats {

@@ -393,7 +393,7 @@ impl CheckProduct {
         })
     }
 
-    fn reached_foreign_modules(
+    pub(super) fn reached_foreign_modules(
         &self,
         reached: &Reachable<'_>,
     ) -> Result<BTreeMap<String, ForeignLeaf>, NativeStop> {
@@ -1286,7 +1286,8 @@ impl Publication {
             launch_digest_unused,
             &options,
         )?
-        .with_release_sites(&release_sites);
+        .with_release_sites(&release_sites)
+        .with_foreign(&self.recipe.foreign_modules);
         let result = link_objects(
             &plan,
             &objects,

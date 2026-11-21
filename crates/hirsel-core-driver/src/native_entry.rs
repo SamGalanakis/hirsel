@@ -16,6 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 mod adapter;
 mod code;
 mod data;
+mod foreign;
 mod report;
 mod sites;
 mod start;
@@ -53,6 +54,7 @@ pub(crate) struct Plan<'a> {
     charge_report: Option<Vec<u8>>,
     recording: bool,
     replay: Option<&'a crate::native::ReplayPlan>,
+    foreign: Vec<foreign::Function<'a>>,
 }
 /// Every link-plan input the environment does not cover, canonically: the
 /// root limit, grant mask, explicit Net rules, ordered directories, charge-report
@@ -102,17 +104,31 @@ impl<'a> Plan<'a> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
             return Err(NativeStop::Entry("Result needs fixed layout".into()));
         };
-        let mut ordinals = [0u64; 12];
+        let mut ordinals = [0u64; 13];
+        let mut grant_mask = options.grant_mask;
         let parameters = binding
             .parameters
             .iter()
             .map(|p| {
-                let kind =
+                let kind = if let Some(interface) =
+                    p.ty.strip_prefix("core@1/core/Foreign[")
+                        .and_then(|ty| ty.strip_suffix(']'))
+                {
+                    if !options.foreign_grants.contains(interface) {
+                        return Err(NativeStop::Entry(format!(
+                            "not granted: Foreign[{interface}]"
+                        )));
+                    }
+                    let kind = grant_kind("Foreign").unwrap();
+                    grant_mask |= 1 << kind;
+                    kind
+                } else {
                     p.ty.strip_prefix("core@1/core/")
                         .and_then(grant_kind)
                         .ok_or_else(|| {
                             NativeStop::Entry(format!("unsupported provider parameter {}", p.ty))
-                        })?;
+                        })?
+                };
                 let index = ordinals[kind as usize];
                 ordinals[kind as usize] += 1;
                 Ok(Requirement {
@@ -143,7 +159,7 @@ impl<'a> Plan<'a> {
             release_sites: &[],
             cleanup,
             root_limit: options.root_limit,
-            grant_mask: options.grant_mask,
+            grant_mask,
             net_rules: &options.net_rules,
             env_patterns: options
                 .env_patterns
@@ -153,11 +169,20 @@ impl<'a> Plan<'a> {
             directories: &options.directories,
             recording: options.recording,
             replay: options.replay.as_ref(),
+            foreign: vec![],
             charge_report: options
                 .logical_charge_report
                 .as_ref()
                 .map(|p| p.as_os_str().as_bytes().to_vec()),
         })
+    }
+
+    pub(crate) fn with_foreign(
+        mut self,
+        leaves: impl IntoIterator<Item = &'a hirsel_core_ir::release_recipe::ForeignLeaf>,
+    ) -> Self {
+        self.foreign = foreign::Function::collect(leaves);
+        self
     }
 
     pub(crate) fn with_release_sites(
@@ -181,32 +206,8 @@ impl<'a> Plan<'a> {
         revision: &[u8; 32],
         revisions: &[(String, [u8; 32])],
     ) -> Result<Vec<u8>> {
-        let mut flags = settings::builder();
-        for (name, value) in [
-            ("is_pic", "true"),
-            ("enable_verifier", "false"),
-            ("opt_level", "none"),
-            ("regalloc_algorithm", "single_pass"),
-            ("enable_probestack", "true"),
-            ("probestack_strategy", "inline"),
-            ("probestack_size_log2", "12"),
-        ] {
-            flags.set(name, value).map_err(error)?;
-        }
-        // The launcher must reach the CPU check even on a pre-v2 x86-64 host.
-        let isa = cranelift_codegen::isa::lookup_by_name(target)
-            .map_err(error)?
-            .finish(settings::Flags::new(flags))
-            .map_err(error)?;
-        let mut builder = ObjectBuilder::new(
-            isa,
-            b"hirsel-link".to_vec(),
-            cranelift_module::default_libcall_names(),
-        )
-        .map_err(error)?;
-        // A revision carrier is live only through a surviving reference.
-        builder.per_data_object_section(true);
-        let mut object = ObjectModule::new(builder);
+        let mut object = object(target)?;
+        let waits = foreign::emit(&mut object, &self.foreign)?;
         let data = data::write(&mut object, self, sources)?;
         data::bytes(
             &mut object,
@@ -222,12 +223,41 @@ impl<'a> Plan<'a> {
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
             .map_err(error)?;
         adapter::emit(&mut object, self, entry, signature)?;
-        start::emit(&mut object, self, &data, entry)?;
+        start::emit(&mut object, self, &data, entry, waits)?;
         let mut product = object.finish();
         sites::define(&mut product.object, sources)?;
         sites::define_release(&mut product.object, sources, self.release_sites)?;
         product.object.write().map_err(error)
     }
+}
+
+fn object(target: &str) -> Result<ObjectModule> {
+    let mut flags = settings::builder();
+    for (name, value) in [
+        ("is_pic", "true"),
+        ("enable_verifier", "false"),
+        ("opt_level", "none"),
+        ("regalloc_algorithm", "single_pass"),
+        ("enable_probestack", "true"),
+        ("probestack_strategy", "inline"),
+        ("probestack_size_log2", "12"),
+    ] {
+        flags.set(name, value).map_err(error)?;
+    }
+    // The launcher must reach the CPU check even on a pre-v2 x86-64 host.
+    let isa = cranelift_codegen::isa::lookup_by_name(target)
+        .map_err(error)?
+        .finish(settings::Flags::new(flags))
+        .map_err(error)?;
+    let mut builder = ObjectBuilder::new(
+        isa,
+        b"hirsel-link".to_vec(),
+        cranelift_module::default_libcall_names(),
+    )
+    .map_err(error)?;
+    // A revision carrier is live only through a surviving reference.
+    builder.per_data_object_section(true);
+    Ok(ObjectModule::new(builder))
 }
 
 fn signature(

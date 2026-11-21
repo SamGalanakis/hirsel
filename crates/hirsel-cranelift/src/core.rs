@@ -17,6 +17,7 @@ pub mod memory_layout {
 }
 
 mod abi;
+pub use abi::Signature as NativeSignature;
 mod calls;
 mod case;
 mod debug;

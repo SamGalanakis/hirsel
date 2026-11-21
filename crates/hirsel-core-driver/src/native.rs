@@ -862,6 +862,7 @@ impl CheckProduct {
     ) -> Result<Linked, NativeStop> {
         let link_archives = self.preflight_foreign_link(reached, entry, options)?;
         let instances = reached.require_native(entry, options)?;
+        let foreign_modules = self.reached_foreign_modules(reached)?;
         let address = reached.address(entry)?;
         let inputs = reached
             .native
@@ -980,7 +981,8 @@ impl CheckProduct {
             link.cleanup.as_ref().map(|c| c.identity.symbol()),
             false,
             options,
-        )?;
+        )?
+        .with_foreign(foreign_modules.values());
         let image = self
             .image
             .as_ref()
@@ -2027,6 +2029,143 @@ pub(crate) mod tests {
             env_patterns: None,
             logical_charge_report: None,
             observed: None,
+        }
+    }
+
+    #[test]
+    fn shared_foreign_thunk_links_sealed_code_and_runs_from_each_backend() {
+        use crate::code_store::ObjectKind;
+        use crate::foreign_archive::LinkArchives;
+        use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name| dir.path().join(name);
+        let mut options = native_options(Backend::Cranelift, dir.path());
+        options.foreign_grants.insert("ffi_laws@1/laws/Laws".into());
+        let Link::Driver(cc) = &options.link else {
+            unreachable!()
+        };
+        let adapter = path("adapter.c");
+        std::fs::write(
+            &adapter,
+            r#"
+#include <stdint.h>
+uint64_t hfl_measure(int8_t s, float f) { return s == -3 && f == 1.25f ? 42 : 0; }
+#define ABI "hfl_measure waits (i8, f32) -> u64\n"
+__attribute__((used, section(".hirsel_abi")))
+static const char abi[sizeof(ABI) - 1] = ABI;
+"#,
+        )
+        .unwrap();
+        command(
+            Command::new(cc)
+                .args(["-std=c11", "-O2", "-fPIC", "-c"])
+                .arg(adapter)
+                .arg("-o")
+                .arg(path("adapter.o")),
+        )
+        .unwrap();
+        command(
+            Command::new(cc.with_file_name("llvm-ar"))
+                .arg("rcs")
+                .arg(path("adapter.a"))
+                .arg(path("adapter.o")),
+        )
+        .unwrap();
+        let bytes = std::fs::read(path("adapter.a")).unwrap();
+        let archive = ObjectRef {
+            hash: ObjectKind::ForeignArchive.hash(&bytes),
+            len: bytes.len() as u64,
+        };
+        let entry = DefPath::from_full("ffi_laws@1/laws/main").unwrap();
+        let identity = Identity::plain(entry.clone());
+        let leaf = ForeignLeaf {
+            module: DefPath::from_full("ffi_laws@1/native").unwrap(),
+            symbols: "hfl_".into(),
+            targets: vec![],
+            functions: vec![ForeignFunction {
+                identity: Identity::plain(DefPath::from_full("ffi_laws@1/native/measure").unwrap()),
+                header: "(core@1/core/Foreign[ffi_laws@1/laws/Laws],i8,f32)->u64 waits".into(),
+            }],
+        };
+        let mut archives = LinkArchives::default();
+        archives
+            .admit(archive, &leaf, TARGET, &entry, None, || Ok(bytes))
+            .unwrap();
+        let module = hirsel_core_ir::text::parse(
+            r#"
+core v1
+type t0 = own "Result" | Ok { } | Error { }
+sig g0 = (u64) -> () dest t0
+sig g1 = (u64, i8, f32) -> (u64)
+inst n0 = ffi_laws@1/laws/main [] []
+inst n1 = ffi_laws@1/native/measure [] []
+fn f0 = n0 g0 {
+ addr a0 = v0 : t0
+b0(v0: ptr, v1: u64):
+ address a0
+ v2: i8 = const -3
+ v3: f32 = const 0x3fa00000
+ v4: u64 = call f1 g1 (v1, v2, v3)
+ v5: u64 = const 42
+ v6: bool = eq v4, v5
+ branch v6, b1, b2
+b1:
+ set_case a0, 0
+ return
+b2:
+ set_case a0, 1
+ return
+}
+fn f1 = n1 g1 extern
+"#,
+        )
+        .unwrap();
+        let plan_abi = EntryAbi {
+            recipe: hirsel_core_layout::compute(&module.types)
+                .unwrap()
+                .remove(0),
+            exit_offset: None,
+            parameters: vec![EntryParameter {
+                ty: "core@1/core/Foreign[ffi_laws@1/laws/Laws]".into(),
+                name: "f".into(),
+            }],
+        };
+        let (_, recipe) =
+            crate::tool_inputs::toolchain(&options.link, TARGET, &options.runtime).unwrap();
+        for backend in [Backend::Cranelift, Backend::Llvm] {
+            options.backend = backend;
+            let object = emit_unit(
+                &module,
+                || module.link_symbols(),
+                &options,
+                ContentHash::default(),
+                &identity,
+            )
+            .unwrap();
+            let plan = crate::native_entry::Plan::new(
+                identity.symbol(),
+                entry.to_string(),
+                &plan_abi,
+                None,
+                false,
+                &options,
+            )
+            .unwrap()
+            .with_foreign([&leaf]);
+            let startup = plan
+                .emit(TARGET, &Default::default(), &[0; 32], &[])
+                .unwrap();
+            std::fs::write(path("unit.o"), object.bytes).unwrap();
+            std::fs::write(path("startup.o"), startup).unwrap();
+            let mut inputs = vec![path("startup.o"), path("unit.o")];
+            archives
+                .append_link_inputs(&mut inputs, &options.runtime, &recipe)
+                .unwrap();
+            inputs.push(options.runtime.clone());
+            let output = path("program");
+            direct_link(&recipe, &inputs, DIRECT_LINK_SUPPORT_LIBS, &output, false).unwrap();
+            run_clean(&output, 0);
         }
     }
     fn exercise(backend: Backend) {

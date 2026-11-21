@@ -32,6 +32,7 @@ pub const PROCESS: u8 = 8;
 pub const TASKS: u8 = 9;
 pub const ARGS: u8 = 10;
 pub const SECRET: u8 = 11;
+pub const FOREIGN: u8 = 12;
 /// Host metadata. Its index + 1 is the numeric provider handle. Source code
 /// cannot construct or inspect this metadata; copying a handle copies designation.
 #[repr(C)]
@@ -636,6 +637,16 @@ impl OsProcess {
                         });
                     }
                 }
+                if input.grant_mask & (1 << FOREIGN) != 0 {
+                    metadata.extend(requirements.iter().filter(|r| r.kind == FOREIGN).map(|r| {
+                        Grant {
+                            kind: FOREIGN,
+                            provider: std::ptr::null(),
+                            handle: r.index as u64,
+                            terminal: false,
+                        }
+                    }));
+                }
             }
             metadata.push(Grant {
                 kind: ARGS,
@@ -821,7 +832,42 @@ pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     entry: crate::process::Entry,
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
-    unsafe { run_os_with_sources(input, parameter_names, sources, entry, Metadata::native) }
+    unsafe {
+        run_os_with_sources(
+            input,
+            parameter_names,
+            sources,
+            entry,
+            Metadata::native,
+            None,
+        )
+    }
+}
+
+/// The sourced OS entry for a foreign-reaching program.
+///
+/// # Safety
+/// As hirsel_core_os_run_with_sources. The checked reach determines whether
+/// any of its foreign calls, releases included, require helpers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_foreign_with_sources(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+    waits: bool,
+) -> u8 {
+    // SAFETY: the caller pins configuration and sources for the OS entry.
+    unsafe {
+        run_os_with_sources(
+            input,
+            parameter_names,
+            sources,
+            entry,
+            Metadata::native,
+            Some(waits),
+        )
+    }
 }
 
 /// OS entry for a closed executable without any launch-digest reader.
@@ -836,7 +882,16 @@ pub unsafe extern "C" fn hirsel_core_os_run_without_digest(
     entry: crate::process::Entry,
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
-    unsafe { run_os_with_sources(input, parameter_names, sources, entry, Metadata::source) }
+    unsafe {
+        run_os_with_sources(
+            input,
+            parameter_names,
+            sources,
+            entry,
+            Metadata::source,
+            None,
+        )
+    }
 }
 
 unsafe fn run_os_with_sources(
@@ -845,6 +900,7 @@ unsafe fn run_os_with_sources(
     sources: *const crate::abi_sites::SourceTable,
     entry: crate::process::Entry,
     launch_metadata: fn(&str, u64, bool) -> Metadata,
+    foreign_waits: Option<bool>,
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
     unsafe {
@@ -856,6 +912,7 @@ unsafe fn run_os_with_sources(
             entry,
             |os, handle| (operations.unwrap().probe)(os, handle),
             launch_metadata,
+            foreign_waits,
         )
     }
 }
@@ -875,6 +932,7 @@ unsafe fn run_with_probe(
             entry,
             probe,
             Metadata::native,
+            None,
         )
     }
 }
@@ -886,6 +944,7 @@ unsafe fn run_with_sources_and_probe(
     entry: crate::process::Entry,
     probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
     launch_metadata: fn(&str, u64, bool) -> Metadata,
+    foreign_waits: Option<bool>,
 ) -> u8 {
     // SAFETY: input tables are borrowed from the OS entry's configuration.
     match unsafe { OsProcess::new(input, probe, launch_metadata) } {
@@ -893,7 +952,14 @@ unsafe fn run_with_sources_and_probe(
             // SAFETY: table is borrowed until this call completes reporting.
             unsafe { crate::abi_sites::hirsel_core_os_process_set_sources(&mut *process, sources) };
             // SAFETY: the Box pins Config and all grants through run and cleanup.
-            unsafe { crate::process::hirsel_core_run(&process.config, entry) }
+            unsafe {
+                match foreign_waits {
+                    Some(waits) => {
+                        crate::process::hirsel_core_run_with_foreign(&process.config, entry, waits)
+                    }
+                    None => crate::process::hirsel_core_run(&process.config, entry),
+                }
+            }
         }
         Err(error) => {
             unsafe { report_startup(error, input.stderr_fd, names) };

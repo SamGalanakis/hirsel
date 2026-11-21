@@ -16,8 +16,7 @@ pub type Thunk = unsafe extern "C" fn(*mut u64) -> u64;
 pub static hirsel_core_foreign_empty: u8 = 0;
 
 /// FFI-5 result tags shared with the linker's thunks.
-pub const RESULT_F32: u8 = 1;
-pub const RESULT_F64: u8 = 2;
+pub use crate::abi_layout::{FOREIGN_RESULT_F32 as RESULT_F32, FOREIGN_RESULT_F64 as RESULT_F64};
 
 /// Enter a bounded, non-suspending C call on this worker's host stack.
 ///
@@ -87,6 +86,22 @@ pub struct Call {
     pub waits: bool,
     pub release: bool,
 }
+
+const _: () = {
+    use crate::abi_layout::*;
+    use std::mem::offset_of;
+    assert!(size_of::<Kind>() == FOREIGN_KIND_BYTES);
+    assert!(offset_of!(Kind, release) == FOREIGN_KIND_RELEASE as usize);
+    assert!(offset_of!(Kind, waits) == FOREIGN_KIND_WAITS);
+    assert!(size_of::<Call>() == FOREIGN_CALL_BYTES);
+    assert!(offset_of!(Call, thunk) == FOREIGN_CALL_THUNK as usize);
+    assert!(offset_of!(Call, kinds) == FOREIGN_CALL_KINDS as usize);
+    assert!(offset_of!(Call, count) == FOREIGN_CALL_COUNT);
+    assert!(offset_of!(Call, new_kind) == FOREIGN_CALL_NEW as usize);
+    assert!(offset_of!(Call, result_tag) == FOREIGN_CALL_RESULT);
+    assert!(offset_of!(Call, waits) == FOREIGN_CALL_WAITS);
+    assert!(offset_of!(Call, release) == FOREIGN_CALL_RELEASE);
+};
 
 pub(crate) struct Run {
     handles: handles::Handles,

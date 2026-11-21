@@ -104,6 +104,7 @@ environment.
 | `RECV_BOUNDED` on a TLS half | as for a socket | the decrypted plaintext, in its original fragments |
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
 | `SEND_SECRET` | half ordinal; canonical args = `before`, the secret's designation, `after`, `until` | the outcome, and the committed count on failure |
+| `SECRET_MAC` | the secret's designation; canonical args = `data` (and `tag` for verify) | the 32-byte tag, the verdict, or `Denied` |
 
 A recording **never** holds ciphertext, handshake records, keys, client or server randoms,
 the certificate chain, the roots bundle, or the provider's verification time.
@@ -113,7 +114,7 @@ ordinal in the order of the run's grants, like every other grant. The header's g
 snapshot keeps the parameter name, the `to` patterns and the source label
 (`env:OPENAI_API_KEY`), but not the bytes. A sealed secret is designated by the order of its
 seal among the run's seals, together with its `to` patterns. The canonical arguments of
-`SEND_SECRET` hold the designation, never the bytes or any function of them, because an
+`SEND_SECRET` and `SECRET_MAC` hold the designation, never the bytes or any function of them, because an
 unkeyed digest of a short secret could be reversed by trying candidate values.
 
 ## Recording failures and truncated recordings

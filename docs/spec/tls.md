@@ -264,7 +264,7 @@ pub type SecretError = Invalid | Capacity(Capacity)
   the run does not start (exit 103). The bytes are kept in run-owned host memory. They
   are zeroed when the run ends and are never charged to a limit. The program receives a
   designation, never the bytes. `to` is the list of name patterns the secret may be sent
-  to (TLS-3 pattern syntax).
+  to (TLS-3 pattern syntax), optionally followed by a use word (the MAC sink, below).
 - **`secret.seal`.** This takes bytes the program already holds, such as a token a
   server minted during the run, together with a `to` pattern list. It moves them into
   run-owned storage that is charged to the caller's limit until the run ends, as
@@ -277,7 +277,8 @@ intersection, and designates the same bytes. If the intersection is empty, the r
 is `Invalid`.
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
-digest of them, or the result of comparing them. Because `Secret` is not `codec`, no
+unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
+verdict are the only values computed from them. Because `Secret` is not `codec`, no
 store or JSON codec encodes one. `secret.render` returns the fixed marker
 `[secret]` for every secret. Every std function that renders, logs or describes a value
 holding a secret writes this marker in the secret's place. This includes the HTTP
@@ -308,9 +309,17 @@ The HTTP client writes a header whose value is a `Secret` by calling `send_secre
 line, with any following head bytes up to the next secret value. On a plain-TCP
 connection, such a request fails `Denied` before any byte is sent.
 
-An HMAC or signature sink, which uses a secret as a key without sending it, is a later
-operation. Its rule is set now: its output is a delivery that passes the replay point
-([CAP-8](capabilities.md#cap-8-the-replay-point)), and its key never does.
+**The MAC sink.** `secret.hmac_sha256(s, data)` and `secret.verify_hmac_sha256(s, data,
+tag)` use a secret as an HMAC-SHA256 key without sending it
+([hmac](../../core/std/api/hmac.md#secret-keys)). The runtime computes from run-owned
+memory. The tag, or the constant-time verdict for exactly 32 tag bytes, is a delivery
+that passes the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), and the
+key never does. A secret's `to` text takes an optional use word after its patterns: `mac`
+permits both operations, and `verify` permits only verification. A list may then have no
+patterns. `narrow` intersects uses, with `mac` and `verify` giving `verify`. Without the
+use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
+signing oracle wherever it is sent, which is why the use must be granted. A signature
+sink with another algorithm follows the same rule.
 
 ## Laws
 

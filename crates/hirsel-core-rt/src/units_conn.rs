@@ -386,13 +386,10 @@ impl UnitCtx {
     ) -> Result<(Inbox, Client), Cap> {
         assert!(cap > 0 && cap <= MAX_CAP && b <= MAX_ROOM);
         let h = 64 + cap * elem;
-        let avail = self.funding().available();
-        if h + b > avail {
-            return Err(Cap { req: h + b, avail });
-        }
-        let Ok(payer) = self.funding().unit_charge(h + b) else {
-            unreachable!()
-        };
+        let payer = self
+            .funding()
+            .unit_charge(h + b)
+            .map_err(|avail| Cap { req: h + b, avail })?;
         let (inbox, client) = self.make_conn(cap, elem, b, stride, owners, Some(payer));
         #[cfg(test)]
         self.book_room(&inbox.0);

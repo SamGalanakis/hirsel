@@ -325,3 +325,133 @@ fn peer_refunds_at_owner_take(tasks: Tasks) -> bool waits {
     }
     result.unwrap(checked)
 }
+
+type Hand: cross {
+    hand: Client[Client[u64]],
+    go: Client[()]
+}
+
+type HoldJob: cross {
+    ready: Client[Hand],
+    done: Client[()]
+}
+
+// The third unit: it is handed the last client of a connection that another
+// helper made and cleaned, holds it until told, then drops it and answers.
+fn hold_then_release(take job: HoldJob) waits {
+    let HoldJob(ready: ready, done: done) = take job
+    let (hand, hand_in): (Client[Client[u64]], Inbox[Client[u64]]) = result.unwrap(conn.new(1, bytes 0))
+    let (go, go_in): (Client[()], Inbox[()]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(ready, Hand(hand: take hand, go: take go)))
+    let last = result.unwrap(conn.receive(hand_in))
+    result.unwrap(conn.receive(go_in))
+    let _ = take last
+    result.unwrap(conn.send(done, ()))
+}
+
+// A helper that makes a connection from its own n (64 + 1 x 8 + 0 = 72),
+// hands the only client to the third unit and cleans its inbox before it
+// ends, so the connection survives the helper with its charge.
+fn leave_survivor(take hand: Client[Client[u64]]) -> u64 waits {
+    let (last, inbox): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(hand, take last))
+    let _ = take inbox
+    7
+}
+
+// A helper's charge is 256 + size(u64) + 32 + 4096 = 4392, all of a bound
+// of 4392. Before the join nothing is left: conn.new(1, bytes 0) asks 72
+// against 0. The end take and the join return all of it except the
+// connection the helper left behind with its last client in a third unit:
+// 72 stay held, so asking the whole 4392 is refused with 4320 available.
+// Once the third unit drops that client, the owner's take of its answer
+// (after the release in the third unit's order) returns the 72, and the
+// whole bound can be spent again.
+// expect: run survivor_outlives_helper(tasks) = true
+fn survivor_outlives_helper(tasks: Tasks) -> bool waits {
+    let (ready, ready_in): (Client[Hand], Inbox[Hand]) = result.unwrap(conn.new(1, bytes 0))
+    let (done, done_in): (Client[()], Inbox[()]) = result.unwrap(conn.new(1, bytes 0))
+    let peer = result.unwrap(task.spawn_unit(tasks, bytes 4096, HoldJob(ready: take ready, done: take done), hold_then_release))
+    let Hand(hand: hand, go: go) = result.unwrap(conn.receive(ready_in))
+    let checked = bound bytes 4392 {
+        let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, take hand, leave_survivor))
+        let before: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        let empty = match before {
+            Error(c) => c.requested == 72 && c.available == 0,
+            Ok(_) => false,
+        }
+        let seven = result.unwrap(task.join(take helper)) == 7
+        let joined: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 4320)
+        let held = match joined {
+            Error(c) => c.requested == 4392 && c.available == 4320,
+            Ok(_) => false,
+        }
+        result.unwrap(conn.send(go, ()))
+        result.unwrap(conn.receive(done_in))
+        let released: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 4320)
+        let whole = match released {
+            Ok(_) => true,
+            Error(_) => false,
+        }
+        empty && seven && held && whole
+    }
+    result.unwrap(task.join(take peer))
+    result.unwrap(checked)
+}
+
+fn idle(take n: u64) -> u64 {
+    n
+}
+
+// Abandoning a helper returns its whole charge with its end: 256 + 8 + 32 +
+// 64 = 360 of a bound of 360. Before the handle is dropped nothing is left;
+// after, asking all 360 succeeds.
+// expect: run abandoned_helper_returns_its_charge(tasks) = true
+fn abandoned_helper_returns_its_charge(tasks: Tasks) -> bool {
+    let checked = bound bytes 360 {
+        let helper = result.unwrap(task.spawn_unit(tasks, bytes 64, 5u64, idle))
+        let before: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        let empty = match before {
+            Error(c) => c.requested == 72 && c.available == 0,
+            Ok(_) => false,
+        }
+        let _ = take helper
+        let after: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 288)
+        let whole = match after {
+            Ok(_) => true,
+            Error(_) => false,
+        }
+        empty && whole
+    }
+    result.unwrap(checked)
+}
+
+// Local tasks and unit helpers draw on one account. A local task's charge
+// is 256 + 8 + 32 + 40 = 336 and a helper's 256 + 8 + 32 + 64 = 360, all of
+// a bound of 696. Before either join nothing is left; the helper's join
+// returns its 360, so a connection of 360 is made and released (the owner's
+// own release returns it within the drop); the local join returns the rest.
+// expect: run local_tasks_and_helpers_share_one_account(tasks) = true
+fn local_tasks_and_helpers_share_one_account(tasks: Tasks) -> bool waits {
+    let checked = bound bytes 696 {
+        let local = result.unwrap(task.spawn(tasks, bytes 40, 3u64, idle))
+        let helper = result.unwrap(task.spawn_unit(tasks, bytes 64, 5u64, idle))
+        let before: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        let empty = match before {
+            Error(c) => c.requested == 72 && c.available == 0,
+            Ok(_) => false,
+        }
+        let five = result.unwrap(task.join(take helper)) == 5
+        let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 288))
+        let _ = take i
+        let _ = take c
+        let three = result.unwrap(task.join(take local)) == 3
+        let after: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 624)
+        let whole = match after {
+            Ok(_) => true,
+            Error(_) => false,
+        }
+        empty && five && three && whole
+    }
+    result.unwrap(checked)
+}

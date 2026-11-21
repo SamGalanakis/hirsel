@@ -515,6 +515,11 @@ struct Child {
     unit_owner: Option<usize>,
     end_taken: bool,
     crossed_result: Option<conn::Item>,
+    /// A helper's own limit from its end until its owner's end take.
+    unit_limit: Option<Limit>,
+    /// What a helper's end take kept of the spawn's charge for its join:
+    /// `size(R)` and the result's content.
+    end_kept: u64,
     /// The child's used cells: those of the chain it failed with.
     cells: Vec<(Limit, u64)>,
     /// Its primary cell when unused at its end, refunded when it is joined.
@@ -1731,6 +1736,7 @@ impl Machine<'_> {
                 let owners = self.cross_owners(r);
                 self.children[i].crossed_result = Some(self.cross_take(rb, r, &owners));
             }
+            self.children[i].unit_limit = Some(limit);
         } else {
             self.end_limit(limit, None);
         }
@@ -1748,9 +1754,7 @@ impl Machine<'_> {
         self.event(END, id, u64::from(status != 0));
         self.sched.tasks[t.k].state = State::Ended;
         if let Some(owner) = unit_owner {
-            self.sched.tasks[owner]
-                .notices
-                .push_back(conn::UnitNotice::HelperEnd(i));
+            self.notify(owner, conn::UnitNotice::HelperEnd(i));
         }
         self.wake(Condition::Join(i));
     }
@@ -3186,16 +3190,19 @@ impl Machine<'_> {
     /// cell; the reserved `n` came back when the child's limit ended. The spawn's
     /// charge holds the child's first primary cell, which may have left with a
     /// chain: a used cell is among the cells returned to go with its `Causes`, or
-    /// went with one the child caught.
+    /// went with one the child caught. A helper's end take returned all but
+    /// `size(R)`, the result's content and what it left behind; the join
+    /// returns the first two less the content `moved` into the result.
     fn settle_child(&mut self, i: usize, moved: u64) -> Vec<(Limit, u64)> {
         let c = &mut self.children[i];
         assert!(!c.joined, "task handle used twice");
         c.joined = true;
-        let unused = if c.unit_owner.is_some() { moved } else { c.n };
-        let (l, n) = (
-            c.limit.take().unwrap(),
-            c.charge - unused - charge::CAUSE_CELL,
-        );
+        let n = if c.unit_owner.is_some() {
+            c.end_kept - moved
+        } else {
+            c.charge - c.n - charge::CAUSE_CELL
+        };
+        let l = c.limit.take().unwrap();
         let cells = std::mem::take(&mut c.cells);
         let primary = c.primary.take();
         self.refund(l, n);
@@ -3477,6 +3484,8 @@ impl Machine<'_> {
                     unit_owner: unit.then(|| self.sched.tasks[t.k].unit),
                     end_taken: false,
                     crossed_result: None,
+                    unit_limit: None,
+                    end_kept: 0,
                     cells: Vec::new(),
                     chain: Vec::new(),
                     primary: None,

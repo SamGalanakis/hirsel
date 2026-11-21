@@ -7,8 +7,11 @@
 //! wait on it. A helper unit is a run of its own on its own OS thread.
 //!
 //! Byte accounting has one authority: the program's limits (`limit.rs`).
-//! A connection's or helper's charge is held as a block admitted from the
-//! creating task's limit. The ledger keeps the unit graph (ports, connection
+//! A connection's or helper's charge is a `Held` admitted from the creating
+//! task's limit. A helper's end take splits its charge: the owner gets back
+//! the task record, the unused part of `n` and the unused cell, keeps
+//! `size(R)` and the result's content until the join, and holds each
+//! connection the helper left behind until that connection's last release. The ledger keeps the unit graph (ports, connection
 //! words, room balances, settlements, helper ends) with roots it never refuses
 //! from; a ledger refusal after the program admitted is a bug (`UnitLedger`).
 //!
@@ -17,7 +20,8 @@
 //! capacity. Clients move as handles. Sockets move with their registrations detached.
 use crate::{
     Capacity, Context,
-    block::{self, Block},
+    block,
+    limit::Payer,
     causes::{self, Cause, Causes, Cell},
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
@@ -31,6 +35,46 @@ use std::{
     ptr,
     sync::{Arc, Mutex},
 };
+
+/// Bytes admitted from `payer` and held for the unit runtime; the limit
+/// record stays live while they are outstanding. Dropping a part refunds it
+/// at the unit.
+struct Held {
+    payer: Payer,
+    bytes: u64,
+}
+
+impl Held {
+    fn admit(context: &Context, bytes: u64) -> Result<Self, Capacity> {
+        let payer = context.payer();
+        payer.admit(Some(bytes))?;
+        Ok(Held { payer, bytes })
+    }
+
+    /// A part of at most `bytes`, refunded on its own.
+    fn split(&mut self, bytes: u64) -> Held {
+        let bytes = bytes.min(self.bytes);
+        self.bytes -= bytes;
+        Held {
+            payer: self.payer,
+            bytes,
+        }
+    }
+
+    /// Hand `bytes` to an owner that refunds them itself.
+    fn partition(&mut self, bytes: u64) -> Payer {
+        self.bytes -= bytes;
+        self.payer
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.bytes != 0 {
+            self.payer.settle_at_unit(self.bytes);
+        }
+    }
+}
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -348,7 +392,7 @@ pub(crate) struct LangUnit {
     sends: Map<u32, *mut SendWait>,
     helpers: Map<usize, *mut HelperH>,
     /// Header and unused room of cleaned connections, until the last release.
-    retained: Map<usize, Block>,
+    retained: Map<usize, Held>,
     /// Tasks waiting on something another unit settles: the scheduler does
     /// not call such a wait a deadlock.
     pub(crate) waits: usize,
@@ -382,9 +426,7 @@ impl LangUnit {
     }
 
     fn refund_retained(&mut self, id: usize) {
-        if let Some(held) = self.retained.remove(&id) {
-            held.refund_at_unit();
-        }
+        self.retained.remove(&id);
     }
 
     pub(crate) fn has_peer(&self) -> bool {
@@ -508,9 +550,10 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
                 }
             }
             Took::HelperEnd => {
-                if let Some(h) = u.helpers.get(&id) {
-                    (**h).ended = true;
-                    Waiters::wake_all(&raw mut (**h).waiters);
+                if let Some(&h) = u.helpers.get(&id) {
+                    end_take(u, &mut *h);
+                    (*h).ended = true;
+                    Waiters::wake_all(&raw mut (*h).waiters);
                 }
             }
             Took::LastRelease => u.refund_retained(id),
@@ -559,7 +602,7 @@ pub struct InboxH {
     inbox: Inbox,
     waiters: Waiters,
     owners: Vec<[u64; 4]>,
-    charge: Option<Block>,
+    charge: Option<Held>,
 }
 
 pub struct ClientH {
@@ -613,7 +656,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
         let Some(charge) = charge.filter(|_| cap <= MAX_CAP && b <= MAX_ROOM) else {
             return refused(0);
         };
-        let held = match Block::new(&*context, Some(charge), 1, 8) {
+        let held = match Held::admit(&*context, charge) {
             Ok(held) => held,
             Err(e) => return refused(e.available),
         };
@@ -943,8 +986,10 @@ pub struct HelperH {
     waiters: Waiters,
     ended: bool,
     port: Arc<crate::units::ledger::Port>,
-    /// The spawn's charge: the task charge with `n`.
-    charge: Option<Block>,
+    /// The spawn's charge, `256 + size(R) + 32 + n`, less what its end take
+    /// returned or handed on.
+    charge: Option<Held>,
+    r_size: u64,
     result: ValueOut,
 }
 
@@ -958,6 +1003,11 @@ struct ValueOut {
 struct Ended {
     failed: bool,
     causes: Vec<(u8, u64)>,
+    /// The result's content.
+    result: u64,
+    /// The cleaned connections it left behind with clients elsewhere: each
+    /// one's key and its retained charge, part of `n`.
+    survivors: Vec<(usize, u64)>,
 }
 
 /// A tagged task handle names a helper.
@@ -1016,7 +1066,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let Some(t) = t else {
             return refused(u64::MAX, 0);
         };
-        let held = match Block::new(&*context, Some(t), 1, 8) {
+        let held = match Held::admit(&*context, t) {
             Ok(b) => b,
             Err(e) => return refused(e.requested, e.available),
         };
@@ -1041,6 +1091,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             ended: false,
             port: hctx.port.clone(),
             charge: Some(held),
+            r_size,
             result: ValueOut {
                 bytes: rx.bytes,
                 owners: rx.owned(),
@@ -1151,9 +1202,19 @@ fn helper_main(
             crate::process::stop(b"UnitLedger");
         }
         let mut lu = Box::from_raw(lu);
+        // Each connection still retained has its last client in another unit;
+        // the owner holds its charge from the end take on. Its own copy here
+        // goes back to this helper's limit, which ends with it.
+        let survivors = lu.retained.drain().map(|(k, h)| (k, h.bytes)).collect();
         let ended = Ended {
             failed: failed != 0,
             causes: context.causes.iter().map(|c| (c.kind(), c.site)).collect(),
+            result: if failed == 0 {
+                item_charge(result.as_ptr(), &ro)
+            } else {
+                0
+            },
+            survivors,
         };
         let mut ret = lu
             .ctx
@@ -1190,6 +1251,31 @@ impl ResultsExt for std::sync::MutexGuard<'_, Option<HashMap<usize, Ended>>> {
     fn take(&mut self, k: usize) -> Option<Ended> {
         self.as_mut().and_then(|m| m.remove(&k))
     }
+}
+
+/// A helper's end take in its owner: the survivors' charges move into the
+/// owner's retained charges under their connections' keys, `size(R)`, the
+/// result's content and a failure's cells stay for the join, and the rest
+/// comes back now.
+/// # Safety
+/// The owner runs the take in a commit; the handle is live.
+unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
+    let results = RESULTS.lock().unwrap();
+    let ended = results
+        .as_ref()
+        .and_then(|m| m.get(&(Arc::as_ptr(&h.port) as usize)))
+        .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+    let held = h.charge.as_mut().unwrap();
+    for &(key, bytes) in &ended.survivors {
+        u.retained.insert(key, held.split(bytes));
+    }
+    let cells = if ended.failed {
+        32 * ended.causes.len() as u64
+    } else {
+        0
+    };
+    let keep = h.r_size + ended.result + cells;
+    drop(held.split(held.bytes.saturating_sub(keep)));
 }
 
 /// Wait for a helper's end take. Shielded waits ignore cancellation.
@@ -1258,7 +1344,7 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: *mut u8) -> (boo
             }
         } else {
             for (kind, site) in &ended.causes {
-                if held.charge() < 32 {
+                if held.bytes < 32 {
                     break;
                 }
                 let mut cell = Cell::prepaid(held.partition(32));

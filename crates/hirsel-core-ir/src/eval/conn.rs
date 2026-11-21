@@ -52,9 +52,56 @@ impl Machine<'_> {
                 UnitNotice::Item(i) => self.conns[i].taken += 1,
                 UnitNotice::Close(i) => self.conns[i].closed = true,
                 UnitNotice::Refund(limit, amount) => limit.find().subtract(amount),
-                UnitNotice::HelperEnd(i) => self.children[i].end_taken = true,
+                UnitNotice::HelperEnd(i) => self.end_take(unit, i),
             }
         }
+    }
+
+    /// The unit a notice for `unit` reaches: an ended helper's notices go to
+    /// its owner once the owner has taken its end (native `Port::fwd`).
+    pub(super) fn unit_dest(&self, mut unit: usize) -> usize {
+        while let Some(c) = unit.checked_sub(1).and_then(|i| self.children.get(i))
+            && c.end_taken
+            && let Some(owner) = c.unit_owner
+        {
+            unit = owner;
+        }
+        unit
+    }
+
+    pub(super) fn notify(&mut self, unit: usize, notice: UnitNotice) {
+        let to = self.unit_dest(unit);
+        self.sched.tasks[to].notices.push_back(notice);
+    }
+
+    /// A helper's end take: the owner gets back the task record, the unused
+    /// part of `n` and the unused primary cell, and keeps `size(R)`, the
+    /// result's content and the connections the helper left behind. Those
+    /// are charged to the helper's limit, which now forwards to the owner's,
+    /// so each refunds there at its own retirement. The notices still queued
+    /// at the helper follow, in order (native `end_take`).
+    fn end_take(&mut self, unit: usize, i: usize) {
+        let c = &mut self.children[i];
+        c.end_taken = true;
+        let lim = c.unit_limit.take().expect("a helper's limit");
+        let survivors = lim.used();
+        let result = c.crossed_result.as_ref().map_or(0, |item| item.charge);
+        let r_size = c.charge - c.n - charge::TASK_RECORD - charge::CAUSE_CELL;
+        let back = c.charge - r_size - charge::CAUSE_CELL - result - survivors;
+        c.end_kept = r_size + result;
+        let payer = c.limit.clone().unwrap();
+        let primary = c.primary.take();
+        {
+            let mut state = lim.0.state.lock().unwrap();
+            state.parent = Some(payer.clone());
+            state.ended = true;
+        }
+        self.refund(payer, back);
+        if let Some(p) = primary {
+            self.refund(p.limit, p.amount);
+        }
+        let rest = std::mem::take(&mut self.sched.tasks[i + 1].notices);
+        self.sched.tasks[unit].notices.extend(rest);
     }
 
     pub(super) fn cross_owners(&self, ty: TypeRef) -> Vec<[u64; 4]> {
@@ -195,9 +242,8 @@ impl Machine<'_> {
         let c = &mut self.conns[i];
         c.used += item.charge;
         c.queue.push_back(item);
-        self.sched.tasks[c.owner]
-            .notices
-            .push_back(UnitNotice::Item(i));
+        let owner = c.owner;
+        self.notify(owner, UnitNotice::Item(i));
         self.wake(Condition::ConnReceive(i));
     }
 
@@ -296,9 +342,8 @@ impl Machine<'_> {
         self.conns[i].clients -= 1;
         let c = &self.conns[i];
         if c.clients == 0 && c.inbox {
-            self.sched.tasks[c.owner]
-                .notices
-                .push_back(UnitNotice::Close(i));
+            let owner = c.owner;
+            self.notify(owner, UnitNotice::Close(i));
             self.wake(Condition::ConnReceive(i));
         }
         self.conn_freed(i);
@@ -330,11 +375,9 @@ impl Machine<'_> {
             && !c.inbox
             && let Some(limit) = c.limit.take()
         {
-            let owner = c.owner;
-            self.sched.tasks[owner]
-                .notices
-                .push_back(UnitNotice::Refund(limit, c.charge));
-            if owner == self.sched.tasks[self.sched.current].unit {
+            let (owner, charge) = (c.owner, c.charge);
+            self.notify(owner, UnitNotice::Refund(limit, charge));
+            if self.unit_dest(owner) == self.sched.tasks[self.sched.current].unit {
                 self.take_unit_notices();
             }
         }

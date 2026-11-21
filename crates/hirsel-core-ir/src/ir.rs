@@ -1007,6 +1007,11 @@ pub enum HostOp {
     SecretNarrow = 31,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     NetNarrowResolve = 41,
+    StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
+    EnvGet = 33,
+    EnvLen = 34,
+    EnvName = 35,
+    EnvNarrow = 36,
 }
 
 impl HostOp {
@@ -1054,6 +1059,11 @@ impl HostOp {
         HostOp::Stopped,
         HostOp::Resolve,
         HostOp::NetNarrowResolve,
+        HostOp::StdinRead,
+        HostOp::EnvGet,
+        HostOp::EnvLen,
+        HostOp::EnvName,
+        HostOp::EnvNarrow,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1096,10 +1106,15 @@ impl HostOp {
             HostOp::SecretNarrow => "secret_narrow",
             HostOp::NetSplit => "net_split",
             HostOp::Stopped => "host_stopped",
+            HostOp::StdinRead => "stdin_read",
+            HostOp::EnvGet => "env_get",
+            HostOp::EnvLen => "env_len",
+            HostOp::EnvName => "env_name",
+            HostOp::EnvNarrow => "env_narrow",
         }
     }
-    /// C entry of a socket or Net ownership/authority adapter.
-    pub const fn net_symbol(self) -> &'static str {
+    /// C entry of a host operation that has its own adapter.
+    pub const fn adapter_symbol(self) -> &'static str {
         match self {
             Self::Connect => "hirsel_core_host_connect",
             Self::Resolve => "hirsel_core_host_resolve",
@@ -1115,6 +1130,11 @@ impl HostOp {
             Self::SecretSeal => "hirsel_core_secret_seal",
             Self::SecretNarrow => "hirsel_core_secret_narrow",
             Self::NetSplit => "hirsel_core_net_split",
+            Self::StdinRead => "hirsel_core_stdin_read",
+            Self::EnvGet => "hirsel_core_env_get",
+            Self::EnvLen => "hirsel_core_env_len",
+            Self::EnvName => "hirsel_core_env_name",
+            Self::EnvNarrow => "hirsel_core_env_narrow",
             _ => unreachable!(),
         }
     }
@@ -1131,6 +1151,10 @@ impl HostOp {
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
                 | HostOp::NetSplit
+                | HostOp::EnvGet
+                | HostOp::EnvLen
+                | HostOp::EnvName
+                | HostOp::EnvNarrow
         )
     }
 }
@@ -1373,7 +1397,15 @@ impl RtOp {
                         ],
                         outcome,
                     ),
-                    HostOp::NetSplit => (vec![V(u64_)], outcome),
+                    HostOp::NetSplit | HostOp::EnvLen => (vec![V(u64_)], outcome),
+                    HostOp::EnvGet | HostOp::EnvName => {
+                        let input = if op == HostOp::EnvGet { p } else { u64_ };
+                        (
+                            vec![V(u64_), V(input)],
+                            vec![p, u8_, Ty::Scalar(Scalar::U32), u64_],
+                        )
+                    }
+                    HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),

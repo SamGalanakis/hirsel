@@ -64,6 +64,10 @@ impl Run {
             socket_activation: ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            env_patterns: crate::process::View {
+                data: std::ptr::null(),
+                len: 0,
+            },
             secret_ops: std::ptr::null(),
             target: view(b"test-target"),
         };

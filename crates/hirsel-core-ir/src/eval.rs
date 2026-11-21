@@ -99,6 +99,9 @@ struct World {
     launch_target: (u64, u64),
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
+    stdin: std::collections::VecDeque<u8>,
+    env_patterns: Vec<hirsel_core_net::EnvPatterns>,
+    env_entries: Vec<(String, u64, Option<u64>)>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     clock: u64,
@@ -107,7 +110,7 @@ struct World {
     temporaries: u64,
     random: u8,
     network: Network,
-    net_charges: Vec<(Limit, u64)>,
+    grant_charges: Vec<(Limit, u64)>,
     secrets: Vec<EvalSecret>,
     tls_writes: BTreeMap<u64, (Name, bool)>,
 }
@@ -1033,6 +1036,29 @@ pub fn run_network(m: &Module, f: FuncId, args: &[u64], limit: u64, network: Net
     )
     .0
 }
+/// Run against supplied input bytes and environment. The evaluator reads no host
+/// process state. An environment supplied here has designation zero.
+pub fn run_stdio(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    stdin: &[u8],
+    env: Option<hirsel_core_net::EnvSnapshot>,
+) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            stdin,
+            env,
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
 struct WorldInput<'a> {
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
@@ -1040,6 +1066,8 @@ struct WorldInput<'a> {
     revisions: Option<&'a Revisions>,
     injection: Option<(usize, bool)>,
     argv: &'a [&'a str],
+    env: Option<hirsel_core_net::EnvSnapshot>,
+    stdin: &'a [u8],
     nans: Nans,
     destination: Option<&'a mut [u8]>,
     instructions: u64,
@@ -1057,6 +1085,8 @@ impl Default for WorldInput<'_> {
             revisions: None,
             injection: None,
             argv: &[],
+            env: None,
+            stdin: &[],
             nans: Nans::Canonical,
             destination: None,
             instructions: u64::MAX,
@@ -1099,14 +1129,19 @@ fn run_world(
         mach.world.launch_target = (target_data, target.len() as u64);
     }
     for a in input.argv {
-        let data = mach.block(a.len() as u64, None, 0, None);
-        mach.mem[split(data).0].bytes = a.as_bytes().to_vec();
-        let carrier = mach.block(24, None, 0, None);
-        mach.store(carrier, 8, data);
-        mach.store(carrier + 8, 8, a.len() as u64);
-        mach.mem[split(data).0].fixed = true;
-        mach.mem[split(carrier).0].fixed = true;
+        let carrier = mach.host_view(a.as_bytes());
         mach.world.args.push(carrier);
+    }
+    mach.world.stdin.extend(input.stdin);
+    if let Some(env) = input.env.take() {
+        mach.world.env_patterns.push(env.patterns);
+        for (name, value) in env.entries {
+            let name_view = mach.host_view(name.as_bytes());
+            let value_view = std::str::from_utf8(&value)
+                .ok()
+                .map(|s| mach.host_view(s.as_bytes()));
+            mach.world.env_entries.push((name, name_view, value_view));
+        }
     }
     // One descriptor per code identity, as the linker keeps one per program:
     // `{code, length, revision}` then the identity bytes, where `code` is a
@@ -1236,7 +1271,7 @@ fn run_world(
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
-    for (l, n) in std::mem::take(&mut mach.world.net_charges) {
+    for (l, n) in std::mem::take(&mut mach.world.grant_charges) {
         l.find().subtract(n);
     }
     // Refunds still pending when the run ends count toward its final use.
@@ -1757,6 +1792,63 @@ impl Machine<'_> {
         };
         (bytes, data, len, cap)
     }
+    fn host_view(&mut self, bytes: &[u8]) -> u64 {
+        let len = bytes.len() as u64;
+        let data = self.block(len, None, 0, None);
+        self.mem[split(data).0].bytes.copy_from_slice(bytes);
+        let carrier = self.block(24, None, 0, None);
+        self.store(carrier, 8, data);
+        self.store(carrier + 8, 8, len);
+        self.mem[split(data).0].fixed = true;
+        self.mem[split(carrier).0].fixed = true;
+        carrier
+    }
+
+    fn env(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::EnvPatterns;
+        let patterns = self.world.env_patterns.get(a[0] as usize);
+        let covered = |name: &str| patterns.is_some_and(|p| p.covers(name));
+        let mut rows = self.world.env_entries.iter().filter(|row| covered(&row.0));
+        let ok = |value| vec![value, 0, 0, 0];
+        let error = |tag| vec![0, tag, 0, 0];
+        match op {
+            HostOp::EnvLen => ok(rows.count() as u64),
+            HostOp::EnvName => ok(rows.nth(a[1] as usize).map_or(0, |row| row.1)),
+            HostOp::EnvGet => {
+                let name = std::str::from_utf8(self.carrier_bytes(a[1])).unwrap();
+                if !covered(name) {
+                    return error(1);
+                }
+                match self
+                    .world
+                    .env_entries
+                    .binary_search_by(|row| row.0.as_str().cmp(name))
+                {
+                    Ok(i) => self.world.env_entries[i].2.map_or_else(|| error(2), ok),
+                    Err(_) => ok(0),
+                }
+            }
+            HostOp::EnvNarrow => {
+                let text = std::str::from_utf8(self.carrier_bytes(a[1])).unwrap();
+                let Some(filter) = EnvPatterns::parse(text) else {
+                    return error(1);
+                };
+                let result = patterns.map_or_else(EnvPatterns::default, |p| p.intersect(&filter));
+                let charge = result.charge();
+                let payer = t.limits.last().unwrap();
+                let requested = charge.unwrap_or(u64::MAX);
+                if let Err(available) = self.admit_charge(payer, requested, charge.is_none()) {
+                    return vec![requested, 2, 0, available];
+                }
+                let key = self.world.env_patterns.len() as u64;
+                self.world.env_patterns.push(result);
+                self.world.grant_charges.push((payer.clone(), requested));
+                ok(key)
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn carrier_bytes(&self, carrier: u64) -> &[u8] {
         let len = self.load(carrier + 8, 8);
         if len == 0 {
@@ -2039,7 +2131,7 @@ impl Machine<'_> {
             .checked_add(1)
             .expect("run-local handle counter");
         grants.insert(key, intersections);
-        self.world.net_charges.push((payer.clone(), charge));
+        self.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
     }
 
@@ -2082,7 +2174,7 @@ impl Machine<'_> {
         };
         let key = self.world.secrets.len() as u64;
         self.world.secrets.push(EvalSecret { patterns, bytes });
-        self.world.net_charges.push((payer.clone(), charge));
+        self.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
     }
 
@@ -2132,6 +2224,9 @@ impl Machine<'_> {
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
+            HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
+                return Ok(self.env(t, op, a));
+            }
             HostOp::SendPair
                 if self
                     .world
@@ -2170,7 +2265,14 @@ impl Machine<'_> {
             | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }
-            HostOp::TlsConnect | HostOp::SendSecret | HostOp::SecretSeal | HostOp::SecretNarrow => {
+            HostOp::TlsConnect
+            | HostOp::SendSecret
+            | HostOp::SecretSeal
+            | HostOp::SecretNarrow
+            | HostOp::EnvGet
+            | HostOp::EnvLen
+            | HostOp::EnvName
+            | HostOp::EnvNarrow => {
                 unreachable!()
             }
             HostOp::Resolve => self.network_resolve(a),
@@ -2223,6 +2325,22 @@ impl Machine<'_> {
                 } else {
                     error(1)
                 }
+            }
+            HostOp::StdinRead => {
+                let (data, len, cap) = (
+                    self.load(a[1], 8),
+                    self.load(a[1] + 8, 8),
+                    self.load(a[1] + 16, 8),
+                );
+                let n = (cap.saturating_sub(len) as usize)
+                    .min(self.world.stdin.len())
+                    .min(64 * 1024);
+                if n != 0 {
+                    let bytes: Vec<_> = self.world.stdin.drain(..n).collect();
+                    self.put(data + len, &bytes);
+                    self.store(a[1] + 8, 8, len + n as u64);
+                }
+                ok(n as u64, 0)
             }
             HostOp::Stopped => {
                 // The model has no OS signal source. Cancellation still wakes this wait.

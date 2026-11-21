@@ -524,6 +524,12 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
     }
+    if unsafe { (*request).operation == STDIN_READ } {
+        let step = unsafe { crate::stdin::step(request, token, true) };
+        #[cfg(test)]
+        probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
+        return step;
+    }
     if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) }
         && let Some(sync) = unsafe { (*state.cast::<OsProvider>()).sync_file }
         // SAFETY: the directory provider owns the request's handle.
@@ -585,12 +591,24 @@ unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::
 }
 /// The OS provider without directory operations parks only socket requests.
 unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
-    // SAFETY: an outstanding socket request pins its Net extension.
-    unsafe { (socket_operations(request).step)(request, token, false) }
+    // SAFETY: an outstanding request pins its socket or stdin operands.
+    unsafe {
+        if (*request).operation == STDIN_READ {
+            crate::stdin::step(request, token, false)
+        } else {
+            (socket_operations(request).step)(request, token, false)
+        }
+    }
 }
 unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
-    // SAFETY: an outstanding socket request pins its Net extension.
-    unsafe { (socket_operations(request).abort)(request, token, reason) }
+    // SAFETY: an outstanding request pins its socket or stdin operands.
+    unsafe {
+        if (*request).operation == STDIN_READ {
+            crate::stdin::abort(request, token, reason)
+        } else {
+            (socket_operations(request).abort)(request, token, reason)
+        }
+    }
 }
 unsafe extern "C" fn resume_with_directory(
     state: *mut u8,

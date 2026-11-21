@@ -442,6 +442,7 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         arg: b"arg".to_vec(),
         net_rules: vec![],
         secret_grants: vec![],
+        env: None,
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -560,10 +561,10 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is vectors.py's format-4 derivation from REPLAY-SPEC §5,
+/// The oracle is vectors.py's format-5 derivation from REPLAY-SPEC §5,
 /// checked with libxxhash. Its Call header has a 32-byte revision.
 #[test]
-fn the_encoder_writes_the_format_4_model_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         tape_id: std::array::from_fn(|i| i as u8),
@@ -576,6 +577,7 @@ fn the_encoder_writes_the_format_4_model_tape_byte_for_byte() {
         arg: b"arg-7".to_vec(),
         net_rules: vec![],
         secret_grants: vec![],
+        env: None,
     };
     let mono = |v: u64| Frame::Op {
         task: 0,

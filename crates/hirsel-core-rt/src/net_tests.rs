@@ -70,6 +70,10 @@ fn net_laws_child() {
         socket_activation: std::ptr::null(),
         secret_grants: core::ptr::null(),
         secret_grants_len: 0,
+        env_patterns: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         secret_ops: std::ptr::null(),
         target: crate::process::View {
             data: b"test-target".as_ptr(),
@@ -208,6 +212,136 @@ fn net_socket_provider_laws() {
     ] {
         isolated(law);
     }
+}
+
+#[test]
+fn stdin_stream_preserves_bytes_across_timeout_and_abort() {
+    use std::{io::Write, os::fd::AsRawFd};
+
+    let (input, mut writer) = UnixStream::pair().unwrap();
+    let original_flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
+    let stream = crate::stdin::Stream::new(duplicate(input.as_raw_fd()));
+    let sink = File::options().write(true).open("/dev/null").unwrap();
+    let mut os = crate::os::OsProvider::new(sink.try_clone().unwrap().into(), sink.into());
+    let provider = os.provider();
+    let grants = [
+        crate::entry::Grant {
+            kind: STDIN,
+            provider: &provider,
+            handle: std::ptr::from_ref(&stream) as u64,
+        },
+        crate::entry::Grant {
+            kind: CLOCK,
+            provider: &provider,
+            handle: 0,
+        },
+    ];
+    unsafe extern "C" fn diagnostic(_: *mut u8, _: *const u8, _: usize) {}
+    let config = crate::process::Config {
+        root_limit: 1 << 20,
+        args: ptr::null(),
+        args_len: 0,
+        grants: ptr::null(),
+        grants_len: 0,
+        provider: &provider,
+        state: ptr::null_mut(),
+        diagnostic,
+        describe: None,
+        scheduler: crate::tasks::SchedulerProvider::default(),
+        stop_fd: 2,
+        capabilities: grants.as_ptr(),
+        capabilities_len: grants.len(),
+        close_grants: None,
+        launch: ptr::null(),
+        describe_output: None,
+    };
+    let mut context = Context::new(1 << 20);
+    context.run = &config;
+    let clock = unsafe { hirsel_core_entry_grant(&config, CLOCK, 0) };
+    let first = unsafe { hirsel_core_entry_grant(&config, STDIN, 0) };
+    let copy = first;
+    let mut bytes = [0; 8];
+    let mut buffer = carrier(&mut bytes, 0);
+
+    let deadline = unsafe { crate::os::epoch(provider.state) };
+    let deadline = crate::os::monotonic_ns().saturating_sub(deadline) + 2_000_000;
+    let timed = unsafe {
+        crate::stdin::hirsel_core_stdin_read(
+            &mut context,
+            first,
+            &mut buffer,
+            1,
+            clock,
+            deadline,
+            1,
+        )
+    };
+    assert_eq!(
+        (timed.error.tag, buffer.len),
+        (6, 0),
+        "timeout leaves the buffer unchanged"
+    );
+
+    // Hold delivery after the helper has read. Cancellation wins this race and
+    // the bytes remain in the shared stream, even for a smaller next buffer.
+    let mut read = crate::stdin::ReadRequest {
+        until: None,
+        deadline: 0,
+    };
+    let mut request = Request {
+        operation: STDIN_READ,
+        mode: 0,
+        handle: grants[0].handle,
+        path: std::ptr::from_mut(&mut read).cast(),
+        path_len: 0,
+        buffer,
+        site: 1,
+    };
+    const TOKEN: u64 = 42;
+    assert_eq!(
+        unsafe { (provider.issue)(provider.state, &mut request, TOKEN) }.kind,
+        STEP_PENDING
+    );
+    writer.write_all(b"abcd").unwrap();
+    while !stream.has_fragment() {
+        std::thread::yield_now();
+    }
+    let aborted = unsafe { (provider.abort)(provider.state, &mut request, TOKEN, ABORT_CANCEL) };
+    assert_eq!(
+        (aborted.error.tag, request.buffer.len),
+        (7, 0),
+        "abort leaves the buffer unchanged"
+    );
+    writer.write_all(b"ef").unwrap();
+    drop(writer);
+
+    let mut small = [0; 2];
+    let mut part = carrier(&mut small, 0);
+    let first_fragment =
+        unsafe { crate::stdin::hirsel_core_stdin_read(&mut context, copy, &mut part, 0, 0, 0, 1) };
+    assert_eq!(
+        (first_fragment.value, small),
+        (2, *b"ab"),
+        "the copied grant reads the oldest fragment after abort and timeout"
+    );
+    loop {
+        let answer = unsafe {
+            crate::stdin::hirsel_core_stdin_read(&mut context, first, &mut buffer, 0, 0, 0, 1)
+        };
+        assert_eq!(answer.error, IoError::OK);
+        if answer.value == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        &bytes[..buffer.len],
+        b"cdef",
+        "the stream delivers each remaining byte exactly once"
+    );
+    assert_eq!(
+        unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) },
+        original_flags
+    );
 }
 fn inherited_child(listener: &std::net::TcpListener, law: &str) -> std::process::Command {
     use std::{os::fd::AsRawFd, os::unix::process::CommandExt, process::Command};

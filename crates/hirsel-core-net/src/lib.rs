@@ -4,6 +4,9 @@ hirsel_guard::install!();
 
 use std::net::IpAddr;
 
+mod env;
+pub use env::{EnvPatterns, EnvSnapshot};
+
 /// The public grant spelling, also used in configuration diagnostics.
 pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names>";
 

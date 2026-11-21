@@ -2169,7 +2169,7 @@ impl Outside {
         Self(readies)
     }
 
-    pub(crate) fn ready(self, token: u64) {
+    pub(crate) fn ready(&self, token: u64) {
         self.0.push(token);
     }
 }

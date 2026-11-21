@@ -15,6 +15,7 @@ pub mod channel;
 pub mod counted;
 mod destination;
 pub mod entry;
+mod env;
 mod fiber;
 pub mod flow;
 mod growth;
@@ -47,6 +48,7 @@ mod sha1;
 mod sha256;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
+mod stdin;
 pub mod steps;
 mod stop_signals;
 #[cfg(feature = "record")]

@@ -210,6 +210,11 @@ fn bindings(decl: &EntryDecl, options: &NativeOptions) -> Result<Vec<GrantBindin
                 .map(|s| (*s).clone())
                 .collect(),
             GrantKind::Net if index == 0 => options.net_rules.iter().map(net_rule).collect(),
+            GrantKind::Env if index == 0 => options
+                .env_patterns
+                .iter()
+                .map(hirsel_core_net::EnvPatterns::text)
+                .collect(),
             GrantKind::Secret => options
                 .secret_grants
                 .iter()
@@ -253,7 +258,7 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     let mut grants = Vec::new();
     for grant in &recipe.launch.grants {
         match grant.kind {
-            GrantKind::Dir | GrantKind::Net => grants.extend(
+            GrantKind::Dir | GrantKind::Net | GrantKind::Env => grants.extend(
                 grant
                     .values
                     .iter()
@@ -284,6 +289,7 @@ fn launch_options(
     options.grant_mask = 0;
     options.net_rules.clear();
     options.secret_grants.clear();
+    options.env_patterns = None;
     if names.len() != recipe.launch.grants.len() {
         return Err(NativeStop::Entry(
             "grant bindings do not match main parameters".into(),
@@ -316,6 +322,15 @@ fn launch_options(
                     .map_err(NativeStop::Entry)?;
                 options.grant_mask |= 1 << kind as u8;
             }
+            GrantKind::Env => match values.as_slice() {
+                [] => {}
+                [patterns] if index == 0 => {
+                    options.env_patterns =
+                        Some(hirsel_core_net::EnvPatterns::parse(patterns).ok_or_else(invalid)?);
+                    options.grant_mask |= 1 << kind as u8;
+                }
+                _ => return Err(invalid()),
+            },
             GrantKind::Secret => match values.as_slice() {
                 [] => {}
                 [source, patterns] => options.secret_grants.push(

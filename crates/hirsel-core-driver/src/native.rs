@@ -95,6 +95,7 @@ pub struct NativeOptions {
     pub grant_mask: u64,
     pub net_rules: Vec<hirsel_core_net::GrantRule>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    pub env_patterns: Option<hirsel_core_net::EnvPatterns>,
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
     /// The toolchain this request already observed for its request record's
@@ -138,6 +139,7 @@ impl NativeOptions {
             grant_mask: 0,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             logical_charge_report: None,
             observed: None,
         }
@@ -1866,6 +1868,7 @@ mod tests {
             grant_mask: 0,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             logical_charge_report: None,
             observed: None,
         }
@@ -2007,6 +2010,7 @@ mod tests {
             .check(source_request(source, dir.path()), &mut Meter::new(false))
             .unwrap();
         options.grant_mask = (1 << 10) - 2;
+        options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_FIXTURE_*");
         options.net_rules =
             vec![hirsel_core_net::GrantRule::parse("Connect 0.0.0.0/0 0-65535").unwrap()];
         let escaped = dir.path().join("directory \"é");
@@ -2114,6 +2118,9 @@ mod tests {
             0 => options.directories.push(dir.path().display().to_string()),
             _ => {
                 options.grant_mask = 1 << expected_kind;
+                if expected_kind == 7 {
+                    options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_FIXTURE_*");
+                }
                 if expected_kind == 1 {
                     options.net_rules = vec![
                         hirsel_core_net::GrantRule::parse("Connect 0.0.0.0/0 0-65535").unwrap(),

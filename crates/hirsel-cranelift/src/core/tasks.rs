@@ -213,6 +213,11 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::StdinRead
+                    | HostOp::EnvGet
+                    | HostOp::EnvLen
+                    | HostOp::EnvName
+                    | HostOp::EnvNarrow
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -232,6 +237,11 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::StdinRead
+                    | HostOp::EnvGet
+                    | HostOp::EnvLen
+                    | HostOp::EnvName
+                    | HostOp::EnvNarrow
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();
@@ -242,12 +252,15 @@ impl Function<'_, '_, '_> {
                         operands.extend_from_slice(&args[..count]);
                         operands.push(site);
                         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
+                        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+                            results[0] = P;
+                        }
                         if matches!(op, HostOp::Listen | HostOp::Accept) {
                             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
                         } else if op == HostOp::TlsConnect {
                             results.extend([U; 4]);
                         }
-                        self.c_call(op.net_symbol(), &params, &results, &operands)?
+                        self.c_call(op.adapter_symbol(), &params, &results, &operands)?
                     }
                     HostOp::Rename => self.c_call(
                         "hirsel_core_host_rename",

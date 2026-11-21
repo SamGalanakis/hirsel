@@ -309,6 +309,15 @@ unsafe extern "C" fn invoke(
                 }
             }
         }
+        let env = if run.mode == 0 && !(*(*config).launch).is_describe() {
+            let source = entry::hirsel_core_entry_grant(config, entry::ENV, 0);
+            (source != 0).then(|| {
+                let handle = entry::hirsel_core_capability_handle(context, source);
+                crate::env::from_handle(handle).record()
+            })
+        } else {
+            None
+        };
         let header = Header {
             kind: KIND_RUN,
             tape_id,
@@ -321,6 +330,7 @@ unsafe extern "C" fn invoke(
             arg,
             net_rules,
             secret_grants,
+            env,
         };
         let expect = Expect {
             identity: &run.identity,
@@ -382,6 +392,7 @@ unsafe extern "C" fn invoke(
         }
         let replay_net_rules = (!startup.net_rules.is_empty())
             .then(|| crate::net::RulesStorage::new(startup.net_rules));
+        let replay_env = startup.env.map(crate::env::Env::new);
         let files = (*context).host_files;
         let mut secret_grants = startup.secret_grants.into_iter();
         for i in 0..run.requirements_len {
@@ -450,6 +461,16 @@ unsafe extern "C" fn invoke(
                             };
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
                             (*files).secrets.lock().unwrap().register(secret)
+                        } else if req.kind == entry::ENV {
+                            let handle = if run.launch.is_describe() || run.mode == 0 {
+                                handle
+                            } else {
+                                let Some(env) = &replay_env else {
+                                    return stopped(run, Fault::Corrupt);
+                                };
+                                env.handle()
+                            };
+                            (*files).registry.grant(p, handle)
                         } else {
                             (*files).registry.grant(p, h)
                         }
@@ -743,6 +764,10 @@ pub(super) fn check_launch_replay() {
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
             secret_grants_len: 0,
+            env_patterns: crate::process::View {
+                data: std::ptr::null(),
+                len: 0,
+            },
             secret_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),

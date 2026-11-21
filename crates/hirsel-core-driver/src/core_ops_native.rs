@@ -120,6 +120,7 @@ fn core_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -207,6 +208,7 @@ fn counted_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -282,6 +284,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -365,6 +368,7 @@ fn stream_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -443,6 +447,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         logical_charge_report: None,
         net_rules: vec![],
         secret_grants: vec![],
+        env_patterns: None,
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -535,6 +540,7 @@ fn host_operations(backend: Backend) {
             logical_charge_report: None,
             net_rules: vec![],
             secret_grants: vec![],
+            env_patterns: None,
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -644,6 +650,7 @@ pub fn proof_clone_run() -> u64 {
         logical_charge_report: None,
         net_rules: vec![],
         secret_grants: vec![],
+        env_patterns: None,
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -2305,4 +2312,95 @@ fn wire_net_source_cranelift() {
 #[test]
 fn wire_net_source_llvm() {
     wire_net_source(Backend::Llvm);
+}
+
+/// CAP-1 and CAP-7. A wildcard grants only its own names, narrowing preserves
+/// the intersection, and a Secret's source cannot also become public input.
+#[test]
+fn env_authority_bounds_the_snapshot_and_refuses_secret_overlap() {
+    use hirsel_core_net::{EnvPatterns, EnvSnapshot, SecretGrant};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+pub fn access(e: Env) -> u8 {
+    match env.get(e, "PRIVATE_VALUE") {
+        Error(Denied) => {},
+        _ => return 11,
+    }
+    let n = result.unwrap(env.narrow(e, "APP_A,PRIVATE_VALUE"))
+    match (env.get(n, "PRIVATE_VALUE"), env.get(n, "APP_B")) {
+        (Error(Denied), Error(Denied)) => {},
+        _ => return 12,
+    }
+    match (env.name(n, 0), env.get(n, "APP_A")) {
+        (Some(name), Ok(Some(value))) if env.len(n) == 1 && name == "APP_A" && value == "a" => {},
+        _ => return 13,
+    }
+    0
+}
+
+pub fn main(e: Env, secret: Secret) -> Result[(), Exit] {
+    let status = access(e)
+    if status == 0 { Ok(()) } else { Error(Exit(status: status)) }
+}
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let access = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/access").unwrap());
+    let checked = product.units([access.clone()], 65536).unwrap();
+    let modules = checked.modules().unwrap();
+    let (module, function) = hirsel_core_materialize::join(&modules, &access).unwrap();
+    let env = EnvSnapshot {
+        patterns: EnvPatterns::parse("APP_*").unwrap(),
+        entries: vec![
+            ("APP_A".into(), b"a".to_vec()),
+            ("APP_B".into(), b"b".to_vec()),
+        ],
+    };
+    assert_eq!(
+        hirsel_core_ir::eval::run_stdio(&module, function, &[0], 1 << 20, &[], Some(env)).outcome,
+        hirsel_core_ir::eval::Outcome::Returned(vec![0]),
+        "11 means an ungranted value escaped, 12 means narrowing widened or failed to remove a name, 13 means the intersection lost a covered value",
+    );
+
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Env").unwrap();
+    options
+        .secret_grants
+        .push(SecretGrant::new("secret", "env:PRIVATE_VALUE", "test.example").unwrap());
+    let launch = |patterns| {
+        let mut options = options.clone();
+        options.env_patterns = EnvPatterns::parse(patterns);
+        let built = product.build(&entry, &options).unwrap();
+        Command::new(&built.executable)
+            .env_clear()
+            .env("APP_A", "a")
+            .env("APP_B", "b")
+            .env("PRIVATE_VALUE", "fixture")
+            .output()
+            .unwrap()
+    };
+    let accepted = launch("APP_*");
+    assert_eq!(
+        accepted.status.code(),
+        Some(0),
+        "11 means an ungranted value escaped, 12 means narrowing widened or failed to remove a name, 13 means the intersection lost a covered value: {:?}",
+        accepted.stderr
+    );
+    assert_not_started(
+        &launch("APP_*,PRIVATE_*"),
+        "not started: Env grant covers Secret source variable \"PRIVATE_VALUE\"\n",
+    );
 }

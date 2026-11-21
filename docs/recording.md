@@ -206,7 +206,7 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape**, in tape format 4, which `crates/hirsel-tape-format` owns.
+A recording file is a **tape**, in tape format 5, which `crates/hirsel-tape-format` owns.
 The format is not part of the language and a replay reads only tapes its own build admits,
 so no reader ever sees another build's layout.
 
@@ -217,6 +217,8 @@ so no reader ever sees another build's layout.
   each a length byte followed by its bytes.
 - A `Secret` grant record holds the parameter name, the source label and the patterns, all
   length-prefixed.
+- An `Env` grant record holds the pattern list and the sorted name and value pairs. Values
+  retain their OS bytes, including when they are not UTF-8.
 - REPEAT stores periodic CHOOSE frames, and a replay expands them to their original
   positions. `tape show` prints REPEAT once, at the position of the first CHOOSE it
   represents.

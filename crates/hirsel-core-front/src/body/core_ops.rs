@@ -20,6 +20,7 @@ pub(crate) enum Kernel {
     SecretRender,
     ArgsLen,
     ArgsGet,
+    Env(HostOp),
     NewOwner(Option<Counted>),
     Share(Counted),
     TryUnwrap(Counted),
@@ -310,6 +311,11 @@ operations! {
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
+    ("stdin", "read", Lane::Runtime(Kernel::Net(HostOp::StdinRead)), "B", "stdin-env-1501", false),
+    ("env", "get", Lane::Runtime(Kernel::Env(HostOp::EnvGet)), "B", "stdin-env-1501", false),
+    ("env", "len", Lane::Runtime(Kernel::Env(HostOp::EnvLen)), "B", "stdin-env-1501", false),
+    ("env", "name", Lane::Runtime(Kernel::Env(HostOp::EnvName)), "B", "stdin-env-1501", false),
+    ("env", "narrow", Lane::Runtime(Kernel::Net(HostOp::EnvNarrow)), "B", "stdin-env-1501", false),
     ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
     ("tls", "connect", Lane::Runtime(Kernel::Net(HostOp::TlsConnect)), "B", "tls-t1-1442", false),
     ("tls", "send_secret", Lane::Runtime(Kernel::Net(HostOp::SendSecret)), "B", "tls-t4-1447", false),
@@ -709,6 +715,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .runtime_row(RtOp::ArgsLen, &[Arg::Value(vals[0]?)], n)
                 .map(|values| values[0]),
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
+            Kernel::Env(op) => self.runtime_env(op, vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
@@ -1473,7 +1480,8 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Host(_)
             | Kernel::Net(_)
             | Kernel::ArgsLen
-            | Kernel::ArgsGet => true,
+            | Kernel::ArgsGet
+            | Kernel::Env(_) => true,
             Kernel::CarrierMove
             | Kernel::CarrierView
             | Kernel::SecretSeal
@@ -2436,11 +2444,82 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Arg::Value(vals[0]?), Arg::Value(vals[1]?)],
             n,
         )?;
+        self.runtime_optional_view(value, result, n)
+    }
+
+    fn runtime_env(
+        &mut self,
+        op: HostOp,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let args: Vec<_> = vals
+            .iter()
+            .copied()
+            .map(|v| v.map(Arg::Value))
+            .collect::<Option<_>>()?;
+        let [value, error, ..] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        match op {
+            HostOp::EnvLen => Some(value),
+            HostOp::EnvName => self.runtime_optional_view(value, result, n),
+            HostOp::EnvGet => {
+                let tag = Ty::Scalar(Scalar::U8);
+                let ok = self.runtime_compare(tag, error, 0, n)?;
+                self.runtime_result(
+                    result,
+                    ok,
+                    n,
+                    |cx, to, ty| {
+                        let view = cx.runtime_optional_view(value, ty, n);
+                        cx.runtime_case_payload(to, 0, ty, view, n);
+                    },
+                    |cx, to, ty| {
+                        let Some(at) =
+                            cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                        else {
+                            return;
+                        };
+                        let denied = cx.runtime_compare(tag, error, 1, n).unwrap();
+                        let no_name = cx.new_block(&[]);
+                        let invalid_value = cx.new_block(&[]);
+                        let done = cx.new_block(&[]);
+                        cx.runtime_branch(denied, no_name, invalid_value, n);
+                        cx.start(no_name);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 0,
+                            },
+                            n,
+                        );
+                        cx.jump(done, &[], n);
+                        cx.start(invalid_value);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 1,
+                            },
+                            n,
+                        );
+                        cx.jump(done, &[], n);
+                        cx.start(done);
+                    },
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn runtime_optional_view(
+        &mut self,
+        value: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
-            self.gap(
-                n,
-                "an argument lookup that is not a declared type is not built",
-            );
+            self.gap(n, "a provider lookup requires an Option of a view");
+
             return None;
         };
         let payload = arguments[0];
@@ -3086,11 +3165,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend([vals[1]?, vals[2]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
                 }
+                HostOp::StdinRead => {
+                    operands.push(vals[1]?);
+                    operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
+                }
                 HostOp::SendSecret => {
                     operands.extend([vals[1]?, vals[2]?, vals[3]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
                 }
-                HostOp::SecretSeal | HostOp::SecretNarrow => operands.push(vals[1]?),
+                HostOp::SecretSeal | HostOp::SecretNarrow | HostOp::EnvNarrow => {
+                    operands.push(vals[1]?)
+                }
                 HostOp::NetSplit => {}
                 _ => unreachable!(),
             }
@@ -3116,7 +3201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let policy_result = matches!(
             op,
-            HostOp::NetNarrow | HostOp::SecretSeal | HostOp::SecretNarrow
+            HostOp::NetNarrow | HostOp::SecretSeal | HostOp::SecretNarrow | HostOp::EnvNarrow
         );
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
         self.runtime_result(
@@ -3125,7 +3210,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
             |cx, to, ty| {
                 if policy_result
-                    || matches!(op, HostOp::RecvBounded | HostOp::SendPair | HostOp::Resolve)
+                    || matches!(
+                        op,
+                        HostOp::RecvBounded
+                            | HostOp::SendPair
+                            | HostOp::Resolve
+                            | HostOp::StdinRead
+                    )
                 {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n);
                 } else if op == HostOp::Connect {
@@ -3190,6 +3281,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         cx.jump(join, &[], n);
                         cx.start(join);
+                    } else if op == HostOp::StdinRead {
+                        cx.runtime_stdin_error(at, error, code, n);
                     } else {
                         cx.runtime_net_error(at, ty, error, code, n);
                     }
@@ -3274,6 +3367,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Step::CaseField { case: 1, field: 0 }],
             u,
             index,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+    fn runtime_stdin_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
+        let join = self.new_block(&[]);
+        for (tag, case) in [(7, 0), (6, 1)] {
+            let on = self
+                .runtime_compare(Ty::Scalar(Scalar::U8), error, tag, n)
+                .unwrap();
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 2,
+            },
+            n,
+        );
+        self.runtime_store(
+            to,
+            &[Step::CaseField { case: 2, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            code,
             n,
         );
         self.jump(join, &[], n);

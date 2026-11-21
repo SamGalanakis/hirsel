@@ -136,6 +136,11 @@ pub(super) fn emit(
             f.constant(plan.secret_grants.len() as u64),
         ),
         (abi::OS_CONFIG_SECRET_OPS, secret_ops),
+        (abi::OS_CONFIG_ENV_PATTERNS, f.address(data.env_patterns)),
+        (
+            abi::OS_CONFIG_ENV_PATTERNS_LEN,
+            f.constant(plan.env_patterns.as_ref().map_or(0, String::len) as u64),
+        ),
     ] {
         f.store(value, config, offset);
     }

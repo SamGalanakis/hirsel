@@ -6,11 +6,11 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
-use hirsel_core_net::{GrantRule, ResolveRule, Rule, TlsRule, TlsTrust};
+use hirsel_core_net::{EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, TlsRule, TlsTrust};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 4;
+pub const FORMAT: u16 = 5;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -238,12 +238,14 @@ pub struct Header {
     /// Inert snapshot of the Run's configured Net rules. Empty for a Call.
     pub net_rules: Vec<GrantRule>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    pub env: Option<EnvSnapshot>,
 }
 /// The complete encoded header does not fit in block zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderTooLarge;
 
 const NET_KIND: u8 = 1;
+const ENV_KIND: u8 = 7;
 const SECRET_KIND: u8 = 11;
 const NET_RULE_LEN: usize = 23;
 
@@ -373,6 +375,22 @@ fn write_patterns(out: &mut Vec<u8>, text: &str) -> Result<(), HeaderTooLarge> {
     Ok(())
 }
 
+fn read_env(c: &mut Cursor<'_>) -> Result<EnvSnapshot, Corrupt> {
+    c.u8()?;
+    let text = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
+    let patterns = EnvPatterns::parse(text).ok_or(Corrupt)?;
+    let count = c.varint()?;
+    let mut entries = Vec::<(String, Vec<u8>)>::new();
+    for _ in 0..count {
+        let name = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
+        if !patterns.covers(name) || entries.last().is_some_and(|row| row.0.as_str() >= name) {
+            return Err(Corrupt);
+        }
+        entries.push((name.to_owned(), c.bytes()?.to_vec()));
+    }
+    Ok(EnvSnapshot { patterns, entries })
+}
+
 fn read_secret_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::SecretGrant>, Corrupt> {
     let mut grants = Vec::new();
     while !c.done() {
@@ -418,6 +436,23 @@ impl Header {
 
     pub fn encode(&self, revision: [u8; 32]) -> Result<Vec<u8>, HeaderTooLarge> {
         let mut grants = write_net_rules(&self.net_rules)?;
+        if let Some(env) = &self.env {
+            grants.push(ENV_KIND);
+            put_bytes(&mut grants, env.patterns.text().as_bytes());
+            put_varint(&mut grants, env.entries.len() as u64);
+            for (name, value) in &env.entries {
+                if grants
+                    .len()
+                    .saturating_add(name.len())
+                    .saturating_add(value.len())
+                    > MAX_LEN
+                {
+                    return Err(HeaderTooLarge);
+                }
+                put_bytes(&mut grants, name.as_bytes());
+                put_bytes(&mut grants, value);
+            }
+        }
         for grant in &self.secret_grants {
             grants.push(SECRET_KIND);
             for field in [&grant.parameter, &grant.source, &grant.patterns] {
@@ -475,7 +510,22 @@ impl Header {
         } else {
             vec![]
         };
+        let env = if grants.bytes.get(grants.at) == Some(&ENV_KIND) {
+            Some(read_env(&mut grants)?)
+        } else {
+            None
+        };
         let secret_grants = read_secret_grants(&mut grants)?;
+        if let Some(env) = &env
+            && secret_grants.iter().any(|grant| {
+                matches!(
+                    hirsel_core_net::SecretSource::parse(&grant.source),
+                    Some(hirsel_core_net::SecretSource::Env(name)) if env.patterns.covers(name)
+                )
+            })
+        {
+            return Err(Corrupt);
+        }
         Ok(Self {
             kind,
             tape_id,
@@ -488,6 +538,7 @@ impl Header {
             arg: arg.to_vec(),
             net_rules,
             secret_grants,
+            env,
         })
     }
 }
@@ -734,7 +785,14 @@ pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
     matches!(
         op,
-        READ | MKDTEMP | RANDOM | LISTEN | ACCEPT | RECV_BOUNDED | TLS_CONNECT | RESOLVE
+        READ | MKDTEMP
+            | RANDOM
+            | LISTEN
+            | ACCEPT
+            | RECV_BOUNDED
+            | TLS_CONNECT
+            | RESOLVE
+            | STDIN_READ
     )
 }
 
@@ -783,6 +841,13 @@ impl Out {
         } else {
             (0, 0)
         };
+        if op == op::STDIN_READ
+            && status != OK
+            && (value != 0
+                || (status == ERROR && (error.0 != 8 || u32::try_from(error.1).is_err())))
+        {
+            return Err(Corrupt);
+        }
         let written = if writes(op) || (op == op::SEND_SECRET && status != OK) {
             c.varint()?
         } else {
@@ -832,7 +897,7 @@ impl Out {
     /// Total payload length determines whether DATA frames follow.
     fn needs(&self, op: u8) -> Result<usize, Corrupt> {
         match op {
-            op::READ | op::RECV_BOUNDED if self.status == OK => {
+            op::READ | op::RECV_BOUNDED | op::STDIN_READ if self.status == OK => {
                 usize::try_from(self.value).map_err(|_| Corrupt)
             }
             op::RESOLVE if self.status == OK => usize::try_from(self.value)
@@ -840,7 +905,7 @@ impl Out {
                 .and_then(|n| n.checked_mul(RESOLVED_IP_LEN))
                 .ok_or(Corrupt),
             op::RESOLVE if self.value != 0 => Err(Corrupt),
-            op::RECV_BOUNDED | op::RESOLVE => Ok(0),
+            op::RECV_BOUNDED | op::RESOLVE | op::STDIN_READ => Ok(0),
             op::RANDOM => usize::try_from(self.written).map_err(|_| Corrupt),
             _ => Ok(self.payload.len()),
         }

@@ -1,6 +1,6 @@
 //! System name lookup on a helper with no access to the caller's list.
 use crate::{
-    os_net::{Operations, pending_deadline, signal},
+    os_net::{Operations, host_deadline, signal},
     provider::*,
     resolve::{ResolveRequest, append, spare},
     tasks::Outside,
@@ -47,7 +47,7 @@ unsafe fn step(request: *mut Request, token: u64, first: bool) -> Step {
     };
     let deadline = if first {
         // SAFETY: the adapter pins the optional clock for the request.
-        unsafe { pending_deadline(&resolve.network) }
+        unsafe { host_deadline(resolve.network.until) }
     } else {
         resolve.job.as_ref().unwrap().deadline
     };

@@ -335,6 +335,7 @@ struct Startup {
     arg: Vec<u8>,
     net_rules: Vec<hirsel_core_net::GrantRule>,
     secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    env: Option<hirsel_core_net::EnvSnapshot>,
 }
 
 fn handle(generation: u32, ordinal: usize) -> u64 {
@@ -646,7 +647,11 @@ fn creates_object(op: u8) -> bool {
     matches!(op, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT)
 }
 
-fn net_status(error: u8) -> u8 {
+fn waiting_io(op: u8) -> bool {
+    socket_op(op) || op == STDIN_READ
+}
+
+fn waiting_io_status(error: u8) -> u8 {
     match error {
         0 => OK,
         6 => TIMED_OUT,
@@ -753,6 +758,18 @@ unsafe fn canonical(r: &Request) -> Args {
     unsafe {
         if socket_op(r.operation) {
             return socket_args(r);
+        }
+        if r.operation == STDIN_READ {
+            let read = &*r.path.cast::<crate::stdin::ReadRequest>();
+            let spare = r.buffer.capacity.saturating_sub(r.buffer.len) as u64;
+            let mut args = spare.to_le_bytes().to_vec();
+            if let Some((_, clock, at)) = read.until {
+                put_varint(&mut args, ordinal_of(clock) as u64);
+                args.extend_from_slice(&at.to_le_bytes());
+            } else {
+                args.push(0);
+            }
+            return Args::of(&args);
         }
         let path = if r.path_len == 0 {
             &[][..]
@@ -878,6 +895,7 @@ impl Tape {
                         arg: header.arg.clone(),
                         net_rules: vec![],
                         secret_grants: vec![],
+                        env: None,
                     },
                 )
             }
@@ -939,6 +957,7 @@ impl Tape {
                         arg: stored.arg,
                         net_rules: stored.net_rules,
                         secret_grants: stored.secret_grants,
+                        env: stored.env,
                     },
                 )
             }
@@ -1466,8 +1485,8 @@ unsafe fn record_out(
     let ordinal = ordinal_of(r.handle);
     let ok = o.status == 0 && o.error == IoError::OK;
     let mut out = Out {
-        status: if socket_op(r.operation) {
-            net_status(o.error.tag)
+        status: if waiting_io(r.operation) {
+            waiting_io_status(o.error.tag)
         } else if o.error == IoError::OK {
             OK
         } else {
@@ -1592,7 +1611,9 @@ unsafe fn replay(
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
         // frame is the divergence `complete` would report.
-        if matches!(op, SYNC | SYNC_DIR | RESOLVE) && !crate::tasks::has_provider_task() {
+        if matches!(op, SYNC | SYNC_DIR | RESOLVE | STDIN_READ)
+            && !crate::tasks::has_provider_task()
+        {
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
                 if *t == task && live.schedule.last.checked_add(*gap) == Some(live.schedule.events))
             {
@@ -1628,7 +1649,7 @@ unsafe fn replay_out(
         OK => {}
         ERROR if out.error.0 != 0 => {}
         ABORTED | TIMED_OUT => {
-            if socket_op(op) {
+            if waiting_io(op) {
                 o.error.tag = if out.status == ABORTED { 7 } else { 6 };
             }
         }
@@ -1872,7 +1893,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
         )
     };
     if let Some(why) = why
-        && !socket_op(unsafe { (*r).operation })
+        && !waiting_io(unsafe { (*r).operation })
     {
         out.status = if why == ABORT_CANCEL {
             ABORTED

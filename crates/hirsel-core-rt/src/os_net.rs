@@ -648,9 +648,11 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome
 /// clock it is the program deadline plus the provider's epoch, as `sleep_wait`
 /// converts it, with no clock read; the caller's fresh read decides expiry. A
 /// substituted clock translates by its own reading, saturating at now.
-pub(crate) unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
+pub(crate) unsafe fn host_deadline(
+    until: Option<(crate::provider::Provider, u64, u64)>,
+) -> Option<u64> {
     unsafe {
-        n.until.and_then(|(p, clock, at)| {
+        until.and_then(|(p, clock, at)| {
             // This translation is host scheduling, outside the program's clock reads.
             #[cfg(feature = "record")]
             let (p, clock) = if crate::tape::owns(&p) {
@@ -692,7 +694,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
                 .as_ref()
                 .is_none_or(|tls| !tls.sessions.contains_key(&(request.handle & !3)));
         let deadline = if drained {
-            let deadline = pending_deadline(n);
+            let deadline = host_deadline(n.until);
             // Even a drained reader gets one try at an already-expired deadline.
             if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
                 let outcome = attempt(request, n, first).unwrap_or_else(|| signal(6));
@@ -703,7 +705,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             if let Some(outcome) = attempt(request, n, first) {
                 return finish(request, n, outcome);
             }
-            let deadline = pending_deadline(n);
+            let deadline = host_deadline(n.until);
             if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
                 return finish(request, n, signal(6));
             }
@@ -789,7 +791,7 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 }
             }
             Ok(Err(write)) => {
-                let deadline = pending_deadline(n);
+                let deadline = host_deadline(n.until);
                 if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
                     return tls_finish(tls, key, signal(6));
                 }

@@ -395,6 +395,98 @@ fn tape_run_replays_llvm() {
     tape_run_replays(Backend::Llvm, Backend::Cranelift);
 }
 
+/// CAP-8. Replay verifies the same stdout writes with no inherited input sources.
+#[test]
+fn run_tape_replays_stdin_and_env_without_host_sources() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let tape = dir.path().join("stdio.tape");
+    let input = dir.path().join("input");
+    std::fs::write(&input, b"nine bytes").unwrap();
+    let source = r#"
+pub fn main(i: Stdin, e: Env, out: Stdout) -> Result[(), Exit] waits {
+    let mut prefix: Bytes = result.unwrap(list.with_capacity(3))
+    if result.unwrap(stdin.read(i, mut prefix, Never)) != 3 {
+        return Error(Exit(status: 3))
+    }
+    let value = match env.get(e, "HIRSEL_FIXTURE_VALUE") {
+        Ok(Some(s)) => s,
+        _ => return Error(Exit(status: 4)),
+    }
+    result.unwrap(stdout.write(out, value))
+    result.unwrap(stdout.write_bytes(out, prefix))
+    result.unwrap(stdout.write_bytes(out, result.unwrap(std.io.read_all(i))))
+    Ok(())
+}
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    request.inputs.packages[0].dependencies.push(package("std"));
+    request
+        .inputs
+        .packages
+        .push(CheckRequest::source_std(&root.join("core/std")).unwrap());
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.grant_mask = (1 << grant_kind("Stdin").unwrap())
+        | (1 << grant_kind("Env").unwrap())
+        | (1 << grant_kind("Stdout").unwrap());
+    options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_FIXTURE_VALUE");
+    let recorded = product.build(&entry, &options).unwrap();
+    let output = Command::new(&recorded.executable)
+        .env_clear()
+        .env("HIRSEL_FIXTURE_VALUE", "snapshot:")
+        .env("HIRSEL_RECORD", &tape)
+        .stdin(Stdio::from(std::fs::File::open(input).unwrap()))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"snapshot:nine bytes");
+
+    options.grant_mask = 0;
+    options.env_patterns = None;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let mut command = Command::new(&replay.executable);
+    command.env_clear();
+    // SAFETY: this changes only fd 0 in the newly forked child.
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(libc::STDIN_FILENO);
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "replay must verify the recorded stdout arguments with stdin closed and an empty environment: {:?}",
+        output.stderr
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "replay cannot write to the host stdout"
+    );
+}
+
 /// Both emitters record identical scheduling coordinates and portable outcomes.
 fn tape_schedule_engines() {
     use std::io::Write;
@@ -559,7 +651,7 @@ fn tape_cli_replays() {
     ];
     let (code, out, err) = process::tape_request(&shown, dir.path());
     assert_eq!(code, Some(0), "show: {err}");
-    assert!(out.contains("format 4") && out.contains("GRANT") && out.contains("END"));
+    assert!(out.contains("format 5") && out.contains("GRANT") && out.contains("END"));
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.

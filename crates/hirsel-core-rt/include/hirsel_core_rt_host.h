@@ -182,6 +182,7 @@ typedef struct {
     size_t secret_grants_len;
     /* Set to &hirsel_core_os_secret_ops for a sourced launch with Secrets. */
     const HirselCoreSecretOperations *secret_ops;
+    HirselCoreView env_patterns;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
@@ -223,6 +224,13 @@ HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, 
 /* RECV_BOUNDED (27): max_receive clips the request buffer's writable spare
    capacity. The caller's carrier publishes only the delivered length. */
 HirselCoreHostOutcome hirsel_core_host_recv_bounded(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint64_t max_receive, uint8_t, uint64_t, uint64_t, uint64_t);
+/* STDIN_READ (32): append at most the caller's existing spare capacity. */
+HirselCoreHostOutcome hirsel_core_stdin_read(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* Env get and name return a borrowed carrier address in Outcome.value (zero for None). */
+HirselCoreHostOutcome hirsel_core_env_get(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_env_len(HirselCoreContext *, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_env_name(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_env_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 /* SEND_PAIR (26): buffer borrows the first prefix. The first word at path
    is a const HirselCoreBuffer * borrowing the second prefix. Both remain
    pinned through deliver. Outcome.value counts their concatenated prefix. */

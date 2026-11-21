@@ -1,6 +1,29 @@
 // Buffered I/O over the explicit host capabilities. No hidden close/flush work:
 // Lines owns its HostFile, Out is flushed explicitly; lexical views freeze each buffer.
-pub type Error = Io(IoError) | Capacity(Capacity) | NotUtf8
+pub type Error = Io(IoError) | Stdin(stdin.StdinError) | Capacity(Capacity) | NotUtf8
+
+/// Reads to EOF, growing by GROWTH from 4096 bytes under the current limit.
+/// On error, the accumulated bytes are cleaned and refunded.
+pub fn read_all(i: Stdin) -> Result[Bytes, Error] waits {
+    let mut buf: Bytes = list.new()
+    loop {
+        if list.len(buf) == list.capacity(buf) {
+            let want: u64 = if list.capacity(buf) == 0 {
+                4096
+            } else {
+                list.capacity(buf)
+            }
+            if let Error(c) = list.reserve(mut buf, want) {
+                return Error(Capacity(c))
+            }
+        }
+        match stdin.read(i, mut buf, Never) {
+            Ok(0) => return Ok(take buf),
+            Ok(_) => {},
+            Error(e) => return Error(Stdin(e)),
+        }
+    }
+}
 
 pub opaque type Lines {
     file: HostFile,

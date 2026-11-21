@@ -165,6 +165,7 @@ pub struct OsConfig {
     pub secret_grants_len: usize,
     /// Installed by the native linker for a launch with Secret grants.
     pub secret_ops: *const SecretOperations,
+    pub env_patterns: View,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -187,6 +188,8 @@ pub struct OsProcess {
     _metadata: Box<[Grant]>,
     _net_rules: Option<crate::net::RulesStorage>,
     secrets: Vec<crate::secret::Granted>,
+    _env: Option<Box<crate::env::Env>>,
+    stdin: Option<Box<crate::stdin::Stream>>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
     pub(crate) config: Config,
@@ -220,6 +223,8 @@ pub(crate) enum StartupError {
     MissingGrant(usize),
     MissingSecret(usize),
     NetRules,
+    EnvPatterns,
+    EnvSecretOverlap(String),
     UnsupportedHostOpenat2(io::Error),
 }
 impl From<io::Error> for StartupError {
@@ -231,9 +236,11 @@ impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
             Self::Io(error) | Self::UnsupportedHostOpenat2(error) => error,
-            Self::MissingGrant(_) | Self::MissingSecret(_) | Self::NetRules => {
-                io::Error::from_raw_os_error(libc::EACCES)
-            }
+            Self::MissingGrant(_)
+            | Self::MissingSecret(_)
+            | Self::NetRules
+            | Self::EnvPatterns
+            | Self::EnvSecretOverlap(_) => io::Error::from_raw_os_error(libc::EACCES),
         }
     }
 }
@@ -287,6 +294,25 @@ impl OsProcess {
             } else {
                 None
             };
+            let env = if input.grant_mask & (1 << ENV) != 0 {
+                let patterns = std::str::from_utf8(bytes(input.env_patterns))
+                    .ok()
+                    .and_then(hirsel_core_net::EnvPatterns::parse)
+                    .ok_or(StartupError::EnvPatterns)?;
+                for i in 0..input.secret_grants_len {
+                    let source = bytes((*input.secret_grants.add(i))[1]);
+                    if let Ok(source) = std::str::from_utf8(source)
+                        && let Some(hirsel_core_net::SecretSource::Env(name)) =
+                            hirsel_core_net::SecretSource::parse(source)
+                        && patterns.covers(name)
+                    {
+                        return Err(StartupError::EnvSecretOverlap(name.to_owned()));
+                    }
+                }
+                (!describe_mode).then(|| Box::new(crate::env::Env::snapshot(patterns)))
+            } else {
+                None
+            };
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let mut launch = launch_metadata(target, n_place, describe_mode);
@@ -312,6 +338,8 @@ impl OsProcess {
             } else {
                 None
             };
+            let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
+                .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
             let mut os = Box::new(OsProvider::new(
                 duplicate(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
                     input.stdout_fd
@@ -435,10 +463,11 @@ impl OsProcess {
                             } else {
                                 provider_pointer
                             },
-                            handle: if kind == NET {
-                                net_rules.as_ref().unwrap().handle()
-                            } else {
-                                0
+                            handle: match kind {
+                                NET => net_rules.as_ref().unwrap().handle(),
+                                STDIN => std::ptr::from_ref(stdin.as_deref().unwrap()) as u64,
+                                ENV => env.as_ref().unwrap().handle(),
+                                _ => 0,
                             },
                         });
                     }
@@ -478,6 +507,8 @@ impl OsProcess {
                 _metadata: metadata,
                 _net_rules: net_rules,
                 secrets,
+                _env: env,
+                stdin,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],
                 config,
@@ -559,6 +590,7 @@ unsafe extern "C" fn close_grants(state: *mut u8) {
     unsafe {
         let process = &mut *state.cast::<OsProcess>();
         process.secrets.clear();
+        drop(process.stdin.take());
         drop(process.os.take());
         drop(process.describe_out.take());
     }
@@ -698,6 +730,15 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
             line.extend_from_slice(b"Net requires --grant ");
             line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());
             line.push(b'\n');
+        }
+        StartupError::EnvPatterns => {
+            line.extend_from_slice(hirsel_core_net::EnvPatterns::SYNTAX.as_bytes());
+            line.push(b'\n');
+        }
+        StartupError::EnvSecretOverlap(name) => {
+            line.extend_from_slice(
+                format!("Env grant covers Secret source variable {name:?}\n").as_bytes(),
+            );
         }
         StartupError::MissingGrant(index) => {
             line.extend_from_slice(b"grant `");

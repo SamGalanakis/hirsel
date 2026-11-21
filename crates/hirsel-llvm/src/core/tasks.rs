@@ -62,6 +62,9 @@ impl FunctionEmitter<'_> {
         let mode = args.get(2).cloned().unwrap_or(int(0));
         let at = self.site_word();
         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
+        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+            results[0] = Ty::Ptr;
+        }
         if matches!(op, HostOp::Listen | HostOp::Accept) {
             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
         } else if op == HostOp::TlsConnect {
@@ -81,6 +84,11 @@ impl FunctionEmitter<'_> {
             | HostOp::SendSecret
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
+            | HostOp::StdinRead
+            | HostOp::EnvGet
+            | HostOp::EnvLen
+            | HostOp::EnvName
+            | HostOp::EnvNarrow
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
@@ -95,7 +103,7 @@ impl FunctionEmitter<'_> {
                     });
                 }
                 operands.push(word(at));
-                self.native_call(op.net_symbol(), &results, &operands)
+                self.native_call(op.adapter_symbol(), &results, &operands)
             }
             HostOp::Rename => self.native_call(
                 "hirsel_core_host_rename",

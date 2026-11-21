@@ -383,6 +383,11 @@ tags!(HostOp {
     29 => SendSecret,
     30 => SecretSeal,
     31 => SecretNarrow,
+    32 => StdinRead,
+    33 => EnvGet,
+    34 => EnvLen,
+    35 => EnvName,
+    36 => EnvNarrow,
     40 => Resolve,
     41 => NetNarrowResolve,
 });

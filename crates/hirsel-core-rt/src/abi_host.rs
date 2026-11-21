@@ -16,7 +16,8 @@
 /// capability_provider(ctx,handle)/capability_handle(ctx,handle) expose the
 /// selected provider and its local designation to core provider adapters.
 /// args_len/get take (context, Args handle [, index]); views remain run-owned.
-/// Stdin and Env have no v1 operations. Process supplies the first stop. Net has explicit rule lists and
+/// Stdin shares one input stream. Env reads a run-owned snapshot. Process supplies
+/// the first stop. Net has explicit rule lists and
 /// try-first socket operations over a per-run epoll driver. Tasks authorizes the
 /// source spawn; FORM #121 carries that designation through its provider. No
 /// handle contains an address or reveals a descriptor to source code.

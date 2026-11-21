@@ -191,6 +191,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut grant_mask = 0;
     let mut net_rules = Vec::new();
     let mut secret_grants = Vec::new();
+    let mut env_patterns: Option<hirsel_core_net::EnvPatterns> = None;
     let mut json = false;
     use crate::cli::OptionId as Opt;
     for (option, value) in invocation.options {
@@ -248,6 +249,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         net_rules.push(hirsel_core_net::GrantRule::parse(rule)?);
                     }
                     grant_mask |= 1 << 1;
+                    continue;
+                }
+                if value == "Env" {
+                    return Err(hirsel_core_net::EnvPatterns::SYNTAX.into());
+                }
+                if let Some(patterns) = value.strip_prefix("Env=") {
+                    let patterns = hirsel_core_net::EnvPatterns::parse(patterns)
+                        .ok_or(hirsel_core_net::EnvPatterns::SYNTAX)?;
+                    if let Some(granted) = &mut env_patterns {
+                        granted.extend(patterns);
+                    } else {
+                        env_patterns = Some(patterns);
+                    }
+                    grant_mask |= 1 << 7;
                     continue;
                 }
                 let kind = crate::grant_kind(&value)
@@ -321,7 +336,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     let mut replay_plan = None;
     if replay_command {
-        if !directories.is_empty() || grant_mask != 0 {
+        if !directories.is_empty() || grant_mask != 0 || !secret_grants.is_empty() {
             return Err("replay takes no host grants".into());
         }
         let mut path = replay_tape.ok_or("replay requires --tape TAPE")?;
@@ -706,6 +721,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.grant_mask = grant_mask;
             options.net_rules = net_rules;
             options.secret_grants = secret_grants;
+            options.env_patterns = env_patterns;
             options.logical_charge_report = logical_charge_report;
             options.recording = needs_recording;
             options.replay = replay_plan;

@@ -1212,6 +1212,8 @@ fn unit_ref(id: u32) -> Option<&'static Unit> {
 thread_local! {
     static CUR: Cell<*mut Unit> = const { Cell::new(std::ptr::null_mut()) };
     static WORKER_IX: Cell<usize> = const { Cell::new(usize::MAX) };
+    // Turns this worker has taken since it last looked at the injector first.
+    static TURNS: Cell<u32> = const { Cell::new(0) };
 }
 /// The unit running on this worker. Never inlined: a unit resumes on any
 /// worker, so no caller may keep this thread's slot address across a park.
@@ -1616,6 +1618,7 @@ fn shared_unit() -> Option<u32> {
 }
 
 const LIFO_RUNS: u32 = 3;
+const INJECTOR_EVERY: u32 = 61;
 fn enqueue(p: &Pool, u: &Unit) {
     mark_queued(p, u);
     let ix = worker_ix();
@@ -1863,6 +1866,18 @@ fn accept_front(p: &Pool) {
 
 /// The next unit for worker `ix`, taken off the queues and the count.
 fn find(p: &Pool, ix: usize) -> Option<UP> {
+    // A worker kept busy by its private slot or its own queue still takes
+    // from the injector every INJECTOR_EVERY turns (Go's schedtick % 61), so
+    // yielded and outside-woken units are not held back behind it for ever.
+    let turns = TURNS.get() + 1;
+    TURNS.set(turns);
+    if turns >= INJECTOR_EVERY {
+        TURNS.set(0);
+        if let Some(u) = p.injector.lock().unwrap().pop_front() {
+            p.queued.fetch_sub(1, Ordering::SeqCst);
+            return Some(u);
+        }
+    }
     if !p.lifo[ix].load(Ordering::Relaxed).is_null() {
         let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !l.is_null() {

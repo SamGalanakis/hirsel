@@ -1301,6 +1301,39 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
+    // 4. Injector starved by a private-slot pair (mc-units-sched). One
+    // worker. Units 0 and 1 wake each other and park, for ever, so the
+    // worker always has a unit in its private slot or (after LIFO_RUNS runs)
+    // one it runs at once. Unit 2 waits for a helper thread, whose wake goes
+    // to the injector. The worker must take it from there.
+    Case {
+        name: "injector_starved",
+        workers: 1,
+        units: 3,
+        body: |id| {
+            match id {
+                0 | 1 => loop {
+                    wake_id(1 - id);
+                    unit_park(None);
+                },
+                _ => {
+                    wait_flag(1);
+                    served(0, "unit 2 ran after the helper woke it");
+                }
+            }
+            0
+        },
+        producers: &[("helper", || {
+            sleep_producer(t0() + param(0));
+            FLAG[1].store(true, Ordering::SeqCst);
+            wake_id(2);
+        })],
+        goals: 0b1,
+        params: |r| {
+            PARAM[0].store(r(1_000, 20_000), Ordering::Relaxed); // the helper's wake
+        },
+        pct: None,
+    },
 ];
 
 /// Run one schedule of `case` and exit the process with its verdict.
@@ -1692,5 +1725,9 @@ mod tests {
     #[test]
     fn requeue_without_notification() {
         check("requeue_without_notification");
+    }
+    #[test]
+    fn injector_starved() {
+        check("injector_starved");
     }
 }

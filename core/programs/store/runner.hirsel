@@ -870,16 +870,26 @@ fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Resu
 
 fn describe_response[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
     let run = code.callable(place)
-    let ran = bound bytes launch_word(0u64, 0u64) {
-        let mut r: Registry[G, H] = registry()
-        let response: Result[Bytes, RegisterError] = match run(mut r) {
-            Ok(()) => describe_registered(a, take r),
-            Error(take e) => Error(take e),
+    // The isolate's cause cell belongs to the parent, outside n_place.
+    let ran = isolate(scoped fn() -> Result[Result[Bytes, RegisterError], Capacity] {
+        bound bytes launch_word(0u64, 0u64) {
+            let mut r: Registry[G, H] = registry()
+            match run(mut r) {
+                Ok(()) => describe_registered(a, take r),
+                Error(take e) => Error(take e),
+            }
         }
-        take response
-    }
+    })
     match take ran {
-        Ok(take answer) => take answer,
+        Ok(Ok(Ok(take answer))) => take answer,
+        Ok(Ok(Error(c))) => Error(Full(c)),
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let Capacity(c) = cause.kind { return Error(Full(c)) }
+                break
+            }
+            fail("runner: describe failed")
+        },
         Error(c) => Error(Full(c)),
     }
 }

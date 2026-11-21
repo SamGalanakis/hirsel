@@ -33,7 +33,7 @@ These goals decide between designs. A rule that would break one of them is wrong
    free and no leaked resources.
 4. **Authority is explicit.** Files, network, clocks, randomness, tasks and output are
    values passed as parameters ([capabilities](capabilities.md)).
-5. **Deterministic.** Given the same recorded inputs and limits, every run that no run
+5. **Deterministic.** Given the same outside inputs and limits, every run that no run
    stop ends behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
    including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
@@ -76,7 +76,7 @@ built `hirsel` does not implement yet; the mark is removed when it does.
 The [Net socket declarations and ownership rules](net.md) define the network
 capability and its explicit grant syntax.
 The [TLS and secrets specification](tls.md) defines the client TLS provider
-operations, `Secret` and what their tapes hold.
+operations and `Secret`.
 The [HTTP specification](http.md) defines std `http`, the runner's HTTP bindings
 and keyed operations. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
@@ -111,6 +111,7 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
+| recording, recording build, release build | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
 | region data, region value | [MEM-2](memory.md#mem-2-region-data) |
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |
 | reservation | [OWN-11](ownership.md#own-11-call-arguments) |
@@ -118,7 +119,6 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | slice end, step, step bound | [MEM-30](budgets.md#mem-30-step-bounds) |
 | shield | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | sub-view | [OWN-8](ownership.md#own-8-views) |
-| tape, substitute | [CAP-9](capabilities.md#cap-9-tapes) |
 | type summary | [OWN-2](ownership.md#own-2-type-summaries) |
 | writable | [OWN-5](ownership.md#own-5-availability) |
 | writer | [MEM-4](memory.md#mem-4-sized-destinations) |

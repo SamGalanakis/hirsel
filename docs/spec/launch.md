@@ -32,7 +32,7 @@ require or extract a constant argument.
   releases it. If mapping fails, the launcher hashes the opened file directly.
   Replacement, rename or deletion of the file after launch leaves the digest
   stable. Both native backends use the same runtime launch boundary. A closed
-  release executable with no digest reader may omit capture on an untaped run.
+  release executable with no digest reader may omit capture on a run that is not recorded.
 - An evaluator launching a built artifact hashes the artifact it loaded, and
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.
@@ -49,8 +49,10 @@ through every task, describe response and session in that process. An embedded
 or evaluator launch owns its own value for the entire run. Views of it cannot
 outlive that owner. No filesystem lookup occurs when a view is read.
 
-A Run tape captures these metadata fields in its argument snapshot. Replay pins
-the recorded value before main instead of hashing the replay executable.
+Launch metadata is an entry argument and passes the replay point
+([CAP-8](capabilities.md#cap-8-the-replay-point)). A release build and a recording build of
+one program are different executables, so their digests differ
+([recording](../recording.md#what-a-recording-holds)).
 
 `Welcome.executable` carries this digest, including an empty digest for
 unavailable identity. Generated bindings record digest, target and `n_place`.
@@ -122,8 +124,8 @@ ordinary place option `--hirsel-activation=<version>` selects the activation
 version that must match the current image under STORE's LOCK. Omitting the
 option selects version zero for empty activation. `--hirsel-install` requests a
 standalone install and is mutually exclusive with an activation version. Use it
-after `--` with `hirsel run`. Both options remain in the argument snapshot for
-Run tape replay.
+after `--` with `hirsel run`. Both options are run arguments, which a recording
+holds like every entry argument.
 
 A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known executable identity and returns
@@ -301,10 +303,10 @@ build cache, where a power cut may turn a write into a miss, is never used for t
 Pin acquisition, reservation and deletion take one collection lock, so no object or image is
 removed between a presence check and the pin that keeps it. Collection removes only what no
 root reaches. The roots are the union of: the assembly record of each retained activation
-(current, previous, and each live `releases` interval), each pending record, each tape pin, and
+(current, previous, and each live `releases` interval), each pending record, each recording pin, and
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
-so the store's `releases` rows keep their format, and a tape pin names the assembly record of
+so the store's `releases` rows keep their format, and a recording pin names the assembly record of
 the run it records and is synced before `Pinned` is answered. A retained digest whose image is
 missing gives `Unknown(ImageGone)`.
 

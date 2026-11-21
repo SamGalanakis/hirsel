@@ -732,7 +732,8 @@ the identity check are reserved ([reserved](reserved.md)).
 value unequal to every other `Unique` made in the run, admits nothing and cannot fail.
 Equality is its only observation: it has no order, no conversion to a number or text, and
 no operation reveals its hash. Which values are made first may depend on the event order,
-so this is what keeps that order from reaching output or a recording.
+so this is what keeps that order from reaching any observable
+([SEM-8](semantics.md#sem-8-determinism)).
 
 ```hirsel
 type Handle: key { pool: Unique, index: u64, generation: u64 }

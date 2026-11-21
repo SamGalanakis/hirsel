@@ -182,8 +182,8 @@ stream has the same arguments, the same bounds, the same committed-prefix rule a
 same deadline as a plain one. Only the bytes on the wire differ, and the provider
 already chooses those for each handle. Separate TLS receive and send tags would make
 two copies of the same contract. They would also give the HTTP reader and writer two
-code paths, and the tape two frame shapes. `SEND_SECRET` is new because its arguments
-cannot be the bytes it sends (TLS-6).
+code paths, and a recording two frame shapes. `SEND_SECRET` is new because its arguments
+cannot be the bytes it sends.
 
 **`TLS_CONNECT`.** `Request.handle` is the socket key. `Request.path` points to the
 runtime's `TlsRequest` extension. It holds the `NetworkRequest` fields the socket
@@ -278,14 +278,15 @@ is `Invalid`.
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 digest of them, or the result of comparing them. Because `Secret` is not `codec`, no
-store, JSON or tape codec encodes one. `secret.render` returns the fixed marker
+store or JSON codec encodes one. `secret.render` returns the fixed marker
 `[secret]` for every secret. Every std function that renders, logs or describes a value
 holding a secret writes this marker in the secret's place. This includes the HTTP
 client's request and error renders. Run diagnostics, failure causes and the launcher's
 grant summary print the parameter name and `[secret]`, never the source's contents.
 Since program code never gets the bytes from a `Secret`, it can log or render copies
 it had before sealing. Received plaintext is outside the TL10 guarantee because an
-authorized peer can return any bytes and replay must preserve its replies exactly.
+authorized peer can return any bytes, and a recording keeps its replies exactly
+([recording](../recording.md#credentials)).
 
 **The sink.** `tls.send_secret` sends `before ‖ secret ‖ after` on `w`. Every byte is
 sent, or the operation fails. These checks run before issue, each with no effect:
@@ -308,79 +309,8 @@ line, with any following head bytes up to the next secret value. On a plain-TCP
 connection, such a request fails `Denied` before any byte is sent.
 
 An HMAC or signature sink, which uses a secret as a key without sending it, is a later
-operation. Its replay rule is set now: its output is a recorded delivery, and its key
-never reaches the tape.
-
-### TLS-6: Tapes
-
-A TLS stream is recorded through the `Net` substitute of [NET-11](net.md). Replay of a
-TLS session makes no host call. It needs no network, no roots and no keys.
-
-| operation | at issue (checked on replay) | at delivery (supplied on replay) |
-|---|---|---|
-| `TLS_CONNECT` | socket ordinal; canonical args = `name`, trust (`System`, or the SHA-256 of the roots bundle), the ALPN entries in order, `until` | the outcome. On success the new stream ordinal, the negotiated protocol and the 32-byte peer digest. |
-| `RECV_BOUNDED` on a TLS half | as NET-11 | the decrypted plaintext, in its original fragments |
-| `SEND_PAIR` on a TLS half | as NET-11: both offered plaintext buffers and the deadline | the committed count |
-| `SEND_SECRET` | half ordinal; canonical args = `before`, the secret's designation, `after`, `until` | the outcome, and the committed count on failure |
-
-The tape **never** contains these: ciphertext, handshake records, keys, client or
-server randoms, the certificate chain, the roots bundle, or the provider's verification
-time. On replay, the halves are local designations. Dropping one changes local
-ownership only, and no `close_notify` is sent.
-
-**Secret designations.** A granted secret is a grant. It takes a `GRANT` frame and an
-object ordinal in the order of the run's grants, like every other grant.
-The header's grant snapshot keeps the parameter name, the `to` patterns and the source
-label (`env:OPENAI_API_KEY`), but not the bytes. A sealed secret is designated by the
-order of its seal among the run's seals, together with its `to` patterns. The canonical
-args of `SEND_SECRET` hold the designation, never the bytes or any function of them.
-Canonical args longer than 16 bytes are stored as an xxh3-64 digest. That digest
-has no key, so if it covered a short secret, someone could recover the secret by trying
-candidate values.
-
-Replay gets the same result without the bytes. The launcher does not read the secret's
-source on replay. The replaying run gets a designation with no bytes behind it. No
-operation can read a secret's bytes, so the program computes the same values. The
-deliveries that depend on the secret, which are the server's replies, come from the
-tape. `SEND_SECRET` on replay checks the designation and the digests of `before` and
-`after`, and delivers the recorded outcome.
-
-**Where cleartext can be on a tape.**
-
-| bytes | on the tape? | why |
-|---|---|---|
-| bytes supplied by a Secret grant | never via the grant or send record | Replay uses the designation. |
-| a sealed secret | only where the bytes were already on the tape, as the received plaintext they were computed from | Replay recomputes the same bytes from those deliveries, so the seal adds nothing to the tape. |
-| received plaintext (response bodies, cookies, minted tokens) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
-| sent plaintext | as the canonical-args rule stores it: 16 bytes or fewer literally, otherwise a digest | Replay only checks sends. |
-
-So the tape does not record the outgoing plaintext stream in full. The send rule that
-already exists stores a digest. Secret operations disclose no secret bytes in logs,
-diagnostics, renders, tape designations or send argument digests.
-
-**Credential-bearing.** A tape that substitutes a `Net` grant used for a TLS session, or
-whose header records a `Secret` grant, is credential-bearing as [http.md §5](http.md)
-defines it:
-
-- the file is created readable only by its owner;
-- exporting it needs the explicit credentials flag;
-- it is never redacted in place.
-
-The reason is that received plaintext holds what servers sent to an authenticated
-client. A tape with only a granted secret's designation still records the replies that
-the secret unlocked.
-
-**Format.** These frames and header records belong to tape format 4. The `Tls` rule
-record holds:
-
-- the direction byte 2;
-- the trust byte, followed by 32 bytes of roots digest when the trust is `Roots`;
-- the port interval;
-- a `u16` count of patterns, each one a length byte followed by its bytes.
-
-A `Secret` grant record holds the parameter name, the source label and the patterns, all
-length-prefixed. `tape.open` already refuses a tape made by another build (CAP-9), so no
-reader ever sees another build's layout.
+operation. Its rule is set now: its output is a delivery that passes the replay point
+([CAP-8](capabilities.md#cap-8-the-replay-point)), and its key never does.
 
 ## Laws
 
@@ -400,15 +330,13 @@ computes.
 | **TL6** truncation | an unauthenticated EOF read as a clean end | The peer closes TCP after half of a body without `close_notify`, and the next receive gives `Tls(Truncated)`. With `close_notify`, the next receive gives `Ok(0)`. The oracle is RFC 8446 §6.1. |
 | **TL7** release on every exit | an fd or session leaked on abort or failure | Check four cases: cancel during a handshake parked on a peer that never answers (`Aborted`), a deadline expiry (`TimedOut`), TL1's failure, and a refusal from TL3. After each one, the process's open descriptor count, read from `/proc/self/fd`, is back to its value before `connect`. |
 | **TL8** ALPN | the wrong protocol reported, or a server choice outside the offer accepted | Offer `[h2, http/1.1]` to a server that lists `[http/1.1]`: the result is `Some(1)`. Against a server that lists only `[x]`: `Tls(Protocol(120))`. An entry of 0 bytes, an entry of 256 bytes, or a repeated entry: `Tls(Alpn)` before issue. The oracle is RFC 7301 §3.2. |
-| **TL9** replay is offline | Replay reaching the host or needing keys | Record an HTTPS GET against the loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest are equal to the recorded run's, and the inner provider records zero calls. |
-| **TL10** a secret never renders | the bytes reaching a render, log line, diagnostic or tape | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. The run is recorded. Search stdout, stderr, the run's diagnostics and the tape file for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value, and the server does not echo it. |
+| **TL10** a secret never renders | the bytes reaching a render, log line or diagnostic | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. Search stdout, stderr and the run's diagnostics for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value, and the server does not echo it. |
 | **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret `to alpha.test`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |
-| **TL12** replay without the secret | Replay reading the secret's source | Replay TL10's tape with the environment variable unset. The run starts. Its outputs equal the recorded run's, byte for byte. The inner provider records zero calls. |
 | **TL13** spent half | a resumed send that splits a secret | Make `send_secret` time out after it has committed a prefix (the scripted peer stops reading). The next `send_pair` on that half gives `Reset`. The scripted peer's received bytes are a prefix of `before ‖ secret ‖ after` and contain nothing after it. |
 
 TL1 to TL8, TL10 and TL11 run against the OS provider over loopback. TL5, TL7 and TL13
-also have scripted-provider cases, so that the evaluator is covered. TL9 and TL12 run
-through the CLI record and replay of NET-11.
+also have scripted-provider cases, so that the evaluator is covered. The recording laws of
+TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 
 ## Build slices
 
@@ -418,10 +346,10 @@ and L (more than three).
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
 | **T1** OS TLS provider | L | — | core declarations (`tls.connect`, `Trust`, `Handshake`, `TlsFailure`, the `NetError.Tls` case); `TLS_CONNECT` and TLS halves in `os.rs` and `os_net.rs` over rustls with `ring` and `rustls-native-certs` (Buck third-party fixups); the `Tls` rule in grant parsing, `net.narrow` and the C rule struct; the C entry; the LLVM and Cranelift lowering of `tls.connect` | TL1–TL8 |
-| **T2** tapes and replay | M | T1 | `TLS_CONNECT` issue and delivery codecs, the TLS halves under the `Net` substitute, the format-4 header `Tls` rule record, credential-bearing file mode and export gate | TL9 |
+| **T2** recordings | M | T1 | in the recording build, `TLS_CONNECT` issue and delivery codecs, the TLS halves under the recorded `Net` grant, the format-4 header `Tls` rule record, credential-bearing file mode and export gate ([recording](../recording.md)) | RL3 |
 | **T3** evaluator and scripted provider | M | T1 | the evaluator's call form for tag 22; peer scripts in the scripted provider (`model_net`) with handshake results and plaintext steps | scripted TL5, TL7 |
-| **T4** Secret | M | T1, T2 | the `Secret` core type and grant kind 11, launcher sources `env:` and `file:`, `seal`, `narrow`, `render`, `SEND_SECRET` in the OS and scripted providers, its tape designation and grant record, the spent-half rule | TL10–TL13 |
+| **T4** Secret | M | T1, T2 | the `Secret` core type and grant kind 11, launcher sources `env:` and `file:`, `seal`, `narrow`, `render`, `SEND_SECRET` in the OS and scripted providers, its designation and grant record in a recording, the spent-half rule | TL10–TL13 |
 | **T5** HTTPS client | S | T1, T4, http-client-1439 | std `tls` api page; `https` connect = `net.connect`, then `tls.connect` offering `http/1.1`, then the plain client's reader and writer over the halves; `Secret` header values written through `send_secret`; `[secret]` in request and error renders | TL10 (the client's case), and one HTTPS round trip in the existing http client harness |
 
-T2 and T3 can run in parallel after T1. T4 waits for T2 because its tape designation is
-part of its contract. T5 is last.
+T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
+recording is part of its contract. T5 is last.

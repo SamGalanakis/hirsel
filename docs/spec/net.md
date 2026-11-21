@@ -88,27 +88,3 @@ this process's descriptor, leaving the host's socket and accept queue live.
 
 Graceful finish, prefix I/O, try-first waiting, reset propagation and the scheduler's
 poll registration are specified by NET-1 through NET-10 and implemented after W1a.
-
-
-### NET-11: CLI recording and replay
-
-A recorded run checks each LISTEN and CONNECT against its source Net rules.
-It records a denied outcome without asking the source provider to perform
-the operation. Replay supplies every socket result from the tape. Successful
-LISTEN, ACCEPT and CONNECT produce run-local socket designations on replay.
-The bound LISTEN address and ACCEPT peer address come from the tape.
-Splitting or releasing a replay socket performs its local ownership change.
-
-Tape format 4 stores a Run's root Net rules, in order and with duplicates,
-in the header's grant snapshot. The header has no mode byte. Each address
-rule occupies 23 bytes.
-[TLS-6](tls.md#tls-6-tapes) defines the TLS rule record.
-Replay starts with no live Net grant. It computes narrowed rule lists and
-their Capacity charges from the snapshot and each parent's intersections.
-
-The tape checks socket arguments at issue. It stores the delivered receive
-bytes and appends them to the caller's buffer in the original fragment sizes.
-Each send checks both offered buffers and the absolute deadline. The delivery
-records how many bytes the source committed. [TLS-6](tls.md#tls-6-tapes) says what a TLS
-session and a `Secret` add to a tape. It also says which tapes are credential-bearing. A final readiness attempt at a
-deadline can deliver a successful receive, including its bytes.

@@ -33,8 +33,6 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
-| `tape` | [tape](../../core/core/tape.hirsel) | CAP-9 |
-| `port` | not yet in the core source | CAP-9 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
@@ -224,7 +222,7 @@ operations it names; nothing else about them may be inferred from an implementat
   the one block of an `Inline[u8, 64]`. Each call admits no bytes and takes one Step
   whatever `count` is ([MEM-30](budgets.md#mem-30-step-bounds)), as a bulk copy does. An
   engine may use the CPU's SHA-256 instructions; the state words are the same on every
-  CPU, so by [SEM-8](semantics.md#sem-8-determinism) a replay elsewhere reproduces the run.
+  CPU, so by [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
   `std.sha256` extends this module with the streaming hash.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
@@ -369,8 +367,8 @@ operations it names; nothing else about them may be inferred from an implementat
   `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
   `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
   cancellation point at its entry and while it waits
-  ([CONC-7](tasks.md#conc-7-cancellation-points)), and replay delivers its completion
-  without waiting ([CAP-8](capabilities.md#cap-8-the-replay-point)). A relative sleep is
+  ([CONC-7](tasks.md#conc-7-cancellation-points)), and its completion passes the replay
+  point ([CAP-8](capabilities.md#cap-8-the-replay-point)). A relative sleep is
   library code over it. No host operation admits; every byte it returns
   lands in capacity the caller already holds. `HostFile` is a mechanical resource
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
@@ -378,7 +376,7 @@ operations it names; nothing else about them may be inferred from an implementat
   changes its capacity, and never waits or fails. The bytes are unpredictable and
   independent of every other value the run observes; like every provider result they pass
   the replay point at issue and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)),
-  so a replay delivers the recorded bytes and a simulation supplies its own.
+  and a simulation supplies its own.
   `host.stopped(p: Process) waits` observes the first SIGTERM or SIGINT
   ([CAP-5](capabilities.md#cap-5-provider-operations)). `Stdin` and `Env` have no
   operations in v1.

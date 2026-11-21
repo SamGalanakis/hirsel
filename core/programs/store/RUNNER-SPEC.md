@@ -568,13 +568,13 @@ pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G
 
   | `Raised(n)` | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
   |---|---|---|---|---|---|---|---|---|---|
-  | CauseKind | Overflow | Bounds | Division | Unwrap | Fail | Cancelled | Capacity | OutOfTime | Tape (v2.10) |
+  | CauseKind | Overflow | Bounds | Division | Unwrap | Fail | Cancelled | Capacity | OutOfTime | retired (was Tape, v2.10) |
 
   | `Bad.kind` | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
   |---|---|---|---|---|---|---|---|
   | DecodeError | Truncated | Invalid | Utf8 | Duplicate | Trailing | Schema | Value |
 
-  `Bad.at` is the error's byte offset. A kind added to core or std later takes the next unused number, whatever its declaration position. A client reads a number it does not know as a fault, or a decode error, of an unknown kind. That is why these are numbers and not typed mirrors: a new variant in a typed enum would make an old client fail to decode the whole Batch.
+  `Bad.at` is the error's byte offset. A retired number is never reused: 9 named `Tape`, which left the language when recording moved outside the program (docs/spec/capabilities.md CAP-9). A kind added to core or std later takes the next unused number, whatever its declaration position. A client reads a number it does not know as a fault, or a decode error, of an unknown kind. That is why these are numbers and not typed mirrors: a new variant in a typed enum would make an old client fail to decode the whole Batch.
 - **The store's `info` is `info(mut tx: Tx) -> CallInfo`, its only signature** (STORE-SPEC G2). No `info(Tx)` overload exists, so a query (view Tx, inside `look`) cannot obtain CallInfo.
 
 ### 1.2 What each one does
@@ -1299,7 +1299,7 @@ A failure after the activation commit and before `Ready` leaves the new activati
 **The host stop source** uses the existing `Process` capability (§12.4).
 - `host.stopped(p: Process) waits` returns once the process has received its first SIGTERM or SIGINT.
 - It is a cancellation point at its entry and while it waits. Its completion passes the replay point at issue and at delivery (CAP-8).
-- Before entering a live or recording program that holds `Process`, the runtime installs the handler. A program without that grant keeps the default action, which ends the process as a crash cut. Replay gets its stop from the tape.
+- Before entering a program that holds `Process`, the runtime installs the handler. A program without that grant keeps the default action, which ends the process as a crash cut. A replay tool supplies the recorded stop and installs no handler (docs/recording.md).
 - A second SIGTERM or SIGINT after the first ends the process at once, also as a crash cut.
 - `runner.main` spawns one task that calls `host.stopped` and then drops the stop `Sender`, so W reads `Closed`.
 - `main` returns `Ok(())` for `Stopped`. For `Forced(n)` and for a `StartError` it writes one stderr line and returns `Error(Exit(status: 1u8))`. The line is `place: forced at the drain deadline, n sends abandoned`, or the error.

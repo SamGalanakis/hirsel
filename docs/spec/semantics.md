@@ -217,8 +217,11 @@ identically on every engine, build and optimisation level. Its **observables** a
   [FAIL-11](failure.md#fail-11-resources));
 - its events and their order ([CONC-10](tasks.md#conc-10-event-order));
 - its host effects: each provider operation's issue, its arguments and its order
-  ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point));
-- what its tapes record ([CAP-9](capabilities.md#cap-9-tapes)).
+  ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point)).
+
+A build with recording machinery is one of these builds: compiling recording in, and
+switching it on, changes none of the observables
+([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)).
 
 **As if.** An engine may do anything whose effects on the observables are those this
 specification gives. Anything not listed is the engine's choice: layout, addresses (of
@@ -475,8 +478,8 @@ with the operating system's state for them enabled. It builds level k's version 
 exactly those features. The launcher and the code generator use the same level table.
 
 A version has no meaning of its own. By [SEM-8](#sem-8-determinism) every version gives the
-same values, failures and sites, steps and charges, and a replay on a CPU with other levels
-reproduces the run. Nothing a program can observe names a version, and every version has
+same values, failures and sites, steps and charges, so a run on a CPU with other levels
+behaves the same. Nothing a program can observe names a version, and every version has
 the function's revision ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ```hirsel unbuilt

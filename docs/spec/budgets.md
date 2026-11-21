@@ -132,7 +132,7 @@ Creating a resource admits its cause cell, and can therefore fail with `Capacity
 nothing was admitted, so nothing is refunded, and the literal's fields come back in its
 error ([T1.2](ownership.md#own-26-the-transition-table)). This holds unless
 it is **mechanical**: its cleanup can never add a cause. These mechanical resources have no cause cell: `Sender`, `Receiver`, `Task`,
-`Latest`, `Flow`, `HostFile`, `Tape` and the four socket resources described in
+`Latest`, `Flow`, `HostFile` and the four socket resources described in
 [Net](net.md). The channel and task handles close a channel or end a child. A `Latest`
 handle releases its root. If cleaning a queued item or result raises a cause, the
 value's finalizer owns that cause. A `Flow` discards its entries and refunds every
@@ -288,7 +288,7 @@ is core's plain record `{ steps: u64 }`.
 - **Determinism.** Which steps a run takes, where a bound stops it and where its slices end
   depend only on its source and the values at its replay point
   ([SEM-8](semantics.md#sem-8-determinism)): every engine, build and optimisation level
-  stops at the same step, and a replay stops where the recorded run stopped. No
+  stops at the same step. No
   optimisation adds, removes, merges or moves a step taken while a bound is current; an
   engine may count several steps at once only where it then stops at the same step as
   counting one at a time would. A step taken while no bound is current uses nothing and

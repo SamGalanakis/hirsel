@@ -32,8 +32,9 @@ There are two seeds, and the choice between them is the caller's.
   gets a different stream, and a replay of the call gets the same one. Any other `u64` the
   program derives (a test's constant, a hash of a job id) works the same way.
 - **Fresh:** 16 bytes from `host.random(r, mut b)`, then
-  `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`. A replay delivers the recorded
-  bytes ([core.md](../../../docs/spec/core.md), Host), so the stream still replays. It is
+  `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`. The bytes are a delivery that
+  passes the replay point ([CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point)),
+  so a run given the same bytes draws the same stream. It is
   still not a secret source; it is only unpredictable at the start.
 
 ## Operations

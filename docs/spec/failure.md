@@ -25,7 +25,6 @@ raised it:
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
 | `OutOfTime` | a step past the current step bound ([MEM-30](budgets.md#mem-30-step-bounds)) |
-| `Tape` | a provider operation whose tape refuses it before issue ([CAP-9](capabilities.md#cap-9-tapes)) |
 
 `Capacity` outside a finalizer is an error, never a failure.
 
@@ -232,7 +231,6 @@ writes one line to stderr, `run stop: ` and the stop's name
 |---|---|
 | the stack is exhausted | `Stack` |
 | every task waits on another task (a join, a channel send or receive, an abandon), no timer is pending and no provider operation is outstanding | `Deadlock` |
-| at whole-run quiescence a replay tape diverges or its reader reports a fault | `Replay tape` with the tape id and verdict |
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |
@@ -271,7 +269,7 @@ recovery boundary and undoes nothing:
   its place, so the code after `isolate` has an unused cell to fail into; when it did not,
   every caught cause having gone into resources' cells, the reserved cell is refunded. A
   failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
-  `Bounds`, `Division`, `Unwrap`, `Fail`, `Tape`, a finalizer's `Capacity`
+  `Bounds`, `Division`, `Unwrap`, `Fail`, a finalizer's `Capacity`
   ([MEM-27](budgets.md#mem-27-finalizer-grants)), and `OutOfTime` at an `isolate` where the
   step bound that ran out is no longer current.
 - A failure whose primary cause is `Cancelled` is not caught, and neither is one whose

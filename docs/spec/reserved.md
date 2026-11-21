@@ -83,8 +83,8 @@ each task and resource; causes are never truncated and cleanup is never skipped.
 FAIL-10, MEM-24, MEM-27.
 
 **R10.** Every outside input and every scheduling or cross-task choice passes the replay
-point, which can supply outcomes without host effects; pure code needs no events or
-yields. *v1:* CAP-5, CAP-8, CAP-9, CONC-7, CONC-10.
+point; pure code needs no events or yields. *v1:* CAP-5, CAP-8, CONC-7, CONC-10. A
+recording is the tools' and never the program's (CAP-9).
 
 **R11.** "Typed operations take explicit behavior dictionaries:
 `encode(view T,mut Sink,Codec[T])->Result[(),EncodeError]`;
@@ -208,8 +208,8 @@ states the committed prefix of a write; cancellation reaches an operation only a
 outcome ([core](core.md#contracts-the-signatures-do-not-state)). Fencing and conditional
 update are later. v1 has no durable provider: the store's step wrapper commits a started
 row before an outside effect and its result before the result is used
-([runner](../../core/std/api/runner.md#store-triggers)), and a tape is never the durable
-record ([CAP-9](capabilities.md#cap-9-tapes)).
+([runner](../../core/std/api/runner.md#store-triggers)), and a recording is never the
+durable record ([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)).
 
 **R24.** Static pool brands may later let a pool skip its identity check. *v1:* a pool is
 library code whose handles are plain data checked at run time (MEM-18); no rule, keyword or
@@ -236,7 +236,7 @@ allocator chunk size becomes a logical capacity (MEM-28).
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence; the revision, `code.revision(s)` (PROG-9), never part of equality | open: for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; tapes and their substitutes (CAP-9); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, plus `host.random` and `host.stopped` ([core](core.md#contracts-the-signatures-do-not-state)) | socket declarations and owned resources ([Net](net.md)); open: socket OS attempts/readiness; providers for `Stdin` and `Env`; watching, renaming across directories |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points (CAP-8); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, plus `host.random` and `host.stopped` ([core](core.md#contracts-the-signatures-do-not-state)) | socket declarations and owned resources ([Net](net.md)); open: socket OS attempts/readiness; providers for `Stdin` and `Env`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1 with flows (CONC-14). Selection, shared limits, mutexes and atomics later. |
 
 ## Not in v1
@@ -252,5 +252,5 @@ need every capture `shareable` and OWN-4 to admit the closure, its calls already
 viewing the environment (LANG-14), and would add a second calling mode, from several tasks; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
 library writes one function per width; generics over an `Inline` length; float lanes, 64-byte vectors, vectors in fields and collections, and checked lane arithmetic, whose `+` would fail with `Overflow` when any lane overflows, at the operator ([SEM-11](semantics.md#sem-11-vectors)); persistent mutable views; derivation other than a codec's (SEM-10); contracts and
-facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats; a step grant for
+facts; `@varint` (R25); documents in segments (R26); the store, runners and places; a step grant for
 finalizers, which would let cleanup under an exhausted step bound take steps ([MEM-30](budgets.md#mem-30-step-bounds)).

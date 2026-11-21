@@ -74,35 +74,26 @@ AArch64 runtime libraries.
 
 ## Record and replay
 
-`hirsel run app --record session.tape [grants] [-- arguments...]` records
-provider operations and task scheduling in a new, owner-only tape. The tape may
-contain bearer tokens and other credentials from provider calls. Choose a path
-that does not exist yet. A stopped run records the delivery of `host.stopped`
-through its Process grant. A tape is a recording for diagnosis and testing: it
-is not synced and cannot resume a run after a crash. Durable state belongs to
-the store ([CAP-9](spec/capabilities.md#cap-9-tapes)).
+`hirsel run app --record session.tape [grants] [-- arguments...]` runs the
+recording build of `app` with recording on, into a new, owner-only file. The
+file may hold bearer tokens and other credentials, so choose a path that does
+not exist yet.
 
 ```sh
 hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json
 hirsel replay app --tape session.tape
 hirsel tape show session.tape --include-credentials
 hirsel replay app --tape session.tape --diagnose
+hirsel build app --recording -o app-rec
+hirsel test app --limit 64M --replay
 ```
 
-Replay takes its arguments and default root limit from the tape and accepts no
-host grants. It reproduces reads, writes and scheduling without repeating the
-recorded host effects. Normal replay refuses a changed code revision before
-running the program. `--diagnose` allows a different revision, labels it, and
-reports the first divergent request at its source position. It always replays
-and never continues with live effects.
-
-Tape format 4 records socket addresses and received bytes, and verifies the
-bytes a program offers to send. For `tls.send_secret`, it records the
-Secret designation and verifies the surrounding bytes.
-
-`tape show --include-credentials` writes the header and stored frames to standard
-output. It shows REPEAT once, at the position of the first CHOOSE it represents.
-Source positions appear in diagnose replay.
+A release build has no recording machinery; `--recording`, `--record`,
+`replay` and `test --replay` use a recording build of the same program.
+Recording and replay, what a recording holds and the replay verdicts are in
+[Recording and replay](recording.md). A recording is for diagnosis and testing.
+Work that must survive a crash goes through the store and its step library
+([CAP-9](spec/capabilities.md#cap-9-recording-is-outside-the-program)).
 
 ## Symbolize a runtime panic
 

@@ -204,7 +204,7 @@ positions or optimisation hints. So:
 The revision is never part of equality: two `StaticFn` values with equal identity bytes are
 equal whatever their revisions. It is `None` only when the program was assembled without its
 revisions, which a program `hirsel build` links never is; a core function the compiler
-implements has its revision in any program. A store, registry or tape that keeps only
+implements has its revision in any program. A store, registry or recording that keeps only
 identity bytes matches by identity alone, so a changed body under an unchanged identity is
 not detected; one that keeps the revision as well detects it.
 

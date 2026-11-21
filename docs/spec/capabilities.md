@@ -19,7 +19,7 @@ fn stamp() -> u64 { host.mono_ns() }                     // refused: CAP-1, no C
 
 A capability type is an opaque type ([PROG-2](programs.md#prog-2-visibility)) of the
 standard library. Its values are made only by its own module, from entry grants (CAP-4) or
-by attenuation (CAP-7), or by a tape as a substitute (CAP-9), so no program can forge one.
+by attenuation (CAP-7), so no program can forge one.
 A `Secret` can also be sealed from bytes the program already holds
 ([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
 before, because it already held those bytes. A capability that holds state is a
@@ -70,9 +70,9 @@ the host.
 The **provider operations** are exactly the host primitives listed in [core](core.md); the
 standard library's capability modules are ordinary code over them, and a program cannot
 declare another. Each is carried out by a **provider**: the implementation behind the
-capability, chosen by the run's configuration (the host, a recording, a replay, a
-simulation) or, for a substitute, by its tape (CAP-9). Programs cannot tell providers apart
-except by the values the operations return. An engine may call a provider in more than one
+capability, chosen by the run's configuration: the host, or a controlled provider such as
+a simulation that a test configures. Programs cannot tell providers apart except by the
+values the operations return. An engine may call a provider in more than one
 form, never with different behaviour: a provider that forwards every operation to another
 is indistinguishable from it. A provider operation that may wait is declared `waits` and is a cancellation point
 at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)). Provider operations state
@@ -127,8 +127,8 @@ fn replace(d: Dir, b: Bytes) -> Result[(), IoError] waits {
 }
 ```
 
-Random bytes land in capacity the caller already holds, so a draw admits nothing, and a
-replay supplies the same bytes:
+Random bytes land in capacity the caller already holds, so a draw admits nothing, and they
+pass the replay point like every provider result (CAP-8):
 
 ```hirsel
 fn store_id(r: Random) -> Result[Bytes, Capacity] {
@@ -141,11 +141,10 @@ fn store_id(r: Random) -> Result[Bytes, Capacity] {
 `host.stopped(p: Process) waits` completes after the process receives its first
 SIGTERM or SIGINT, including a signal received before the call. It is a
 cancellation point at entry and while waiting. Its issue and delivery pass
-through [CAP-8](#cap-8-the-replay-point), so replay observes the recorded
-completion. Native live and recording entry install the handlers before
-entering a program that receives `Process`. A second SIGTERM or SIGINT takes
-its default action and ends the process immediately. Replay and launches
-without `Process` leave the host's signal dispositions untouched.
+the replay point ([CAP-8](#cap-8-the-replay-point)). Native entry installs the
+handlers before entering a program that receives `Process`. A second SIGTERM
+or SIGINT takes its default action and ends the process immediately. A launch
+without `Process` leaves the host's signal dispositions untouched.
 
 ### CAP-6: No ambient input
 
@@ -167,67 +166,52 @@ combines two into more than either.
 
 ### CAP-8: The replay point
 
-Every input the run did not compute (a provider's results, the scheduler's choices of
-[CONC-10](tasks.md#conc-10-event-order), the entry arguments) passes one **replay point**.
-A provider operation passes it twice: at issue, before any host effect, and at delivery,
-before its result reaches the task. A recording provider can record each value there in
-order, and a replaying provider can supply the delivery without performing the issue. A
-scheduler choice is recorded; the result of an event is not, since the order and the run's
-other inputs determine it, so a replay that follows the recorded order recomputes every
-`receive`, `try_receive`, `latest.read` and count.
-Once issued, an operation delivers exactly one result
-([CONC-7](tasks.md#conc-7-cancellation-points)). Given the same values, the run behaves
-identically
-([SEM-8](semantics.md#sem-8-determinism)). The format of a recording is not part of the
-language. Passing the replay point makes nothing durable ([CAP-9](#cap-9-tapes)).
+Every input the run did not compute passes one **replay point**: each provider operation's
+result, each scheduler choice of [CONC-10](tasks.md#conc-10-event-order), and the entry's
+arguments, which include its grants, its root limit and its launch metadata
+([launch](launch.md)). A provider operation passes it twice: at issue, before any host
+effect, and at delivery, before its result reaches the task. Each input enters the run once,
+at its own point, and nothing outside the run reaches a value except through such a point.
+A scheduler choice is an input; the result of an event is not, since the order and the
+run's other inputs determine it, so the same choices give the same `receive`,
+`try_receive`, `latest.read` and count. Once issued, an operation delivers exactly one
+result ([CONC-7](tasks.md#conc-7-cancellation-points)). Given the same values at the
+replay point in the same order, the run behaves identically
+([SEM-8](semantics.md#sem-8-determinism)).
 
-### CAP-9: Tapes
+The replay point is a position in every run, not a mechanism: a build without recording
+machinery has the same points and does nothing at them beyond the operation itself. They
+are where a recording build observes each input once (CAP-9). Passing the replay point makes
+nothing durable.
 
-A **tape** is a core resource, `Tape`, that records or replays the provider operations made
-through the capabilities it substitutes. `tape.open(d, name, mode, header)` opens the tape
-file `name` in the directory `d`, to record, to replay, or to replay across: a replay that
-also accepts a recording made by another code revision, which `tape.across(t)` reports.
-`tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.tasks` and `tape.args` each
-take a tape and a capability and return a **substitute**: a capability of the same type whose every operation, and every operation
-on a handle made through it, reaches the tape at its issue and at its delivery (CAP-8). A
-substitute differs from its source only by the values its operations return (CAP-5), so
-code that takes the capability runs unchanged on either.
+### CAP-9: Recording is outside the program
 
-- Recording, the tape performs each operation through its source's provider and records its
-  issue and its delivery in the order of the run.
-- Replaying, the tape performs nothing: it checks each issue against the recording before
-  any effect, delivers the recorded result and never reaches the source's provider, so a
-  replay has no host effect. An issue that differs from the recording, in its operation, its
-  object or its argument, is a divergence: it has no effect, and the tape refuses it.
-- `tape.open` refuses, before anything runs, a recording made by another build, whose build
-  identity, which covers every byte of the code that runs, differs from the opener's, and
-  one whose argument or limit differs. Opened across, a replay accepts a recording whose
-  code revision differs and still refuses the others.
-- `tape.end(take t)` waits until every operation on the tape that is in progress has
-  delivered, then seals the tape. After `end`, or once the tape is dropped, the tape refuses
-  every operation on a substitute or on a handle made through it, which never reaches the
-  source; cleaning such a handle closes the handle behind it, if there is one, and records
-  nothing. A dropped tape keeps what it recorded but is not sealed, as if the run had ended
-  there.
+No program operation, type or cause takes, returns, names or reports a recording or a
+replay. A **recording** is a trace of a run made without altering the code: the launcher or
+the test runner makes it from a **recording build** of the unmodified program, and replay
+is a tool run against a recording. Both are specified with the tools
+([recording and replay](../recording.md)), with the recording's format, which recordings a
+replay accepts, how a replay compares what the run does with what was recorded, and its
+verdicts.
 
-An operation its tape refuses fails before its issue with cause `Tape`
-([FAIL-2](failure.md#fail-2-causes)), which carries no reason: the reason is in the tape's
-verdict and in the printed cause. A refusal is sticky: once a tape refuses one operation it
-refuses every later one, so a replay that reaches the same point fails the same way.
+A **release build** contains no recording machinery. A recording build is the same program,
+for the same target and engine at the same optimisation, with that machinery added; it runs
+with recording off or on. In all three, a run given the same values at the replay point
+(CAP-8) in the same order makes the same observations
+([SEM-8](semantics.md#sem-8-determinism)): its values, output and outcome, its causes and
+their sites, its charges and `Capacity` refusals, its steps and slice ends, its events, and
+its provider operations and their arguments. A recording observes the run and decides
+nothing in it: it charges no limit, takes no step, adds no event, poll or provider
+operation, and changes no delivery. When a recording fails, the run goes on unchanged and
+the tool reports it; when a replay diverges, the tool ends that replay and reports where.
+Neither reaches the program.
 
-`tape.port(mut t)` returns a `Port` and its `PortEnd`, a way out of code that holds only
-substitutes that carries bytes and nothing else: `port.call(p, request, mut reply)` is a
-provider operation recorded like any other, and the holder of the `PortEnd` takes each call
-with `tape.serve` and replies with `tape.answer`. `tape.port`, `tape.serve` and
-`tape.answer` are not yet in the core source ([core](core.md)). The format of a tape is not
-part of the language.
-
-A tape is for diagnosis and testing and makes no durability promise: no tape write is
-synced, nothing resumes from a tape, and a crash ends the recording where it falls. The
-store is the one durability contract: a commit to a disk store survives any crash once
-`store.durable` has returned for it ([store](../../core/std/api/store.md)), and nothing
-else promises that work survives a crash. `host.sync` and `host.sync_dir` are the host
-barriers beneath it ([core](core.md#contracts-the-signatures-do-not-state)). A process
-that performs outside effects over several steps is durable only through its own commits,
-which the store's step wrapper makes for it
-([runner](../../core/std/api/runner.md#store-triggers)).
+A recording is for diagnosis and testing and makes no durability promise: nothing resumes
+from one, and a crash ends it where it falls. The store is the one durability contract: a
+commit to a disk store survives any crash once `store.durable` has returned for it
+([store](../../core/std/api/store.md)), and nothing else promises that work survives a
+crash. `host.sync` and `host.sync_dir` are the host barriers beneath it
+([core](core.md#contracts-the-signatures-do-not-state)). A program whose work must survive
+a crash without repeating an outside effect wraps each such effect in the store's step
+library, which commits a started row before the effect and its result before the result is
+used ([runner](../../core/std/api/runner.md#store-triggers)).

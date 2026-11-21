@@ -28,7 +28,7 @@ fn transport_receive[G: send, H: send](mut s: WireSession[G, H], mut w: WireWork
     take frame
 }
 
-pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
     let mut reg: Registry[(), ()] = registry()
     result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
     result.unwrap(transact(mut reg, code.describe(w3c_tx), 65536u64, DEFAULT_STEPS))
@@ -72,7 +72,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         let at = host.mono_ns(clock)
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
         let Req(e: take input) = result.unwrap(channel.try_receive(requests))
-        let Requested(Request(caller: _, stream: take named, p: p, key: _, arg: _, digest: _, reply_to: _, live: _, identity: _, seed: _)) = take input else {
+        let Requested(Request(stream: take named, p: p, ..)) = take input else {
             return false
         }
         let mut reply_bytes: Bytes = list.new()
@@ -126,7 +126,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     preserved && freed && no_head && refused_legacy && unchanged && readmitted
 }
 
-pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     let mut reg: Registry[(), ()] = registry()
     result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
     result.unwrap(transact(mut reg, code.describe(w3c_tx), 65536u64, DEFAULT_STEPS))
@@ -269,7 +269,7 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) ->
     result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true)))
     if let Some(take out) = transport_receive(mut rig.owner, mut rig.work) { return take out }
     let q = result.unwrap(channel.try_receive(rig.requests))
-    result.unwrap(head_arrival(mut rig.head, take q, false))
+    result.unwrap(head_arrival(mut rig.head, take q, false, false))
     if list.len(rig.head.group) != 0u64 { result.unwrap(gate(mut rig.head)) }
     let release = result.unwrap(channel.try_receive(rig.releases))
     let PubIn(e: take released) = take release
@@ -321,12 +321,13 @@ fn w3c_close(take rig: W3cRig) -> () waits {
 pub fn law_full_head_waits(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut rig = w3c_rig(tasks, clock, random)
     let filling = result.unwrap(head_lease(copy_wire_head(rig.owner.head)))
+    let deadline = int.saturating_add(host.mono_ns(clock), 10000000000u64)
     for p in 0u64 .. 5u64 {
         let key = w3c_retired()
         let arg: Bytes = list.new()
         let digest = store.request_digest(key, arg)
         let request = Request(caller: store.Caller(issuer: 1, subject: list.new()), stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
-            reply_to: wire_me(rig.owner), live: latest.handle(filling.live),
+            deadline: deadline, reply_to: wire_me(rig.owner), live: latest.handle(filling.live),
             identity: latest.handle(filling.identity), seed: result.unwrap(owner_seed(filling)))
         if let Posted = try_head(rig.owner.head, Req(e: Requested(take request))) {} else { return false }
     }
@@ -549,7 +550,7 @@ fn test_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> 
 // L28 (v2.19, outcome_dropped): a unit the writer drops loses its content and keeps its
 // Outcome rows, which ride in the owner's next Reset; a Dropped never counts toward the
 // protocol-error close, so a second one sends a second Reset rather than closing 1008.
-pub fn law_dropped_keeps_outcomes(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+pub fn law_dropped_keeps_outcomes(tasks: Tasks, c: Clock, r: Random) -> bool {
     let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, None, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
@@ -583,7 +584,7 @@ pub fn law_dropped_keeps_outcomes(tasks: Tasks, c: Clock, r: Random) -> bool wai
 }
 
 @test
-fn test_dropped_keeps_outcomes(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+fn test_dropped_keeps_outcomes(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] {
     if law_dropped_keeps_outcomes(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
@@ -609,7 +610,7 @@ fn repair_board(mark: u8) -> List[Row] {
 // image from empty (v2.20 item 5), so the client reaches the newest board with no `Reset`
 // (item 6 counts only coalesced rows against `budget`). Red when the owner keeps every
 // superseded repair queued: the sixth whole board puts it over `budget`, and it resets.
-pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
     let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, None, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
@@ -658,7 +659,7 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool waits {
 }
 
 @test
-fn test_repair_coalesced(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+fn test_repair_coalesced(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] {
     if law_repair_coalesced(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
@@ -671,7 +672,7 @@ fn held_quiet(from: Receiver[PubIn]) -> bool {
 // writer holds no content unit. Otherwise the publisher forgets the read set the held unit
 // was computed from, a later hit no longer fences it, and the writer releases it stale.
 // Red on v2.19.1, which sent each removal at once.
-pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
     let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, None, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
@@ -717,7 +718,7 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool w
 }
 
 @test
-fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] {
     if law_removal_waits_for_writer(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 

@@ -4,7 +4,7 @@ fn bad() -> Parcel { make[Parcel]() }
 // LANG-12 forbids call type arguments; LANG-11 fixes them from the expected type.
 // expect: refuse LANG-12 at 3:26
 // expect: message LANG-12 at 3:26 | type arguments are not written at a call
-// expect: message LANG-12 at 3:26 | let value: ResultType = callee()
+// expect: message LANG-12 at 3:26 | (callee() : ResultType)
 // library: std
 fn listed() -> std.codec.Codec[List[Parcel]] { std.codec.of_list[Parcel]() }
 fn indexed(fs: List[fn() -> u64]) -> u64 { fs[0u64]() }

@@ -258,6 +258,7 @@ impl Files {
             sockets: Default::default(),
             connected: Default::default(),
             tls: Default::default(),
+            tls_writes: Default::default(),
             #[cfg(feature = "record")]
             net_tape: None,
             #[cfg(feature = "record")]

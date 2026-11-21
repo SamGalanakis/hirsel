@@ -1239,47 +1239,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse("LANG-11", n, "inline.copy_from_slice requires Inline[T, N]");
                 return;
             }
-            if missing == 0
-                && matches!(path.0.name.as_str(), "sink" | "stage" | "port")
-                && path.0.modules == ["flow"]
-                && path.package_is("core", "1")
-            {
-                let (holds, parameters) = crate::decls::holds_components(&p.decls, &self.t, t);
-                if holds == 0 && parameters != 0 {
-                    let shown = self.shown(t);
-                    self.refuse(
-                        "CONC-14",
-                        n,
-                        format!(
-                            "the holds set of `{shown}` must be known empty when wiring a flow"
-                        ),
-                    );
-                    return;
-                }
-                if holds != 0 {
-                    let shown = self.shown(t);
-                    let mut message = format!(
-                        "flow values must hold nothing; `{shown}` holds an owned, scoped or authority value"
-                    );
-                    if let TyKind::Adt(d, xs) = self.t.kind(t).clone() {
-                        for field in p.decls[d.index()].all_fields() {
-                            let ty = crate::types::subst(&mut self.t, field.ty, &xs);
-                            let (holds, _) = crate::decls::holds_components(&p.decls, &self.t, ty);
-                            if holds != 0 {
-                                message = format!(
-                                    "flow values must hold nothing; field `{}` of `{shown}` has type `{}`",
-                                    field.name,
-                                    self.shown(ty)
-                                );
-                                break;
-                            }
-                        }
-                    }
-                    self.refuse("CONC-14", n, message);
-                    return;
-                }
-            }
-
             if missing != 0 {
                 let (a, b) = (self.shown(t), crate::decls::bound_names(missing));
                 let transfer = p.fns[f].path.package_is("core", "1")

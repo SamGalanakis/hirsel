@@ -238,10 +238,10 @@ fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, int
 fn equals[T: inert + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 fn same[T: codec + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 ```
-```hirsel unbuilt
+```hirsel
 type Tagged: inert { n: u64 }                             // refused: OWN-4, inert is computed
 ```
-```hirsel unbuilt
+```hirsel
 type DoorWire: codec { n: u64 }
 pub opaque type Door: codec via DoorWire (to: wire, from: open) { w: DoorWire, dir: Dir }   // refused: OWN-4, at dir: codec implies inert
 fn wire(d: Door) -> View[DoorWire] in d { view d.w }

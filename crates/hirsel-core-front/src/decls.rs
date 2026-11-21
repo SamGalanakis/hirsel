@@ -25,6 +25,9 @@ pub const ENCODED: u16 = PACKED | STREAMABLE;
 const FIXED_ENCODING: u16 = 512;
 /// A declared conditional codec promise (OWN-4, SEM-10).
 pub const CODEC: u16 = 1024;
+/// An empty holds set (OWN-2, OWN-4): computed like `plain`, never declared on a type.
+/// `codec`, `integer` and `float` imply it through [`param_holds`].
+pub const INERT: u16 = 2048;
 /// A declared bound set closed under implication (OWN-4): `integer` and `float` imply
 /// every bound all their admitted types have, and `streamable` implies `packed`.
 pub fn implied(mut b: u16) -> u16 {
@@ -50,6 +53,7 @@ pub fn bound_bit(name: &str) -> u16 {
         "packed" => PACKED,
         "streamable" => STREAMABLE,
         "codec" => CODEC,
+        "inert" => INERT,
         _ => ORDERED,
     }
 }
@@ -70,6 +74,7 @@ pub fn bound_names(b: u16) -> String {
         (PACKED, "packed"),
         (STREAMABLE, "streamable"),
         (CODEC, "codec"),
+        (INERT, "inert"),
     ];
     names
         .into_iter()
@@ -89,10 +94,11 @@ pub const H_OPAQUE: u8 = 16;
 
 /// What a rigid type parameter may hold (OWN-2): every category its bounds do not
 /// exclude. `plain` and `shareable` exclude resources, scoped values and region
-/// references. `codec` excludes all five held categories, including capabilities.
+/// references. `inert`, and `codec`, which implies it, exclude all five held categories,
+/// including capabilities.
 pub fn param_holds(bounds: u16) -> u8 {
     let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_REGION | H_OPAQUE;
-    if bounds & CODEC != 0 {
+    if bounds & (CODEC | INERT) != 0 {
         0
     } else if bounds & (PLAIN | SHAREABLE) != 0 {
         all & !(H_RESOURCE | H_SCOPED | H_REGION | H_OPAQUE)
@@ -544,11 +550,11 @@ impl Program<'_> {
                             for &b in item.tree.children(c) {
                                 let t = item.tree.node(b).token.unwrap();
                                 let bit = bound_bit(item.tree.token_text(item.text, t));
-                                if bit & (PLAIN | ENCODED) != 0 {
+                                if bit & (PLAIN | INERT | ENCODED) != 0 {
                                     self.refusals.push(refusal(
                                         "OWN-4",
                                         self.site(at, b),
-                                        "plain, packed and streamable are computed, never declared",
+                                        "plain, inert, packed and streamable are computed, never declared",
                                     ));
                                 }
                                 if bit == CODEC
@@ -2522,19 +2528,30 @@ pub(crate) fn holds_components(
     }
 }
 
-fn holds_nothing(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
-    let (fixed, mut parameters) = holds_components(decls, t, ty);
-    if fixed != 0 {
-        return false;
-    }
-    while parameters != 0 {
-        let i = parameters.trailing_zeros() as usize;
-        if param_holds(params.get(i).copied().unwrap_or(0)) != 0 {
-            return false;
+/// An empty holds set (OWN-2) for `ty`, reading each rigid parameter's bounds. It walks
+/// the type directly, so a parameter index past a bit mask's width needs no mask.
+pub(crate) fn holds_nothing(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    params: &[u16],
+) -> bool {
+    match t.kind(ty) {
+        TyKind::Param(i) => param_holds(params.get(*i as usize).copied().unwrap_or(0)) == 0,
+        TyKind::Tuple(xs) => xs.iter().all(|&x| holds_nothing(decls, t, x, params)),
+        TyKind::Anchored(x, _) | TyKind::Array(x, _) => holds_nothing(decls, t, *x, params),
+        TyKind::Fn(_, _, _, Callable::Plain) => true,
+        TyKind::Fn(..) | TyKind::View(_) | TyKind::Region(_) => false,
+        TyKind::Adt(d, xs) => {
+            let summary = &decls[d.index()].summary;
+            summary.holds == 0
+                && xs.iter().enumerate().all(|(i, &x)| {
+                    (i < 64 && summary.holds_params & (1 << i) == 0)
+                        || holds_nothing(decls, t, x, params)
+                })
         }
-        parameters &= parameters - 1;
+        _ => true,
     }
-    true
 }
 
 fn walk_holds(
@@ -2833,7 +2850,16 @@ fn missing_codec_declarations(
 
 /// The bounds a type has (OWN-4, SEM-7).
 pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> u16 {
-    bounds_inner::<true>(decls, t, ty, params)
+    bounds_inner::<true>(decls, t, ty, params) | inert(decls, t, ty, params)
+}
+
+/// `inert` (OWN-4) is exactly an empty holds set (OWN-2), so no other bound conditions it.
+fn inert(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> u16 {
+    if holds_nothing(decls, t, ty, params) {
+        INERT
+    } else {
+        0
+    }
 }
 
 pub(crate) fn missing_bounds(
@@ -2849,7 +2875,12 @@ pub(crate) fn missing_bounds(
     let available = if required & ENCODED == 0 {
         bounds_inner::<false>(decls, t, ty, params)
     } else {
-        has_bounds(decls, t, ty, params)
+        bounds_inner::<true>(decls, t, ty, params)
+    };
+    let available = if required & INERT != 0 {
+        available | inert(decls, t, ty, params)
+    } else {
+        available
     };
     required & !available
 }

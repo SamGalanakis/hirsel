@@ -1461,19 +1461,24 @@ fn enqueue(p: &Pool, u: &Unit) {
     notify_worker(p);
 }
 
-/// Wake a sleeping worker only if none is awake and looking for work.
+/// Wake a sleeping worker unless the workers already searching cover the
+/// queued units. A handed worker counts as searching before the OS runs it,
+/// so a burst wakes several workers at once instead of one wake at a time.
 fn notify_worker(p: &Pool) {
-    if p.searching.load(Ordering::SeqCst) > 0 {
+    let covered = |p: &Pool| {
+        let s = p.searching.load(Ordering::SeqCst);
+        s > 0 && p.queued.load(Ordering::SeqCst) <= s
+    };
+    if covered(p) {
         return;
     }
     if p.nsleep.load(Ordering::SeqCst) > 0 {
         let mut idle = p.idle.lock().unwrap();
-        if p.searching.load(Ordering::SeqCst) == 0
+        if !covered(p)
             && let Some(w) = idle.pop()
         {
             p.nsleep.fetch_sub(1, Ordering::SeqCst);
-            // The woken worker searches on this count; later wakes in the
-            // same burst see a searcher and leave the others parked.
+            // The woken worker searches on this count.
             p.searching.fetch_add(1, Ordering::SeqCst);
             p.handed[w].store(true, Ordering::Release);
             drop(idle);
@@ -1482,7 +1487,7 @@ fn notify_worker(p: &Pool) {
             return;
         }
     }
-    if p.poller_blocked.load(Ordering::SeqCst) {
+    if p.searching.load(Ordering::SeqCst) == 0 && p.poller_blocked.load(Ordering::SeqCst) {
         write_wake(p);
     }
 }

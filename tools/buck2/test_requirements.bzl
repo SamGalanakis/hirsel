@@ -46,5 +46,6 @@ OPENAT2_TEST_CASES = {
         "native::tests::test_replay_flag_records_and_replays",
         "native::tests::recording_cli_replays",
         "native::tests::recording_schedule_replays_across_engines",
+        "native::tests::parallel_test_cli_preserves_rows_and_isolates_shared_directory",
     ],
 }

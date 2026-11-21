@@ -35,7 +35,7 @@ struct ReachableOutput<'a> {
     census: std::collections::BTreeMap<&'a str, usize>,
     first_stops: &'a [crate::GapStop],
 }
-fn hex(hash: hirsel_core_ids::ContentHash) -> String {
+pub(crate) fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 /// Local loading still parses disk input under CA4's decoder. Size limits
@@ -178,6 +178,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut n_place = None;
     let mut place_timeout = Duration::from_secs(10);
     let mut test_filter = None;
+    let mut test_jobs = None;
     let mut test_timeout = None;
     let mut explicit_limit = false;
     let mut backend = None;
@@ -289,6 +290,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 grant_mask |= 1 << kind;
             }
             Opt::Filter => test_filter = Some(value),
+            Opt::TestJobs => {
+                test_jobs = Some(
+                    value
+                        .parse()
+                        .map_err(|_| "-j expects a positive job count")?,
+                );
+            }
             Opt::TestTimeout => {
                 let seconds: u64 = value.parse()?;
                 if seconds == 0 {
@@ -845,7 +853,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
-    let mut native_options = if native_command && (test_command || accepted) {
+    let native_options = if native_command && (test_command || accepted) {
         let options = prepared.expect("a native command prepares its options")?;
         if options.logical_charge_report.is_some() {
             eprintln!(
@@ -858,8 +866,6 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         None
     };
     if test_command {
-        let options = native_options.as_mut().unwrap();
-        let output_dir = options.output.clone();
         let tests: Vec<_> = product
             .tests()
             .filter(|path| {
@@ -871,21 +877,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .collect();
         let mut rows = Vec::new();
         let mut failed = false;
-        for test in &tests {
-            options.output = output_dir.join(hex(hirsel_core_ids::ContentHash::of_bytes(
-                test.to_string().as_bytes(),
-            )));
-            let result = if test_replay {
-                product.run_test_with_replay(
-                    test,
-                    options,
-                    test_timeout,
-                    &runner,
-                    expect_verdict.as_deref(),
-                )
-            } else {
-                product.run_test_with_runner(test, options, test_timeout, &runner)
-            };
+        let batch = crate::test_run::TestBatch {
+            jobs: test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?,
+            timeout: test_timeout,
+            runner: &runner,
+            replay: test_replay,
+            expect_verdict: expect_verdict.as_deref(),
+        };
+        batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
             let row = match result {
                 Ok(outcome) => {
                     let passed = outcome.passed();
@@ -919,7 +918,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 }
             };
             rows.push(row);
-        }
+        });
         let passed = !tests.is_empty() && !failed;
         if json {
             println!("{}", serde_json::json!({"passed":passed,"tests":rows}));

@@ -1,8 +1,10 @@
 //! PROG-4: a checked test uses the ordinary entry ABI, in a fresh process. A run
 //! stop can end that process without ending another test's run.
 use crate::{CheckProduct, NativeOptions, NativeStop};
-use hirsel_core_ids::DefPath;
+use hirsel_core_ids::{ContentHash, DefPath};
+use std::collections::BTreeMap;
 use std::io::{self, Read};
+use std::num::NonZeroUsize;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -88,6 +90,153 @@ impl TestOutcome {
     }
 }
 
+pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
+    let mut mask = vec![0usize; 16];
+    loop {
+        // SAFETY: The kernel can write up to the allocated byte length to mask.
+        let status = unsafe {
+            libc::sched_getaffinity(
+                0,
+                std::mem::size_of_val(mask.as_slice()),
+                mask.as_mut_ptr().cast(),
+            )
+        };
+        if status == 0 {
+            let count = mask.iter().map(|word| word.count_ones() as usize).sum();
+            return NonZeroUsize::new(count)
+                .ok_or_else(|| io::Error::other("empty CPU affinity mask"));
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINVAL) {
+            return Err(error);
+        }
+        // A fixed cpu_set_t can be too small for the kernel's CPU mask.
+        mask.resize(mask.len() * 2, 0);
+    }
+}
+
+type TestResult = Result<TestOutcome, NativeStop>;
+
+pub(crate) struct TestBatch<'a> {
+    pub jobs: NonZeroUsize,
+    pub timeout: Option<Duration>,
+    pub runner: &'a Runner,
+    pub replay: bool,
+    pub expect_verdict: Option<&'a str>,
+}
+
+impl TestBatch<'_> {
+    pub(crate) fn run(
+        self,
+        product: &CheckProduct,
+        tests: &[DefPath],
+        options: &NativeOptions,
+        mut report: impl FnMut(&DefPath, TestResult),
+    ) {
+        let output = |test: &DefPath| {
+            options
+                .output
+                .join(crate::request::hex(ContentHash::of_bytes(
+                    test.to_string().as_bytes(),
+                )))
+        };
+        let mut test_options = options.clone();
+        if self.jobs.get() == 1
+            || tests.len() <= 1
+            || self.replay
+            || options.recording
+            || options.replay.is_some()
+            || options.logical_charge_report.is_some()
+            || !matches!(self.runner, Runner::Native)
+            || std::env::var_os("HIRSEL_CONTROL_FD").is_some()
+        {
+            for test in tests {
+                test_options.output = output(test);
+                let result = if self.replay {
+                    product.run_test_with_replay(
+                        test,
+                        &test_options,
+                        self.timeout,
+                        self.runner,
+                        self.expect_verdict,
+                    )
+                } else {
+                    product.run_test_with_runner(test, &test_options, self.timeout, self.runner)
+                };
+                report(test, result);
+            }
+            return;
+        }
+
+        let mut next_row = 0;
+        let mut rows = BTreeMap::new();
+        let mut complete = |index, result| {
+            rows.insert(index, result);
+            while let Some(result) = rows.remove(&next_row) {
+                report(&tests[next_row], result);
+                next_row += 1;
+            }
+        };
+
+        std::thread::scope(|scope| {
+            let (completed, results) = std::sync::mpsc::channel();
+            let unwrap = |outcome: std::thread::Result<TestResult>| {
+                outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            };
+            let mut running = 0;
+            for (index, test) in tests.iter().enumerate() {
+                let exclusive = product.test_needs_exclusive_run(test, options);
+                let slots = if exclusive { 0 } else { self.jobs.get() - 1 };
+                while running > slots {
+                    let (index, outcome) =
+                        results.recv().expect("running child reports its result");
+                    complete(index, unwrap(outcome));
+                    running -= 1;
+                }
+
+                test_options.output = output(test);
+                if exclusive {
+                    complete(
+                        index,
+                        product.run_test_with_runner(
+                            test,
+                            &test_options,
+                            self.timeout,
+                            self.runner,
+                        ),
+                    );
+                    continue;
+                }
+                let mut command = match product.test_command(test, &test_options, self.runner) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        complete(index, Err(error));
+                        continue;
+                    }
+                };
+                let completed = completed.clone();
+                let timeout = self.timeout;
+                let waiter = std::thread::Builder::new().spawn_scoped(scope, move || {
+                    // Report panics too so the caller can unwind while the
+                    // scope joins the remaining children.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        test_outcome(test, &mut command, timeout)
+                    }));
+                    let _ = completed.send((index, outcome));
+                });
+                match waiter {
+                    Ok(_) => running += 1,
+                    Err(error) => complete(index, Err(error.into())),
+                }
+            }
+            drop(completed);
+            for (index, outcome) in results {
+                complete(index, unwrap(outcome));
+            }
+        });
+    }
+}
+
 impl CheckProduct {
     /// Tests declared in this request's source modules. Published dependencies
     /// retain their reference restrictions but are not rediscovered as local tests.
@@ -124,22 +273,53 @@ impl CheckProduct {
         timeout: Option<Duration>,
         runner: &Runner,
     ) -> Result<TestOutcome, NativeStop> {
+        test_outcome(
+            test,
+            &mut self.test_command(test, options, runner)?,
+            timeout,
+        )
+    }
+
+    fn test_command(
+        &self,
+        test: &DefPath,
+        options: &NativeOptions,
+        runner: &Runner,
+    ) -> Result<Command, NativeStop> {
         if !self.test_entries.contains_key(test) {
             return Err(NativeStop::Entry(format!(
                 "{test} is not a discovered @test"
             )));
         }
         let built = self.build(test, options)?;
-        let (output, timed_out, wall_time) = execute(
-            &mut runner.command(&std::fs::canonicalize(&built.executable)?),
-            timeout,
-        )?;
-        Ok(TestOutcome {
-            definition: test.clone(),
-            output,
-            timed_out,
-            wall_time,
-        })
+        Ok(runner.command(&std::fs::canonicalize(&built.executable)?))
+    }
+
+    fn test_needs_exclusive_run(&self, test: &DefPath, options: &NativeOptions) -> bool {
+        let Some(Ok(entry)) = self.test_entries.get(test) else {
+            return false;
+        };
+        let grants = |kind| options.grant_mask & (1 << crate::grant_kind(kind).unwrap()) != 0;
+        entry
+            .parameters
+            .iter()
+            .any(|param| match param.ty.as_str() {
+                // Unbound grants can open host handles during startup, but only a
+                // bound parameter can use one. Drain even unbound runs before
+                // starting a test that could change another run's startup inputs.
+                "core@1/core/Dir" => !options.directories.is_empty(),
+                "core@1/core/Net" => grants("Net"),
+                "core@1/core/Stdin" => grants("Stdin"),
+                "core@1/core/Secret" => !options.secret_grants.is_empty(),
+                "core@1/core/Clock"
+                | "core@1/core/Random"
+                | "core@1/core/Stdout"
+                | "core@1/core/Stderr"
+                | "core@1/core/Env"
+                | "core@1/core/Process"
+                | "core@1/core/Tasks" => false,
+                _ => true,
+            })
     }
 
     /// Run a checked test in the recording build with recording on, require it to
@@ -236,6 +416,16 @@ impl CheckProduct {
             replay_stderr.trim()
         )))
     }
+}
+
+fn test_outcome(test: &DefPath, command: &mut Command, timeout: Option<Duration>) -> TestResult {
+    let (output, timed_out, wall_time) = execute(command, timeout)?;
+    Ok(TestOutcome {
+        definition: test.clone(),
+        output,
+        timed_out,
+        wall_time,
+    })
 }
 
 fn execute(

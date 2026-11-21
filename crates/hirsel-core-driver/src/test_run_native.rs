@@ -80,3 +80,123 @@ fn prog4_independent_runs_limits_and_outcomes_cranelift() { prog4_runs(Backend::
 #[test]
 #[ignore = "explicit native integration target"]
 fn prog4_independent_runs_limits_and_outcomes_llvm() { prog4_runs(Backend::Llvm); }
+
+#[test]
+fn parallel_test_cli_preserves_rows_and_isolates_shared_directory() {
+    crate::openat2_required::require();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+@test
+fn a_timeout(c: Clock) -> Result[(), ()] waits {
+    host.sleep_until(c, host.mono_ns(c) + 60000000000u64)
+    Ok(())
+}
+@test
+fn b_pass(out: Stdout) -> Result[(), ()] waits {
+    result.unwrap(stdout.write(out, "finished"))
+    Ok(())
+}
+@test
+fn c_error() -> Result[(), ()] { Error(()) }
+@test
+fn d_missing_grant(input: Stdin) -> Result[(), ()] { Ok(()) }
+@test
+fn e_build_refused() -> Result[(), ()] { missing_definition() }
+
+fn write_shared(dir: Dir, clock: Clock) -> Result[(), ()] waits {
+    let mut file = result.unwrap(host.open(dir, "shared", CreateNew))
+    result.unwrap(host.write(mut file, string.as_bytes("test")))
+    result.unwrap(host.close(take file))
+    host.sleep_until(clock, host.mono_ns(clock) + 100000000u64)
+    result.unwrap(host.remove(dir, "shared"))
+    Ok(())
+}
+@test
+fn f_first_writer(dir: Dir, clock: Clock) -> Result[(), ()] waits { write_shared(dir, clock) }
+@test
+fn g_second_writer(dir: Dir, clock: Clock) -> Result[(), ()] waits { write_shared(dir, clock) }
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let manifest = dir.path().join("inputs.json");
+    std::fs::write(&manifest, serde_json::to_vec(&request.inputs).unwrap()).unwrap();
+    let options = native_options(Backend::Cranelift, dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let runtime = options
+        .runtime
+        .canonicalize()
+        .expect("test runtime archive");
+    let cc = cc.canonicalize().expect("test link driver");
+    let grant = dir.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    let args = [
+        "test",
+        "--inputs",
+        manifest.to_str().unwrap(),
+        "--source-core",
+        "--runtime",
+        runtime.to_str().unwrap(),
+        "--cc",
+        cc.to_str().unwrap(),
+        "--store",
+        request.store.to_str().unwrap(),
+        "--limit",
+        "1048576",
+        "--json",
+        "--test-timeout",
+        "1",
+        "--grant",
+        "Clock",
+        "--grant",
+        "Stdout",
+        "--dir",
+        grant.to_str().unwrap(),
+        "-j",
+    ];
+    let run = |jobs| {
+        let args = args
+            .into_iter()
+            .chain([jobs])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let (status, stdout, stderr) = process::tape_request(&args, dir.path());
+        assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+        let mut result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(result["passed"], false);
+        let rows = result["tests"].as_array_mut().unwrap();
+        let expected = [
+            ("a_timeout", false, Some(serde_json::Value::Null), true),
+            ("b_pass", true, Some(0.into()), false),
+            ("c_error", false, Some(1.into()), false),
+            ("d_missing_grant", false, Some(103.into()), false),
+            ("e_build_refused", false, None, false),
+            ("f_first_writer", true, Some(0.into()), false),
+            ("g_second_writer", true, Some(0.into()), false),
+        ];
+        assert_eq!(rows.len(), expected.len(), "{rows:?}");
+        for (row, (name, passed, status, timed_out)) in rows.iter_mut().zip(expected) {
+            assert_eq!(row["definition"], format!("app@1/main/{name}"));
+            assert_eq!(row["passed"], passed, "{row}");
+            assert_eq!(row.get("status"), status.as_ref(), "{row}");
+            let wall_ms = row.as_object_mut().unwrap().remove("wall_ms").unwrap();
+            if status.is_some() {
+                assert_eq!(row["timed_out"], timed_out, "{row}");
+                assert!(wall_ms.as_f64().unwrap() >= if timed_out { 1000.0 } else { 0.0 });
+            } else {
+                assert!(row["stopped"].is_string(), "{row}");
+                assert!(wall_ms.is_null(), "{row}");
+            }
+        }
+        assert_eq!(rows[1]["stdout"], "finished");
+        assert!(std::fs::read_dir(&grant).unwrap().next().is_none());
+        result
+    };
+    assert_eq!(run("1"), run("4"));
+}

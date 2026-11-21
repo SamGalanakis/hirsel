@@ -385,6 +385,14 @@ Returned owned errors are dropped by emitted FORM glue before their outcome is
 reported; a failure from that cleanup is a failed test too. An `Exit` never makes
 an `Error` pass. The driver does not share a test's run or root bookkeeping.
 
+`-j N` limits concurrent children and defaults to the CPU count in the
+process affinity mask. `-j 1` runs everything serially. Tests with a granted
+Dir, Net, Stdin or Secret run alone, in discovery order. Captured output
+streams, Tasks, Env snapshots and Process stop handles are local to each
+child. Clock and Random grants also allow parallel runs. Replay, emulator
+runs and runs with a shared charge report or inherited host control run
+serially. Rows always appear in discovery order.
+
 Human output is one `pass <definition>` or `fail <definition>: <reason>` line per
 selected test. Error outcomes say `error`; failures, stops and setup refusals
 include the run's stderr, with lines joined by ` | `. `--json` instead retains

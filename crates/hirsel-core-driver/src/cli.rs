@@ -22,6 +22,7 @@ pub enum OptionId {
     Dir,
     Grant,
     Filter,
+    TestJobs,
     TestTimeout,
     Release,
     DebugLines,
@@ -434,6 +435,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("TEXT"),
         ["test"],
         "Select test definition paths containing TEXT."
+    ),
+    option!(
+        TestJobs,
+        ["-j"],
+        Some("N"),
+        ["test"],
+        "Run up to N isolated test children at once. Defaults to the number of CPUs in the process affinity mask."
     ),
     option!(
         TestTimeout,

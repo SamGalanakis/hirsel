@@ -26,8 +26,7 @@ class InstructionGuard(unittest.TestCase):
         baseline["rows"] = [{
             "key": "arena/CLBG::Mandelbrot",
             "suite": "arena",
-            "mode": "certified",
-            "certified": True,
+            "mode": "release",
             "flags": ["--backend", "llvm", "--release"],
             "argv": ["./clbg-64", "one-iteration.json", "CLBG::Mandelbrot"],
             "affinity": [10],
@@ -85,7 +84,7 @@ class InstructionGuard(unittest.TestCase):
             def record_build(receipt):
                 row, = receipt["rows"]
                 row["build_record"] = build_record({
-                    "accepted": True, "native": {"linked": True, "step_charging_elided": True},
+                    "accepted": True, "native": {"linked": True},
                     "measurement": {key: row[key] for key in ("compiler_sha256", "runtime_archive_sha256",
                                                               *build.MANIFEST_HASHES, "image_sha256", "flags")},
                 })

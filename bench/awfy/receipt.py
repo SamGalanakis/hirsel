@@ -24,14 +24,14 @@ import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 
-VERSION = 4
+VERSION = 5
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
 GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256")
-WORKLOAD_IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", "fixture_sha256")
+WORKLOAD_IDENTITY = ("suite", "mode", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
 
 
@@ -93,7 +93,6 @@ def build_record(report):
         **report["measurement"],
         "accepted": report["accepted"] is True and not report.get("stopped"),
         "linked": native["linked"],
-        "certified": native.get("step_charging_elided", False),
     }
 
 
@@ -105,7 +104,7 @@ def verified_build(row):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
-    return record.get("certified") is row["certified"] and record.get("flags") == row["flags"]
+    return record.get("flags") == row["flags"]
 
 
 def runtime_case(suite, name, directory, command, marker, fixture, tools):
@@ -134,12 +133,10 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
     for field, value in checked.items():
         if provenance[field] != value:
             raise ValueError(f"{path}: {field} differs from the build")
-    certified = native.get("step_charging_elided", False)
     return {
         "key": f"{suite}/{name}",
         "suite": suite,
-        "mode": "certified" if certified else "bounded",
-        "certified": certified,
+        "mode": "release",
         "flags": provenance["flags"],
         "argv": [f"./{binary.name}", *map(str, command[1:])],
         "cwd": str(directory),
@@ -292,13 +289,12 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False):
 
 def validate_row(key, row):
     for field in IDENTITY:
-        if field not in row or row[field] is None or (field != "certified" and not row[field]):
+        if field not in row or row[field] is None or not row[field]:
             raise ValueError(f"missing {field}")
-    suite, mode, certified = row["suite"], row["mode"], row["certified"]
+    suite, mode = row["suite"], row["mode"]
     if (suite not in measure.SUITES or not key.startswith(suite + "/")
-            or type(certified) is not bool
             or (mode not in ("cold", "edit") if suite == "compile"
-                else mode != ("certified" if certified else "bounded"))
+                else mode != "release")
             or any(not re.fullmatch("[a-f0-9]{64}", row[field])
                    for field in (*CANDIDATE_HASHES, "fixture_sha256"))
             or not all(isinstance(row[field], list)
@@ -635,9 +631,9 @@ def multicore_peer_pairs(args, siblings, env, report):
         log = bins / f"hirsel-{name}.log"
         report = next((json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")), {})
         native = report.get("native") or {}
-        if not (report.get("accepted") and native.get("linked") and native.get("step_charging_elided")
+        if not (report.get("accepted") and native.get("linked")
                 and Path(native["executable"]).resolve() == Path(hirsel["argv"][0]).resolve()):
-            raise ValueError(f"{key}: expected a certified Hirsel build")
+            raise ValueError(f"{key}: expected a linked Hirsel build")
         for peer in args.peer:
             status = max(status, run_cycle_pairs(f"{key} Hirsel/{peer}", command(peer.title()),
                                                 hirsel, args, siblings, env, report, peer=True))

@@ -9,13 +9,13 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="canonical" href="https://samgalanakis.github.io/hirsel/">
+  <link rel="canonical" href="https://hirsel.ai/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="hirsel">
   <meta property="og:title" content="hirsel: Good fences make fast systems.">
   <meta property="og:description" content="A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.">
-  <meta property="og:url" content="https://samgalanakis.github.io/hirsel/">
-  <meta property="og:image" content="https://samgalanakis.github.io/hirsel/social-card.png">
+  <meta property="og:url" content="https://hirsel.ai/">
+  <meta property="og:image" content="https://hirsel.ai/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="The hirsel ram mark and wordmark with the line: Good fences make fast systems.">
@@ -35,17 +35,17 @@
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--cream);color:var(--ink)}
-body{font:400 16px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+body{font:400 16px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;font-kerning:normal;-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 button:disabled{cursor:default;opacity:.38}
 a{color:inherit}
 canvas#c{position:fixed;inset:0;width:100vw;height:100vh;display:block}
-.wmfont{font-family:"Archivo Black","Arial Black","Inter",system-ui,sans-serif;font-weight:900;letter-spacing:-.035em}
+.wmfont{font-family:"Archivo Black","Arial Black","Inter",system-ui,sans-serif;font-weight:400;font-synthesis:none;letter-spacing:-.035em}
 
 header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:28px;padding:18px 48px;z-index:3}
 header .wm{font-size:22px;line-height:1}
 header .idx{flex:1;min-width:0}
-header .strip{position:relative;display:flex;gap:18px;font-size:13.5px;font-weight:500;white-space:nowrap}
+header .strip{position:relative;display:flex;gap:20px;font-size:14px;font-weight:500;white-space:nowrap}
 header .strip button{color:var(--mute);padding:4px 0;border-bottom:1.5px solid transparent;transition:color .3s,border-color .3s;flex:none}
 header .strip button:hover{color:var(--ink)}
 header .strip button.on{color:var(--ink);border-bottom-color:var(--ink)}
@@ -58,27 +58,33 @@ header .gh svg{width:20px;height:20px;display:block}
 .land{position:fixed;left:48px;bottom:52px;z-index:2;pointer-events:none}
 .land>*{pointer-events:auto}
 .land h1{margin:0;font-size:clamp(76px,12.5vw,176px);line-height:.8}
-.land .head{margin:22px 0 0 4px;font-size:24px;line-height:1.2;font-weight:600;letter-spacing:-.015em;color:var(--ink)}
-.land .tag{margin:8px 0 0 5px;max-width:42ch;font-size:14px;line-height:1.5;font-weight:400;color:#3d3b35}
-.land .in{margin:22px 0 0 4px;font-size:15px;font-weight:500;display:inline-flex;gap:10px;align-items:center;border-bottom:1.5px solid var(--ink);padding-bottom:3px}
+.land .head{margin:24px 0 0 4px;font-size:26px;line-height:1.2;font-weight:600;letter-spacing:-.02em;color:var(--ink);text-wrap:balance}
+.land .tag{margin:10px 0 0 5px;max-width:40ch;font-size:16px;line-height:1.5;font-weight:400;color:#3d3b35;text-wrap:pretty}
+.land .in{margin:26px 0 0 4px;font-size:16px;font-weight:500;display:inline-flex;gap:10px;align-items:center;border-bottom:1.5px solid var(--ink);padding-bottom:3px}
 .land .in span{transition:transform .5s cubic-bezier(.2,.7,.2,1)}
 .land .in:hover span{transform:translateX(6px)}
 
 .panel{position:fixed;left:48px;top:50%;transform:translateY(-50%);width:340px;z-index:2}
-.panel .eyebrow{margin:0 0 10px;font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--mute)}
-.panel h2{margin:0;font:400 31px/1.12 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;letter-spacing:-.025em}
-.panel .body{margin:18px 0 0;font-size:16px;line-height:1.6;color:#2b2a26;max-width:34ch}
+.panel h2{margin:0;font:400 31px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em;text-wrap:balance}
+.panel .body{margin:20px 0 0;font-size:16px;line-height:1.58;color:#2b2a26;max-width:34ch;text-wrap:pretty}
 .panel .body p{margin:0}
 .panel .body .half{margin-top:12px}
-.panel .body .half b{display:block;margin-bottom:1px;font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--mute)}
+.panel .body .half b{font-weight:600;color:var(--ink);text-transform:capitalize}
+.panel .body .half b::after{content:".\2002"}
+.panel .body .half p{display:inline}
 .det{margin-top:14px}
-.det button{font-size:13px;font-weight:500;color:var(--mute);border-bottom:1px solid var(--rule);padding-bottom:1px;transition:color .25s,border-color .25s}
+.det button{font-size:14px;font-weight:500;color:var(--mute);border-bottom:1px solid var(--rule);padding-bottom:1px;transition:color .25s,border-color .25s}
 .det button:hover{color:var(--ink);border-bottom-color:var(--ink)}
-.walk{display:flex;justify-content:space-between;gap:16px;margin-top:30px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
+.walk{display:flex;justify-content:space-between;gap:16px;margin-top:28px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
 .walk button{color:var(--mute)} .walk button:hover{color:var(--ink)}
 .walk .nx{margin-left:auto}
 :focus-visible{outline:2px solid var(--ink);outline-offset:3px}
 
+@media (max-width:920px) and (min-width:701px){
+  header{padding:18px 32px;gap:20px}
+  header .strip{gap:13px;font-size:13px}
+  .land,.panel{left:32px}
+}
 @media (max-width:700px){
   header{padding:12px 16px 0;gap:12px}
   header .wm{font-size:19px}
@@ -90,17 +96,15 @@ header .gh svg{width:20px;height:20px;display:block}
   header .stepper span{min-width:0;text-align:center;padding:0 2px}
   .land{left:16px;right:16px;bottom:34px}
   .land h1{font-size:84px}
-  .land .head{font-size:20px;margin-top:16px;margin-left:3px}
-  .land .tag{font-size:13px;margin-top:6px;margin-left:3px}
-  .land .in{margin-top:16px}
+  .land .head{font-size:21px;margin-top:16px;margin-left:3px}
+  .land .tag{font-size:15px;margin-top:8px;margin-left:3px}
+  .land .in{margin-top:20px}
   .panel{left:16px;right:16px;top:auto;bottom:14px;transform:none;width:auto;max-height:52vh;overflow:auto}
-  .panel .eyebrow{margin-bottom:6px}
-  .panel h2{font-size:23px}
+  .panel h2{font-size:24px}
   .panel .body{margin-top:10px;font-size:15px;line-height:1.5;max-width:none}
-  .panel .body .half{margin-top:7px}
-  .panel .body .half b{font-size:11px}
+  .panel .body .half{margin-top:8px}
   .det{margin-top:8px}
-  .walk{margin-top:14px;padding-top:10px}
+  .walk{display:none}
 }
 </style>
 </head>
@@ -142,12 +146,11 @@ header .gh svg{width:20px;height:20px;display:block}
 </section>
 
 <section class="panel" id="panel" aria-live="polite" hidden>
-  <p class="eyebrow" id="pName"></p>
   <h2 id="pTitle"></h2>
   <div class="body" id="pBody"></div>
   <div class="det" id="det" hidden>
     <!-- On the real site the run could be streamed over SSE from a seeded simulation on the server. -->
-    <button id="replayBtn">&#8634; replay</button>
+    <button id="replayBtn">Replay the run</button>
   </div>
   <div class="walk">
     <button id="prevBtn">&larr; <span></span></button>
@@ -172,9 +175,9 @@ const COPY = {
   bounded: ['Bounded', 'A full patch refuses the next mouthful.',
     'Every allocation is made against a limit. Running out is the ordinary failure Capacity, which the program catches and handles, and then it carries on. Bound scopes nest one limit inside another.'],
   deterministic: ['Deterministic', 'One run, every time.',
-    'Given the same outside inputs and limits, a program behaves identically on every engine and build, down to the moment it runs out of memory. No flag, build mode, optimiser or engine changes what a program means. A run can also be recorded from outside, without altering the program, and replayed.'],
+    'Given the same outside inputs and limits, a program behaves identically on every engine and build, down to the moment it runs out of memory. No flag, build mode, optimiser or engine changes what a program means. A run can be recorded from outside, without altering the program, and replayed.'],
   authority: ['Explicit authority', 'Only a sheep handed the key goes through the gate.',
-    'Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed, and nothing else.'],
+    'Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed.'],
   local: ['Local', 'Each sheep needs only its own ground.',
     'Correct code needs no global knowledge. Checking a definition reads only its own body and the declarations it names, and each refusal names one rule and one site.'],
   fast: ['Fast', 'A straight line across the hill.',
@@ -206,8 +209,8 @@ const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const INK = '#11110F', RED = '#CB271F', BG = '#FBF6EC';
 /* the hill's tonal ramp: cream > oat > straw > peat > ink. Moss is the one quiet secondary, kept
    to grazing ground inside a wall; red stays with the one red ram and Capacity. */
-const GROUND = '#ECE3CF', GROUND2 = '#E2D7BE', HILL = '#F3EBDB', USED = '#4A463D';
-const OAT = '#E6DCC4', STRAW = '#D3C4A2', PEAT = '#8C7458', PEAT_D = '#4E3E2E', MOSS = '#DFDCC0';
+const GROUND = '#ECE3CF', GROUND2 = '#E2D7BE', HILL = '#F3EBDB';
+const OAT = '#E6DCC4', PEAT = '#8C7458', PEAT_D = '#4E3E2E', MOSS = '#DFDCC0';
 function sheep(x, y, s, face, red, a) {
   if (a <= .01) return;
   if (s > 14) { ctx.save(); ctx.globalAlpha = a * .085; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x + (face > 0 ? -1 : 1) * s * .02, y + s * .02, s * .4, s * .095, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
@@ -222,10 +225,6 @@ function patch(x, y, hw, hh2, a, col) {
   if (a <= .01) return;
   ctx.save(); ctx.globalAlpha = a * .07; ctx.fillStyle = INK; dia(x, y + 1.6, hw, hh2); ctx.fill(); ctx.restore();
   fillDia(x, y, hw, hh2, col || GROUND, a);
-}
-function label(txt, x, y, a, align, size, weight, col) {
-  ctx.globalAlpha = a; ctx.fillStyle = col || INK; ctx.font = (weight || 500) + ' ' + (size || 11.5) + 'px Inter, system-ui, sans-serif';
-  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, x, y); ctx.globalAlpha = 1;
 }
 /* every in-scene callout: small type set straight on the ground, cut out of whatever lies under
    it by a cream halo, and, where it names a thing, a short hairline pinned to that thing with a
@@ -433,8 +432,10 @@ SC.hill = (g) => {
       }
     }
   });
+  const rp = MOB ? [W * .8, g.rTo + (H - g.rTo) * .42] : [W * .36, g.rTo + (H - g.rTo) * .22];
+  let redSlot = 0; slots.forEach((l, j) => { if (Math.hypot(l.cx - rp[0], l.cy - rp[1]) < Math.hypot(slots[redSlot].cx - rp[0], slots[redSlot].cy - rp[1])) redSlot = j; });
   return {
-    slots, redSlot: 0, ids: [], key: 0,
+    slots, redSlot, ids: [], key: 0,
     ground(t, a) {
       for (const w of segs) drawWall(w.A, w.B, w.st, a * .19 * w.fa, w.k);
       for (const p of posts) { const k = (MOB ? .5 : .6) + .3 * cl01((p[1] - g.rTo) / (H - g.rTo)); post(p[0], p[1], a * .3 * sm((p[1] - top) / 220), k); }
@@ -513,8 +514,8 @@ SC.parallel = (g) => {
 SC.bounded = (g) => {
   const b = g.box, ids = [];
   const OC = 7, OR = 5;
-  const ts = Math.min(b.w * .9 / ((OC + OR) / 2), b.h * .62 / ((OC + OR) / 4), MOB ? 62 : 106);
-  const cx = b.x + b.w * .5, cy = b.y + b.h * (MOB ? .53 : .5);
+  const ts = Math.min(b.w * .88 / ((OC + OR) / 2), b.h * .62 / ((OC + OR) / 4), MOB ? 62 : 118);
+  const cx = b.x + b.w * .5, cy = b.y + b.h * (MOB ? .53 : .45);
   const K = (U, V) => [cx + (U - V - (OC - OR) / 2) * ts / 2, cy + (U + V - (OC + OR) / 2) * ts / 4];
   const tiles = [];
   for (let v = 0; v < OR; v++) for (let u = 0; u < OC; u++) tiles.push({ u, v, c: K(u + .5, v + .5), inner: u >= 1 && u <= 3 && v >= 1 && v <= 2 });
@@ -587,9 +588,9 @@ SC.bounded = (g) => {
       }
       const ca = capA(t);
       if (ca > .01) {
-        /* the failure is named off the field, up the grid's own axis from the red ram's head */
-        const pin = [r.x + (r.face > 0 ? s * .12 : -s * .12), r.y - s * .98], at = MOB ? [pin[0] - ts * .1, pin[1] - ts * .95] : [pin[0] - ts * .55, pin[1] - ts * .3];
-        note('Capacity', at[0], at[1], a * ca, { align: MOB ? 'center' : 'right', col: RED, size: MOB ? 12.5 : 14, to: pin, sub: 'caught, carries on', subA: sm((t - REF - 50) / 16) });
+        /* named where the mouthful was refused; it stays there as the ram carries on */
+        const sz = MOB ? 12.5 : 14, head = HOME[1] - s * .98;
+        note('Capacity', HOME[0], head - sz * 2 - 8, a * ca, { col: RED, size: sz, sub: 'caught, carries on', subA: sm((t - REF - 50) / 16) });
       }
     },
   };
@@ -644,8 +645,8 @@ const DET = (() => {
 })();
 SC.deterministic = (g) => {
   const b = g.box, ids = [], { C, R, start, steps, NS, STEP, MOVE } = DET;
-  const ts = Math.min(b.w * .86 / ((C + R) / 2), b.h * .7 / ((C + R) / 4), MOB ? 62 : 102);
-  const cx = b.x + b.w * .5, cy = b.y + b.h * (MOB ? .52 : .47);
+  const ts = Math.min(b.w * .86 / ((C + R) / 2), b.h * .7 / ((C + R) / 4), MOB ? 62 : 124);
+  const cx = b.x + b.w * .5, cy = b.y + b.h * (MOB ? .52 : .43);
   const K = (U, V) => [cx + (U - V - (C - R) / 2) * ts / 2, cy + (U + V - (C + R) / 2) * ts / 4];
   const cell = p => K(p[0] + .5, p[1] + .5);
   const s = MOB ? 30 : 42;
@@ -744,7 +745,7 @@ SC.authority = (g) => {
         ctx.save(); ctx.globalAlpha = a * r.a; ctx.strokeStyle = INK; ctx.lineWidth = 1.8;
         ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.moveTo(x + 4, y); ctx.lineTo(x + 12.5, y); ctx.moveTo(x + 9.5, y); ctx.lineTo(x + 9.5, y + 4); ctx.moveTo(x + 12.5, y); ctx.lineTo(x + 12.5, y + 4); ctx.stroke(); ctx.restore();
         /* the key is what the ram was handed */
-        if (k === 1) { const rt = x > W - 100; note('capability', rt ? x - 8 : x + 12, y - 22, a * r.a * .9, { align: rt ? 'right' : 'left', to: [x + (rt ? -2 : 2), y - 4] }); }
+        if (k === 1) { const wx = lerp(top[0], bot[0], cl01((y - top[1]) / (bot[1] - top[1]))), rt = x < wx, la = sm((Math.abs(r.x - wx) - 12) / 28); note('capability', rt ? x - 8 : x + 12, y - 22, a * r.a * .9 * la, { align: rt ? 'right' : 'left', to: [x + (rt ? -2 : 2), y - 4] }); }
       });
     },
   };
@@ -1104,7 +1105,7 @@ function renderDom(v) {
   $('wm').hidden = hill; $('idx').hidden = hill; $('land').hidden = !hill; $('panel').hidden = hill;
   idxBtns.forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   if (!hill) {
-    $('pName').textContent = c[0]; $('pTitle').textContent = c[1];
+    $('pTitle').textContent = c[1];
     /* a body is one paragraph, or a lead and labelled halves */
     const pb = $('pBody'); pb.replaceChildren();
     for (const part of [].concat(Array.isArray(c[2]) ? c[2] : [c[2]])) {

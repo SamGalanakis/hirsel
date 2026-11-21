@@ -58,7 +58,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
             if name == 'args-returned-views':
                 grants = ['Stdout']
             host = name.startswith('host') or name in ('clocks', 'mkdtemp', 'mkdtemp-bounds', 'sleep-peer')
-            if host:
+            if host and name != 'host':
                 grants = ['Clock', 'Tasks']
             if name in ('sleep-peer', 'sleep-cancel', 'parent-failure'):
                 grants = ['Clock', 'Stdout', 'Tasks']

@@ -191,14 +191,15 @@ impl<'a> Plan<'a> {
             .map_err(error)?
             .finish(settings::Flags::new(flags))
             .map_err(error)?;
-        let mut object = ObjectModule::new(
-            ObjectBuilder::new(
-                isa,
-                b"hirsel-link".to_vec(),
-                cranelift_module::default_libcall_names(),
-            )
-            .map_err(error)?,
-        );
+        let mut builder = ObjectBuilder::new(
+            isa,
+            b"hirsel-link".to_vec(),
+            cranelift_module::default_libcall_names(),
+        )
+        .map_err(error)?;
+        // A revision carrier is live only through a surviving reference.
+        builder.per_data_object_section(true);
+        let mut object = ObjectModule::new(builder);
         let data = data::write(&mut object, self, sources)?;
         data::bytes(
             &mut object,

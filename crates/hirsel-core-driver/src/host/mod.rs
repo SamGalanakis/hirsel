@@ -23,7 +23,7 @@ use hirsel_core_ir::{
 };
 use records::{Active, Attempt, Deploy, Records, State};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs::{self, DirBuilder, File, Permissions},
     io::{self, Read, Write},
     net::TcpListener,
@@ -423,8 +423,9 @@ impl Host {
     ) -> Result<(Running, child::Place), Error> {
         let active = self.records.active()?;
         let record = self.records.read_deploy()?;
+        let pending = self.records.pending_assemblies()?;
         if let Some(active) = active {
-            let mut choices = vec![(active.assembly, active.version)];
+            let mut choices = VecDeque::from([(active.assembly, active.version)]);
             if let Some(install) = &record
                 && matches!(
                     install.state,
@@ -434,18 +435,23 @@ impl Host {
                 if let Some(next) = install.exported.checked_add(1)
                     && (install.assembly, next) != choices[0]
                 {
-                    choices.insert(0, (install.assembly, next));
+                    choices.push_front((install.assembly, next));
                 }
                 if let Some(prior) = self
                     .records
                     .indexed(active.store, install.prior_activation)?
                     && !choices.contains(&(prior, install.prior_activation))
                 {
-                    choices.push((prior, install.prior_activation));
+                    choices.push_back((prior, install.prior_activation));
                 }
             }
+            choices.extend(pending.iter().map(|&key| (key, active.version)));
+            let mut tried = BTreeSet::new();
             let mut failures = Vec::new();
-            for (key, version) in choices {
+            while let Some((key, version)) = choices.pop_front() {
+                if !tried.insert((key, version)) {
+                    continue;
+                }
                 let probe = self.reopen(key, version);
                 match probe {
                     Ok((running, place)) if running.active.store == active.store => {
@@ -455,7 +461,17 @@ impl Host {
                         return Ok((running, place));
                     }
                     Ok(_) => return Err("recovered a different store".into()),
-                    Err(error) => failures.push(format!("{version} {error}")),
+                    Err(error) => {
+                        if let Some(CurrentVersion(current)) =
+                            error.downcast_ref::<CurrentVersion>()
+                        {
+                            if let Some(key) = self.records.indexed(active.store, *current)? {
+                                choices.push_front((key, *current));
+                            }
+                            choices.extend(pending.iter().map(|&key| (key, *current)));
+                        }
+                        failures.push(format!("{version} {error}"));
+                    }
                 }
             }
             return Err(format!("place recovery failed ({})", failures.join(", ")).into());
@@ -464,6 +480,11 @@ impl Host {
             && boot.old == ContentHash([0; 32])
         {
             let assembly = self.records.assembly(boot.assembly)?;
+            let recipe = self.recipe(assembly.recipe)?;
+            return self.boot(assembly, recipe, true);
+        }
+        if pending.len() == 1 {
+            let assembly = self.records.assembly(*pending.first().unwrap())?;
             let recipe = self.recipe(assembly.recipe)?;
             return self.boot(assembly, recipe, true);
         }
@@ -490,7 +511,14 @@ impl Host {
         recipe: Recipe,
         recover: bool,
     ) -> Result<(Running, child::Place), Error> {
-        let (found, retain_from, child) = match recover.then(|| self.reopen(assembly.identity, 1)) {
+        let recovered = recover.then(|| match self.reopen(assembly.identity, 1) {
+            Err(error) => match error.downcast_ref::<CurrentVersion>() {
+                Some(CurrentVersion(version)) => self.reopen(assembly.identity, *version),
+                None => Err(error),
+            },
+            opened => opened,
+        });
+        let (found, retain_from, child) = match recovered {
             Some(Ok((running, child))) => (running.active, running.retain_from, child),
             _ => {
                 let mut child = self.start(&assembly, &recipe, 0)?;
@@ -979,6 +1007,17 @@ enum Reply {
     Uncertain,
 }
 
+#[derive(Debug)]
+struct CurrentVersion(u64);
+
+impl std::fmt::Display for CurrentVersion {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "NotCurrent({})", self.0)
+    }
+}
+
+impl std::error::Error for CurrentVersion {}
+
 impl Reply {
     fn read(frame: &[u8]) -> Result<Self, Error> {
         let mut wire = Reader {
@@ -1028,7 +1067,7 @@ impl Reply {
 
     fn error(self) -> Error {
         match self {
-            Self::Current(version) => format!("NotCurrent({version})").into(),
+            Self::Current(version) => CurrentVersion(version).into(),
             Self::Refused(reason) => reason.into(),
             _ => "unexpected place response".into(),
         }

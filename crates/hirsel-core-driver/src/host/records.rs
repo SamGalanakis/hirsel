@@ -223,6 +223,18 @@ impl Records {
         sync_dir(&dir)
     }
 
+    pub(super) fn pending_assemblies(&self) -> io::Result<BTreeSet<ContentHash>> {
+        let mut assemblies = BTreeSet::new();
+        for item in fs::read_dir(self.root.join("pending"))? {
+            let item = item?;
+            if !item.file_name().as_encoded_bytes().starts_with(b".tmp") {
+                let [assembly] = read_hashes(&item.path())?;
+                assemblies.insert(assembly);
+            }
+        }
+        Ok(assemblies)
+    }
+
     pub(super) fn retire_activations(&self, store: Attempt, retain_from: u64) -> io::Result<()> {
         let prefix = format!("{}-", crate::call::hex(&store));
         let directory = self.root.join("activations");

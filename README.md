@@ -14,3 +14,7 @@
   &nbsp;·&nbsp;
   <a href="docs/building.md">Building</a>
 </p>
+
+## License
+
+[MIT](LICENSE) © 2026 Sam Galanakis

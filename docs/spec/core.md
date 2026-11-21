@@ -485,8 +485,8 @@ pub type StreamReply = Done | WriteFailed(WriteError)
 
 pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
 pub fn net(bytes n: u64) -> (Net, Served[NetOp])
-pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
-pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
+pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
+pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 pub fn dir_op(c: Call[DirOp]) -> DirOp
 pub fn net_op(c: Call[NetOp]) -> NetOp
@@ -508,6 +508,13 @@ pub fn trigger(take t: StopTrigger)
 ```
 
 `advance_to`, `set_wall` and `idle` are in module `clock`, and `trigger` in module `process`.
+The two stream constructors take the stream's terminal bit as well (below); this replaces
+their declarations above:
+
+```hirsel unbuilt
+pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
+pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
+```
 
 - **Served ports.** `provide.dir`, `net`, `stdout` and `stderr` admit the port's room of `n`
   bytes, with a cell's 32, from the current limit and raise `Capacity` when it is refused;

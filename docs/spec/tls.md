@@ -434,7 +434,8 @@ iteration, `<count>` steps in all, at the call and before issue
 nothing, as every step does. Slice ends among them fall at the call, before the
 derivation. The call then admits 32 bytes of run-owned storage for the `Scram` from the
 current limit, and a refusal raises `Capacity` with nothing sent. The storage is refunded
-when the `Scram` is consumed or dropped. Nothing else is admitted.
+when the `Scram` is consumed or dropped, or at once when the operation fails, since no
+`Scram` then exists. Nothing else is admitted.
 
 **Issue.** From the run-owned bytes of `s`, the runtime computes:
 
@@ -476,7 +477,7 @@ the sealed bytes, so the server's view of the proof adds nothing. The scripted p
 plays the client-final message as plaintext the peer expects, and its handshake result may
 state a binding value.
 
-**Replay.** `scram_sha256` and `scram_verify` are provider operations
+**Replay.** On a host TLS half, `scram_sha256` and `scram_verify` are provider operations
 ([CAP-5](capabilities.md#cap-5-provider-operations)) under the run-owned secret sink, and
 they pass the replay point at issue and at delivery
 ([CAP-8](capabilities.md#cap-8-the-replay-point)):
@@ -489,11 +490,20 @@ they pass the replay point at issue and at delivery
 - `scram_final_len` is computed from its arguments and the stream's record, and adds no
   frame.
 
+On a TLS half of `provide.net`, both are computed by the run, as every virtual provider's
+results are ([core](core.md#provide)). They pass no replay point. A replay recomputes the
+proof from the sealed bytes, which it recomputes from the deliveries they came from
+([recording](../recording.md#credentials)), and sends the same `Send` calls to the server.
+It recomputes the verdict of a `Scram` made there too.
+
 A recording never holds the password, its normalized bytes, `SaltedPassword`, `ClientKey`,
 `StoredKey`, `ServerKey`, the proof or the expected signature. A replay delivers the
 recorded outcome and verdict from a `Scram` with no bytes behind it
 ([recording](../recording.md#credentials)).
 
+The server's `v=` is also received plaintext in program memory, since the program reads it
+before passing it to `scram_verify`. So guessing material is in the program as it is on the
+wire; the sink keeps out only what would let the program authenticate without the server.
 What a tape does hold is the received plaintext, which includes the salt, the iteration
 count, the server's nonce and the server's `v=`. With the client-first message that the
 same tape's sends describe, that is enough to test password guesses offline at `<count>`
@@ -527,13 +537,13 @@ computes.
 | **TL16** join refusals | halves of different sockets merged, or a refusal that loses a half | Using a counting provider: halves of two different loopback sockets, the halves of a TLS stream, and the halves of an accepted socket each give `Unjoined` with zero provider calls. Afterwards, one byte sent on each returned write half reaches that half's own peer, and no other. |
 | **SC1** RFC 7677 vector | a wrong derivation, AuthMessage or base64 | Use secret `pencil` `to alpha.test`, over a loopback TLS stream verified as `alpha.test`. `client_first` is `n,,n=user,r=rOprNGfwEbeRWgbNEkqO`. `server_first` is `r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096`. `before` and `after` are empty. The server receives exactly `c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=`, and `scram_final_len` gives 106. `scram_verify` with `v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=` gives `true`. With the first signature character changed to `7`, with `e=invalid-proof`, and with the right `v=` on a `Scram` made from a different server nonce, it gives `false`. The oracle is RFC 7677 §3. |
 | **SC2** normalization and raw fallback | skipping SASLprep, or failing where PostgreSQL falls back | Use SC1's transcript with three passwords. `pen\u{AD}cil` (U+00AD, which RFC 4013 table B.1 maps to nothing) sends SC1's proof. The bytes `70 65 6E FF 63 69 6C` are not UTF-8 and are used raw, so the proof is `p=udNjQvoDM/dE+e/v63Vs504VHmXCmsAHQp5FC38JZcU=`. `pen\u{E000}cil` holds a private-use code point, which RFC 4013 §5 prohibits, so its raw UTF-8 bytes `70 65 6E EE 80 80 63 69 6C` are used and the proof is `p=S0CJLeozN1oaedLBR16sXAg8qzxE/6wMKY16FfthmYo=`. The last two proofs come from Python's `hashlib.pbkdf2_hmac` and `hmac` over those raw bytes. |
-| **SC3** iteration range before work | a check after the derivation, or an off-by-one at either end | With SC1's transcript, `i=4096` succeeds (SC1), and `i=1000000` succeeds, with the server accepting the proof by its own reference computation. `i=4095`, `i=1000001` and `i=0` give `Iterations`. `i=04096` and a missing `i=` give `Transcript`. In each refused case the server receives no byte after the handshake, and the call takes exactly 1 step, counted by a `bound steps 1` scope that returns `Ok`. |
-| **SC4** per-iteration charge | the derivation counted as one step | With the arguments in locals bound outside the scope, `bound steps 4097 { secret.scram_sha256(...) }` returns `Ok`, and `bound steps 4096 { ... }` returns `Error(OutOfTime(steps: 4096))`, with no byte reaching the server. By hand, that is 1 step for the call and 4096 for its iterations. |
+| **SC3** iteration range before work | a check after the derivation, or an off-by-one at either end | With SC1's transcript, `i=4096` succeeds (SC1), and `i=1000000` succeeds, with the server accepting the proof by its own reference computation. `i=4095`, `i=1000001` and `i=0` give `Iterations`. `i=04096` and a missing `i=` give `Transcript`. In each refused case the server receives no byte after the handshake, and the call takes exactly 1 step: `bound steps 1 { let mut h = take w; secret.scram_sha256(mut h, ...) }` returns `Ok` holding the refusal. The half is moved into the scope, since MEM-30 refuses a body that lends `mut` a place declared outside it, and a `let` with a move takes no step. |
+| **SC4** per-iteration charge | the derivation counted as one step | With the other arguments in locals bound outside the scope, `bound steps 4097 { let mut h = take w; secret.scram_sha256(mut h, ...) }` returns `Ok`, and the same body under `bound steps 4096` returns `Error(OutOfTime(steps: 4096))`, with no byte reaching the server. By hand, that is 1 step for the call and 4096 for its iterations, and the `let` takes none (MEM-30). |
 | **SC5** transcript checks | accepting a server nonce that does not extend the client's, or a mandatory extension | Each of these gives `Transcript` with no byte after the handshake: a server nonce that does not start with the client nonce, a server nonce equal to the client nonce, a `server_first` starting with `m=`, a `client_first` of `n,a=admin,n=,r=abc`, and a salt that is not base64. The oracle is RFC 5802 §5.1 and §7. |
 | **SC6** authority | a proof emitted to a host the secret may not reach | Each of these gives `Denied`, and the server receives zero bytes after the handshake: a secret `to beta.test` on an `alpha.test` stream, any secret on a plain-TCP half, and a granted secret on a TLS half of `provide.net`, where the server's `provide.next` sees no `Send`. |
 | **SC7** channel binding | the identity digest used where the signature's hash is required, or binding over a missing value | `client_first` `p=tls-server-end-point,,n=,r=abc` over the `alpha.test` leaf, signed with SHA-256, sends `c=` the base64 of `p=tls-server-end-point,,` followed by the leaf's `openssl x509 -outform der \| sha256sum` digest. Over a leaf signed with SHA-384 (an added fixture), it sends the base64 of the header followed by the leaf's `sha384sum` digest, and `scram_final_len` counts its 48 bytes. An Ed25519 leaf, and `p=tls-unique,,`, give `Binding` before issue. The oracle is RFC 5929 §4.1. |
 | **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
-| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, `secret.seal("pencil", "alpha.test")` with SC1's transcript: the server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. |
+| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, `secret.seal("pencil", "alpha.test")` with SC1's transcript: the server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
 
 TL1 to TL8, TL10, TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the

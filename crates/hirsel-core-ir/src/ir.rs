@@ -8,6 +8,7 @@
 //! memory: a read names no "reaching version", so a producer need not build SSA for
 //! slots or prove liveness before emitting.
 
+use crate::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty, Vector};
 use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, Recipe, TypeRef, cleanup_class};
@@ -1501,34 +1502,41 @@ impl Inst {
 
 /// The blocks control leaves `bi` for: its instructions' failure blocks and its
 /// terminator's targets.
+#[cfg(any(test, feature = "wf"))]
 pub(crate) fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
-    let blk = &b.blocks[bi];
-    let mut out: Vec<BlockId> = blk
+    let mut successors = Vec::new();
+    for_each_successor(b, bi, |next| successors.push(next));
+    successors
+}
+
+pub(crate) fn for_each_successor(b: &Body, bi: usize, mut visit: impl FnMut(BlockId)) {
+    b.blocks[bi]
         .insts
         .get(&b.insts)
         .unwrap_or_default()
         .iter()
         .filter_map(|i| i.fail(b))
-        .collect();
+        .for_each(&mut visit);
     let edge = |e: &EdgeId| b.edges[e.index()].target;
     match &b.terminators[bi] {
-        Terminator::Jump(e) => out.push(edge(e)),
-        Terminator::Branch { yes, no, .. } => out.extend([edge(yes), edge(no)]),
+        Terminator::Jump(e) => visit(edge(e)),
+        Terminator::Branch { yes, no, .. } => {
+            visit(edge(yes));
+            visit(edge(no));
+        }
         Terminator::Switch {
             arms, otherwise, ..
         } => {
-            out.extend(
-                arms.get(&b.pools.arms)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| edge(&a.edge)),
-            );
-            out.push(edge(otherwise));
+            arms.get(&b.pools.arms)
+                .unwrap_or_default()
+                .iter()
+                .map(|a| edge(&a.edge))
+                .for_each(&mut visit);
+            visit(edge(otherwise));
         }
-        Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
+        Terminator::Raise { cleanup, .. } => cleanup.iter().copied().for_each(visit),
         Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
     }
-    out
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -2036,68 +2044,151 @@ impl Closure {
 impl Module {
     /// The closure of row `root` ([`Closure`]).
     pub fn closure(&self, root: TypeId) -> Closure {
+        self.closure_impl(root, None).expect("unmetered closure")
+    }
+
+    pub(crate) fn decoded_closure(
+        &self,
+        root: TypeId,
+        budget: &mut DecodeBudget,
+    ) -> DecodeResult<Closure> {
+        self.closure_impl(root, Some(budget))
+    }
+
+    fn closure_impl(
+        &self,
+        root: TypeId,
+        mut budget: Option<&mut DecodeBudget>,
+    ) -> DecodeResult<Closure> {
+        use std::collections::hash_map::Entry;
         let mut order = HashMap::<u32, u32>::new();
-        let mut rows: Vec<Option<ClosureRow>> = vec![];
-        let mut pending = vec![root.0];
-        order.insert(root.0, 0);
-        rows.push(None);
+        let mut rows: Vec<Option<ClosureRow>> = Vec::new();
+        let mut pending = Vec::new();
         let visit = |r: u32,
                      order: &mut HashMap<u32, u32>,
                      rows: &mut Vec<Option<ClosureRow>>,
-                     pending: &mut Vec<u32>| {
+                     pending: &mut Vec<u32>,
+                     budget: &mut Option<&mut DecodeBudget>| {
+            if let Some(&number) = order.get(&r) {
+                return Ok(number);
+            }
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.reserve(rows, 1)?;
+                budget.reserve(pending, 1)?;
+                if order.len() == order.capacity() {
+                    // This accounts for the growing hash table, including
+                    // bucket control bytes and unused load-factor capacity.
+                    budget.charge_bytes(order.capacity().max(4).saturating_mul(32))?;
+                    order
+                        .try_reserve(1)
+                        .map_err(|_| DecodeError::Limit(DecodeLimit::Bytes))?;
+                }
+            }
             let next = order.len() as u32;
-            *order.entry(r).or_insert_with(|| {
-                rows.push(None);
-                pending.push(r);
-                next
-            })
+            let Entry::Vacant(entry) = order.entry(r) else {
+                unreachable!()
+            };
+            entry.insert(next);
+            rows.push(None);
+            pending.push(r);
+            Ok(next)
         };
+        visit(root.0, &mut order, &mut rows, &mut pending, &mut budget)?;
         while let Some(t) = pending.pop() {
-            let mut shape = self.types[t as usize].clone();
-            shape.map_refs(&mut |r| TypeRef(visit(r.0, &mut order, &mut rows, &mut pending)));
-            let hook = |f: Option<FuncRef>,
-                        order: &mut HashMap<u32, u32>,
-                        rows: &mut Vec<Option<ClosureRow>>,
-                        pending: &mut Vec<u32>| {
-                let f = &self.functions[f?.0 as usize];
+            let original = &self.types[t as usize];
+            if let Some(budget) = budget.as_deref_mut() {
+                crate::normal::charge_shape(original, budget)?;
+            }
+            let mut shape = original.clone();
+            let mut error = None;
+            shape.map_refs(&mut |r| match visit(
+                r.0,
+                &mut order,
+                &mut rows,
+                &mut pending,
+                &mut budget,
+            ) {
+                Ok(number) => TypeRef(number),
+                Err(refused) => {
+                    error = Some(refused);
+                    r
+                }
+            });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            let mut hook = |f: Option<FuncRef>| -> DecodeResult<Option<ClosureHook>> {
+                let Some(f) = f else { return Ok(None) };
+                let f = &self.functions[f.0 as usize];
                 let key = &self.instances[f.instance.index()];
-                let arguments = key
-                    .arguments
-                    .iter()
-                    .map(|a| visit(a.0, order, rows, pending))
-                    .collect();
-                let mut signature = self.signatures[f.signature.index()].clone();
+                let original = &self.signatures[f.signature.index()];
+                if let Some(budget) = budget.as_deref_mut() {
+                    crate::normal::charge_identity(&key.definition, &key.dictionaries, budget)?;
+                    budget.allocation::<u32>(key.arguments.len())?;
+                    budget.allocation::<Param>(original.params.len())?;
+                    budget.allocation::<Ty>(original.results.len())?;
+                }
+                let mut arguments = Vec::with_capacity(key.arguments.len());
+                for argument in &key.arguments {
+                    arguments.push(visit(
+                        argument.0,
+                        &mut order,
+                        &mut rows,
+                        &mut pending,
+                        &mut budget,
+                    )?);
+                }
+                let mut signature = original.clone();
                 for param in &mut signature.params {
                     if let Param::Address {
                         place: PlaceTy::Declared(id),
                         ..
                     } = param
                     {
-                        *id = TypeId(visit(id.0, order, rows, pending));
+                        *id = TypeId(visit(
+                            id.0,
+                            &mut order,
+                            &mut rows,
+                            &mut pending,
+                            &mut budget,
+                        )?);
                     }
                 }
-                signature.dest = signature
-                    .dest
-                    .map(|id| TypeId(visit(id.0, order, rows, pending)));
-                Some(ClosureHook {
+                if let Some(id) = &mut signature.dest {
+                    *id = TypeId(visit(
+                        id.0,
+                        &mut order,
+                        &mut rows,
+                        &mut pending,
+                        &mut budget,
+                    )?);
+                }
+                Ok(Some(ClosureHook {
                     definition: key.definition.clone(),
                     dictionaries: key.dictionaries.clone(),
                     arguments,
                     signature,
-                })
+                }))
             };
             let hooks = [
-                hook(shape.finalizer.take(), &mut order, &mut rows, &mut pending),
-                hook(shape.clone.take(), &mut order, &mut rows, &mut pending),
-                hook(shape.codec.take(), &mut order, &mut rows, &mut pending),
+                hook(shape.finalizer.take())?,
+                hook(shape.clone.take())?,
+                hook(shape.codec.take())?,
             ];
             rows[order[&t] as usize] = Some(ClosureRow { shape, hooks });
         }
-        Closure::new(
-            rows.into_iter()
-                .map(|r| r.expect("every visited row is filled"))
-                .collect(),
-        )
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.allocation::<ClosureRow>(rows.len())?;
+        }
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|r| r.expect("every visited row is filled"))
+            .collect();
+        let hash = match budget {
+            Some(budget) => crate::normal::decoded_closure_hash(&rows, budget)?,
+            None => crate::normal::closure_hash(&rows),
+        };
+        Ok(Closure { rows, hash })
     }
 }
 

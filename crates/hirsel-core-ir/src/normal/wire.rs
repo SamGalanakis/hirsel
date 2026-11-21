@@ -1,11 +1,12 @@
 use super::*;
 
-pub(super) struct Write<'order, 'm, 'b> {
+pub(crate) struct Write<'order, 'm, 'b> {
     pub(super) bytes: Vec<u8>,
     pub(super) module: &'order mut ModuleOrder<'m>,
     pub(super) local: Option<BodyOrder<'b>>,
     pub(super) closure: bool,
     pub(super) abi: bool,
+    pub(super) abi_closures: Option<&'m [Option<ContentHash>]>,
 }
 
 impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
@@ -16,6 +17,7 @@ impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
             local: None,
             closure: false,
             abi: false,
+            abi_closures: None,
         }
     }
 
@@ -32,41 +34,61 @@ impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
     }
 
     pub(super) fn raw(&mut self, bytes: &[u8]) {
-        if !self.module.planning {
+        if !self.module.planning && reserve(self.module.meter, &mut self.bytes, bytes.len()) {
             self.bytes.extend_from_slice(bytes);
         }
     }
 
-    pub(super) fn count(&mut self, value: usize) {
+    pub(crate) fn count(&mut self, value: usize) {
         if self.module.planning {
             return;
         }
         if self.closure {
             (value as u64).write(self);
         } else {
-            uleb(&mut self.bytes, value as u64);
+            let mut scratch = [0u8; 10];
+            let mut n = value as u64;
+            let mut i = 0;
+            while n >= 128 {
+                scratch[i] = n as u8 | 128;
+                n >>= 7;
+                i += 1;
+            }
+            scratch[i] = n as u8;
+            self.raw(&scratch[..=i]);
         }
     }
 
     fn local_row(&mut self, kind: LocalRow, row: usize) {
-        let (number, fresh) = self.local_mut().table(kind).discover(row);
+        let meter = self.module.meter;
+        let (number, fresh) = self.local_mut().table(kind).discover(row, meter);
         self.count(number as usize);
         if fresh {
-            let body = self.local().body;
-            let prior = std::mem::take(&mut self.bytes);
-            match kind {
-                LocalRow::Slot => body.slots[row].write(self),
-                LocalRow::Address => body.addresses[row].write(self),
-                LocalRow::Call => body.calls[row].write(self),
-                LocalRow::Edge => body.edges[row].write(self),
+            if let Some(meter) = meter {
+                meter.descend(|| self.write_local_row(kind, row));
+            } else {
+                let prior = std::mem::take(&mut self.bytes);
+                self.write_local_row(kind, row);
+                let bytes = std::mem::replace(&mut self.bytes, prior);
+                self.local_mut().table(kind).bytes[number as usize] = bytes;
             }
-            let bytes = std::mem::replace(&mut self.bytes, prior);
-            self.local_mut().table(kind).bytes[number as usize] = bytes;
+        }
+    }
+
+    fn write_local_row(&mut self, kind: LocalRow, row: usize) {
+        let body = self.local().body;
+        match kind {
+            LocalRow::Slot => body.slots[row].write(self),
+            LocalRow::Address => body.addresses[row].write(self),
+            LocalRow::Call => body.calls[row].write(self),
+            LocalRow::Edge => body.edges[row].write(self),
         }
     }
 }
 
-pub(super) struct Read<'a> {
+pub(crate) struct Read<'a, 'b> {
+    pub(super) budget: &'b mut DecodeBudget,
+    depth: usize,
     bytes: &'a [u8],
     pub(super) pools: Pools,
     pub(super) instance_closures: Vec<Vec<ContentHash>>,
@@ -74,12 +96,27 @@ pub(super) struct Read<'a> {
     local_refs: [Option<u32>; 6],
 }
 
-impl<'a> Read<'a> {
-    pub(super) fn new(bytes: &'a [u8], magic: &[u8]) -> io::Result<Self> {
+impl<'a, 'b> Read<'a, 'b> {
+    pub(crate) fn new(
+        bytes: &'a [u8],
+        magic: &[u8],
+        budget: &'b mut DecodeBudget,
+    ) -> DecodeResult<Self> {
+        budget.check_depth(1)?;
+        let header_len = magic.len() - 2;
+        if bytes.get(..header_len) == Some(&magic[..header_len])
+            && bytes
+                .get(header_len..magic.len())
+                .is_some_and(|version| version != &magic[header_len..])
+        {
+            return Err(DecodeError::Unsupported("code frame version"));
+        }
         let bytes = bytes
             .strip_prefix(magic)
             .ok_or_else(|| invalid("normal form header"))?;
         Ok(Self {
+            budget,
+            depth: 1,
             bytes,
             pools: Pools::default(),
             instance_closures: Vec::new(),
@@ -88,7 +125,8 @@ impl<'a> Read<'a> {
         })
     }
 
-    fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> DecodeResult<&'a [u8]> {
+        self.budget.check()?;
         let (head, tail) = self
             .bytes
             .split_at_checked(n)
@@ -97,7 +135,7 @@ impl<'a> Read<'a> {
         Ok(head)
     }
 
-    fn unsigned(&mut self) -> io::Result<u64> {
+    pub(crate) fn unsigned(&mut self) -> DecodeResult<u64> {
         let mut value = 0;
         for shift in (0..64).step_by(7) {
             let byte = u8::read(self)?;
@@ -115,13 +153,13 @@ impl<'a> Read<'a> {
         Err(invalid("invalid unsigned LEB128"))
     }
 
-    pub(super) fn index(&mut self) -> io::Result<u32> {
+    pub(crate) fn index(&mut self) -> DecodeResult<u32> {
         self.unsigned()?
             .try_into()
             .map_err(|_| invalid("index exceeds u32"))
     }
 
-    pub(super) fn count(&mut self) -> io::Result<usize> {
+    pub(crate) fn count(&mut self) -> DecodeResult<usize> {
         let count =
             usize::try_from(self.unsigned()?).map_err(|_| invalid("count exceeds usize"))?;
         if count > self.bytes.len() {
@@ -130,7 +168,39 @@ impl<'a> Read<'a> {
         Ok(count)
     }
 
-    fn reference(&mut self, global: bool, kind: usize) -> io::Result<u32> {
+    pub(crate) fn read_vec<T>(
+        &mut self,
+        len: usize,
+        mut item: impl FnMut(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<Vec<T>> {
+        self.nested(|input| {
+            let mut vec = Vec::new();
+            for _ in 0..len {
+                let value = item(input)?;
+                input.budget.reserve(&mut vec, 1)?;
+                vec.push(value);
+            }
+            Ok(vec)
+        })
+    }
+
+    fn nested<T>(&mut self, decode: impl FnOnce(&mut Self) -> DecodeResult<T>) -> DecodeResult<T> {
+        self.budget.check_depth(self.depth + 1)?;
+        self.depth += 1;
+        let result = decode(self);
+        self.depth -= 1;
+        result
+    }
+
+    pub(crate) fn charge_members(&mut self, len: usize) -> DecodeResult<()> {
+        self.budget.charge_members(len)
+    }
+
+    pub(crate) fn charge_slots(&mut self, len: usize) -> DecodeResult<()> {
+        self.budget.charge_slots(len)
+    }
+
+    fn reference(&mut self, global: bool, kind: usize) -> DecodeResult<u32> {
         let id = self.index()?;
         let max = if global {
             &mut self.global_refs[kind]
@@ -141,7 +211,7 @@ impl<'a> Read<'a> {
         Ok(id)
     }
 
-    fn check_refs<const N: usize>(refs: [Option<u32>; N], limits: [usize; N]) -> io::Result<()> {
+    fn check_refs<const N: usize>(refs: [Option<u32>; N], limits: [usize; N]) -> DecodeResult<()> {
         if refs
             .into_iter()
             .zip(limits)
@@ -153,7 +223,7 @@ impl<'a> Read<'a> {
         }
     }
 
-    pub(super) fn check_globals(&self, module: &Module) -> io::Result<()> {
+    pub(super) fn check_globals(&self, module: &Module) -> DecodeResult<()> {
         Self::check_refs(
             self.global_refs,
             [
@@ -166,7 +236,7 @@ impl<'a> Read<'a> {
         )
     }
 
-    pub(super) fn check_locals(&mut self, body: &Body) -> io::Result<()> {
+    pub(super) fn check_locals(&mut self, body: &Body) -> DecodeResult<()> {
         Self::check_refs(
             std::mem::take(&mut self.local_refs),
             [
@@ -180,7 +250,8 @@ impl<'a> Read<'a> {
         )
     }
 
-    pub(super) fn end(self) -> io::Result<()> {
+    pub(crate) fn end(self) -> DecodeResult<()> {
+        self.budget.check()?;
         if self.bytes.is_empty() {
             Ok(())
         } else {
@@ -189,13 +260,13 @@ impl<'a> Read<'a> {
     }
 }
 
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+pub(crate) fn invalid(message: &'static str) -> DecodeError {
+    DecodeError::Malformed(message)
 }
 
-pub(super) trait Wire: Sized {
+pub(crate) trait Wire: Sized {
     fn write(&self, out: &mut Write<'_, '_, '_>);
-    fn read(input: &mut Read<'_>) -> io::Result<Self>;
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self>;
 }
 
 macro_rules! integers {
@@ -205,20 +276,20 @@ macro_rules! integers {
                 out.raw(&self.to_le_bytes());
             }
 
-            fn read(input: &mut Read<'_>) -> io::Result<Self> {
+            fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
                 Ok(Self::from_le_bytes(input.take(std::mem::size_of::<Self>())?.try_into().unwrap()))
             }
         }
     )*};
 }
-integers!(u8, u32, u64);
+integers!(u8, u16, u32, u64);
 
 impl Wire for bool {
     fn write(&self, out: &mut Write<'_, '_, '_>) {
         u8::from(*self).write(out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         match u8::read(input)? {
             0 => Ok(false),
             1 => Ok(true),
@@ -235,7 +306,7 @@ impl<T: Wire> Wire for Option<T> {
         }
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         bool::read(input)?.then(|| T::read(input)).transpose()
     }
 }
@@ -245,8 +316,9 @@ impl<T: Wire> Wire for Vec<T> {
         write_slice(self, out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
-        (0..input.count()?).map(|_| T::read(input)).collect()
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let len = input.count()?;
+        input.read_vec(len, T::read)
     }
 }
 
@@ -255,8 +327,12 @@ impl<T: Wire> Wire for Box<T> {
         (**self).write(out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
-        Ok(Box::new(T::read(input)?))
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        input.nested(|input| {
+            let item = T::read(input)?;
+            input.budget.allocation::<T>(1)?;
+            Ok(Box::new(item))
+        })
     }
 }
 
@@ -266,9 +342,12 @@ impl Wire for String {
         out.raw(self.as_bytes());
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         let n = input.count()?;
-        String::from_utf8(input.take(n)?.to_vec()).map_err(|_| invalid("invalid UTF-8"))
+        let bytes = input.take(n)?;
+        let value = std::str::from_utf8(bytes).map_err(|_| invalid("invalid UTF-8"))?;
+        input.budget.charge_bytes(n)?;
+        Ok(value.to_owned())
     }
 }
 
@@ -286,14 +365,18 @@ macro_rules! rows {
                 if out.closure {
                     self.0.write(out);
                 } else if out.abi {
-                    out.module.module.closure(TypeId(self.0)).hash.write(out);
+                    let hash = match out.abi_closures {
+                        Some(closures) => closures[self.0 as usize].expect("ABI shape hash"),
+                        None => out.module.module.closure(TypeId(self.0)).hash,
+                    };
+                    hash.write(out);
                 } else {
                     let number = ($visit)(out, self.0 as usize);
                     out.count(number as usize);
                 }
             }
 
-            fn read(input: &mut Read<'_>) -> io::Result<Self> {
+            fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
                 input.reference($global, $kind).map(Self)
             }
         }
@@ -318,7 +401,7 @@ macro_rules! local_rows {
                 out.local_row(LocalRow::$row, self.index());
             }
 
-            fn read(input: &mut Read<'_>) -> io::Result<Self> {
+            fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
                 input.reference(false, $kind).map(Self)
             }
         }
@@ -334,8 +417,9 @@ macro_rules! pools {
                 write_slice(self.get(pool).expect("checked pool range"), out);
             }
 
-            fn read(input: &mut Read<'_>) -> io::Result<Self> {
+            fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
                 let items = Vec::<$ty>::read(input)?;
+                input.budget.reserve(&mut input.pools.$pool, items.len())?;
                 Ok(Self::push(&mut input.pools.$pool, items))
             }
         }
@@ -351,7 +435,7 @@ macro_rules! record {
                 $($field.write(out);)*
             }
 
-            fn read(input: &mut Read<'_>) -> io::Result<Self> {
+            fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
                 Ok(Self { $($field: Wire::read(input)?),* })
             }
         }
@@ -397,7 +481,7 @@ macro_rules! tags {
                 }
             }
 
-            fn read(input: &mut Read<'_>) -> io::Result<Self> {
+            fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
                 match u8::read(input)? {
                     $($tag => Ok(Self::$name $(( $(wire_field!(read input, $part $(@ $part_kind)?)?),+ ))? $({ $($field: wire_field!(read input, $field $(@ $field_kind)?)?),+ })?)),*,
                     _ => Err(invalid(concat!("unknown ", stringify!($ty), " tag"))),
@@ -416,14 +500,15 @@ impl Wire for DefPath {
         }
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         let text = String::read(input)?;
         let mut parts = text.split('/');
         let (package, version) = parts
             .next()
             .and_then(|p| p.split_once('@'))
             .ok_or_else(|| invalid("missing package version"))?;
-        fn component(text: &str) -> io::Result<String> {
+        fn component(text: &str, budget: &mut DecodeBudget) -> DecodeResult<String> {
+            budget.charge_bytes(text.len())?;
             let mut input = text.as_bytes().iter().copied();
             let mut bytes = Vec::with_capacity(text.len());
             while let Some(byte) = input.next() {
@@ -439,16 +524,25 @@ impl Wire for DefPath {
             }
             String::from_utf8(bytes).map_err(|_| invalid("invalid path UTF-8"))
         }
-        let mut modules: Vec<_> = parts.map(component).collect::<io::Result<_>>()?;
+        let mut modules = Vec::new();
+        for part in parts {
+            input.budget.reserve(&mut modules, 1)?;
+            modules.push(component(part, input.budget)?);
+        }
         let name = modules.pop().ok_or_else(|| invalid("missing item name"))?;
+        input.budget.charge_bytes(version.len())?;
         let path = Self(ItemPath {
             package: PackageId {
-                name: component(package)?,
+                name: component(package, input.budget)?,
                 version: version.to_owned(),
             },
             modules,
             name,
         });
+        // The canonical spelling may grow its output buffer geometrically.
+        input
+            .budget
+            .charge_bytes(text.len().saturating_mul(4).saturating_add(8))?;
         if path.definition_identity() != text
             || !version.bytes().all(|b| b.is_ascii_digit())
             || version.is_empty()
@@ -465,7 +559,7 @@ impl Wire for ContentHash {
         out.raw(&self.0);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         Ok(Self(input.take(32)?.try_into().unwrap()))
     }
 }
@@ -491,7 +585,7 @@ impl Wire for InstanceKey {
         out.module.metadata = prior;
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         let Identity {
             definition,
             dictionaries,
@@ -501,6 +595,7 @@ impl Wire for InstanceKey {
         if arguments.len() != closures.len() {
             return Err(invalid("instance argument and closure counts differ"));
         }
+        input.budget.reserve(&mut input.instance_closures, 1)?;
         input.instance_closures.push(closures);
         Ok(Self {
             definition,
@@ -560,7 +655,7 @@ impl Wire for CallSite {
         fail.write(out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         Ok(Self {
             callee: Wire::read(input)?,
             signature: Wire::read(input)?,
@@ -583,7 +678,7 @@ impl Wire for Edge {
         args.write(out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         Ok(Self {
             target: Wire::read(input)?,
             args: Wire::read(input)?,
@@ -600,7 +695,7 @@ impl Wire for CompactRoot {
         self.width.write(out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         Ok(Self {
             ty: Wire::read(input)?,
             width: Wire::read(input)?,
@@ -655,7 +750,9 @@ impl Wire for Shape {
         out.module.metadata = prior;
         if out.module.planning {
             for hook in hooks.into_iter().filter_map(|f| *f) {
-                out.module.declarations.number(hook.0 as usize);
+                out.module
+                    .declarations
+                    .number_metered(hook.0 as usize, out.module.meter);
             }
             return;
         }
@@ -666,7 +763,7 @@ impl Wire for Shape {
         send.write(out);
     }
 
-    fn read(input: &mut Read<'_>) -> io::Result<Self> {
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         Ok(Self {
             name: Wire::read(input)?,
             repr: Wire::read(input)?,

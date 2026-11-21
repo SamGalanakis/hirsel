@@ -1,10 +1,11 @@
 //! PROG-10 normal form for checked instance modules.
 
+use crate::decode::{DecodeBudget, DecodeError, DecodeResult};
 use crate::*;
 use hirsel_core_ids::{ContentHash, DefPath, ItemPath, PackageId};
 use hirsel_core_layout::{Case, Field, FieldTy, FuncRef, Handle, Repr, TypeRef, Width};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
-use std::io;
 
 pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
     while value >= 128 {
@@ -32,10 +33,27 @@ pub(crate) fn closure_hash(rows: &[ClosureRow]) -> ContentHash {
     ContentHash::of_parts("hirsel.core-closure.v1", [&out.bytes[..]])
 }
 
+pub(crate) fn decoded_closure_hash(
+    rows: &[ClosureRow],
+    budget: &mut DecodeBudget,
+) -> DecodeResult<ContentHash> {
+    let empty = Module::default();
+    let meter = PlanMeter::new(budget);
+    let mut order = ModuleOrder::metered(&empty, Some(&meter));
+    let mut out = Write::module(&mut order);
+    wire::encode_closure(rows, &mut out);
+    let bytes = out.bytes;
+    meter.finish(budget)?;
+    Ok(ContentHash::of_parts(
+        "hirsel.core-closure.v1",
+        [&bytes[..]],
+    ))
+}
+
 const BODY_MAGIC: &[u8] = b"HIRBODY\0\x01\x00";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 
-mod wire;
+pub(crate) mod wire;
 use wire::{Read, Wire, Write};
 
 /// Fingerprint the closed ABI signature, independent of type row numbering.
@@ -83,6 +101,119 @@ impl EncodedBody {
     }
 }
 
+/// Canonical traversal also serves the producer. In a decoder, keep the
+/// first refusal and stop descending before more work or allocation.
+struct PlanMeter {
+    budget: RefCell<DecodeBudget>,
+    error: Cell<Option<DecodeError>>,
+    depth: Cell<usize>,
+}
+
+pub(crate) fn charge_identity(
+    definition: &DefPath,
+    dictionaries: &[String],
+    budget: &mut DecodeBudget,
+) -> DecodeResult<()> {
+    let path = &definition.0;
+    budget.allocation::<String>(path.modules.len())?;
+    budget.allocation::<String>(dictionaries.len())?;
+    for component in [&path.package.name, &path.package.version, &path.name]
+        .into_iter()
+        .chain(&path.modules)
+        .chain(dictionaries)
+    {
+        budget.charge_bytes(component.len())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn charge_shape(shape: &Shape, budget: &mut DecodeBudget) -> DecodeResult<()> {
+    fn field(ty: &FieldTy, budget: &mut DecodeBudget) -> DecodeResult<()> {
+        match ty {
+            FieldTy::Seq(element)
+            | FieldTy::Array(element, _)
+            | FieldTy::View(element)
+            | FieldTy::Locator(element)
+            | FieldTy::FixedSpan(element)
+            | FieldTy::SeqSpan(element)
+            | FieldTy::IndexedSpan(element) => {
+                budget.allocation::<FieldTy>(1)?;
+                field(element, budget)
+            }
+            FieldTy::Map(key, value) => {
+                budget.allocation::<FieldTy>(2)?;
+                field(key, budget)?;
+                field(value, budget)
+            }
+            _ => Ok(()),
+        }
+    }
+    fn fields(fields: &[Field], budget: &mut DecodeBudget) -> DecodeResult<()> {
+        budget.allocation::<Field>(fields.len())?;
+        for item in fields {
+            budget.charge_bytes(item.name.len())?;
+            field(&item.ty, budget)?;
+        }
+        Ok(())
+    }
+    budget.charge_bytes(shape.name.len())?;
+    match &shape.body {
+        hirsel_core_layout::Body::Record(items) => fields(items, budget)?,
+        hirsel_core_layout::Body::Variant(cases) => {
+            budget.allocation::<Case>(cases.len())?;
+            for case in cases {
+                budget.charge_bytes(case.name.len())?;
+                fields(&case.fields, budget)?;
+            }
+        }
+    }
+    if let Some(held) = &shape.held {
+        field(held, budget)?;
+    }
+    Ok(())
+}
+
+impl PlanMeter {
+    fn new(budget: &mut DecodeBudget) -> Self {
+        Self {
+            budget: RefCell::new(std::mem::replace(budget, DecodeBudget::unlimited())),
+            error: Cell::new(None),
+            depth: Cell::new(0),
+        }
+    }
+
+    fn finish(self, budget: &mut DecodeBudget) -> DecodeResult<()> {
+        *budget = self.budget.into_inner();
+        self.error.into_inner().map_or(Ok(()), Err)
+    }
+
+    fn do_with<T>(&self, action: impl FnOnce(&mut DecodeBudget) -> DecodeResult<T>) -> Option<T> {
+        if self.error.get().is_some() {
+            return None;
+        }
+        match action(&mut self.budget.borrow_mut()) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.error.set(Some(error));
+                None
+            }
+        }
+    }
+
+    fn descend<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        let depth = self.depth.get() + 1;
+        self.do_with(|budget| budget.check_depth(depth))?;
+        self.depth.set(depth);
+        let result = action();
+        self.depth.set(depth - 1);
+        Some(result)
+    }
+}
+
+fn reserve<T>(meter: Option<&PlanMeter>, vec: &mut Vec<T>, count: usize) -> bool {
+    meter.is_none_or(|meter| meter.do_with(|budget| budget.reserve(vec, count)).is_some())
+}
+
 #[derive(Default)]
 struct Numbers {
     order: Vec<usize>,
@@ -91,13 +222,24 @@ struct Numbers {
 
 impl Numbers {
     fn number(&mut self, row: usize) -> (u32, bool) {
+        self.number_metered(row, None)
+    }
+
+    fn number_metered(&mut self, row: usize, meter: Option<&PlanMeter>) -> (u32, bool) {
         if row >= self.by_row.len() {
+            let additional = row + 1 - self.by_row.len();
+            if !reserve(meter, &mut self.by_row, additional) {
+                return (0, false);
+            }
             self.by_row.resize(row + 1, None);
         }
         let next = self.order.len() as u32;
         match self.by_row[row] {
             Some(number) => (number, false),
             None => {
+                if !reserve(meter, &mut self.order, 1) {
+                    return (0, false);
+                }
                 self.order.push(row);
                 self.by_row[row] = Some(next);
                 (next, true)
@@ -128,9 +270,9 @@ impl Table {
         }
     }
 
-    fn discover(&mut self, row: usize) -> (u32, bool) {
-        let (number, fresh) = self.numbers.number(row);
-        if fresh {
+    fn discover(&mut self, row: usize, meter: Option<&PlanMeter>) -> (u32, bool) {
+        let (number, fresh) = self.numbers.number_metered(row, meter);
+        if fresh && reserve(meter, &mut self.bytes, 1) {
             self.bytes.push(Vec::new());
         }
         (number, fresh)
@@ -155,6 +297,7 @@ enum LocalRow {
 
 struct ModuleOrder<'m> {
     module: &'m Module,
+    meter: Option<&'m PlanMeter>,
     types: Table,
     signatures: Table,
     statics: Table,
@@ -173,14 +316,23 @@ struct ModuleOrder<'m> {
 
 impl<'m> ModuleOrder<'m> {
     fn new(module: &'m Module) -> Self {
+        Self::metered(module, None)
+    }
+
+    fn metered(module: &'m Module, meter: Option<&'m PlanMeter>) -> Self {
+        let mut live_functions = Vec::new();
+        if reserve(meter, &mut live_functions, module.functions.len()) {
+            live_functions.resize(module.functions.len(), false);
+        }
         Self {
             module,
+            meter,
             types: Table::default(),
             signatures: Table::default(),
             statics: Table::default(),
             instances: Table::default(),
             functions: Numbers::default(),
-            live_functions: vec![false; module.functions.len()],
+            live_functions,
             declarations: Numbers::default(),
             planning: false,
             metadata: false,
@@ -205,22 +357,41 @@ impl<'m> ModuleOrder<'m> {
         if self.planning && !self.metadata && matches!(kind, GlobalRow::Type) {
             self.retain_layout(row);
         }
-        let (number, fresh) = self.table(kind).discover(row);
+        let meter = self.meter;
+        let (number, fresh) = self.table(kind).discover(row, meter);
         if fresh && self.planning {
-            self.write_row(kind, row);
+            if let Some(meter) = meter {
+                meter.descend(|| self.write_row(kind, row));
+            } else {
+                self.write_row(kind, row);
+            }
         }
         number
     }
 
     fn retain_layout(&mut self, root: usize) {
-        let mut pending = vec![root];
+        let meter = self.meter;
+        let mut pending = Vec::new();
+        if reserve(meter, &mut pending, 1) {
+            pending.push(root);
+        }
         while let Some(row) = pending.pop() {
-            if !self.layouts.number(row).1 {
+            if !self.layouts.number_metered(row, meter).1 {
                 continue;
             }
-            let mut shape = self.module.types[row].clone();
+            let original = &self.module.types[row];
+            if meter.is_some_and(|meter| {
+                meter
+                    .do_with(|budget| charge_shape(original, budget))
+                    .is_none()
+            }) {
+                break;
+            }
+            let mut shape = original.clone();
             shape.map_refs(&mut |ty| {
-                pending.push(ty.index());
+                if reserve(meter, &mut pending, 1) {
+                    pending.push(ty.index());
+                }
                 ty
             });
         }
@@ -243,16 +414,42 @@ impl<'m> ModuleOrder<'m> {
     }
 
     fn function(&mut self, row: usize) -> u32 {
-        if self.planning {
-            self.live_functions[row] = true;
+        if self.planning
+            && let Some(live) = self.live_functions.get_mut(row)
+        {
+            *live = true;
         }
-        self.functions.number(row).0
+        self.functions.number_metered(row, self.meter).0
     }
 
-    fn slot(&mut self, slot: Slot) {
-        if self.seen_slots.insert(slot.clone()) {
-            self.slots.push(slot);
+    fn builtin_slot(&mut self, definition: &DefPath) {
+        if self.meter.is_some_and(|meter| {
+            meter
+                .do_with(|budget| charge_identity(definition, &[], budget))
+                .is_none()
+        }) {
+            return;
         }
+        let slot = Slot::Builtin(definition.clone());
+        if self.seen_slots.contains(&slot) {
+            return;
+        }
+        if self.meter.is_some_and(|meter| {
+            meter
+                .do_with(|budget| {
+                    budget.charge_slots(1)?;
+                    charge_identity(definition, &[], budget)?;
+                    // A insertion may create a leaf and split an ancestor.
+                    budget.allocation::<Slot>(24)?;
+                    budget.charge_bytes(256)
+                })
+                .is_none()
+        }) || !reserve(self.meter, &mut self.slots, 1)
+        {
+            return;
+        }
+        self.seen_slots.insert(slot.clone());
+        self.slots.push(slot);
     }
 }
 
@@ -268,25 +465,37 @@ struct BodyOrder<'m> {
 
 impl<'m> BodyOrder<'m> {
     fn new(body: &'m Body) -> Self {
+        Self::metered(body, None)
+    }
+
+    fn metered(body: &'m Body, meter: Option<&PlanMeter>) -> Self {
         let mut blocks = Numbers::default();
         let mut values = Numbers::default();
-        let mut pending = vec![BlockId(0)];
+        let mut pending = Vec::new();
+        if reserve(meter, &mut pending, 1) {
+            pending.push(BlockId(0));
+        }
         while let Some(id) = pending.pop() {
-            let (_, fresh) = blocks.number(id.index());
+            let (_, fresh) = blocks.number_metered(id.index(), meter);
             if !fresh {
                 continue;
             }
             let block = &body.blocks[id.index()];
             for &parameter in block.params.get(&body.pools.values).unwrap() {
-                values.number(parameter.index());
+                values.number_metered(parameter.index(), meter);
             }
             for inst in block.insts.get(&body.insts).unwrap() {
                 for result in results(inst, body) {
-                    values.number(result.index());
+                    values.number_metered(result.index(), meter);
                 }
             }
-            let successors = crate::ir::successors(body, id.index());
-            pending.extend(successors.into_iter().rev());
+            let before = pending.len();
+            crate::ir::for_each_successor(body, id.index(), |next| {
+                if reserve(meter, &mut pending, 1) {
+                    pending.push(next);
+                }
+            });
+            pending[before..].reverse();
         }
         Self {
             body,
@@ -398,7 +607,11 @@ pub struct FunctionAnnex {
 
 /// A body's source positions and hints, indexed by canonical function number.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Annex(pub Vec<Option<FunctionAnnex>>);
+pub struct Annex(
+    pub Vec<Option<FunctionAnnex>>,
+    /// The entry's parameter names, used in startup diagnostics.
+    pub Option<Vec<String>>,
+);
 
 impl Annex {
     pub fn encode(&self) -> Vec<u8> {
@@ -422,35 +635,45 @@ impl Annex {
                 out.count(parameter as usize);
             }
         }
+        self.1.write(&mut out);
         out.bytes
     }
 
-    /// Read the two annex sections and check their shape against the decoded body.
-    pub fn decode(bytes: &[u8], body: &Module) -> io::Result<Self> {
-        let mut input = Read::new(bytes, ANNEX_MAGIC)?;
-        let mut functions = Vec::new();
-        for _ in 0..input.count()? {
-            functions.push(if bool::read(&mut input)? {
-                Some(FunctionAnnex {
-                    instructions: Wire::read(&mut input)?,
-                    terminators: Wire::read(&mut input)?,
-                    cold_calls: vec![],
-                    cold_edges: vec![],
-                    callable_parameters: vec![],
-                })
-            } else {
-                None
-            });
+    /// Read the annex sections and check their shape against the decoded body.
+    pub fn decode(bytes: &[u8], body: &Module, budget: &mut DecodeBudget) -> DecodeResult<Self> {
+        let mut input = Read::new(bytes, ANNEX_MAGIC, budget)?;
+        let len = input.count()?;
+        if len != body.functions.len() {
+            return Err(DecodeError::Malformed("annex does not match body"));
         }
+        let mut functions = input.read_vec(len, |input| {
+            bool::read(input)?
+                .then(|| {
+                    Ok(FunctionAnnex {
+                        instructions: Wire::read(input)?,
+                        terminators: Wire::read(input)?,
+                        cold_calls: vec![],
+                        cold_edges: vec![],
+                        callable_parameters: vec![],
+                    })
+                })
+                .transpose()
+        })?;
         for function in functions.iter_mut().flatten() {
             function.cold_calls = Wire::read(&mut input)?;
             function.cold_edges = Wire::read(&mut input)?;
-            function.callable_parameters = (0..input.count()?)
-                .map(|_| input.index())
-                .collect::<io::Result<_>>()?;
+            let len = input.count()?;
+            function.callable_parameters = input.read_vec(len, Read::index)?;
         }
+        let names: Option<Vec<String>> = Wire::read(&mut input)?;
         input.end()?;
-        let matches = functions.len() == body.functions.len()
+        let names_match = names.as_ref().is_none_or(|names| {
+            body.functions.first().is_some_and(|entry| {
+                names.len() == body.signatures[entry.signature.index()].params.len()
+            })
+        });
+        let matches = names_match
+            && functions.len() == body.functions.len()
             && functions
                 .iter()
                 .zip(&body.functions)
@@ -476,12 +699,9 @@ impl Annex {
                     _ => false,
                 });
         if !matches {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "annex does not match body",
-            ));
+            return Err(DecodeError::Malformed("annex does not match body"));
         }
-        Ok(Self(functions))
+        Ok(Self(functions, names))
     }
 
     pub fn hash(&self) -> ContentHash {
@@ -501,14 +721,14 @@ pub fn encode_with_annex(
     sources: &crate::source::SourceMap,
 ) -> (EncodedBody, Annex) {
     let (body, annex) = encode_with_sources(module, root, Some(sources));
-    (body, Annex(annex))
+    (body, Annex(annex, None))
 }
 
 /// Materialize the retained module for existing native and evaluator consumers.
 /// Source anchors and hints keep their original facts in the canonical numbering.
 pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
     let (mut code, annex) = encode_with_annex(module, root, &crate::source::SourceMap::default());
-    let mut retained = decode_payload(&code.bytes)
+    let mut retained = decode_payload(&code.bytes, &mut DecodeBudget::unlimited())
         .expect("our own normal body decodes")
         .0;
     retained.items.clone_from(&module.items);
@@ -611,64 +831,98 @@ fn encode_with_sources(
     (encoded, annex)
 }
 
+fn planned_closure(module: &Module, ty: TypeId, meter: Option<&PlanMeter>) -> Option<ContentHash> {
+    match meter {
+        None => Some(module.closure(ty).hash),
+        Some(meter) => meter.do_with(|budget| module.decoded_closure(ty, budget).map(|c| c.hash)),
+    }
+}
+
 fn plan(module: &Module, root: FuncId) -> ModuleOrder<'_> {
-    let mut order = ModuleOrder::new(module);
+    plan_metered(module, root, None)
+}
+
+fn plan_metered<'m>(
+    module: &'m Module,
+    root: FuncId,
+    meter: Option<&'m PlanMeter>,
+) -> ModuleOrder<'m> {
+    let mut order = ModuleOrder::metered(module, meter);
     order.planning = true;
     order.function(root.index());
     let mut next = 0;
     let mut layouts_walked = 0;
     loop {
         while let Some(&row) = order.functions.order.get(next) {
-            let body = module.functions[row].body.as_ref().map(BodyOrder::new);
+            let body = module.functions[row]
+                .body
+                .as_ref()
+                .map(|body| BodyOrder::metered(body, meter));
             write_function(&mut order, row, body, None);
             next += 1;
         }
-        let mut finalizers: Vec<_> = order.layouts.order[layouts_walked..]
-            .iter()
-            .filter_map(|&ty| {
-                let f = module.types[ty].finalizer?;
-                (!order.live_functions[f.0 as usize])
-                    .then(|| (module.closure(TypeId(ty as u32)).hash, f))
-            })
-            .collect();
+        let mut finalizers = Vec::new();
+        for &ty in &order.layouts.order[layouts_walked..] {
+            if let Some(f) = module.types[ty].finalizer
+                && !order.live_functions[f.0 as usize]
+                && reserve(meter, &mut finalizers, 1)
+                && let Some(hash) = planned_closure(module, TypeId(ty as u32), meter)
+            {
+                finalizers.push((hash, finalizers.len(), f));
+            }
+        }
         layouts_walked = order.layouts.order.len();
         if finalizers.is_empty() {
             break;
         }
-        finalizers.sort_by_key(|&(hash, _)| hash);
-        for (_, f) in finalizers {
+        finalizers.sort_unstable_by_key(|&(hash, order, _)| (hash, order));
+        for (_, _, f) in finalizers {
             order.function(f.0 as usize);
         }
     }
-    let mut root_types: Vec<_> = order
+    let mut compact_types = Vec::new();
+    for ty in order
         .functions
         .order
         .iter()
         .filter_map(|&row| module.functions[row].body.as_ref())
         .flat_map(|body| body.compact_roots.iter().map(|root| root.ty))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|ty| {
-            order
-                .types
-                .numbers
-                .by_row
-                .get(ty.index())
-                .copied()
-                .flatten()
-                .is_none()
-        })
-        .map(|ty| (module.closure(ty).hash, ty))
-        .collect();
-    root_types.sort_by_key(|&(hash, _)| hash);
+    {
+        if reserve(meter, &mut compact_types, 1) {
+            compact_types.push(ty);
+        }
+    }
+    compact_types.sort_unstable();
+    compact_types.dedup();
+    let mut root_types = Vec::new();
+    for ty in compact_types {
+        if order
+            .types
+            .numbers
+            .by_row
+            .get(ty.index())
+            .copied()
+            .flatten()
+            .is_none()
+            && reserve(meter, &mut root_types, 1)
+            && let Some(hash) = planned_closure(module, ty, meter)
+        {
+            root_types.push((hash, ty));
+        }
+    }
+    root_types.sort_unstable();
     for &(_, ty) in &root_types {
-        order.types.discover(ty.index());
+        order.types.discover(ty.index(), meter);
     }
     for (_, ty) in root_types {
-        order.write_row(GlobalRow::Type, ty.index());
+        if let Some(meter) = meter {
+            meter.descend(|| order.write_row(GlobalRow::Type, ty.index()));
+        } else {
+            order.write_row(GlobalRow::Type, ty.index());
+        }
     }
     for &declaration in &order.declarations.order {
-        order.functions.number(declaration);
+        order.functions.number_metered(declaration, meter);
     }
     order.planning = false;
     order
@@ -692,7 +946,14 @@ fn write_function<'m>(
     };
     let body = body_order.body;
     out.local = Some(body_order);
-    let blocks = out.local().blocks.order.clone();
+    let mut blocks = Vec::new();
+    if reserve(
+        out.module.meter,
+        &mut blocks,
+        out.local().blocks.order.len(),
+    ) {
+        blocks.extend_from_slice(&out.local().blocks.order);
+    }
     out.count(blocks.len());
     for block in blocks {
         let block_row = &body.blocks[block];
@@ -701,8 +962,10 @@ fn write_function<'m>(
         out.count(insts.len());
         for inst in insts {
             match *inst {
-                Inst::BuiltinUse { ref definition } if !out.module.planning => {
-                    out.module.slot(Slot::Builtin((**definition).clone()));
+                Inst::BuiltinUse { ref definition }
+                    if !out.module.planning || out.module.meter.is_some() =>
+                {
+                    out.module.builtin_slot(definition);
                 }
                 Inst::DescriptorRef { function, .. }
                     if !out.module.planning
@@ -711,6 +974,13 @@ fn write_function<'m>(
                     out.module.described.insert(identity);
                 }
                 _ => {}
+            }
+            if out
+                .module
+                .meter
+                .is_some_and(|meter| meter.do_with(|b| b.check()).is_none())
+            {
+                break;
             }
             inst.write(&mut out);
         }
@@ -735,10 +1005,12 @@ fn write_function<'m>(
     for &row in &local.values.order {
         body.values[row].write(&mut out);
     }
-    local.slots.append(&mut out.bytes);
-    local.addresses.append(&mut out.bytes);
-    local.calls.append(&mut out.bytes);
-    local.edges.append(&mut out.bytes);
+    if !out.module.planning {
+        local.slots.append(&mut out.bytes);
+        local.addresses.append(&mut out.bytes);
+        local.calls.append(&mut out.bytes);
+        local.edges.append(&mut out.bytes);
+    }
     let annex = sources.map(|sources| function_annex(module, &local, sources));
     (out.bytes, annex)
 }
@@ -801,9 +1073,107 @@ fn function_annex(
 /// Decode a body with canonical IDs and empty source and optimisation fields.
 /// Function 0 is the instance's root. Source positions and hints are read
 /// separately from the annex.
-pub fn decode(bytes: &[u8]) -> io::Result<Module> {
-    let (module, closures) = decode_payload(bytes)?;
-    let malformed = || io::Error::new(io::ErrorKind::InvalidData, "noncanonical body");
+pub struct DecodedBody {
+    pub module: Module,
+    pub slots: Vec<Slot>,
+    closures: Vec<Vec<ContentHash>>,
+    closure_hashes: Vec<Option<ContentHash>>,
+    signatures: Vec<Option<ContentHash>>,
+}
+
+impl DecodedBody {
+    /// The function's canonical identity. The closure hashes have already
+    /// been checked during the decode.
+    pub fn identity(&self, function: FuncId, budget: &mut DecodeBudget) -> DecodeResult<Identity> {
+        let row = self
+            .module
+            .functions
+            .get(function.index())
+            .ok_or(DecodeError::Malformed("function outside normal form table"))?
+            .instance
+            .index();
+        let key = &self.module.instances[row];
+        charge_identity(&key.definition, &key.dictionaries, budget)?;
+        budget.allocation::<ContentHash>(self.closures[row].len())?;
+        Ok(Identity {
+            definition: key.definition.clone(),
+            dictionaries: key.dictionaries.clone(),
+            closures: self.closures[row].clone(),
+        })
+    }
+
+    pub fn signature(
+        &mut self,
+        function: FuncId,
+        budget: &mut DecodeBudget,
+    ) -> DecodeResult<ContentHash> {
+        let id = self
+            .module
+            .functions
+            .get(function.index())
+            .ok_or(DecodeError::Malformed("function outside normal form table"))?
+            .signature
+            .index();
+        if self.signatures.is_empty() {
+            budget.reserve(&mut self.signatures, self.module.signatures.len())?;
+            self.signatures.resize(self.module.signatures.len(), None);
+        }
+        if let Some(hash) = self.signatures[id] {
+            budget.check()?;
+            return Ok(hash);
+        }
+        let signature = &self.module.signatures[id];
+        let types = signature
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                Param::Address {
+                    place: PlaceTy::Declared(ty),
+                    ..
+                } => Some(*ty),
+                _ => None,
+            })
+            .chain(signature.dest);
+        for ty in types {
+            cached_closure_hash(&self.module, ty, &mut self.closure_hashes, budget)?;
+        }
+        let meter = PlanMeter::new(budget);
+        let mut order = ModuleOrder::metered(&self.module, Some(&meter));
+        let mut out = Write::module(&mut order);
+        out.abi = true;
+        out.abi_closures = Some(&self.closure_hashes);
+        signature.write(&mut out);
+        let bytes = out.bytes;
+        meter.finish(budget)?;
+        let hash = ContentHash::of_parts("hirsel.code-signature.v1", [&bytes[..]]);
+        self.signatures[id] = Some(hash);
+        Ok(hash)
+    }
+}
+
+fn cached_closure_hash(
+    module: &Module,
+    ty: TypeId,
+    cached: &mut Vec<Option<ContentHash>>,
+    budget: &mut DecodeBudget,
+) -> DecodeResult<ContentHash> {
+    if cached.is_empty() {
+        budget.reserve(cached, module.types.len())?;
+        cached.resize(module.types.len(), None);
+    }
+    let slot = &mut cached[ty.index()];
+    if let Some(hash) = *slot {
+        budget.check()?;
+        return Ok(hash);
+    }
+    let hash = module.decoded_closure(ty, budget)?.hash;
+    *slot = Some(hash);
+    Ok(hash)
+}
+
+pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBody> {
+    let (module, closures) = decode_payload(bytes, budget)?;
+    let malformed = || DecodeError::Malformed("noncanonical body");
     if module.functions.first().is_none_or(|f| f.body.is_none()) {
         return Err(malformed());
     }
@@ -812,24 +1182,22 @@ pub fn decode(bytes: &[u8]) -> io::Result<Module> {
             if body.blocks.is_empty() {
                 return Err(malformed());
             }
-            let blocks = BodyOrder::new(body);
-            if !blocks.blocks.is_canonical(body.blocks.len()) {
-                return Err(malformed());
-            }
             for term in &body.terminators {
+                budget.check()?;
                 if let Terminator::Switch { arms, .. } = term {
-                    let mut seen = BTreeSet::new();
-                    if arms
-                        .get(&body.pools.arms)
-                        .unwrap()
-                        .iter()
-                        .any(|arm| !seen.insert(arm.value))
-                    {
+                    let arms = arms.get(&body.pools.arms).unwrap();
+                    let mut values = Vec::new();
+                    budget.reserve(&mut values, arms.len())?;
+                    values.extend(arms.iter().map(|arm| arm.value));
+                    values.sort_unstable();
+                    if values.windows(2).any(|pair| pair[0] == pair[1]) {
                         return Err(malformed());
                     }
                 }
             }
-            let mut definitions = vec![false; body.values.len()];
+            let mut definitions = Vec::new();
+            budget.reserve(&mut definitions, body.values.len())?;
+            definitions.resize(body.values.len(), false);
             for block in &body.blocks {
                 let values = block
                     .params
@@ -846,6 +1214,7 @@ pub fn decode(bytes: &[u8]) -> io::Result<Module> {
                             .flat_map(|i| results(i, body)),
                     );
                 for v in values {
+                    budget.check()?;
                     if std::mem::replace(&mut definitions[v.index()], true) {
                         return Err(malformed());
                     }
@@ -856,25 +1225,30 @@ pub fn decode(bytes: &[u8]) -> io::Result<Module> {
             }
         }
     }
-    let plan = plan(&module, FuncId(0));
-    if !plan.canonical_locals
-        || !plan.functions.is_canonical(module.functions.len())
-        || !plan.types.numbers.is_canonical(module.types.len())
-        || !plan
+    let meter = PlanMeter::new(budget);
+    let plan = plan_metered(&module, FuncId(0), Some(&meter));
+    let canonical = plan.canonical_locals
+        && plan.functions.is_canonical(module.functions.len())
+        && plan.types.numbers.is_canonical(module.types.len())
+        && plan
             .signatures
             .numbers
             .is_canonical(module.signatures.len())
-        || !plan.instances.numbers.is_canonical(module.instances.len())
-        || !plan.statics.numbers.is_canonical(module.statics.len())
-    {
+        && plan.instances.numbers.is_canonical(module.instances.len())
+        && plan.statics.numbers.is_canonical(module.statics.len());
+    let live_functions = plan.live_functions;
+    let builtins = plan.slots;
+    meter.finish(budget)?;
+    if !canonical {
         return Err(malformed());
     }
+    let mut slots = Vec::new();
     for (row, function) in module.functions.iter().enumerate() {
-        if !plan.live_functions[row] && function.versioned {
+        if !live_functions[row] && function.versioned {
             return Err(malformed());
         }
         if let Some(body) = &function.body
-            && (!plan.live_functions[row]
+            && (!live_functions[row]
                 || !body
                     .compact_roots
                     .windows(2)
@@ -882,25 +1256,49 @@ pub fn decode(bytes: &[u8]) -> io::Result<Module> {
         {
             return Err(malformed());
         }
-    }
-    for (row, hashes) in closures.into_iter().enumerate() {
-        if module.identity(InstanceId(row as u32)).closures != hashes {
-            return Err(malformed());
+        if live_functions[row] && function.body.is_none() {
+            budget.charge_slots(1)?;
+            budget.reserve(&mut slots, 1)?;
+            slots.push(Slot::External(FuncId(row as u32)));
         }
     }
-    Ok(module)
+    budget.reserve(&mut slots, builtins.len())?;
+    slots.extend(builtins);
+    let mut closure_hashes = Vec::new();
+    for (key, hashes) in module.instances.iter().zip(&closures) {
+        for (&ty, &hash) in key.arguments.iter().zip(hashes) {
+            if cached_closure_hash(&module, ty, &mut closure_hashes, budget)? != hash {
+                return Err(malformed());
+            }
+        }
+    }
+    budget.check()?;
+    Ok(DecodedBody {
+        module,
+        slots,
+        closures,
+        closure_hashes,
+        signatures: Vec::new(),
+    })
 }
 
-fn decode_payload(bytes: &[u8]) -> io::Result<(Module, Vec<Vec<ContentHash>>)> {
-    let mut input = Read::new(bytes, BODY_MAGIC)?;
+fn decode_payload(
+    bytes: &[u8],
+    budget: &mut DecodeBudget,
+) -> DecodeResult<(Module, Vec<Vec<ContentHash>>)> {
+    let mut input = Read::new(bytes, BODY_MAGIC, budget)?;
+    let types = Wire::read(&mut input)?;
+    let signatures = Wire::read(&mut input)?;
+    let statics = Wire::read(&mut input)?;
+    let instances = Wire::read(&mut input)?;
+    let len = input.count()?;
+    let functions = input.read_vec(len, read_function)?;
     let module = Module {
-        types: Wire::read(&mut input)?,
-        signatures: Wire::read(&mut input)?,
-        statics: Wire::read(&mut input)?,
-        instances: Wire::read(&mut input)?,
-        functions: (0..input.count()?)
-            .map(|_| read_function(&mut input))
-            .collect::<io::Result<_>>()?,
+        types,
+        signatures,
+        statics,
+        instances,
+        functions,
         ..Module::default()
     };
     input.check_globals(&module)?;
@@ -909,7 +1307,7 @@ fn decode_payload(bytes: &[u8]) -> io::Result<(Module, Vec<Vec<ContentHash>>)> {
     Ok((module, closures))
 }
 
-fn read_function(input: &mut Read<'_>) -> io::Result<Function> {
+fn read_function(input: &mut Read<'_, '_>) -> DecodeResult<Function> {
     let instance = Wire::read(input)?;
     let signature = Wire::read(input)?;
     let versioned = Wire::read(input)?;
@@ -922,11 +1320,15 @@ fn read_function(input: &mut Read<'_>) -> io::Result<Function> {
     })
 }
 
-fn read_body(input: &mut Read<'_>) -> io::Result<Body> {
+fn read_body(input: &mut Read<'_, '_>) -> DecodeResult<Body> {
     let mut body = Body::default();
     for _ in 0..input.count()? {
         let params = Wire::read(input)?;
-        let insts = PoolRange::push(&mut body.insts, Vec::<Inst>::read(input)?);
+        let instructions = Vec::<Inst>::read(input)?;
+        input.budget.reserve(&mut body.insts, instructions.len())?;
+        let insts = PoolRange::push(&mut body.insts, instructions);
+        input.budget.reserve(&mut body.blocks, 1)?;
+        input.budget.reserve(&mut body.terminators, 1)?;
         body.blocks.push(Block {
             params,
             insts,
@@ -934,6 +1336,9 @@ fn read_body(input: &mut Read<'_>) -> io::Result<Body> {
         });
         body.terminators.push(Wire::read(input)?);
     }
+    input
+        .budget
+        .reserve(&mut body.inst_anchors, body.insts.len())?;
     body.inst_anchors.resize(body.insts.len(), None);
     body.compact_roots = Wire::read(input)?;
     body.values = Wire::read(input)?;
@@ -950,6 +1355,10 @@ fn read_body(input: &mut Read<'_>) -> io::Result<Body> {
 mod tests {
     use super::*;
     use crate::{source::SourceMap, text, wf};
+
+    fn decode(bytes: &[u8]) -> DecodeResult<Module> {
+        super::decode(bytes, &mut DecodeBudget::unlimited()).map(|body| body.module)
+    }
 
     fn checked(source: &str) -> Module {
         let module = text::parse(source).unwrap();
@@ -1105,7 +1514,8 @@ mod tests {
             );
             let bytes = annex.encode();
             let decoded_body = round_trip(&b);
-            let decoded = Annex::decode(&bytes, &decoded_body).unwrap();
+            let decoded =
+                Annex::decode(&bytes, &decoded_body, &mut DecodeBudget::unlimited()).unwrap();
             assert_eq!(decoded.encode(), bytes);
             let facts = decoded.0[0].as_ref().unwrap();
             assert_eq!(facts.cold_calls, vec![hint == 1]);
@@ -1443,11 +1853,14 @@ fn f0 = n0 g0 {
         };
         assert_eq!((line(&sites_a), line(&sites_b)), (1, 2));
         let decoded = round_trip(&b);
-        assert_eq!(Annex::decode(&sites_b.encode(), &decoded).unwrap(), sites_b);
+        assert_eq!(
+            Annex::decode(&sites_b.encode(), &decoded, &mut DecodeBudget::unlimited()).unwrap(),
+            sites_b
+        );
         let mut wrong = sites_b;
         wrong.0[0].as_mut().unwrap().cold_calls.clear();
         assert!(
-            Annex::decode(&wrong.encode(), &decoded).is_err(),
+            Annex::decode(&wrong.encode(), &decoded, &mut DecodeBudget::unlimited()).is_err(),
             "annex must cover the body's calls"
         );
     }

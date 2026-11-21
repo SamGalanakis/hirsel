@@ -1,6 +1,11 @@
 //! PROG-10 code addresses, independent of reuse and native artifacts.
 
 use crate::Identity;
+use crate::decode::{DecodeBudget, DecodeResult};
+use crate::normal::{
+    uleb,
+    wire::{Read, Wire, invalid},
+};
 use hirsel_core_ids::ContentHash;
 use std::collections::BTreeMap;
 
@@ -8,6 +13,113 @@ use std::collections::BTreeMap;
 pub struct CodeRow {
     pub body: ContentHash,
     pub slots: Vec<Identity>,
+}
+
+const GROUP_MAGIC: &[u8] = b"HIRGROUP\0\x01\x00";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Binding {
+    Internal(u32),
+    External(ContentHash),
+    Builtin(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Member {
+    pub body: ContentHash,
+    pub slots: Vec<Binding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Group {
+    pub members: Vec<Member>,
+}
+
+impl Binding {
+    fn encode(self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Internal(member) => {
+                bytes.push(0);
+                uleb(bytes, u64::from(member));
+            }
+            Self::External(address) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&address.0);
+            }
+            Self::Builtin(number) => {
+                bytes.push(2);
+                bytes.extend_from_slice(&number.to_le_bytes());
+            }
+        }
+    }
+
+    fn decode(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        match u8::read(input)? {
+            0 => Ok(Self::Internal(input.index()?)),
+            1 => Ok(Self::External(Wire::read(input)?)),
+            2 => Ok(Self::Builtin(Wire::read(input)?)),
+            _ => Err(invalid("unknown group binding tag")),
+        }
+    }
+}
+
+impl Group {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Self::header(self.members.len());
+        for member in &self.members {
+            Self::write_member(&mut bytes, member.body, member.slots.iter().copied());
+        }
+        bytes
+    }
+
+    fn header(count: usize) -> Vec<u8> {
+        let mut bytes = GROUP_MAGIC.to_vec();
+        uleb(&mut bytes, count as u64);
+        bytes
+    }
+
+    fn write_member(
+        bytes: &mut Vec<u8>,
+        body: ContentHash,
+        slots: impl ExactSizeIterator<Item = Binding>,
+    ) {
+        bytes.extend_from_slice(&body.0);
+        uleb(bytes, slots.len() as u64);
+        for slot in slots {
+            slot.encode(bytes);
+        }
+    }
+
+    /// Read the frame. Admission checks member order against the identities in
+    /// the bodies and validates the bindings once it has the whole closure.
+    pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<Self> {
+        let mut input = Read::new(bytes, GROUP_MAGIC, budget)?;
+        let count = input.count()?;
+        if count == 0 || u32::try_from(count - 1).is_err() {
+            return Err(invalid("invalid group member count"));
+        }
+        input.charge_members(count)?;
+        let members = input.read_vec(count, |input| {
+            let body = Wire::read(input)?;
+            let count = input.count()?;
+            input.charge_slots(count)?;
+            let slots = input.read_vec(count, Binding::decode)?;
+            Ok(Member { body, slots })
+        })?;
+        input.end()?;
+        Ok(Self { members })
+    }
+
+    pub fn hash(bytes: &[u8]) -> ContentHash {
+        ContentHash::of_parts("hirsel.code-group.v1", [bytes])
+    }
+
+    pub fn member_address(hash: ContentHash, ordinal: u32) -> ContentHash {
+        let mut bytes = [0; 36];
+        bytes[..32].copy_from_slice(&hash.0);
+        bytes[32..].copy_from_slice(&ordinal.to_le_bytes());
+        ContentHash::of_parts("hirsel.code-address.v1", [&bytes[..]])
+    }
 }
 
 /// The bytes carried by a PROG-9 descriptor and the entry link.
@@ -40,15 +152,28 @@ pub fn code_addresses(
     roots: impl IntoIterator<Item = Identity>,
     row: impl FnMut(&Identity) -> Option<CodeRow>,
 ) -> Option<BTreeMap<Identity, ContentHash>> {
-    addresses(roots, row, |identity| {
-        builtin_semantics::number(&identity.definition)
-    })
+    code_groups(roots, row, |_, _| {})
+}
+
+/// Compute the addresses and hand each canonical group frame to its producer.
+pub fn code_groups(
+    roots: impl IntoIterator<Item = Identity>,
+    row: impl FnMut(&Identity) -> Option<CodeRow>,
+    group: impl FnMut(ContentHash, Vec<u8>),
+) -> Option<BTreeMap<Identity, ContentHash>> {
+    addresses(
+        roots,
+        row,
+        |identity| builtin_semantics::number(&identity.definition),
+        group,
+    )
 }
 
 fn addresses(
     roots: impl IntoIterator<Item = Identity>,
     mut row: impl FnMut(&Identity) -> Option<CodeRow>,
     builtin: impl Fn(&Identity) -> Option<u32>,
+    group: impl FnMut(ContentHash, Vec<u8>),
 ) -> Option<BTreeMap<Identity, ContentHash>> {
     let mut checked = BTreeMap::new();
     let mut builtins = BTreeMap::new();
@@ -82,7 +207,7 @@ fn addresses(
                 .collect(),
         })
         .collect();
-    let hashes = group_addresses(&nodes);
+    let hashes = group_addresses(&nodes, group);
     let mut result: BTreeMap<_, _> = checked.into_keys().zip(hashes).collect();
     result.extend(builtins.into_iter().map(|(identity, number)| {
         let address = hash_builtin(&identity, number);
@@ -114,7 +239,10 @@ struct Frame {
     next: usize,
 }
 
-fn group_addresses(nodes: &[Node]) -> Vec<ContentHash> {
+fn group_addresses(
+    nodes: &[Node],
+    mut group: impl FnMut(ContentHash, Vec<u8>),
+) -> Vec<ContentHash> {
     let mut visits: Vec<_> = (0..nodes.len()).map(|_| Visit::default()).collect();
     let mut frames: Vec<Frame> = Vec::new();
     let mut stack = Vec::new();
@@ -167,7 +295,9 @@ fn group_addresses(nodes: &[Node]) -> Vec<ContentHash> {
                         break;
                     }
                 }
-                hash_group(nodes, &mut members, &mut group_numbers, &mut addresses);
+                let (hash, bytes) =
+                    hash_group(nodes, &mut members, &mut group_numbers, &mut addresses);
+                group(hash, bytes);
                 members.clear();
             }
             if let Some(parent) = frames.last() {
@@ -183,44 +313,29 @@ fn hash_group(
     members: &mut [usize],
     numbers: &mut [Option<u32>],
     addresses: &mut [ContentHash],
-) {
+) -> (ContentHash, Vec<u8>) {
     members.sort_unstable();
     for (k, &member) in members.iter().enumerate() {
         numbers[member] = Some(k as u32);
     }
-    let mut bytes = b"HIRGROUP\0\x01\x00".to_vec();
-    crate::normal::uleb(&mut bytes, members.len() as u64);
+    let mut bytes = Group::header(members.len());
     for &member in members.iter() {
         let node = &nodes[member];
-        bytes.extend_from_slice(&node.body.0);
-        crate::normal::uleb(&mut bytes, node.slots.len() as u64);
-        for slot in &node.slots {
-            match *slot {
-                Slot::Instance(child) => match numbers[child] {
-                    Some(k) => {
-                        bytes.push(0);
-                        crate::normal::uleb(&mut bytes, u64::from(k));
-                    }
-                    None => {
-                        bytes.push(1);
-                        bytes.extend_from_slice(&addresses[child].0);
-                    }
-                },
-                Slot::Builtin(number) => {
-                    bytes.push(2);
-                    bytes.extend_from_slice(&number.to_le_bytes());
-                }
-            }
-        }
+        let slots = node.slots.iter().map(|slot| match *slot {
+            Slot::Instance(child) => match numbers[child] {
+                Some(k) => Binding::Internal(k),
+                None => Binding::External(addresses[child]),
+            },
+            Slot::Builtin(number) => Binding::Builtin(number),
+        });
+        Group::write_member(&mut bytes, node.body, slots);
     }
-    let group = ContentHash::of_parts("hirsel.code-group.v1", [&bytes[..]]);
-    let mut member_bytes = [0; 36];
-    member_bytes[..32].copy_from_slice(&group.0);
+    let group = Group::hash(&bytes);
     for &member in members.iter() {
         let k = numbers[member].take().unwrap();
-        member_bytes[32..].copy_from_slice(&k.to_le_bytes());
-        addresses[member] = ContentHash::of_parts("hirsel.code-address.v1", [&member_bytes[..]]);
+        addresses[member] = Group::member_address(group, k);
     }
+    (group, bytes)
 }
 
 #[cfg(test)]

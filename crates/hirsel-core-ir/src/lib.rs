@@ -1069,7 +1069,8 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-mod address;
+pub mod address;
+pub mod decode;
 /// A test evaluator for the FORM v0 subset, for this crate's samples and its producers'
 /// behaviour cases.
 #[cfg(any(test, feature = "eval"))]
@@ -1080,6 +1081,7 @@ mod ir;
 pub mod native_layout;
 pub mod normal;
 pub mod receive_loops;
+pub mod release_recipe;
 pub mod roles;
 pub mod source;
 mod static_data;

@@ -39,6 +39,11 @@ core@1/channel/try_send
 core@1/channel/try_receive
 core@1/char/from_u32
 core@1/char/to_u32
+# DECISIONS.md 2026-11-21 (std check XXH3 kernels)
+core@1/check/xxh3_short
+core@1/check/xxh3_short_inline
+core@1/check/xxh3_stripe
+core@1/check/xxh3_stripes
 core@1/code/callable
 core@1/code/describe
 core@1/code/identity
@@ -394,6 +399,14 @@ core@1/core/NetError
 core@1/core/Socket
 core@1/core/Until
 core@1/host/accept
+# DECISIONS.md 2026-11-21 (main-reds-1523, store control socket and NetError.Tls).
+core@1/core/ReadHalf
+core@1/core/WriteHalf
+core@1/net/split
+core@1/host/recv_bounded
+core@1/host/send_pair
+core@1/core/TlsFailure
+core@1/core/CertFailure
 # DECISIONS.md 2026-11-17: W3d's loopback wire client and fixture listeners.
 core@1/host/connect
 core@1/host/listen

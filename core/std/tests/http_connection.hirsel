@@ -1330,3 +1330,222 @@ fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, 
     http_client.close(take client)
     list.len(entries) == 1
 }
+
+fn listen_with_budget(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, budget: u64) -> (Task[()], Addr) waits {
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/{tail...}", router.raw(echo)))
+    result.unwrap(router.add(mut routes, "POST", "/{tail...}", router.raw(echo)))
+    let addr = Addr(ip: V4(2130706433), port: 0)
+    let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
+    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg, routes: result.unwrap(router.build(take routes)))
+    (result.unwrap(task.spawn(tasks, bytes budget, take job, test_server)), where_to)
+}
+
+fn client_response(mut r: ReadHalf, mut received: Bytes, c: Clock, deadline: u64) -> (u16, u64, u64) waits {
+    let mut h = http1.head()
+    loop {
+        match http1.response(received, mut h) {
+            Complete => break,
+            Partial => {},
+            _ => return (0, 0, 0),
+        }
+        let max = list.capacity(received)
+        match host.recv_bounded(mut r, mut received, max, At(c, deadline)) {
+            Ok(0) => return (0, 0, 0),
+            Ok(_) => {},
+            Error(_) => return (0, 0, 0),
+        }
+    }
+    let mut content_len: u64 = 0
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(list.slice(received, f.name.start, f.name.end), string.as_bytes("Content-Length")) {
+            if let Ok(n) = int.parse_decimal_span(received, f.value.start, f.value.end, 65536) {
+                content_len = n
+            }
+        }
+    }
+    while list.len(received) < h.end + content_len {
+        let max = list.capacity(received)
+        match host.recv_bounded(mut r, mut received, max, At(c, deadline)) {
+            Ok(0) => return (0, 0, 0),
+            Ok(_) => {},
+            Error(_) => return (0, 0, 0),
+        }
+    }
+    (h.status, h.end, h.end + content_len)
+}
+
+// HTTP-6/HTTP-7. A connection that starts with a bodyless request must still
+// materialize body scratch for a later body read (under handler_bytes < 8192),
+// and a fresh connection must materialize it for an unread body drain while
+// preserving the pipelined next request.
+// expect: run http_lazy_scratch_read_and_drain(network) = true
+fn http_lazy_scratch_read_and_drain(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let until = after_ms(host.mono_ns(c), 90)
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    if empty_get(mut output, mut input, string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n"), c, until) != 200 {
+        return false
+    }
+    let post_head = string.as_bytes("POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n")
+    if !client_send(mut output, post_head, At(c, until)) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut input, mut received, c, until) != 100 {
+        return false
+    }
+    if !client_send(mut output, string.as_bytes("0123456789"), At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    let (st1, b1_start, b1_end) = client_response(mut input, mut received, c, until)
+    if st1 != 200 || list.slice(received, b1_start, b1_end) != string.as_bytes("0123456789") {
+        return false
+    }
+    let chunked_head = string.as_bytes("POST /echo HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+    if !client_send(mut output, chunked_head, At(c, until)) {
+        return false
+    }
+    host.sleep_until(c, after_ms(host.mono_ns(c), 2))
+    if !client_send(mut output, string.as_bytes("5\r\nhello\r\n0\r\n\r\n"), At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    if !client_end(mut input, mut received, At(c, until)) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(received, mut h) != Complete || h.status != 200 || list.slice(received, h.end, list.len(received)) != string.as_bytes("hello") {
+        return false
+    }
+    let (r2, w2) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut drain_in = take r2
+    let mut drain_out = take w2
+    let skip_head = string.as_bytes("POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 10\r\n\r\n")
+    if !client_send(mut drain_out, skip_head, At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    let (st2, _, _) = client_response(mut drain_in, mut received, c, until)
+    if st2 != 200 {
+        return false
+    }
+    let tail = string.as_bytes("abcdefghijGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    if !client_send(mut drain_out, tail, At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    if !client_end(mut drain_in, mut received, At(c, until)) {
+        return false
+    }
+    let mut h2 = http1.head()
+    http1.response(received, mut h2) == Complete && h2.status == 200 && h2.end == list.len(received)
+}
+
+// HTTP-1/MEM-24. Each connection reserves C = read(32768) + out(128) +
+// scratch(8192) + J/reply(1272) + handler(4096) = 46456, plus T(0) = 288 and
+// Completion = 72, so 46816 per connection. With supervisor fixed overhead
+// (~10094), a budget of 99600 admits one bodyless connection and refuses a
+// second concurrent bodyless connection with 503 (short by ~4126, less than
+// 8192), while 105000 admits both.
+// expect: run http_bodyless_connection_admission_budget(network) = true
+fn http_bodyless_connection_admission_budget(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let until = after_ms(host.mono_ns(c), 90)
+    let req = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+    let (tight_server, tight_addr) = listen_with_budget(n, c, tasks, test_config(), 99600)
+    let (r1, w1) = net.split(result.unwrap(host.connect(n, tight_addr, Never)))
+    let mut in1 = take r1
+    let mut out1 = take w1
+    if empty_get(mut out1, mut in1, req, c, until) != 200 {
+        return false
+    }
+    let (r2, w2) = net.split(result.unwrap(host.connect(n, tight_addr, Never)))
+    let mut in2 = take r2
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_end(mut in2, mut received, At(c, until)) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(received, mut h) != Complete || h.status != 503 {
+        return false
+    }
+    let (room_server, room_addr) = listen_with_budget(n, c, tasks, test_config(), 105000)
+    let (r3, w3) = net.split(result.unwrap(host.connect(n, room_addr, Never)))
+    let mut in3 = take r3
+    let mut out3 = take w3
+    if empty_get(mut out3, mut in3, req, c, until) != 200 {
+        return false
+    }
+    let (r4, w4) = net.split(result.unwrap(host.connect(n, room_addr, Never)))
+    let mut in4 = take r4
+    let mut out4 = take w4
+    empty_get(mut out4, mut in4, req, c, until) == 200
+}
+
+// HTTP-7/MEM-24. After a body read materializes the 8192 B scratch under
+// handler_bytes = 4096, closing must release scratch before net.finish
+// allocates its own 8192 B linger scratch (only 5368 B remain otherwise),
+// and exiting must refund the full connection budget for the next socket.
+// expect: run http_body_scratch_release_and_linger(network) = true
+fn http_body_scratch_release_and_linger(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.sockets_max = 1
+    cfg.http_max = 1
+    cfg.conns_max = 1
+    cfg.ip_sockets_max = 1
+    cfg.linger_ms = 10
+    let (server, addr) = listen_with_budget(n, c, tasks, take cfg, 58000)
+    let until = after_ms(host.mono_ns(c), 90)
+    let (r1, w1) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut in1 = take r1
+    let mut out1 = take w1
+    let post = string.as_bytes("POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n")
+    if !client_send(mut out1, post, At(c, until)) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut in1, mut received, c, until) != 100 || !client_send(mut out1, string.as_bytes("hello"), At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    if !client_end(mut in1, mut received, At(c, until)) {
+        return false
+    }
+    let mut h1 = http1.head()
+    if http1.response(received, mut h1) != Complete || h1.status != 200 || list.slice(received, h1.end, list.len(received)) != string.as_bytes("hello") {
+        return false
+    }
+    let closed_at = host.mono_ns(c)
+    // Peer write half out1 is still open, so net.finish must linger for 10 ms.
+    let (rb, wb) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut busy_in = take rb
+    list.clear(mut received)
+    if !client_end(mut busy_in, mut received, At(c, until)) {
+        return false
+    }
+    let mut hb = http1.head()
+    if http1.response(received, mut hb) != Complete || hb.status != 503 {
+        return false
+    }
+    host.sleep_until(c, after_ms(closed_at, 14))
+    let (r2, w2) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut in2 = take r2
+    let mut out2 = take w2
+    if !client_send(mut out2, post, At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    if client_head(mut in2, mut received, c, until) != 100 || !client_send(mut out2, string.as_bytes("world"), At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    if !client_end(mut in2, mut received, At(c, until)) {
+        return false
+    }
+    let mut h2 = http1.head()
+    http1.response(received, mut h2) == Complete && h2.status == 200 && list.slice(received, h2.end, list.len(received)) == string.as_bytes("world")
+}

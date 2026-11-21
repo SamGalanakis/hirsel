@@ -52,7 +52,19 @@ current module, and nothing else. If `a` is a local or a constant, `.b` selects 
 its value; if a module or package, `.b` selects a member, so another module's constant is
 read as `m.ORIGIN.x`. A module wins over a constant of its name. A function is never the
 head of a path: a head that names only a function, or nothing, is refused here, at the
-head, and is never rebound. So a module may
+head, and is never rebound.
+
+A package's **root module** is its module whose path is the package's name: module `store`
+of package `store`, module `core` of the core library. A package name is the head of a path
+into that package, and `.b` after it selects a member of its root module or a module of
+the package: `store.fetch(..)` calls the root module's `fetch`, `store.Tx` names its type, and
+`store.wal.append(..)` calls a member of module `wal`. The root module is reached only that
+way, so `store.store.fetch` names nothing and is refused here, at the second `store`. Inside
+the package the head `store` is the root module itself, as a module of the current package,
+so the same path reads the same member there. A root module member that has the name of a
+module of its package is refused here, at that member, with the module as the causal site,
+so `.b` after a package name is never ambiguous. A package with no root module, as `std`,
+is reached only through its modules (`std.order.compare`). So a module may
 define a function with the name of a module, as an entry point `main` beside a module
 `main`, and in it `main.main(..)` calls the module's `main`. In a type position the last
 name of a path is a type (`path.Path`). So `fn f(c: char)` names the builtin type and `char.digit(c)` a module
@@ -90,6 +102,16 @@ fn list(xs: List[u64]) -> u64 { list.len(xs) }            // list.len is the cor
 type Point { x: i64, y: i64 }
 const ORIGIN: Point = Point(x: 0, y: 0)
 fn left() -> i64 { ORIGIN.x }
+```
+```hirsel unbuilt
+// in a package that depends on package store, whose root module is store/store.hirsel
+fn count(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
+  let n = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
+    option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
+  }));
+  n
+}
+fn stutter(db: store.store.Db) -> u64 { 0 }               // refused: LANG-7, at the second store
 ```
 ```hirsel
 fn width() -> u64 { 8 }

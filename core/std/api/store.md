@@ -1,6 +1,6 @@
 # Store
 
-Package `store`, module `store`, implements the M4 store in Hirsel over
+Package `store`, root module `store` (reached as `store.x`, LANG-7), implements the M4 store in Hirsel over
 `std.omap.OMap[Bytes, Arc[Bytes]]`. Keys remain inline and stored values are shared
 when a path is copied. The S1 package has memory stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,

@@ -2,18 +2,24 @@
 //! arrival port, owned helpers, shared nodes and boards. Connections are in
 //! `units_conn.rs`.
 //!
-//! Every byte a unit holds is a `Charge` with exactly one payer record. A
-//! record's balance changes only at an operation of the unit whose books hold
-//! it, or at that unit's take of an arrival (a credit). Shared state between
-//! units is limited to the arrival port, a connection's word and lock, a
-//! shared node's count and a board's lock; all of their atomics and locks go
-//! through `units_sync.rs`.
+//! Byte accounting has one authority, the limit table (`limit.rs`). A unit
+//! of the language keeps no books here: the program's limits admit its
+//! connections and helpers (`units_lang.rs`). A model unit (the ledger law,
+//! the pool checker, the ABI and its bench) holds a `Funding` of its own:
+//! its root, its bounds (`enter`/`exit`), and for each helper a root and a
+//! cell reservation prepaid from the record that admitted the spawn, ended
+//! at the owner's end take.
 //!
-//! Records live in their unit's books for as long as the unit's root runs; a
-//! helper's books are adopted by its owner at the end take. A `RecRef` is a
-//! raw pointer into some books, and every resolve checks, in O(1), that the
-//! record belongs to the resolving unit's books, so a cross-unit balance touch
-//! panics instead of racing.
+//! Every byte a model unit holds is a `Charge` with exactly one payer
+//! `Account`: a limit record, or a connection's room, whose balance is the
+//! byte field of the connection word until the clean and the record that
+//! admitted the connection after it. A balance changes only at an operation
+//! of the unit that holds the charge, or at that unit's take of an arrival (a
+//! credit). Shared state between units is limited to the arrival port, a
+//! connection's word and lock, a shared node's count and a board's lock; all
+//! of their atomics and locks go through `units_sync.rs`. The model
+//! harnesses run their units one at a time, so a helper's charges, which
+//! are records in its owner's table, are never touched by two threads at once.
 #![allow(dead_code)]
 
 /// Name an arrival for a harness (test builds only; the names are never built otherwise).
@@ -42,9 +48,10 @@ pub(crate) mod conn;
 mod law;
 
 use super::sync::{AtomicPtr, AtomicU64};
+use crate::limit::{Funding, Payer};
 use conn::{ConnCore, Taken};
 use std::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     collections::{HashMap, VecDeque},
     ptr::{self, NonNull},
     sync::{Arc, atomic::Ordering},
@@ -64,50 +71,74 @@ pub(crate) struct Cap {
     pub(crate) avail: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RecRef(NonNull<Rec>);
-// SAFETY: a RecRef is only dereferenced by the unit whose books hold the
-// record, which every resolve checks.
-unsafe impl Send for RecRef {}
+/// Who pays for a charge: a limit record, or a connection's room. One
+/// tagged word; a room is tagged in its low bit (`ConnCore` is 64-aligned).
+/// A zero-byte charge pins nothing, so its account is never read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Account(NonNull<u8>);
+// SAFETY: an account is read only by the unit that holds its charge (a
+// room's survivors by the connection's owner); the model harnesses run
+// their units one at a time.
+unsafe impl Send for Account {}
 
-pub(crate) enum Kind {
-    Root,
-    Bound,
-    HelperRoot,
-    /// The non-spendable 32-byte reservation that funds a helper's primary cell.
-    CellRes,
-    /// A connection's room; its balance is the byte field of the connection word.
-    Room(*const ConnCore),
-    /// A finalizer's grant, ended when the finalizer ends.
-    Grant,
+enum Payee<'a> {
+    Limit(Payer),
+    Room(&'a ConnCore),
 }
 
-pub(crate) struct Rec {
-    limit: u64,
-    used: Cell<u64>,
-    parent: Option<RecRef>,
-    ended: Cell<bool>,
-    retired: Cell<bool>,
-    spendable: bool,
-    kind: Kind,
-    /// The books (by their unit's port address) that hold this record.
-    owner: Cell<usize>,
-    #[cfg(test)]
-    name: Option<String>,
+impl Account {
+    fn limit(p: Payer) -> Self {
+        Self(NonNull::new(p.record_pointer().cast()).unwrap())
+    }
+
+    fn room(c: &ConnCore) -> Self {
+        Self(NonNull::from(c).cast::<u8>().map_addr(|a| a | 1))
+    }
+
+    /// The caller holds a nonzero charge on this account, which pins it: a
+    /// limit record by its outstanding bytes, a room by its connection,
+    /// which the owner keeps.
+    fn payee<'a>(self) -> Payee<'a> {
+        let p = self.0.as_ptr();
+        if p.addr() & 1 != 0 {
+            // SAFETY: by the contract.
+            Payee::Room(unsafe { &*p.map_addr(|a| a & !1).cast::<ConnCore>() })
+        } else {
+            Payee::Limit(Payer::from_current(p.cast()))
+        }
+    }
+}
+
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Account({:p})", self.0)
+    }
+}
+
+/// Give `n` bytes back to `to`. The only refund of a model unit's charges
+/// and credits; a zero refund touches nothing.
+fn repay(to: Account, n: u64) {
+    if n == 0 {
+        return;
+    }
+    match to.payee() {
+        Payee::Limit(p) => p.unit_refund(n),
+        Payee::Room(c) => c.room_repay(n),
+    }
 }
 
 /// One payer for `size` bytes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Charge {
     pub(crate) size: u64,
-    pub(crate) payer: RecRef,
+    pub(crate) payer: Account,
 }
 
-/// A pending credit: `amount` bytes back to `to` (resolved at the take).
+/// A pending credit: `amount` bytes back to `to`, at the take.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Credit {
     pub(crate) amount: u64,
-    pub(crate) to: RecRef,
+    pub(crate) to: Account,
 }
 
 /// What a resource's finalizer does when the resource is dropped.
@@ -214,6 +245,11 @@ enum ValueData {
 }
 
 impl Value {
+    /// A value with no charge (a helper's packed result, units_lang).
+    pub(crate) fn empty() -> Value {
+        Self::plain(Charges::Empty)
+    }
+
     fn plain(charges: Charges) -> Value {
         let data = match charges {
             Charges::Empty => ValueData::Empty,
@@ -670,9 +706,9 @@ pub(crate) enum Settle {
 pub(crate) enum Body {
     /// A shared node's or board's last release.
     Credits(Vec<Credit>),
-    /// A connection's retirement: its retained header and unused room.
-    /// The credit, and the identity of the retired connection.
-    LastRelease(Credit, Arc<conn::ConnCore>),
+    /// A connection's retirement: its retained header and unused room, and
+    /// the retired connection, whose admitting record they go back to.
+    LastRelease(u64, Arc<conn::ConnCore>),
     /// A helper's end, carrying the whole helper.
     HelperEnd(HelperEnd),
     /// The settlement of a waiting send, to its sender.
@@ -696,14 +732,14 @@ impl Body {
         };
         match self {
             Body::Credits(cs) => amounts(cs),
-            Body::LastRelease(c, _) => c.amount.to_string(),
+            Body::LastRelease(retained, _) => retained.to_string(),
             // SAFETY: the end arrival owns the ended helper's context.
             Body::HelperEnd(e) => {
                 let h = unsafe { e.0.as_ref() };
                 let info = h.helper.as_ref().unwrap();
                 format!(
                     "root {} ret {}",
-                    h.used(info.root),
+                    h.current_used(),
                     info.ret.as_ref().map_or(0, |v| v.bytes())
                 )
             }
@@ -948,8 +984,8 @@ unsafe impl Sync for BoardCore {}
 // ---------------------------------------------------------------------------
 
 struct Handle {
-    fixed: Charge,
-    result: Charge,
+    /// A model helper's task record and result slot, charged to its owner.
+    charges: Option<[Charge; 2]>,
     state: HState,
 }
 enum HState {
@@ -960,10 +996,19 @@ enum HState {
 
 struct HelperInfo {
     k: usize,
-    root: RecRef,
-    cell_res: RecRef,
+    /// A model helper's cell reservation; its root is the helper's funding.
+    cell_res: Option<Funding>,
     owner: Arc<Port>,
     ret: Option<Value>,
+}
+
+/// A named balance a snapshot reports (test builds).
+#[cfg(test)]
+enum Book {
+    Root(Payer),
+    Bound(Payer),
+    Scope(Payer),
+    Room(Arc<ConnCore>),
 }
 
 /// What a take did.
@@ -988,10 +1033,12 @@ pub(crate) type Released = (Took, usize, TakeInfo);
 /// One unit's runtime state, touched only by the thread running the unit.
 pub(crate) struct UnitCtx {
     pub(crate) port: Arc<Port>,
-    /// Boxed: a `RecRef` is the record's address, kept while the book grows.
-    #[allow(clippy::vec_box)]
-    books: Vec<Box<Rec>>,
-    stack: Vec<RecRef>,
+    /// A model unit's current scope; none for a language unit.
+    funding: Option<Funding>,
+    /// A model unit's cleaned connections, kept for their room's survivors.
+    rooms: Vec<Arc<ConnCore>>,
+    #[cfg(test)]
+    books: Vec<(String, Book)>,
     reached: VecDeque<ArrivalRef>,
     /// Pins connection slots until all their arrivals have been taken or dropped.
     connections: HashMap<usize, Arc<ConnCore>>,
@@ -1030,8 +1077,10 @@ impl UnitCtx {
     fn blank(#[allow(unused)] label: String) -> UnitCtx {
         UnitCtx {
             port: Port::new(),
+            funding: None,
+            rooms: Vec::new(),
+            #[cfg(test)]
             books: Vec::new(),
-            stack: Vec::new(),
             reached: VecDeque::new(),
             connections: HashMap::new(),
             #[cfg(test)]
@@ -1054,20 +1103,27 @@ impl UnitCtx {
         }
     }
 
-    /// A run root with `limit` bytes.
+    /// A language unit: the program's limits account for its bytes.
+    pub(crate) fn unfunded() -> UnitCtx {
+        UnitCtx::blank(String::new())
+    }
+
+    /// A model run root with `limit` bytes.
     pub(crate) fn root(limit: u64) -> UnitCtx {
         Self::root_as(limit, "U0")
     }
 
-    /// A run root labelled `label` (labels name records and arrivals in
-    /// test builds; elsewhere they are dropped).
+    /// A model run root labelled `label` (labels name balances and arrivals
+    /// in test builds; elsewhere they are dropped).
     pub(crate) fn root_as(limit: u64, #[allow(unused)] label: &str) -> UnitCtx {
         #[cfg(test)]
         let mut u = UnitCtx::blank(label.into());
         #[cfg(not(test))]
         let mut u = UnitCtx::blank(String::new());
-        let r = u.new_rec(limit, None, Kind::Root, true, Some(label.into()));
-        u.stack.push(r);
+        let f = Funding::root(limit);
+        #[cfg(test)]
+        u.books.push((label.into(), Book::Root(f.payer.get())));
+        u.funding = Some(f);
         u
     }
 
@@ -1110,141 +1166,30 @@ impl UnitCtx {
         }
     }
 
-    /// The balance of the record that admits now (its `used`).
+    fn funding(&self) -> &Funding {
+        self.funding
+            .as_ref()
+            .expect("a language unit admits through its program's limits")
+    }
+
+    /// The bytes charged to the scope that admits now.
     pub(crate) fn current_used(&self) -> u64 {
-        self.used(self.cur())
+        self.funding.as_ref().map_or(0, |f| f.payer.get().usage().0)
     }
 
-    fn tag(&self) -> usize {
-        Arc::as_ptr(&self.port) as usize
-    }
-
-    fn new_rec(
-        &mut self,
-        limit: u64,
-        parent: Option<RecRef>,
-        kind: Kind,
-        spendable: bool,
-        #[allow(unused)] name: Option<String>,
-    ) -> RecRef {
-        let mut b = Box::new(Rec {
-            limit,
-            used: Cell::new(0),
-            parent,
-            ended: Cell::new(false),
-            retired: Cell::new(false),
-            spendable,
-            kind,
-            owner: Cell::new(self.tag()),
-            #[cfg(test)]
-            name,
-        });
-        let r = RecRef(NonNull::from(&mut *b));
-        self.books.push(b);
-        r
-    }
-
-    fn rec(&self, r: RecRef) -> &Rec {
-        // SAFETY: records are freed only with their books; the owner check
-        // below makes a reference into another unit's books a panic.
-        let rec = unsafe { r.0.as_ref() };
-        assert_eq!(
-            rec.owner.get(),
-            self.tag(),
-            "a balance touched outside its unit's books"
-        );
-        rec
-    }
-
-    fn resolve(&self, mut r: RecRef) -> RecRef {
-        loop {
-            let rec = self.rec(r);
-            if rec.ended.get() {
-                r = rec.parent.expect("an ended record without a parent");
-            } else {
-                return r;
-            }
-        }
-    }
-
-    fn used(&self, r: RecRef) -> u64 {
-        let rec = self.rec(r);
-        match rec.kind {
-            // SAFETY: a live room's connection is held by its owner's inbox.
-            Kind::Room(c) => unsafe { &*c }.room_used(),
-            _ => rec.used.get(),
-        }
-    }
-
-    fn add_used(&self, r: RecRef, n: u64) {
-        let rec = self.rec(r);
-        match rec.kind {
-            // SAFETY: as in `used`.
-            Kind::Room(c) => unsafe { &*c }.room_add(n),
-            _ => {
-                let u = rec.used.get() + n;
-                assert!(u <= rec.limit, "record over its limit");
-                rec.used.set(u);
-            }
-        }
-    }
-
-    fn sub_used(&self, r: RecRef, n: u64) {
-        let rec = self.rec(r);
-        match rec.kind {
-            // SAFETY: as in `used`.
-            Kind::Room(c) => unsafe { &*c }.room_sub(n),
-            _ => rec
-                .used
-                .set(rec.used.get().checked_sub(n).expect("a negative balance")),
-        }
-    }
-
-    fn refund(&self, c: Charge) {
-        let r = self.resolve(c.payer);
-        self.sub_used(r, c.size);
-    }
-
-    fn apply(&self, c: Credit) {
-        let r = self.resolve(c.to);
-        self.sub_used(r, c.amount);
-    }
-
-    /// Hand a record over: its unused bytes go back to its parent, and it
-    /// joins the parent for every later charge and credit.
-    fn end_rec(&self, r: RecRef) {
-        let rec = self.rec(r);
-        assert!(!rec.ended.get(), "a record ended twice");
-        let unused = rec.limit - self.used(r);
-        let p = self.resolve(rec.parent.expect("a root cannot be handed over"));
-        self.sub_used(p, unused);
-        rec.ended.set(true);
-    }
-
-    fn cur(&self) -> RecRef {
-        *self.stack.last().unwrap()
-    }
-
-    /// Admit `n` bytes into the current record.
-    fn admit(&self, n: u64) -> Result<RecRef, Cap> {
-        let r = self.cur();
-        let rec = self.rec(r);
-        let used = rec.used.get();
-        if !rec.spendable || used + n > rec.limit {
-            return Err(Cap {
-                req: n,
-                avail: rec.limit - used,
-            });
-        }
-        rec.used.set(used + n);
-        Ok(r)
+    /// Admit `n` bytes into the current scope. A refusal raises no capacity
+    /// event: the caller reports it.
+    fn admit(&self, n: u64) -> Result<Account, Cap> {
+        self.funding()
+            .unit_charge(n)
+            .map(Account::limit)
+            .map_err(|avail| Cap { req: n, avail })
     }
 
     // -- local operations -------------------------------------------------
 
     pub(crate) fn probe(&self) -> u64 {
-        let rec = self.rec(self.cur());
-        rec.limit - rec.used.get()
+        self.funding().available()
     }
 
     pub(crate) fn alloc_block(&mut self, size: u64) -> Result<Value, Cap> {
@@ -1310,8 +1255,10 @@ impl UnitCtx {
         out
     }
 
-    /// Drop a value. A resource's finalizer runs inside a grant record; a
-    /// failing one returns the cause chain, a passing one its survivors.
+    /// Drop a value. A resource's finalizer charges its grant: each charge
+    /// it makes is a part of the grant's charge, and the unused part goes
+    /// back when it ends. A failing finalizer returns the cause chain, a
+    /// passing one its survivors.
     pub(crate) fn drop_value(&mut self, v: Value) -> Option<Value> {
         let ValueExtra {
             charges,
@@ -1323,23 +1270,25 @@ impl UnitCtx {
             self.drop_shared(s);
         }
         let Some((res, fin)) = res.and_then(|r| r.fin.clone().map(|f| (r, f))) else {
-            for &c in charges.iter() {
-                self.refund(c);
+            for c in charges.iter() {
+                repay(c.payer, c.size);
             }
             return None;
         };
         let cell = charges[res.cell];
-        let home = self.resolve(cell.payer);
-        let grant = (res.grant_size > 0)
-            .then(|| self.new_rec(res.grant_size, Some(home), Kind::Grant, true, None));
-        let in_grant = |me: &Self, n: u64| -> Charge {
+        let grant = res.grant.map(|g| charges[g]);
+        let mut unused = res.grant_size;
+        let mut in_grant = |n: u64| -> Charge {
             let g = grant.expect("a finalizer charge without a grant");
-            me.add_used(g, n);
-            Charge { size: n, payer: g }
+            unused = unused.checked_sub(n).expect("a finalizer over its grant");
+            Charge {
+                size: n,
+                payer: g.payer,
+            }
         };
         let mut survivors = Charges::Empty;
         if fin.spawn_shared > 0 {
-            let c = in_grant(self, fin.spawn_shared);
+            let c = in_grant(fin.spawn_shared);
             let s = self.new_node(c, Charges::Empty, Vec::new());
             if fin.share_out {
                 self.fin_made.push(Some(s));
@@ -1349,19 +1298,19 @@ impl UnitCtx {
             }
         }
         if fin.run_lifetime > 0 {
-            let c = in_grant(self, fin.run_lifetime);
+            let c = in_grant(fin.run_lifetime);
             self.run_lifetime.push(c);
         }
         if fin.keep_survivor > 0 {
-            survivors.push(in_grant(self, fin.keep_survivor));
+            survivors.push(in_grant(fin.keep_survivor));
         }
-        let msg = (fin.fails && fin.fail_msg > 0).then(|| in_grant(self, fin.fail_msg));
+        let msg = (fin.fails && fin.fail_msg > 0).then(|| in_grant(fin.fail_msg));
         if let Some(g) = grant {
-            self.end_rec(g);
+            repay(g.payer, unused);
         }
         for (i, c) in charges.iter().enumerate() {
             if i != res.cell && Some(i) != res.grant {
-                self.refund(*c);
+                repay(c.payer, c.size);
             }
         }
         if fin.fails {
@@ -1370,31 +1319,38 @@ impl UnitCtx {
             cs.extend(survivors.iter().copied());
             Some(Value::plain(cs))
         } else {
-            self.refund(cell);
+            repay(cell.payer, cell.size);
             (!survivors.is_empty()).then(|| Value::plain(survivors))
         }
     }
 
     pub(crate) fn enter_bound(&mut self, size: u64) -> Result<(), Cap> {
-        let p = self.admit(size)?;
+        let f = self.funding.as_mut().expect("a language unit has no bounds here");
+        let avail = f.available();
+        if size > avail {
+            return Err(Cap { req: size, avail });
+        }
+        f.enter(size).expect("a bound within the available bytes");
         let k = self.next_bound;
         self.next_bound += 1;
         #[cfg(test)]
-        let name = Some(format!("{}/b{k}", self.label));
-        #[cfg(not(test))]
-        let name = {
-            let _ = k;
-            None
-        };
-        let r = self.new_rec(size, Some(p), Kind::Bound, true, name);
-        self.stack.push(r);
+        {
+            let b = Book::Bound(f.payer.get());
+            self.books.push((format!("{}/b{k}", self.label), b));
+        }
+        let _ = k;
         Ok(())
     }
 
+    /// Leave the innermost bound: its unused bytes go back to the scope
+    /// around it, which pays for its charges from now on.
     pub(crate) fn exit_bound(&mut self) {
-        assert!(self.stack.len() > 1, "cannot exit the root record");
-        let r = self.stack.pop().unwrap();
-        self.end_rec(r);
+        #[cfg(test)]
+        {
+            let i = self.books.iter().rposition(|(_, b)| matches!(b, Book::Bound(_)));
+            self.books.remove(i.expect("cannot exit the root scope"));
+        }
+        self.funding.as_mut().unwrap().exit();
     }
 
     /// Catch a failure inside an isolate: a replacement cell is admitted;
@@ -1415,35 +1371,13 @@ impl UnitCtx {
 
     // -- helpers --------------------------------------------------------------
 
-    /// Spawn an owned helper with limit `n` and an inline result slot of `r`
-    /// bytes. The argument's blocks move into the helper's root.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn spawn_helper(
-        &mut self,
-        n: u64,
-        r: u64,
-        arg: Option<Value>,
-    ) -> Result<(usize, Box<UnitCtx>, Option<Value>), (Cap, Option<Value>)> {
-        let t = TASK_FIXED + r + CELL + n;
-        let cur = self.cur();
-        {
-            let rec = self.rec(cur);
-            let used = rec.used.get();
-            if !rec.spendable || used + t > rec.limit {
-                return Err((
-                    Cap {
-                        req: t,
-                        avail: rec.limit - used,
-                    },
-                    arg,
-                ));
-            }
-        }
-        let ab = arg.as_ref().map_or(0, Value::bytes);
-        if ab > n {
-            return Err((Cap { req: ab, avail: n }, arg));
-        }
-        self.add_used(cur, t);
+    /// Spawn an owned helper whose bytes the program's limits account for
+    /// (units_lang): its handle index and its unit.
+    pub(crate) fn spawn_unit(&mut self) -> (usize, Box<UnitCtx>) {
+        self.new_helper(None)
+    }
+
+    fn new_helper(&mut self, charges: Option<[Charge; 2]>) -> (usize, Box<UnitCtx>) {
         let k = self.helpers.len();
         let spawn = self.next_spawn;
         self.next_spawn += 1;
@@ -1454,74 +1388,106 @@ impl UnitCtx {
             let _ = spawn;
             String::new()
         };
-        let mut h = Box::new(UnitCtx::blank(label.clone()));
-        let root = h.new_rec(n, Some(cur), Kind::HelperRoot, true, Some(label.clone()));
-        let cell_res = h.new_rec(
-            CELL,
-            Some(cur),
-            Kind::CellRes,
-            false,
-            Some(format!("{label}/cell")),
-        );
-        h.rec(cell_res).used.set(CELL);
-        h.cell = Some(Charge {
-            size: CELL,
-            payer: cell_res,
-        });
-        h.stack.push(root);
-        let arg = arg.map(|mut v| {
-            for c in v.charges_mut().iter_mut() {
-                self.refund(*c);
-                c.payer = root;
-                h.add_used(root, c.size);
-            }
-            v
-        });
+        let mut h = Box::new(UnitCtx::blank(label));
         h.helper = Some(HelperInfo {
             k,
-            root,
-            cell_res,
+            cell_res: None,
             owner: self.port.clone(),
             ret: None,
         });
         self.helpers.push(Some(Handle {
-            fixed: Charge {
-                size: TASK_FIXED,
-                payer: cur,
-            },
-            result: Charge {
-                size: r,
-                payer: cur,
-            },
+            charges,
             state: HState::Running,
         }));
+        (k, h)
+    }
+
+    /// Spawn an owned model helper with limit `n` and an inline result slot
+    /// of `r` bytes. The spawn charges `256 + r + 32 + n` to the current
+    /// scope: the task record and the result slot stay with the owner; `n`
+    /// and the 32-byte cell are reservations prepaid from that charge,
+    /// ended at the end take. The argument's blocks move into the root.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn spawn_helper(
+        &mut self,
+        n: u64,
+        r: u64,
+        arg: Option<Value>,
+    ) -> Result<(usize, Box<UnitCtx>, Option<Value>), (Cap, Option<Value>)> {
+        let t = TASK_FIXED + r + CELL + n;
+        let avail = self.funding().available();
+        if t > avail {
+            return Err((Cap { req: t, avail }, arg));
+        }
+        let ab = arg.as_ref().map_or(0, Value::bytes);
+        if ab > n {
+            return Err((Cap { req: ab, avail: n }, arg));
+        }
+        let Ok(payer) = self.funding().unit_charge(t) else {
+            unreachable!()
+        };
+        let charge = |size| Charge {
+            size,
+            payer: Account::limit(payer),
+        };
+        let (k, mut h) = self.new_helper(Some([charge(TASK_FIXED), charge(r)]));
+        let root = payer.prepaid(n);
+        let cell_res = payer.prepaid(CELL);
+        let Ok(cell) = cell_res.unit_charge(CELL) else {
+            unreachable!()
+        };
+        h.cell = Some(Charge {
+            size: CELL,
+            payer: Account::limit(cell),
+        });
+        #[cfg(test)]
+        {
+            let label = h.label.clone();
+            h.books.push((label.clone(), Book::Scope(root.payer.get())));
+            h.books
+                .push((format!("{label}/cell"), Book::Scope(cell_res.payer.get())));
+        }
+        let arg = arg.map(|mut v| {
+            for c in v.charges_mut().iter_mut() {
+                repay(c.payer, c.size);
+                let Ok(p) = root.unit_charge(c.size) else {
+                    unreachable!()
+                };
+                c.payer = Account::limit(p);
+            }
+            v
+        });
+        h.helper.as_mut().unwrap().cell_res = Some(cell_res);
+        h.funding = Some(root);
         Ok((k, h, arg))
     }
 
-    /// End a helper: its unused primary cell goes back to the cell
-    /// reservation (or joins the returned cause chain), and the whole helper
-    /// travels to its owner as one arrival.
-    /// End a helper. Publishing its end hands the context to the owner, so
-    /// this is the helper's last touch of it; the pointer returned may be
-    /// read only by a caller that knows the end has not been taken (the
-    /// single-threaded ledger law).
+    /// End a helper: a model helper's unused primary cell goes back to the
+    /// cell reservation (or joins the returned cause chain), and the whole
+    /// helper travels to its owner as one arrival. Publishing its end hands
+    /// the context to the owner, so this is the helper's last touch of it;
+    /// the pointer returned may be read only by a caller that knows the end
+    /// has not been taken (the single-threaded ledger law).
     pub(crate) fn end_helper(
         mut self: Box<Self>,
         ret: Option<Value>,
         with_cell: bool,
     ) -> NonNull<UnitCtx> {
-        let cell = self.cell.take().expect("only a helper ends this way");
-        let ret = if with_cell {
-            Some(match ret {
+        assert!(self.helper.is_some(), "only a helper ends this way");
+        let cell = self.cell.take();
+        let ret = match cell {
+            Some(cell) if with_cell => Some(match ret {
                 Some(mut v) => {
                     v.push_charge(cell);
                     v
                 }
                 None => Value::plain(Charges::One(cell)),
-            })
-        } else {
-            self.refund(cell);
-            ret
+            }),
+            Some(cell) => {
+                repay(cell.payer, cell.size);
+                ret
+            }
+            None => ret,
         };
         let info = self.helper.as_mut().unwrap();
         info.ret = ret;
@@ -1545,32 +1511,37 @@ impl UnitCtx {
         p
     }
 
-    /// The end take: release the task's 256 bytes, adopt the helper's books,
-    /// hand over its cell reservation and root, then forward the credits and
-    /// notices it had, in the order they reached it, then those still in its
-    /// port.
+    /// The end take: release the task's 256 bytes, hand over a model
+    /// helper's cell reservation and root to the scope that paid for them,
+    /// then forward the credits and notices it had, in the order they
+    /// reached it, then those still in its port.
     fn end_take(&mut self, e: HelperEnd) {
         let p = e.0;
         std::mem::forget(e);
         // SAFETY: made by Box::into_raw in `end_helper`; this take owns it.
         let mut h = unsafe { Box::from_raw(p.as_ptr()) };
         let info = h.helper.take().unwrap();
-        let fixed = {
-            let hd = self.helpers[info.k].as_ref().unwrap();
-            assert!(
-                matches!(hd.state, HState::Running),
-                "a helper end taken twice"
-            );
-            hd.fixed
-        };
-        self.refund(fixed);
-        let tag = self.tag();
-        for r in h.books.drain(..) {
-            r.owner.set(tag);
-            self.books.push(r);
+        let hd = self.helpers[info.k].as_ref().unwrap();
+        assert!(
+            matches!(hd.state, HState::Running),
+            "a helper end taken twice"
+        );
+        if let Some([fixed, _]) = hd.charges {
+            repay(fixed.payer, fixed.size);
         }
-        self.end_rec(info.cell_res);
-        self.end_rec(info.root);
+        // An ended reservation joins its parent: unused bytes go back now,
+        // and its charges are paid there from now on. The union may move
+        // the owner's own record, so its handle is brought up to date.
+        if let Some(cell) = info.cell_res {
+            cell.end();
+        }
+        if let Some(root) = h.funding.take() {
+            root.end();
+        }
+        if let Some(f) = &self.funding {
+            f.normalize();
+        }
+        self.rooms.append(&mut h.rooms);
         // Forward.
         let raw = Arc::into_raw(self.port.clone()) as *mut Port;
         let old = h.port.fwd.swap(raw, Ordering::Release);
@@ -1608,8 +1579,9 @@ impl UnitCtx {
         let HState::Ended(ret) = std::mem::replace(&mut hd.state, HState::Consumed) else {
             panic!("a helper consumed before its end was taken, or twice");
         };
-        let result = hd.result;
-        self.refund(result);
+        if let Some([_, result]) = hd.charges {
+            repay(result.payer, result.size);
+        }
         match ret {
             Some(v) if drop_result => {
                 self.drop_value(v);
@@ -1882,12 +1854,12 @@ impl UnitCtx {
         let (t, ident) = match body {
             Body::Credits(cs) => {
                 for c in cs {
-                    self.apply(c);
+                    repay(c.to, c.amount);
                 }
                 (Took::Credits, 0)
             }
-            Body::LastRelease(c, conn) => {
-                self.apply(c);
+            Body::LastRelease(retained, conn) => {
+                conn.retire(retained);
                 (Took::LastRelease, Arc::as_ptr(&conn).addr())
             }
             Body::HelperEnd(e) => {
@@ -1898,7 +1870,7 @@ impl UnitCtx {
             }
             Body::Settlement(id, Settle::Accepted(cs)) => {
                 for c in cs {
-                    self.apply(c);
+                    repay(c.to, c.amount);
                 }
                 (Took::Accepted(id), id as usize)
             }
@@ -1957,11 +1929,11 @@ impl UnitCtx {
         Some(self.settled.swap_remove(i).1)
     }
 
-    /// End the run root: its record retires with its run-lifetime storage,
-    /// and every later arrival to it is dropped.
+    /// End the run root: it retires with its run-lifetime storage, and
+    /// every later arrival to it is dropped.
     pub(crate) fn end_root(&mut self) {
-        let root = self.stack[0];
-        self.rec(root).retired.set(true);
+        #[cfg(test)]
+        self.books.retain(|(_, b)| !matches!(b, Book::Root(_)));
         self.run_lifetime.clear();
         self.discard_arrivals();
     }
@@ -1977,20 +1949,31 @@ impl UnitCtx {
         }
     }
 
-    /// Every live, named record: `name=used/limit`.
+    /// Every live, named balance: `name=used/limit`. A scope's use is its
+    /// record's capacity less what it has available; a room's is the byte
+    /// field of its connection word.
     #[cfg(test)]
     pub(crate) fn snapshot(&self, out: &mut Vec<String>) {
-        for r in &self.books {
-            if r.ended.get() || r.retired.get() || matches!(r.kind, Kind::Grant) {
-                continue;
-            }
-            let used = match r.kind {
-                // SAFETY: as in `used`.
-                Kind::Room(c) => unsafe { &*c }.room_used(),
-                _ => r.used.get(),
+        for (name, b) in &self.books {
+            let (used, limit) = match b {
+                Book::Root(p) | Book::Bound(p) | Book::Scope(p) => p.usage(),
+                Book::Room(c) => (c.room_used(), c.room_limit()),
             };
-            out.push(format!("{}={used}/{}", r.name.as_ref().unwrap(), r.limit));
+            out.push(format!("{name}={used}/{limit}"));
         }
+    }
+
+    /// A model connection's room is a named balance until its clean.
+    #[cfg(test)]
+    fn book_room(&mut self, c: &Arc<ConnCore>) {
+        self.books
+            .push((format!("{}/room", c.label), Book::Room(c.clone())));
+    }
+
+    #[cfg(test)]
+    fn close_room(&mut self, c: &ConnCore) {
+        self.books
+            .retain(|(_, b)| !matches!(b, Book::Room(r) if ptr::eq(&**r, c)));
     }
 }
 

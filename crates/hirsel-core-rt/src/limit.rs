@@ -535,6 +535,27 @@ impl Payer {
             self.settle(bytes);
         }
     }
+    /// A model unit's refund (units_ledger): the harnesses run one unit at a
+    /// time, so it credits the payer's root at once. Never zero bytes: a
+    /// zero-byte charge holds no pin.
+    pub(crate) fn unit_refund(self, bytes: u64) {
+        debug_assert!(bytes != 0, "a zero-byte unit refund");
+        let _commit = crate::sequencer::enter();
+        let f = self.forest();
+        let id = self.slot().id;
+        let root = f.find(id);
+        f.refund_rooted(id, root, bytes);
+    }
+    /// A record's (used, capacity): what its live limit has handed out.
+    pub(crate) fn usage(self) -> (u64, u64) {
+        let p = self.canonical();
+        let _commit = crate::sequencer::enter();
+        // SAFETY: the caller's handle or outstanding bytes pin this record.
+        unsafe {
+            let capacity = (*p.links()).live.capacity;
+            (capacity - (*p.local()).available, capacity)
+        }
+    }
     /// Connection charges settle in their owning unit at the release or take.
     pub(crate) fn settle_at_unit(self, bytes: u64) {
         let _commit = crate::sequencer::enter();
@@ -884,6 +905,20 @@ impl Funding {
     }
     pub(crate) fn admit(&self, bytes: Option<u64>) -> Result<(), Capacity> {
         self.payer.get().canonical().admit(bytes)
+    }
+    /// A model unit's admission (units_ledger): no injection and no capacity
+    /// event; a refusal returns what is available. The bytes stay
+    /// outstanding on the returned canonical payer until `unit_refund`.
+    pub(crate) fn unit_charge(&self, bytes: u64) -> Result<Payer, u64> {
+        let payer = self.payer.get().canonical();
+        // SAFETY: the unit's handle pins its canonical local record.
+        let r = unsafe { &mut *payer.local() };
+        if bytes > r.available {
+            return Err(r.available);
+        }
+        r.available -= bytes;
+        r.outstanding += bytes;
+        Ok(payer)
     }
     #[cfg(test)]
     pub(crate) fn refund(&self, bytes: u64) {

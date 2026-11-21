@@ -11,9 +11,10 @@
 //! wait, the service of waiting sends, a withdrawal, the seal, the last client
 //! and the cleaning's end.
 use super::super::sync::{AtomicU64, Mutex};
-use super::{Arrival, ArrivalRef, Body, Cap, Credit, Kind, RecRef, Released, Settle, UnitCtx, Value};
+use super::{Account, Arrival, ArrivalRef, Body, Cap, Credit, Released, Settle, UnitCtx, Value, repay};
+use crate::limit::Payer;
 use std::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     collections::VecDeque,
     mem::MaybeUninit,
     sync::{Arc, atomic::Ordering},
@@ -128,8 +129,12 @@ pub(crate) struct ConnCore {
     b: u64,
     h: u64,
     owner: Arc<super::Port>,
-    room: RecRef,
-    admitting: RecRef,
+    /// The record a model unit admitted `h + b` from; none when the
+    /// program's limits hold the connection's charge (units_lang).
+    admitting: Option<Payer>,
+    /// Cleared at the clean: the room's survivors are paid by the admitting
+    /// record from then on. Owner only.
+    room_open: Cell<bool>,
     slow: Mutex<Slow>,
     side: UnsafeCell<Side>,
     #[cfg(test)]
@@ -138,7 +143,7 @@ pub(crate) struct ConnCore {
 
 // SAFETY: slots pass from sender to port to taker. Reuse follows the
 // connection word's bitmap, or the free-list lock on larger connections.
-// The owner alone touches `side`. Other units only copy the record pointers.
+// The owner alone touches `side`, `room_open` and the admitting record.
 unsafe impl Send for ConnCore {}
 unsafe impl Sync for ConnCore {}
 
@@ -248,6 +253,28 @@ impl ConnCore {
         let w = self.hot.word.fetch_sub(n, Ordering::AcqRel);
         assert!(w & BYTES >= n, "a negative room balance");
     }
+    #[cfg(test)]
+    pub(crate) fn room_limit(&self) -> u64 {
+        self.b
+    }
+    /// A refund to the room: to its word until the clean, then to the
+    /// record that admitted the connection.
+    pub(super) fn room_repay(&self, n: u64) {
+        if self.room_open.get() {
+            self.room_sub(n);
+        } else {
+            self.admitting
+                .expect("a room survivor of a connection the program's limits hold")
+                .unit_refund(n);
+        }
+    }
+    /// The last release's take: the retained header and unused room go back
+    /// to a model unit's admitting record.
+    pub(super) fn retire(&self, retained: u64) {
+        if let Some(p) = self.admitting {
+            p.unit_refund(retained);
+        }
+    }
     #[allow(clippy::mut_from_ref)]
     pub(crate) fn side(&self) -> &mut Side {
         // SAFETY: only the owner calls this, from its own thread, and never
@@ -348,6 +375,7 @@ impl UnitCtx {
         self.conn_new_cross(cap, elem, b, 0, &[])
     }
 
+    /// As `conn_new`, for items laid out by `stride` and `owners`.
     pub(crate) fn conn_new_cross(
         &mut self,
         cap: u64,
@@ -358,20 +386,49 @@ impl UnitCtx {
     ) -> Result<(Inbox, Client), Cap> {
         assert!(cap > 0 && cap <= MAX_CAP && b <= MAX_ROOM);
         let h = 64 + cap * elem;
-        let adm = self.admit(h + b)?;
+        let avail = self.funding().available();
+        if h + b > avail {
+            return Err(Cap { req: h + b, avail });
+        }
+        let Ok(payer) = self.funding().unit_charge(h + b) else {
+            unreachable!()
+        };
+        let (inbox, client) = self.make_conn(cap, elem, b, stride, owners, Some(payer));
+        #[cfg(test)]
+        self.book_room(&inbox.0);
+        Ok((inbox, client))
+    }
+
+    /// A connection whose charge the program's limits hold (units_lang).
+    pub(crate) fn conn_open(
+        &mut self,
+        cap: u64,
+        elem: u64,
+        b: u64,
+        stride: usize,
+        owners: &[[u64; 4]],
+    ) -> (Inbox, Client) {
+        self.make_conn(cap, elem, b, stride, owners, None)
+    }
+
+    fn make_conn(
+        &mut self,
+        cap: u64,
+        elem: u64,
+        b: u64,
+        stride: usize,
+        owners: &[[u64; 4]],
+        admitting: Option<Payer>,
+    ) -> (Inbox, Client) {
+        assert!(cap > 0 && cap <= MAX_CAP && b <= MAX_ROOM);
+        let h = 64 + cap * elem;
         let k = self.next_conn;
         self.next_conn += 1;
         #[cfg(test)]
         let label = format!("{}.C{k}", self.label);
         let _ = k;
         let owner = self.port.clone();
-        #[cfg(test)]
-        let room_name = Some(format!("{label}/room"));
-        #[cfg(not(test))]
-        let room_name = None;
-        let c = Arc::new_cyclic(|w| {
-            let r = self.new_rec(b, Some(adm), Kind::Room(w.as_ptr()), true, room_name);
-            ConnCore {
+        let c = Arc::new(ConnCore {
                 hot: Hot {
                     word: AtomicU64::new(0),
                     first: UnsafeCell::new(MaybeUninit::uninit()),
@@ -411,8 +468,8 @@ impl UnitCtx {
                 b,
                 h,
                 owner,
-                room: r,
-                admitting: adm,
+                admitting,
+                room_open: Cell::new(true),
                 slow: Mutex::new(Slow {
                     waiters: VecDeque::new(),
                     clients: 1,
@@ -432,18 +489,17 @@ impl UnitCtx {
                 }),
                 #[cfg(test)]
                 label,
-            }
-        });
+            });
         self.connections.insert(Arc::as_ptr(&c).addr(), c.clone());
-        Ok((Inbox(c.clone()), Client(c)))
+        (Inbox(c.clone()), Client(c))
     }
 
     /// The room pays for an item from here on; the sender's own payers are
     /// credited now (accepted at issue).
-    fn pay_into_room(&self, c: &ConnCore, v: &mut Value) {
+    fn pay_into_room(c: &ConnCore, v: &mut Value) {
         for ch in v.charges_mut() {
-            self.refund(*ch);
-            ch.payer = c.room;
+            repay(ch.payer, ch.size);
+            ch.payer = Account::room(c);
         }
     }
 
@@ -482,7 +538,7 @@ impl UnitCtx {
         }
         match c.admit_fast(bytes) {
             Ok(w) => {
-                self.pay_into_room(c, &mut v);
+                Self::pay_into_room(c, &mut v);
                 Self::publish_item(c, w, Outgoing::Ledger(v), bytes);
                 Sent::Accepted
             }
@@ -534,7 +590,7 @@ impl UnitCtx {
                     Ok(_) => {
                         drop(s);
                         if let Outgoing::Ledger(v) = &mut item {
-                            self.pay_into_room(c, v);
+                            Self::pay_into_room(c, v);
                         }
                         Self::publish_item(c, w, item, bytes);
                         return Sent::Accepted;
@@ -610,7 +666,7 @@ impl UnitCtx {
                             amount: ch.size,
                             to: ch.payer,
                         };
-                        ch.payer = c.room;
+                        ch.payer = Account::room(c);
                         cr
                     })
                     .collect(),
@@ -749,7 +805,12 @@ impl UnitCtx {
         }
         side.cleaned = true;
         let retained = c.h + (c.b - c.room_used());
-        self.rec(c.room).ended.set(true);
+        c.room_open.set(false);
+        #[cfg(test)]
+        self.close_room(c);
+        if c.admitting.is_some() {
+            self.rooms.push(inbox.0.clone());
+        }
         let last = {
             let mut s = c.slow.lock().unwrap();
             s.cleaned = true;
@@ -768,13 +829,7 @@ impl UnitCtx {
 
     fn last_release(c: &Arc<ConnCore>, retained: u64) {
         let a = named!(
-            ArrivalRef::boxed(Body::LastRelease(
-                Credit {
-                    amount: retained,
-                    to: c.admitting,
-                },
-                c.clone(),
-            )),
+            ArrivalRef::boxed(Body::LastRelease(retained, c.clone())),
             format!("retire:{}", c.label),
             format!("last_release:{}", c.label)
         );

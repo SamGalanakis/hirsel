@@ -11,9 +11,10 @@
 //! task's limit. A helper's end take splits its charge: the owner gets back
 //! the task record, the unused part of `n` and the unused cell, keeps
 //! `size(R)` and the result's content until the join, and holds each
-//! connection the helper left behind until that connection's last release. The ledger keeps the unit graph (ports, connection
-//! words, room balances, settlements, helper ends) with roots it never refuses
-//! from; a ledger refusal after the program admitted is a bug (`UnitLedger`).
+//! connection the helper left behind until that connection's last release.
+//! The ledger keeps the unit graph (ports, connection words, room balances,
+//! settlements, helper ends) and no books of its own: a language unit is
+//! unfunded, and every byte it moves is a `Held` or a block's own charge.
 //!
 //! An item's flat bytes occupy its reserved arrival slot. Sequence content
 //! (a `List` of plain elements or a `String`) occupies the room at length
@@ -26,7 +27,7 @@ use crate::{
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
-    units::ledger::{Released, Took, UnitCtx},
+    units::ledger::{Released, Took, UnitCtx, Value},
 };
 use hirsel_core_layout::cross::{CLIENT, SEQ, SOCKET};
 use std::{
@@ -81,9 +82,6 @@ type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
 fn map<K, V>() -> Map<K, V> {
     HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0))
 }
-
-/// The ledger roots never refuse: the program's limits decide every admission.
-const UNREFUSED: u64 = 1 << 62;
 
 /// The owners of a `cross` type, as the emitter writes them: per owner
 /// `[offset, kind, element bytes, element logical size]`.
@@ -455,14 +453,6 @@ impl LangUnit {
     }
 }
 
-impl Drop for LangUnit {
-    fn drop(&mut self) {
-        if self.helper.is_none() {
-            self.ctx.end_root();
-        }
-    }
-}
-
 /// A helper about to start its run, and where the run's unit is handed back.
 type Pending = Option<(Box<UnitCtx>, Arc<HelperShared>, *mut *mut LangUnit)>;
 std::thread_local! {
@@ -487,7 +477,7 @@ pub(crate) fn adopt(readies: &Arc<Readies>) -> *mut LangUnit {
 /// A root unit, made at the first unit operation of a run that is not a helper.
 pub(crate) fn root_unit(readies: &Arc<Readies>) -> *mut LangUnit {
     Box::into_raw(LangUnit::new(
-        Box::new(UnitCtx::root(UNREFUSED)),
+        Box::new(UnitCtx::unfunded()),
         readies,
         None,
     ))
@@ -497,7 +487,8 @@ pub(crate) fn root_unit(readies: &Arc<Readies>) -> *mut LangUnit {
 /// The scheduler owns this root unit and no task runs.
 pub(crate) unsafe fn drop_root_unit(u: *mut LangUnit) {
     // SAFETY: made by `root_unit`.
-    drop(unsafe { Box::from_raw(u) });
+    let mut u = unsafe { Box::from_raw(u) };
+    u.ctx.end_root();
 }
 
 /// Take every arrival and wake what waits on it; then arm the port so the
@@ -667,8 +658,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
         let owners = (*item).owners();
         let (inbox, client) = u
             .ctx
-            .conn_new_cross(cap, logical, b, (*item).bytes as usize, owners)
-            .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
+            .conn_open(cap, logical, b, (*item).bytes as usize, owners);
         let key = Arc::as_ptr(&inbox.0) as usize;
         let ih = Box::into_raw(Box::new(InboxH {
             files: (*context).host_files,
@@ -1081,10 +1071,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         }
         let _commit = tasks::before_commit();
         let u = unit();
-        let (k, hctx, _) = u
-            .ctx
-            .spawn_helper(n, r_size, None)
-            .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
+        let (k, hctx) = u.ctx.spawn_unit();
         let data = pack(input, x.bytes, x.owners());
         let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
         free_owners(input, x.owners());
@@ -1220,10 +1207,7 @@ fn helper_main(
             },
             survivors,
         };
-        let mut ret = lu
-            .ctx
-            .alloc_block(0)
-            .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
+        let mut ret = Value::empty();
         if failed == 0 {
             let data = pack(result.as_ptr(), rb, &ro);
             let sockets = detach_sockets(&mut context, result.as_ptr(), socket_offsets(&ro));
@@ -1236,8 +1220,7 @@ fn helper_main(
             .insert(Arc::as_ptr(&lu.ctx.port) as usize, ended);
         files.close_all(&mut context);
         drop(context);
-        let ctx = std::mem::replace(&mut lu.ctx, Box::new(UnitCtx::root(0)));
-        drop(lu);
+        let LangUnit { ctx, .. } = *lu;
         ctx.end_helper(Some(ret), false);
     }
 }

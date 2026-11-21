@@ -90,7 +90,11 @@ pub fn specialize_over(
             function
                 .body
                 .is_none()
-                .then(|| external.get(&module.code_identity(FuncId(f as u32))).copied())
+                .then(|| {
+                    external
+                        .get(&module.code_identity(FuncId(f as u32)))
+                        .copied()
+                })
                 .flatten()
         })
         .collect();
@@ -151,7 +155,10 @@ pub fn specialize_library(module: &mut Module, roots: &[FuncId]) -> Vec<Summary>
                         yes[function.index()]
                     }
                     _ => false,
-                }) || module.step_free.get(&FuncId(f as u32)).is_some_and(|s| yes[s.body.index()]);
+                }) || module
+                    .step_free
+                    .get(&FuncId(f as u32))
+                    .is_some_and(|s| yes[s.body.index()]);
                 if reaches {
                     yes[f] = true;
                     changed = true;

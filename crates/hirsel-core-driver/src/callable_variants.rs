@@ -316,7 +316,8 @@ impl Work<'_, '_> {
         self.modules.push(Cow::Owned(module));
         self.owners.push(self.owners[base.unit]);
         self.variants.insert(hash, target);
-        self.bound.insert(hash, bindings.values().cloned().collect());
+        self.bound
+            .insert(hash, bindings.values().cloned().collect());
         self.pending.push((target, bindings));
         Ok(target)
     }
@@ -467,7 +468,10 @@ impl Work<'_, '_> {
                 continue;
             }
             // A callee in a separately lowered std is not a unit here.
-            let Some(&t) = self.originals.get(&m.identity(m.functions[f.index()].instance)) else {
+            let Some(&t) = self
+                .originals
+                .get(&m.identity(m.functions[f.index()].instance))
+            else {
                 continue;
             };
             self.pending.push((t, BTreeMap::new()));
@@ -645,7 +649,14 @@ fn root() -> u64 { let delta:u64=1; forward(41u64, fn(x:u64)->u64 {x+delta}) }
             .iter()
             .map(|k| Cow::Borrowed(reached.materialized.get(k).ir().unwrap()))
             .collect();
-        prepare(&mut modules, keys, &reached.materialized, Roots::Entry(&entry), 64).unwrap();
+        prepare(
+            &mut modules,
+            keys,
+            &reached.materialized,
+            Roots::Entry(&entry),
+            64,
+        )
+        .unwrap();
         assert_eq!(
             modules.len(),
             keys.len() + 2,
@@ -694,7 +705,14 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
                 .iter()
                 .flat_map(|m| m.code_variants.values().copied())
                 .collect();
-            prepare(&mut modules, keys, &reached.materialized, Roots::Entry(&entry), 64).unwrap();
+            prepare(
+                &mut modules,
+                keys,
+                &reached.materialized,
+                Roots::Entry(&entry),
+                64,
+            )
+            .unwrap();
             assert_eq!(
                 modules
                     .iter()

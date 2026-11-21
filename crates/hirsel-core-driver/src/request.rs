@@ -983,9 +983,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         product.std_side(options, runtime)
                     })
                     .transpose();
-                    let built = std.and_then(|std| {
-                        publication.assemble_with(options, reached.counters, std)
-                    });
+                    let built = std
+                        .and_then(|std| publication.assemble_with(options, reached.counters, std));
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, recipe)
                     {

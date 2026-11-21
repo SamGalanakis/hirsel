@@ -186,7 +186,10 @@ impl CheckProduct {
             );
         }
         let points = super::recipe_build::bind_annexes(&mut units, &BTreeMap::new())?.points;
-        let mut modules: Vec<_> = units.values().map(|unit| Cow::Borrowed(&unit.module)).collect();
+        let mut modules: Vec<_> = units
+            .values()
+            .map(|unit| Cow::Borrowed(&unit.module))
+            .collect();
         let body_keys = crate::callable_variants::prepare_inputs(
             &mut modules,
             &reached,
@@ -299,7 +302,8 @@ impl CheckProduct {
             })
         };
         for object in &mut objects {
-            object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename).map_err(emit)?;
+            object.bytes =
+                hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename).map_err(emit)?;
             if let Some(debug) = &mut object.debug {
                 for section in &mut debug.sections {
                     if own.contains(section.symbol.as_bytes()) {

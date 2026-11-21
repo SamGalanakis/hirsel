@@ -1,5 +1,6 @@
 //! Publish the checked program and assemble its recipe with a local toolchain.
 
+use super::std_release::StdSide;
 use super::*;
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
@@ -13,7 +14,6 @@ use hirsel_core_ir::{
     release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, ObjectRef, Recipe},
     source::{ItemSource, SourceFile, SourceMap, anchored_items},
 };
-use super::std_release::StdSide;
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]

@@ -182,12 +182,9 @@ pub fn pingpong(pool: bool, rounds: u64) -> u8 {
     if !pool {
         return once();
     }
-    assert!(
-        std::env::var("HIRSEL_UNTIED").is_ok(),
-        "set HIRSEL_UNTIED to the worker count"
-    );
+    let w = crate::units::workers().expect("set HIRSEL_UNTIED to the worker count");
     // SAFETY: lengths, masks, descriptors and nullable pointers; the root
     // reads none of them.
     let config: crate::entry::OsConfig = unsafe { std::mem::zeroed() };
-    crate::units::launch(1, &config, |_| once())
+    crate::units::launch(1, w, &config, &|_| once())
 }

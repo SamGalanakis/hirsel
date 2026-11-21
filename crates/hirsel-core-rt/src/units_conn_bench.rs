@@ -19,14 +19,11 @@ static PEER: [AtomicPtr<Client>; 2] = [const { AtomicPtr::new(null_mut()) }; 2];
 /// `conn_<ready|parked> n=<n> ns=<total> check=<n>` to stderr from unit 0.
 #[doc(hidden)]
 pub fn conn_pingpong(parked: bool, warm: u64, n: u64, size: u64) -> u8 {
-    assert!(
-        std::env::var("HIRSEL_UNTIED").is_ok_and(|w| w.parse::<usize>().is_ok_and(|w| w >= 1)),
-        "set HIRSEL_UNTIED to the worker count"
-    );
     // SAFETY: every field is a length, a mask, a descriptor or a nullable
     // pointer; the bench's units read none of them.
     let config: crate::entry::OsConfig = unsafe { std::mem::zeroed() };
-    super::super::launch(2, &config, |_| {
+    let w = super::super::workers().expect("set HIRSEL_UNTIED to the worker count");
+    super::super::launch(2, w, &config, &|_| {
         // SAFETY: runs on pool units 0 and 1, one body each.
         unsafe { body(parked, warm, n, size) }
     })

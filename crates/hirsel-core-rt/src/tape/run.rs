@@ -285,8 +285,7 @@ unsafe extern "C" fn invoke(
             if let Some(v) = std::env::var_os("HIRSEL_TAPE_ID_FIXED") {
                 tape_id = [0; 16];
                 tape_id[..8].copy_from_slice(&(v.len() as u64 + 0x5eed).to_le_bytes());
-                tape_id[8..12].copy_from_slice(&crate::units::unit().to_le_bytes());
-            }
+                            }
         }
         let mut arg = Vec::new();
         put_varint(&mut arg, (*config).args_len as u64);
@@ -523,21 +522,9 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
         };
         super::writer::start();
         let path = path.as_os_str().as_bytes();
-        let status = if let Some(k) = crate::units::count() {
-            // Run one recorder per unit and append the unit id to its file name.
-            struct Shared(*const View, *const SourceTable, *const libc::c_char, *const [u8; 32]);
-            // SAFETY: the caller pins every operand for the whole launch.
-            unsafe impl Sync for Shared {}
-            let shared = Shared(names, sources, identity, revision);
-            crate::units::launch(k, &*input, |config| {
-                let shared = &shared;
-                let mut unit_path = path.to_vec();
-                unit_path.extend_from_slice(format!(".u{}", crate::units::unit()).as_bytes());
-                run_taped(config, shared.0, shared.1, entry, unit_path, 0, shared.2, shared.3)
-            })
-        } else {
-            run_taped(input, names, sources, entry, path.to_vec(), 0, identity, revision)
-        };
+        // A recorded run is its root alone: helper units run on their own
+        // threads and are not recorded (see units.rs, "A unit recording").
+        let status = run_taped(input, names, sources, entry, path.to_vec(), 0, identity, revision);
         super::writer::flush();
         for (at, err) in super::writer::take_failures() {
             report_truncation((*input).stderr_fd, at, err);

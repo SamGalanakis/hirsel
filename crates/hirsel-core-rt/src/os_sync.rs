@@ -200,10 +200,7 @@ fn start() -> Result<(), i32> {
         std::thread::Builder::new()
             .name("hirsel-sync".into())
             .stack_size(STACK)
-            .spawn(|| {
-                crate::units::restore_mask();
-                run()
-            })
+            .spawn(run)
             .map_err(|e| e.raw_os_error().unwrap_or(libc::EAGAIN))?;
     }
     STARTED.store(true, Ordering::Release);

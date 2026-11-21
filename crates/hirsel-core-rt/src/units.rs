@@ -929,108 +929,6 @@ pub(crate) fn spin() -> bool {
     *SPIN.get_or_init(|| std::env::var_os("HIRSEL_XSPIN").is_some())
 }
 
-pub(crate) fn count() -> Option<usize> {
-    std::env::var("HIRSEL_UNITS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&k: &usize| k >= 1)
-}
-
-/// The process's affinity before units pin themselves, for helper threads.
-pub(crate) static ORIGINAL_MASK: OnceLock<libc::cpu_set_t> = OnceLock::new();
-
-pub(crate) fn restore_mask() {
-    if let Some(mask) = ORIGINAL_MASK.get() {
-        // SAFETY: a valid set for the calling thread.
-        unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), mask) };
-    }
-}
-
-struct SendPtr<T>(T);
-unsafe impl<T> Send for SendPtr<T> {}
-
-/// Run main once per unit, each on its own thread; the worst status wins.
-pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&crate::entry::OsConfig) -> u8 + Sync) -> u8 {
-    if let Some(w) = untied_workers() {
-        return launch_untied(k, w, input, &run);
-    }
-    // SAFETY: zeroed is the empty set; the call fills it for this thread.
-    let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut mask) };
-    let _ = ORIGINAL_MASK.set(mask);
-    let base: u32 = std::env::var("HIRSEL_UNIT_BASE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let cpus: Vec<usize> = std::env::var("HIRSEL_UNIT_CPUS")
-        .ok()
-        .map(|v| v.split(',').filter_map(|c| c.trim().parse().ok()).collect())
-        .unwrap_or_default();
-    let total = k as u32;
-    let statuses: Vec<u8> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..k)
-            .map(|i| {
-                let unit = base + i as u32;
-                let cpu = cpus.get(i).copied();
-                let input = SendPtr(input as *const crate::entry::OsConfig);
-                let run = &run;
-                std::thread::Builder::new()
-                    .name(format!("hirsel-unit-{unit}"))
-                    .stack_size(16 << 20)
-                    .spawn_scoped(scope, move || {
-                        let input = input;
-                        UNIT.set(unit);
-                        if let Some(cpu) = cpu {
-                            // SAFETY: a one-CPU set for the calling thread.
-                            unsafe {
-                                let mut set: libc::cpu_set_t = std::mem::zeroed();
-                                libc::CPU_SET(cpu, &mut set);
-                                libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set);
-                            }
-                        }
-                        // SAFETY: the launcher's configuration outlives the scope.
-                        let input = unsafe { &*input.0 };
-                        let extra = [unit.to_string(), total.to_string()];
-                        let mut views: Vec<crate::process::View> = (0..input.args_len)
-                            .map(|j| unsafe { *input.args.add(j) })
-                            .collect();
-                        for e in &extra {
-                            views.push(crate::process::View {
-                                data: e.as_ptr(),
-                                len: e.len(),
-                            });
-                        }
-                        let config = crate::entry::OsConfig {
-                            args: views.as_ptr(),
-                            args_len: views.len(),
-                            ..*input
-                        };
-                        let status = run(&config);
-                        #[cfg(feature = "record")]
-                        finish_unit(unit);
-                        status
-                    })
-                    .unwrap()
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or(101)).collect()
-    });
-    if std::env::var_os("HIRSEL_XSTATS").is_some() {
-        #[cfg(feature = "record")]
-        let replay_stats = format!(" replay_sent={}", replay().map_or(0, |r| r.sent.load(Ordering::Relaxed)));
-        #[cfg(not(feature = "record"))]
-        let replay_stats = "";
-        eprintln!(
-            "crossing-stats msgs={} bytes={} wakes={} full_waits={}{replay_stats}",
-            STATS[0].load(Ordering::Relaxed),
-            STATS[1].load(Ordering::Relaxed),
-            STATS[2].load(Ordering::Relaxed),
-            STATS[3].load(Ordering::Relaxed),
-        );
-    }
-    statuses.into_iter().max().unwrap_or(0)
-}
-
 // ================================================================== untied
 //
 // mc-units-untied (throwaway prototype): `HIRSEL_UNTIED=W` with
@@ -1112,7 +1010,9 @@ static UNTIED_ON: AtomicBool = AtomicBool::new(false);
 pub(crate) fn untied() -> bool {
     UNTIED_ON.load(Ordering::Relaxed)
 }
-fn untied_workers() -> Option<usize> {
+/// `HIRSEL_UNTIED=W`: run the root unit, and every helper unit it makes, on W
+/// worker threads.
+pub(crate) fn workers() -> Option<usize> {
     std::env::var("HIRSEL_UNTIED")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1210,8 +1110,6 @@ pub(crate) struct Unit {
     /// The unit's scheduler-less waiter (replaces the thread's ALONE).
     pub(crate) alone: std::sync::OnceLock<Arc<crate::tasks::Readies>>,
     pub(crate) alone_depth: Cell<usize>,
-    _views: Vec<crate::process::View>,
-    _extra: Vec<String>,
     config: crate::entry::OsConfig,
     /// A helper unit's body (CONC-15), run in place of main.
     job: Cell<Option<Job>>,
@@ -1435,15 +1333,7 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
 fn create_unit_with(id: u32, role: u32, job: Option<Job>) -> &'static Unit {
     let t0 = now();
     let p = pool();
-    let base = &BASE.get().unwrap().0;
-    let extra = vec![id.to_string(), p.k.to_string(), role.to_string()];
-    let mut views: Vec<crate::process::View> =
-        // SAFETY: the base argument views are pinned for the launch.
-        (0..base.args_len).map(|j| unsafe { *base.args.add(j) }).collect();
-    for e in &extra {
-        views.push(crate::process::View { data: e.as_ptr(), len: e.len() });
-    }
-    let config = crate::entry::OsConfig { args: views.as_ptr(), args_len: views.len(), ..*base };
+    let config = BASE.get().unwrap().0;
     let u: &'static Unit = Box::leak(Box::new(Unit {
         id,
         sp: UnsafeCell::new(std::ptr::null_mut()),
@@ -1472,8 +1362,6 @@ fn create_unit_with(id: u32, role: u32, job: Option<Job>) -> &'static Unit {
         timer_at: AtomicU64::new(u64::MAX),
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
-        _views: views,
-        _extra: extra,
         config,
         helper: job.is_some(),
         job: Cell::new(job),
@@ -2225,7 +2113,9 @@ fn worker_main(p: &'static Pool, ix: usize) {
     });
 }
 
-fn launch_untied(
+/// Run `run` as `k` root units (a program has one; the reference bench two) on
+/// `w` workers; the worst status wins.
+pub(crate) fn launch(
     k: usize,
     w: usize,
     input: &crate::entry::OsConfig,

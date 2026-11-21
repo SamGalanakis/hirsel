@@ -643,13 +643,13 @@ unsafe fn run_os_with_sources(
     entry: crate::process::Entry,
     launch_metadata: fn(&str, u64, bool) -> Metadata,
 ) -> u8 {
-    if let Some(k) = crate::units::count() {
+    if let Some(w) = crate::units::workers() {
         struct Shared(*const View, *const crate::abi_sites::SourceTable);
         // SAFETY: the caller pins the tables for the whole launch.
         unsafe impl Sync for Shared {}
         let shared = Shared(parameter_names, sources);
-        // SAFETY: each unit borrows the pinned tables until its run returns.
-        return crate::units::launch(k, unsafe { &*input }, |config| unsafe {
+        // SAFETY: the root unit borrows the pinned tables until its run returns.
+        return crate::units::launch(1, w, unsafe { &*input }, &|config| unsafe {
             let shared = &shared;
             let operations = config.directory_ops.as_ref();
             run_with_sources_and_probe(

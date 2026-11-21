@@ -13,16 +13,27 @@ pub(crate) struct ProgramFacts {
     pub consumed: Vec<Vec<BodyFacts>>,
 }
 
+/// `step_contexts`: the joined module was specialized by step context
+/// ([`hirsel_core_ir::step_contexts`]), which rewrites bodies in place.
 pub(crate) fn key(
     compiler: ContentHash,
     entry: &DefPath,
     modules: &[ContentHash],
     instances: &[hirsel_core_ir::Identity],
     recorded: &[ContentHash],
+    step_contexts: bool,
 ) -> io::Result<ContentHash> {
     native::key(
-        "hirsel.native-program-facts.v1",
-        &(FACTS_SCHEMA, compiler, entry, modules, instances, recorded),
+        "hirsel.native-program-facts.v2",
+        &(
+            FACTS_SCHEMA,
+            compiler,
+            entry,
+            modules,
+            instances,
+            recorded,
+            step_contexts,
+        ),
     )
 }
 
@@ -124,6 +135,7 @@ mod tests {
             modules,
             &[],
             recorded,
+            false,
         )
     }
     // These are the published first-parameter facts of string.truncate from

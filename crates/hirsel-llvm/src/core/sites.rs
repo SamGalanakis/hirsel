@@ -171,6 +171,7 @@ pub(super) fn debug_plan(
     module: &Module,
     function_symbols: &[String],
     versioned: Option<&[bool]>,
+    step_dispatch: &[Option<FuncId>],
     failures: &failure::Failures,
     next: &mut usize,
     sink: &mut dyn Sink,
@@ -243,10 +244,15 @@ pub(super) fn debug_plan(
             ty: signature,
             unit,
         };
-        let linkage = if failures.may_fail[i] {
-            base.to_owned()
+        let body_base = if step_dispatch[i].is_some() {
+            super::step_free::checked(base)
         } else {
-            format!("{base}.infallible")
+            base.to_owned()
+        };
+        let linkage = if failures.may_fail[i] {
+            body_base
+        } else {
+            format!("{body_base}.infallible")
         };
         let scope = node(subprogram(linkage));
         let fallback = node(Metadata::Location {

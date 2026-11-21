@@ -27,6 +27,10 @@ pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
+// MEM-30: while a step bound is current the window at CONTEXT_STEPS holds at
+// most one slice; with none current it starts at 2^62. A larger word means no
+// bound is current.
+pub const STEP_SLICE: i64 = 65_536;
 pub const TASK_ARC_REPLAY: usize = 0;
 // Nonzero when the task's init/share/release hooks must run whatever its credit:
 // a tape group, an open LATEST pair, an event sink or test schedule, or a

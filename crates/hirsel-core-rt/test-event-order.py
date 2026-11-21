@@ -63,7 +63,7 @@ def manifest(source):
 
 def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
     """Launch the named roots without the recorder's foreign link adapter."""
-    roots = {'unbounded': True, 'bounded': False, 'flow_step_owner': False}
+    roots = ('unbounded', 'bounded', 'routes', 'flow_step_owner')
     failures = ('failure_before_slice', 'failure_at_slice', 'failure_after_slice')
 
     def position(offset):
@@ -74,7 +74,7 @@ def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
     finalizer = position(source.index('{', source.index('drop(f)')))
     causes = [('Division', *divide), ('OutOfTime', *finalizer)]
     # The evaluator delegates flows to the native reference.
-    for name in ('unbounded', 'bounded'):
+    for name in ('unbounded', 'bounded', 'routes'):
         report = evaluator.evaluate(inputs, f'app@1/main/{name}', program_entry=True)
         outcome = json.loads(report.stdout).get('outcome')
         if outcome != {'kind': 'returned', 'values': [1]}:
@@ -88,22 +88,21 @@ def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
                 for site, expected in zip(sites, (divide, finalizer), strict=True)):
             raise ValueError(f'{name}: evaluator causes {outcomes} at {sites}')
 
-    def build(name, backend, store, certified, cc=args.cc):
+    def build(name, backend, store, cc=args.cc):
         store.mkdir(parents=True, exist_ok=True)
         output = store / name
         command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs),
                    '--entry', f'app@1/main/{name}', '--backend', backend,
                    '--runtime', str(args.runtime), '--store', str(store / 'store'),
                    '--cc', str(cc), '--json', '-o', str(output)]
+        if re.search(rf'pub fn {name}\([^)]*:\s*Tasks\b', source):
+            command += ['--grant', 'Tasks']
         if backend == 'llvm':
             command.append('--release')
         env = dict(os.environ, XDG_CACHE_HOME=str(store / 'cache'), XDG_DATA_HOME=str(store / 'data'))
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True)
         if result.returncode:
             raise ValueError(f'{name}/{backend}: build {result.stdout!r} {result.stderr!r}')
-        actual = json.loads(result.stdout)['native']['step_charging_elided']
-        if actual != certified:
-            raise ValueError(f'{name}/{backend}: expected Step elision {certified}, got {actual}')
         ran = subprocess.run([output], capture_output=True)
         if name in failures:
             sites = [(kind, int(line), int(column)) for kind, line, column in re.findall(
@@ -116,21 +115,22 @@ def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
 
     if 'cranelift' in (args.backend or ('cranelift', 'llvm')):
         for name in (*roots, *failures):
-            build(name, 'cranelift', folder / 'cranelift-images', False)
+            build(name, 'cranelift', folder / 'cranelift-images')
     if 'llvm' not in (args.backend or ('cranelift', 'llvm')):
         return
-    build('flow_step_owner', 'llvm', folder / 'flow-image', False)
-    build('unbounded', 'llvm', folder / 'foreign-image', False, recorder_linker)
+    build('flow_step_owner', 'llvm', folder / 'flow-image')
+    build('routes', 'llvm', folder / 'routes-image')
+    build('unbounded', 'llvm', folder / 'foreign-image', recorder_linker)
     for name in failures:
-        build(name, 'llvm', folder / 'failure-images', False)
+        build(name, 'llvm', folder / 'failure-images')
     pair = ('unbounded', 'bounded')
-    cold = {name: build(name, 'llvm', folder / f'cold-{name}', roots[name]) for name in pair}
+    cold = {name: build(name, 'llvm', folder / f'cold-{name}') for name in pair}
     for order in (pair, pair[::-1]):
         store = folder / f'warm-{order[0]}'
         for name in order:
-            if build(name, 'llvm', store, roots[name]) != cold[name]:
+            if build(name, 'llvm', store) != cold[name]:
                 raise ValueError(f'{name}: release bytes differ after priming with {order[0]}')
-    print('step-bounds: exact cause sites, metered flow stage and both cache orders pass', flush=True)
+    print('step-bounds: exact cause sites, metered flow stage, step-context routes and both cache orders pass', flush=True)
 
 
 def main():

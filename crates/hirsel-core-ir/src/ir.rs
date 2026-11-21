@@ -1924,6 +1924,19 @@ pub struct Module {
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.
     pub code_variants: std::collections::BTreeMap<FuncId, ContentHash>,
+    /// MEM-30 step-free bodies ([`crate::step_contexts`]): `step_free[f]` runs
+    /// `f` while no step bound is current, a time no step can be observed.
+    pub step_free: std::collections::BTreeMap<FuncId, StepFree>,
+}
+/// The body that runs a function while no step bound is current.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct StepFree {
+    /// A private code variant of the same instance and signature.
+    pub body: FuncId,
+    /// Code pointers, finalizers or the launcher may enter the function under a
+    /// bound or without one: its symbol selects this body or the checked one by
+    /// the current step window, and both bodies share one calling convention.
+    pub dispatch: bool,
 }
 impl Module {
     /// The identity of function `function`'s code: a code variant's, or its

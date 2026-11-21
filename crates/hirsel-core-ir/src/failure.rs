@@ -51,6 +51,11 @@ impl Failures {
                 pending.push(i);
             }
         }
+        // A dispatching symbol tail-calls either body, so both share its status.
+        for (canonical, free) in module.step_free.iter().filter(|(_, s)| s.dispatch) {
+            callers[canonical.index()].push(free.body.index());
+            callers[free.body.index()].push(canonical.index());
+        }
         while let Some(callee) = pending.pop() {
             for &caller in &callers[callee] {
                 if !may_fail[caller] {

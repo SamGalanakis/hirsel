@@ -262,8 +262,6 @@ pub struct BuildProduct {
     /// True means diagnostic instrumentation; timings are not performance samples.
     pub observation_mode: bool,
     pub debug_lines: bool,
-    /// The closed image cannot install a Step bound, so it emits no Step charging.
-    pub step_charging_elided: bool,
     /// The walk's and the link's work counters.
     pub reach: crate::reach::ReachCounters,
 }
@@ -491,7 +489,9 @@ enum Linked {
 struct Emitted {
     objects: Vec<ObjectProduct>,
     table: Option<Table>,
-    step_charging_elided: bool,
+    /// The image was specialized for the hirsel launcher alone entering it
+    /// (`step_contexts::specialize`): the entry runs with no step bound current.
+    closed_image: bool,
     launch_digest_unused: bool,
     release_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
@@ -541,7 +541,7 @@ impl CheckProduct {
         Ok(Emitted {
             objects,
             table,
-            step_charging_elided: false,
+            closed_image: false,
             launch_digest_unused: false,
             release_sites: Vec::new(),
         })
@@ -863,7 +863,7 @@ impl CheckProduct {
         let Emitted {
             mut objects,
             table,
-            step_charging_elided,
+            closed_image,
             launch_digest_unused,
             release_sites,
         } = self.emit_reached(entry, reached, options, true)?;
@@ -966,7 +966,7 @@ impl CheckProduct {
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),
-            step_charging_elided,
+            closed_image,
             counters,
             record,
             address,
@@ -1504,7 +1504,7 @@ fn link_objects(
     sources: impl FnOnce() -> io::Result<hirsel_core_ir::source::SourceMap>,
     toolchain: ContentHash,
     recipe: crate::tool_inputs::LinkRecipe,
-    step_charging_elided: bool,
+    closed_image: bool,
     mut counters: crate::reach::ReachCounters,
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
     address: ContentHash,
@@ -1589,7 +1589,7 @@ fn link_objects(
         let recapture = || {
             let recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
                 .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
-            if step_charging_elided && !recipe.uses_hirsel_launcher() {
+            if closed_image && !recipe.uses_hirsel_launcher() {
                 return Err(NativeStop::Link(
                     "direct link refused: process entry inputs changed".into(),
                 ));
@@ -1726,7 +1726,6 @@ fn link_objects(
         linked,
         observation_mode: options.logical_charge_report.is_some(),
         debug_lines: options.debug_lines,
-        step_charging_elided,
         reach: counters,
     };
     // Copy from integrity-checked bytes even on a hit; a damaged materialized file

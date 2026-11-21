@@ -49,12 +49,10 @@ pub fn emit_program_for_target(
     exports: &[String],
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    Ok(
-        emit_program_parts(units, exports, target, 0, false, &mut Unheld)?
-            .objects
-            .pop()
-            .expect("an unreused program is generated"),
-    )
+    Ok(emit_program_parts(units, exports, target, 0, &mut Unheld)?
+        .objects
+        .pop()
+        .expect("an unreused program is generated"))
 }
 
 /// A release program's parts after whole-program optimisation, in order, and
@@ -116,12 +114,11 @@ impl ReleaseUnit {
         module: &hirsel_core_ir::Module,
         facts: &hirsel_core_ir::roles::Facts,
         observe_charge: bool,
-        elide_steps: bool,
     ) -> Result<Self, String> {
         let context = std::rc::Rc::new(construction::Context::with_anonymous_locals(true)?);
-        let neutral = (!elide_steps).then(|| core::step_neutral_program(&[module]));
+        let neutral = core::step_neutral_program(&[module]);
         let (module, sites) =
-            core::emit_release_unit(module, context, facts, observe_charge, neutral.as_ref())
+            core::emit_release_unit(module, context, facts, observe_charge, &neutral)
                 .map_err(|error| error.to_string())?;
         Ok(Self { module, sites })
     }
@@ -152,14 +149,11 @@ impl ReleaseUnit {
 /// for each definition's release tail and each part's object ([`Held`]). Each
 /// part not held is generated from its bitcode alone on up to `jobs` threads;
 /// with `jobs` 0 they are generated together as one object.
-/// `elide_steps` requires a closed executable where no call or runtime entry
-/// can make a Step bound current or hold a receive grant at a refill.
 pub fn emit_program_parts(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
     jobs: u32,
-    elide_steps: bool,
     held: &mut dyn Held,
 ) -> Result<Program, String> {
     let context = units
@@ -174,7 +168,7 @@ pub fn emit_program_parts(
             Unit::Text(_) => None,
         })
         .collect::<Vec<_>>();
-    let neutral = (!elide_steps).then(|| core::step_neutral_program(&modules));
+    let neutral = core::step_neutral_program(&modules);
     let versions = (target == hirsel_core_layout::Target::X86_64Linux)
         .then(|| core::versioned_program(&modules));
     let mut lowered = Vec::with_capacity(units.len());
@@ -193,7 +187,7 @@ pub fn emit_program_parts(
                     facts,
                     *observe_charge,
                     *debug_lines,
-                    neutral.as_ref(),
+                    &neutral,
                     versions.as_ref(),
                 )
                 .map_err(|e| e.to_string())?,
@@ -258,7 +252,6 @@ b0(v0: u64):
             &[core::symbol(&module, hirsel_core_ir::FuncId(0))],
             hirsel_core_layout::Target::X86_64Linux,
             1,
-            true,
             &mut super::Unheld,
         )
         .unwrap();

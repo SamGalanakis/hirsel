@@ -11,8 +11,7 @@
 //! part. An unchanged definition is generated once, whichever program and
 //! build reached it.
 use super::*;
-use hirsel_core_ir::{Callee, FuncId, HostOp, Inst, RtOp};
-use hirsel_core_layout::flow::Op as FlowOp;
+use hirsel_core_ir::{Callee, RtOp};
 use serde::{Deserialize, Serialize};
 
 /// The release unit's key: its inputs and the role facts each unit consumed.
@@ -184,162 +183,6 @@ pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
     decode::<Parts>(payload).is_some_and(|r| r.schema == PARTS_SCHEMA)
 }
 
-/// In a launched executable, every code pointer comes from a function or
-/// descriptor reference in the image. The launcher supplies only capabilities,
-/// spawn copies a parent's bound, and cleanup and the task entry adapters call
-/// back into the same image. Drop glue calls finalizers by type. Clone and
-/// codec code is called or named explicitly in the materialized bodies.
-fn cannot_install_step_bound(module: &Module) -> bool {
-    let defined = |f: FuncId| module.functions[f.index()].body.is_some();
-    module
-        .types
-        .iter()
-        .filter_map(|shape| shape.finalizer)
-        .all(|f| defined(FuncId(f.0)))
-        && module
-            .functions
-            .iter()
-            .filter_map(|f| f.body.as_ref())
-            .all(|body| {
-                body.insts.iter().all(|inst| match *inst {
-                    Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
-                        defined(function)
-                    }
-                    Inst::Call { call } => match body.calls[call.index()].callee {
-                        Callee::Direct(function) => defined(function),
-                        Callee::Indirect(_) => true,
-                        Callee::Runtime(op) => step_elision_compatible(op),
-                    },
-                    Inst::Const { .. }
-                    | Inst::LayoutConst { .. }
-                    | Inst::ReadStatic { .. }
-                    | Inst::Unary { .. }
-                    | Inst::CompactWidth { .. }
-                    | Inst::Binary { .. }
-                    | Inst::Compare { .. }
-                    | Inst::Convert { .. }
-                    | Inst::IntArith { .. }
-                    | Inst::MulAdd { .. }
-                    | Inst::ScalarUnary { .. }
-                    | Inst::Address { .. }
-                    | Inst::Read { .. }
-                    | Inst::Store { .. }
-                    | Inst::StorageLive { .. }
-                    | Inst::StorageDead { .. }
-                    | Inst::UpdateMask { .. }
-                    | Inst::Pointer { .. }
-                    | Inst::Alloc { .. }
-                    | Inst::Free { .. }
-                    | Inst::FrameRefund { .. }
-                    | Inst::Copy { .. }
-                    | Inst::Grow { .. }
-                    | Inst::Case { .. }
-                    | Inst::SetCase { .. }
-                    | Inst::RegionOpen { .. }
-                    | Inst::RegionClose { .. }
-                    | Inst::Trim { .. }
-                    | Inst::LimitEnter { .. }
-                    | Inst::BuiltinUse { .. }
-                    | Inst::LimitExit
-                    | Inst::Drop { .. }
-                    | Inst::Share { .. }
-                    | Inst::Release { .. }
-                    | Inst::TryUnwrap { .. }
-                    | Inst::Mark { .. }
-                    | Inst::Unmark { .. }
-                    | Inst::Step { .. }
-                    | Inst::Simd { .. }
-                    | Inst::PutLanes { .. }
-                    | Inst::PromoteFrame { .. } => true,
-                })
-            })
-}
-
-fn step_elision_compatible(op: RtOp) -> bool {
-    match op {
-        RtOp::StepEnter | RtOp::StepLeave | RtOp::StepCatch | RtOp::Flow(FlowOp::Stage) => false,
-        // The native receive-in-loop entry can retain the sequencer grant.
-        // A Step refill is one of the release boundaries for that grant.
-        RtOp::Receive { .. } => false,
-        RtOp::Spawn { .. }
-        | RtOp::Join { .. }
-        | RtOp::Cancel
-        | RtOp::CheckCancel
-        | RtOp::ChannelNew { .. }
-        | RtOp::ChannelSender
-        | RtOp::Send { .. }
-        | RtOp::TrySend { .. }
-        | RtOp::TryReceive { .. }
-        | RtOp::LatestNew { .. }
-        | RtOp::LatestHandle
-        | RtOp::LatestPublish
-        | RtOp::LatestRead
-        | RtOp::DestId
-        | RtOp::CompareBytes
-        | RtOp::HashBytes
-        | RtOp::Sha1Blocks
-        | RtOp::Sha256Blocks
-        | RtOp::CauseNext
-        | RtOp::CauseValue
-        | RtOp::ArgsLen
-        | RtOp::ArgsGet
-        | RtOp::TapeOpen
-        | RtOp::TapeEnd
-        | RtOp::TapeGrant
-        | RtOp::TapeAcross
-        | RtOp::IsolateEnter
-        | RtOp::IsolateLeave
-        | RtOp::IsolateCatch
-        | RtOp::LaunchWord
-        | RtOp::LaunchTarget { .. }
-        | RtOp::DescribeEmit
-        | RtOp::Flow(
-            FlowOp::New
-            | FlowOp::Sink
-            | FlowOp::Port
-            | FlowOp::Push
-            | FlowOp::Advance
-            | FlowOp::End
-            | FlowOp::Next
-            | FlowOp::Finish,
-        )
-        | RtOp::Host(
-            HostOp::Open
-            | HostOp::Read
-            | HostOp::Write
-            | HostOp::Close
-            | HostOp::TryLock
-            | HostOp::Unlock
-            | HostOp::Mkdir
-            | HostOp::Mkdtemp
-            | HostOp::Remove
-            | HostOp::RemoveTree
-            | HostOp::WallMs
-            | HostOp::MonoNs
-            | HostOp::Stdout
-            | HostOp::Stderr
-            | HostOp::Rename
-            | HostOp::SleepUntil
-            | HostOp::Sync
-            | HostOp::SyncDir
-            | HostOp::Random
-            | HostOp::Connect
-            | HostOp::Listen
-            | HostOp::Accept
-            | HostOp::RecvBounded
-            | HostOp::SendPair
-            | HostOp::NetNarrow
-            | HostOp::NetNarrowTls
-            | HostOp::TlsConnect
-            | HostOp::SendSecret
-            | HostOp::SecretSeal
-            | HostOp::SecretNarrow
-            | HostOp::NetSplit
-            | HostOp::Stopped,
-        ) => true,
-    }
-}
-
 impl CheckProduct {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_release(
@@ -399,22 +242,25 @@ impl CheckProduct {
                 },
             )
             .collect::<Vec<_>>();
-        let (mut joined, _) =
-            hirsel_core_materialize::join(&units, entry_identity).map_err(|message| {
-                NativeStop::Emit {
-                    definition: entry.clone(),
-                    message,
-                }
+        let (mut joined, entry_function) = hirsel_core_materialize::join(&units, entry_identity)
+            .map_err(|message| NativeStop::Emit {
+                definition: entry.clone(),
+                message,
             })?;
         // The unit holds every body the program can run, so a blob's `W` that every
         // root reaching its type writes alike is a constant; the unit key below
         // reads the module after this.
         hirsel_core_ir::widths::resolve(&mut joined);
-        let elide_steps = closed_executable && cannot_install_step_bound(&joined);
-        // The closed-unit walk above proves calls, function references and
-        // finalizers stay in the image. The separate result cleanup is
-        // considered when selecting the entry plan.
-        let launch_digest_unused = elide_steps
+        // In a launched executable every code pointer comes from a function or
+        // descriptor reference in the image: the launcher supplies only
+        // capabilities, and spawn, flow, cleanup and the task entry adapters
+        // call back into the same image. Drop glue calls finalizers by type.
+        let contained = closed_executable && hirsel_core_ir::step_contexts::self_contained(&joined);
+        if contained {
+            hirsel_core_ir::step_contexts::specialize(&mut joined, entry_function);
+        }
+        // The separate result cleanup is considered when selecting the entry plan.
+        let launch_digest_unused = contained
             && !joined
                 .functions
                 .iter()
@@ -430,7 +276,8 @@ impl CheckProduct {
         // All shape-owner modules used by generic materialization are in this
         // ordered closure. Entry and compiler identify the deterministic callable
         // preparation above, including appended private units.
-        let facts_key = crate::native_facts::key(compiler, entry, &body_identities, reached, &[])?;
+        let facts_key =
+            crate::native_facts::key(compiler, entry, &body_identities, reached, &[], contained)?;
         let crate::native_facts::ProgramFacts { facts, consumed } =
             crate::native_facts::get(store, facts_key, &refs, &[])?;
         let instance = reached
@@ -448,7 +295,6 @@ impl CheckProduct {
                 runtime,
                 instance,
                 closed_executable,
-                elide_steps,
                 &refs,
             ),
             &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
@@ -475,7 +321,6 @@ impl CheckProduct {
                 &modules[0],
                 &facts[0],
                 options.logical_charge_report.is_some(),
-                elide_steps,
             )
             .map_err(emit)?;
             sites = std::mem::take(&mut release.sites);
@@ -517,14 +362,9 @@ impl CheckProduct {
             let exports = [instance.symbol()];
             let program = match lowered {
                 Some(release) => release.emit(&exports, jobs, &mut reuse),
-                None => hirsel_llvm_lazy::emit_program_parts(
-                    &units,
-                    &exports,
-                    target,
-                    jobs,
-                    elide_steps,
-                    &mut reuse,
-                ),
+                None => {
+                    hirsel_llvm_lazy::emit_program_parts(&units, &exports, target, jobs, &mut reuse)
+                }
             }
             .map_err(emit)?;
             if let Some(error) = failure {
@@ -603,7 +443,7 @@ impl CheckProduct {
         Ok(Emitted {
             objects,
             table: None,
-            step_charging_elided: elide_steps,
+            closed_image: contained,
             launch_digest_unused,
             release_sites: sites,
         })

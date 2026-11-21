@@ -593,7 +593,7 @@ fn link_weak_adapter_order(
         || product.source_map(&rows),
         inputs.toolchain.image,
         inputs.recipe.clone(),
-        emitted.step_charging_elided,
+        emitted.closed_image,
         reached.counters,
         |_| Ok(0),
         reached.address(entry).unwrap(),

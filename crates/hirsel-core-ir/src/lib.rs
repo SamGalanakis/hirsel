@@ -1085,6 +1085,7 @@ pub mod release_recipe;
 pub mod roles;
 pub mod source;
 mod static_data;
+pub mod step_contexts;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;

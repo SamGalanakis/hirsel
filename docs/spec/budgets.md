@@ -289,8 +289,10 @@ is core's plain record `{ steps: u64 }`.
   depend only on its source and the values at its replay point
   ([SEM-8](semantics.md#sem-8-determinism)): every engine, build and optimisation level
   stops at the same step, and a replay stops where the recorded run stopped. No
-  optimisation adds, removes, merges or moves a step; an engine may count several steps at
-  once only where it then stops at the same step as counting one at a time would.
+  optimisation adds, removes, merges or moves a step taken while a bound is current; an
+  engine may count several steps at once only where it then stops at the same step as
+  counting one at a time would. A step taken while no bound is current uses nothing and
+  ends no slice, so an engine need not count it, even in code that also runs under a bound.
 
 ```hirsel
 fn spin(n: u64) -> Result[u64, OutOfTime] {

@@ -503,10 +503,17 @@ std::string machine_text(const TargetMachine &tm) {
 // writable or thread-local data, unwinding personalities, named metadata
 // that reaches the object) is not a part's, so such a module is generated
 // and keyed whole.
+std::string unsplittable_content(const Module &m);
 std::string unsplittable(const Module &m) {
     Triple triple(m.getTargetTriple());
     if (triple.getArch() != Triple::x86_64 || !triple.isOSBinFormatELF())
         return "the object split is x86-64 ELF only";
+    return unsplittable_content(m);
+}
+
+// Why `m`'s content, whatever its target, cannot be split: `unsplittable`
+// less the target.
+std::string unsplittable_content(const Module &m) {
     if (!m.alias_empty() || !m.ifunc_empty()) return "aliases";
     if (!m.getComdatSymbolTable().empty()) return "comdats";
     for (const GlobalVariable &g : m.globals()) {
@@ -727,13 +734,23 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     name_from_content(m);
     bool whole = !unsplittable(m).empty();
     if (lend) {
-        if (whole) {
-            *error = strdup(("a library that lends its bodies is cut per definition: " + unsplittable(m)).c_str());
+        // A library whose target alone has no split (AArch64) is lent from
+        // and generated whole: its local functions become hidden globals, as
+        // its parts' are, so the names the lent bodies call are the names the
+        // library's link contract gives its object's definitions.
+        if (std::string content = unsplittable_content(m); !content.empty()) {
+            *error = strdup(("a library that lends its bodies is cut per definition: " + content).c_str());
             return 1;
         }
         SmallVector<char, 0> lent;
         lent_bodies(m, asm_lines(m), lend_limit, own, lent);
         lend(context, (const uint8_t *)lent.data(), lent.size());
+        if (whole)
+            for (Function &f : m)
+                if (!f.isDeclaration() && f.hasLocalLinkage()) {
+                    f.setLinkage(GlobalValue::ExternalLinkage);
+                    f.setVisibility(GlobalValue::HiddenVisibility);
+                }
     }
     auto ask = [&](StringRef name, const hirsel_key::Digest &key) {
         return reuse(context, name.data(), name.size(), machine_key.data(), machine_key.size(),

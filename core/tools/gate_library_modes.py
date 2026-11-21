@@ -149,7 +149,7 @@ def main():
                     result = self.progress.run([str(executable), *arguments], cwd=work, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     return result
-                invoke(compiler, 'std-product', '--runtime', str(runtime), expected=2)
+                invoke(compiler, 'core-product', '--runtime', str(runtime), expected=2)
                 invoke(compiler, 'core-product', '--target', 'x86_64-unknown-linux-gnu', expected=2)
                 initial = json.loads(invoke(compiler, 'env', '--json').stdout)
                 self.assertIsNone(initial['installed_root'])

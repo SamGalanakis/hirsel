@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const FILE: &str = "hirsel-core-toolchain.json";
 const VERSION: u32 = 2;
@@ -413,7 +414,42 @@ pub fn publish(
             prebuild(&installed, target, &archive, recipe, meter)?;
         }
     }
+    if std && let Some((bytes, target)) = &runtime {
+        prebuild_release(&product.image, target, bytes, meter)?;
+    }
     Ok(product)
+}
+
+/// Lower the release std of a std product's image for a default release
+/// build on `target` linking the runtime archive `runtime`, into the image's
+/// store, where every build over the image finds it before lowering std
+/// itself. Every checked plain root is lowered; a refused one is skipped.
+pub(crate) fn prebuild_release(
+    image: &Arc<CoreImage>,
+    target: &str,
+    runtime: &[u8],
+    meter: &mut Meter,
+) -> io::Result<()> {
+    let scratch = tempfile::tempdir()?;
+    let request = crate::CheckRequest {
+        manifest: None,
+        inputs: crate::CorpusManifest {
+            core: image.directory()?.inputs.core.clone(),
+            packages: vec![],
+        },
+        store: scratch.path().join("request"),
+        library: crate::LibraryInput::Image(Arc::clone(image)),
+        entry: None,
+    };
+    let product = crate::Driver::default().check(request, meter)?;
+    product
+        .prebuild_release_std(
+            target,
+            crate::tool_inputs::runtime_identity(ContentHash::of_bytes(runtime)),
+        )
+        .map_err(|stop| io::Error::other(format!("prebuilding the release std: {stop}")))?;
+    meter.finish("std product/release prebuild");
+    Ok(())
 }
 
 /// Prebuild the installed std image's plain instances for a development

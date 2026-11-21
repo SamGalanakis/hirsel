@@ -470,11 +470,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if install_root.is_some() && (store.is_some() || image_path.is_some()) {
         return Err("--install cannot be combined with --store or --image".into());
     }
-    if matches!(command, "core-product" | "std-product")
-        && install_root.is_none()
-        && (explicit_runtime || recording_runtime.is_some() || explicit_target)
+    if install_root.is_none()
+        && ((command == "core-product" && (explicit_runtime || explicit_target))
+            || (matches!(command, "core-product" | "std-product") && recording_runtime.is_some()))
     {
-        return Err("product --runtime/--target require --install".into());
+        return Err(
+            "core-product --runtime/--target and --recording-runtime require --install".into(),
+        );
     }
     if profile_front && !hirsel_core_ids::published::FRONT_OBSERVER_AVAILABLE {
         return Err("--profile-front needs the front-observer release compiler".into());
@@ -608,7 +610,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     &mut meter,
                 )?
             } else if command == "std-product" {
-                crate::PackageProduct::bundled_std(&store, &mut meter)?
+                let package = crate::PackageProduct::bundled_std(&store, &mut meter)?;
+                if let Some(runtime) = &runtime {
+                    let bytes = std::fs::read(runtime)?;
+                    crate::installation::check_runtime(runtime, &bytes, false)?;
+                    crate::installation::prebuild_release(
+                        &package.image,
+                        &target,
+                        &bytes,
+                        &mut meter,
+                    )?;
+                }
+                package
             } else {
                 crate::PackageProduct::bundled(&store, &mut meter)?
             };

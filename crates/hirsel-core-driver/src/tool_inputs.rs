@@ -313,6 +313,12 @@ pub(crate) struct Toolchain {
     pub(crate) environment: ContentHash,
 }
 
+/// The identity native objects are keyed by for a runtime archive whose bytes
+/// hash to `content`: objects are emitted against its ABI.
+pub(crate) fn runtime_identity(content: ContentHash) -> ContentHash {
+    ContentHash::of_parts("hirsel.core-runtime.v2", [content.0.as_slice()])
+}
+
 /// One cached record of every toolchain input. Stat signatures avoid
 /// re-reading unchanged runtime, linker and CRT bytes on every request. The
 /// recipe belongs to the C driver and target alone; the runtime archive is
@@ -404,7 +410,7 @@ fn installed_toolchain(
             "hirsel.installed-toolchain-image.v2",
             [crate::encode(&(identity, &archive.content))?.as_slice()],
         ),
-        runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.content.0.as_slice()]),
+        runtime: runtime_identity(archive.content),
         environment: keyed_environment(&[]),
     };
     let recipe = LinkRecipe {
@@ -473,7 +479,7 @@ fn driver_toolchain(
     );
     let toolchain = Toolchain {
         image: identity,
-        runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.0.as_slice()]),
+        runtime: runtime_identity(archive),
         environment,
     };
     // A moved stat over equal bytes is a change to the record: rewrite it so

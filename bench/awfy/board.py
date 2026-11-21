@@ -510,7 +510,7 @@ def prepare_compile(out, artifacts, env):
 def prepare_hirsel_compile(out, artifacts, env):
     suite = load("arena_suite", ROOT / "core/langarena/run.py")
     packages = out / "packages"
-    run([artifacts["compiler"], "std-product", "--store", packages], env=env)
+    run([artifacts["compiler"], "std-product", "--store", packages, "--runtime", artifacts["runtime"]], env=env)
     helper = out / "helper.hirsel"
     shutil.copyfile(ROOT / "core/langarena/helper.hirsel", helper)
     manifest = suite.inputs(ROOT, "helper", helper)

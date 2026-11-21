@@ -406,7 +406,8 @@ const RIDGE_B = () => MOB ? 36 : 48;
 function geom(view, pe) {
   const g = { vi: VIEWS.indexOf(view) };
   g.pTo = g.vi * W * .55;
-  if (view === 'hill') { g.rTo = H * (MOB ? .2 : .23); return g; }
+  /* a phone's hill rises to the same height as every other view's, so the sky stays a strip */
+  if (view === 'hill') { g.rTo = MOB ? Math.round(Math.max(88, H * .11)) : H * .23; return g; }
   const hd = document.querySelector('header').getBoundingClientRect();
   g.hdB = hd.bottom; g.rTo = hd.bottom + (MOB ? 36 : 64);
   pe = pe || $('panel'); const by = g.rTo + RIDGE_B() + 12;
@@ -499,28 +500,34 @@ const SC = {};
 
 SC.hill = (g) => {
   const land = document.getElementById('land').getBoundingClientRect();
-  const ex = { l: land.left - 30, r: land.right + 40, t: land.top - 34 };
-  /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it */
-  let cw = Math.max(W, H) / 9, cells;
+  const ex = { l: land.left - 30, r: land.right + 40, t: land.top - (MOB ? 30 : 34) };
+  /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it.
+     A big screen sizes the patches so the whole flock grazes the near slope. A phone keeps them
+     big enough to read, takes as many as fit whole above the name, and leaves the rest of the
+     flock up on the ridge, as every other view does. */
+  let cw = MOB ? (W - 24) / 4.4 : Math.max(W, H) / 9, cells;
   for (let it = 0; it < 60; it++) {
-    const ch = cw * .5, cand = [];
+    const ch = cw * .5, cand = [], step = cw * .5;
+    /* on a phone the lattice is centred and every patch lies whole inside the width */
+    const nx = MOB ? Math.floor((W - 2 * (cw * .45 + 6)) / step) + 1 : 0, x0 = MOB ? (W - (nx - 1) * step) / 2 : cw * .5;
     for (let j = 0; ; j++) {
       const y = g.rTo + ch * .9 + j * ch * .5; if (y > H - ch * .6) break;
       for (let i = 0; ; i++) {
-        const x = cw * .5 + i * cw * .5; if (x > W - cw * .4) break;
+        const x = x0 + i * step; if (MOB ? i >= nx : x > W - cw * .4) break;
         if ((i + j) % 2) continue;
         if (y < rY(x, g.pTo, g.rTo) + ch * .9) continue;
-        if (x > ex.l && x < ex.r && y > ex.t) continue;
+        if (x > ex.l && x < ex.r && y > ex.t - (MOB ? ch * .6 : 0)) continue;
         cand.push([x, y]);
       }
     }
     const r = mb(11); for (let i = cand.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]]; }
     cells = [];
-    for (const c of cand) { if (cells.length >= N) break; if (!cells.some(q => Math.abs(q[0] - c[0]) < cw * .6 && Math.abs(q[1] - c[1]) < ch * .6)) cells.push(c); }
-    if (cells.length >= N && cand.length >= N / .3) break; cw *= .95;
+    for (const c of cand) { if (cells.length >= N) break; if (!cells.some(q => Math.abs(q[0] - c[0]) < cw * .6 && Math.abs(q[1] - c[1]) < ch * (MOB ? 1.1 : .6))) cells.push(c); }
+    if (MOB ? cells.length >= 3 || cw < 56 : cells.length >= N && cand.length >= N / .3) break; cw *= .95;
   }
   const ch = cw * .5, s = Math.min(cw * .36, 46), slots = [];
-  for (let i = 0; i < N; i++) { const [x, y] = cells[i]; slots.push({ x, y: y + ch * .12, s, a: 1, rx: cw * .19, ry: ch * .19, cx: x, cy: y }); }
+  if (!cells.length) cells.push([W * .7, Math.min(ex.t - ch * .6, g.rTo + ch * 2)]);
+  for (const [x, y] of cells) slots.push({ x, y: y + ch * .12, s, a: 1, rx: cw * .19, ry: ch * .19, cx: x, cy: y });
   /* walled fields: dykes run along the cell lattice, between patches, every few cells in each
      direction. A run breaks off here and there, and some breaks are gates between two posts. */
   const Y0 = g.rTo + ch * .9, cp = (A, B) => [cw * .5 + (A - B) * cw * .5, Y0 + (A + B) * ch * .5];
@@ -540,7 +547,7 @@ SC.hill = (g) => {
       }
     }
   });
-  const rp = MOB ? [W * .8, g.rTo + (H - g.rTo) * .42] : [W * .36, g.rTo + (H - g.rTo) * .22];
+  const rp = MOB ? [W * .66, g.rTo + (ex.t - g.rTo) * .45] : [W * .36, g.rTo + (H - g.rTo) * .22];
   let redSlot = 0; slots.forEach((l, j) => { if (Math.hypot(l.cx - rp[0], l.cy - rp[1]) < Math.hypot(slots[redSlot].cx - rp[0], slots[redSlot].cy - rp[1])) redSlot = j; });
   return {
     slots, redSlot, ids: [], key: 0,

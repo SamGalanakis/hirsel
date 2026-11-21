@@ -1594,3 +1594,125 @@ archives = [
     assert_ne!(checked().foreign, original.foreign);
     assert_eq!(original.foreign_inputs[&vec!["native".to_string()]].archives[target].bytes.as_ref(), b"abc");
 }
+
+#[test]
+fn package_l8_foreign_metadata_matches_cold_requests() {
+    use sha2::{Digest, Sha256};
+
+    let law = PackageLaw::new();
+    let runtime = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = runtime.link else { unreachable!() };
+    law.write("adapter.c", r#"
+#include <stdint.h>
+uint64_t PING(void) { return UINT64_C(1); }
+
+#define TEXT_(x) #x
+#define TEXT(x) TEXT_(x)
+#define ABI TEXT(PING) " stack () -> u64\n"
+__attribute__((used, section(".hirsel_abi")))
+static const char abi[sizeof(ABI) - 1] = ABI;
+"#);
+    std::fs::create_dir_all(law.path("work/math/native")).unwrap();
+    let archive = |prefix: &str| {
+        let compiled = Command::new(&cc).current_dir(law.dir.path()).args([
+            "-std=c11", "-O2", "-fPIC", "-ffreestanding", "-fno-unwind-tables",
+            "-fno-asynchronous-unwind-tables", "-fno-addrsig", "-fno-ident",
+            "-fno-stack-protector", &format!("-DPING={prefix}ping"), "-c", "adapter.c", "-o", "adapter.o",
+        ]).output().unwrap();
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+        let path = format!("work/math/native/{prefix}.a");
+        let archived = Command::new(cc.with_file_name("llvm-ar"))
+            .current_dir(law.dir.path())
+            .args(["rcs", &path, "adapter.o"])
+            .output().unwrap();
+        assert!(archived.status.success(), "{}", String::from_utf8_lossy(&archived.stderr));
+        let bytes = std::fs::read(law.path(&path)).unwrap();
+        crate::package_content::hex(&Sha256::digest(bytes).into())
+    };
+    let hm = archive("hm_");
+    let hn = archive("hn_");
+    law.write("work/math/native/arm.a", b"");
+
+    law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"math\"]\n");
+    law.app("work/app", "[dependencies]\nmath = { major = 1, path = \"../math\" }\n");
+    law.write("work/app/main.hirsel", r#"
+pub fn main(f: Foreign[math.Math]) -> Result[(), Exit] {
+    if math.ping(f) == 1u64 { Ok(()) } else { Error(Exit(status: 1u8)) }
+}
+"#);
+    law.write("work/math/math.hirsel", r#"
+pub opaque type Math {}
+pub fn ping(f: Foreign[Math]) -> u64 { native.ping(f) }
+"#);
+    law.write("work/math/native.hirsel", "pub fn ping(f: Foreign[math.Math]) -> u64\n");
+    let configure = |symbols: Option<&str>, arm: bool| {
+        let mut manifest = String::from("[sources]\n\"math.hirsel\" = \"math\"\n\"native.hirsel\" = \"native\"\n");
+        if let Some(symbols) = symbols {
+            let pin = if symbols == "hm_" { &hm } else { &hn };
+            manifest.push_str(&format!(r#"
+[foreign.native]
+symbols = "{symbols}"
+archives = [
+  {{ target = "x86_64-unknown-linux-gnu", file = "native/{symbols}.a", sha256 = "{pin}" }},
+"#));
+            if arm {
+                manifest.push_str(r#"  { target = "aarch64-unknown-linux-gnu", file = "native/arm.a", sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },"#);
+            }
+            manifest.push_str("\n]\n");
+        }
+        law.manifest("work/math", "math", 1, &manifest);
+    };
+    let cold = || {
+        let fresh = PackageLaw::new();
+        for file in [
+            "work/hirsel.toml", "work/app/hirsel.toml", "work/app/main.hirsel",
+            "work/math/hirsel.toml", "work/math/math.hirsel", "work/math/native.hirsel",
+            "work/math/native/hm_.a", "work/math/native/hn_.a", "work/math/native/arm.a",
+        ] {
+            fresh.write(file, std::fs::read(law.path(file)).unwrap());
+        }
+        fresh
+    };
+    let check = |law: &PackageLaw| law.run(&["check", "work/app", "--json"]);
+    let publish = |law: &PackageLaw| PackageLaw::pass(law.run(&[
+        "publish", "work/app", "--grant", "Foreign=math@1/math/Math",
+    ]));
+
+    configure(Some("hm_"), false);
+    PackageLaw::pass(check(&law));
+    let original = publish(&law);
+    PackageLaw::pass(law.run(&["run", "work/app", "--source-core", "--source-std", "--grant", "Foreign=math@1/math/Math"]));
+    configure(None, false);
+    let warm = check(&law);
+    let fresh = check(&cold());
+    assert_eq!(warm.0, Some(1), "{}\n{}", warm.1, warm.2);
+    assert_eq!(warm.0, fresh.0);
+    let warm: serde_json::Value = serde_json::from_str(&warm.1).unwrap();
+    let fresh: serde_json::Value = serde_json::from_str(&fresh.1).unwrap();
+    assert_eq!(warm["diagnostics"], fresh["diagnostics"]);
+    assert!(warm["diagnostics"].as_array().is_some_and(|rows| !rows.is_empty()));
+
+    configure(Some("hn_"), false);
+    let changed = publish(&law);
+    assert_eq!(changed, publish(&cold()));
+    assert_ne!(changed, original);
+
+    configure(Some("hm_"), true);
+    let second_target = publish(&law);
+    assert_eq!(second_target, publish(&cold()));
+    assert_ne!(second_target, original);
+
+    law.write("work/math/native/hm_.a", b"abc");
+    let build = |law: &PackageLaw| law.run(&[
+        "build", "work/app", "--grant", "Foreign=math@1/math/Math", "-o", "linked-program",
+    ]);
+    let warm = build(&law);
+    let fresh = build(&cold());
+    assert_eq!(warm.0, Some(2), "{}\n{}", warm.1, warm.2);
+    assert_eq!(warm.0, fresh.0);
+    let after_lock = |stderr: &str| stderr.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock"))
+        .collect::<Vec<_>>().join("\n");
+    assert_eq!(after_lock(&warm.2), after_lock(&fresh.2));
+    assert!(warm.2.contains("FFI-3: archive") && warm.2.contains("does not match its pin:"), "{}", warm.2);
+    assert!(!law.path("linked-program").exists());
+}

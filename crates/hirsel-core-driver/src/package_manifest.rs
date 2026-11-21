@@ -152,7 +152,32 @@ impl Manifest {
             Err(error) => return (false, Err(error)),
         };
         let workspace = table.contains_key("workspace");
-        (workspace, Self::validate_table(text, &table, refuse))
+        let result = Self::validate_table(text, &table, refuse).and_then(|manifest| {
+            if !cfg!(test)
+                && let Some(package) = &manifest.package
+                && !package.foreign.is_empty()
+                && !std::fs::canonicalize(path).is_ok_and(|path| {
+                    package.id.name == "ffi_laws"
+                        && package.id.major == 1
+                        && path.ends_with("core/programs/ffi_laws/hirsel.toml")
+                        && package.foreign.len() == 1
+                        && package.foreign.iter().all(|(module, foreign)| {
+                            module.as_slice() == ["native"]
+                                && foreign.symbols == "hfl_"
+                                && foreign.rows.iter().all(|(target, archive)| {
+                                    target == "x86_64-unknown-linux-gnu"
+                                        && archive.file == "libffi_laws.a"
+                                        && crate::package_content::hex(&archive.pin)
+                                            == "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6"
+                                })
+                        })
+                })
+            {
+                return Err(refuse("foreign modules are not enabled yet".into()));
+            }
+            Ok(manifest)
+        });
+        (workspace, result)
     }
 
     fn validate_table(

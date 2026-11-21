@@ -1,0 +1,273 @@
+fn allocate_while_parked(take n: u64) -> u64 {
+    let mut count = 0u64
+    for _ in 0u64 .. n {
+        let mut scratch: Bytes = list.with_capacity(16)
+        list.push(mut scratch, 1u8)
+        count = count + list.len(scratch)
+    }
+    count
+}
+
+@test
+fn fl5_mutable_loan(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let mut d: Bytes = list.with_capacity(4)
+    list.fill(mut d, 4, 0)
+    let child = task.spawn(tasks, bytes 65536, 10000u64, allocate_while_parked)
+    let written = native.mark_w(f, mut d)
+    let allocations = result.unwrap(task.join(take child))
+    if written != 4 || allocations != 10000 || list.len(d) != 4 { return Error(()) }
+    for byte in d {
+        if byte != 0xABu8 { return Error(()) }
+    }
+    Ok(())
+}
+
+@test
+fn fl5_immutable_slice(f: Foreign[laws.Laws]) -> Result[(), ()] {
+    let mut c: Bytes = list.with_capacity(12)
+    for i in 0u64 .. 12u64 {
+        let byte: u8 = int.narrow(i)
+        list.push(mut c, byte)
+    }
+    let middle = list.slice(c, 4, 8)
+    let len = native.loan_length(f, middle)
+    let sum = native.loan_sum(f, middle)
+    if len == 4 && sum == 22 { Ok(()) } else { Error(()) }
+}
+
+@test
+fn fl5_stack_loan(f: Foreign[laws.Laws]) -> Result[(), ()] {
+    let mut b: Bytes = list.with_capacity(16)
+    list.fill(mut b, 4, 0)
+    if native.mark(f, mut b) != 4 || list.len(b) != 4 { return Error(()) }
+    for byte in b {
+        if byte != 0xABu8 { return Error(()) }
+    }
+    list.push(mut b, 0)
+    let mut empty: Bytes = list.new()
+    if list.capacity(b) == 16 && native.mark(f, mut empty) == 0 { Ok(()) } else { Error(()) }
+}
+
+fn probe(maybe_grant: Option[Foreign[laws.Laws]]) -> u64 {
+    match maybe_grant {
+        Some(f) => native.freed(f),
+        None => 0
+    }
+}
+
+@test
+fn fl6_reaches_without_calling() -> Result[(), ()] {
+    if probe(None) == 0 { Ok(()) } else { Error(()) }
+}
+
+@test
+fn fl6_parameterless_control() -> Result[(), ()] {
+    Ok(())
+}
+
+resource type ObjBox: send { f: Foreign[laws.Laws], p: foreign.Ptr[laws.Obj] }
+drop(o) {}
+
+fn make_handle(f: Foreign[laws.Laws]) -> foreign.Ptr[laws.Obj] {
+    match native.make(f) {
+        Some(p) => p,
+        None => fail("ffi_laws: pool exhausted"),
+    }
+}
+
+fn box_handle(f: Foreign[laws.Laws], p: foreign.Ptr[laws.Obj]) -> ObjBox {
+    match ObjBox(f: f, p: p) {
+        Ok(take o) => take o,
+        Error(_) => fail("ffi_laws: no room for handle wrapper"),
+    }
+}
+
+fn close_obj(take o: ObjBox) -> i32 waits {
+    let ObjBox(f: f, p: p) = take o
+    native.free(f, p)
+}
+
+fn caused(cs: Causes, expected: String) -> bool {
+    let mut n = 0u64
+    for c in cs {
+        match c.kind {
+            Fail(message) => {
+                if message != expected { return false }
+            },
+            _ => return false,
+        }
+        n += 1
+    }
+    n == 1
+}
+
+fn failed_with(take outcome: Result[i32, JoinError], expected: String) -> bool {
+    match outcome {
+        Error(Failed(take cs)) => caused(cs, expected),
+        _ => false,
+    }
+}
+
+@test
+fn fl3_double_release(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let p = make_handle(f)
+    if native.free(f, p) != 0 { return Error(()) }
+    let stale = box_handle(f, p)
+    let child = task.spawn(tasks, bytes 65536, take stale, close_obj)
+    if failed_with(task.join(take child), "foreign handle released") && native.freed(f) == 1 {
+        Ok(())
+    } else { Error(()) }
+}
+
+@test
+fn fl4_racing_release(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let p = make_handle(f)
+    let one = box_handle(f, p)
+    let two = box_handle(f, p)
+    let first = task.spawn(tasks, bytes 65536, take one, close_obj)
+    let second = task.spawn(tasks, bytes 65536, take two, close_obj)
+    let a = task.join(take first)
+    let b = task.join(take second)
+    if native.freed(f) != 1 { return Error(()) }
+    match take a {
+        Ok(0) => if failed_with(take b, "foreign handle released") { Ok(()) } else { Error(()) },
+        take other => {
+            if failed_with(take other, "foreign handle released") {
+                match b { Ok(0) => Ok(()), _ => Error(()) }
+            } else { Error(()) }
+        },
+    }
+}
+
+fn make_and_release(take parts: (Foreign[laws.Laws], Sender[()])) -> i32 waits {
+    let (f, take ready) = take parts
+    let p = make_handle(f)
+    let _ = channel.send(ready, ())
+    native.free(f, p)
+}
+
+fn bad_alias(take o: ObjBox) -> i32 waits {
+    let ObjBox(f: f, p: p) = take o
+    let _ = native.same(f, p)
+    1
+}
+
+@test
+fn fl17_address_reuse(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let _ = native.gate(f, 1)
+    let (ready, pending): (Sender[()], Receiver[()]) = channel.new(1)
+    let first = task.spawn(tasks, bytes 65536, (f, take ready), make_and_release)
+    let _ = channel.receive(pending)
+    while native.held(f) != 1 {}
+    let q = make_handle(f)
+    let _ = native.open(f, 1)
+    if result.unwrap(task.join(take first)) != 0 { return Error(()) }
+    if native.made(f) != 2 || native.freed(f) != 1 { return Error(()) }
+    let _ = native.gate(f, 0)
+    let box_q = box_handle(f, q)
+    let duplicate = task.spawn(tasks, bytes 65536, take box_q, bad_alias)
+    if !failed_with(task.join(take duplicate), "foreign pointer already held") { return Error(()) }
+    if native.made(f) != 2 || native.free(f, q) != 0 || native.freed(f) != 2 {
+        Error(())
+    } else { Ok(()) }
+}
+
+resource type MaybeForeign { f: Option[Foreign[laws.Laws]] }
+drop(o) { let _ = probe(o.f) }
+
+@test
+fn fl6_reaches_in_finalizer() -> Result[(), ()] {
+    match MaybeForeign(f: None) {
+        Ok(take owner) => { let _ = take owner; Ok(()) },
+        Error(_) => Error(()),
+    }
+}
+
+fn close_then_check(take o: ObjBox) -> i32 waits {
+    let result = close_obj(take o)
+    task.check_cancel()
+    result
+}
+
+@test
+fn fl16_cancelled_release(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let p = make_handle(f)
+    let owner = box_handle(f, p)
+    let mut child = task.spawn(tasks, bytes 65536, take owner, close_then_check)
+    task.cancel(mut child)
+    match task.join(take child) {
+        Error(Cancelled(_)) => if native.freed(f) == 1 { Ok(()) } else { Error(()) },
+        _ => Error(()),
+    }
+}
+
+resource type FailingDrop { f: Foreign[laws.Laws], p: foreign.Ptr[laws.Obj] }
+drop(o) { fail("x") }
+
+fn fail_in_finalizer(take f: Foreign[laws.Laws]) -> i32 {
+    let p = make_handle(f)
+    let owner = match FailingDrop(f: f, p: p) {
+        Ok(take owner) => take owner,
+        Error(_) => fail("ffi_laws: no room for handle wrapper"),
+    }
+    let _ = take owner
+    0
+}
+
+@test
+fn fl16_failed_finalizer(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let child = task.spawn(tasks, bytes 65536, f, fail_in_finalizer)
+    if failed_with(task.join(take child), "x") && native.freed(f) == 1 { Ok(()) } else { Error(()) }
+}
+
+fn hold_helper(take parts: (Foreign[laws.Laws], Sender[()])) -> i32 waits {
+    let (f, take ready) = take parts
+    let _ = channel.send(ready, ())
+    native.hold(f)
+}
+
+fn queued_use(take parts: (Foreign[laws.Laws], Sender[()])) -> i32 waits {
+    let (f, take ready) = take parts
+    let p = make_handle(f)
+    let _ = channel.send(ready, ())
+    let _ = native.same(f, p)
+    1
+}
+
+fn queued_make(take parts: (Foreign[laws.Laws], Sender[()])) -> i32 waits {
+    let (f, take ready) = take parts
+    let _ = channel.send(ready, ())
+    match native.make_w(f) {
+        Some(_) => 0,
+        None => 1,
+    }
+}
+
+@test
+fn fl18_full_helper_pool(f: Foreign[laws.Laws], tasks: Tasks) -> Result[(), ()] waits {
+    let (ready, pending): (Sender[()], Receiver[()]) = channel.new(4)
+    let first = task.spawn(tasks, bytes 65536, (f, channel.sender(ready)), hold_helper)
+    let second = task.spawn(tasks, bytes 65536, (f, channel.sender(ready)), hold_helper)
+    let third = task.spawn(tasks, bytes 65536, (f, channel.sender(ready)), hold_helper)
+    let fourth = task.spawn(tasks, bytes 65536, (f, channel.sender(ready)), hold_helper)
+    for _ in 0u64 .. 4u64 { let _ = channel.receive(pending) }
+    while native.held(f) != 4 {}
+    let mut blocked = task.spawn(tasks, bytes 65536, (f, channel.sender(ready)), queued_use)
+    let _ = channel.receive(pending)
+    let next = task.spawn(tasks, bytes 65536, (f, take ready), queued_make)
+    let _ = channel.receive(pending)
+    task.cancel(mut blocked)
+    let cancelled = match task.join(take blocked) {
+        Error(Cancelled(_)) => true,
+        _ => false,
+    }
+    let _ = native.open(f, 4)
+    let a = result.unwrap(task.join(take first))
+    let b = result.unwrap(task.join(take second))
+    let c = result.unwrap(task.join(take third))
+    let d = result.unwrap(task.join(take fourth))
+    let e = result.unwrap(task.join(take next))
+    if cancelled && a == 0 && b == 0 && c == 0 && d == 0 && e == 0 && native.made(f) == 2 {
+        Ok(())
+    } else { Error(()) }
+}

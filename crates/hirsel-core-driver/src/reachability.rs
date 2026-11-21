@@ -55,20 +55,10 @@ impl Reachable<'_> {
         options: &NativeOptions,
     ) -> Result<&[Identity], NativeStop> {
         let instances = self.require()?;
-        if !self.materialized.foreign.is_empty() {
-            if options.recording
-                && let Some(reason) = self.recording_refusal(entry)
-            {
-                return Err(NativeStop::ForeignRecording(reason));
-            }
-            return Err(NativeStop::Entry(
-                "foreign modules are not enabled yet".into(),
-            ));
-        }
-        if !options.foreign_grants.is_empty() {
-            return Err(NativeStop::Entry(
-                "foreign modules are not enabled yet".into(),
-            ));
+        if options.recording
+            && let Some(reason) = self.recording_refusal(entry)
+        {
+            return Err(NativeStop::ForeignRecording(reason));
         }
         Ok(instances)
     }
@@ -396,7 +386,7 @@ impl CheckProduct {
                         .into_iter()
                         .map(|f| &ir.instances[ir.functions[f.index()].instance.index()])
                         .filter(|key| !hirsel_core_front::is_glue(&key.definition))
-                        .map(|key| (key.definition.clone(), true)),
+                        .map(|key| (key.definition.clone(), !self.is_foreign(&key.definition))),
                 );
             }
         } else if let Some(header) = header {

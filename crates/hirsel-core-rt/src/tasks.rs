@@ -3579,7 +3579,21 @@ pub(crate) unsafe fn lang_unit() -> *mut crate::units_lang::LangUnit {
 
 /// # Safety
 /// `task` is the active task, or null in a callback.
-pub(crate) unsafe fn lang_unit_for(mut task: *mut Task) -> *mut crate::units_lang::LangUnit {
+#[inline(always)]
+pub(crate) unsafe fn lang_unit_for(task: *mut Task) -> *mut crate::units_lang::LangUnit {
+    // SAFETY: the running task pins its run.
+    unsafe {
+        if !task.is_null() && !(*(*task).run).lang.is_null() {
+            return (*(*task).run).lang;
+        }
+        lang_unit_slow(task)
+    }
+}
+/// # Safety
+/// As `lang_unit_for`.
+#[cold]
+#[inline(never)]
+unsafe fn lang_unit_slow(mut task: *mut Task) -> *mut crate::units_lang::LangUnit {
     if task.is_null() {
         task = CALLBACK_TASK.get();
     }

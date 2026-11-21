@@ -160,6 +160,7 @@ unsafe fn detach_sockets(
 
 /// Install the socket keys in a received value or give a refused send its
 /// sockets back.
+#[inline(always)]
 unsafe fn attach_sockets(
     context: *mut Context,
     value: *mut u8,
@@ -167,18 +168,28 @@ unsafe fn attach_sockets(
     sockets: Option<&CrossingSockets>,
 ) {
     if let Some(sockets) = sockets {
-        // SAFETY: the caller owns the destination and runs in its registry's unit.
-        unsafe {
-            let files = &mut *(*context).host_files;
-            let keys = sockets.lock().unwrap().keys(files);
-            for (offset, key) in offsets.zip(keys) {
-                set_word(value.add(offset as usize), key);
-            }
-            if tasks::in_task()
-                && let Some(poller) = files.sockets.active_poller()
-            {
-                tasks::attach_net(&raw mut files.sockets, poller);
-            }
+        // SAFETY: forwarded.
+        unsafe { attach_crossing(context, value, offsets, sockets) }
+    }
+}
+#[inline(never)]
+unsafe fn attach_crossing(
+    context: *mut Context,
+    value: *mut u8,
+    offsets: impl Iterator<Item = u64>,
+    sockets: &CrossingSockets,
+) {
+    // SAFETY: the caller owns the destination and runs in its registry's unit.
+    unsafe {
+        let files = &mut *(*context).host_files;
+        let keys = sockets.lock().unwrap().keys(files);
+        for (offset, key) in offsets.zip(keys) {
+            set_word(value.add(offset as usize), key);
+        }
+        if tasks::in_task()
+            && let Some(poller) = files.sockets.active_poller()
+        {
+            tasks::attach_net(&raw mut files.sockets, poller);
         }
     }
 }
@@ -569,11 +580,16 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
 }
 
 /// Register sockets when the receiving unit takes an arrival.
+#[inline(always)]
 unsafe fn take_sockets(u: &mut LangUnit, h: &InboxH) {
     // Only an item type with socket fields carries sockets.
-    if h.inbox.0.socket_offsets.is_empty() {
-        return;
+    if !h.inbox.0.socket_offsets.is_empty() {
+        // SAFETY: forwarded.
+        unsafe { take_crossing(u, h) }
     }
+}
+#[inline(never)]
+unsafe fn take_crossing(u: &mut LangUnit, h: &InboxH) {
     if let Some(sockets) = h
         .inbox
         .0
@@ -750,7 +766,11 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
         }
         let charge = item_charge(value, owners);
         let offsets = || client.0.socket_offsets.iter().copied();
-        let sockets = detach_sockets(context, value, offsets());
+        let sockets = if client.0.socket_offsets.is_empty() {
+            None
+        } else {
+            detach_sockets(context, value, offsets())
+        };
         let mut source = CrossSend::new(value);
         source.sockets = sockets.clone();
         let id = match UnitCtx::send_cross(client, source, charge, wait, || {

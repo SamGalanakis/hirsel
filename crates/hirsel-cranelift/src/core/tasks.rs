@@ -215,6 +215,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
                     | HostOp::StdinRead
                     | HostOp::EnvGet
                     | HostOp::EnvLen
@@ -239,6 +241,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
                     | HostOp::StdinRead
                     | HostOp::EnvGet
                     | HostOp::EnvLen

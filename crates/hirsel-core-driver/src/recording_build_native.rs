@@ -1163,6 +1163,7 @@ fn cli_tls_replay(with_secret: bool) {
     let peer = std::thread::spawn(move || {
         if with_secret {
             let (mut plain, _) = listener.accept().unwrap();
+            plain.write_all(b"!").unwrap();
             let mut refused = Vec::new();
             plain.read_to_end(&mut refused).unwrap();
             assert!(refused.is_empty(), "plaintext reached plain TCP");
@@ -1266,9 +1267,11 @@ fn cli_tls_replay(with_secret: bool) {
         std::fs::write(&file, file_bytes).unwrap();
         grants.extend([
             "--grant",
-            "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test",
+            "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test mac",
             "--grant",
             &from_file,
+            "--grant",
+            "Secret:verifier=env:HIRSEL_TL10_TOKEN verify",
         ]);
     }
     let record = invoke("run", &grants)
@@ -1300,7 +1303,7 @@ fn cli_tls_replay(with_secret: bool) {
         .collect::<Vec<_>>()
         .join(" ");
     let expected = if with_secret {
-        format!("[secret][secret]{response}")
+        format!("[secret][secret]{response}mac verified\n")
     } else {
         format!("{RESPONSE}1 {digest_words}\n")
     };
@@ -1314,7 +1317,37 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(!sealed.windows(CA.len()).any(|bytes| bytes == CA));
     assert!(!sealed.windows(LEAF.len()).any(|bytes| bytes == LEAF));
 
+    let assert_secrets_absent = |outputs: &[&[u8]]| {
+        for bytes in [raw.as_slice(), token.as_bytes(), file_bytes.as_slice()] {
+            for form in [
+                bytes,
+                crate::call::hex(bytes).as_bytes(),
+                crate::call::base64(bytes).as_bytes(),
+            ] {
+                for output in outputs {
+                    assert!(
+                        !output.windows(form.len()).any(|word| word == form),
+                        "a Secret representation escaped"
+                    );
+                }
+            }
+        }
+        let mut padded = [0; 64];
+        padded[..token.len()].copy_from_slice(token.as_bytes());
+        for pad in [0x36, 0x5c] {
+            let material = padded.map(|b| b ^ pad);
+            for output in outputs {
+                assert!(
+                    !output
+                        .windows(material.len())
+                        .any(|bytes| bytes == material),
+                    "a padded MAC key escaped"
+                );
+            }
+        }
+    };
     if with_secret {
+        assert_secrets_absent(&[sealed.as_slice(), &record.stdout, &record.stderr]);
         std::fs::remove_file(&file).unwrap();
     }
     std::fs::remove_file(&roots).unwrap();
@@ -1345,29 +1378,24 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(export.contains("op=22"), "{export}");
     if with_secret {
         assert!(export.contains("op=23"));
-        assert!(export.contains("grant `token` [secret] to alpha.test"));
+        assert!(export.contains("grant `token` [secret] to alpha.test mac"));
         assert!(export.contains("grant `local` [secret] to alpha.test"));
-        for bytes in [raw.as_slice(), token.as_bytes(), file_bytes.as_slice()] {
-            for form in [
-                bytes,
-                crate::call::hex(bytes).as_bytes(),
-                crate::call::base64(bytes).as_bytes(),
-            ] {
-                for output in [
-                    sealed.as_slice(),
-                    &record.stdout,
-                    &record.stderr,
-                    &replay.stdout,
-                    &replay.stderr,
-                    export.as_bytes(),
-                ] {
-                    assert!(
-                        !output.windows(form.len()).any(|word| word == form),
-                        "a Secret representation escaped"
-                    );
-                }
-            }
-        }
+        assert_secrets_absent(&[&replay.stdout, &replay.stderr, export.as_bytes()]);
+        let mac_op = format!(" op={} ", hirsel_tape_format::op::SECRET_MAC);
+        let mac: Vec<_> = export
+            .lines()
+            .filter(|line| line.contains(&mac_op))
+            .collect();
+        assert_eq!(
+            mac.len(),
+            6,
+            "MAC operations issued without the necessary use"
+        );
+        assert_eq!(
+            mac[0].split_once(" OP ").unwrap().1,
+            mac[1].split_once(" OP ").unwrap().1,
+            "CLI and narrow canonical MAC designations differ"
+        );
     }
 }
 

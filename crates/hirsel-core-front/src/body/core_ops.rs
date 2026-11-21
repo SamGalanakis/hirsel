@@ -323,6 +323,8 @@ operations! {
     ("tls", "send_secret", Lane::Runtime(Kernel::Net(HostOp::SendSecret)), "B", "tls-t4-1447", false),
     ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
+    ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
+    ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
@@ -3126,6 +3128,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
+            return self.runtime_secret_mac(op, vals, result, n);
+        }
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(
             op,
@@ -3293,6 +3298,63 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else {
                         cx.runtime_net_error(at, ty, error, code, n);
                     }
+                }
+            },
+        )
+    }
+
+    fn runtime_secret_mac(
+        &mut self,
+        op: HostOp,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let signing = op == HostOp::SecretHmac;
+        let third = if signing {
+            let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+                unreachable!("the MAC builtin returns a Result")
+            };
+            let id = self.runtime_type(arguments[0], n)?;
+            let output = self.new_slot(PlaceTy::Declared(id), n);
+            self.pointer(output, n)
+        } else {
+            vals[2]?
+        };
+        let [value, error, ..] = self.runtime_row(
+            RtOp::Host(op),
+            &[
+                Arg::Value(vals[0]?),
+                Arg::Value(vals[1]?),
+                Arg::Value(third),
+            ],
+            n,
+        )?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                let value = if signing {
+                    Some(third)
+                } else {
+                    cx.runtime_nonzero(u, value, n)
+                };
+                cx.runtime_case_payload(to, 0, ty, value, n);
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.inst(
+                        Inst::SetCase {
+                            address: at,
+                            case: 0,
+                        },
+                        n,
+                    );
                 }
             },
         )

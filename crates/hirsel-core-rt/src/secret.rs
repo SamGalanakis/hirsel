@@ -4,9 +4,9 @@ use crate::{
     entry::{SecretOperations, hirsel_core_capability_handle},
     host_file::DYNAMIC_GRANT,
     limit::Payer,
-    provider::{Buffer, IoError, Outcome},
+    provider::{Buffer, IoError, Outcome, Provider, Request, STEP_DONE, Step, Wait},
 };
-use hirsel_core_net::{Name, Pattern, SecretGrant, SecretSource};
+use hirsel_core_net::{Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse};
 use std::{io::Read, sync::Arc};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -19,7 +19,7 @@ pub(crate) enum Origin {
 #[derive(Clone)]
 pub(crate) struct Secret {
     pub(crate) origin: Origin,
-    pub(crate) patterns: Arc<[Pattern]>,
+    pub(crate) policy: SecretPolicy,
     pub(crate) bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
 }
 
@@ -52,7 +52,7 @@ impl Granted {
         Some(Self {
             secret: Secret {
                 origin: Origin::Granted(index),
-                patterns: Pattern::parse_list(&record.patterns)?.into(),
+                policy: SecretPolicy::parse(&record.patterns)?,
                 bytes: Some(Arc::new(bytes)),
             },
             record,
@@ -130,9 +130,9 @@ pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
     }
 }
 
-unsafe fn patterns(to: *const Buffer) -> Option<Box<[Pattern]>> {
+unsafe fn policy(to: *const Buffer) -> Option<SecretPolicy> {
     let bytes = unsafe { crate::tls::bytes(&*to) };
-    Pattern::parse_list(std::str::from_utf8(bytes).ok()?)
+    SecretPolicy::parse(std::str::from_utf8(bytes).ok()?)
 }
 
 pub(crate) const INVALID: Outcome = Outcome {
@@ -165,15 +165,21 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
     _site: u64,
 ) -> Outcome {
     unsafe {
-        let Some(patterns) = patterns(to) else {
+        let Some(policy) = policy(to) else {
             return INVALID;
         };
         let bytes = crate::tls::bytes(&*source);
-        let charge = match admit((*context).payer(), &patterns, bytes.len() as u64) {
+        let charge = match admit((*context).payer(), &policy.patterns, bytes.len() as u64) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
-        let owned = Zeroizing::new(bytes.to_vec());
+        #[cfg(feature = "record")]
+        let replay = (*(*context).host_files)
+            .secret_mac_tape
+            .is_some_and(|tape| tape.replay);
+        #[cfg(not(feature = "record"))]
+        let replay = false;
+        let owned = (!replay).then(|| Arc::new(Zeroizing::new(bytes.to_vec())));
         if (*source).capacity != 0 && (*source).len != 0 {
             std::slice::from_raw_parts_mut((*source).data, (*source).len).zeroize();
         }
@@ -183,8 +189,8 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
         let value = secrets.push(
             Secret {
                 origin,
-                patterns: patterns.into(),
-                bytes: Some(Arc::new(owned)),
+                policy,
+                bytes: owned,
             },
             Some(charge),
         );
@@ -206,19 +212,18 @@ pub unsafe extern "C" fn hirsel_core_secret_narrow(
 ) -> Outcome {
     unsafe {
         crate::process::deny_describe_capability(context);
-        let Some(requested) = patterns(to) else {
+        let Some(requested) = policy(to) else {
             return INVALID;
         };
         let mut secret = resolve(context, s);
-        let patterns = Pattern::intersection(&secret.patterns, &requested);
-        if patterns.is_empty() {
+        let Some(policy) = secret.policy.intersect(&requested) else {
             return INVALID;
-        }
-        let charge = match admit((*context).payer(), &patterns, 0) {
+        };
+        let charge = match admit((*context).payer(), &policy.patterns, 0) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
-        secret.patterns = patterns.into();
+        secret.policy = policy;
         let value = (*(*context).host_files)
             .secrets
             .lock()
@@ -238,4 +243,132 @@ pub struct SendRequest {
     pub(crate) origin: Origin,
     pub(crate) patterns: Arc<[Pattern]>,
     pub(crate) committed: usize,
+}
+
+#[cfg(feature = "record")]
+#[derive(Clone, Copy)]
+pub(crate) struct MacTape {
+    pub(crate) provider: Provider,
+    pub(crate) handle: u64,
+    pub(crate) replay: bool,
+}
+
+pub(crate) struct MacRequest<'a> {
+    pub(crate) secret: &'a Secret,
+    pub(crate) data: &'a [u8],
+    pub(crate) tag: Option<&'a [u8]>,
+}
+
+pub(crate) const MAC_PROVIDER: Provider = Provider {
+    state: std::ptr::null_mut(),
+    wait: crate::os::WAIT,
+    issue: mac_issue,
+    resume: mac_resume,
+    abort: mac_abort,
+    deliver: crate::provider::DELIVER,
+};
+
+unsafe extern "C" fn mac_issue(_: *mut u8, request: *mut Request, _: u64) -> Step {
+    // SAFETY: the adapter pins MacRequest and its output through delivery.
+    let outcome = unsafe {
+        let request = &mut *request;
+        let args = &*request.path.cast::<MacRequest<'_>>();
+        let key = args.secret.bytes.as_deref().unwrap();
+        let mut outcome = Outcome::default();
+        if let Some(tag) = args.tag {
+            outcome.value = u64::from(hirsel_core_net::verify_hmac_sha256(key, args.data, tag));
+        } else {
+            let tag = hirsel_core_net::hmac_sha256(key, args.data);
+            request.buffer.data.cast::<[u8; 32]>().write(tag);
+            request.buffer.len = tag.len();
+        }
+        outcome
+    };
+    Step {
+        kind: STEP_DONE,
+        outcome,
+        deadline_ns: 0,
+    }
+}
+
+unsafe extern "C" fn mac_resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
+    unreachable!("Secret MAC never waits")
+}
+
+unsafe extern "C" fn mac_abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
+    unreachable!("Secret MAC never waits")
+}
+
+unsafe fn mac(
+    context: *mut Context,
+    handle: u64,
+    data: *const Buffer,
+    tag: Option<*const Buffer>,
+    out: *mut u8,
+    site: u64,
+) -> Outcome {
+    // SAFETY: the two entry points pin the Secret and all carriers.
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let secret = resolve(context, handle);
+        let needed = if tag.is_some() {
+            SecretUse::Verify
+        } else {
+            SecretUse::Mac
+        };
+        if secret.policy.usage < needed {
+            return crate::net::DENIED;
+        }
+        let args = MacRequest {
+            secret: &secret,
+            data: crate::tls::bytes(&*data),
+            tag: tag.map(|tag| crate::tls::bytes(&*tag)),
+        };
+        #[cfg(feature = "record")]
+        let tape = (*(*context).host_files).secret_mac_tape;
+        #[cfg(feature = "record")]
+        let (p, h) = tape.map_or((MAC_PROVIDER, 0), |tape| (tape.provider, tape.handle));
+        #[cfg(not(feature = "record"))]
+        let (p, h) = (MAC_PROVIDER, 0);
+        let mut request = Request {
+            operation: crate::provider::SECRET_MAC,
+            mode: u8::from(tag.is_some()),
+            handle: h,
+            path: (&raw const args).cast(),
+            path_len: std::mem::size_of_val(&args),
+            buffer: Buffer {
+                data: out,
+                len: 0,
+                capacity: if tag.is_none() { 32 } else { 0 },
+            },
+            site,
+        };
+        crate::provider::drive(context, &p, &mut request, None)
+    }
+}
+
+/// # Safety
+/// The Secret is live, `data` is pinned, and `out` is writable for 32 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_hmac_sha256(
+    context: *mut Context,
+    s: u64,
+    data: *const Buffer,
+    out: *mut u8,
+    site: u64,
+) -> Outcome {
+    unsafe { mac(context, s, data, None, out, site) }
+}
+
+/// # Safety
+/// The Secret is live and both input carriers are pinned through delivery.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_verify_hmac_sha256(
+    context: *mut Context,
+    s: u64,
+    data: *const Buffer,
+    tag: *const Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe { mac(context, s, data, Some(tag), std::ptr::null_mut(), site) }
 }

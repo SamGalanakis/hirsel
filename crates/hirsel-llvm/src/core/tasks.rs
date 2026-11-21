@@ -84,6 +84,8 @@ impl FunctionEmitter<'_> {
             | HostOp::SendSecret
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
+            | HostOp::SecretHmac
+            | HostOp::SecretVerifyHmac
             | HostOp::StdinRead
             | HostOp::EnvGet
             | HostOp::EnvLen

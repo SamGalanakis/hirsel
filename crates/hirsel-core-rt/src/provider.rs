@@ -84,7 +84,7 @@ pub const STEP_PENDING: u8 = 1;
 /// operation except the clock reads (CONC-7; REPLAY-SPEC section 3, C).
 #[inline(always)]
 pub(crate) fn cancellation_point(operation: u8) -> bool {
-    operation != WALL_MS && operation != MONO_NS
+    !matches!(operation, WALL_MS | MONO_NS | SECRET_MAC)
 }
 pub const ABORT_CANCEL: u8 = 1;
 pub const ABORT_DEADLINE: u8 = 2;

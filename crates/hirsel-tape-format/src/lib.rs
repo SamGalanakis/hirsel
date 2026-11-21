@@ -10,7 +10,7 @@ use hirsel_core_net::{EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, Tl
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 5;
+pub const FORMAT: u16 = 6;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -792,6 +792,7 @@ pub fn carries_payload(op: u8) -> bool {
             | ACCEPT
             | RECV_BOUNDED
             | TLS_CONNECT
+            | SECRET_MAC
             | RESOLVE
             | STDIN_READ
     )

@@ -35,7 +35,7 @@ differ, as Go's `hmac.Equal` and `subtle.ConstantTimeCompare` do. Unequal length
 ## Secret keys
 
 ```
-pub type MacError = Denied
+pub type MacError = Denied()
 pub fn secret.hmac_sha256(s: Secret, data: Bytes) -> Result[Inline[u8, 32], MacError]
 pub fn secret.verify_hmac_sha256(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
 ```
@@ -60,7 +60,8 @@ time in 256.
   ```
 
   The same text is accepted by `secret.seal` and `secret.narrow` (`"*.example.com mac"`,
-  `"verify"`). A list may have no patterns when it has a use. `narrow` intersects uses as
+  `"verify"`). `mac` and `verify` are reserved in this text and cannot name DNS destinations.
+  A list may have no patterns when it has a use. `narrow` intersects uses as
   well: `mac` with `verify` gives `verify`, and a use absent from either side is dropped.
   An empty result is still `Invalid`. Without the needed use, the operation gives
   `Denied` before issue, with no effect.

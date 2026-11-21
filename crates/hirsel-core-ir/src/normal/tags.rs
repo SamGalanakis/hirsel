@@ -390,8 +390,10 @@ tags!(HostOp {
     36 => EnvNarrow,
     37 => ReadAt,
     38 => WriteAt,
+    39 => SecretHmac,
     40 => Resolve,
     41 => NetNarrowResolve,
+    42 => SecretVerifyHmac,
 });
 
 tags!(RaiseCause {

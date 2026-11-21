@@ -771,6 +771,24 @@ unsafe fn canonical(r: &Request) -> Args {
             }
             return Args::of(&args);
         }
+        if r.operation == SECRET_MAC {
+            let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
+            let (kind, ordinal) = match mac.secret.origin {
+                crate::secret::Origin::Granted(ordinal) => (0, ordinal),
+                crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
+            };
+            let policy = mac.secret.policy.text();
+            let mut head = vec![r.mode, kind];
+            put_varint(&mut head, ordinal);
+            put_varint(&mut head, policy.len() as u64);
+            put_varint(&mut head, mac.data.len() as u64);
+            return Args::of_parts(&[
+                &head,
+                policy.as_bytes(),
+                mac.data,
+                mac.tag.unwrap_or_default(),
+            ]);
+        }
         let path = if r.path_len == 0 {
             &[][..]
         } else {
@@ -810,6 +828,15 @@ fn clock(op: u8) -> bool {
 impl Tape {
     pub(crate) fn group(&self) -> schedule::Group {
         schedule::Group::root(self.cell, self.generation)
+    }
+    fn secret_mac(&self, replay: bool) -> crate::secret::MacTape {
+        crate::secret::MacTape {
+            provider: self.cell.provider,
+            // Object zero is the run-owned MAC sink. The Secret itself is in
+            // the canonical args, including for seals without a grant object.
+            handle: handle(self.generation, 0),
+            replay,
+        }
     }
     /// Open a recording file at `name` in the Dir `dir` (its provider and
     /// handle), as the code whose revision is `revision`: the launcher passes
@@ -1273,6 +1300,10 @@ unsafe fn denied(request: &Request) -> bool {
 /// A first non-ready answer opens W explicitly. Subsequent callbacks keep
 /// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
+    // This operation has only immediate frames, in both modes.
+    if unsafe { (*r).operation == SECRET_MAC } {
+        return Wait::default();
+    }
     let cell = cell_of(state);
     // SAFETY: the driver pins this request for the entire operation.
     let h = unsafe { (*r).handle };
@@ -1412,7 +1443,14 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             }
         };
     }
-    let inner = live.objects[ordinal - 1].inner.unwrap();
+    let inner = if r.operation == SECRET_MAC {
+        Inner {
+            provider: crate::secret::MAC_PROVIDER,
+            handle: 0,
+        }
+    } else {
+        live.objects[ordinal - 1].inner.unwrap()
+    };
     let before = r.buffer.len;
     drop(s);
     // SAFETY: address operations pin their permission result through delivery.
@@ -1612,6 +1650,9 @@ unsafe fn replay(
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
+        if op == SECRET_MAC {
+            return Err(Fault::Corrupt);
+        }
         // Without a scheduler nothing else readies a replayed helper, and
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
@@ -1735,6 +1776,21 @@ unsafe fn replay_out(
             }
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
+        }
+    } else if op == SECRET_MAC {
+        if !ok
+            || if r.mode == 0 {
+                out.value != 0 || out.payload.len() != 32
+            } else {
+                out.value > 1 || !out.payload.is_empty()
+            }
+        {
+            return Err(Fault::Corrupt);
+        }
+        if r.mode == 0 {
+            // SAFETY: the signing adapter pins an inline 32-byte destination.
+            unsafe { ptr::copy_nonoverlapping(out.payload.as_ptr(), r.buffer.data, 32) };
+            r.buffer.len = 32;
         }
     } else if carries_payload(op) {
         let spare = r.buffer.capacity.saturating_sub(r.buffer.len);

@@ -1007,6 +1007,8 @@ pub enum HostOp {
     SecretNarrow = 31,
     ReadAt = 37,
     WriteAt = 38,
+    SecretHmac = hirsel_core_ids::host_op::SECRET_MAC as isize,
+    SecretVerifyHmac = 42,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     NetNarrowResolve = 41,
     StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
@@ -1053,6 +1055,8 @@ impl HostOp {
         HostOp::SendSecret,
         HostOp::SecretSeal,
         HostOp::SecretNarrow,
+        HostOp::SecretHmac,
+        HostOp::SecretVerifyHmac,
         HostOp::RecvBounded,
         HostOp::SendPair,
         HostOp::NetNarrow,
@@ -1110,6 +1114,8 @@ impl HostOp {
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
             HostOp::SecretNarrow => "secret_narrow",
+            HostOp::SecretHmac => "secret_hmac_sha256",
+            HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
             HostOp::NetSplit => "net_split",
             HostOp::Stopped => "host_stopped",
             HostOp::StdinRead => "stdin_read",
@@ -1135,6 +1141,8 @@ impl HostOp {
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
             Self::SecretNarrow => "hirsel_core_secret_narrow",
+            Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
+            Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
             Self::NetSplit => "hirsel_core_net_split",
             Self::StdinRead => "hirsel_core_stdin_read",
             Self::EnvGet => "hirsel_core_env_get",
@@ -1156,6 +1164,8 @@ impl HostOp {
                 | HostOp::NetNarrowResolve
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
+                | HostOp::SecretHmac
+                | HostOp::SecretVerifyHmac
                 | HostOp::NetSplit
                 | HostOp::EnvGet
                 | HostOp::EnvLen
@@ -1392,6 +1402,9 @@ impl RtOp {
                     ),
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
+                    HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
+                        (vec![V(u64_), V(p), V(p)], outcome)
+                    }
                     HostOp::NetNarrowTls => (
                         vec![
                             V(u64_),

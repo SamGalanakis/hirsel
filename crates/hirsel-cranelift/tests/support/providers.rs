@@ -300,6 +300,8 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
                     | HostOp::NetSplit
                     | HostOp::StdinRead
                     | HostOp::EnvGet
@@ -398,6 +400,8 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
                     | HostOp::NetSplit
                     | HostOp::StdinRead
                     | HostOp::EnvGet

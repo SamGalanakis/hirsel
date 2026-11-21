@@ -93,6 +93,8 @@ pub(crate) struct Files {
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     #[cfg(feature = "record")]
     pub(crate) net_tape: Option<crate::net::SocketTape>,
+    #[cfg(feature = "record")]
+    pub(crate) secret_mac_tape: Option<crate::secret::MacTape>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
     // Children inherit these entries without borrowing the scheduler's sockets.

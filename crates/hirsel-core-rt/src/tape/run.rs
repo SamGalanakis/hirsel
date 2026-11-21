@@ -394,6 +394,7 @@ unsafe extern "C" fn invoke(
             .then(|| crate::net::RulesStorage::new(startup.net_rules));
         let replay_env = startup.env.map(crate::env::Env::new);
         let files = (*context).host_files;
+        (*files).secret_mac_tape = Some(tape.secret_mac(run.mode != 0));
         let mut secret_grants = startup.secret_grants.into_iter();
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
@@ -436,7 +437,7 @@ unsafe extern "C" fn invoke(
                             let mut secret = if run.launch.is_describe() {
                                 crate::secret::Secret {
                                     origin: crate::secret::Origin::Granted(0),
-                                    patterns: std::sync::Arc::from([]),
+                                    policy: hirsel_core_net::SecretPolicy::default(),
                                     bytes: None,
                                 }
                             } else if run.mode == 0 {
@@ -451,11 +452,8 @@ unsafe extern "C" fn invoke(
                                 }
                                 crate::secret::Secret {
                                     origin: crate::secret::Origin::Granted(0),
-                                    patterns: hirsel_core_net::Pattern::parse_list(
-                                        &record.patterns,
-                                    )
-                                    .unwrap()
-                                    .into(),
+                                    policy: hirsel_core_net::SecretPolicy::parse(&record.patterns)
+                                        .unwrap(),
                                     bytes: None,
                                 }
                             };

@@ -18,7 +18,7 @@ use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
     compute, field_size, map_entry,
 };
-use hirsel_core_net::{Name, Pattern, SecretGrant};
+use hirsel_core_net::{Name, SecretGrant, SecretPolicy, SecretUse};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use zeroize::Zeroizing;
@@ -116,7 +116,7 @@ struct World {
 }
 #[derive(Clone)]
 struct EvalSecret {
-    patterns: Box<[Pattern]>,
+    policy: SecretPolicy,
     bytes: Arc<Zeroizing<Vec<u8>>>,
 }
 
@@ -2178,25 +2178,24 @@ impl Machine<'_> {
     }
 
     fn secret_policy(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
-        let Some(patterns) = std::str::from_utf8(self.carrier_bytes(a[1]))
+        let Some(policy) = std::str::from_utf8(self.carrier_bytes(a[1]))
             .ok()
-            .and_then(Pattern::parse_list)
+            .and_then(SecretPolicy::parse)
         else {
             return vec![0, 1, 0, 0];
         };
-        let (patterns, len) = if op == HostOp::SecretSeal {
-            (patterns, self.load(a[0] + 8, 8))
+        let (policy, len) = if op == HostOp::SecretSeal {
+            (policy, self.load(a[0] + 8, 8))
         } else {
             let Some(parent) = self.world.secrets.get(a[0] as usize) else {
                 return vec![0, 1, 0, 0];
             };
-            let intersection = Pattern::intersection(&parent.patterns, &patterns);
-            if intersection.is_empty() {
+            let Some(intersection) = parent.policy.intersect(&policy) else {
                 return vec![0, 1, 0, 0];
-            }
+            };
             (intersection, 0)
         };
-        let size = SecretGrant::logical_size(&patterns, len);
+        let size = SecretGrant::logical_size(&policy.patterns, len);
         let charge = size.unwrap_or(u64::MAX);
         let payer = t.limits.last().unwrap();
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
@@ -2215,9 +2214,34 @@ impl Machine<'_> {
             self.world.secrets[a[0] as usize].bytes.clone()
         };
         let key = self.world.secrets.len() as u64;
-        self.world.secrets.push(EvalSecret { patterns, bytes });
+        self.world.secrets.push(EvalSecret { policy, bytes });
         self.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
+    }
+
+    fn secret_mac(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let secret = &self.world.secrets[a[0] as usize];
+        let signing = op == HostOp::SecretHmac;
+        let needed = if signing {
+            SecretUse::Mac
+        } else {
+            SecretUse::Verify
+        };
+        if secret.policy.usage < needed {
+            return vec![0, 1, 0, 0];
+        }
+        let data = self.carrier_bytes(a[1]);
+        if signing {
+            let tag = hirsel_core_net::hmac_sha256(&secret.bytes, data);
+            for (i, byte) in tag.into_iter().enumerate() {
+                self.store(a[2] + i as u64, 1, u64::from(byte));
+            }
+            vec![0, 0, 0, 0]
+        } else {
+            let verdict =
+                hirsel_core_net::verify_hmac_sha256(&secret.bytes, data, self.carrier_bytes(a[2]));
+            vec![u64::from(verdict), 0, 0, 0]
+        }
     }
 
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
@@ -2231,7 +2255,12 @@ impl Machine<'_> {
         let Some(secret) = self.world.secrets.get(a[2] as usize) else {
             return Ok(vec![0, 1, 0, 0]);
         };
-        if !secret.patterns.iter().any(|pattern| pattern.covers(name)) {
+        if !secret
+            .policy
+            .patterns
+            .iter()
+            .any(|pattern| pattern.covers(name))
+        {
             return Ok(vec![0, 1, 0, 0]);
         }
         let bytes = secret.bytes.clone();
@@ -2266,6 +2295,7 @@ impl Machine<'_> {
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
+            HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
             HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
                 return Ok(self.env(t, op, a));
             }
@@ -2311,6 +2341,8 @@ impl Machine<'_> {
             | HostOp::SendSecret
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
+            | HostOp::SecretHmac
+            | HostOp::SecretVerifyHmac
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName

@@ -118,6 +118,8 @@ pub opaque type Secret
 
 pub type SecretError = Invalid | Capacity(Capacity)
 
+pub type MacError = Denied()
+
 pub opaque resource type Socket
 
 pub opaque resource type ReadHalf

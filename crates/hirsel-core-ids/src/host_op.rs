@@ -29,5 +29,6 @@ pub const SEND_PAIR: u8 = 26;
 pub const STOPPED: u8 = 28;
 pub const READ_AT: u8 = 37;
 pub const WRITE_AT: u8 = 38;
+pub const SECRET_MAC: u8 = 39;
 pub const RESOLVE: u8 = 40;
 pub const STDIN_READ: u8 = 32;

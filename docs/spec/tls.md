@@ -316,7 +316,8 @@ memory. The tag, or the constant-time verdict for exactly 32 tag bytes, is a del
 that passes the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), and the
 key never does. A secret's `to` text takes an optional use word after its patterns: `mac`
 permits both operations, and `verify` permits only verification. A list may then have no
-patterns. `narrow` intersects uses, with `mac` and `verify` giving `verify`. Without the
+patterns. The words `mac` and `verify` are reserved in this text and cannot name DNS destinations.
+`narrow` intersects uses, with `mac` and `verify` giving `verify`. Without the
 use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
 signing oracle wherever it is sent, which is why the use must be granted. A signature
 sink with another algorithm follows the same rule.

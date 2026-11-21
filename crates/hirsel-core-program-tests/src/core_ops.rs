@@ -793,6 +793,7 @@ fn f(n: Net, c: Clock) -> u64 waits {
         4u64
     }
 }
+
 "#;
     let (program, functions) = crate::SourceProgram::lower(source, None);
     let model = Model::new(Config {
@@ -831,4 +832,43 @@ fn f(n: Net, c: Clock) -> u64 waits {
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![0]));
     assert_eq!(report.used, 0);
     assert_eq!((model.live_handles(), model.pending()), (0, 0));
+}
+
+#[test]
+fn secret_mac_authority_is_an_intersection() {
+    let source = r#"
+fn f() -> u64 {
+    let data = string.as_bytes("what do ya want for nothing?")
+    let key = result.unwrap(string.into_bytes("Jefe"))
+    let mac = result.unwrap(secret.seal(take key, "mac"))
+    let tag = result.unwrap(secret.hmac_sha256(mac, data))
+    let mut tag_data: Bytes = result.unwrap(list.with_capacity(32))
+    if !bytebuf.append_inline(mut tag_data, tag, 0, 32) { return 1 }
+    let verify = result.unwrap(secret.narrow(mac, "verify"))
+    let narrowed = result.unwrap(secret.narrow(verify, "mac"))
+    match secret.hmac_sha256(narrowed, data) {
+        Error(Denied) => {},
+        _ => return 2,
+    }
+    if !result.unwrap(secret.verify_hmac_sha256(narrowed, data, tag_data)) { return 3 }
+    if result.unwrap(secret.verify_hmac_sha256(narrowed, data, list.slice(tag_data, 0, 31))) { return 4 }
+    let other_key = result.unwrap(string.into_bytes("Jefe"))
+    let no_use = result.unwrap(secret.seal(take other_key, "alpha.test"))
+    match secret.narrow(no_use, "mac") {
+        Error(Invalid) => {},
+        _ => return 5,
+    }
+    match secret.hmac_sha256(no_use, data) {
+        Error(Denied) => 0,
+        _ => 6,
+    }
+}
+"#;
+    let (module, functions) = crate::SourceProgram::lower(source, None);
+    let result = eval::run(&module, functions["f"], &[], 4096);
+    assert_eq!(
+        result.outcome,
+        eval::Outcome::Returned(vec![0]),
+        "MAC authority case"
+    );
 }

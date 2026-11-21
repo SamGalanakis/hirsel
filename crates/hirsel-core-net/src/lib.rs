@@ -128,7 +128,9 @@ pub mod tls;
 mod tls_rule;
 pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
 mod secret_grant;
-pub use secret_grant::{SecretGrant, SecretSource};
+pub use secret_grant::{
+    SecretGrant, SecretPolicy, SecretSource, SecretUse, hmac_sha256, verify_hmac_sha256,
+};
 
 #[cfg(test)]
 mod tests {

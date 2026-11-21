@@ -3868,6 +3868,9 @@ impl Machine<'_> {
             vectors.unpack(b, &mut vals, &pool(blk.params), &incoming);
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
+                if matches!(inst, Inst::BuiltinUse { .. }) {
+                    continue;
+                }
                 assert!(
                     self.instructions != 0,
                     "evaluator instruction budget exhausted"
@@ -4629,6 +4632,7 @@ impl Machine<'_> {
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
             }
+            Inst::BuiltinUse { .. } => {}
             Inst::LimitExit => {
                 let l = t.limits.pop().unwrap();
                 self.end_limit(l, None);

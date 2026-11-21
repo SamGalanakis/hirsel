@@ -34,11 +34,6 @@ impl CheckProduct {
                 }
             }
         }
-        let revisions: BTreeMap<_, _> = checked
-            .into_iter()
-            .filter_map(|(root, result)| result.ok().map(|revision| (root, revision)))
-            .collect();
-        self.flow_revisions = (!revisions.is_empty()).then(|| Arc::new(revisions));
         diagnostics
     }
 
@@ -46,64 +41,54 @@ impl CheckProduct {
         let mut instances = InstanceSet::default();
         let mut resolver = Resolver::default();
         let mut witness = None;
-        let mut visited = 0;
-        let revision = hirsel_core_ir::code_revision(root, |key| {
-            if visited == crate::native::DEFAULT_INSTANCE_LIMIT {
-                witness = Some(format!(
-                    "the stage body's static reach cannot be closed within {} instances",
-                    crate::native::DEFAULT_INSTANCE_LIMIT
-                ));
-                return None;
-            }
-            visited += 1;
-            if let Ok(definition) = self.demand_body(&key.definition) {
-                let facts = &definition.check.flow;
-                let arguments = resolver.arguments(key).ok();
-                let bad = arguments.as_ref().map_or(0, |args| {
-                    args.iter().enumerate().fold(0, |bits, (i, arg)| {
-                        bits | (u64::from(holds_authority(arg)) << i)
-                    })
-                });
-                if facts.waits {
-                    witness = Some(format!("`{}` is declared `waits`", key.definition));
-                } else if let Some(fact) = facts
-                    .violations
-                    .iter()
-                    .filter(|fact| fact.when == 0 || fact.when & bad != 0)
-                    .min_by_key(|fact| fact.at)
-                {
-                    let mut message = fact.message.clone();
-                    if fact.when != 0
-                        && let Some(args) = arguments
+        let reached = crate::instances::collect_instances(
+            [root.clone()],
+            crate::native::DEFAULT_INSTANCE_LIMIT,
+            |key| {
+                if let Ok(definition) = self.demand_body(&key.definition) {
+                    let facts = &definition.check.flow;
+                    let arguments = resolver.arguments(key).ok();
+                    let bad = arguments.as_ref().map_or(0, |args| {
+                        args.iter().enumerate().fold(0, |bits, (i, arg)| {
+                            bits | (u64::from(holds_authority(arg)) << i)
+                        })
+                    });
+                    if facts.waits {
+                        witness = Some(format!("`{}` is declared `waits`", key.definition));
+                    } else if let Some(fact) = facts
+                        .violations
+                        .iter()
+                        .filter(|fact| fact.when == 0 || fact.when & bad != 0)
+                        .min_by_key(|fact| fact.at)
                     {
-                        let i = (fact.when & bad).trailing_zeros() as usize;
-                        message.push_str(&format!(" at `{}`", args[i].rows[0].shape.name));
+                        let mut message = fact.message.clone();
+                        if fact.when != 0
+                            && let Some(args) = arguments
+                        {
+                            let i = (fact.when & bad).trailing_zeros() as usize;
+                            message.push_str(&format!(" at `{}`", args[i].rows[0].shape.name));
+                        }
+                        witness = Some(message);
                     }
-                    witness = Some(message);
+                    if witness.is_some() {
+                        return Err(crate::instances::InstanceStop::OutsideReached(
+                            key.definition.clone(),
+                        ));
+                    }
                 }
-                if witness.is_some() {
-                    return None;
-                }
-            }
-            let children = match self.instance_step(
-                key,
-                &mut instances,
-                None,
-                &mut resolver,
-                &mut |_, _| {},
-            ) {
-                Ok(children) => children,
-                Err(stop) => {
-                    witness = Some(format!(
-                        "the stage body's static reach cannot be closed ({stop:?})"
-                    ));
-                    return None;
-                }
-            };
-            Some((instances.get(key).body, children))
-        });
-        revision
-            .ok_or_else(|| witness.expect("a refused revision row explains why closure stopped"))
+                self.instance_step(key, &mut instances, None, &mut resolver, &mut |_, _| {})
+            },
+        );
+        let reached = reached.map_err(|stop| {
+            witness.unwrap_or_else(|| {
+                format!("the stage body's static reach cannot be closed ({stop:?})")
+            })
+        })?;
+        instances
+            .addresses(&reached, None)
+            .and_then(|addresses| addresses.get(root).copied())
+            .map(hirsel_core_ir::code_revision)
+            .ok_or_else(|| "the stage body's static reach has no address for its root".into())
     }
 }
 

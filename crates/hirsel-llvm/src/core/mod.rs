@@ -2170,6 +2170,7 @@ impl FunctionEmitter<'_> {
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
+            | Inst::BuiltinUse { .. }
             | Inst::Mark { .. }
             | Inst::Unmark { .. } => {}
             Inst::UpdateMask {

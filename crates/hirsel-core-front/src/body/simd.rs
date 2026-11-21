@@ -78,6 +78,7 @@ impl Cx<'_, '_, '_> {
                 self.refuse("SEM-11", args[1], "put_lanes takes a vector of u8 lanes");
                 return (ERROR, None);
             }
+            self.builtin_use(f, n);
             self.source_step(n);
             let result = g.result;
             let value = self.put_lanes(header, value, count, shape, result, n);
@@ -158,6 +159,7 @@ impl Cx<'_, '_, '_> {
                     Hold::CallView(c, _) if c == call => None,
                     _ => Some(h),
                 });
+                self.builtin_use(f, n);
                 self.source_step(n);
                 let address = self.lanes_address(header, offset, shape, n);
                 let ty = self.vector_type(shape);
@@ -208,6 +210,7 @@ impl Cx<'_, '_, '_> {
             }
             BitAnd | BitOr | BitXor | BitNot | Shl | Shr => unreachable!(),
         };
+        self.builtin_use(f, n);
         self.source_step(n);
         (result, self.emit_simd(op, result, first, second, n))
     }

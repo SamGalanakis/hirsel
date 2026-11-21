@@ -114,7 +114,7 @@ pub(crate) struct Instance {
     pub schema: u32,
     pub identity: hirsel_core_ir::Identity,
     pub own: Option<ContentHash>,
-    /// The module's `revision::body`, which a hit's revision reads.
+    /// The module's PROG-10 body hash, which a hit's revision reads.
     pub body: ContentHash,
     /// The digest of the encoded environment the key was made with.
     pub env: ContentHash,
@@ -122,13 +122,17 @@ pub(crate) struct Instance {
     pub debug: Option<ContentHash>,
     /// The instances the module calls outside itself, sorted and deduplicated.
     pub children: Vec<hirsel_core_ir::Identity>,
+    /// Exact PROG-10 slot order, including symbolic builtins.
+    pub slots: Vec<hirsel_core_ir::Identity>,
+    pub signatures: crate::instances::CodeSignatures,
+    pub adapters: Vec<crate::instances::Adapter>,
     /// The instances the module describes (`revision::described`).
     pub described: Vec<hirsel_core_ir::Identity>,
     pub items: Vec<hirsel_core_ids::DefPath>,
     /// Every closure a child's arguments name, deduplicated, by hash.
     pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
 }
-pub(crate) const INSTANCE_SCHEMA: u32 = 4;
+pub(crate) const INSTANCE_SCHEMA: u32 = 5;
 
 /// Publish an emitted instance's object, debug rows and record under its
 /// key; the object, the debug rows' name and the descriptor the object's
@@ -211,6 +215,9 @@ mod tests {
             object: Default::default(),
             debug: None,
             children: vec![],
+            slots: vec![],
+            signatures: Default::default(),
+            adapters: vec![],
             described: vec![],
             items: vec![],
             closures: vec![],

@@ -132,16 +132,7 @@ impl Words<'_> {
     }
 
     fn definition(&mut self, path: &DefPath) {
-        let item = &path.0;
-        let mut d = String::new();
-        escape(&item.package.name, &mut d);
-        d.push('@');
-        d.push_str(&item.package.version);
-        for part in item.modules.iter().chain(std::iter::once(&item.name)) {
-            d.push('/');
-            escape(part, &mut d);
-        }
-        self.word(&d);
+        self.word(&path.definition_identity());
     }
 
     fn callable(
@@ -260,17 +251,5 @@ impl Words<'_> {
             TyKind::Error | TyKind::Hole | TyKind::Never | TyKind::Param(_) => return None,
         }
         Some(())
-    }
-}
-
-/// A component of a definition identity: ASCII letters, digits and `_` as themselves,
-/// every other byte as `%` and two upper-case hex digits.
-fn escape(part: &str, out: &mut String) {
-    for &b in part.as_bytes() {
-        if b.is_ascii_alphanumeric() || b == b'_' {
-            out.push(b as char);
-        } else {
-            let _ = write!(out, "%{b:02X}");
-        }
     }
 }

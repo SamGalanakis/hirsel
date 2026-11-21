@@ -390,6 +390,22 @@ pub(super) fn simd_call(row: Option<u16>) -> Option<SimdCall> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn builtin_use(&mut self, f: usize, n: NodeId) {
+        let function = &self.p.fns[f];
+        let definition = &function.path;
+        if self.live()
+            && function.body.is_none()
+            && hirsel_core_ir::is_versioned_builtin(definition)
+        {
+            self.inst(
+                Inst::BuiltinUse {
+                    definition: Box::new(definition.clone()),
+                },
+                n,
+            );
+        }
+    }
+
     pub(super) fn core_operation(
         &mut self,
         f: usize,

@@ -239,6 +239,7 @@ fn cannot_install_step_bound(module: &Module) -> bool {
                     | Inst::RegionClose { .. }
                     | Inst::Trim { .. }
                     | Inst::LimitEnter { .. }
+                    | Inst::BuiltinUse { .. }
                     | Inst::LimitExit
                     | Inst::Drop { .. }
                     | Inst::Share { .. }

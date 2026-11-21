@@ -882,6 +882,7 @@ impl<'a> Seal<'a> {
             | Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::RegionOpen { .. }
+            | Inst::BuiltinUse { .. }
             | Inst::LimitExit
             | Inst::Step { .. } => {}
         }

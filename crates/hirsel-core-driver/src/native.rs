@@ -253,8 +253,9 @@ pub struct BuildProduct {
     /// The executable's key: its objects' identities, the entry plan, the
     /// sources digest and the link inputs. Its record is stored under it.
     pub identity: ContentHash,
-    /// The entry's code revision (`revision::revision`): its reached
-    /// instances' checked CoreIR, independent of engine, build and layout.
+    /// The entry's PROG-10 code address.
+    pub address: ContentHash,
+    /// The entry's PROG-9 revision.
     pub revision: ContentHash,
     pub compiled: usize,
     pub linked: bool,
@@ -433,6 +434,9 @@ impl Table {
         object: Bare,
         debug: Option<ContentHash>,
         children: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
+        slots: &[Identity],
+        signatures: &crate::instances::CodeSignatures,
+        adapters: &[crate::instances::Adapter],
         described: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
         items: Vec<DefPath>,
         closures: impl IntoIterator<Item = &'c Arc<hirsel_core_ir::Closure>>,
@@ -465,6 +469,9 @@ impl Table {
             object,
             debug,
             children,
+            slots: slots.to_vec(),
+            signatures: signatures.clone(),
+            adapters: adapters.to_vec(),
             described,
             items,
             closures,
@@ -600,6 +607,9 @@ impl CheckProduct {
                             e.children
                                 .iter()
                                 .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
+                            &e.slots,
+                            &e.signatures,
+                            &e.adapters,
                             e.described
                                 .iter()
                                 .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
@@ -628,6 +638,9 @@ impl CheckProduct {
                             record.object,
                             record.debug,
                             record.children.iter().map(|c| (None, c)),
+                            &record.slots,
+                            &record.signatures,
+                            &record.adapters,
                             record.described.iter().map(|c| (None, c)),
                             record.items.clone(),
                             &record.closures,
@@ -653,6 +666,9 @@ impl CheckProduct {
                     object: Default::default(),
                     debug: None,
                     children: fields.children.clone(),
+                    slots: fields.slots.clone(),
+                    signatures: fields.signatures.clone(),
+                    adapters: fields.adapters.clone(),
                     described: fields.described.clone(),
                     items: module.items.clone(),
                     closures: fields.closures.clone(),
@@ -669,6 +685,9 @@ impl CheckProduct {
                         bare,
                         debug,
                         fields.children.iter().map(|c| (None, c)),
+                        &fields.slots,
+                        &fields.signatures,
+                        &fields.adapters,
                         fields.described.iter().map(|c| (None, c)),
                         module.items.clone(),
                         &fields.closures,
@@ -804,6 +823,7 @@ impl CheckProduct {
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
         let instances = reached.require()?;
+        let address = reached.address(entry)?;
         let inputs = reached
             .native
             .as_ref()
@@ -878,7 +898,6 @@ impl CheckProduct {
         };
         objects.extend(cleanup);
         let counters = reached.counters;
-        let revision = reached.revision(entry)?;
         // The record is published once the executable is stored: a walk's
         // draft with its table, or a hit's sections under its current head.
         let record = |executable: ContentHash| -> io::Result<u64> {
@@ -916,7 +935,7 @@ impl CheckProduct {
                     "hirsel.core-entry-policy.v1",
                     &crate::native_entry::policy(options),
                 )?,
-                revision,
+                address,
                 instance_limit: options.instance_limit as u64,
             };
             Ok(crate::reach::publish(&store, reach.selection, prior, &head, content)? as u64)
@@ -950,7 +969,7 @@ impl CheckProduct {
             step_charging_elided,
             counters,
             record,
-            revision,
+            address,
             || reached.revisions(),
         )
     }
@@ -1122,16 +1141,27 @@ impl CheckProduct {
             definition: entry.clone(),
             message,
         })?;
+        let code = hirsel_core_ir::normal::encode(
+            &module,
+            hirsel_core_ir::FuncId((module.functions.len() - 1) as u32),
+        );
         let record = crate::native_object::Instance {
             schema: crate::native_object::INSTANCE_SCHEMA,
             identity: identity.clone(),
             own: Some(own),
-            body: crate::revision::body(&module, &mut Vec::new())?,
+            body: code.hash(),
             env: records.digest,
             object: Default::default(),
             debug: None,
             children: vec![],
-            described: crate::revision::described(&module),
+            slots: code
+                .slots
+                .iter()
+                .map(|slot| slot.identity(&module))
+                .collect(),
+            signatures: Default::default(),
+            adapters: vec![],
+            described: code.described,
             items: module.items.clone(),
             closures: vec![],
         };
@@ -1477,9 +1507,10 @@ fn link_objects(
     step_charging_elided: bool,
     mut counters: crate::reach::ReachCounters,
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
-    revision: ContentHash,
+    address: ContentHash,
     revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
 ) -> Result<Linked, NativeStop> {
+    let revision = hirsel_core_ir::code_revision(address);
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
         "release-link-gc-sections"
@@ -1689,6 +1720,7 @@ fn link_objects(
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
         identity: link_key,
+        address,
         revision,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,

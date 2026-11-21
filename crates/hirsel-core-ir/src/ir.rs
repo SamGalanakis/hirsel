@@ -763,6 +763,11 @@ pub enum Inst {
         vector: ValueId,
         count: ValueId,
     },
+    /// A symbolic dependency on a compiler-implemented definition lowered in
+    /// this block. Its instructions do the work; this row carries its identity.
+    BuiltinUse {
+        definition: Box<DefPath>,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
@@ -1494,6 +1499,38 @@ impl Inst {
     }
 }
 
+/// The blocks control leaves `bi` for: its instructions' failure blocks and its
+/// terminator's targets.
+pub(crate) fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
+    let blk = &b.blocks[bi];
+    let mut out: Vec<BlockId> = blk
+        .insts
+        .get(&b.insts)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i.fail(b))
+        .collect();
+    let edge = |e: &EdgeId| b.edges[e.index()].target;
+    match &b.terminators[bi] {
+        Terminator::Jump(e) => out.push(edge(e)),
+        Terminator::Branch { yes, no, .. } => out.extend([edge(yes), edge(no)]),
+        Terminator::Switch {
+            arms, otherwise, ..
+        } => {
+            out.extend(
+                arms.get(&b.pools.arms)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|a| edge(&a.edge)),
+            );
+            out.push(edge(otherwise));
+        }
+        Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
+        Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
+    }
+    out
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Callee {
     Direct(FuncId),
@@ -1705,15 +1742,37 @@ pub struct InstanceKey {
 
 /// An instantiation apart from any module: its definition, its ordered dictionaries
 /// and the closure hash of each type argument ([`Closure`]).
-#[derive(
-    serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
-)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Identity {
     pub definition: DefPath,
     pub dictionaries: Vec<String>,
     pub closures: Vec<ContentHash>,
 }
+impl Ord for Identity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order_fields().cmp(&other.order_fields())
+    }
+}
+
+impl PartialOrd for Identity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Identity {
+    fn order_fields(&self) -> (&str, &str, &[String], &str, &[String], &[ContentHash]) {
+        let path = &self.definition.0;
+        (
+            &path.package.name,
+            &path.package.version,
+            &path.modules,
+            &path.name,
+            &self.dictionaries,
+            &self.closures,
+        )
+    }
+
     /// The non-generic definition `definition`.
     pub fn plain(definition: DefPath) -> Self {
         Self {
@@ -1794,52 +1853,9 @@ impl Module {
         }
     }
 }
-/// `revision(root)` (`hirsel.code-revision.v1`) over the instances `row`
-/// describes: each one's body hash and the instances it names. None when an
-/// instance the walk reaches has no row.
-pub fn code_revision(
-    root: &Identity,
-    row: impl FnMut(&Identity) -> Option<(ContentHash, Vec<Identity>)>,
-) -> Option<ContentHash> {
-    let reached = revision_rows(root, row)?;
-    let mut rows: Vec<[u8; 64]> = reached
-        .iter()
-        .map(|(identity, body)| {
-            let mut row = [0; 64];
-            row[..32].copy_from_slice(&identity.digest().0);
-            row[32..].copy_from_slice(&body.0);
-            row
-        })
-        .collect();
-    rows.sort_unstable();
-    let count = (rows.len() as u64).to_le_bytes();
-    Some(ContentHash::of_parts(
-        "hirsel.code-revision.v1",
-        [&root.digest().0[..], &count[..]]
-            .into_iter()
-            .chain(rows.iter().map(|r| &r[..])),
-    ))
-}
-
-fn revision_rows<T>(
-    root: &Identity,
-    mut row: impl FnMut(&Identity) -> Option<(T, Vec<Identity>)>,
-) -> Option<std::collections::BTreeMap<Identity, T>> {
-    let mut reached = std::collections::BTreeMap::new();
-    let mut pending = vec![root.clone()];
-    while let Some(identity) = pending.pop() {
-        if reached.contains_key(&identity) {
-            continue;
-        }
-        let (body, children) = row(&identity)?;
-        pending.extend(children.into_iter().filter(|c| !reached.contains_key(c)));
-        reached.insert(identity, body);
-    }
-    Some(reached)
-}
-/// The code revision of an intrinsic: its one row, with the zero body.
+/// The code revision of a compiler-implemented core definition.
 pub fn intrinsic_revision(root: &Identity) -> ContentHash {
-    code_revision(root, |_| Some((ContentHash::default(), vec![]))).expect("one row")
+    crate::code_revision(crate::builtin_address(root).expect("intrinsic has a semantics number"))
 }
 /// `h` and the 64 hex digits of `digest`.
 pub fn symbol(digest: ContentHash) -> String {
@@ -2012,7 +2028,7 @@ impl Closure {
     /// The closure of `rows`, hashed over their encoding (the encoding the store
     /// hashes IR with).
     pub fn new(rows: Vec<ClosureRow>) -> Self {
-        let hash = ContentHash::of_encoded("hirsel.core-closure.v1", &rows);
+        let hash = crate::normal::closure_hash(&rows);
         Self { rows, hash }
     }
 }

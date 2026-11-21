@@ -2,7 +2,7 @@
 //! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
 //! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::Identity;
+use hirsel_core_ir::{CodeRow, Identity, code_addresses, code_revision};
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
@@ -28,7 +28,15 @@ impl Units {
     }
     /// The entry's revision, computed before any link remaps its units.
     pub fn revision(&self, root: &Identity) -> Option<ContentHash> {
-        self.instances.revision(root, None)
+        self.address(root).map(code_revision)
+    }
+
+    /// The code address before native linking.
+    pub fn address(&self, root: &Identity) -> Option<ContentHash> {
+        self.instances
+            .addresses(&self.reached, None)?
+            .get(root)
+            .copied()
     }
     /// The code revision of each instance a reached unit describes, as a
     /// link of this walk gives its revision carriers.
@@ -84,7 +92,7 @@ pub fn collect_instances(
 /// its record instead.
 #[derive(Default)]
 pub(crate) struct InstanceSet {
-    flow_revisions: Option<Arc<std::collections::BTreeMap<Identity, ContentHash>>>,
+    addresses: std::sync::OnceLock<Option<BTreeMap<Identity, ContentHash>>>,
     rows: std::collections::BTreeMap<Identity, usize>,
     bodies: Vec<InstanceBody>,
     /// Each walked instance's key and the store its record lives in, when the
@@ -106,12 +114,32 @@ pub(crate) enum Location {
     /// The package image's store: an image definition.
     Library,
 }
+/// The ABI of the reached definition and its external references. Intrinsic
+/// uses have no native link ABI to compare.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct CodeSignatures {
+    pub own: ContentHash,
+    pub slots: Vec<(Identity, ContentHash)>,
+}
+
+/// A generated adapter may be emitted weak by several owners. Each owner
+/// describes the same local body and the same ordered binding identities.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Adapter {
+    identity: Identity,
+    body: ContentHash,
+    slots: Vec<Identity>,
+}
+
 /// The fields of an instance record that are read from its module.
 pub(crate) struct Fields {
     pub own: Option<ContentHash>,
-    /// The module's `revision::body`.
+    /// The module's PROG-10 body hash.
     pub body: ContentHash,
     pub children: Vec<Identity>,
+    pub slots: Vec<Identity>,
+    pub signatures: CodeSignatures,
+    pub adapters: Vec<Adapter>,
     /// The instances the module describes (`revision::described`).
     pub described: Vec<Identity>,
     pub closures: Vec<Arc<hirsel_core_ir::Closure>>,
@@ -172,8 +200,11 @@ pub(crate) struct InstanceBody {
     pub product: Option<Arc<DefinitionProduct>>,
     module: Option<Module>,
     pub function: hirsel_core_ir::FuncId,
-    /// The module's `revision::body`.
+    /// The module's PROG-10 body hash.
     pub body: ContentHash,
+    pub slots: Vec<Identity>,
+    pub signatures: CodeSignatures,
+    pub adapters: Vec<Adapter>,
     /// The instances the module describes (`revision::described`).
     pub described: Vec<Identity>,
     /// The module's signature-only rows the walk reached, by ascending row, with
@@ -255,38 +286,65 @@ impl InstanceSet {
             })
             .collect())
     }
-    /// `revision::revision(root)` over this walk's instances: a materialised
-    /// one's module, a hit's record, or an expanded one's entry in `prior`,
-    /// the reach record it was expanded from (every instance, on a hit of
-    /// the whole record).
-    pub(crate) fn revision(
+    /// One hash per group after the walk has chosen the current body for every
+    /// identity. Warm records supply only local body hashes and slot order.
+    pub(crate) fn addresses(
         &self,
-        root: &Identity,
+        instances: &[Identity],
         prior: Option<&crate::reach::Reach>,
-    ) -> Option<ContentHash> {
-        hirsel_core_ir::code_revision(root, |identity| {
-            if let Some(&row) = self.rows.get(identity) {
-                let body = &self.bodies[row];
-                return Some((
-                    body.body,
-                    body.externals.iter().map(|(_, c)| c.clone()).collect(),
-                ));
-            }
-            if let Some(record) = self.hits.get(identity) {
-                return Some((record.body, record.children.clone()));
-            }
-            let prior = prior?;
-            let entry = prior.entry(prior.instance(identity)?);
-            Some((
-                entry.body,
-                entry
-                    .children
-                    .iter()
-                    .map(|&c| prior.entry(c as usize).identity.clone())
-                    .collect(),
-            ))
-        })
+    ) -> Option<&BTreeMap<Identity, ContentHash>> {
+        self.addresses
+            .get_or_init(|| {
+                let mut rows = BTreeMap::new();
+                let mut generated = BTreeMap::new();
+                for identity in instances {
+                    let (body, slots, signatures, adapters) =
+                        if let Some(&row) = self.rows.get(identity) {
+                            let body = &self.bodies[row];
+                            (body.body, &body.slots, &body.signatures, &body.adapters)
+                        } else if let Some(record) = self.hits.get(identity) {
+                            (
+                                record.body,
+                                &record.slots,
+                                &record.signatures,
+                                &record.adapters,
+                            )
+                        } else {
+                            let prior = prior?;
+                            let entry = prior.entry(prior.instance(identity)?);
+                            (entry.body, &entry.slots, &entry.signatures, &entry.adapters)
+                        };
+                    rows.insert(identity, (body, slots, signatures));
+                    for adapter in adapters {
+                        use std::collections::btree_map::Entry;
+                        match generated.entry(&adapter.identity) {
+                            Entry::Vacant(entry) => {
+                                entry.insert(adapter);
+                            }
+                            Entry::Occupied(entry) if *entry.get() == adapter => {}
+                            Entry::Occupied(_) => return None,
+                        }
+                    }
+                }
+                for (_, _, signatures) in rows.values() {
+                    for (identity, expected) in &signatures.slots {
+                        let (_, _, actual) = rows.get(identity)?;
+                        if *expected != actual.own {
+                            return None;
+                        }
+                    }
+                }
+                code_addresses(instances.iter().cloned(), |identity| {
+                    let (body, slots, _) = rows.get(identity)?;
+                    Some(CodeRow {
+                        body: *body,
+                        slots: (*slots).clone(),
+                    })
+                })
+            })
+            .as_ref()
     }
+
     /// Each instance that one of `instances` describes, with its code
     /// revision over this walk (`revision`), by identity.
     pub(crate) fn revisions(
@@ -311,15 +369,11 @@ impl InstanceSet {
                 );
             }
         }
+        let addresses = self.addresses(instances, prior)?;
         described
             .into_iter()
             .map(|identity| {
-                let revision = self
-                    .flow_revisions
-                    .as_ref()
-                    .and_then(|checked| checked.get(&identity))
-                    .copied()
-                    .or_else(|| self.revision(&identity, prior))?;
+                let revision = code_revision(*addresses.get(&identity)?);
                 Some((identity, revision))
             })
             .collect()
@@ -396,7 +450,6 @@ impl CheckProduct {
         records: Option<(&Records, Expand<'_>)>,
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
-        instances.flow_revisions = self.flow_revisions.clone();
         let mut resolver = Resolver::default();
         collect_instances(roots, limit, |key| {
             self.instance_step(key, instances, records, &mut resolver, &mut observe)
@@ -520,16 +573,54 @@ impl CheckProduct {
                 }
             };
             observe(key, "materialize");
-            let (body, described) = {
-                let module = match (&built.module, &product) {
-                    (Some(module), _) => module,
-                    (None, Some(product)) => product.ir().map_err(|e| input(e.to_string()))?,
-                    (None, None) => unreachable!("a glue instance is materialised"),
+            let (slots, signatures, adapters) = {
+                use hirsel_core_ir::normal::{self, Slot};
+                let module = built.module.as_ref().expect("materialized module");
+                let slots = built
+                    .code
+                    .slots
+                    .iter()
+                    .map(|slot| slot.identity(module))
+                    .collect::<Vec<_>>();
+                let signatures = CodeSignatures {
+                    own: normal::signature(module, built.function),
+                    slots: built
+                        .code
+                        .slots
+                        .iter()
+                        .filter_map(|slot| match slot {
+                            Slot::External(function) => {
+                                Some((slot.identity(module), normal::signature(module, *function)))
+                            }
+                            Slot::Builtin(_) => None,
+                        })
+                        .collect(),
                 };
-                let body = crate::revision::body(module, &mut Vec::new())
-                    .map_err(|e| input(e.to_string()))?;
-                (body, crate::revision::described(module))
+                let adapters = module
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, function)| {
+                        function.body.as_ref()?;
+                        let key = &module.instances[function.instance.index()];
+                        key.definition.0.name.contains("$callable[").then(|| {
+                            let code = normal::encode(module, hirsel_core_ir::FuncId(i as u32));
+                            Adapter {
+                                identity: module.identity(function.instance),
+                                body: code.hash(),
+                                slots: code
+                                    .slots
+                                    .iter()
+                                    .map(|slot| slot.identity(module))
+                                    .collect(),
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (slots, signatures, adapters)
             };
+            let body = built.code.hash();
+            let described = built.code.described;
             resolver.add(&built.children);
             if records.is_some() {
                 let mut closures = std::collections::BTreeMap::new();
@@ -550,12 +641,15 @@ impl CheckProduct {
                             .collect::<BTreeSet<_>>()
                             .into_iter()
                             .collect(),
+                        slots: slots.clone(),
+                        signatures: signatures.clone(),
+                        adapters: adapters.clone(),
                         described: described.clone(),
                         closures: closures.into_values().collect(),
                     },
                 );
             }
-            let externals: Vec<_> = built
+            let mut externals: Vec<_> = built
                 .children
                 .into_iter()
                 .map(
@@ -564,6 +658,7 @@ impl CheckProduct {
                      }| (function, identity),
                 )
                 .collect();
+            externals.sort_by_key(|(function, _)| *function);
             let pending = externals
                 .iter()
                 .map(|(_, identity)| identity.clone())
@@ -575,6 +670,9 @@ impl CheckProduct {
                 module: built.module,
                 function: built.function,
                 body,
+                slots,
+                signatures,
+                adapters,
                 described,
                 externals,
             });

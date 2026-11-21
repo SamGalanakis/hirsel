@@ -1,4 +1,4 @@
-// The code revision (hirsel.code-revision.v1, code-revision-1038 DESIGN v2),
+// Code addresses and revisions (PROG-9, PROG-10),
 // on the code-revision-review-1040 corpus. Laws:
 // - L1 sensitivity: a pair whose exits differ has different revisions
 //   (s01, s02, s03, s04, s51; d1 an edge out of an instance that carries a
@@ -64,12 +64,12 @@ fn generated_names_and_revisions_ignore_parentheses() {
         let reached = product.reachable(&entry, 256).unwrap();
         let identity = Identity::plain(DefPath::from_full("app@1/main/entry").unwrap());
         let module = reached.materialized.get(&identity).ir().unwrap();
-        (closure_names(module), reached.revision(&entry).unwrap())
+        (closure_names(module), reached.address(&entry).unwrap())
     };
     let a = observe(GENERATED_CLOSURE);
     let b = observe(&GENERATED_CLOSURE.replace("7u64", "(7u64)"));
     assert_eq!(a.0, b.0, "grouping leaves the generated name equal");
-    assert_eq!(a.1, b.1, "grouping leaves the code revision equal");
+    assert_eq!(a.1, b.1, "grouping leaves the code address equal");
     assert_eq!(a.0, ["entry$closure0"]);
 
     let earlier = GENERATED_CLOSURE.replace("let f =", "let first = fn() -> u64 { 3 }; let f =");
@@ -171,7 +171,7 @@ pub fn main() -> Result[(), Exit] {
 "#;
 
 #[test]
-fn own_layout_is_resolved_after_the_code_revision() {
+fn own_layout_is_resolved_after_the_body_hash() {
     use hirsel_core_ir::{Inst, LayoutQuery, Static};
     use hirsel_core_layout::Layout;
 
@@ -185,8 +185,10 @@ fn own_layout_is_resolved_after_the_code_revision() {
     assert!(reached.accepted());
     let instance = reached.instances.as_ref().unwrap().iter()
         .find(|i| i.definition == entry).unwrap();
-    let module = reached.materialized.get(instance).ir().unwrap();
-    let saved = crate::revision::body(module, &mut Vec::new()).unwrap();
+    let instance = reached.materialized.get(instance);
+    let module = instance.ir().unwrap();
+    let body_hash = || hirsel_core_ir::normal::encode(module, instance.function).hash();
+    let saved = body_hash();
     let mut layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let (ty, data) = module.statics.iter().find_map(|s| match s {
         Static::Aggregate { ty, .. } => Some((*ty, s)),
@@ -209,7 +211,7 @@ fn own_layout_is_resolved_after_the_code_revision() {
         assert!(native.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
             b.insts.contains(&Inst::Const { result: size, bits: size_bytes })
         }));
-        assert_eq!(crate::revision::body(module, &mut Vec::new()).unwrap(), saved);
+        assert_eq!(body_hash(), saved);
     }
 }
 
@@ -221,6 +223,9 @@ fn revision_cases() -> Vec<RevisionCase> {
         std: (Std::None, Std::None),
         expect,
     };
+    const OPAQUE: &str = "fn f(x: u64) -> u64 { x + 7 }\n\
+        fn same[F](a: StaticFn[F], b: StaticFn[F]) -> bool { code.identity(a) == code.identity(b) }\n\
+        fn entry() -> u64 { if same(code.describe(f), code.describe(f)) { 7 } else { 0 } }\n";
     use Revision::*;
     vec![
         s("s01 newline subtraction", "fn entry() -> i64 { 1i64 - 2 }\n", "fn entry() -> i64 { 1i64\n - 2 }\n", WRAP_I64, Differ),
@@ -247,6 +252,11 @@ fn revision_cases() -> Vec<RevisionCase> {
             ),
             expect: Differ,
         },
+        s("i1 opaque code.identity ignores an unreached edit",
+          &format!("{OPAQUE}fn spare() -> u64 {{ 1 }}\n"),
+          &format!("{OPAQUE}fn spare() -> u64 {{ 2 }}\n"), WRAP_7, Equal),
+        s("i2 opaque code.identity ignores an unreached addition",
+          OPAQUE, &format!("{OPAQUE}fn spare() -> u64 {{ 1 }}\n"), WRAP_7, Equal),
         s("c01 local rename", "fn entry() -> u64 { let n = 7u64; n }\n", "fn entry() -> u64 { let z = 7u64; z }\n", WRAP_7, Equal),
         s(
             "c02 parameter rename",
@@ -320,7 +330,8 @@ fn revision_build(app: &str, std: Option<&Path>, dir: &Path, (backend, optimize,
         .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
         .unwrap();
     let exit = Command::new(&built.executable).status().unwrap().code();
-    (built.revision, exit)
+    assert_eq!(built.revision, hirsel_core_ir::code_revision(built.address));
+    (built.address, exit)
 }
 /// The std directory of a side: the tree's, or a copy under `dir` with one edit.
 fn revision_std(std: Std, dir: &Path, side: &str) -> Option<PathBuf> {
@@ -378,12 +389,40 @@ fn revision_laws_and_reuse() {
     let a = revision_build(&app, None, &a_dir, CRANELIFT);
     let b = revision_build(&app, None, &b_dir, (Backend::Cranelift, false, 0));
     assert_eq!(a.0, b.0, "s45: L6 a root limit is not a revision input");
+    revision_warm_slot_order_is_current();
 }
 
 #[test]
 #[ignore = "explicit native integration target"]
 fn revision_engines_agree() {
     weak_adapter_link_orders();
+    let variant_source = "fn apply[T: plain](x: T, f: fn(T) -> T) -> T { f(x) }\n\
+        fn forward[T: plain](x: T, f: fn(T) -> T) -> T { apply(x, f) }\n\
+        fn inc(x: u64) -> u64 { x + 1 }\n\
+        fn vector(x: u8) -> bool { let v: Simd[u8, 16] = simd.splat(x); simd.any(v) }\n\
+        pub fn main() -> Result[(), Exit] { if forward(41u64, inc) == 42 && vector(7u8) && !vector(0u8) { Ok(()) } else { Error(Exit(status: 1)) } }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(revision_request(variant_source, None, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let identity = Identity::plain(entry.clone());
+    let units = product.units([identity.clone()], 4096).unwrap();
+    let address = units.address(&identity).unwrap();
+    let vector = DefPath::from_full("app@1/main/vector").unwrap();
+    let modules = units.modules().unwrap();
+    let vector = modules.iter().find(|unit| unit.identity.definition == vector).unwrap();
+    assert!(vector.module.functions[vector.function.index()].versioned, "D12 a real versioned definition");
+    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, true)] {
+        let options = NativeOptions { optimize, ..native_options(backend, dir.path()) };
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(Command::new(&built.executable).status().unwrap().code(), Some(0));
+        assert_eq!(built.address, address, "A7 native and checked addresses agree");
+        if optimize {
+            assert!(built.private_variants > 0, "A7 LLVM release emitted a private callable variant");
+        }
+    }
     for case in revision_cases() {
         for (side, app, std) in [("a", case.a, case.std.0), ("b", case.b, case.std.1)] {
             let dir = tempfile::tempdir().unwrap();
@@ -452,6 +491,7 @@ fn weak_adapter_link_orders() {
             row,
             unit.module.identity(adapter.instance),
             symbols[row.index()].clone(),
+            hirsel_core_ir::normal::encode(unit.module, row).hash(),
         )
     });
     assert_ne!(
@@ -460,6 +500,7 @@ fn weak_adapter_link_orders() {
     );
     assert_eq!(adapters[0].1, adapters[1].1);
     assert_eq!(adapters[0].2, adapters[1].2);
+    assert_eq!(adapters[0].3, adapters[1].3, "P1 the shared adapter has one normal body");
     for order in [units, [units[1], units[0]]] {
         // The IR linker remaps both copies into one set of tables and compares
         // their bodies and signatures under the shared identity.
@@ -555,7 +596,7 @@ fn link_weak_adapter_order(
         emitted.step_charging_elided,
         reached.counters,
         |_| Ok(0),
-        reached.revision(entry).unwrap(),
+        reached.address(entry).unwrap(),
         || reached.revisions(),
     )
     .unwrap();
@@ -619,6 +660,9 @@ fn revision_described() {
     assert_ne!(fresh_a.0[0], fresh_b.0[0], "an edit to f changes f's revision");
     assert_eq!(fresh_a.0[1], fresh_b.0[1], "and leaves g's equal");
     assert_eq!(fresh_a.0[3], fresh_b.0[3], "and the intrinsic's");
+    let intrinsic = Identity::plain(DefPath::core("float.widen"));
+    let expected = hirsel_core_ir::code_revision(hirsel_core_ir::builtin_address(&intrinsic).unwrap());
+    assert_eq!(fresh_a.0[3], expected.0);
     // B into A's store, then A again (a link hit), then A under another root
     // limit (a reach hit and a link miss: the rows come from the record).
     assert_eq!(described_build(&b, None, &at("a"), CRANELIFT), fresh_b, "B in a primed store");
@@ -631,7 +675,7 @@ fn revision_described() {
     // L5: an imaged core and std against their sources (the package set is
     // the same: std's codec makers are selected from types).
     let std = revision_std(Std::Tree, dir.path(), "a");
-    let source = described_build(&a, std.as_deref(), &at("source"), CRANELIFT).0;
+    let source = described_build(&a, std.as_deref(), &at("source"), CRANELIFT);
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let project = at("imaged");
     std::fs::write(project.join("main.hirsel"), &a).unwrap();
@@ -642,5 +686,330 @@ fn revision_described() {
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     let options = NativeOptions { grant_mask: 1 << 4, ..native_options(Backend::Cranelift, &project) };
     let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
-    assert_eq!(described_run(&built.executable), source, "L5: an imaged core's bytes");
+    assert_eq!((described_run(&built.executable), built.revision), source, "A8: an imaged core's revisions");
+    assert_eq!(hirsel_core_ir::code_revision(built.address), built.revision);
+}
+
+// Hand-framed v1 singleton group. This oracle assembles the specified bytes
+// directly: one binding per builtin at its version, beside the local body hash.
+fn builtin_group(body: ContentHash, slots: usize) -> ContentHash {
+    assert!(slots < 128);
+    let mut group = b"HIRGROUP\0\x01\x00\x01".to_vec();
+    group.extend_from_slice(&body.0);
+    group.push(slots as u8);
+    for _ in 0..slots {
+        group.extend_from_slice(&[2, 1, 0, 0, 0]);
+    }
+    let group = ContentHash::of_parts("hirsel.code-group.v1", [&group[..]]);
+    let mut member = [0; 36];
+    member[..32].copy_from_slice(&group.0);
+    ContentHash::of_parts("hirsel.code-address.v1", [&member[..]])
+}
+
+#[test]
+fn revision_builtin_dependencies_use_the_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = "fn direct(x: f32) -> f64 { float.widen(x) }\n\
+               fn callable(x: f32) -> f64 { let widen: fn(f32) -> f64 = float.widen; widen(x) }\n\
+               fn descriptor(out: Stdout) -> bool waits {\n\
+                   let Some(r) = code.revision(code.describe(float.widen)) else { return false };\n\
+                   match stdout.write_bytes(out, r) { Ok(_) => true, Error(_) => false }\n\
+               }\n\
+               fn unrelated(x: f64) -> f32 { float.narrow(x) }\n\
+               pub fn main() -> Result[(), Exit] { Ok(()) }\n";
+    let product = Driver::default()
+        .check(revision_request(app, None, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let roots = ["direct", "callable", "descriptor", "unrelated"].map(|name| {
+        Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap())
+    });
+    let units = product.units(roots.clone(), 4096).unwrap();
+    let modules = units.modules().unwrap();
+    let mut observed = Vec::new();
+    let mut expected = Vec::new();
+    for (root, name) in roots.iter().zip(["float.widen", "float.widen", "float.widen", "float.narrow"]) {
+        let unit = modules.iter().find(|unit| unit.identity == root).unwrap();
+        let normal = hirsel_core_ir::normal::encode(unit.module, unit.function);
+        assert!(normal.slots.iter().any(|slot| matches!(slot,
+            hirsel_core_ir::normal::Slot::Builtin(definition) if definition.is_core(name)
+        )), "{root:?}: D5 records {name} in the producer");
+        assert!(normal.slots.iter().all(|slot| matches!(slot, hirsel_core_ir::normal::Slot::Builtin(_))));
+        observed.push(units.address(root).unwrap());
+        expected.push(builtin_group(normal.hash(), normal.slots.len()));
+    }
+    let (module, descriptor) = hirsel_core_materialize::join(&modules, &roots[2]).unwrap();
+    let result = hirsel_core_ir::eval::run(&module, descriptor, &[0], 4096);
+    assert_eq!(result.outcome, hirsel_core_ir::eval::Outcome::Returned(vec![1]));
+    // SHA-256 of the framed revision domain and the V0 float.widen address.
+    let revision = [
+        0xa6, 0x0a, 0x72, 0xe6, 0xe0, 0x12, 0x67, 0xbd, 0x93, 0xfe, 0x57, 0x58, 0xfe, 0x4c, 0xeb, 0xd3,
+        0x06, 0xf3, 0x17, 0x59, 0x05, 0xa7, 0xeb, 0xe7, 0x83, 0x9b, 0x6d, 0x52, 0x59, 0x49, 0xbf, 0x6c,
+    ];
+    assert_eq!(result.stdout, revision, "D5 evaluator carrier binds builtin 1");
+    assert_eq!(observed, expected, "D5 direct, callable and descriptor use bind builtin 1");
+}
+
+#[test]
+fn revision_cross_module_and_recursive_bindings() {
+    let dir = tempfile::tempdir().unwrap();
+    let main_source = "fn caller() -> u64 { leaf.value() }\n\
+                       fn a(x: u64) -> u64 { if x == 0 { 7 } else { b(x - 1) } }\n\
+                       fn b(x: u64) -> u64 { if x == 0 { 7 } else { a(x - 1) } }\n\
+                       fn sibling() -> u64 { 9 }\n\
+                       pub fn main() -> Result[(), Exit] { if caller() + a(1) + sibling() == 23 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
+    let roots = ["main", "caller", "a", "b", "sibling"].map(|name| {
+        Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap())
+    });
+    let leaf = Identity::plain(DefPath::from_full("app@1/leaf/value").unwrap());
+    let measure = |source: &str, leaf_value: u64| {
+        let file = dir.path().join("leaf.hirsel");
+        std::fs::write(&file, format!("pub fn value() -> u64 {{ {leaf_value} }}\n")).unwrap();
+        let mut request = revision_request(source, None, dir.path());
+        request.inputs.packages[0].sources.push(hirsel_core_resolve::ModuleSource {
+            file, modules: vec!["leaf".into()], signatures: false,
+        });
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        let units = product.units([roots[0].clone()], 4096).unwrap();
+        let modules = units.modules().unwrap();
+        let body_and_address = |root: &Identity| {
+            let unit = modules.iter().find(|unit| unit.identity == root).unwrap();
+            let body = hirsel_core_ir::normal::encode(unit.module, unit.function).hash();
+            (body, units.address(root).unwrap())
+        };
+        let result = [
+            body_and_address(&roots[0]), body_and_address(&roots[1]), body_and_address(&roots[2]),
+            body_and_address(&roots[3]), body_and_address(&roots[4]), body_and_address(&leaf),
+        ];
+        for root in [&roots[2], &roots[3]] {
+            let from_member = product.units([root.clone()], 4096).unwrap();
+            assert_eq!(from_member.address(&roots[2]), Some(result[2].1));
+            assert_eq!(from_member.address(&roots[3]), Some(result[3].1));
+        }
+        result
+    };
+    let before = measure(main_source, 7);
+    let after_leaf = measure(main_source, 8);
+    for i in [0, 1] {
+        assert_eq!(before[i].0, after_leaf[i].0, "D3 caller body is local");
+        assert_ne!(before[i].1, after_leaf[i].1, "D3 caller address follows the binding");
+    }
+    assert_ne!(before[5].0, after_leaf[5].0);
+    assert_ne!(before[5].1, after_leaf[5].1);
+    assert_eq!(before[2..5], after_leaf[2..5]);
+    let after_b = measure(&main_source.replace(
+        "fn b(x: u64) -> u64 { if x == 0 { 7 }",
+        "fn b(x: u64) -> u64 { if x == 0 { 8 }",
+    ), 7);
+    assert_eq!(before[2].0, after_b[2].0, "D4 a's body is local");
+    assert_ne!(before[2].1, after_b[2].1, "D4 a follows its recursive group");
+    assert_ne!(before[3].0, after_b[3].0);
+    assert_ne!(before[3].1, after_b[3].1);
+    assert_eq!(before[4..], after_b[4..]);
+}
+
+#[test]
+fn revision_s51_maker_changes_the_binding_and_survives_an_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let case = revision_cases().into_iter().find(|case| case.name.starts_with("s51 ")).unwrap();
+    let std = revision_std(Std::Tree, dir.path(), "base").unwrap();
+    let edited = revision_std(case.std.1, dir.path(), "edit").unwrap();
+    let product = |std: &Path, store: &Path| {
+        let mut request = revision_request(case.a, Some(std), dir.path());
+        request.store = store.to_owned();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        product
+    };
+    let source = product(&std, &dir.path().join("source"));
+    let edit = product(&edited, &dir.path().join("edited"));
+    let image = prebuild_std(&dir.path().join("image"));
+    let request = revision_request(case.a, Some(&std), dir.path());
+    let (image_build, _) = prebuild_check(
+        &image, &dir.path().join("installed-check"), vec![request.inputs.packages[0].clone()], Some("app@1/main/main"),
+    );
+    let main = Identity::plain(DefPath::from_full("app@1/main/main").unwrap());
+    let entry = Identity::plain(DefPath::from_full("app@1/main/entry").unwrap());
+    let maker = Identity::plain(DefPath::from_full("std@1/codec/of_u64").unwrap());
+    let facts = |product: &CheckProduct| {
+        let units = product.units([main.clone()], 65_536).unwrap();
+        let modules = units.modules().unwrap();
+        [&main, &entry, &maker].map(|root| {
+            let unit = modules.iter().find(|unit| unit.identity == root).unwrap();
+            let body = hirsel_core_ir::normal::encode(unit.module, unit.function);
+            let slots = body.slots.iter().map(|slot| slot.identity(unit.module)).collect::<Vec<_>>();
+            (body.hash(), units.address(root).unwrap(), slots)
+        })
+    };
+    let before = facts(&source);
+    let after = facts(&edit);
+    assert!(before[1].2.contains(&maker), "D2 type-selected maker is a slot");
+    assert_eq!(before[1].0, after[1].0, "D2 caller body stays local");
+    assert_ne!(before[2].0, after[2].0, "D2 selected maker body changed");
+    assert_ne!(before[2].1, after[2].1, "D2 selected maker address changed");
+    assert_ne!(before[1].1, after[1].1, "D2 caller address followed the maker");
+    assert_ne!(source.root, image_build.root, "A8 the pre-check root differs");
+    assert!(!image_build.definitions.contains_key(&maker.definition));
+    assert!(image_build.image.as_ref().unwrap().has_body(&maker.definition).unwrap(), "A8 the maker is supplied by the installed image");
+    assert_eq!(before, facts(&image_build), "A8 image and source body, slots, and address agree");
+}
+
+#[test]
+fn revision_retargeting_is_in_the_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = "fn f() -> i64 { 8 }\nfn g() -> i64 { 3 }\nfn diff() -> i64 { f() - g() }\n\
+        pub fn main() -> Result[(), Exit] { if diff() > 0 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
+    let diff = Identity::plain(DefPath::from_full("app@1/main/diff").unwrap());
+    let check = |app: &str| {
+        let product = Driver::default()
+            .check(revision_request(app, None, dir.path()), &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        let units = product.units([diff.clone()], 4096).unwrap();
+        let modules = units.modules().unwrap();
+        let owner = modules.iter().find(|unit| *unit.identity == diff).unwrap();
+        let body = hirsel_core_ir::normal::encode(owner.module, owner.function).hash();
+        let leaves = modules.iter().filter(|unit| unit.identity != &diff)
+            .map(|unit| (unit.identity.clone(), units.address(unit.identity).unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let order = if app.contains("g() - f()") { ["g", "f"] } else { ["f", "g"] };
+        let mut group = b"HIRGROUP\0\x01\x00\x01".to_vec();
+        group.extend_from_slice(&body.0);
+        group.push(2);
+        for name in order {
+            let leaf = Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap());
+            group.push(1);
+            group.extend_from_slice(&leaves[&leaf].0);
+        }
+        let group = ContentHash::of_parts("hirsel.code-group.v1", [&group[..]]);
+        let mut member = [0; 36];
+        member[..32].copy_from_slice(&group.0);
+        let expected = ContentHash::of_parts("hirsel.code-address.v1", [&member[..]]);
+        assert_eq!(units.address(&diff), Some(expected), "A9 group uses canonical slot order");
+        (body, units.address(&diff).unwrap(), leaves)
+    };
+    let (a, b) = (check(original), check(&original.replace("f() - g()", "g() - f()")));
+    assert_eq!(a.2, b.2, "D9 the same identities and leaf addresses are reached");
+    assert_ne!(a.0, b.0, "D9 the first use names a different slot");
+    assert_ne!(a.1, b.1);
+}
+
+fn revision_warm_slot_order_is_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = "fn z() -> u64 { 7 }\nfn a() -> u64 { 1 }\nfn p() -> u64 { z() - a() }\n\
+             pub fn main() -> Result[(), Exit] { if p() == 6 { Ok(()) } else { Error(Exit(status: 1)) } }\n\
+             pub fn alt() -> Result[(), Exit] { if p() == 7 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
+    let b = a.replace("z() -> u64 { 7 }", "z() -> u64 { 8 }");
+    let identity = |name: &str| Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap());
+    let p = identity("p");
+    let (z, leaf_a) = (identity("z"), identity("a"));
+    let options = native_options(Backend::Cranelift, dir.path());
+    let check = |source: &str, entry: &DefPath| {
+        let mut request = revision_request(source, None, dir.path());
+        request.entry = Some(entry.clone());
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        product
+    };
+    let main = identity("main").definition;
+    let alt = identity("alt").definition;
+    let first = check(a, &main);
+    let built = first.build(&main, &options).unwrap();
+    assert_eq!(Command::new(&built.executable).status().unwrap().code(), Some(0));
+    let old = first.units([p.clone()], 4096).unwrap().address(&p).unwrap();
+    for (entry, is_expansion) in [(&alt, false), (&main, true)] {
+        let current = check(&b, entry);
+        let reached = current.reachable_for(entry, &options).unwrap();
+        let prior = reached.reach.as_ref().and_then(|r| r.prior.as_ref());
+        let (body, slots) = if is_expansion {
+            let row = reached.materialized.table[&p];
+            let row = prior.unwrap().entry(row as usize);
+            (row.body, &row.slots)
+        } else {
+            let hit = &reached.materialized.hits[&p];
+            (hit.body, &hit.slots)
+        };
+        assert_eq!(slots, &[z.clone(), leaf_a.clone()], "A9 exact slot order from the warm record");
+        let bound = reached.materialized.addresses(reached.require().unwrap(), prior).unwrap();
+        // Hand framing for a singleton with External(z) then External(a).
+        let mut bytes = b"HIRGROUP\0\x01\x00\x01".to_vec();
+        bytes.extend_from_slice(&body.0);
+        bytes.push(2);
+        for target in [&z, &leaf_a] {
+            bytes.push(1);
+            bytes.extend_from_slice(&bound[target].0);
+        }
+        let group = ContentHash::of_parts("hirsel.code-group.v1", [&bytes[..]]);
+        let mut member = [0; 36];
+        member[..32].copy_from_slice(&group.0);
+        let expected = ContentHash::of_parts("hirsel.code-address.v1", [&member[..]]);
+        assert_eq!(bound[&p], expected, "A9 warm slots rebind in the current graph");
+        assert_ne!(bound[&p], old, "A9 callee edit invalidates the prior address");
+        let cold = current.units([p.clone()], 4096).unwrap();
+        assert_eq!(cold.address(&p), Some(expected));
+        let built = current.build_reachable(entry, &reached, &options).unwrap();
+        assert_eq!(Command::new(&built.executable).status().unwrap().code(), Some(i32::from(is_expansion)));
+    }
+}
+
+#[test]
+fn revision_parser_and_source_keys_are_distinct_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Identity::plain(DefPath::from_full("app@1/main/entry").unwrap());
+    let measure = |case: &str, changed: &DefPath| {
+        let product = Driver::default()
+            .check(revision_request(case, None, dir.path()), &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        let key = product.demand_body(changed).unwrap().record;
+        let units = product.units([root.clone()], 4096).unwrap();
+        let modules = units.modules().unwrap();
+        let (module, function) = hirsel_core_materialize::join(&modules, &root).unwrap();
+        let address = units.address(&root).unwrap();
+        (key, address, hirsel_core_ir::eval::run(&module, function, &[], 4096).outcome)
+    };
+    for case in revision_cases().into_iter().filter(|case| {
+        ["s01 ", "s02 ", "c01 ", "c02 ", "c04 "].into_iter().any(|prefix| case.name.starts_with(prefix))
+    }) {
+        let changed = if case.name.starts_with("c02 ") {
+            DefPath::from_full("app@1/main/helper").unwrap()
+        } else {
+            root.definition.clone()
+        };
+        let a = measure(case.a, &changed);
+        let b = measure(case.b, &changed);
+        assert_ne!(a.0, b.0, "{} varied the pre-check record", case.name);
+        match case.expect {
+            Revision::Equal => {
+                assert_eq!(a.2, b.2, "{} equivalent execution", case.name);
+                assert_eq!(a.1, b.1, "{} A3 source record is not the address", case.name);
+            }
+            Revision::Differ => {
+                assert_ne!(a.2, b.2, "{} independent D1 evaluator difference", case.name);
+                assert_ne!(a.1, b.1, "{} D1 different parse reaches different code", case.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn revision_opaque_identity_ignores_unreached_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = Identity::plain(DefPath::from_full("app@1/main/main").unwrap());
+    let measure = |source| {
+        let product = Driver::default()
+            .check(revision_request(source, None, dir.path()), &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        let units = product.units([main.clone()], 4096).unwrap();
+        let modules = units.modules().unwrap();
+        let (module, function) = hirsel_core_materialize::join(&modules, &main).unwrap();
+        let report = hirsel_core_ir::eval::run(&module, function, &[], 4096);
+        (product.root, units.address(&main).unwrap(), report.outcome)
+    };
+    for case in revision_cases().into_iter().filter(|case| case.name.starts_with("i1 ") || case.name.starts_with("i2 ")) {
+        let a = measure(case.a);
+        let b = measure(case.b);
+        assert_ne!(a.0, b.0, "{} changed the source", case.name);
+        assert_eq!(a.2, b.2, "{} observed equal returns", case.name);
+        assert_eq!(a.1, b.1, "{} I1 an opaque descriptor reads its own identity", case.name);
+    }
 }

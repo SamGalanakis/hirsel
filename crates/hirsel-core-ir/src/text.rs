@@ -772,6 +772,7 @@ impl Printer {
                         v(bytes)
                     ),
                     Inst::LimitExit => "limit_exit".into(),
+                    Inst::BuiltinUse { definition } => format!("builtin_use {definition}"),
                     Inst::Step { fail: f } => format!("step{}", fail(*f)),
                     Inst::Drop {
                         address,
@@ -1454,6 +1455,13 @@ impl BodyParser {
             Some("step") => {
                 l.next()?;
                 return Ok(Inst::Step { fail: l.fail()? });
+            }
+            Some("builtin_use") => {
+                l.next()?;
+                let definition = DefPath::from_full(l.next()?).ok_or("bad builtin definition")?;
+                return Ok(Inst::BuiltinUse {
+                    definition: Box::new(definition),
+                });
             }
             Some("limit_exit") => {
                 l.next()?;

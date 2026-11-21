@@ -27,14 +27,14 @@
 //! head is a new generation, the prior sections under the new head, written
 //! by the store's one rename; no section is rewritten in place.
 use super::*;
-use crate::instances::Location;
+use crate::instances::{Adapter, CodeSignatures, Location};
 use crate::native::EntryAbi;
 use crate::store::Bare;
 use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 9;
+pub(crate) const REACH_SCHEMA: u32 = 10;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -62,16 +62,19 @@ pub(crate) type Graph = BTreeMap<(DefPath, bool), (Vec<(DefPath, bool)>, bool)>;
 /// One instance of the table, in link order: the instance record's fields
 /// with its children and closures as indices, and its items as indices of
 /// the record's paths.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Entry {
     pub identity: Identity,
     pub own: Option<ContentHash>,
-    /// The instance's `revision::body`.
+    /// The instance's PROG-10 body hash.
     pub body: ContentHash,
     pub location: Location,
     pub object: Bare,
     pub debug: Option<ContentHash>,
     pub children: Vec<u32>,
+    pub slots: Vec<Identity>,
+    pub signatures: CodeSignatures,
+    pub adapters: Vec<Adapter>,
     /// The instances it describes, as table indices.
     pub described: Vec<u32>,
     pub items: Vec<u32>,
@@ -79,16 +82,19 @@ pub(crate) struct Entry {
 }
 
 /// An instance of a new record's table, before its paths are numbered.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Fresh {
     pub identity: Identity,
     pub own: Option<ContentHash>,
-    /// The instance's `revision::body`.
+    /// The instance's PROG-10 body hash.
     pub body: ContentHash,
     pub location: Location,
     pub object: Bare,
     pub debug: Option<ContentHash>,
     pub children: Vec<u32>,
+    pub slots: Vec<Identity>,
+    pub signatures: CodeSignatures,
+    pub adapters: Vec<Adapter>,
     /// The instances it describes, as table indices.
     pub described: Vec<u32>,
     pub items: Vec<DefPath>,
@@ -114,7 +120,7 @@ pub(crate) struct EntryLink {
 /// One table instance as stored: its identity's definition by path index.
 /// Each parameter is owned when read and borrowed when written.
 #[derive(Serialize, Deserialize)]
-struct StoredEntry<S, H, U> {
+struct StoredEntry<S, H, U, Slots, Signatures, Adapters> {
     definition: u32,
     dictionaries: S,
     closure_hashes: H,
@@ -124,6 +130,9 @@ struct StoredEntry<S, H, U> {
     object: Bare,
     debug: Option<ContentHash>,
     children: U,
+    slots: Slots,
+    signatures: Signatures,
+    adapters: Adapters,
     described: U,
     items: U,
     closures: U,
@@ -192,9 +201,9 @@ pub(crate) struct Head {
     pub tools: ContentHash,
     /// The entry policy's digest.
     pub policy: ContentHash,
-    /// The entry's code revision over the record's instances, so that a hit
+    /// The entry's code address over the record's instances, so that a hit
     /// reports it without decoding them.
-    pub revision: ContentHash,
+    pub address: ContentHash,
     pub instance_limit: u64,
 }
 impl Head {
@@ -209,7 +218,7 @@ impl Head {
             self.recipe,
             self.tools,
             self.policy,
-            self.revision,
+            self.address,
         ]
     }
     fn encode(&self, out: &mut Vec<u8>) {
@@ -232,7 +241,7 @@ impl Head {
             recipe: hash(6),
             tools: hash(7),
             policy: hash(8),
-            revision: hash(9),
+            address: hash(9),
             instance_limit: u64::from_le_bytes(bytes[limit..limit + 8].try_into().unwrap()),
         }
     }
@@ -452,8 +461,14 @@ impl Reach {
     /// Table entry `i`, decoded when first asked for; its indices are in range.
     pub(crate) fn entry(&self, i: usize) -> &Entry {
         self.instances[i].get_or_init(|| {
-            let e: StoredEntry<Vec<String>, Vec<ContentHash>, Vec<u32>> =
-                decode_element(self.element(Section::Instances, i));
+            let e: StoredEntry<
+                Vec<String>,
+                Vec<ContentHash>,
+                Vec<u32>,
+                Vec<Identity>,
+                CodeSignatures,
+                Vec<Adapter>,
+            > = decode_element(self.element(Section::Instances, i));
             let in_range = (e.definition as usize) < self.paths.len()
                 && e.children
                     .iter()
@@ -476,6 +491,9 @@ impl Reach {
                 object: e.object,
                 debug: e.debug,
                 children: e.children,
+                slots: e.slots,
+                signatures: e.signatures,
+                adapters: e.adapters,
                 described: e.described,
                 items: e.items,
                 closures: e.closures,
@@ -890,6 +908,9 @@ fn encode_record<'a>(
             object: e.object,
             debug: e.debug,
             children: &e.children,
+            slots: &e.slots,
+            signatures: &e.signatures,
+            adapters: &e.adapters,
             described: &e.described,
             items: &items,
             closures: &e.closures,

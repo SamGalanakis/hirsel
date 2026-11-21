@@ -36,7 +36,6 @@ mod reach;
 mod reachability;
 pub mod request;
 mod request_record;
-mod revision;
 mod test_run;
 mod tool_inputs;
 pub use core_inventory::{allowlist, core_declarations, core_inventory};
@@ -398,7 +397,6 @@ pub struct CheckProduct {
     pub snapshot: ContentHash,
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
-    flow_revisions: Option<Arc<BTreeMap<hirsel_core_ir::Identity, ContentHash>>>,
     native_entry: Option<native::EntryBinding>,
     test_entries: BTreeMap<DefPath, Result<native::EntryDecl, String>>,
     headers: Arc<reuse::Headers>,
@@ -418,7 +416,6 @@ impl CheckProduct {
             snapshot: ContentHash::default(),
             image: None,
             library: None,
-            flow_revisions: None,
             native_entry: None,
             test_entries: BTreeMap::new(),
             headers: Arc::default(),

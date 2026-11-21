@@ -195,9 +195,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         // MEM-4: `emit(take w, x)` writes the literal `x` in place; it is a form.
         if self.is_emit(f) {
+            self.builtin_use(f, n);
             return self.emit_form(n, f, args, want);
         }
         if self.is_put(f) {
+            self.builtin_use(f, n);
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
@@ -675,17 +677,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.source_step(n);
         let v = if let Some(insertion) = map_insertion {
+            self.builtin_use(f, n);
             self.finish_map_insertion(insertion, map_key_at, f, &[tys[0], tys[1]], vals, result, n)
         } else if let Some(replacement) = replacement {
+            self.builtin_use(f, n);
             self.finish_list_replacement(tys[0], replacement, vals[2], n)
         } else if let Some(prepared) = slot_push
             && let Some(header) = vals[0]
         {
+            self.builtin_use(f, n);
             self.finish_slot_push(prepared, f, tys[0], header, vals[1], result, n)
         } else if let Some((full, to)) = push
             && self.live()
             && let Some(header) = vals[0]
         {
+            self.builtin_use(f, n);
             let direct = vals[1].and_then(|v| self.pointer_address(v)) == Some(to);
             self.list_push(tys[0], header, vals[1], result, n, Some((full, direct)))
         } else if builtin {
@@ -1502,6 +1508,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
+        self.builtin_use(f, n);
         let g = &self.p.fns[f];
         let codec = is_codec_of(&g.path);
         if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
@@ -1665,6 +1672,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
+        self.builtin_use(f, n);
         let g = &self.p.fns[f];
         if g.path.0.modules == ["core"] && g.path.0.name == "fail" {
             // `fail(msg)` raises with the message it takes (FORM `raise fail`).

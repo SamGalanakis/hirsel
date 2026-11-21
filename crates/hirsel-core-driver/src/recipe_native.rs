@@ -365,11 +365,30 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     grants
 }
 
+pub(crate) fn foreign_recording_refusal(recipe: &Recipe) -> Option<String> {
+    let function = recipe
+        .foreign_modules
+        .iter()
+        .flat_map(|leaf| &leaf.functions)
+        .map(|function| function.identity.definition.definition_identity())
+        .min()?;
+    Some(format!(
+        "FFI-8: a recording build cannot reach foreign code: {} reaches {}",
+        recipe.entry.definition.definition_identity(),
+        function,
+    ))
+}
+
 fn launch_options(
     recipe: &Recipe,
     names: &[String],
     options: &NativeOptions,
 ) -> Result<(NativeOptions, EntryDecl), NativeStop> {
+    if options.recording
+        && let Some(reason) = foreign_recording_refusal(recipe)
+    {
+        return Err(NativeStop::Entry(reason));
+    }
     if recipe.has_foreign() {
         return Err(NativeStop::Entry(
             "foreign modules are not enabled yet".into(),

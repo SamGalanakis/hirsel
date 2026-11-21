@@ -11,11 +11,11 @@ use crate::{
     AssemblyRecord, Link, NativeOptions, Publication,
     cli::{Invocation, OptionId as Opt},
     code_admission::{
-        AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection, NativeSemantics,
-        ObjectKey, ReleaseLease, send_release,
+        AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
+        NativeSemantics, ObjectKey, ReleaseLease, send_release,
     },
     code_store::{CodeStore, ObjectKind},
-    native::recipe_build::parse_root,
+    native::recipe_build::{foreign_recording_refusal, parse_root},
     sdk::{Describe, Reader},
 };
 use hirsel_core_ids::ContentHash;
@@ -42,6 +42,24 @@ type Error = Box<dyn std::error::Error>;
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 
+fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io::Result<Recipe> {
+    let max = max as u64;
+    let mut bytes = Vec::new();
+    code.open(ObjectKind::Recipe, root)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max || Recipe::hash(&bytes) != root {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stored recipe hash or length",
+        ));
+    }
+    Ok(Recipe::decode_retained(
+        &bytes,
+        &mut DecodeBudget::unlimited(),
+    )?)
+}
+
 fn limits() -> AdmissionLimits {
     AdmissionLimits {
         recipe_bytes: 16 << 20,
@@ -56,7 +74,7 @@ fn limits() -> AdmissionLimits {
     }
 }
 
-pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
+pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
     let root = parse_root(
         invocation
             .positional
@@ -121,7 +139,13 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
         let mut peer = UnixStream::connect(socket)?;
         peer.set_write_timeout(admission.timeout)?;
         peer.write_all(&[u8::from(added)])?;
-        send_release(&mut peer, &source, root, &admission)?;
+        match send_release(&mut peer, &source, root, &admission) {
+            Err(AdmissionError::Refused(reason)) if reason.starts_with("FFI-8: ") => {
+                eprintln!("deploy: refused: {reason}");
+                return Ok(2);
+            }
+            sent => sent?,
+        }
         peer.set_read_timeout(Some(DEPLOY_TIMEOUT))?;
         let mut report = read_frame(&mut peer, admission.recipe_bytes)?;
         if report.is_empty() {
@@ -134,7 +158,7 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
         return if let Some(reason) = answer.refused {
             Err(reason.into())
         } else {
-            Ok(())
+            Ok(0)
         };
     }
     let state = private_dir(state.ok_or("--state DIR is required")?)?;
@@ -400,6 +424,7 @@ impl Host {
         admitted: AdmittedRelease<'a>,
     ) -> Result<(AssemblyRecord, Recipe, ReleaseLease<'a>), Error> {
         let (verified, lease) = admitted.into_parts();
+        self.check_recording(verified.recipe())?;
         lease.publish(&self.code, verified.recipe_bytes())?;
         let publication = Publication::from_verified(verified);
         let recipe = publication.recipe().clone();
@@ -440,19 +465,16 @@ impl Host {
     }
 
     fn recipe(&self, root: ContentHash) -> Result<Recipe, Error> {
-        let max = self.limits.recipe_bytes as u64;
-        let mut bytes = Vec::new();
-        self.code
-            .open(ObjectKind::Recipe, root)?
-            .take(max.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > max || Recipe::hash(&bytes) != root {
-            return Err("stored recipe hash or length".into());
+        Ok(read_recipe(&self.code, root, self.limits.recipe_bytes)?)
+    }
+
+    fn check_recording(&self, recipe: &Recipe) -> Result<(), Error> {
+        if self.recording.is_some()
+            && let Some(reason) = foreign_recording_refusal(recipe)
+        {
+            return Err(reason.into());
         }
-        Ok(Recipe::decode_retained(
-            &bytes,
-            &mut DecodeBudget::unlimited(),
-        )?)
+        Ok(())
     }
 
     fn initial(
@@ -464,14 +486,22 @@ impl Host {
         std::thread::scope(|scope| {
             let sender = scope.spawn(move || send_release(&mut local, source, root, &self.limits));
             let mut connection = ControlConnection::local(peer);
-            let admitted = self
-                .admission
-                .admit(&mut connection, &self.limits, &NativeSemantics);
+            let admitted = self.admission.admit_for_runtime(
+                &mut connection,
+                &self.limits,
+                &NativeSemantics,
+                self.recording.is_some(),
+            );
+            if let Err(AdmissionError::RecordingForeign(reason)) = &admitted {
+                let _ = connection.refuse_before_need(reason);
+            }
             drop(connection);
-            sender
+            let sent = sender
                 .join()
-                .map_err(|_| "local publication sender failed")??;
-            self.assemble(admitted?)
+                .map_err(|_| "local publication sender failed")?;
+            let admitted = admitted?;
+            sent?;
+            self.assemble(admitted)
         })
     }
 
@@ -481,6 +511,7 @@ impl Host {
         recipe: &Recipe,
         version: u64,
     ) -> Result<child::Place, Error> {
+        self.check_recording(recipe)?;
         if recipe.launch.root_limit > self.memory {
             return Err("Memory".into());
         }
@@ -864,13 +895,18 @@ impl Host {
                 return Ok((report, None));
             }
         };
-        let admitted = match self
-            .admission
-            .admit(operator, &self.limits, &NativeSemantics)
-        {
+        let admitted = match self.admission.admit_for_runtime(
+            operator,
+            &self.limits,
+            &NativeSemantics,
+            self.recording.is_some(),
+        ) {
             Ok(admitted) => admitted,
             Err(error) => {
-                let reason = format!("Refused(Admit({error}))");
+                let reason = match error {
+                    AdmissionError::RecordingForeign(reason) => reason,
+                    error => format!("Refused(Admit({error}))"),
+                };
                 let _ = operator.refuse_before_need(&reason);
                 report.refused = Some(reason);
                 return Ok((report, None));

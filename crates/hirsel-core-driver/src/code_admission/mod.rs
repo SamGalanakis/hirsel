@@ -73,6 +73,7 @@ pub enum AdmissionError {
     Limit(Limit),
     Disconnected,
     Refused(String),
+    RecordingForeign(String),
     Io(io::Error),
 }
 
@@ -94,7 +95,7 @@ impl fmt::Display for AdmissionError {
             Self::Unsupported(reason) => write!(out, "Unsupported({reason})"),
             Self::Limit(limit) => write!(out, "Limit({limit:?})"),
             Self::Disconnected => out.write_str("admission peer disconnected"),
-            Self::Refused(reason) => out.write_str(reason),
+            Self::Refused(reason) | Self::RecordingForeign(reason) => out.write_str(reason),
             Self::Io(error) => error.fmt(out),
         }
     }
@@ -356,6 +357,16 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
+        self.admit_for_runtime(connection, limits, semantics, false)
+    }
+
+    pub(crate) fn admit_for_runtime(
+        &self,
+        connection: &mut ControlConnection,
+        limits: &AdmissionLimits,
+        semantics: &impl BackendSemantics,
+        recording: bool,
+    ) -> Result<AdmittedRelease<'_>, AdmissionError> {
         let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
         let (root, recipe_bytes) = exchange.recipe(limits.recipe_bytes)?;
@@ -363,6 +374,11 @@ impl AdmissionStore {
 
         let mut budget = budget(limits, Some(deadline));
         let recipe = Recipe::decode(&recipe_bytes, &mut budget)?;
+        if recording
+            && let Some(reason) = crate::native::recipe_build::foreign_recording_refusal(&recipe)
+        {
+            return Err(AdmissionError::RecordingForeign(reason));
+        }
         let objects = listed_objects(&recipe, limits, &mut budget)?;
         let mut reservation = self.reserve(root, objects, limits.outstanding, &mut budget)?;
         transfer(

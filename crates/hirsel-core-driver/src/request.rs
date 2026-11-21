@@ -67,8 +67,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     };
     let command = invocation.command.name;
     if matches!(command, "host" | "deploy") {
-        crate::host::run(invocation)?;
-        std::process::exit(0);
+        std::process::exit(crate::host::run(invocation)?);
     }
     if command == "replay"
         && invocation

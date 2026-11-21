@@ -1334,3 +1334,95 @@ pub fn decode(data: Bytes, max_output: u64, max_window: u64) -> Result[Bytes, Er
 pub fn decode_with(d: Dictionary, data: Bytes, max_output: u64, max_window: u64) -> Result[Bytes, Error] {
     decode_frames(data, max_output, max_window, Some(view d))
 }
+
+fn block_header(mut out: Bytes, n: u64, kind: u64, last: bool) -> Result[(), Capacity] {
+    let header = (n << 3) | (kind << 1) | (if last {
+        1u64
+    } else {
+        0u64
+    })
+    let lo: u16 = int.truncate(header)
+    let hi: u8 = int.narrow(header >> 16)
+    list.put_word_le(mut out, lo)?
+    put_byte(mut out, hi)
+}
+
+fn put_byte(mut out: Bytes, x: u8) -> Result[(), Capacity] {
+    match list.push(mut out, x) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(e.0),
+    }
+}
+
+fn same_byte(data: Bytes, at: u64, n: u64) -> bool {
+    let first = data[at]
+    for i in (at + 1) .. (at + n) {
+        if data[i] != first {
+            return false
+        }
+    }
+    true
+}
+
+/// Encode an RFC 8878 frame with content size and an XXH64 checksum.
+/// Levels 1 through 19 use the same raw and run-length block writer.
+pub fn encode(data: Bytes, level: u8) -> Result[Bytes, Capacity] {
+    // The API's level domain is 1..19. All supported levels have the
+    // same block limit because this writer has no match search.
+    let levels: Inline[u64, 19] =[131072; 19]
+    let level_index: u64 = int.widen(level)
+    let block_size = levels[level_index - 1]
+    let n = list.len(data)
+    let mut out: Bytes = list.new()
+    list.put_word_le(mut out, 0xfd2fb528u32)?
+    let flag: u8 = if n <= 255 {
+        0
+    } else if n <= 65791 {
+        64
+    } else if n <= 0xffffffff {
+        128
+    } else {
+        192
+    }
+    let single: u8 = if n <= block_size {
+        32
+    } else {
+        0
+    }
+    put_byte(mut out, flag | single | 4)?
+    if single == 0 {
+        // Window descriptor with a 128 KiB base and zero mantissa.
+        put_byte(mut out, 56)?
+    }
+    if flag == 0 {
+        put_byte(mut out, int.narrow(n))?
+    } else if flag == 64 {
+        let size: u16 = int.narrow(n - 256)
+        list.put_word_le(mut out, size)?
+    } else if flag == 128 {
+        let size: u32 = int.narrow(n)
+        list.put_word_le(mut out, size)?
+    } else {
+        list.put_word_le(mut out, n)?
+    }
+    let mut at: u64 = 0
+    while true {
+        let len = smaller(block_size, n - at)
+        let last = at + len == n
+        if len > 1 && same_byte(data, at, len) {
+            block_header(mut out, len, 1, last)?
+            put_byte(mut out, data[at])?
+        } else {
+            block_header(mut out, len, 0, last)?
+            list.append(mut out, list.slice(data, at, at + len))?
+        }
+        if last {
+            break
+        }
+        at += len
+    }
+    let mut hash = xxh_start()
+    xxh_add(mut hash, data)
+    list.put_word_le(mut out, xxh_finish(hash))?
+    Ok(take out)
+}

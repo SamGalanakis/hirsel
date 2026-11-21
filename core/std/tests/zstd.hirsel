@@ -148,3 +148,22 @@ fn hostile_decode() -> bool {
     let large_window = result.unwrap(b"\x28\xb5\x2f\xfd\x00\xff")
     checksums && refunds(bad_magic) && entropy_edges() && is_error(frame, 4, 5, TooLarge()) && is_error(frame, 5, 4, WindowTooLarge(5)) && is_error(large_window, 65536, 1024, WindowTooLarge(4123168604160)) && is_error(reserved, 5, 5, ReservedBit()) && is_error(wrong_size, 5, 5, ContentSize()) && is_error(oversize, 6, 5, BlockOversize()) && is_error(bad_magic, 5, 5, BadMagic()) && is_error(trailing, 5, 5, TrailingData(14)) && is_error(short_block, 1024, 1024, Truncated())
 }
+
+// Every level writes a checksummed frame that decodes to its original bytes.
+// expect: run encode_roundtrip() = true
+fn encode_roundtrip() -> bool {
+    let items = inputs()
+    for input in items {
+        let n = list.len(input)
+        for level in 1u8 .. 20 {
+            let output = result.unwrap(zstd.encode(input, level))
+            if result.unwrap(zstd.decode(output, n, 8388608)) != input {
+                return false
+            }
+        }
+    }
+    let mut rle: Bytes = list.new()
+    result.unwrap(list.fill(mut rle, 131073, b'Z'))
+    let multiple = result.unwrap(zstd.encode(rle, 19))
+    result.unwrap(zstd.decode(multiple, 131073, 131072)) == rle
+}

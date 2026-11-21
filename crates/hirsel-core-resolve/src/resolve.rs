@@ -410,6 +410,7 @@ impl<'a> Resolver<'a, '_> {
                 self.site(n),
                 format!("`{}` shadows a visible name", self.index.symbols.text(name)),
             );
+            d.primary.span = self.item.token_span(t);
             match target {
                 Target::Binder(b) => d.causal.push(self.out.binders[b as usize].site),
                 Target::Definition(id) => d.causal.push(self.index.get(id).site),

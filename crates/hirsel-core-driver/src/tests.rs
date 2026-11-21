@@ -2922,6 +2922,125 @@ fn unresolved_bodies_suppress_cascades_without_hiding_independent_body_errors() 
     }
 }
 
+#[test]
+fn body_demand_reports_lang_7_at_the_binding_and_names_the_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "\
+fn peer() -> u64 { 0u64 }
+fn local() -> u64 { let peer = 1u64; peer }
+fn parameter(peer: u64) -> u64 { peer }
+fn prelude() -> u64 { let replace = 2u64; replace }
+fn closure() -> u64 { let f = fn(peer: u64) -> u64 { peer }; f(3u64) }
+fn shadow(x: u64) -> u64 { let x = x + 1; x }
+type Sample { n: u64 }
+fn legal() -> u64 {
+    let sibling = Sample(n: 3u64)
+    let dep = Sample(n: 4u64)
+    sibling.n + dep.n
+}
+";
+    let resource = format!("fn deep() -> u64 {{ {}1 }}", "1 + ".repeat(2000));
+    let core_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let prelude = std::fs::read_to_string(core_dir.join("core.hirsel")).unwrap();
+    let mut req = modules_request(
+        &[
+            ("main", source),
+            (
+                "malformed",
+                "fn malformed() -> u64 { let mut bytes: u64 = 0; 0u64 }",
+            ),
+            ("resource", &resource),
+            ("sibling", "pub fn sibling_value() -> u64 { 0u64 }"),
+            ("dep/api", "pub fn dep_value() -> u64 { 0u64 }"),
+        ],
+        dir.path(),
+        &dir.path().join("store"),
+    );
+    req.inputs
+        .packages
+        .push(PackageManifest::directory(&core_dir, package("core"), true).unwrap());
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    let diagnostics: Vec<_> = product
+        .machine_diagnostics()
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.primary.module == "app@1/main")
+        .collect();
+    assert_eq!(diagnostics.len(), 5, "{:#?}", product.diagnostics);
+    let span = |text: &str, marker: &str, name: &str| {
+        let start = (text.find(marker).unwrap() + marker.find(name).unwrap()) as u32;
+        hirsel_core_syntax::Span {
+            start,
+            end: start + name.len() as u32,
+        }
+    };
+    let peer = span(source, "fn peer()", "peer");
+    let replace = span(&prelude, "pub fn replace[", "replace");
+    let shadowed = span(source, "x: u64", "x: u64");
+    let terminal = |text: &str, at: hirsel_core_syntax::Span| {
+        let before = &text[..at.start as usize];
+        let line = 1 + before.bytes().filter(|&b| b == b'\n').count();
+        let column = 1 + before.rsplit('\n').next().unwrap().chars().count();
+        let end_column = column + (at.end - at.start) as usize;
+        format!("{line}:{column}-{end_column}")
+    };
+    let path = |name: &str| DefPath::from_full(&format!("app@1/{name}")).unwrap();
+    let peer = ("app@1/main", source, peer);
+    let replace = ("core@1/core", prelude.as_str(), replace);
+    let shadowed = ("app@1/main", source, shadowed);
+    for (function, name, marker, (cause_module, cause_source, cause)) in [
+        ("local", "peer", "peer = 1u64", peer),
+        ("parameter", "peer", "parameter(peer:", peer),
+        ("prelude", "replace", "replace = 2u64", replace),
+        ("closure", "peer", "fn(peer:", peer),
+        ("shadow", "x", "x = x + 1", shadowed),
+    ] {
+        let at = span(source, marker, name);
+        let diagnostic = diagnostics.iter().find(|d| d.primary.span == at).unwrap();
+        assert_eq!(diagnostic.rule, "LANG-7");
+        let [causal] = diagnostic.causal.as_slice() else {
+            panic!("{function} must name one conflicting binding");
+        };
+        assert_eq!(causal.module, cause_module);
+        assert_eq!(causal.span, cause);
+
+        let definition = path(&format!("main/{function}"));
+        let root = hirsel_core_ir::Identity::plain(definition.clone());
+        let Err(InstanceStop::Incomplete {
+            definition: stopped,
+            message,
+        }) = product.instances([root], 8)
+        else {
+            panic!("{function} must stop instance demand");
+        };
+        assert_eq!(stopped, definition);
+        assert_eq!(
+            message,
+            format!(
+                "app@1/main:{}: LANG-7 `{name}` shadows a visible name\n  caused by {cause_module}:{}",
+                terminal(source, at),
+                terminal(cause_source, cause)
+            )
+        );
+    }
+    let malformed = hirsel_core_ir::Identity::plain(path("malformed/malformed"));
+    assert!(matches!(
+        product.instances([malformed], 8),
+        Err(InstanceStop::Incomplete { message, .. })
+            if message.starts_with("app@1/malformed:") && message.contains("LANG-2")
+    ));
+    let deep = hirsel_core_ir::Identity::plain(path("resource/deep"));
+    assert!(matches!(
+        product.instances([deep], 8),
+        Err(InstanceStop::Incomplete { message, .. })
+            if message.starts_with("app@1/resource:") && message.contains("resolver resource refusal")
+    ));
+    let legal = hirsel_core_ir::Identity::plain(path("main/legal"));
+    assert!(product.instances([legal], 8).is_ok());
+}
+
 /// Attack 960's resolution counterexamples 1 and 6, and attack 979's H1 both
 /// ways and across a package, as edit-kind cases. Law: after an edit, an
 /// incremental build reports the diagnostics, holds the products and publishes

@@ -414,6 +414,39 @@ impl InstanceSet {
     }
 }
 impl CheckProduct {
+    /// A body stopped before emission can have only a request-level refusal.
+    /// Use the current sites, since a conflicting name can move in another item
+    /// without changing this body's record.
+    fn body_source_stop(&self, definition: &DefPath) -> io::Result<Option<String>> {
+        let Some(header) = self.headers.get(definition) else {
+            return Ok(None);
+        };
+        let (_, source, item) = header.anchor;
+        let syntax = self
+            .files
+            .iter()
+            .find(|f| f.file == source)
+            .and_then(|f| f.syntax.items.get(item as usize))
+            .filter(|range| range.has_errors);
+        let owns = |site: &Site| {
+            site.source == Some(source)
+                && (site.item == item
+                    || site.item == u32::MAX
+                        && syntax.is_some_and(|range| range.owned.contains(&site.span.start)))
+        };
+        if let Some(refusal) = self.diagnostics.iter().find(|r| owns(&r.primary)) {
+            return self.render_refusal(refusal).map(Some);
+        }
+        if let Some(resource) = self.resources.iter().find(|r| owns(&r.primary)) {
+            return Ok(Some(format!(
+                "{}: resource {}",
+                self.render_site(&resource.primary)?,
+                resource.message
+            )));
+        }
+        Ok(None)
+    }
+
     /// Materialize every unit reached from `roots`, without native object records.
     /// A program entry is one root; source corpora can select several definitions.
     pub fn units(
@@ -549,12 +582,14 @@ impl CheckProduct {
                     Some(format!("{}: {}", refusal.rule, refusal.message))
                 } else if let Some(gap) = product.incomplete.first() {
                     Some(gap.message.clone())
+                } else if product.check.function.is_none() {
+                    Some(
+                        self.body_source_stop(&key.definition)
+                            .map_err(|e| input(e.to_string()))?
+                            .unwrap_or_else(|| "body has no complete native product".to_owned()),
+                    )
                 } else {
-                    product
-                        .check
-                        .function
-                        .is_none()
-                        .then(|| "body has no complete native product".to_owned())
+                    None
                 };
                 if let Some(message) = message {
                     return Err(InstanceStop::Incomplete {

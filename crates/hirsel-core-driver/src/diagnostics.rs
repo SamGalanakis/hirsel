@@ -84,6 +84,34 @@ impl CheckProduct {
     pub fn machine_diagnostics(&self) -> io::Result<Vec<Diagnostic<'_>>> {
         self.diagnostics_for(self.diagnostics.iter())
     }
+    pub(crate) fn render_refusal(&self, refusal: &Refusal) -> io::Result<String> {
+        use std::fmt::Write;
+
+        let mut text = format!(
+            "{}: {} {}",
+            self.render_site(&refusal.primary)?,
+            refusal.rule,
+            refusal.message
+        );
+        for site in &refusal.causal {
+            write!(text, "\n  caused by {}", self.render_site(site)?).unwrap();
+        }
+        Ok(text)
+    }
+    pub(crate) fn render_site(&self, site: &Site) -> io::Result<String> {
+        let location = self.source_site(site)?;
+        let file = site
+            .source
+            .and_then(|source| self.files.iter().find(|f| f.file == source));
+        Ok(match file {
+            Some(file) => render_span(
+                Path::new(&location.module),
+                file.syntax.source.as_bytes(),
+                location.span,
+            ),
+            None => SourceFiles::none().render(&location),
+        })
+    }
     pub fn diagnostics_for<'a>(
         &self,
         rows: impl IntoIterator<Item = &'a Refusal>,

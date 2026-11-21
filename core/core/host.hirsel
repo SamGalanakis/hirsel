@@ -8,6 +8,8 @@ pub fn write(mut f: HostFile, b: Bytes) -> Result[(), WriteError] waits
 
 pub fn open_dir(d: Dir, p: String) -> Result[Dir, IoError] waits
 
+pub fn read_only(d: Dir) -> Dir
+
 pub fn entries(d: Dir) -> Result[HostEntries, IoError] waits
 
 pub fn next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits

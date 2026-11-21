@@ -1,5 +1,6 @@
 //! FORM #50's closed provider rows. No operation allocates program storage.
 use crate::{Context, entry::*, host_file::*, provider::*};
+use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use std::ptr;
 
 fn request(operation: u8, mode: u8, site: u64, buffer: Buffer) -> Request {
@@ -11,6 +12,25 @@ fn request(operation: u8, mode: u8, site: u64, buffer: Buffer) -> Request {
         path_len: 0,
         buffer,
         site,
+    }
+}
+
+/// Deny a checked operation at entry, without issuing it to a provider.
+///
+/// # Safety
+/// The context belongs to the currently running task.
+pub(crate) unsafe fn denied(context: *mut Context, site: u64) -> Outcome {
+    // SAFETY: the caller owns this task's entry and context.
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let _commit = crate::tasks::before_provider_entry();
+        if crate::tasks::check_cancel(context, site) != 0 {
+            return CANCELLED;
+        }
+    }
+    Outcome {
+        error: IoError::from_errno(libc::EACCES),
+        ..Outcome::default()
     }
 }
 
@@ -105,6 +125,11 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             }
             OPEN | RENAME | MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | SYNC_DIR | OPEN_DIR
             | ENTRIES | STAT => {
+                let rights = handle & DIR_READ_ONLY;
+                if rights != 0 && needs_writable_dir(op, mode) {
+                    return denied(context, site);
+                }
+                let handle = handle & !DIR_READ_ONLY;
                 let provider = hirsel_core_capability_provider(context, handle);
                 request.handle = hirsel_core_capability_handle(context, handle);
                 if matches!(op, OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | STAT) {
@@ -112,7 +137,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                     request.path_len = buffer.len;
                 }
                 if matches!(op, OPEN | ENTRIES) {
-                    hirsel_core_host_file_open(context, provider, &mut request)
+                    open_file(context, provider, &mut request, rights != 0)
                 } else {
                     let mut result = drive(context, provider, &mut request, None);
                     if matches!(op, MKDTEMP | OPEN_DIR)
@@ -121,7 +146,8 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                     {
                         result.value = (*(*context).host_files)
                             .registry
-                            .grant(*provider, result.value);
+                            .grant(*provider, result.value)
+                            | rights;
                     }
                     result
                 }
@@ -204,6 +230,9 @@ pub unsafe extern "C" fn hirsel_core_host_rename(
     site: u64,
 ) -> Outcome {
     unsafe {
+        if handle & DIR_READ_ONLY != 0 {
+            return denied(context, site);
+        }
         let a = *from;
         let b = *to;
         let mut path = Vec::with_capacity(a.len + 1 + b.len);

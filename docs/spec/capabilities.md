@@ -180,6 +180,8 @@ child limit. A narrowed
 capability never permits more than its source. No operation widens a capability or
 combines two into more than either.
 
+`host.read_only(d: Dir) -> Dir` narrows a directory to read-only access without a host effect.
+
 ### CAP-8: The replay point
 
 Every input the run did not compute passes one **replay point**: each provider operation's

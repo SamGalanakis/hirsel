@@ -199,15 +199,15 @@ pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Checked {
 }
 
 /// Builds a client request from exactly sixteen caller-supplied random bytes.
-/// The host is ASCII without whitespace. Error(400) is invalid input; the
-/// outer Error is Capacity. O(host bytes). Ex: `websocket.request(host, nonce, true)?`.
-pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Result[Bytes, u16], Capacity] {
+/// The host is ASCII without whitespace. Error(400) is invalid input.
+/// Refused allocation raises Capacity. O(host bytes). Ex: `websocket.request(host, nonce, true)?`.
+pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Bytes, u16] {
     if list.len(nonce) != 16 || list.len(host) == 0 {
-        return Ok(Error(400))
+        return Error(400)
     }
     for x in host {
         if x < 33 || x > 126 {
-            return Ok(Error(400))
+            return Error(400)
         }
     }
     let mut out: Bytes = list.new()
@@ -221,9 +221,9 @@ pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Result
     }
     list.append(mut out, string.as_bytes("\r\n"))
     if list.len(out) > 8192 {
-        return Ok(Error(431))
+        return Error(431)
     }
-    Ok(Ok(take out))
+    Ok(take out)
 }
 
 pub type Control: send {
@@ -645,22 +645,22 @@ pub fn encoder(role: Role, max_frame: u64) -> Encoder {
 }
 
 /// Appends one frame to out; validates the opcode, fragmentation, close and
-/// size limits before writing. Inner Error is the close code, outer Error is
-/// Capacity. Caller retains out and its send cursor until fully written.
+/// size limits before writing. Error carries the close code. Refused allocation
+/// raises Capacity. Caller retains out and its send cursor until fully written.
 /// O(payload); max_frame + 14 output bytes. Ex: `websocket.encode(mut e, true, 2, payload, mask, mut out)?`.
-pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inline[u8, 4], mut out: Bytes) -> Result[Result[(), u16], Capacity] {
+pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inline[u8, 4], mut out: Bytes) -> Result[(), u16] {
     if e.closed {
-        return Ok(Error(1002))
+        return Error(1002)
     }
     let n = list.len(payload)
     if opcode != 0 && opcode != 1 && opcode != 2 && opcode != 8 && opcode != 9 && opcode != 10 {
-        return Ok(Error(1002))
+        return Error(1002)
     }
     if opcode >= 8 && (!fin || n > 125) {
-        return Ok(Error(1002))
+        return Error(1002)
     }
     if opcode == 0 && !e.fragmented || (opcode == 1 || opcode == 2) && e.fragmented {
-        return Ok(Error(1002))
+        return Error(1002)
     }
     let is_text = opcode == 1 || opcode == 0 && e.text
     let mut utf = if opcode == 1 {
@@ -670,15 +670,15 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
     }
     if is_text {
         let Some(validated) = validate_fragment(utf, payload) else {
-            return Ok(Error(1007))
+            return Error(1007)
         }
         utf = validated
         if fin && utf.tail[0] != 0 {
-            return Ok(Error(1007))
+            return Error(1007)
         }
     }
     if n > e.max || opcode < 8 && n > e.max - e.total {
-        return Ok(Error(1009))
+        return Error(1009)
     }
     if opcode == 8 {
         let mut c = Control(data:[0; 125], len: n)
@@ -687,7 +687,7 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
         }
         let code = close_error(c)
         if code != 0 {
-            return Ok(Error(code))
+            return Error(code)
         }
     }
     let wide: u64 = if n < 126 {
@@ -703,10 +703,7 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
     } else {
         0
     }
-    let needed = match int.checked_add(n, head) {
-        Some(x) => x,
-        None => return Error(Capacity(requested: n, available: 0))
-    }
+    let needed = n + head
     list.reserve(mut out, needed)
     let _ = list.push(mut out, opcode | if fin {
         128
@@ -752,7 +749,7 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
     if opcode == 8 {
         e.closed = true
     }
-    Ok(Ok(()))
+    Ok(())
 }
 
 /// Appends the header of one whole unmasked binary frame of n payload bytes,
@@ -760,12 +757,12 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
 /// the frame must not interrupt a fragmented message. The encoder state is
 /// unchanged, as a whole binary frame leaves it. O(1); reserves n + header.
 /// Ex: `websocket.binary_head(e, n, mut out)?`.
-pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[Result[(), u16], Capacity] {
+pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[(), u16] {
     if e.closed || e.fragmented || e.role == Client {
-        return Ok(Error(1002))
+        return Error(1002)
     }
     if n > e.max {
-        return Ok(Error(1009))
+        return Error(1009)
     }
     let wide: u64 = if n < 126 {
         0
@@ -774,10 +771,7 @@ pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[Result[(), u16]
     } else {
         8
     }
-    let needed = match int.checked_add(n, 2 + wide) {
-        Some(x) => x,
-        None => return Error(Capacity(requested: n, available: 0))
-    }
+    let needed = n + 2 + wide
     list.reserve(mut out, needed)
     let _ = list.push(mut out, 130u8)
     let tag: u8 = if wide == 0 {
@@ -792,7 +786,7 @@ pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[Result[(), u16]
         let x: u8 = int.truncate(n >> ((wide - i - 1) * 8))
         let _ = list.push(mut out, x)
     }
-    Ok(Ok(()))
+    Ok(())
 }
 
 /// Appends the inline control payload, for the sole writer to encode as Pong

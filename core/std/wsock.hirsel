@@ -408,11 +408,8 @@ pub fn encode(mut out: Outbound, fin: bool, opcode: u8, payload: Bytes) -> Resul
         }
     }
     let mut b = buffer(list.len(payload) + 14)?
-    match websocket.encode(mut out.encoder, fin, opcode, payload, mask, mut b) {
-        Ok(Ok(_)) => Ok(take b),
-        Ok(Error(code)) => Error(Protocol(code)),
-        Error(c) => Error(Allocation(c))
-    }
+    websocket.encode(mut out.encoder, fin, opcode, payload, mask, mut b) ?=> Protocol
+    Ok(take b)
 }
 
 /// Encodes x as one whole binary frame, writing its codec bytes straight
@@ -428,11 +425,7 @@ pub fn encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -> Re
         return Error(Configuration)
     }
     let mut b = buffer(n + 14)?
-    match websocket.binary_head(out.encoder, n, mut b) {
-        Ok(Ok(_)) => {},
-        Ok(Error(code)) => return Error(Protocol(code)),
-        Error(c) => return Error(Allocation(c))
-    }
+    websocket.binary_head(out.encoder, n, mut b) ?=> Protocol
     let start = list.len(b)
     match codec.encode(coding, x, mut b) {
         Ok(_) => {},
@@ -864,11 +857,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
     let deadline = At(clock, after(host.mono_ns(clock), config.upgrade_ms))
     let mut nonce = buffer(16)?
     host.random(random, mut nonce)
-    let request = match websocket.request(host_name, nonce, true) {
-        Ok(Ok(take b)) => take b,
-        Ok(Error(code)) => return Error(Http(code)),
-        Error(c) => return Error(Allocation(c))
-    }
+    let request = websocket.request(host_name, nonce, true) ?=> Http
     let mut key: Bytes = list.new()
     base64.encode(nonce, mut key)
     send_response(mut output_half, request, string.as_bytes(""), deadline)?

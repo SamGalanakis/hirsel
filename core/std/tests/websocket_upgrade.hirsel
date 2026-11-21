@@ -131,7 +131,7 @@ fn client_negotiation_tail() -> bool {
 // Mutant: wrong_client_nonce, inject_host.
 // expect: run client_request_vector() = true
 fn client_request_vector() -> bool {
-    let r = result.unwrap(websocket.request(b"server.example.com", b"the sample nonce", false))
+    let r = websocket.request(b"server.example.com", b"the sample nonce", false)
     let expected = b"GET /hirsel HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     match r {
         Ok(b) => b == expected,

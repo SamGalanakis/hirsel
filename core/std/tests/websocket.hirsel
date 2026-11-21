@@ -318,15 +318,15 @@ fn encode_vectors() -> bool {
     let mut client = websocket.encoder(Client, 256)
     let mut out: Bytes = list.new()
     let mask: Inline[u8, 4] =[0x37, 0xfa, 0x21, 0x3d]
-    let masked = result.unwrap(websocket.encode(mut client, true, 2, b"Hello", mask, mut out)) == Ok(()) && out == unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
+    let masked = websocket.encode(mut client, true, 2, b"Hello", mask, mut out) == Ok(()) && out == unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
     let mut server = websocket.encoder(Server, 256)
     list.clear(mut out)
     let no_mask: Inline[u8, 4] =[0; 4]
-    let ping = result.unwrap(websocket.encode(mut server, true, 9, unhex("04 05"), no_mask, mut out)) == Ok(())
-    let pong = result.unwrap(websocket.encode(mut server, true, 10, unhex("01"), no_mask, mut out)) == Ok(()) && out == unhex("89 02 04 05 8a 01 01")
+    let ping = websocket.encode(mut server, true, 9, unhex("04 05"), no_mask, mut out) == Ok(())
+    let pong = websocket.encode(mut server, true, 10, unhex("01"), no_mask, mut out) == Ok(()) && out == unhex("89 02 04 05 8a 01 01")
     list.clear(mut out)
-    let closed = result.unwrap(websocket.encode(mut server, true, 8, unhex("03 e8"), no_mask, mut out)) == Ok(()) && out == unhex("88 02 03 e8")
-    masked && ping && pong && closed && result.unwrap(websocket.encode(mut server, true, 2, b"x", no_mask, mut out)) == Error(1002)
+    let closed = websocket.encode(mut server, true, 8, unhex("03 e8"), no_mask, mut out) == Ok(()) && out == unhex("88 02 03 e8")
+    masked && ping && pong && closed && websocket.encode(mut server, true, 2, b"x", no_mask, mut out) == Error(1002)
 }
 
 // The sender has the same fragmentation, text and size contract as the reader.
@@ -336,12 +336,12 @@ fn encode_validation() -> bool {
     let mut e = websocket.encoder(Server, 4)
     let mut out: Bytes = list.new()
     let mask: Inline[u8, 4] =[0; 4]
-    let start = result.unwrap(websocket.encode(mut e, false, 1, unhex("e2"), mask, mut out)) == Ok(())
-    let ping = result.unwrap(websocket.encode(mut e, true, 9, b"p", mask, mut out)) == Ok(())
-    let finished = result.unwrap(websocket.encode(mut e, true, 0, unhex("82 ac"), mask, mut out)) == Ok(())
-    let invalid = result.unwrap(websocket.encode(mut e, true, 8, unhex("00"), mask, mut out)) == Error(1002)
+    let start = websocket.encode(mut e, false, 1, unhex("e2"), mask, mut out) == Ok(())
+    let ping = websocket.encode(mut e, true, 9, b"p", mask, mut out) == Ok(())
+    let finished = websocket.encode(mut e, true, 0, unhex("82 ac"), mask, mut out) == Ok(())
+    let invalid = websocket.encode(mut e, true, 8, unhex("00"), mask, mut out) == Error(1002)
     let before = list.len(out)
-    let long = result.unwrap(websocket.encode(mut e, true, 2, b"fives", mask, mut out)) == Error(1009) && list.len(out) == before
+    let long = websocket.encode(mut e, true, 2, b"fives", mask, mut out) == Error(1009) && list.len(out) == before
     start && ping && finished && invalid && long
 }
 
@@ -416,7 +416,7 @@ fn ping_preserves_assembly() -> bool {
 // discarded tail between the handshake and the first frame. Mutant: drop_tail.
 // expect: run upgrade_frame_handoff() = true
 fn upgrade_frame_handoff() -> bool {
-    let mut input = result.unwrap(result.unwrap(websocket.request(b"example.com", b"the sample nonce", false)))
+    let mut input = result.unwrap(websocket.request(b"example.com", b"the sample nonce", false))
     list.append(mut input, unhex("82 83 00 00 00 00 61 62 63"))
     let mut at = match websocket.server(input) {
         Upgraded(end, _) => end,
@@ -437,7 +437,7 @@ fn mask_word_tail() -> bool {
     let mask: Inline[u8, 4] =[0x37, 0xfa, 0x21, 0x3d]
     let mut enc = websocket.encoder(Client, 256)
     let mut out: Bytes = list.new()
-    if result.unwrap(websocket.encode(mut enc, true, 2, plain, mask, mut out)) != Ok(()) || out != wire {
+    if websocket.encode(mut enc, true, 2, plain, mask, mut out) != Ok(()) || out != wire {
         return false
     }
     for cut in 0u64 .. list.len(wire) {

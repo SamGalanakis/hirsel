@@ -297,3 +297,27 @@ fn sealed(tasks: Tasks) -> bool waits {
     }
     held && both && closed_writer(o)
 }
+
+// NOTES 20: a Call given to another port's reply is consumed as a dropped
+// one: the reply is Withdrawn and its writer sees Closed with nothing written.
+// expect: run foreign_call(tasks) = true
+fn foreign_call(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let (_, t) = provide.stderr(bytes 64)
+    let mut served = take s
+    let mut other = take t
+    let child = task.spawn(tasks, bytes 65536, o, closed_writer)
+    let refused = match provide.next(mut served) {
+        Some(take call) => {
+            match provide.reply(mut other, take call, provide.stream_reply(Done)) {
+                Error(Withdrawn()) => true,
+                _ => false
+            }
+        },
+        None => false
+    }
+    let closed = result.unwrap(task.join(take child))
+    let _ = take served
+    let _ = take other
+    refused && closed
+}

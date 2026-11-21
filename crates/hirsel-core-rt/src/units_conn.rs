@@ -11,7 +11,7 @@
 //! wait, the service of waiting sends, a withdrawal, the seal, the last client
 //! and the cleaning's end.
 use super::super::sync::{AtomicU64, Mutex};
-use super::{Account, Arrival, ArrivalRef, Body, Cap, Credit, Released, Settle, UnitCtx, Value, repay};
+use super::{Account, Arrival, ArrivalRef, Body, Cap, Credit, CrossRoom, Released, Settle, UnitCtx, Value, repay};
 use crate::limit::Payer;
 use std::{
     cell::{Cell, UnsafeCell},
@@ -121,6 +121,10 @@ pub(crate) struct ConnCore {
     hot: Hot,
     spares: Box<[ArrivalSlot]>,
     flat: FlatSlots,
+    /// Slot 0's room storage, kept from its last take for its next send.
+    /// Only the holder of slot 0's reservation touches it: the taker stores
+    /// it before the release, and a sender takes it after its admission.
+    spare: UnsafeCell<CrossRoom>,
     pub(crate) stride: usize,
     pub(crate) seqs: Box<[[u64; 4]]>,
     pub(crate) socket_offsets: Box<[u64]>,
@@ -319,7 +323,13 @@ impl Inbox {
             return Some(Err(e));
         }
         let slot = front.slot;
-        side.taken.pop_front();
+        let taken = side.taken.pop_front().unwrap();
+        if slot == 0 {
+            if let Some(room) = taken.value.into_room() {
+                // SAFETY: this taker holds slot 0's reservation until the release.
+                unsafe { *c.spare.get() = room };
+            }
+        }
         side.freed += 1;
         let w = c.release_item(slot, bytes);
         if w & WAITERS != 0 {
@@ -444,6 +454,7 @@ impl UnitCtx {
                         Box::<[UnsafeCell<MaybeUninit<u8>>]>::new_uninit_slice(bytes).assume_init()
                     }),
                 },
+                spare: UnsafeCell::new(Box::default()),
                 stride,
                 seqs: owners
                     .iter()
@@ -509,7 +520,12 @@ impl UnitCtx {
             Outgoing::Cross(source) => unsafe {
                 #[cfg(test)]
                 let tag = source.tag;
-                let room = source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes);
+                let room = if index == 0 {
+                    // SAFETY: this sender holds slot 0's reservation.
+                    source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes, &mut *c.spare.get())
+                } else {
+                    source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes, &mut Box::default())
+                };
                 let v = Value::cross(room, source.sockets);
                 #[cfg(test)]
                 let v = Value { tag, ..v };

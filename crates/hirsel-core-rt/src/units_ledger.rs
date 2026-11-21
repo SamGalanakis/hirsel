@@ -335,6 +335,14 @@ impl Value {
         }
     }
 
+    /// A taken item's nonempty room storage, for reuse.
+    fn into_room(self) -> Option<CrossRoom> {
+        match self.data {
+            ValueData::Cross(room) if !room.is_empty() => Some(room),
+            _ => None,
+        }
+    }
+
     fn cross_parts(&self) -> (u64, *const u8) {
         let room = self.cross_room().unwrap();
         let content = if room.is_empty() {

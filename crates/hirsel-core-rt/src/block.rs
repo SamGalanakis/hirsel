@@ -145,8 +145,13 @@ pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
     // SAFETY: caller supplies exclusive cleaned storage and its exact charge.
     unsafe { free_with(payload, charge, None) }
 }
+/// As `free`; with the running task's live context the refund and the page
+/// release take their local paths when that task holds the block's payer
+/// and heap.
+/// # Safety
+/// As `free`, and `context` (if any) is the running task's.
 #[inline(always)]
-unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>) {
+pub(crate) unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>) {
     // SAFETY: this live block pins page metadata. Resolve the logical refund
     // first. The page remains live until the physical slot is returned.
     unsafe {

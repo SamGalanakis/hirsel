@@ -225,13 +225,15 @@ impl CrossSend {
     }
 
     /// The connection owns the destination slot. Only the flat bytes go
-    /// there; sequence contents occupy the connection's room.
+    /// there; sequence contents occupy the connection's room, in `spare`
+    /// when it is large enough (it is then taken).
     pub(crate) unsafe fn copy_into(
         &self,
         slot: *mut u8,
         stride: usize,
         seqs: &[[u64; 4]],
         charge: u64,
+        spare: &mut Box<[MaybeUninit<u64>]>,
     ) -> Box<[MaybeUninit<u64>]> {
         // SAFETY: the reserved slot has the connection's item layout. The
         // sender pins every source buffer through publication.
@@ -250,7 +252,12 @@ impl CrossSend {
             if bytes == 0 && charge == 0 {
                 return Box::default();
             }
-            let mut room = Box::new_uninit_slice(1 + bytes.div_ceil(std::mem::size_of::<u64>()));
+            let words = 1 + bytes.div_ceil(std::mem::size_of::<u64>());
+            let mut room = if spare.len() >= words {
+                std::mem::take(spare)
+            } else {
+                Box::new_uninit_slice(words)
+            };
             room[0].write(charge);
             let to = room.as_mut_ptr().add(1).cast::<u8>();
             let mut at = 0;
@@ -267,8 +274,9 @@ impl CrossSend {
 }
 
 /// Free the seq buffers of a value whose content has been copied out; its
-/// clients have moved and are not touched.
-unsafe fn free_owners(value: *const u8, owners: &[[u64; 4]]) {
+/// clients have moved and are not touched. `context` is the running task's
+/// when the caller has it.
+unsafe fn free_owners(context: Option<&Context>, value: *const u8, owners: &[[u64; 4]]) {
     // SAFETY: the value owns each nonempty buffer, charged at its capacity.
     unsafe {
         for o in owners {
@@ -277,7 +285,7 @@ unsafe fn free_owners(value: *const u8, owners: &[[u64; 4]]) {
                 let cap = word(at.add(16));
                 if cap != 0 {
                     let p = word(at) as *mut u8;
-                    block::free(ptr::NonNull::new_unchecked(p), round8(cap * o[3]));
+                    block::free_with(ptr::NonNull::new_unchecked(p), round8(cap * o[3]), context);
                 }
             }
         }
@@ -745,7 +753,7 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             &mut (*tasks::lang_unit_for(task)).ctx
         }) {
             Sent::Accepted => {
-                free_owners(value, owners);
+                free_owners(Some(&*context), value, owners);
                 return out(0);
             }
             Sent::Bounds => {
@@ -779,7 +787,7 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             match frame.settled.take() {
                 Some(Took::Accepted(_)) => {
                     u.waits -= 1;
-                    free_owners(value, owners);
+                    free_owners(Some(&*context), value, owners);
                     return out(0);
                 }
                 Some(Took::Closed(_)) => {
@@ -1074,7 +1082,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let (k, hctx) = u.ctx.spawn_unit();
         let data = pack(input, x.bytes, x.owners());
         let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
-        free_owners(input, x.owners());
+        free_owners(None, input, x.owners());
         let shared = Arc::new(HelperShared {});
         let h = Box::into_raw(Box::new(HelperH {
             k,
@@ -1212,7 +1220,7 @@ fn helper_main(
             let data = pack(result.as_ptr(), rb, &ro);
             let sockets = detach_sockets(&mut context, result.as_ptr(), socket_offsets(&ro));
             ret.set_item(data, sockets);
-            free_owners(result.as_ptr(), &ro);
+            free_owners(None, result.as_ptr(), &ro);
         }
         RESULTS
             .lock()

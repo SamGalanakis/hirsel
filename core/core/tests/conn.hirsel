@@ -457,3 +457,148 @@ fn local_tasks_and_helpers_share_one_account(tasks: Tasks) -> bool waits {
     }
     result.unwrap(checked)
 }
+
+// 64 bytes whose i-th byte is i × 31 + seed (mod 256).
+fn filled(seed: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(64)
+    for i in 0u64 .. 64 {
+        list.push(mut b, int.truncate(i * 31 + seed))
+    }
+    b
+}
+
+fn holds(b: Bytes, seed: u64) -> bool {
+    let mut ok = list.len(b) == 64
+    for i in 0u64 .. 64 {
+        let want: u8 = int.truncate(i * 31 + seed)
+        ok = ok && b[i] == want
+    }
+    ok
+}
+
+// True when the running bound cannot admit one more word.
+fn bound_full() -> bool {
+    let mut probe: Bytes = list.new()
+    match list.try_reserve(mut probe, 8) {
+        Error(_) => true,
+        Ok(()) => false,
+    }
+}
+
+fn bound_has(n: u64) -> bool {
+    let mut probe: Bytes = list.new()
+    match list.try_reserve(mut probe, n) {
+        Error(_) => false,
+        Ok(()) => true,
+    }
+}
+
+// Takes two items from its own connection (bytes 64, one slot, so the
+// second send goes into the room the first take left), sees Closed once the
+// owner drops its client, and drops its inbox: the connection is gone. Each
+// item is charged at the take to the receiver's bound of 128, round8(64) = 64,
+// so the bound is full; both keep their bytes, and dropping one returns 64.
+fn keeper(take hello: Client[Client[Bytes]]) -> u64 waits {
+    let (c, i): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes 64))
+    result.unwrap(conn.send(hello, take c))
+    let kept = bound bytes 128 {
+        let a = result.unwrap(conn.receive(i))
+        let b = result.unwrap(conn.receive(i))
+        let closed = match conn.receive(i) {
+            Error(Closed) => true,
+            _ => false,
+        }
+        {
+            let gone = take i
+        }
+        let full = bound_full()
+        let same = holds(a, 1) && holds(b, 101)
+        {
+            let gone = take a
+        }
+        closed && full && same && bound_has(64) && holds(b, 101)
+    }
+    match kept {
+        Ok(true) => 1,
+        _ => 0,
+    }
+}
+
+// A received item is the receiver's own: it keeps its content after the
+// connection's room is reused by the next send and after the connection is gone.
+// expect: run received_bytes_outlive_their_connection(tasks) = true
+fn received_bytes_outlive_their_connection(tasks: Tasks) -> bool waits {
+    let (hello, hello_in): (Client[Client[Bytes]], Inbox[Client[Bytes]]) = result.unwrap(conn.new(1, bytes 0))
+    let t = result.unwrap(task.spawn_unit(tasks, bytes 4096, take hello, keeper))
+    let c = result.unwrap(conn.receive(hello_in))
+    result.unwrap(conn.send(c, filled(1)))
+    result.unwrap(conn.send(c, filled(101)))
+    {
+        let gone = take c
+    }
+    result.unwrap(task.join(take t)) == 1
+}
+
+type Relay: cross {
+    hello: Client[Client[Bytes]],
+    next: Client[Bytes]
+}
+
+// Takes one item under a bound of 64 (full at the take), waits for its
+// connection to close and drops it, then sends the item on: the send's
+// acceptance returns the 64.
+fn relay(take r: Relay) -> u64 waits {
+    let Relay(hello: hello, next: next) = take r
+    let (c, i): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes 64))
+    result.unwrap(conn.send(hello, take c))
+    let passed = bound bytes 64 {
+        let b = result.unwrap(conn.receive(i))
+        let closed = match conn.receive(i) {
+            Error(Closed) => true,
+            _ => false,
+        }
+        {
+            let gone = take i
+        }
+        let full = bound_full()
+        result.unwrap(conn.send(next, take b))
+        closed && full && bound_has(64)
+    }
+    match passed {
+        Ok(true) => 1,
+        _ => 0,
+    }
+}
+
+// The third unit takes the forwarded item under a bound of 64, after the
+// first connection is gone, and finds the sender's bytes.
+fn sink(take hello: Client[Client[Bytes]]) -> u64 waits {
+    let (c, i): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes 64))
+    result.unwrap(conn.send(hello, take c))
+    let got = bound bytes 64 {
+        let b = result.unwrap(conn.receive(i))
+        bound_full() && holds(b, 7)
+    }
+    match got {
+        Ok(true) => 1,
+        _ => 0,
+    }
+}
+
+// A received item sent on to a third unit moves with its content: each
+// unit is charged 64 at its take, and the relay's send returns its 64.
+// expect: run received_bytes_cross_to_a_third_unit(tasks) = true
+fn received_bytes_cross_to_a_third_unit(tasks: Tasks) -> bool waits {
+    let (sink_hello, sink_in): (Client[Client[Bytes]], Inbox[Client[Bytes]]) = result.unwrap(conn.new(1, bytes 0))
+    let s = result.unwrap(task.spawn_unit(tasks, bytes 4096, take sink_hello, sink))
+    let next = result.unwrap(conn.receive(sink_in))
+    let (relay_hello, relay_in): (Client[Client[Bytes]], Inbox[Client[Bytes]]) = result.unwrap(conn.new(1, bytes 0))
+    let r = result.unwrap(task.spawn_unit(tasks, bytes 4096, Relay(hello: take relay_hello, next: take next), relay))
+    let c = result.unwrap(conn.receive(relay_in))
+    result.unwrap(conn.send(c, filled(7)))
+    {
+        let gone = take c
+    }
+    let relayed = result.unwrap(task.join(take r)) == 1
+    relayed && result.unwrap(task.join(take s)) == 1
+}

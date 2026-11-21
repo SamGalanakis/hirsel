@@ -6,6 +6,10 @@ pub fn read(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits
 
 pub fn write(mut f: HostFile, b: Bytes) -> Result[(), WriteError] waits
 
+pub fn read_at(mut f: HostFile, at: u64, mut buf: Bytes) -> Result[u64, IoError] waits
+
+pub fn write_at(mut f: HostFile, at: u64, b: Bytes) -> Result[(), WriteError] waits
+
 pub fn close(take f: HostFile) -> Result[(), IoError] waits
 
 pub fn try_lock(mut f: HostFile) -> Result[bool, IoError] waits

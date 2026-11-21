@@ -776,7 +776,7 @@ impl Args {
 /// What an operation of a given op tag carries in its outcome.
 pub fn writes(op: u8) -> bool {
     use crate::op::*;
-    matches!(op, WRITE | STDOUT | STDERR | RANDOM)
+    matches!(op, WRITE | WRITE_AT | STDOUT | STDERR | RANDOM)
 }
 /// One family byte followed by the 16 IP octets.
 pub const RESOLVED_IP_LEN: usize = 17;
@@ -785,7 +785,8 @@ pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
     matches!(
         op,
-        READ | MKDTEMP
+        READ | READ_AT
+            | MKDTEMP
             | RANDOM
             | LISTEN
             | ACCEPT
@@ -897,7 +898,7 @@ impl Out {
     /// Total payload length determines whether DATA frames follow.
     fn needs(&self, op: u8) -> Result<usize, Corrupt> {
         match op {
-            op::READ | op::RECV_BOUNDED | op::STDIN_READ if self.status == OK => {
+            op::READ | op::READ_AT | op::RECV_BOUNDED | op::STDIN_READ if self.status == OK => {
                 usize::try_from(self.value).map_err(|_| Corrupt)
             }
             op::RESOLVE if self.status == OK => usize::try_from(self.value)

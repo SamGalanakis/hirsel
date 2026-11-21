@@ -5,7 +5,9 @@
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28, Resolve 40.
-   Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
+   ReadAt 37, WriteAt 38. Positioned requests carry an eight-byte little-endian
+   offset in path and the original open mode in mode.
+   Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
 /* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code).
    Network outcomes use 1 Denied, 2 Refused, 3 Unreachable, 4 InUse, 5 Reset,
@@ -59,6 +61,7 @@ HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProv
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_io(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_clock(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_at(HirselCoreContext *, uint8_t op, uint64_t handle, uint64_t at, HirselCoreBuffer *operand, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
 /* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.

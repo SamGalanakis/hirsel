@@ -105,6 +105,18 @@ impl FunctionEmitter<'_> {
                 operands.push(word(at));
                 self.native_call(op.adapter_symbol(), &results, &operands)
             }
+            HostOp::ReadAt | HostOp::WriteAt => self.native_call(
+                "hirsel_core_host_at",
+                &results,
+                &[
+                    ptr(CONTEXT),
+                    zeroext(Type::I8, int(op.code())),
+                    word(args[0].clone()),
+                    word(args[1].clone()),
+                    ptr(args[2].clone()),
+                    word(at),
+                ],
+            ),
             HostOp::Rename => self.native_call(
                 "hirsel_core_host_rename",
                 &results,

@@ -12,6 +12,7 @@ use std::{
 struct File {
     provider: Provider,
     handle: u64,
+    mode: u8,
 }
 // SAFETY: transferring the opaque callback descriptor does not access its
 // state. The runtime invokes it under the run's provider calling contract.
@@ -156,7 +157,11 @@ impl Registry {
         id
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.insert_grant(File { provider, handle })
+        self.insert_grant(File {
+            provider,
+            handle,
+            mode: 0,
+        })
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         let file = Arc::as_ptr(&self.0.lock().unwrap().grants[&handle]);
@@ -233,6 +238,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
     // SAFETY: exclusive operation borrows; no registry borrow spans a callback.
     unsafe {
         let mut issued = None;
+        let mode = (*request).mode;
         let mut result = drive(context, provider, request, Some(&mut issued));
         let Some(issued) = issued else {
             return result;
@@ -242,6 +248,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
             result.value = (*(*context).host_files).registry.insert(File {
                 provider,
                 handle: result.value,
+                mode,
             });
         } else if issued.status == 0 && issued.error == IoError::OK {
             // Delivery failed after a committed open: the unpublished file is ours.
@@ -250,6 +257,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
                 File {
                     provider,
                     handle: issued.value,
+                    mode,
                 },
             );
         }
@@ -282,6 +290,9 @@ pub unsafe extern "C" fn hirsel_core_host_file(
             (*registry).registry.file(file)
         };
         (*request).handle = owned.handle;
+        if matches!((*request).operation, READ_AT | WRITE_AT) {
+            (*request).mode = owned.mode;
+        }
         if (*request).operation != CLOSE {
             return drive(context, &owned.provider, request, None);
         }

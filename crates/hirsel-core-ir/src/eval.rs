@@ -121,13 +121,55 @@ struct EvalSecret {
 }
 
 enum Node {
-    File(Vec<u8>),
+    File(ModelFile),
     Dir,
 }
 struct OpenFile {
     key: (u64, Vec<u8>),
-    at: usize,
+    at: u64,
     locked: bool,
+    mode: u8,
+}
+const FILE_PAGE: u64 = 4096;
+
+#[derive(Default)]
+struct ModelFile {
+    len: u64,
+    pages: BTreeMap<u64, Box<[u8; FILE_PAGE as usize]>>,
+}
+
+impl ModelFile {
+    fn read(&self, at: u64, count: usize) -> Vec<u8> {
+        let mut bytes = vec![0; count];
+        Self::visit(at, count, |page, from, to, pos| {
+            if let Some(page) = self.pages.get(&page) {
+                bytes[pos..pos + to - from].copy_from_slice(&page[from..to]);
+            }
+        });
+        bytes
+    }
+
+    fn write(&mut self, at: u64, bytes: &[u8]) {
+        Self::visit(at, bytes.len(), |page, from, to, pos| {
+            let page = self
+                .pages
+                .entry(page)
+                .or_insert_with(|| Box::new([0; FILE_PAGE as usize]));
+            page[from..to].copy_from_slice(&bytes[pos..pos + to - from]);
+        });
+        self.len = self.len.max(at + bytes.len() as u64);
+    }
+
+    fn visit(at: u64, count: usize, mut f: impl FnMut(u64, usize, usize, usize)) {
+        let mut pos = 0;
+        while pos < count {
+            let offset = at + pos as u64;
+            let from = (offset % FILE_PAGE) as usize;
+            let n = (count - pos).min(FILE_PAGE as usize - from);
+            f(offset / FILE_PAGE, from, from + n, pos);
+            pos += n;
+        }
+    }
 }
 /// The model host's largest block: an admitted allocation above it stops the run.
 const HOST_BYTES: u64 = 1 << 32;
@@ -2399,15 +2441,18 @@ impl Machine<'_> {
                     (Some(Node::Dir), _) => return Ok(error(DENIED)),
                     (None, 0) => return Ok(error(NOT_FOUND)),
                     (Some(_), 3) => return Ok(error(EXISTS)),
-                    (Some(Node::File(c)), 2) => c.len(),
+                    (Some(Node::File(c)), 2) => c.len,
                     (Some(_), 0) => 0,
                     _ => {
-                        let keep = a[2] == 2;
-                        let n = w.nodes.entry(key.clone()).or_insert(Node::File(Vec::new()));
+                        let keep = matches!(a[2], 2 | 4);
+                        let n = w
+                            .nodes
+                            .entry(key.clone())
+                            .or_insert(Node::File(ModelFile::default()));
                         if let Node::File(c) = n
                             && !keep
                         {
-                            c.clear();
+                            *c = ModelFile::default();
                         }
                         0
                     }
@@ -2416,38 +2461,66 @@ impl Machine<'_> {
                     key,
                     at,
                     locked: false,
+                    mode: a[2] as u8,
                 }));
                 ok(FILE_BASE + w.files.len() as u64 - 1, 0)
             }
-            HostOp::Read => {
-                let (_, data, len, cap) = self.carrier(a[1]);
+            HostOp::Read | HostOp::ReadAt => {
+                let positioned = op == HostOp::ReadAt;
+                let buffer = a[if positioned { 2 } else { 1 }];
+                let (_, data, len, cap) = self.carrier(buffer);
                 let i = file(a[0]);
                 let f = self.world.files[i].as_ref().expect("an open file");
                 let Some(Node::File(c)) = self.world.nodes.get(&f.key) else {
                     return Ok(error(NOT_FOUND));
                 };
-                let n = (cap.saturating_sub(len) as usize).min(c.len() - f.at);
-                let bytes = c[f.at..f.at + n].to_vec();
+                if positioned && !matches!(f.mode, 0 | 4) {
+                    return Ok(error(DENIED));
+                }
+                let at = if positioned { a[1] } else { f.at };
+                let n = cap.saturating_sub(len).min(c.len.saturating_sub(at)) as usize;
+                let bytes = c.read(at, n);
                 if n > 0 {
                     self.put(data + len, &bytes);
-                    self.store(a[1] + 8, 8, len + n as u64);
+                    self.store(buffer + 8, 8, len + n as u64);
                 }
-                self.world.files[i].as_mut().unwrap().at += n;
+                if !positioned {
+                    self.world.files[i].as_mut().unwrap().at += n as u64;
+                }
                 ok(n as u64, 0)
             }
-            HostOp::Write => {
-                let (bytes, ..) = self.carrier(a[1]);
+            HostOp::Write | HostOp::WriteAt => {
+                let positioned = op == HostOp::WriteAt;
+                let (bytes, ..) = self.carrier(a[if positioned { 2 } else { 1 }]);
+                if positioned && a[1].checked_add(bytes.len() as u64).is_none() {
+                    return Err(Stop::Cause("Bounds"));
+                }
                 let i = file(a[0]);
                 let f = self.world.files[i].as_mut().expect("an open file");
                 let Some(Node::File(c)) = self.world.nodes.get_mut(&f.key) else {
                     return Ok(error(NOT_FOUND));
                 };
-                let end = f.at + bytes.len();
-                if c.len() < end {
-                    c.resize(end, 0);
+                if positioned && !matches!(f.mode, 1 | 3 | 4) {
+                    return Ok(error(DENIED));
                 }
-                c[f.at..end].copy_from_slice(&bytes);
-                f.at = end;
+                if bytes.is_empty() {
+                    return Ok(ok(0, 0));
+                }
+                let at = if positioned {
+                    a[1]
+                } else if f.mode == 2 {
+                    c.len
+                } else {
+                    f.at
+                };
+                let end = at + bytes.len() as u64;
+                if end > i64::MAX as u64 {
+                    return Ok(vec![0, 5, 27, 0]); // Other(EFBIG)
+                }
+                c.write(at, &bytes);
+                if !positioned {
+                    f.at = end;
+                }
                 ok(0, bytes.len() as u64)
             }
             HostOp::Close => {

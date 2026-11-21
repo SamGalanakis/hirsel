@@ -388,6 +388,8 @@ tags!(HostOp {
     34 => EnvLen,
     35 => EnvName,
     36 => EnvNarrow,
+    37 => ReadAt,
+    38 => WriteAt,
     40 => Resolve,
     41 => NetNarrowResolve,
 });

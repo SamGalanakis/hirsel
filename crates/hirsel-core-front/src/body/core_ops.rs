@@ -151,6 +151,8 @@ operations! {
     ("host", "open", Lane::Runtime(Kernel::Host(HostOp::Open)), "B", "core-ops-914", false),
     ("host", "read", Lane::Runtime(Kernel::Host(HostOp::Read)), "B", "core-ops-914", false),
     ("host", "write", Lane::Runtime(Kernel::Host(HostOp::Write)), "B", "core-ops-914", false),
+    ("host", "read_at", Lane::Runtime(Kernel::Host(HostOp::ReadAt)), "B", "fs-ops-1502", false),
+    ("host", "write_at", Lane::Runtime(Kernel::Host(HostOp::WriteAt)), "B", "fs-ops-1502", false),
     ("host", "close", Lane::Runtime(Kernel::Host(HostOp::Close)), "B", "core-ops-914", false),
     ("host", "try_lock", Lane::Runtime(Kernel::Host(HostOp::TryLock)), "B", "core-ops-914", false),
     ("host", "unlock", Lane::Runtime(Kernel::Host(HostOp::Unlock)), "B", "core-ops-914", false),
@@ -2659,6 +2661,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             op,
             HostOp::Read
                 | HostOp::Write
+                | HostOp::ReadAt
+                | HostOp::WriteAt
                 | HostOp::Close
                 | HostOp::TryLock
                 | HostOp::Unlock
@@ -2671,7 +2675,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let mut args = [Arg::Value(handle); 3];
         let len = match op {
-            HostOp::Rename => {
+            HostOp::Rename | HostOp::ReadAt | HostOp::WriteAt => {
                 args[1] = Arg::Value(vals[1]?);
                 args[2] = Arg::Value(vals[2]?);
                 3
@@ -2725,7 +2729,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_store(to, &[], u64t, value, n);
                     }
                 }
-                HostOp::Read | HostOp::Mkdtemp | HostOp::Random => {
+                HostOp::Read | HostOp::ReadAt | HostOp::Mkdtemp | HostOp::Random => {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n)
                 }
                 HostOp::TryLock => {
@@ -2739,7 +2743,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if let Some(to) =
                     cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
                 {
-                    if matches!(op, HostOp::Write | HostOp::Stdout | HostOp::Stderr) {
+                    if matches!(
+                        op,
+                        HostOp::Write | HostOp::WriteAt | HostOp::Stdout | HostOp::Stderr
+                    ) {
                         cx.runtime_write_error(to, ty, written, error, code, n);
                     } else {
                         cx.runtime_io_error(to, error, code, n);

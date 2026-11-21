@@ -46,6 +46,13 @@ pub struct Request {
     pub buffer: Buffer,
     pub site: u64,
 }
+impl Request {
+    pub(crate) fn offset(&self) -> u64 {
+        // SAFETY: positioned requests pin eight little-endian offset bytes.
+        u64::from_le_bytes(unsafe { self.path.cast::<[u8; 8]>().read() })
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Outcome {
@@ -211,16 +218,26 @@ unsafe fn drive_with(
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
             }
-            if operation == MKDTEMP
-                && (*request)
-                    .buffer
-                    .len
-                    .checked_add(32)
-                    .is_none_or(|n| n > (*request).buffer.capacity)
+            let request = &*request;
+            if (operation == MKDTEMP
+                && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
+                || (operation == WRITE_AT
+                    && request
+                        .offset()
+                        .checked_add(request.buffer.len as u64)
+                        .is_none())
             {
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
                 return CANCELLED;
             }
+        }
+        if (operation == READ_AT && !matches!((*request).mode, 0 | 4))
+            || (operation == WRITE_AT && !matches!((*request).mode, 1 | 3 | 4))
+        {
+            return Outcome {
+                error: IoError::from_errno(libc::EACCES),
+                ..Outcome::default()
+            };
         }
         if !authorize(&*provider, &mut *request) {
             return crate::net::DENIED;

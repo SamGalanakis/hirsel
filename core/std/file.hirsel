@@ -11,8 +11,8 @@
 //
 // OpenMode (core.md, "Host"): Read opens an existing file for reading; Write creates or
 // empties a file for writing; Append creates or opens one for writing at the end;
-// CreateNew creates one for writing and fails with Exists. There is no read-write mode,
-// so a program that reads back what it wrote opens the file twice.
+// CreateNew creates one for writing and fails with Exists; ReadWrite opens for reading and
+// writing and creates the file when absent.
 //
 // IoError has no arm for Capacity or invalid data, so the operations that allocate
 // return `file.Error`.
@@ -43,6 +43,16 @@ pub fn read_into(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits 
 /// Alloc: nothing. Cost: O(len). Ex: `std.file.write_all(mut dst, list.slice(buf, 0, 17))?`
 pub fn write_all(mut f: HostFile, data: Bytes) -> Result[(), WriteError] waits {
     host.write(mut f, data)
+}
+
+/// Appends up to the spare capacity of buf by reading at a byte offset.
+pub fn read_at(mut f: HostFile, at: u64, mut buf: Bytes) -> Result[u64, IoError] waits {
+    host.read_at(mut f, at, mut buf)
+}
+
+/// Writes data at a byte offset. Errors report the committed prefix.
+pub fn write_at(mut f: HostFile, at: u64, data: Bytes) -> Result[(), WriteError] waits {
+    host.write_at(mut f, at, data)
 }
 
 /// Closes f and reports the host's close error. `host.close`. Either way f is ended and

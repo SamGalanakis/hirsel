@@ -158,7 +158,7 @@ pub type RuleError = Invalid | Capacity(Capacity)
 
 pub opaque resource type HostFile
 
-pub type OpenMode = Read | Write | Append | CreateNew
+pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite
 
 pub type Capacity {
     requested: u64,

@@ -113,6 +113,8 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "stopped", 1),
     ("host", "sync", 1),
     ("host", "sync_dir", 1),
+    ("host", "read_at", 1),
+    ("host", "write_at", 1),
     ("host", "try_lock", 1),
     ("host", "unlock", 1),
     ("host", "wall_ms", 1),

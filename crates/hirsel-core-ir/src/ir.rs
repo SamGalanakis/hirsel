@@ -1005,6 +1005,8 @@ pub enum HostOp {
     SendSecret = 23,
     SecretSeal = 30,
     SecretNarrow = 31,
+    ReadAt = 37,
+    WriteAt = 38,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     NetNarrowResolve = 41,
     StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
@@ -1057,6 +1059,8 @@ impl HostOp {
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
+        HostOp::ReadAt,
+        HostOp::WriteAt,
         HostOp::Resolve,
         HostOp::NetNarrowResolve,
         HostOp::StdinRead,
@@ -1074,6 +1078,8 @@ impl HostOp {
         match self {
             HostOp::Open => "host_open",
             HostOp::Read => "host_read",
+            HostOp::ReadAt => "host_read_at",
+            HostOp::WriteAt => "host_write_at",
             HostOp::Write => "host_write",
             HostOp::Close => "host_close",
             HostOp::TryLock => "host_try_lock",
@@ -1407,6 +1413,7 @@ impl RtOp {
                     }
                     HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
+                    HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
                     HostOp::Close

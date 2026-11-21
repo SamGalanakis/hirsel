@@ -140,6 +140,7 @@ impl OsProvider {
                     1 => libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
                     2 => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                    4 => libc::O_RDWR | libc::O_CREAT,
                     _ => unreachable!(),
                 };
                 let fd = beneath(self.directories[&request.handle].as_raw_fd(), path, flags)?;
@@ -147,20 +148,29 @@ impl OsProvider {
                 self.files.insert(id, fd);
                 out.value = id;
             }
-            READ => {
+            READ | READ_AT => {
                 let fd = self.files[&request.handle].as_raw_fd();
+                let offset = (request.operation == READ_AT).then(|| request.offset());
                 let b = &mut request.buffer;
                 // A single read either commits a prefix or fails without moving the
                 // cursor. No read_exact retry can discard an already consumed prefix.
                 if b.capacity > b.len {
                     // SAFETY: spare capacity is writable; fd is held by this provider.
-                    let n = unsafe { libc::read(fd, b.data.add(b.len).cast(), b.capacity - b.len) };
+                    let n = unsafe {
+                        let data = b.data.add(b.len).cast();
+                        let spare = b.capacity - b.len;
+                        match offset {
+                            Some(at) if at > i64::MAX as u64 => 0,
+                            Some(at) => libc::pread(fd, data, spare, at as i64),
+                            None => libc::read(fd, data, spare),
+                        }
+                    };
                     let n = syscall(n)? as usize;
                     b.len += n;
                     out.value = n as u64;
                 }
             }
-            WRITE => {
+            WRITE | WRITE_AT => {
                 return Ok(write_request(
                     self.files[&request.handle].as_raw_fd(),
                     request,
@@ -716,7 +726,8 @@ fn write_request(fd: i32, request: &Request) -> Outcome {
         // SAFETY: the caller pins the readable input bytes through delivery.
         unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
     };
-    write_all(fd, bytes)
+    let offset = (request.operation == WRITE_AT).then(|| request.offset());
+    write_all_from(fd, bytes, offset)
 }
 
 fn random(request: &mut Request) -> io::Result<Outcome> {
@@ -753,10 +764,33 @@ fn syscall(rc: isize) -> io::Result<isize> {
     }
 }
 pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
+    write_all_from(fd, bytes, None)
+}
+
+fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: live descriptor and remaining readable bytes.
-        let n = unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        let n = unsafe {
+            let data = bytes[written..].as_ptr().cast();
+            let len = bytes.len() - written;
+            match offset {
+                Some(at) => {
+                    let Some(at) = at
+                        .checked_add(written as u64)
+                        .and_then(|n| i64::try_from(n).ok())
+                    else {
+                        return Outcome {
+                            written: written as u64,
+                            error: IoError::from_errno(libc::EFBIG),
+                            ..Outcome::default()
+                        };
+                    };
+                    libc::pwrite(fd, data, len, at)
+                }
+                None => libc::write(fd, data, len),
+            }
+        };
         if n < 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::EINTR) {

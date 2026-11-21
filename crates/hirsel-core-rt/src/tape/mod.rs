@@ -787,9 +787,14 @@ unsafe fn canonical(r: &Request) -> Args {
                 a.extend_from_slice(path);
                 a
             }
-            READ | RANDOM => ((r.buffer.capacity - r.buffer.len) as u64)
+            READ | RANDOM => (r.buffer.capacity.saturating_sub(r.buffer.len) as u64)
                 .to_le_bytes()
                 .to_vec(),
+            READ_AT => {
+                let spare = (r.buffer.capacity.saturating_sub(r.buffer.len) as u64).to_le_bytes();
+                return Args::of_parts(&[path, &spare]);
+            }
+            WRITE_AT => return Args::of_parts(&[path, bytes]),
             WRITE | STDOUT | STDERR | MKDTEMP => bytes.to_vec(),
             MKDIR | REMOVE | REMOVE_TREE | RENAME => path.to_vec(),
             SLEEP_UNTIL => bytes.to_vec(),

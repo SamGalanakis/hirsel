@@ -189,6 +189,7 @@ core@1/host/mkdtemp
 core@1/host/mono_ns
 core@1/host/open
 core@1/host/read
+core@1/host/read_at
 core@1/host/remove
 core@1/host/remove_tree
 core@1/host/rename
@@ -204,6 +205,7 @@ core@1/host/try_lock
 core@1/host/unlock
 core@1/host/wall_ms
 core@1/host/write
+core@1/host/write_at
 core@1/indexed/get
 # DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
 core@1/inline/word_be

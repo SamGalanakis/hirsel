@@ -139,6 +139,38 @@ pub unsafe extern "C" fn hirsel_core_host_op(
     }
 }
 
+/// Positioned I/O carries its offset in the request's eight-byte path operand.
+///
+/// # Safety
+/// The checked operation owns the file key and supplies a live Bytes carrier.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_at(
+    context: *mut Context,
+    op: u8,
+    handle: u64,
+    at: u64,
+    operand: *mut Buffer,
+    site: u64,
+) -> Outcome {
+    let offset = at.to_le_bytes();
+    // SAFETY: the checked row pins the carrier and the offset through delivery.
+    unsafe {
+        let buffer = *operand;
+        let mut request = request(op, 0, site, buffer);
+        request.path = offset.as_ptr();
+        request.path_len = offset.len();
+        let outcome = hirsel_core_host_file(context, handle, &mut request);
+        if op == READ_AT
+            && outcome.status == 0
+            && outcome.error == IoError::OK
+            && request.buffer.len != buffer.len
+        {
+            (*operand).len = request.buffer.len;
+        }
+        outcome
+    }
+}
+
 /// Host rename uses two path carriers; the combined request is only an issue-time view.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_rename(

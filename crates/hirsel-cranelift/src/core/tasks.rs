@@ -197,6 +197,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::WallMs
                     | HostOp::MonoNs
                     | HostOp::Rename
+                    | HostOp::ReadAt
+                    | HostOp::WriteAt
                     | HostOp::SleepUntil
                     | HostOp::Sync
                     | HostOp::SyncDir
@@ -262,6 +264,12 @@ impl Function<'_, '_, '_> {
                         }
                         self.c_call(op.adapter_symbol(), &params, &results, &operands)?
                     }
+                    HostOp::ReadAt | HostOp::WriteAt => self.c_call(
+                        "hirsel_core_host_at",
+                        &[P, K, U, U, P, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                        &[self.context, code, args[0], args[1], args[2], site],
+                    )?,
                     HostOp::Rename => self.c_call(
                         "hirsel_core_host_rename",
                         &[P, U, P, P, U],

@@ -1,20 +1,40 @@
 // Freeze installed library sources and identities when the toolchain is built.
 use sha2::{Digest, Sha256};
-use std::{env, fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+fn sources(root: &Path, dir: &Path, paths: &mut Vec<(String, PathBuf)>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            if dir != root || entry.file_name() != "tests" {
+                sources(root, &path, paths);
+            }
+        } else if path.extension().is_some_and(|e| e == "hirsel") {
+            let relative = path.strip_prefix(root).unwrap().with_extension("");
+            let module = relative
+                .components()
+                .map(|c| c.as_os_str().to_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("/");
+            paths.push((module, path));
+        }
+    }
+}
+
 fn package(root: &Path, symbol: &str, generated: &mut String) -> [u8; 32] {
     println!("cargo:rerun-if-changed={}", root.display());
-    let mut files = fs::read_dir(root)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "hirsel"))
-        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    sources(root, root, &mut files);
     files.sort();
     let mut hash = Sha256::new();
     hash.update(b"hirsel.bundled-library.v1");
     hash.update(symbol.as_bytes());
     generated.push_str(&format!("pub const {symbol}: &[(&str, &str)] = &[\n"));
-    for path in files {
-        let module = path.file_stem().unwrap().to_str().unwrap();
+    for (module, path) in files {
         let source = fs::read_to_string(&path).unwrap();
         hash.update((module.len() as u64).to_le_bytes());
         hash.update(module.as_bytes());

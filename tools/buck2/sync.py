@@ -81,7 +81,7 @@ BUILD_SCRIPT_SOURCES = {
 
 BUILD_SCRIPT_INPUTS = {
     "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
-    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel"],
+    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel"],
 }
 
 # What each crate's tests read at run time outside their crate: repository
@@ -106,7 +106,7 @@ TEST_DATA = {
         "core/langarena/**/*.hirsel", "core/twins/**/*.hirsel",
     ],
     "hirsel-core-diag-unittest": ["docs/spec/**", "crates/hirsel-core-syntax/src/**", "crates/hirsel-core-resolve/src/**", "crates/hirsel-core-front/src/**"],
-    "hirsel-core-resolve-unittest": ["core/core/**", "core/std/*.hirsel"],
+    "hirsel-core-resolve-unittest": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-core-program-tests-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel", "docs/PRIMER.md", "docs/spec/**"],
     "hirsel-core-program-tests-test-cranelift_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
@@ -500,7 +500,7 @@ def first_party(meta: dict) -> str:
         'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_test", "hirsel_toolchain_bundle")\n',
     ]
 
-    out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/*.hirsel"])')))
+    out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/*.hirsel", "core/std/sim/*.hirsel"])')))
     out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", host=True,
                            data=["//tools/buck2:fmt.py"],
                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))

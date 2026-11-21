@@ -132,6 +132,7 @@ const NET_LISTEN: u64 = 2;
 const NET_ACCEPT: u64 = 3;
 const NET_RECV: u64 = 4;
 const NET_SEND: u64 = 5;
+const NET_HANDSHAKE: u64 = 6;
 const NET_RELEASED: u64 = 8;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
@@ -146,6 +147,7 @@ const R_ENTRIES: u64 = 8;
 /// NetReply's own variants after the shared Done, Failed and Count.
 const R_SOCKET: u64 = 9;
 const R_LISTENER: u64 = 10;
+const R_SECURED: u64 = 11;
 /// A port caller's socket and listener keys: the registry's generation-0
 /// band with bit 33 set, so they never meet a registry key (generation 1 and
 /// up) or a model key (small and sequential). Process-wide, so two ports'
@@ -328,6 +330,19 @@ impl Port {
                 let tail = unsafe { (*n.send_tail).len } as u64;
                 w[..4].copy_from_slice(&[NET_SEND, id, b.len as u64, tail]);
             }
+            TLS_CONNECT => {
+                // The Socket is whole: `tls.connect` takes it before any split.
+                let id = self.socket(request.handle, Kind::Socket)?;
+                // SAFETY: TLS_CONNECT pins its TlsRequest in `path`.
+                let tls = unsafe { &*request.path.cast::<crate::tls::TlsRequest>() };
+                w[..5].copy_from_slice(&[
+                    NET_HANDSHAKE,
+                    id,
+                    tls.name.len as u64,
+                    tls.alpn.len as u64,
+                    u64::from(tls.trust == 0),
+                ]);
+            }
             _ => return None,
         }
         Some(w)
@@ -417,6 +432,14 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
                 let n = &*r.path.cast::<crate::net::NetworkRequest>();
                 request_bytes((*n.send_tail).data, (*n.send_tail).len)
             }
+            // A handshake's canonical name and its offer as ALPN wire
+            // bytes (NOTES 32).
+            (Vocab::Net, NET_HANDSHAKE, 1) => {
+                crate::tls::view_bytes(&(*r.path.cast::<crate::tls::TlsRequest>()).name)
+            }
+            (Vocab::Net, NET_HANDSHAKE, 2) => {
+                crate::tls::view_bytes(&(*r.path.cast::<crate::tls::TlsRequest>()).alpn)
+            }
             _ => &[],
         }
     }
@@ -455,6 +478,7 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     NET_CONNECT | NET_ACCEPT => reply == R_SOCKET,
                     NET_LISTEN => reply == R_LISTENER,
                     NET_RECV | NET_SEND => reply == R_COUNT,
+                    NET_HANDSHAKE => reply == R_SECURED,
                     _ => false,
                 }
         }
@@ -1136,8 +1160,9 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
     }
     let mut root = 0;
     if vocab == Vocab::Net {
-        // Every address in either direction and family (NOTES 31).
-        let rules = crate::net::RulesStorage::new((0..2).flat_map(|dir| {
+        // Every address in either direction and family (NOTES 31), and a
+        // handshake to any name and port under any trust (NOTES 32).
+        let addresses = (0..2).flat_map(|dir| {
             (0..2).map(move |family| {
                 hirsel_core_net::GrantRule::Address(hirsel_core_net::Rule {
                     dir,
@@ -1149,7 +1174,9 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
                     last: u16::MAX,
                 })
             })
-        }));
+        });
+        let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
+        let rules = crate::net::RulesStorage::new(addresses.chain([tls]));
         root = rules.handle();
         port.rules = Some(rules);
     }
@@ -1217,6 +1244,25 @@ pub(crate) fn split_socket(provider: &Provider, key: u64) {
         {
             h.write = Some(State::Live);
         }
+    }
+}
+
+/// `net.join` on a port socket's live halves: whole again, the server asked
+/// nothing. False when the halves are not both live.
+pub(crate) fn join_socket(provider: &Provider, key: u64) -> bool {
+    let Some(port) = net_port(provider) else {
+        return false;
+    };
+    let mut p = lock(port);
+    let Some(&id) = p.keys.get(&(key & !3)) else {
+        return false;
+    };
+    match p.handles.get_mut(&id) {
+        Some(h) if h.state == State::Live && h.write == Some(State::Live) => {
+            h.write = None;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1432,6 +1478,16 @@ pub unsafe extern "C" fn hirsel_core_port_fill(
     }
 }
 
+/// The entries of ALPN wire bytes, each a length byte then its protocol.
+fn alpn_count(mut wire: &[u8]) -> u64 {
+    let mut count = 0;
+    while let Some((&len, rest)) = wire.split_first() {
+        wire = rest.get(usize::from(len)..).unwrap_or_default();
+        count += 1;
+    }
+    count
+}
+
 /// The caller's outcome for a reply that answers its call, or None when the
 /// reply breaks the port's rules (the server fails).
 fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
@@ -1493,6 +1549,16 @@ fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
                 return None;
             }
             out.value = w[0];
+        }
+        R_SECURED => {
+            // Some(i) names one of the offered protocols; None is (0, 0).
+            // SAFETY: the call is unsettled, so its caller's request is pinned.
+            let offered = alpn_count(unsafe { field_bytes(p.vocab, call, 2) });
+            if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {
+                return None;
+            }
+            // SAFETY: as above.
+            out.value = unsafe { (*call.request).handle };
         }
         R_LOCKED => out.value = (w[0] != 0) as u64,
         R_STAT => {
@@ -1627,6 +1693,34 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
                     lo: w[3],
                     port: w[4] as u16,
                 };
+            }
+        }
+    }
+    if (p.vocab, tag) == (Vocab::Net, R_SECURED) {
+        // The chosen protocol and the peer digest (big-endian words) go to
+        // the caller's outputs; the stream's write half is now live.
+        // SAFETY: the call is unsettled, so its caller's request is pinned.
+        unsafe {
+            let c = &p.calls[&id];
+            let tls = &*(*c.request).path.cast::<crate::tls::TlsRequest>();
+            let protocol = &mut *tls.protocol_out;
+            protocol.len = 0;
+            if w[0] == 1 {
+                let mut wire = crate::tls::view_bytes(&tls.alpn);
+                for _ in 0..w[1] {
+                    wire = &wire[1 + usize::from(wire[0])..];
+                }
+                let chosen = &wire[1..1 + usize::from(wire[0])];
+                ptr::copy_nonoverlapping(chosen.as_ptr(), protocol.data, chosen.len());
+                protocol.len = chosen.len();
+            }
+            let peer = &mut *tls.peer_out;
+            for (i, word) in w[2..6].iter().enumerate() {
+                peer[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
+            }
+            let key = (*c.request).handle;
+            if let Some(&h) = p.keys.get(&(key & !3)) {
+                p.handles.get_mut(&h).expect("live socket").write = Some(State::Live);
             }
         }
     }

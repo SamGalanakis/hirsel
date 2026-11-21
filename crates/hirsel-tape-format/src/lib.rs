@@ -359,6 +359,9 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
                         out.push(1);
                         out.extend_from_slice(&digest);
                     }
+                    // Only a served Net's root holds Any, and a tape never
+                    // records one: the reader refuses it as Corrupt.
+                    TlsTrust::Any => out.push(2),
                 }
                 let (first, last) = rule.ports();
                 out.extend_from_slice(&first.to_le_bytes());

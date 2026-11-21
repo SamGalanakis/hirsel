@@ -762,6 +762,7 @@ unsafe fn socket_args(request: &Request) -> Args {
                     args.push(1);
                     args.extend_from_slice(&digest);
                 }
+                hirsel_core_net::TlsTrust::Any => args.push(2),
             }
             let alpn = crate::tls::view_bytes(&tls.alpn);
             put_varint(&mut args, alpn.len() as u64);

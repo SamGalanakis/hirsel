@@ -798,16 +798,16 @@ fn net_released(mut s: Served[NetOp], id: u64, part: u64) -> bool waits {
     }
 }
 
-// Take the next call, expect a Connect to 127.0.0.1:8080, and issue
+// Take the next call, expect a Connect to 127.0.0.1:port, and issue
 // Socket(id).
-fn net_connect(mut s: Served[NetOp], id: u64) -> bool waits {
+fn net_connect(mut s: Served[NetOp], id: u64, port: u16) -> bool waits {
     match provide.next(mut s) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                Connect(addr) => loopback(addr, 8080),
+                Connect(addr) => loopback(addr, port),
                 _ => false
             }
-            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: 8080)))
+            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: port)))
         },
         None => false
     }
@@ -837,7 +837,7 @@ fn net_echo(tasks: Tasks) -> bool waits {
         },
         None => false
     }
-    let connected = net_connect(mut served, 8)
+    let connected = net_connect(mut served, 8, 8080)
     let accepted = match provide.next(mut served) {
         Some(take call) => {
             let op = match provide.net_op(call) {
@@ -876,7 +876,7 @@ fn net_echo(tasks: Tasks) -> bool waits {
     }
     let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
     let wholes = net_released(mut served, 9, 0) && net_released(mut served, 7, 0)
-    let again = net_connect(mut served, 10) && net_released(mut served, 10, 0)
+    let again = net_connect(mut served, 10, 8080) && net_released(mut served, 10, 0)
     let client = result.unwrap(task.join(take child))
     let quiet = match provide.next(mut served) {
         Some(take call) => {
@@ -886,4 +886,194 @@ fn net_echo(tasks: Tasks) -> bool waits {
         None => true
     }
     listened && connected && accepted && sent && received && halves && wholes && again && client && quiet
+}
+
+// Consumes a handshake's result: true when it is Error(Denied).
+fn tls_denied(take r: Result[(ReadHalf, WriteHalf, Handshake), NetError]) -> bool {
+    match take r {
+        Ok(take stream) => {
+            let (take rh, take wh, _) = take stream
+            let _ = take rh
+            let _ = take wh
+            false
+        },
+        Error(Denied) => true,
+        Error(_) => false
+    }
+}
+
+// Dials 127.0.0.1:443 twice through the served Net: the first socket is
+// split and rejoined, then its handshake offers h2 and http/1.1 as
+// Alpha.Test; the second offers nothing as beta.test.
+fn tls_client(take n: Net) -> bool waits {
+    let at = Addr(ip: V4(2130706433), port: 443)
+    let dialed = result.unwrap(host.connect(n, at, Never))
+    // Split and rejoined in place, as STARTTLS does: the server sees neither.
+    let (rh, wh) = net.split(take dialed)
+    let first = result.unwrap(net.join(take rh, take wh))
+    let mut alpn: List[String] = list.new()
+    list.push(mut alpn, string.from("h2"))
+    list.push(mut alpn, string.from("http/1.1"))
+    let secured = match tls.connect(n, take first, string.from("Alpha.Test"), System, alpn, Never) {
+        Ok(take stream) => {
+            let (take r, take w, h) = take stream
+            let (p0, p1, p2, p3) = h.peer
+            let chosen = match h.protocol {
+                Some(p) => p == 1,
+                None => false
+            }
+            let _ = take r
+            let _ = take w
+            chosen && p0 == 1 && p1 == 2 && p2 == 3 && p3 == 0xffffffffffffffff
+        },
+        Error(_) => false
+    }
+    let second = result.unwrap(host.connect(n, at, Never))
+    let none: List[String] = list.new()
+    let refused = match tls.connect(n, take second, string.from("beta.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            false
+        },
+        Error(e) => match e {
+            Tls(f) => match f {
+                Alpn => true,
+                _ => false
+            },
+            _ => false
+        }
+    }
+    secured && refused
+}
+
+// A served Net's handshake is a Handshake call (core.md, Provide; NOTES 32):
+// the socket's id, the canonical name's length (payload field 1) and the
+// offer's ALPN wire bytes' length (field 2: each protocol after its length
+// byte), and whether the trust is System. Secured's protocol is the zero-
+// based index into the offer and its peer the digest's words, both as the
+// server gave them. The stream's halves drop as Read and Write; a Failed
+// reply is the client's error, and the socket the handshake consumed comes
+// back as Released Whole.
+// expect: run net_tls(tasks) = true
+fn net_tls(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, tls_client)
+    let dialed = net_connect(mut served, 8, 443)
+    let shaken = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket, name, alpn, system) => socket == 8 && name == 10 && alpn == 12 && system,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(32)
+            provide.payload(call, 1, mut p)
+            provide.payload(call, 2, mut p)
+            let data = list.len(p) == 22 && p[0] == 0x61 && p[9] == 0x74 && p[10] == 2 && p[11] == 0x68 && p[13] == 8 && p[21] == 0x31
+            let digest: (u64, u64, u64, u64) = (1, 2, 3, 0xffffffffffffffff)
+            op && data && net_answer(mut served, take call, Secured(Handshake(protocol: Some(1), peer: digest)))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let redialed = net_connect(mut served, 9, 443)
+    let failed = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket, name, alpn, system) => socket == 9 && name == 9 && alpn == 0 && system,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Failed(Tls(Alpn)))
+        },
+        None => false
+    }
+    let whole = net_released(mut served, 9, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && shaken && halves && redialed && failed && whole && client && quiet
+}
+
+type Crossing: send {
+    model: Net,
+    served: Net
+}
+
+// A model socket handed to the served Net, then a served socket handed to
+// the model Net (whose grant permits *.test): each handshake is Denied.
+fn crossing_client(take c: Crossing) -> bool waits {
+    let (listener, at) = result.unwrap(host.listen(c.model, Addr(ip: V4(2130706433), port: 0), 1))
+    let mut l = take listener
+    let plain = result.unwrap(host.connect(c.model, at, Never))
+    let none: List[String] = list.new()
+    let model_socket = tls_denied(tls.connect(c.served, take plain, string.from("alpha.test"), System, none, Never))
+    let virtual = result.unwrap(host.connect(c.served, Addr(ip: V4(2130706433), port: 8080), Never))
+    let empty: List[String] = list.new()
+    let served_socket = tls_denied(tls.connect(c.model, take virtual, string.from("alpha.test"), System, empty, Never))
+    let _ = take l
+    model_socket && served_socket
+}
+
+// A handshake goes only through the Net whose provider made the socket
+// (NOTES 32): a served Net cannot answer for a model socket, nor a model
+// Net for a served one. Each is Denied before any call, and the served
+// socket it consumed reaches its server only as Released Whole.
+// expect: run tls_crossing(network) = true
+fn tls_crossing(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (v, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, Crossing(model: n, served: v), crossing_client)
+    let dialed = net_connect(mut served, 8, 8080)
+    let whole = net_released(mut served, 8, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && whole && client && quiet
+}
+
+fn bad_secured(take s: Served[NetOp]) -> bool waits {
+    let mut served = take s
+    let dialed = net_connect(mut served, 8, 8080)
+    match provide.next(mut served) {
+        Some(take call) => {
+            let digest: (u64, u64, u64, u64) = (0, 0, 0, 0)
+            dialed && net_answer(mut served, take call, Secured(Handshake(protocol: Some(0), peer: digest)))
+        },
+        None => false
+    }
+}
+
+// core.md, Handles: Secured naming a protocol outside the offer (here an
+// empty one) fails the server with Fail, and the caller sees Reset.
+// expect: run net_tls_fail(tasks) = true
+fn net_tls_fail(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let server = task.spawn(tasks, bytes 65536, take s, bad_secured)
+    let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 8080), Never))
+    let none: List[String] = list.new()
+    let reset = match tls.connect(n, take socket, string.from("alpha.test"), System, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            false
+        },
+        Error(e) => match e {
+            Reset => true,
+            _ => false
+        }
+    }
+    reset && fail_cause(task.join(take server))
 }

@@ -26,7 +26,7 @@ import time
 from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL_NET_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535')
+MODEL_NET_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535', 'Tls *.test 0-65535 System')
 
 
 def model_network(case):

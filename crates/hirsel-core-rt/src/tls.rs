@@ -161,8 +161,10 @@ unsafe fn connect(
                 return error;
             }
         };
+        // A served socket's handshake is its port's, never a tape's carrier.
+        let served = crate::provide::owns(&provider);
         #[cfg(feature = "record")]
-        let tape = (*files).net_tape;
+        let tape = (*files).net_tape.filter(|_| !served);
         #[cfg(feature = "record")]
         let source = match tape {
             Some(tape) => crate::tape::source(&provider, tape.handle(key)).map(|(p, _)| p),
@@ -255,7 +257,7 @@ unsafe fn connect(
                         .unwrap_or_default(),
                 },
             );
-        } else if state.consumed {
+        } else if state.consumed && !served {
             let _commit = crate::sequencer::enter();
             (*files).connected.remove(&key);
         } else {
@@ -279,6 +281,14 @@ unsafe fn prepare(
 ) -> Result<(net::Address, Provider, HandshakeState), Outcome> {
     unsafe {
         let (address, provider) = (*files).connected.get(&key).copied().ok_or(DENIED)?;
+        // A served Net's sockets handshake through that Net, and only it:
+        // never another provider's, which could not answer for them.
+        let net_provider = &*hirsel_core_capability_provider(context, n);
+        if (crate::provide::owns(&provider) || crate::provide::owns(net_provider))
+            && provider.state != net_provider.state
+        {
+            return Err(DENIED);
+        }
         let name = tls::verification_name(view_bytes(&name)).ok_or_else(|| tls_failure(1, 0))?;
         if bad_alpn {
             return Err(tls_failure(2, 0));

@@ -126,8 +126,9 @@ struct World {
     /// them as on any Net) and their port.
     net_ports: BTreeMap<u64, usize>,
     /// A served Net caller's socket and listener keys (direction bits clear):
-    /// port and server id (native `provide::Port::keys`).
-    port_keys: BTreeMap<u64, (usize, u64)>,
+    /// port, server id and the peer's port, which a handshake's rule checks
+    /// (native `provide::Port::keys`, `Files::connected`).
+    port_keys: BTreeMap<u64, (usize, u64, u16)>,
     next_port_key: u64,
 }
 const CELL_BASE: u64 = 0x80_0000;
@@ -343,7 +344,7 @@ fn port_closed(vocab: Vocab) -> [u64; 5] {
 fn port_outcome(vocab: Vocab, op: u64, v: [u64; 5]) -> Vec<u64> {
     match (vocab, op) {
         (Vocab::Dir, 3 | 14) => v.to_vec(),
-        (Vocab::Net, 2 | 3) => [&v[..4], &[0; 4]].concat(),
+        (Vocab::Net, 2 | 3 | 6) => [&v[..4], &[0; 4]].concat(),
         _ => v[..4].to_vec(),
     }
 }
@@ -2608,12 +2609,26 @@ impl Machine<'_> {
                 0 | 3 => tag == 9,
                 2 => tag == 10,
                 4 | 5 => tag == 3,
+                6 => tag == 11,
                 _ => false,
             };
         if !answers {
             return None;
         }
         Some(match tag {
+            11 => {
+                // Some(i) names one of the offered protocols; None is (0, 0).
+                let mut wire = &call.fields[2][..];
+                let mut offered = 0;
+                while let Some((&len, rest)) = wire.split_first() {
+                    wire = rest.get(usize::from(len)..).unwrap_or_default();
+                    offered += 1;
+                }
+                if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {
+                    return None;
+                }
+                ([0, 0, 0, w[0] + w[1], 0], None)
+            }
             1 => {
                 (1..=9).contains(&w[0]).then_some(())?;
                 ([0, w[0], w[1] & 0xffff_ffff, 0, 0], None)
@@ -2652,7 +2667,7 @@ impl Machine<'_> {
         let (calls, _, _, _, vocab) = cell.port();
         let call = calls.get_mut(&id).unwrap();
         call.held = false;
-        let (op, caller) = (call.words[0], call.caller);
+        let (op, caller, dialed) = (call.words[0], call.caller, call.words[4]);
         if is_notice(vocab, op) {
             // A Released notice needs no reply; `Done` acknowledges it.
             cell.prune(id);
@@ -2699,7 +2714,12 @@ impl Machine<'_> {
             if vocab == Vocab::Net {
                 let key = PORT_KEYS | (self.world.next_port_key << 2);
                 self.world.next_port_key += 1;
-                self.world.port_keys.insert(key, (c, answer[0]));
+                // A connected socket's peer is the dialed address; an
+                // accepted one's, the reply's.
+                let peer = if op == 0 { dialed } else { a[7] };
+                self.world
+                    .port_keys
+                    .insert(key, (c, answer[0], peer as u16));
                 answer[0] = key;
             } else {
                 self.world.port_handles.push((c, answer[0]));
@@ -2719,6 +2739,10 @@ impl Machine<'_> {
         if vocab == Vocab::Net && matches!(op, 2 | 3) && row[1] == 0 {
             // A listener's bound address, an accepted socket's peer.
             row[4..8].copy_from_slice(&a[4..8]);
+        }
+        if vocab == Vocab::Net && op == 6 && row[1] == 0 {
+            // The peer digest's words.
+            row[4..8].copy_from_slice(&a[5..9]);
         }
         let k = self.world.cells[c].settle(id, row);
         k.into_iter().for_each(|k| self.ready_provider(k));
@@ -2827,8 +2851,10 @@ impl Machine<'_> {
                 if vocab != Vocab::Net {
                     return Some(Ok(ok(h, served)));
                 }
-                // A served Net is an ordinary grant of every address (native
-                // `provide_port`), so `net.narrow` intersects it as any Net's.
+                // A served Net is an ordinary grant of every address and
+                // handshake (native `provide_port`), so `net.narrow`
+                // intersects it as any Net's.
+                let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
                 let rules = (0..2)
                     .flat_map(|dir| {
                         (0..2).map(move |family| {
@@ -2843,6 +2869,7 @@ impl Machine<'_> {
                             })
                         })
                     })
+                    .chain([tls])
                     .collect();
                 let grants = &mut self.world.network.grants;
                 let key = grants
@@ -3331,7 +3358,7 @@ impl Machine<'_> {
     /// port, server id and whether the key's part (whole, read or write half)
     /// is live and of kind `kind`.
     fn port_socket(&self, key: u64, kind: u8) -> Option<(usize, u64, bool)> {
-        let &(c, id) = self.world.port_keys.get(&(key & !3))?;
+        let &(c, id, _) = self.world.port_keys.get(&(key & !3))?;
         let VirtualCell::Port { handles, .. } = &self.world.cells[c] else {
             unreachable!()
         };
@@ -3383,10 +3410,28 @@ impl Machine<'_> {
         self.port_call(t, c, w, fields, out, live)
     }
 
+    /// `net.join` on a served Net socket's live halves (native
+    /// `provide::join_socket`): whole again, the server asked nothing.
+    fn port_join(&mut self, key: u64) -> bool {
+        let Some(&(c, id, _)) = self.world.port_keys.get(&(key & !3)) else {
+            return false;
+        };
+        let VirtualCell::Port { handles, .. } = &mut self.world.cells[c] else {
+            unreachable!()
+        };
+        match handles.get_mut(&id) {
+            Some(h) if h.state == PortState::Live && h.write == Some(PortState::Live) => {
+                h.write = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `net.split` or a dropped socket, half or listener of a served Net
     /// (native `split_socket`, `release_socket`); false when `key` is not one.
     fn port_socket_part(&mut self, key: u64, split: bool) -> bool {
-        let Some(&(c, id)) = self.world.port_keys.get(&(key & !3)) else {
+        let Some(&(c, id, _)) = self.world.port_keys.get(&(key & !3)) else {
             return false;
         };
         let VirtualCell::Port {
@@ -3648,6 +3693,15 @@ impl Machine<'_> {
 
     fn tls_connect(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[1];
+        let served = self.world.net_ports.get(&a[0]).copied();
+        if let Some(&(c, _, peer)) = self.world.port_keys.get(&(key & !3)) {
+            return self.port_tls(t, a, c, peer, served);
+        }
+        if served.is_some() {
+            // A served Net cannot answer for another provider's socket.
+            self.world.network.sockets.release(key);
+            return Ok(vec![0, 1, 0, 0, 0, 0, 0, 0]);
+        }
         let model = self.world.network.sockets.model().unwrap().clone();
         let offered = match model
             .connected_peer(key)
@@ -3695,6 +3749,68 @@ impl Machine<'_> {
         let mut result = vec![reply.value, 0, 0, protocol];
         result.extend(hirsel_core_net::tls::peer_words(reply.peer));
         Ok(result)
+    }
+
+    /// `tls.connect` on a served Net's socket (native `tls::connect` through
+    /// the port): the handshake is a call its server answers with Secured,
+    /// and only through that Net (NOTES 32). The Socket is consumed on every
+    /// return: a failure releases it whole.
+    fn port_tls(
+        &mut self,
+        t: &Task,
+        a: &[u64],
+        c: usize,
+        peer: u16,
+        served: Option<usize>,
+    ) -> X<Vec<u64>> {
+        let key = a[1];
+        let failed = |s: &mut Self, tag: u64, code: u64| {
+            s.port_socket_part(key, false);
+            Ok(vec![0, tag, code, 0, 0, 0, 0, 0])
+        };
+        if served != Some(c) {
+            return failed(self, 1, 0);
+        }
+        let offered = match self.tls_offer(a, peer) {
+            Ok(offered) => offered,
+            Err((tag, code)) => return failed(self, tag, code),
+        };
+        let name = hirsel_core_net::tls::verification_name(self.carrier_bytes(a[2])).unwrap();
+        let canonical = match &name {
+            hirsel_core_net::Name::Dns(name) => name.as_bytes().to_vec(),
+            hirsel_core_net::Name::Ip(ip) => ip.to_string().into_bytes(),
+        };
+        let wire: Vec<u8> = offered
+            .iter()
+            .flat_map(|p| std::iter::once(p.len() as u8).chain(p.iter().copied()))
+            .collect();
+        let (_, id, live) = self.port_socket(key, 3).unwrap();
+        let mut w = [0; 8];
+        w[..5].copy_from_slice(&[
+            6,
+            id,
+            canonical.len() as u64,
+            wire.len() as u64,
+            u64::from(a[3] == 0),
+        ]);
+        let row = match self
+            .check_cancel(t)
+            .and_then(|()| self.port_call(t, c, w, vec![vec![], canonical, wire], None, live))
+        {
+            Ok(row) => row,
+            Err(stop) => {
+                self.port_socket_part(key, false);
+                return Err(stop);
+            }
+        };
+        if row[1] != 0 {
+            return failed(self, row[1], row[2]);
+        }
+        self.port_socket_part(key, true);
+        self.world
+            .tls_writes
+            .insert(key & !3, (name, false, Default::default()));
+        Ok([&[key, 0, 0], &row[3..8]].concat())
     }
 
     fn narrow_net(&mut self, t: &Task, parent: u64, rule: hirsel_core_net::GrantRule) -> Vec<u64> {
@@ -3800,6 +3916,10 @@ impl Machine<'_> {
 
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
+        if self.world.port_keys.contains_key(&(key & !3)) {
+            // A served Net's server never sees a secret (NOTES 32).
+            return Ok(vec![0, 1, 0, 0]);
+        }
         let Some((name, spent, _)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
@@ -3842,6 +3962,9 @@ impl Machine<'_> {
     fn scram_send(&mut self, t: &mut Task, args: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::scram::Transcript;
         let key = args[0];
+        if self.world.port_keys.contains_key(&(key & !3)) {
+            return Ok(vec![0, 1, 0, 0]);
+        }
         let Some((name, spent, binding)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
@@ -4048,6 +4171,13 @@ impl Machine<'_> {
             HostOp::NetSplit => {
                 let (read, write) = self.world.network.sockets.split(a[0]);
                 vec![read, 0, 0, write]
+            }
+            HostOp::NetJoin
+                if (a[0] & !3) == (a[1] & !3)
+                    && !self.world.tls_writes.contains_key(&(a[0] & !3))
+                    && self.port_join(a[0]) =>
+            {
+                ok(a[0] & !3, 0)
             }
             HostOp::NetJoin => {
                 let (read, write) = (a[0], a[1]);
@@ -4877,11 +5007,11 @@ impl Machine<'_> {
             FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
                 let h = self.load(at, 8);
-                if self.port_socket_part(h, false) {
-                    return false;
-                }
                 if h & 3 == 2 {
                     self.world.tls_writes.remove(&(h & !3));
+                }
+                if self.port_socket_part(h, false) {
+                    return false;
                 }
                 self.world.network.sockets.release(h);
                 false

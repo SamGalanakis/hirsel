@@ -54,7 +54,7 @@ impl RulesStorage {
             .iter()
             .map(|row| {
                 // SAFETY: the launcher borrows the pattern bytes through startup.
-                unsafe { row.decode() }
+                unsafe { row.decode() }.filter(|rule| !rule.is_served())
             })
             .collect::<Option<Vec<_>>>()?;
         Some(Self::new(rules))
@@ -597,6 +597,16 @@ unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
     }
 }
 
+/// Whether `key` is part of a TLS stream.
+unsafe fn tls_stream(context: *mut Context, key: u64) -> bool {
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        (*(*context).host_files)
+            .tls_writes
+            .contains_key(&(key & !3))
+    }
+}
+
 /// A served Net's socket, half or listener: its port's provider.
 unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Provider> {
     let _commit = crate::sequencer::enter();
@@ -639,6 +649,10 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
+        // A served Net's server never sees a secret (NOTES 32).
+        if served_socket(context, key).is_some() {
+            return DENIED;
+        }
         let secret = crate::secret::resolve(context, s);
         {
             let _commit = crate::sequencer::enter();
@@ -777,6 +791,19 @@ pub unsafe extern "C" fn hirsel_core_net_join(
     write: u64,
     _site: u64,
 ) -> Outcome {
+    unsafe {
+        // A served socket's halves rejoin at its port; a TLS stream's never.
+        if let Some(provider) = served_socket(context, read)
+            && read & !3 == write & !3
+            && !tls_stream(context, read)
+            && crate::provide::join_socket(&provider, read)
+        {
+            return Outcome {
+                value: read & !3,
+                ..Outcome::default()
+            };
+        }
+    }
     let _commit = crate::sequencer::enter();
     unsafe {
         let files = (*context).host_files;
@@ -817,9 +844,14 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         if let Some(provider) = served_socket(context, key) {
             // The port queues the Released; its server is readied outside
             // the run's commit section.
-            if crate::provide::release_socket(&provider, key) {
-                let _commit = crate::sequencer::enter();
-                (*(*context).host_files).connected.remove(&(key & !3));
+            let gone = crate::provide::release_socket(&provider, key);
+            let _commit = crate::sequencer::enter();
+            let files = (*context).host_files;
+            if key & 3 == 2 {
+                (*files).tls_writes.remove(&(key & !3));
+            }
+            if gone {
+                (*files).connected.remove(&(key & !3));
             }
             return;
         }

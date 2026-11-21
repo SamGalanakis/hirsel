@@ -555,6 +555,7 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
             let trust = match rule.trust() {
                 TlsTrust::System => "System".to_owned(),
                 TlsTrust::Roots(hash) => format!("Roots=sha256:{}", selection(ContentHash(hash))),
+                TlsTrust::Any => "Any".to_owned(),
             };
             format!("Tls {} {first}-{last} {trust}", rule.pattern_text())
         }

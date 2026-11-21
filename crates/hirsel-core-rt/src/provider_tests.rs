@@ -1153,10 +1153,104 @@ fn foreign_helper_parks_the_issuer_and_delivers_its_writes() {
     let config = config(std::ptr::null(), 0, &mut stderr);
     // SAFETY: config and stderr stay live through the run and helper shutdown.
     assert_eq!(
-        unsafe { hirsel_core_run_with_foreign_helpers(&config, main) },
+        unsafe { hirsel_core_run_with_foreign(&config, main, true) },
         0
     );
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn foreign_handles_retire_ordinals_and_release_remaining_owners_in_reverse_order() {
+    use crate::foreign::{Call, Kind, hirsel_core_foreign_call};
+    use std::ptr;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CELLS: [u8; 3] = [1, 2, 3];
+    static RELEASES: AtomicU64 = AtomicU64::new(0);
+    static KIND: Kind = Kind {
+        release,
+        waits: true,
+    };
+
+    unsafe extern "C" fn make(args: *mut u64) -> u64 {
+        // SAFETY: this thunk's one scalar carries a fixture-owned cell address.
+        unsafe { args.read() }
+    }
+
+    unsafe extern "C" fn release(args: *mut u64) -> u64 {
+        // SAFETY: runtime preflight resolves the ordinal to a static fixture cell.
+        let value = unsafe { *ptr::with_exposed_provenance::<u8>(args.add(1).read() as usize) };
+        let previous = RELEASES.load(Ordering::Relaxed);
+        RELEASES.store(previous * 10 + u64::from(value), Ordering::Relaxed);
+        9
+    }
+
+    unsafe extern "C" fn main(
+        context: *mut crate::Context,
+        _: *const Config,
+        result: *mut MainResult,
+    ) -> u8 {
+        let scalar = [ptr::null()];
+        let handle = [&raw const KIND];
+        let maker = Call {
+            thunk: make,
+            kinds: scalar.as_ptr(),
+            count: 1,
+            new_kind: &KIND,
+            waits: false,
+            release: false,
+            result_tag: 0,
+        };
+        let closer = Call {
+            thunk: release,
+            kinds: handle.as_ptr(),
+            count: 1,
+            new_kind: ptr::null(),
+            waits: true,
+            release: true,
+            result_tag: 0,
+        };
+        let mut word = 0;
+        let cell_address = |i: usize| (&raw const CELLS[i]).expose_provenance() as u64;
+        // SAFETY: the fixture pins every descriptor, argument, and result
+        // for its call, and the kind and the cells outlive run-end release.
+        unsafe {
+            *result = MainResult::default();
+            for i in 0..3 {
+                let mut argument = [cell_address(i), 0];
+                assert_eq!(
+                    hirsel_core_foreign_call(context, &maker, &mut argument, &mut word, 16),
+                    0
+                );
+                assert_eq!(word, (i + 1) as u64);
+            }
+            let mut argument = [2, 0];
+            assert_eq!(
+                hirsel_core_foreign_call(context, &closer, &mut argument, &mut word, 16),
+                0
+            );
+            assert_eq!(word, 9);
+            let mut argument = [cell_address(1), 0];
+            assert_eq!(
+                hirsel_core_foreign_call(context, &maker, &mut argument, &mut word, 16),
+                0
+            );
+            assert_eq!(word, 4);
+            let mut alias = [cell_address(2), 0];
+            hirsel_core_foreign_call(context, &maker, &mut alias, &mut word, 17)
+        }
+    }
+
+    RELEASES.store(0, Ordering::Relaxed);
+    let mut stderr = Vec::new();
+    let config = config(ptr::null(), 0, &mut stderr);
+    // SAFETY: config, diagnostics and the fixture's cells outlive the whole run.
+    assert_eq!(
+        unsafe { hirsel_core_run_with_foreign(&config, main, true) },
+        101
+    );
+    assert_eq!(stderr, b"Fail(\"foreign pointer already held\") at 17\n");
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 2231);
 }
 
 #[test]

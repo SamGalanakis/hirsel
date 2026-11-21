@@ -1,6 +1,6 @@
 //! One run owns its helpers. Scheduler callbacks reserve a lane in FIFO order;
 //! the helper itself checks cancellation at issue and delivers before freeing it.
-use super::{Thunk, invoke};
+use super::{Invocation, handles::RELEASE_WAIT_OP};
 use crate::{
     Context,
     provider::{self, Outcome, Provider, Request, Step, Wait},
@@ -58,9 +58,7 @@ unsafe impl Send for Link {}
 
 struct Call {
     shared: *const Shared,
-    args: *mut u64,
-    thunk: Thunk,
-    result_tag: u8,
+    invocation: Invocation,
     cancel: *const AtomicBool,
     next: Option<Link>,
     token: u64,
@@ -93,19 +91,21 @@ impl Helpers {
     pub(crate) unsafe fn call(
         &self,
         context: *mut Context,
-        thunk: Thunk,
-        args: *mut u64,
-        result_tag: u8,
+        invocation: Invocation,
+        cancellable: bool,
         site: u64,
     ) -> Outcome {
         // SAFETY: cancel flag belongs to the current task. It stays pinned
         // across the park and is read only atomically from the helper.
-        let cancel = unsafe { tasks::foreign_cancel_flag(context) };
+        let _commit = tasks::before_provider_entry();
+        let cancel = if cancellable {
+            unsafe { tasks::foreign_cancel_flag(context) }
+        } else {
+            ptr::null()
+        };
         let mut call = Call {
             shared: &*self.shared,
-            args,
-            thunk,
-            result_tag,
+            invocation,
             cancel,
             next: None,
             token: 0,
@@ -121,19 +121,14 @@ impl Helpers {
             abort,
             deliver: provider::DELIVER,
         };
-        let mut request = Request {
-            operation: WAIT_OP,
-            mode: 0,
-            handle: 0,
-            path: ptr::null(),
-            path_len: 0,
-            buffer: provider::Buffer {
-                data: ptr::null_mut(),
-                len: 0,
-                capacity: 0,
+        let mut request = request(
+            if cancellable {
+                WAIT_OP
+            } else {
+                RELEASE_WAIT_OP
             },
             site,
-        };
+        );
         // SAFETY: the callbacks unlink the frame before returning delivery.
         // If the helper observed a cancellation during issue, the caller
         // records it here. The scheduler has already recorded a W cancellation.
@@ -141,7 +136,7 @@ impl Helpers {
         let outcome = unsafe {
             tasks::provider_operation(context, &provider, &mut request, Some(&mut issued))
         };
-        if outcome.status != 0 && issued.is_some() {
+        if outcome.status == provider::CANCELLED.status && issued.is_some() {
             // SAFETY: the task owns its cause cell again after delivery.
             unsafe { tasks::check_cancel(context, site) };
         }
@@ -219,7 +214,7 @@ impl State {
 impl Shared {
     fn run(&self) {
         loop {
-            let (index, link, thunk, args, result_tag, cancelled) = {
+            let (index, link, invocation, cancelled) = {
                 let mut state = self.state.lock().unwrap();
                 loop {
                     if state.closing {
@@ -238,27 +233,19 @@ impl Shared {
                         let call = unsafe { &*link.0 };
                         let cancelled = unsafe { call.cancel.as_ref() }
                             .is_some_and(|flag| flag.load(Ordering::Acquire));
-                        break (
-                            index,
-                            link,
-                            call.thunk,
-                            call.args,
-                            call.result_tag,
-                            cancelled,
-                        );
+                        break (index, link, call.invocation, cancelled);
                     }
                     state = self.work.wait(state).unwrap();
                 }
             };
-            let outcome = if cancelled {
-                provider::CANCELLED
-            } else {
-                // SAFETY: this is the sole owner of the issued call's pinned
-                // argument frame and loans, on a thread with STACK bytes.
-                let value = unsafe { invoke(thunk, args, result_tag) };
-                Outcome {
-                    value,
-                    ..Outcome::default()
+            // SAFETY: this worker owns the transition out of the submitted
+            // slot, and the task pins its C operands through completion.
+            let outcome = unsafe {
+                if cancelled {
+                    invocation.rollback();
+                    provider::CANCELLED
+                } else {
+                    invocation.issue()
                 }
             };
             let mut state = self.state.lock().unwrap();
@@ -347,8 +334,25 @@ unsafe extern "C" fn abort(raw: *mut u8, _: *mut Request, _: u64, _: u8) -> Outc
         } else {
             state.unlink(link);
         }
+        (*link.0).invocation.rollback();
         (*link.0).outside.take();
         state.wake_first();
     }
     provider::CANCELLED
+}
+
+pub(super) fn request(operation: u8, site: u64) -> Request {
+    Request {
+        operation,
+        mode: 0,
+        handle: 0,
+        path: ptr::null(),
+        path_len: 0,
+        buffer: provider::Buffer {
+            data: ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+        },
+        site,
+    }
 }

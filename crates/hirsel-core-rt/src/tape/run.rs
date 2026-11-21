@@ -774,7 +774,7 @@ unsafe fn run_taped(
             }
             let key = replay.stored.map_hash_key.0;
             run.replay = Some(replay);
-            process::run_with_map_hash_key(&config, invoke, key, false)
+            process::run_with_map_hash_key(&config, invoke, key, None)
         };
         if let Some((at, err)) = run.record_truncated {
             let line = format!("record: truncated at {at}: {}\n", format_io_error(err));

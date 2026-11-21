@@ -43,9 +43,13 @@ incomplete features and its resource refusals. `hirsel explain RULE` prints a
 specification rule (for example `hirsel explain CAP-4`), and `hirsel explain --list`
 lists them all.
 
-`hirsel fmt DIR` formats every source file in place and refuses malformed input
-without a partial edit. `hirsel fmt --check DIR` lists the files that differ and
-exits 1 when any do.
+`hirsel fmt FILE` formats one file in place. `hirsel fmt DIR` formats every
+`.hirsel` file in the directory tree. A source refusal prevents writes to the
+whole batch. `hirsel fmt --stdin` reads one source from standard input and sends
+the formatted bytes to standard output. `--check` exits 1 when the input differs
+from its formatted form. For a file or directory it lists differing paths, and
+for stdin it writes no formatted bytes. Use `--signatures` for core declarations
+that omit function bodies.
 
 ## Build and run
 

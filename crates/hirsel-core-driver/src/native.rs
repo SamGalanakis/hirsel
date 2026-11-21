@@ -1836,6 +1836,112 @@ mod tests {
     include!("revision_native.rs");
     include!("build_identity.rs");
 
+    #[test]
+    fn fmt_files_match_check_sites_and_prepare_the_whole_directory_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("a.hirsel");
+        let good_source = b"fn a(){1}";
+        std::fs::write(&good, good_source).unwrap();
+        let bad_source = "// header\r\nfn bad() { /* é→😀 */ # }\r\n";
+        let request = crate::tests::request(bad_source, dir.path());
+        let bad = &request.inputs.packages[0].sources[0].file;
+        let manifest = dir.path().join("inputs.json");
+        std::fs::write(&manifest, serde_json::to_vec(&request.inputs).unwrap()).unwrap();
+
+        let run = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+            process::tape_request(&args, dir.path())
+        };
+        let (status, _, check_stderr) = run(&[
+            "check",
+            "--inputs",
+            manifest.to_str().unwrap(),
+            "--store",
+            request.store.to_str().unwrap(),
+        ]);
+        assert_eq!(status, Some(1), "{check_stderr}");
+        let (status, stdout, fmt_stderr) = run(&["fmt", dir.path().to_str().unwrap()]);
+        assert_eq!(status, Some(1), "{fmt_stderr}");
+        // There are 21 scalars before `#` on line 2, including three multibyte scalars.
+        let site = format!("{}:2:22-23", bad.display());
+        assert!(
+            check_stderr.contains(&format!("{site}: LANG-1 ")),
+            "{check_stderr}"
+        );
+        assert!(
+            fmt_stderr.contains(&format!("{site}: LANG-1: ")),
+            "{fmt_stderr}"
+        );
+        assert_eq!(stdout, format!("{}\n", good.display()));
+        assert_eq!(std::fs::read(&good).unwrap(), good_source);
+        assert_eq!(std::fs::read(bad).unwrap(), bad_source.as_bytes());
+
+        let (status, stdout, stderr) = run(&["fmt", "--check", good.to_str().unwrap()]);
+        assert_eq!(status, Some(1), "{stderr}");
+        assert_eq!(stdout, format!("{}\n", good.display()));
+        assert_eq!(std::fs::read(&good).unwrap(), good_source);
+        let (status, _, stderr) = run(&["fmt", good.to_str().unwrap()]);
+        assert_eq!(status, Some(0), "{stderr}");
+        assert_eq!(std::fs::read(&good).unwrap(), b"fn a() {\n    1\n}\n");
+    }
+
+    #[test]
+    fn fmt_stdin_checks_exact_bytes_and_renders_refusals() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().unwrap();
+        let run = |opts: &[&str], source: &[u8]| {
+            let args = ["fmt", "--stdin"]
+                .into_iter()
+                .chain(opts.iter().copied())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let mut child = process::tape_request_command(&args, dir.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(source).unwrap();
+            let output = child.wait_with_output().unwrap();
+            let payload = |bytes: Vec<u8>| {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .split_once(process::CHILD_MARK)
+                    .unwrap()
+                    .1
+                    .to_owned()
+            };
+            (
+                output.status.code(),
+                payload(output.stdout),
+                payload(output.stderr),
+            )
+        };
+        let input = b"pub fn f(x:u64)->u64\r\n";
+        let canonical = "pub fn f(x: u64) -> u64\n";
+        let (status, stdout, stderr) = run(&["--signatures"], input);
+        assert_eq!(
+            (status, stdout.as_str(), stderr.as_str()),
+            (Some(0), canonical, "")
+        );
+        for (source, expected) in [(input.as_slice(), 1), (canonical.as_bytes(), 0)] {
+            let (status, stdout, stderr) = run(&["--check", "--signatures"], source);
+            assert_eq!(
+                (status, stdout.as_str(), stderr.as_str()),
+                (Some(expected), "", "")
+            );
+        }
+        let (status, stdout, stderr) = run(&[], b"// ok\r\n\xff");
+        assert_eq!((status, stdout.as_str()), (Some(1), ""));
+        assert_eq!(stderr, "<stdin>:2:1-2: LANG-1: source is not UTF-8\n");
+        let (status, stdout, stderr) =
+            run(&[], "// header\r\nfn bad() { /* é→😀 */ # }\r\n".as_bytes());
+        assert_eq!((status, stdout.as_str()), (Some(1), ""));
+        assert!(stderr.contains("<stdin>:2:22-23: LANG-1: "), "{stderr}");
+    }
+
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
         assert_eq!(

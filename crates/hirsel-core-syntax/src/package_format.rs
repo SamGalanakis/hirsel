@@ -1,5 +1,5 @@
 //! Package formatting is prepare-then-write: source refusals never leave a partial reformat.
-use crate::{Diagnostic, ParseMode, ResourceRefusal, Symbols, format, parse_bytes};
+use crate::{Diagnostic, ParseMode, ResourceRefusal, Symbols, format_verified, parse_bytes};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -57,8 +57,9 @@ pub fn format_package(
 }
 
 /// Parse and prepare every input before writing any. Check never modifies a file.
-/// A parse/resource refusal returns a report and writes nothing; an I/O failure
-/// returns Err. Write-time I/O errors may leave earlier successfully written files.
+/// A parse/resource refusal returns a report and writes nothing. A read or
+/// equivalence failure returns Err before any write. Write-time I/O errors may
+/// leave earlier successfully written files.
 /// Repeated paths are formatted once; giving two modes for one path is invalid.
 pub fn format_files(
     inputs: &[(PathBuf, ParseMode)],
@@ -81,7 +82,9 @@ pub fn format_files(
     for (path, mode) in inputs {
         let bytes = fs::read(&path)?;
         let parsed = parse_bytes(&bytes, mode, &mut symbols);
-        match format(&parsed) {
+        match format_verified(&parsed, mode, &mut symbols)
+            .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?
+        {
             Some(text) if text.as_bytes() != bytes => {
                 report.differing.push(path.clone());
                 prepared.push((path.clone(), text));

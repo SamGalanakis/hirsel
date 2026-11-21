@@ -45,6 +45,7 @@ pub enum OptionId {
     Help,
     Install,
     FmtCheck,
+    FmtStdin,
     Signatures,
     ListRules,
     SdkOut,
@@ -103,7 +104,7 @@ commands! {
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
-    "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
+    "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
     "explain", "explain RULE|debug-lines | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
     "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
@@ -336,7 +337,14 @@ static OPTIONS: &[OptionSpec] = &[
         ["--check"],
         None,
         ["fmt"],
-        "List differing files without writing; exit 1 when any differ."
+        "Exit 1 on differences without writing. For files, list paths that differ."
+    ),
+    option!(
+        FmtStdin,
+        ["--stdin"],
+        None,
+        ["fmt"],
+        "Read source from standard input and write the formatted bytes to standard output."
     ),
     option!(
         Signatures,

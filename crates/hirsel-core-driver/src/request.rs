@@ -130,15 +130,22 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         use crate::cli::OptionId;
         let has = |option| invocation.options.iter().any(|(id, _)| *id == option);
         if command == "fmt" {
-            let directory = invocation
-                .positional
-                .as_deref()
-                .ok_or("fmt requires a package directory")?;
-            let status = crate::cli_tools::format(
-                Path::new(directory),
-                has(OptionId::FmtCheck),
-                has(OptionId::Signatures),
-            )?;
+            use hirsel_core_syntax::{FormatAction, ParseMode};
+            let action = if has(OptionId::FmtCheck) {
+                FormatAction::Check
+            } else {
+                FormatAction::Write
+            };
+            let mode = if has(OptionId::Signatures) {
+                ParseMode::Signatures
+            } else {
+                ParseMode::Source
+            };
+            let status = match (has(OptionId::FmtStdin), invocation.positional.as_deref()) {
+                (true, None) => crate::cli_tools::format_stdin(action, mode)?,
+                (false, Some(path)) => crate::cli_tools::format(Path::new(path), action, mode)?,
+                _ => return Err("fmt requires one of FILE, DIR, or --stdin".into()),
+            };
             std::process::exit(status);
         }
         crate::cli_tools::explain(
@@ -334,6 +341,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::IncludeCredentials
             | Opt::Lib
             | Opt::FmtCheck
+            | Opt::FmtStdin
             | Opt::Signatures
             | Opt::ListRules
             | Opt::SdkOut

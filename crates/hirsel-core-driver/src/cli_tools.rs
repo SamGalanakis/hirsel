@@ -1,54 +1,89 @@
 //! User formatting and explanations call the canonical syntax/spec libraries.
-use hirsel_core_syntax::{FormatAction, ParseMode, format_package};
+use crate::diagnostics::render_span;
+use hirsel_core_syntax::{
+    Diagnostic, FormatAction, ParseMode, ResourceRefusal, Symbols, format_files, format_package,
+    format_verified, parse_bytes,
+};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
-pub fn format(
-    directory: &Path,
-    check: bool,
-    signatures: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let report = format_package(
-        directory,
-        if signatures {
-            ParseMode::Signatures
-        } else {
-            ParseMode::Source
-        },
-        if check {
-            FormatAction::Check
-        } else {
-            FormatAction::Write
-        },
-    )?;
+pub fn format(path: &Path, action: FormatAction, mode: ParseMode) -> io::Result<i32> {
+    let report = if path.metadata()?.is_dir() {
+        format_package(path, mode, action)?
+    } else {
+        format_files(&[(path.to_owned(), mode)], action)?
+    };
     if report.files.is_empty() {
-        return Err(format!("no .hirsel sources in {}", directory.display()).into());
+        return Err(io::Error::other(format!(
+            "no .hirsel sources in {}",
+            path.display()
+        )));
     }
     for path in &report.differing {
         println!("{}", path.display());
     }
     let mut resource = false;
     for refusal in &report.refused {
-        for diagnostic in &refusal.diagnostics {
-            eprintln!(
-                "{}:{}..{}: {}: {}",
-                refusal.path.display(),
-                diagnostic.primary.start,
-                diagnostic.primary.end,
-                diagnostic.rule,
-                diagnostic.message
-            );
-        }
-        if let Some(error) = &refusal.resource_refusal {
-            resource = true;
-            eprintln!("{}: resource: {error}", refusal.path.display());
-        }
+        let bytes = std::fs::read(&refusal.path)?;
+        print_format_refusal(
+            &refusal.path,
+            &bytes,
+            &refusal.diagnostics,
+            refusal.resource_refusal.as_ref(),
+        );
+        resource |= refusal.resource_refusal.is_some();
     }
     Ok(if resource {
         2
     } else {
-        i32::from(!report.refused.is_empty() || check && !report.differing.is_empty())
+        i32::from(
+            !report.refused.is_empty()
+                || action == FormatAction::Check && !report.differing.is_empty(),
+        )
     })
 }
+
+pub fn format_stdin(action: FormatAction, mode: ParseMode) -> io::Result<i32> {
+    let mut bytes = Vec::new();
+    io::stdin().lock().read_to_end(&mut bytes)?;
+    let mut symbols = Symbols::default();
+    let parsed = parse_bytes(&bytes, mode, &mut symbols);
+    let Some(output) = format_verified(&parsed, mode, &mut symbols)? else {
+        print_format_refusal(
+            Path::new("<stdin>"),
+            &bytes,
+            &parsed.diagnostics,
+            parsed.resource_refusal.as_ref(),
+        );
+        return Ok(if parsed.resource_refusal.is_some() {
+            2
+        } else {
+            1
+        });
+    };
+    if action == FormatAction::Check {
+        return Ok(i32::from(output.as_bytes() != bytes));
+    }
+    io::stdout().lock().write_all(output.as_bytes())?;
+    Ok(0)
+}
+
+fn print_format_refusal(
+    path: &Path,
+    bytes: &[u8],
+    diagnostics: &[Diagnostic],
+    resource: Option<&ResourceRefusal>,
+) {
+    for diagnostic in diagnostics {
+        let site = render_span(path, bytes, diagnostic.primary);
+        eprintln!("{site}: {}: {}", diagnostic.rule, diagnostic.message);
+    }
+    if let Some(error) = resource {
+        let site = render_span(path, bytes, error.site());
+        eprintln!("{site}: resource: {error}");
+    }
+}
+
 pub fn explain(
     rule: Option<&str>,
     list: bool,

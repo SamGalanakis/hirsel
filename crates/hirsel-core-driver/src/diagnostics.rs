@@ -329,22 +329,20 @@ impl SourceFiles {
         let Some((path, text)) = found else {
             return format!("{} {}..{}", site.module, site.span.start, site.span.end);
         };
-        let start = line_column(&text, site.span.start as usize);
-        let end = line_column(&text, site.span.end as usize);
-        if site.span.end <= site.span.start || start == end {
-            format!("{}:{}:{}", path.display(), start.0, start.1)
-        } else if start.0 == end.0 {
-            format!("{}:{}:{}-{}", path.display(), start.0, start.1, end.1)
-        } else {
-            format!(
-                "{}:{}:{}-{}:{}",
-                path.display(),
-                start.0,
-                start.1,
-                end.0,
-                end.1
-            )
-        }
+        render_span(path, &text, site.span)
+    }
+}
+
+pub(crate) fn render_span(path: &Path, text: &[u8], span: Span) -> String {
+    let (line, column) = line_column(text, span.start as usize);
+    let (end_line, end_column) = line_column(text, span.end as usize);
+    let path = path.display();
+    if span.end <= span.start || (line, column) == (end_line, end_column) {
+        format!("{path}:{line}:{column}")
+    } else if line == end_line {
+        format!("{path}:{line}:{column}-{end_column}")
+    } else {
+        format!("{path}:{line}:{column}-{end_line}:{end_column}")
     }
 }
 

@@ -30,9 +30,10 @@ PRIOR-ART.md records choices and tradeoffs. There are no old semantic dependenci
 
 `format(&ParseOutput)` formats a successful complete parse, retaining every literal,
 comment and semicolon. Blocks, fields, match arms and statements use four-space structural
-layout; declarations have one blank line between them. Other lists stay inline. Tests
-check token preservation, item-relative anchors, AST shape, recovery and idempotence.
-No reparse or validation of our own output runs in the product.
+layout; declarations have one blank line between them. Other lists stay inline.
+`format_verified` checks changed output by reparsing in the original mode and
+comparing the normalized AST, token spellings and comment ownership. Tests also
+check item-relative anchors, recovery and idempotence.
 
 `hirsel-core-syntax FILE [--signatures]` writes canonical text to stdout. Invalid source
 prints located rule diagnostics and exits unsuccessfully without formatted output.
@@ -42,7 +43,7 @@ files recursively; symlink directories are not followed. `format_files` takes ex
 `(PathBuf, ParseMode)` inputs. Both return `FormatReport { files, differing, refused }`
 in sorted path order. A `FormatRefusal` contains its path, syntax diagnostics and
 optional resource refusal. Check never writes. Write prepares every input first and
-writes nothing when any source refuses or a read fails. A write-time I/O failure is
+writes nothing when any source refuses, an equivalence check fails or a read fails. A write-time I/O failure is
 returned as an error and may leave earlier files formatted.
 
 The internal binary accepts `--check FILE...` or `--write FILE...`, optionally with
@@ -57,4 +58,4 @@ cases have no primary-site refusal oracle and receive canonical formatting norma
 Package preparation adapts Go's gofmt file-list reporting and Rust's cargo fmt check
 mode. Unlike gofmt's independent writes, a parse refusal here prevents all writes in
 one operation. Unlike cargo fmt's external process coordination, the driver uses one
-library call. No second parse or checker runs in the formatter.
+library call.

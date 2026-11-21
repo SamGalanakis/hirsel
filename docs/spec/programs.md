@@ -80,7 +80,16 @@ capabilities, unmarked as `main`'s are (PROG-3), so never `Args`; it returns `Re
 for any `E`, and may be `waits`. Each test runs as its own run with its own root limit: the
 test run's configuration grants its parameters and supplies its root limit as a run's
 configuration does for `main` ([CAP-4](capabilities.md#cap-4-entry-grants),
-[MEM-19](budgets.md#mem-19-limits)), and a test whose run does not start fails. `Ok(())`
+[MEM-19](budgets.md#mem-19-limits)), and a test whose run does not start fails. The package
+declares that configuration beside the manifest that names `main` (PROG-3): one root limit
+and one set of grants for its tests, any part of which a named test's own configuration
+replaces, and its test sources, which join the package's modules in its test runs and in no
+other build. A configuration naming a test the package does not have is refused. Of the
+declared grants a test is granted only those its parameters take, so a test without
+parameters is granted nothing and no test's configuration changes another test's run. Each
+test run starts in a working directory of its own, empty when the run starts, and a relative
+directory grant resolves against it as a launch's does
+([launch](launch.md#release-recipe-and-host-assembly)). `Ok(())`
 passes the test; `Error(e)` fails it, `e` cleaned as its run ends whatever `E` is, an `Exit`
 included; a failure fails it; a run stop fails the test it stops and ends no other test's
 run. A test that takes no parameters has its outcome fixed by its program and its run's

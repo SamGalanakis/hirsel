@@ -793,7 +793,9 @@ impl PackageLaw {
         let mut args = arguments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         args.extend(["--package-store".into(), self.path(store).to_str().unwrap().into()]);
         if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect") {
-            args.extend(["--libraries".into(), self.libraries.to_str().unwrap().into()]);
+            if !arguments.contains(&"--recipe") {
+                args.extend(["--libraries".into(), self.libraries.to_str().unwrap().into()]);
+            }
             args.extend(["--store".into(), self.path("compiler-store").to_str().unwrap().into()]);
         }
         if matches!(arguments[0], "build" | "publish") {
@@ -850,6 +852,68 @@ impl PackageLaw {
 
     fn empty_store(&self) {
         assert!(std::fs::read_dir(self.path("packages")).unwrap().next().is_none());
+    }
+}
+
+#[test]
+fn foreign_recipe_build_uses_only_selected_sealed_archive() {
+    use crate::code_store::{CodeStore, ObjectKind};
+    use hirsel_core_ir::{decode::DecodeBudget, release_recipe::Recipe};
+
+    for engine in ["cranelift", "llvm"] {
+        let law = PackageLaw::new();
+        for file in ["laws.hirsel", "native.hirsel", "main.hirsel", "libffi_laws.a"] {
+            let contents = std::fs::read(law.libraries.join("programs/ffi_laws").join(file)).unwrap();
+            law.write(&format!("ffi_laws/{file}"), contents);
+        }
+        let store = CodeStore::new(law.path("code-store"));
+        let publish = |arm: &[u8]| {
+            let arm_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(arm).0);
+            law.write("ffi_laws/arm.a", arm);
+            law.manifest("ffi_laws", "ffi_laws", 1, &format!(r#"
+[sources]
+"laws.hirsel" = "laws"
+"native.hirsel" = "native"
+"main.hirsel" = "main"
+[foreign.native]
+symbols = "hfl_"
+archives = [
+    {{ target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "{}" }},
+    {{ target = "aarch64-unknown-linux-gnu", file = "arm.a", sha256 = "{arm_pin}" }},
+]
+"#, crate::package_manifest::STAGED_FOREIGN[0].3));
+            PackageLaw::pass(law.run(&[
+                "publish", "ffi_laws", "--backend", engine, "--grant", "Foreign=ffi_laws@1/laws/Laws",
+            ])).trim().to_owned()
+        };
+        let first = publish(b"");
+        let second = publish(b"abc");
+        assert_ne!(first, second);
+        std::fs::remove_dir_all(law.path("ffi_laws")).unwrap();
+        let build = |root: &str| law.run(&["build", "--recipe", root, "-o", "sealed-program"]);
+        for root in [&first, &second] {
+            PackageLaw::pass(build(root));
+            let run = Command::new(law.path("sealed-program")).output().unwrap();
+            assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+            assert_eq!(run.stderr, b"freed 3\nfreed 2\nfreed 1\n");
+        }
+        let root = crate::native::recipe_build::parse_root(&second).unwrap();
+        let bytes = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
+        let mut recipe = Recipe::decode(&bytes, &mut DecodeBudget::unlimited()).unwrap();
+        let [selected] = recipe.foreign_archives.as_slice() else { panic!("one selected target") };
+        let selected = *selected;
+        recipe.foreign_archives.clear();
+        let missing = store.put(ObjectKind::Recipe, &recipe.encode()).unwrap().hash;
+        let (status, _, error) = build(&crate::call::hex(&missing.0));
+        assert_eq!(status, Some(2), "{error}");
+        assert!(error.contains("Missing"), "{error}");
+        let extra = store.put(ObjectKind::ForeignArchive, b"abc").unwrap();
+        recipe.foreign_archives = vec![selected, extra];
+        recipe.foreign_archives.sort_by_key(|archive| archive.hash);
+        let extra = store.put(ObjectKind::Recipe, &recipe.encode()).unwrap().hash;
+        let (status, _, error) = build(&crate::call::hex(&extra.0));
+        assert_eq!(status, Some(2), "{error}");
+        assert!(error.contains("Extra"), "{error}");
     }
 }
 

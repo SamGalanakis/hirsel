@@ -60,6 +60,34 @@ def ffi_laws(args, root, backend):
         return len(cold) + len(warm) + 1
 
 
+def sqlite_laws(args, root, backend):
+    with tempfile.TemporaryDirectory(prefix='hirsel-sqlite-laws-') as store:
+        fixture = Path(store) / 'core/programs/sqlite'
+        shutil.copytree(root / 'core/programs/sqlite', fixture)
+        command = [
+            str(args.compiler.resolve()), 'test', '.', '--backend', backend,
+            '--runtime', str(args.runtime.resolve()), '--cc', str(args.cc.resolve()),
+            '--libraries', str(root / 'core'), '--source-core', '--source-std',
+            '--store', str(Path(store) / 'build'), '-o', str(Path(store) / 'tests'),
+            '--grant', 'Foreign=sqlite@1/sqlite/Sqlite', '--test-timeout', '20', '--json',
+        ]
+        env = os.environ | {'XDG_CACHE_HOME': str(Path(store) / 'cache'), 'HIRSEL_S8_WORKERS': '1'}
+
+        def request(extra):
+            output = subprocess.run(command + extra, cwd=fixture, env=env,
+                                    capture_output=True, text=True, check=False)
+            if output.returncode:
+                raise AssertionError(output.stdout + output.stderr)
+            return json.loads(output.stdout)['tests']
+
+        first = request([])
+        second = request(['--filter', 'fl10_random'])
+        initial = next(row for row in first if row['definition'].endswith('/fl10_random'))
+        if len(second) != 1 or not initial['stdout'] or initial['stdout'] != second[0]['stdout']:
+            raise AssertionError((initial, second))
+        return len(first) + len(second)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
@@ -90,7 +118,7 @@ def main():
                        model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
                        schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                        record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
-            ffi = sum(ffi_laws(args, root, engine) for engine in engines)
+            ffi = sum(ffi_laws(args, root, engine) + sqlite_laws(args, root, engine) for engine in engines)
             findings = [f"{row['engine']} {row['file']}:{row['line']} {row['test']}: {row['cause']}"
                         for row in rows if row['applicable'] and not row['passed']]
             # tools/sweep counts this line: one body per law and engine.

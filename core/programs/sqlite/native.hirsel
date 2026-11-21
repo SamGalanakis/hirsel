@@ -1,0 +1,37 @@
+pub fn open_memory(f: Foreign[sqlite.Sqlite], mut e: Bytes) -> Option[foreign.Ptr[sqlite.DbHandle]] waits
+
+pub fn exec(f: Foreign[sqlite.Sqlite], db: foreign.Ptr[sqlite.DbHandle], sql: Bytes, mut e: Bytes) -> i32 waits
+
+pub fn prepare(f: Foreign[sqlite.Sqlite], db: foreign.Ptr[sqlite.DbHandle], sql: Bytes, mut e: Bytes) -> Option[foreign.Ptr[sqlite.StmtHandle]] waits
+
+pub fn column_count(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle]) -> u32 waits
+
+pub fn bind_i64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: i64, mut e: Bytes) -> i32 waits
+
+pub fn bind_f64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: f64, mut e: Bytes) -> i32 waits
+
+pub fn bind_blob(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: Bytes, mut e: Bytes) -> i32 waits
+
+pub fn bind_text(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: Bytes, mut e: Bytes) -> i32 waits
+
+pub fn bind_null(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, mut e: Bytes) -> i32 waits
+
+pub fn step(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], mut e: Bytes) -> i32 waits
+
+pub fn column_kind(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32) -> i32 waits
+
+pub fn column_i64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32) -> i64 waits
+
+pub fn column_f64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32) -> f64 waits
+
+pub fn column_len(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, mut e: Bytes) -> i64 waits
+
+pub fn column_copy(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, mut out: Bytes, start: u64, mut e: Bytes) -> i32 waits
+
+pub fn reset(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], mut e: Bytes) -> i32 waits
+
+pub fn finalize(f: Foreign[sqlite.Sqlite], take s: foreign.Ptr[sqlite.StmtHandle]) -> i32 waits
+
+pub fn close(f: Foreign[sqlite.Sqlite], take db: foreign.Ptr[sqlite.DbHandle]) -> i32 waits
+
+pub fn errstr(f: Foreign[sqlite.Sqlite], code: i32, mut e: Bytes)

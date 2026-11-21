@@ -1,0 +1,318 @@
+fn expect_row(step: sqlite.Step) {
+    match step {
+        Row => {},
+        Done => fail("expected a SQLite row"),
+    }
+}
+
+fn expect_error(e: sqlite.SqliteError, code: i32, text: String) {
+    if e.code != code || e.message != text { fail("unexpected SQLite error") }
+}
+
+@test
+fn fl8_blob_round_trip(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    sqlite.exec(mut db, "create table t(b blob)")?
+    let mut insert = sqlite.prepare(mut db, "insert into t values (?1)")?
+    let mut src: Bytes = list.new()
+    sqlite.bind_bytes(mut insert, 1, src)?
+    list.fill(mut src, 2, 9)
+    let _ = sqlite.step(mut insert)?
+    sqlite.reset(mut insert)?
+    sqlite.bind_null(mut insert, 1)?
+    let _ = sqlite.step(mut insert)?
+    sqlite.reset(mut insert)?
+    list.clear(mut src)
+    list.push(mut src, 0)
+    list.push(mut src, 255)
+    sqlite.bind_bytes(mut insert, 1, src)?
+    list.clear(mut src)
+    list.fill(mut src, 2, 9)
+    let _ = sqlite.step(mut insert)?
+    sqlite.finalize(take insert)?
+
+    let mut select = sqlite.prepare(mut db, "select b from t order by rowid")?
+    let mut out: Bytes = list.new()
+    expect_row(sqlite.step(mut select)?)
+    match sqlite.column_kind(mut select, 0) {
+        Blob => {},
+        _ => fail("empty blob changed kind"),
+    }
+    sqlite.column_bytes(mut select, 0, mut out)?
+    if list.len(out) != 0 { fail("empty blob changed length") }
+    expect_row(sqlite.step(mut select)?)
+    match sqlite.column_kind(mut select, 0) {
+        Null => {},
+        _ => fail("NULL changed kind"),
+    }
+    expect_row(sqlite.step(mut select)?)
+    match sqlite.column_kind(mut select, 0) {
+        Blob => {},
+        _ => fail("blob changed kind"),
+    }
+    sqlite.column_bytes(mut select, 0, mut out)?
+    if list.len(out) != 2 || out[0] != 0 || out[1] != 255 { fail("bound bytes changed") }
+    sqlite.finalize(take select)?
+    sqlite.close(take db)
+}
+
+@test
+fn fl9_finalize_then_close(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let s = sqlite.prepare(mut db, "select 1")?
+    sqlite.finalize(take s)?
+    sqlite.close(take db)
+}
+
+@test
+fn fl9_close_then_finalize(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let mut s = sqlite.prepare(mut db, "select 1")?
+    sqlite.close(take db)?
+    expect_row(sqlite.step(mut s)?)
+    sqlite.finalize(take s)
+}
+
+@test
+fn fl9_close_then_drop(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let s = sqlite.prepare(mut db, "select 1")?
+    sqlite.close(take db)
+}
+
+@test
+fn fl9_drop_both(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let s = sqlite.prepare(mut db, "select 1")?
+    Ok(())
+}
+
+@test
+fn fl9_final_release_error(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let mut s = sqlite.prepare(mut db, "select abs(-9223372036854775808)")?
+    match sqlite.step(mut s) {
+        Error(e) => if e.code != 1 { fail("expected a SQL error") },
+        _ => fail("expected a SQL error"),
+    }
+    sqlite.close(take db)?
+    match sqlite.finalize(take s) {
+        Error(e) => expect_error(e, 1, "SQL logic error"),
+        _ => fail("expected finalize to report the SQL error"),
+    }
+    Ok(())
+}
+
+fn denied(take r: Result[(), sqlite.SqliteError]) {
+    match r {
+        Error(e) => if e.code != 23 { fail("expected SQLITE_AUTH") },
+        _ => fail("SQL unexpectedly obtained authority"),
+    }
+}
+
+@test
+fn fl10_ambient_authority(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let mut s = sqlite.prepare(mut db, "select date('now'), datetime(0, 'localtime'), datetime(0, 'utc')")?
+    expect_row(sqlite.step(mut s)?)
+    for i in 0u32 .. 3u32 {
+        match sqlite.column_kind(mut s, i) {
+            Null => {},
+            _ => fail("SQLite observed host time"),
+        }
+    }
+    sqlite.finalize(take s)?
+    match sqlite.prepare(mut db, "attach ':memory:' as x") {
+        Error(e) => if e.code != 23 { fail("expected SQLITE_AUTH") },
+        _ => fail("ATTACH unexpectedly succeeded"),
+    }
+    denied(sqlite.exec(mut db, "vacuum"))
+    denied(sqlite.exec(mut db, "vacuum into 'x.db'"))
+    denied(sqlite.exec(mut db, "pragma temp_store_directory = '/tmp'"))
+    denied(sqlite.exec(mut db, "pragma soft_heap_limit = 1"))
+    sqlite.close(take db)
+}
+
+@test
+fn fl19_sql_validation(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    match sqlite.exec(mut db, "create table t(x); \0drop table t") {
+        Error(e) => expect_error(e, 1, "sqlite: SQL holds a zero byte"),
+        _ => fail("SQL with zero byte was executed"),
+    }
+    match sqlite.prepare(mut db, "select * from t") {
+        Error(e) => expect_error(e, 1, "no such table: t"),
+        _ => fail("SQL before the zero byte was executed"),
+    }
+    match sqlite.prepare(mut db, "select 1; select 2") {
+        Error(e) => expect_error(e, 1, "sqlite: prepare takes one statement"),
+        _ => fail("prepare accepted two statements"),
+    }
+    match sqlite.prepare(mut db, " -- c") {
+        Error(e) => expect_error(e, 1, "sqlite: no statement"),
+        _ => fail("prepare returned a null statement"),
+    }
+    sqlite.exec(mut db, " -- c")?
+    let mut s = sqlite.prepare(mut db, "select ?1")?
+    match sqlite.bind_i64(mut s, 0, 1) {
+        Error(e) => expect_error(e, 25, "sqlite: parameter index out of range"),
+        _ => fail("bind accepted parameter zero"),
+    }
+    sqlite.finalize(take s)?
+    sqlite.close(take db)
+}
+
+fn read_without_row(take s: sqlite.Stmt) -> i64 waits {
+    let mut stmt = take s
+    sqlite.column_i64(mut stmt, 0)
+}
+
+fn read_past_row(take s: sqlite.Stmt) -> i64 waits {
+    let mut stmt = take s
+    sqlite.column_i64(mut stmt, 1)
+}
+
+fn expect_failure(take outcome: Result[i64, JoinError], expected: String) {
+    match outcome {
+        Error(Failed(take cs)) => {
+            for c in cs {
+                match c.kind {
+                    Fail(text) => if text == expected { return },
+                    _ => {},
+                }
+                break
+            }
+        },
+        _ => {},
+    }
+    fail("column read failed with the wrong cause")
+}
+
+@test
+fn fl19_column_checks(f: Foreign[sqlite.Sqlite], tasks: Tasks) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let before = sqlite.prepare(mut db, "select 7")?
+    let child = task.spawn(tasks, bytes 65536, take before, read_without_row)
+    expect_failure(task.join(take child), "sqlite: no current row")
+    let mut past = sqlite.prepare(mut db, "select 7")?
+    expect_row(sqlite.step(mut past)?)
+    let child_past = task.spawn(tasks, bytes 65536, take past, read_past_row)
+    expect_failure(task.join(take child_past), "sqlite: column index out of range")
+    let mut after = sqlite.prepare(mut db, "select 7")?
+    expect_row(sqlite.step(mut after)?)
+    let _ = sqlite.step(mut after)?
+    let child_after = task.spawn(tasks, bytes 65536, take after, read_without_row)
+    expect_failure(task.join(take child_after), "sqlite: no current row")
+    sqlite.close(take db)
+}
+
+@test
+fn fl20_short_utf8_boundary(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut name = string.from("select * from ")
+    let mut expected = string.from("no such table: ")
+    for _ in 0u64 .. 240u64 {
+        string.push_char(mut name, 'a')
+        string.push_char(mut expected, 'a')
+    }
+    string.push_char(mut name, 'é')
+    let mut db = sqlite.open_memory(f)?
+    match sqlite.prepare(mut db, name) {
+        Error(e) => expect_error(e, 1, expected),
+        _ => fail("prepare unexpectedly resolved a table"),
+    }
+    sqlite.close(take db)
+}
+
+fn count_rows(take work: (sqlite.Stmt, Sender[u8], Sender[()])) -> i64 waits {
+    let (take s, take done, take ready) = take work
+    let mut stmt = take s
+    result.unwrap(channel.send(ready, ()))
+    expect_row(result.unwrap(sqlite.step(mut stmt)))
+    let count = sqlite.column_i64(mut stmt, 0)
+    result.unwrap(channel.send(done, 1u8))
+    count
+}
+
+fn no_error(take outcome: Result[(), sqlite.SqliteError]) {
+    match outcome {
+        Ok(()) => {},
+        Error(e) => fail(string.from(e.message)),
+    }
+}
+
+fn join_success(take outcome: Result[(), JoinError]) {
+    match outcome {
+        Ok(()) => {},
+        Error(Failed(take cs)) => {
+            for c in cs {
+                match c.kind {
+                    Fail(text) => fail(string.from(text)),
+                    Capacity(_) => fail("SQLite test task exhausted its byte limit"),
+                    Unwrap => fail("SQLite test task unwrapped an error"),
+                    _ => fail("unexpected SQLite test task cause"),
+                }
+            }
+            fail("SQLite test task failed without a cause")
+        },
+        Error(Cancelled(_)) => fail("SQLite test task was cancelled"),
+    }
+}
+
+fn bind_repeatedly(take s: sqlite.Stmt) waits {
+    let mut stmt = take s
+    for i in 0i64 .. 1000i64 {
+        no_error(sqlite.bind_i64(mut stmt, 1, i))
+        expect_row(result.unwrap(sqlite.step(mut stmt)))
+        if sqlite.column_i64(mut stmt, 0) != i { fail("bind changed under contention") }
+        no_error(sqlite.reset(mut stmt))
+    }
+}
+
+fn duplicates(take s: sqlite.Stmt) waits {
+    let mut stmt = take s
+    match sqlite.step(mut stmt) {
+        Error(e) => expect_error(e, 2067, "UNIQUE constraint failed: u.x"),
+        _ => fail("duplicate insert unexpectedly succeeded"),
+    }
+}
+
+fn unrelated(take done: Sender[u8]) waits {
+    result.unwrap(channel.send(done, 0u8))
+}
+
+@test
+fn fl21_contention(f: Foreign[sqlite.Sqlite], tasks: Tasks) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    sqlite.exec(mut db, "create table u(x unique); insert into u values(1)")?
+    let count = sqlite.prepare(mut db,
+        "with recursive c(x) as (select 1 union all select x+1 from c where x < 1000000) select count(*) from c")?
+    let bound_stmt = sqlite.prepare(mut db, "select ?1")?
+    let dup = sqlite.prepare(mut db, "insert into u values (1)")?
+    let (done, completed): (Sender[u8], Receiver[u8]) = channel.new(2)
+    let (ready, started): (Sender[()], Receiver[()]) = channel.new(1)
+    let counter = task.spawn(tasks, bytes 65536, (take count, channel.sender(done), take ready), count_rows)
+    result.unwrap(channel.receive(started))
+    let binder = task.spawn(tasks, bytes 65536, take bound_stmt, bind_repeatedly)
+    let conflicting = task.spawn(tasks, bytes 65536, take dup, duplicates)
+    let independent = task.spawn(tasks, bytes 65536, take done, unrelated)
+    if result.unwrap(channel.receive(completed)) != 0 { fail("SQLite blocked the scheduler") }
+    result.unwrap(task.join(take independent))
+    if result.unwrap(task.join(take counter)) != 1000000 { fail("recursive query count changed") }
+    join_success(task.join(take binder))
+    join_success(task.join(take conflicting))
+    sqlite.close(take db)
+}
+
+@test
+fn fl10_random(f: Foreign[sqlite.Sqlite], out: Stdout) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    let mut s = sqlite.prepare(mut db, "select random()")?
+    expect_row(sqlite.step(mut s)?)
+    let bits: u64 = int.truncate(sqlite.column_i64(mut s, 0))
+    let mut text = string.with_capacity(21)
+    string.push_u64(mut text, bits)
+    string.push_char(mut text, '\n')
+    result.unwrap(stdout.write(out, text))
+    sqlite.finalize(take s)?
+    sqlite.close(take db)
+}

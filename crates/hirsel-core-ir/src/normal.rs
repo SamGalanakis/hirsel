@@ -1709,21 +1709,21 @@ fn f0 = n0 g0 {
 ",
         );
         let encoded = encode(&module, FuncId(0));
-        // Literal v1 wire fields and SHA-256 computed independently with
-        // Python hashlib over the two u64le length-prefixed parts.
+        // Literal v2 wire fields. The hashes are SHA-256 over the domain
+        // and payload, each preceded by its u64 little-endian length.
         let body = hex(concat!(
-            "484952424f4459000100",
-            "00010001000900000001",
-            "0c61707040312f6d61696e2f66000000",
-            "01000000010100010000",
-            "0700000000000000",
-            "0301000001000900000000",
+            "484952424f4459000200",               // HIRBODY, NUL, u16le version 2
+            "000100010009000000",                 // types, () -> u64 signature, statics
+            "010c61707040312f6d61696e2f66000000", // instance app@1/main/f
+            "01000000010100010000",               // one function and block, const v0
+            "0700000000000000",                   // u64le 7
+            "0301000001000900000000",             // return v0, compact roots, local rows
         ));
         assert_eq!(encoded.bytes, body);
         let hash = encoded.hash();
         assert_eq!(
             hash.0.as_slice(),
-            hex("bf13ac887471a35ca6faf6c5d851787598bd9133e41a999eda48fc1c6e6bd3ea")
+            hex("1d2085dbdf9eab841d96b70d5c63b07f6f3a3f58dc0ec6ae4c9eeb27be8398be")
         );
         let identity = module.identity(module.functions[0].instance);
         let addresses = crate::code_addresses([identity.clone()], |_| {
@@ -1736,11 +1736,11 @@ fn f0 = n0 g0 {
         let address = addresses[&identity];
         assert_eq!(
             address.0.as_slice(),
-            hex("4f153742d5122fbe3bff42c86d8fd6c5fbbda4f4ec540000ba017e46bebac4cf")
+            hex("436fff16f259a64a36fe60690cfffe04764d09b13854a38736e83576960aa996")
         );
         assert_eq!(
             crate::code_revision(address).0.as_slice(),
-            hex("b2c86bcbd593913c656fc5b525b029d0bbaf7612018d1118449e6f9af2553207")
+            hex("e5a1c671c97634303ffcc3c4ce955f4125e81e5e50a1e87883553d66ffcba257")
         );
         let widen = Identity::plain(DefPath::core("float.widen"));
         assert_eq!(

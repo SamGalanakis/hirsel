@@ -418,8 +418,26 @@ fn verify_release(
     })?;
     if recipe.has_foreign() {
         check_foreign_archive_inventory(&recipe, budget)?;
+        let mut sealed = std::collections::BTreeMap::new();
+        for leaf in &recipe.foreign_modules {
+            let target = &recipe.launch.target;
+            let row = leaf.targets.binary_search_by(|row| row.target.cmp(target))
+                .expect("the checked archive inventory selects a row for each leaf");
+            let archive = leaf.targets[row].archive;
+            let mut check = || {
+                let bytes = load(ObjectKind::ForeignArchive, &archive, budget)?;
+                crate::foreign_archive::SealedArchive::open(bytes, archive, &leaf.module, target)
+            };
+            let sealed = match sealed.entry(archive.hash) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(check()?),
+            };
+            sealed.check_headers(archive, leaf, target, &recipe.entry.definition)?;
+        }
         for archive in &recipe.foreign_archives {
-            load(ObjectKind::ForeignArchive, archive, budget)?;
+            if !sealed.contains_key(&archive.hash) {
+                load(ObjectKind::ForeignArchive, archive, budget)?;
+            }
         }
         return Err(AdmissionError::Unsupported(
             "foreign modules are not enabled yet",

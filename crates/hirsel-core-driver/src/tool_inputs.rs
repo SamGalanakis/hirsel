@@ -1449,6 +1449,87 @@ fn shell_words(line: &str) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sealed_foreign_archives_check_pin_object_features_and_abi() {
+        use crate::code_store::ObjectKind;
+        use crate::foreign_archive::SealedArchive;
+        use hirsel_core_ids::DefPath;
+        use hirsel_core_ir::Identity;
+        use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
+
+        let target = "x86_64-unknown-linux-gnu";
+        let module = DefPath::from_full("ffi_laws@1/native").unwrap();
+        let entry = DefPath::from_full("ffi_laws@1/main/main").unwrap();
+        let digest = |text| crate::native::recipe_build::parse_root(text).unwrap();
+        let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let open = |bytes, hash, len| SealedArchive::open(bytes, ObjectRef { hash, len }, &module, target);
+        let prefix = |hash: ContentHash| format!("FFI-3: archive object {} of ffi_laws@1/native for {target}", crate::call::hex(&hash.0));
+        let wrong = open(b"abc".to_vec(), digest(empty), 3).err().unwrap();
+        assert_eq!(
+            wrong.to_string(),
+            format!("{} does not match its pin: expected sha256 {empty}, found sha256 {abc}", prefix(digest(empty)))
+        );
+        let not_ar = open(b"abc".to_vec(), digest(abc), 3).err().unwrap();
+        assert_eq!(not_ar.to_string(), format!("{} is not an indexed ar archive", prefix(digest(abc))));
+
+        let fixture = tempfile::tempdir().unwrap();
+        let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
+        let build = |extra: &str| {
+            let mut source = r#"
+static volatile int flag;
+int hfl_touch(void) { return flag; }
+__attribute__((used, section(".hirsel_abi")))
+static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch stack () -> i32\n";
+"#.to_owned();
+            source.push_str(extra);
+            std::fs::write(fixture.path().join("laws.c"), source).unwrap();
+            let argument = format!("--target={target}");
+            let compiled = Command::new(llvm.join("clang")).current_dir(fixture.path())
+                .args([&argument, "-std=c11", "-O2", "-fPIC", "-c", "laws.c", "-o", "laws.o"])
+                .output().unwrap();
+            assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+            let archived = Command::new(llvm.join("llvm-ar")).current_dir(fixture.path())
+                .args(["rcs", "laws.a", "laws.o"]).output().unwrap();
+            assert!(archived.status.success(), "{}", String::from_utf8_lossy(&archived.stderr));
+            let bytes = std::fs::read(fixture.path().join("laws.a")).unwrap();
+            let object = ObjectRef { hash: ObjectKind::ForeignArchive.hash(&bytes), len: bytes.len() as u64 };
+            (open(bytes, object.hash, object.len).unwrap(), object)
+        };
+        let mut leaf = ForeignLeaf {
+            module: module.clone(),
+            symbols: "hfl_".into(),
+            targets: vec![],
+            functions: vec![ForeignFunction {
+                identity: Identity::plain(DefPath::from_full("ffi_laws@1/native/touch").unwrap()),
+                header: "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32".into(),
+            }],
+        };
+        let (valid, valid_object) = build("");
+        valid.check_headers(valid_object, &leaf, target, &entry).unwrap();
+        let (invalid, object) = build("__attribute__((constructor)) static void initialize(void) { flag = 1; }\n");
+        let problem = invalid.check_headers(object, &leaf, target, &entry).unwrap_err();
+        assert_eq!(
+            problem.to_string(),
+            format!("{}: member laws.o has section .init_array of type SHT_INIT_ARRAY, which is not an admitted object feature", prefix(object.hash))
+        );
+        let (invalid, object) = build(r#"
+__asm__(".data\n.globl hfl_unique\n.type hfl_unique,@gnu_unique_object\nhfl_unique: .byte 0\n");
+"#);
+        let problem = invalid.check_headers(object, &leaf, target, &entry).unwrap_err();
+        assert_eq!(
+            problem.to_string(),
+            format!("{}: member laws.o has symbol hfl_unique with binding STB_GNU_UNIQUE, which is not an admitted object feature", prefix(object.hash))
+        );
+        leaf.functions[0].header = "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->u64".into();
+        let problem = valid.check_headers(valid_object, &leaf, target, &entry).unwrap_err();
+        assert_eq!(
+            problem.to_string(),
+            format!("{}: the ABI of hfl_touch is hfl_touch stack () -> i32, but its header declares hfl_touch stack () -> u64, declared at ffi_laws@1/main/main", prefix(valid_object.hash))
+        );
+    }
+
     /// Law: LLVM keys take the loaded libLLVM's bytes, so a library one byte
     /// apart (same name and size) is another identity, and a copy the same.
     /// Oracle: the files' bytes.

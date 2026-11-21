@@ -1977,17 +1977,17 @@ fn strided(s: u64, stride: u64) -> u64 {
         eval::run(&module, names["probe"], &[64], 1_000_000).outcome,
         eval::Outcome::Returned(vec![1019])
     );
-    // isolate call + user entry + two allocation calls, five full trips
-    // at three Steps, two calls in the failing trip, outer unwrap, seven latches.
-    // 1 + 1 + 2 + 5*3 + 2 + 1 + 7 = 29. Failure is caught before the tail.
-    for (s, want) in [(28, 28), (29, 1019)] {
+    // isolate call + user entry + list.with_capacity, five full trips
+    // at two Steps (push and latch), one push before division fails, outer
+    // unwrap and seven latches. 1 + 1 + 1 + 5*2 + 1 + 1 + 7 = 22.
+    for (s, want) in [(21, 21), (22, 1019)] {
         assert_eq!(
             eval::run(&module, names["probe"], &[s], 1_000_000).outcome,
             eval::Outcome::Returned(vec![want])
         );
     }
-    // Two setup calls, three Steps per checked-stride trip, then list.len.
-    for (s, stride, want) in [(33, 1, 1010), (18, 2, 1005), (15, 3, 1004)] {
+    // One setup call, two Steps per trip (push and latch), then list.len.
+    for (s, stride, want) in [(22, 1, 1010), (12, 2, 1005), (10, 3, 1004)] {
         assert_eq!(
             eval::run(&module, names["strided"], &[s, stride], 1_000_000).outcome,
             eval::Outcome::Returned(vec![want])
@@ -2083,12 +2083,10 @@ fn strided(s: u64, stride: u64) -> u64 {
 fn counted_reference_regions_keep_exact_bounds_and_mutation_prefixes() {
     let source = r#"
 type Cell { value: u64 }
-fn capacity_only(take r: Result[(), (Capacity, Arc[Cell])]) -> Result[(), Capacity] {
-    match r { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
-}
 fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Result[(), Capacity] {
     for i in 0u64 .. n {
         let held = arc.share(value)
+        list.try_reserve(mut xs, 1)?
         list.push(mut xs, take held)
         if i == at { return Error(Capacity(requested: 1, available: 0)) }
     }
@@ -2120,6 +2118,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
         let (module, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
         let mut cases = Vec::new();
         for n in [0u64, 4, if atomic { 1024 } else { 16384 }] {
+            let total = 7 + 4 * n;
             let bounds = if n < 8 {
                 (0..=4 * n + 13).collect::<Vec<_>>()
             } else {
@@ -2132,6 +2131,9 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                     5,
                     13,
                     14,
+                    37,
+                    38,
+                    39,
                     41,
                     42,
                     65535,
@@ -2141,9 +2143,9 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                     65544,
                     65547,
                     65548,
-                    8 + 4 * n - 1,
-                    8 + 4 * n,
-                    8 + 4 * n + 1,
+                    total - 1,
+                    total,
+                    total + 1,
                 ]
             };
             let positions = [0, 7, n]
@@ -2151,10 +2153,10 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                 .collect::<std::collections::BTreeSet<_>>();
             for at in positions {
                 for &s in &bounds {
-                    // Three setup calls and the helper call cost four. Each
-                    // trip shares, pushes, unwraps Capacity and latches. An early
-                    // error skips its latch; the tail is three latches and len.
-                    let need = if at < n { 11 + 4 * at } else { 8 + 4 * n };
+                    // list.new, arc.new and share_loop cost three. Each trip
+                    // shares, reserves, pushes and latches. An early error
+                    // skips its latch. The tail is three latches and list.len.
+                    let need = if at < n { 10 + 4 * at } else { total };
                     let want = if s < need {
                         2000000000u64 + s * 100000
                     } else if at < n {
@@ -3637,23 +3639,29 @@ fn static_bytes_preserve_budget_law() {
     let source = include_str!("../../../core/front/cases/rules/MEM-28-static-bytes.hirsel");
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases = [
-        ("literal_refusal", vec![0], 1615),
-        ("literal_refusal", vec![1], 1615),
-        ("refund_after_handover", vec![0], 890),
-        ("refund_after_handover", vec![1], 890),
-        ("empty_is_free", vec![], 0),
-        ("cloned_and_counted", vec![], 18),
-        ("inline_capacity", vec![], 311),
+        ("literal_refusal", vec![0], 1615, 32),
+        ("literal_refusal", vec![1], 1615, 32),
+        ("refusal_after_handover", vec![0], 800, 32),
+        ("refusal_after_handover", vec![1], 800, 32),
+        ("refund_after_handover", vec![0], 90, 0),
+        ("refund_after_handover", vec![1], 90, 0),
+        ("empty_is_free", vec![], 0, 0),
+        ("cloned_and_counted", vec![], 18, 0),
+        ("inline_capacity", vec![], 311, 0),
     ];
-    let runs = cases.each_ref().map(|(name, args, _)| Case {
+    let runs = cases.each_ref().map(|(name, args, _, _)| Case {
         function: names[*name],
         args: args.clone(),
         limit: 4096,
         injection: None,
     });
-    for (report, (_, _, expected)) in execute(&program, &runs).iter().zip(cases) {
-        assert_eq!(report.outcome, eval::Outcome::Returned(vec![expected]));
-        assert_eq!(report.used, 0);
+    for (report, (name, args, expected, used)) in execute(&program, &runs).iter().zip(cases) {
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![expected]),
+            "{name}{args:?}"
+        );
+        assert_eq!(report.used, used, "{name}{args:?}");
     }
 }
 

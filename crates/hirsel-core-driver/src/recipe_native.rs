@@ -13,6 +13,7 @@ use hirsel_core_ir::{
     release_recipe::{self as wire, BodyRef, GrantBinding, GrantKind, Launch, Recipe},
     source::{ItemSource, SourceFile, SourceMap, anchored_items},
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub struct AssemblyRecord {
@@ -478,6 +479,29 @@ fn site_item(site: &Site) -> DefPath {
     })
 }
 
+/// The anchor of `site` in a unit whose source items are `items`, adding its
+/// item on first sight. Keyed by the borrowed site, so each distinct site
+/// builds its DefPath once.
+fn anchor<'a>(
+    seen: &mut HashMap<(&'a str, u32, u32), ItemId>,
+    items: &mut Vec<DefPath>,
+    site: Option<&'a Site>,
+) -> Option<hirsel_core_ir::Anchor> {
+    let site = site?;
+    let index = *seen
+        .entry((site.file.as_str(), site.line, site.column))
+        .or_insert_with(|| {
+            let index = ItemId(items.len() as u32);
+            items.push(site_item(site));
+            index
+        });
+    Some(hirsel_core_ir::Anchor {
+        item: index,
+        start: 0,
+        end: 0,
+    })
+}
+
 fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, NativeStop> {
     let mut points = BTreeMap::<String, BTreeSet<(u32, u32)>>::new();
     for unit in units.values() {
@@ -488,10 +512,15 @@ fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, Nativ
                 .chain(&hints.terminators)
                 .flatten()
             {
-                points
-                    .entry(site.file.clone())
-                    .or_default()
-                    .insert((site.line, site.column));
+                let at = (site.line, site.column);
+                match points.get_mut(&site.file) {
+                    Some(file) => {
+                        file.insert(at);
+                    }
+                    None => {
+                        points.insert(site.file.clone(), BTreeSet::from([at]));
+                    }
+                }
             }
         }
     }
@@ -524,29 +553,16 @@ fn bind_annexes(units: &mut BTreeMap<Identity, Unit>) -> Result<SourceMap, Nativ
     }
     for unit in units.values_mut() {
         let module = &mut unit.module;
-        let mut items = BTreeMap::new();
-        let mut anchor = |site: Option<&Site>| {
-            let item = site_item(site?);
-            let index = *items.entry(item.clone()).or_insert_with(|| {
-                let index = ItemId(module.items.len() as u32);
-                module.items.push(item);
-                index
-            });
-            Some(hirsel_core_ir::Anchor {
-                item: index,
-                start: 0,
-                end: 0,
-            })
-        };
+        let mut items = HashMap::new();
         for (function, hints) in module.functions.iter_mut().zip(&unit.annex.0) {
             let (Some(body), Some(hints)) = (function.body.as_mut(), hints) else {
                 continue;
             };
             for (at, site) in body.inst_anchors.iter_mut().zip(&hints.instructions) {
-                *at = anchor(site.as_ref());
+                *at = anchor(&mut items, &mut module.items, site.as_ref());
             }
             for (block, site) in body.blocks.iter_mut().zip(&hints.terminators) {
-                block.anchor = anchor(site.as_ref());
+                block.anchor = anchor(&mut items, &mut module.items, site.as_ref());
             }
             for (call, &cold) in body.calls.iter_mut().zip(&hints.cold_calls) {
                 call.cold = cold;

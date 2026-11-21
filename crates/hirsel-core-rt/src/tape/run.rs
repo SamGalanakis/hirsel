@@ -30,6 +30,7 @@ struct Run {
     stderr: i32,
     diagnostic: Vec<u8>,
     stop: Option<u8>,
+    record_truncated: Option<(u64, IoError)>,
     grants: Vec<u64>,
     sink: Box<crate::os::OsProvider>,
     launch: Box<Metadata>,
@@ -131,13 +132,63 @@ unsafe extern "C" fn describe(state: *mut u8, cause: *const Cause) -> View {
         }
     }
 }
-fn stopped(run: &mut Run, message: impl std::fmt::Display) -> u8 {
-    let line = format!("tape: {message}\n");
+fn refused(run: &mut Run, error: OpenError) -> u8 {
+    let reason = match error {
+        OpenError::Refused(Refusal::Code) => "code".to_owned(),
+        OpenError::Refused(Refusal::Revision) => "revision".to_owned(),
+        OpenError::Refused(Refusal::Arg) => "arg".to_owned(),
+        OpenError::Refused(Refusal::Limit) => "limit".to_owned(),
+        OpenError::Refused(Refusal::Damaged(block)) => format!("damaged block {block}"),
+        OpenError::Refused(Refusal::HeaderTooLarge) => "header too large".to_owned(),
+        OpenError::Unreadable(Fault::Truncated(at)) => format!("truncated at {at}"),
+        OpenError::Unreadable(Fault::Damaged(block)) => format!("damaged block {block}"),
+        OpenError::Unreadable(Fault::Corrupt) => "corrupt".to_owned(),
+        OpenError::Unreadable(other) => format!("{other}"),
+        OpenError::Io(e) => format_io_error(e),
+    };
+    let line = if run.mode != 0 {
+        format!("replay: refused: {reason}\n")
+    } else {
+        format!("record: refused: {reason}\n")
+    };
     // SAFETY: configured fd is borrowed through this call, line owns its bytes.
     unsafe {
         crate::os::diagnostic(run.stderr, line.as_ptr(), line.len());
     }
-    run.stop = Some(process::NOT_STARTED);
+    run.stop = Some(if run.mode != 0 {
+        2
+    } else {
+        process::NOT_STARTED
+    });
+    1
+}
+
+fn format_io_error(e: IoError) -> String {
+    match e.tag {
+        1 => "not found".to_owned(),
+        2 => "denied".to_owned(),
+        3 => "exists".to_owned(),
+        4 => "closed".to_owned(),
+        _ if e.code != 0 => format!("os error {}", e.code),
+        _ => format!("io ({}, {})", e.tag, e.code),
+    }
+}
+
+fn stopped(run: &mut Run, message: impl std::fmt::Display) -> u8 {
+    let line = if run.mode != 0 {
+        format!("replay: {message}\n")
+    } else {
+        format!("tape: {message}\n")
+    };
+    // SAFETY: configured fd is borrowed through this call, line owns its bytes.
+    unsafe {
+        crate::os::diagnostic(run.stderr, line.as_ptr(), line.len());
+    }
+    run.stop = Some(if run.mode != 0 {
+        1
+    } else {
+        process::NOT_STARTED
+    });
     1
 }
 unsafe extern "C" fn refuse_wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
@@ -293,8 +344,15 @@ unsafe extern "C" fn invoke(
         );
         let (tape, startup) = match opened {
             Ok(t) => t,
-            Err(e) => return stopped(run, format_args!("{e:?}")),
+            Err(e) => return refused(run, e),
         };
+        if run.mode != 0 {
+            tape.set_replay_abort(ReplayAbort {
+                stderr: run.stderr,
+                sources: run.sources,
+                diagnose: run.mode == 2,
+            });
+        }
         *run.launch = if run.mode == 0 {
             (*(*config).launch).clone()
         } else {
@@ -410,8 +468,19 @@ unsafe extern "C" fn invoke(
         substituted.launch = &*run.launch;
         let failed = (run.entry)(context, &substituted, result);
         let outcome = ending(context, failed, &*result);
-        match tape.end(&outcome) {
-            Ok(()) => failed,
+        match tape.end_with_truncation(&outcome) {
+            Ok(None) => {
+                if run.mode != 0 {
+                    run.stop = Some(0);
+                    0
+                } else {
+                    failed
+                }
+            }
+            Ok(Some(truncated)) => {
+                run.record_truncated = Some(truncated);
+                failed
+            }
             Err(f) => stopped(run, f),
         }
     }
@@ -518,6 +587,7 @@ unsafe fn run_taped(
             stderr: input.stderr_fd,
             diagnostic: vec![],
             stop: None,
+            record_truncated: None,
             grants: vec![],
             sink,
             launch: Box::new(Metadata::source(
@@ -582,6 +652,10 @@ unsafe fn run_taped(
         config.close_grants = None;
         config.describe_output = Some(emit_describe);
         let status = process::hirsel_core_run(&config, invoke);
+        if let Some((at, err)) = run.record_truncated {
+            let line = format!("record: truncated at {at}: {}\n", format_io_error(err));
+            crate::os::diagnostic(run.stderr, line.as_ptr(), line.len());
+        }
         run.stop.unwrap_or(status)
     }
 }

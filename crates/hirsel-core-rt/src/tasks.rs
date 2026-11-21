@@ -1724,25 +1724,8 @@ impl Scheduler {
 
     fn stop_quiescent(&mut self) -> ! {
         #[cfg(feature = "record")]
-        if let Some((id, fault)) = self.tapes.seal_deadlock() {
-            let tape = u128::from_be_bytes(id);
-            let verdict = match fault {
-                crate::tape::Fault::Diverged(divergence) => {
-                    format!(
-                        "Replay tape {tape:032x}: Diverged({:?}) at {}",
-                        divergence.kind, divergence.at
-                    )
-                }
-                crate::tape::Fault::Truncated(at) => {
-                    format!("Replay tape {tape:032x}: Truncated at {at}")
-                }
-                crate::tape::Fault::Damaged(block) => {
-                    format!("Replay tape {tape:032x}: Damaged block {block}")
-                }
-                crate::tape::Fault::Corrupt => format!("Replay tape {tape:032x}: Corrupt"),
-                fault => format!("Tape {tape:032x}: {fault}"),
-            };
-            crate::process::stop(verdict.as_bytes());
+        {
+            let _ = self.tapes.seal_deadlock();
         }
         crate::process::stop(b"Deadlock");
     }

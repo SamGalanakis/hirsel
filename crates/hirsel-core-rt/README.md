@@ -94,7 +94,9 @@ hirsel_core_run maps that completed outcome to PROG-3's process status.
 Before live or recording entry, an OS Process grant installs SIGTERM and
 SIGINT handlers. The first signal latches the stop and wakes the provider
 through the scheduler's readiness path. A second signal takes the default
-crash action. Replay supplies the stop from the tape and leaves the signal
+crash action. A release build links the release runtime without recording
+machinery; a recording build links the recording runtime (`record` feature).
+A replay tool supplies the stop from the recording and leaves the signal
 dispositions alone.
 
 Provider callbacks receive a Request at issue and an Outcome at delivery. A

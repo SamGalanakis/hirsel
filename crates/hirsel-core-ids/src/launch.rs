@@ -96,6 +96,7 @@ impl Metadata {
         Self::embedded(Some(hash_bytes(image)), target, n_place, describe)
     }
 
+    /// Embedded launch metadata for a tool that replays such a recording.
     pub fn embedded(digest: Option<[u8; 32]>, target: &str, n_place: u64, describe: bool) -> Self {
         let executable = digest
             .map(Executable::Digest)

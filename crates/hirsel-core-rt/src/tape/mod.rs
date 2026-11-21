@@ -189,7 +189,26 @@ struct Recorder {
     chooses: [Option<(u64, u64)>; 2],
     repeat: u64,
     frames: usize,
+    /// Complete frames written to `sink` before any storage failure.
+    written_frames: u64,
+    /// First storage failure during recording: `(last_complete_frame, error)`.
+    /// Once set, recording stops writing while the program keeps running unchanged.
+    failed: Option<(u64, IoError)>,
 }
+
+/// Launcher replay abort hook: ends the replay process immediately at the first
+/// divergence or fault, writing one verdict line and exiting 1 without running
+/// any further program code, cleanup or finalizer.
+#[derive(Clone, Copy)]
+pub(crate) struct ReplayAbort {
+    pub(crate) stderr: i32,
+    pub(crate) sources: *const crate::abi_sites::SourceTable,
+    pub(crate) diagnose: bool,
+}
+// SAFETY: `sources` is immutable and pinned for the replay process's lifetime.
+unsafe impl Send for ReplayAbort {}
+// SAFETY: `sources` is immutable and pinned for the replay process's lifetime.
+unsafe impl Sync for ReplayAbort {}
 
 struct Replayer {
     source: ProviderFile,
@@ -209,6 +228,7 @@ struct Live {
     pending: BTreeMap<usize, Pending>,
     mode: Mode,
     fault: Option<Fault>,
+    replay_abort: Option<ReplayAbort>,
     /// Index ordinal - 1 (section 4.3: one sequence per tape, from 1).
     objects: Vec<Object>,
     /// Replay Net grants retain an inert rule list without an inner provider.
@@ -436,10 +456,48 @@ impl Drop for ProviderFile {
     }
 }
 
+impl Live {
+    /// If this is a launcher replay, write `replay: VERDICT at N` (plus the source
+    /// position under `--diagnose`) and exit 1 immediately so no program code,
+    /// cleanup or finalizer runs after the divergence or fault.
+    pub(super) fn abort_replay(&self, fault: Fault, site: u64) {
+        let Some(abort) = self.replay_abort else {
+            return;
+        };
+        let mut line = match fault {
+            Fault::Diverged(d) => format!("replay: Diverged({:?}) at {}", d.kind, d.at),
+            Fault::Truncated(at) => format!("replay: Truncated at {at}"),
+            Fault::Damaged(block) => format!("replay: Damaged at {block}"),
+            Fault::Corrupt => format!(
+                "replay: Corrupt at {}",
+                self.replayer.as_ref().map_or(0, |r| r.taken + 1)
+            ),
+            other => format!("replay: {other}"),
+        };
+        if abort.diagnose {
+            // SAFETY: `abort.sources` is pinned for the process lifetime.
+            if let Some(pos) = unsafe { crate::abi_sites::format_site(site, abort.sources) } {
+                line.push_str(" (");
+                line.push_str(&pos);
+                line.push(')');
+            }
+        }
+        line.push('\n');
+        // SAFETY: `abort.stderr` is the launcher's stderr fd.
+        unsafe {
+            crate::os::diagnostic(abort.stderr, line.as_ptr(), line.len());
+            libc::_exit(1);
+        }
+    }
+}
+
 impl Recorder {
     /// Keep period-two CHOOSE runs in a REPEAT. Seals fall between frames,
     /// including between a frame and its DATA continuations.
     fn frame(&mut self, f: &Frame) -> Result<(), IoError> {
+        if self.failed.is_some() {
+            return Ok(());
+        }
         if let Frame::Choose { gap, index } = *f {
             let choose = Some((gap, index));
             if self.chooses[(self.repeat % 2) as usize] == choose {
@@ -459,7 +517,10 @@ impl Recorder {
             for data in rest {
                 self.frames += 1;
                 if self.full() {
-                    self.close(0)?;
+                    let _ = self.close(0);
+                    if self.failed.is_some() {
+                        return Ok(());
+                    }
                 }
                 self.retained_buffer = None;
                 self.buffer.extend_from_slice(&data);
@@ -467,9 +528,9 @@ impl Recorder {
         }
         self.frames += 1;
         if matches!(f, Frame::End { .. }) {
-            self.close(format::END)?;
+            let _ = self.close(format::END);
         } else if self.full() {
-            self.close(0)?;
+            let _ = self.close(0);
         }
         Ok(())
     }
@@ -488,8 +549,12 @@ impl Recorder {
     }
 
     fn close(&mut self, flags: u8) -> Result<(), IoError> {
+        if self.failed.is_some() {
+            return Ok(());
+        }
         self.flush_repeat();
         self.chooses = [None, None];
+        let block_frames = self.frames as u64;
         self.frames = 0;
         let b = block(&self.tape_id, flags, self.seq, &self.buffer);
         self.seq += 1;
@@ -501,7 +566,16 @@ impl Recorder {
             }
         }
         self.encoder.new_block();
-        self.sink.write(&b)
+        match self.sink.write(&b) {
+            Ok(()) => {
+                self.written_frames += block_frames;
+                Ok(())
+            }
+            Err(e) => {
+                self.failed = Some((self.written_frames, e));
+                Err(e)
+            }
+        }
     }
 }
 
@@ -707,10 +781,9 @@ impl Tape {
     pub(crate) fn group(&self) -> schedule::Group {
         schedule::Group::root(self.cell, self.generation)
     }
-    /// Open a tape at `name` in the Dir `dir` (its provider and handle), as
-    /// the code whose revision is `revision`: the generated `tape.open` passes
-    /// the entry object's `hirsel_code_revision`, the entry's code revision,
-    /// so a program that never opens a tape never references it.
+    /// Open a recording file at `name` in the Dir `dir` (its provider and
+    /// handle), as the code whose revision is `revision`: the launcher passes
+    /// the entry object's `hirsel_code_revision`, the entry's code revision.
     /// Record creates the file (CreateNew) and writes block 0 from `header`;
     /// Replay reads it and refuses, in this order, a changed identity,
     /// revision (unless `expect.across`), argument (when `expect` passes
@@ -773,6 +846,8 @@ impl Tape {
                     chooses: [None, None],
                     repeat: 0,
                     frames: 0,
+                    written_frames: 0,
+                    failed: None,
                 };
                 recorder.close(0).map_err(OpenError::Io)?;
                 let live = Live {
@@ -782,6 +857,7 @@ impl Tape {
                     schedule: schedule::Schedule::new(header.chooser),
                     mode,
                     fault: None,
+                    replay_abort: None,
                     objects: vec![],
                     replay_net_rules: BTreeMap::new(),
                     clocks: BTreeMap::new(),
@@ -830,6 +906,7 @@ impl Tape {
                     schedule: schedule::Schedule::new(stored.chooser),
                     mode,
                     fault: None,
+                    replay_abort: None,
                     objects: vec![],
                     replay_net_rules: BTreeMap::new(),
                     clocks: BTreeMap::new(),
@@ -885,6 +962,13 @@ impl Tape {
         let mut state = self.cell.state.lock().unwrap();
         let live = state.live.as_mut().unwrap();
         live.replay_net_rules.insert(ordinal_of(handle), rules);
+    }
+
+    pub(crate) fn set_replay_abort(&self, abort: ReplayAbort) {
+        let mut state = self.cell.state.lock().unwrap();
+        if let Some(live) = state.live.as_mut() {
+            live.replay_abort = Some(abort);
+        }
     }
 
     /// `std.<kind>.on_tape`: the substitute for the capability `source`, as
@@ -965,7 +1049,10 @@ impl Tape {
                     Ok(_) => Err(rep.diverged(Mismatch::Op)),
                     Err(f) => Err(f),
                 };
-                stored.inspect_err(|&f| live.fault = Some(refuse(f)))?
+                stored.inspect_err(|&f| {
+                    live.fault = Some(refuse(f));
+                    live.abort_replay(f, 0);
+                })?
             }
         };
         let inner = match live.mode {
@@ -988,15 +1075,32 @@ impl Tape {
         let _commit = crate::tasks::before_tape_frame(self.group(), true);
         let result = self.finish(Seal::Explicit(ending));
         std::mem::forget(self);
+        match result {
+            Ok(None) => Ok(()),
+            Ok(Some((_, e))) => Err(Fault::Io(e)),
+            Err(f) => Err(f),
+        }
+    }
+    pub(crate) fn end_with_truncation(
+        self,
+        ending: &Ending,
+    ) -> Result<Option<(u64, IoError)>, Fault> {
+        let _commit = crate::tasks::before_tape_frame(self.group(), true);
+        let result = self.finish(Seal::Explicit(ending));
+        std::mem::forget(self);
         result
     }
-    fn finish(&self, seal: Seal<'_>) -> Result<(), Fault> {
+    fn finish(&self, seal: Seal<'_>) -> Result<Option<(u64, IoError)>, Fault> {
         crate::tasks::detach_tape(self.group());
         finish(self.cell, self.generation, seal)
     }
 }
 
-fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Result<(), Fault> {
+fn finish(
+    cell: &'static Cell,
+    expected_generation: u32,
+    seal: Seal<'_>,
+) -> Result<Option<(u64, IoError)>, Fault> {
     let mut s = cell.state.lock().unwrap();
     if s.generation != expected_generation {
         return Err(Fault::Ended);
@@ -1028,21 +1132,25 @@ fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Resu
             kind: Mismatch::Schedule,
         }));
     }
+    let mut truncated = None;
     if let Some(rec) = live.recorder.as_mut() {
-        let written = if let Some(e) = end {
-            rec.frame(&Frame::End {
-                gap: live.schedule.events - live.schedule.last,
-                ending: e.clone(),
-            })
-        } else if rec.buffer.is_empty() {
-            Ok(())
-        } else {
-            rec.close(0)
-        };
-        let closed = rec.sink.close();
-        if result.is_ok() {
-            result = written.and(closed).map_err(Fault::Io);
+        if rec.failed.is_none() {
+            if let Some(e) = end {
+                let _ = rec.frame(&Frame::End {
+                    gap: live.schedule.events - live.schedule.last,
+                    ending: e.clone(),
+                });
+            } else if !rec.buffer.is_empty() {
+                let _ = rec.close(0);
+            }
         }
+        let closed = rec.sink.close();
+        if rec.failed.is_none()
+            && let Err(e) = closed
+        {
+            rec.failed = Some((rec.written_frames, e));
+        }
+        truncated = rec.failed;
     }
     if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
         result = match rep.next() {
@@ -1086,8 +1194,16 @@ fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Resu
         let closed = rep.source.close().map_err(Fault::Io);
         result = result.and(closed);
     }
+    if let Err(f) = result {
+        live.abort_replay(f, 0);
+    }
+    if deadlock.is_some() && result.is_ok() && live.replay_abort.is_some() {
+        // Recorded deadlock matched and sealed on replay: exit 0.
+        // SAFETY: launcher replay sealed cleanly.
+        unsafe { libc::_exit(0) };
+    }
     FREE.with_borrow_mut(|f| f.push(cell));
-    result
+    result.map(|()| truncated)
 }
 impl Drop for Tape {
     fn drop(&mut self) {
@@ -1259,6 +1375,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             Ok(step) => step,
             Err(f) => {
                 live.fault = Some(refuse(f));
+                live.abort_replay(f, r.site);
                 done(REFUSED)
             }
         };
@@ -1286,17 +1403,9 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         args,
     };
     if step.kind == STEP_PENDING {
-        let written = live.recorder.as_mut().unwrap().frame(&own);
-        if let Err(e) = &written {
-            live.fault = Some(refuse(Fault::Io(*e)));
-        }
+        let _ = live.recorder.as_mut().unwrap().frame(&own);
         if matches!(r.operation, SYNC | SYNC_DIR) {
             s.accepted.insert(key, inner);
-            if written.is_err() {
-                return step;
-            }
-        } else if written.is_err() {
-            return done(REFUSED);
         }
         let live = s.live.as_mut().unwrap();
         live.pending.insert(
@@ -1328,9 +1437,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         args,
         out,
     };
-    if let Err(e) = live.recorder.as_mut().unwrap().frame(&frame) {
-        live.fault = Some(refuse(Fault::Io(e)));
-    }
+    let _ = live.recorder.as_mut().unwrap().frame(&frame);
     live.schedule.events += 1;
     if !denied {
         s.delivering.insert(key, delivery);
@@ -1676,6 +1783,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
             Ok(o) => done(o),
             Err(f) => {
                 live.fault = Some(refuse(f));
+                live.abort_replay(f, unsafe { (*r).site });
                 done(REFUSED)
             }
         };

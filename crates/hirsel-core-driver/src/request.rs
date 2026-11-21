@@ -316,7 +316,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             }
         }
     }
-    let _ = &expect_verdict;
+    if expect_verdict.is_some() && !test_replay {
+        return Err("--expect-verdict requires --replay".into());
+    }
     let mut replay_plan = None;
     if replay_command {
         if !directories.is_empty() || grant_mask != 0 {
@@ -818,7 +820,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.output = output_dir.join(hex(hirsel_core_ids::ContentHash::of_bytes(
                 test.to_string().as_bytes(),
             )));
-            let row = match product.run_test_with_runner(test, options, test_timeout, &runner) {
+            let result = if test_replay {
+                product.run_test_with_replay(
+                    test,
+                    options,
+                    test_timeout,
+                    &runner,
+                    expect_verdict.as_deref(),
+                )
+            } else {
+                product.run_test_with_runner(test, options, test_timeout, &runner)
+            };
+            let row = match result {
                 Ok(outcome) => {
                     let passed = outcome.passed();
                     failed |= !passed;

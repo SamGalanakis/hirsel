@@ -1,7 +1,7 @@
 //! Commit ownership. The residual domain has one token, passed FIFO within
 //! an L3 cohort for a bounded run before a waiting remote cohort is served
 //! (lock cohorting: Dice, Marathe and Shavit, C-BO-MCS shape, with MCS at
-//! both levels). The tape records the actual commit order, so the grant
+//! both levels). A recording build records the actual commit order, so the grant
 //! order is not part of the recorded schedule.
 use std::{
     cell::Cell,

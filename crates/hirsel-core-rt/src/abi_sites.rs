@@ -55,28 +55,24 @@ pub unsafe extern "C" fn hirsel_core_os_process_set_sources(
 
 pub use crate::entry::hirsel_core_os_run_with_sources;
 
+/// Format a source site word into `path:line:column`, or `None` when unbound.
 /// # Safety
-/// Same borrowed table contract as set_sources; the cause pins its message.
-/// Only the failure-report boundary calls this function.
+/// Same borrowed table contract as `set_sources`.
 #[cfg_attr(hirsel_runtime_size, optimize(size))]
-pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) -> String {
-    if sources.is_null() || cause.site == 0 {
-        // SAFETY: cause's message remains pinned throughout reporting.
-        return unsafe { crate::abi_host::format_cause(cause) };
+pub(crate) unsafe fn format_site(site: u64, sources: *const SourceTable) -> Option<String> {
+    if sources.is_null() || site == 0 {
+        return None;
     }
     // SAFETY: linked item/file indices and source byte boundaries are emitted by
     // our binder. UTF-8 was checked before source positions were assigned.
     unsafe {
         let sources = &*sources;
         let rows = std::slice::from_raw_parts(sources.files, sources.files_len);
-        let Some(row) = rows
-            .partition_point(|file| file.start <= cause.site)
-            .checked_sub(1)
-        else {
-            return crate::abi_host::format_cause(cause);
-        };
+        let row = rows
+            .partition_point(|file| file.start <= site)
+            .checked_sub(1)?;
         let file = &rows[row];
-        let offset = (cause.site - file.start) as usize;
+        let offset = (site - file.start) as usize;
         let source = file.source.bytes(sources.files);
         let (line, column) = if let Some(markers) = source.strip_prefix(&[source_positions::TAG]) {
             source_positions::position(markers, offset)
@@ -96,6 +92,20 @@ pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) ->
             (line, column)
         };
         let path = std::str::from_utf8_unchecked(file.path.bytes(sources.files));
-        crate::abi_host::format_cause_at(cause, format_args!("{path}:{line}:{column}"))
+        Some(format!("{path}:{line}:{column}"))
+    }
+}
+
+/// # Safety
+/// Same borrowed table contract as set_sources; the cause pins its message.
+/// Only the failure-report boundary calls this function.
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
+pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) -> String {
+    // SAFETY: cause's message and borrowed source table stay pinned through reporting.
+    unsafe {
+        match format_site(cause.site, sources) {
+            Some(pos) => crate::abi_host::format_cause_at(cause, format_args!("{pos}")),
+            None => crate::abi_host::format_cause(cause),
+        }
     }
 }

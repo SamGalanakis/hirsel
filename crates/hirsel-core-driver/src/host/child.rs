@@ -11,6 +11,7 @@ pub(super) struct Place {
     child: Child,
     control: UnixStream,
     pidfile: Option<PathBuf>,
+    pub(super) first_write_ns: Option<u64>,
 }
 
 pub(super) struct Children(PathBuf);
@@ -165,6 +166,7 @@ impl Place {
             child,
             control,
             pidfile: None,
+            first_write_ns: None,
         };
         place.pidfile = children.record(place.child.id())?;
         Ok(place)
@@ -172,6 +174,26 @@ impl Place {
 
     pub(super) fn control(&mut self) -> &mut UnixStream {
         &mut self.control
+    }
+
+    pub(super) fn has_notice(&self) -> io::Result<bool> {
+        let mut socket = libc::pollfd {
+            fd: self.control.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll borrows one initialized record and does not wait.
+        match unsafe { libc::poll(&raw mut socket, 1, 0) } {
+            n if n >= 0 => Ok(socket.revents & libc::POLLIN != 0),
+            _ => {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     pub(super) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {

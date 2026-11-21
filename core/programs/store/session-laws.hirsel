@@ -257,11 +257,11 @@ pub fn law_writer_one_frame() -> bool {
         let second: Bytes = result.unwrap(list.with_capacity(262158u64))
         let mut busy = false
         let handed = if wire_ready(busy) {
-            match wire_offer(tx, mut busy, WireUnit(frame: take first, check: None)) { Ok(()) => true, _ => false }
+            match wire_offer(tx, mut busy, WireUnit(frame: take first, check: None, write_ack: false)) { Ok(()) => true, _ => false }
         } else { false }
         let pending = result.unwrap(channel.try_receive(rx))
         let rejected = if wire_ready(busy) {
-            let _ = wire_offer(tx, mut busy, WireUnit(frame: take second, check: None))
+            let _ = wire_offer(tx, mut busy, WireUnit(frame: take second, check: None, write_ack: false))
             false
         } else {
             let extra: Result[Bytes, Capacity] = list.with_capacity(1u64)
@@ -314,7 +314,7 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
         let _ = task.join(take owner)
         let owner_closed = match channel.try_send(end, ()) { Error(Closed(_)) => true, _ => false }
         let _ = channel.try_send(events, wire_event(Sent))
-        let _ = channel.try_send(writes, WireUnit(frame: list.new(), check: None))
+        let _ = channel.try_send(writes, WireUnit(frame: list.new(), check: None, write_ack: false))
         let _ = channel.try_send(credit, ())
         let live = match (channel.try_receive(hear), channel.try_receive(read_writes), channel.try_receive(read_credit)) {
             (Ok(WireEvent(e: Sent)), Ok(_), Ok(())) => true,

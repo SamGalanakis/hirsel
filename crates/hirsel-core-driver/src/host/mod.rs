@@ -121,7 +121,12 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
         peer.write_all(&[u8::from(added)])?;
         send_release(&mut peer, &source, root, &admission)?;
         peer.set_read_timeout(Some(DEPLOY_TIMEOUT))?;
-        let report = read_frame(&mut peer, admission.recipe_bytes)?;
+        let mut report = read_frame(&mut peer, admission.recipe_bytes)?;
+        if report.is_empty() {
+            // The activation is ready. Only the timing report is pending.
+            peer.set_read_timeout(None)?;
+            report = read_frame(&mut peer, admission.recipe_bytes)?;
+        }
         let answer = serde_json::from_slice::<Report>(&report)?;
         println!("{}", serde_json::to_string(&answer)?);
         return if let Some(reason) = answer.refused {
@@ -174,21 +179,24 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
     };
     let admin = bind_control(&socket)?;
     let (mut active, mut live) = host.open_place(root, source.as_ref())?;
+    let mut pending = None;
     loop {
+        finish_pause(&mut pending, &mut live, false);
         match ControlConnection::accept(&admin) {
             Ok(mut operator) => {
                 let previous = active.active.version;
-                let report = match host.submit(&mut operator, &mut active, &mut live) {
-                    Ok((report, replacement)) => {
-                        if let Some(replacement) = replacement {
-                            live = replacement;
-                        }
-                        report
+                let (mut report, pause) = match host.submit(&mut operator, &mut active, &mut live) {
+                    Ok((report, Some(replacement))) => {
+                        finish_pause(&mut pending, &mut live, true);
+                        live = replacement.place;
+                        (report, Some(replacement.pause))
                     }
+                    Ok((report, None)) => (report, None),
                     Err(error) => {
+                        finish_pause(&mut pending, &mut live, true);
                         drop(live);
                         (active, live) = host.open_place(root, source.as_ref())?;
-                        if active.active.version == previous {
+                        let report = if active.active.version == previous {
                             Report {
                                 refused: Some(error.to_string()),
                                 ..Report::default()
@@ -198,15 +206,30 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
                                 activation: Some(active.active.version),
                                 ..Report::default()
                             }
-                        }
+                        };
+                        (report, None)
                     }
                 };
                 let mut peer = operator.into_stream()?;
                 peer.set_write_timeout(Some(START_TIMEOUT))?;
-                let _ = write_frame(&mut peer, &serde_json::to_vec(&report)?);
+                if let Some(pause) = pause {
+                    if pause.waiting {
+                        if write_frame(&mut peer, &[]).is_ok() {
+                            pending = Some(PendingReport {
+                                peer,
+                                report,
+                                pause,
+                            });
+                        }
+                        continue;
+                    }
+                    report.pause_ms = pause.millis(None);
+                }
+                send_report(&mut peer, &report);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if live.try_wait()?.is_some() {
+                    finish_pause(&mut pending, &mut live, true);
                     (active, live) = host.open_place(root, source.as_ref())?;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -302,6 +325,71 @@ struct Report {
     activation: Option<u64>,
     refused: Option<String>,
     preview: Vec<String>,
+}
+
+struct Replacement {
+    place: child::Place,
+    pause: Pause,
+}
+
+struct Pause {
+    until_ready: Duration,
+    ready_ns: u64,
+    waiting: bool,
+}
+
+impl Pause {
+    fn millis(&self, first_write_ns: Option<u64>) -> u128 {
+        // The child clock has its own epoch. Measure its interval from Ready
+        // so time spent servicing the admin socket cannot move the endpoint.
+        let after_ready = first_write_ns.map_or(0, |at| at.saturating_sub(self.ready_ns));
+        (self.until_ready.as_nanos() + u128::from(after_ready)).div_ceil(1_000_000)
+    }
+}
+
+struct PendingReport {
+    peer: UnixStream,
+    report: Report,
+    pause: Pause,
+}
+
+fn send_report(peer: &mut UnixStream, report: &Report) {
+    let _ = write_frame(
+        peer,
+        &serde_json::to_vec(report).expect("serializable report"),
+    );
+}
+
+fn finish_pause(pending: &mut Option<PendingReport>, live: &mut child::Place, retired: bool) {
+    if pending.is_none() {
+        return;
+    }
+    if let Err(error) = poll_write_ack(live) {
+        eprintln!("deploy pause: {error}");
+        *pending = None;
+    }
+    if (live.first_write_ns.is_some() || retired)
+        && let Some(mut finished) = pending.take()
+    {
+        finished.report.pause_ms = finished.pause.millis(live.first_write_ns);
+        send_report(&mut finished.peer, &finished.report);
+    }
+}
+
+fn poll_write_ack(live: &mut child::Place) -> Result<(), Error> {
+    if live.first_write_ns.is_none() && live.has_notice()? {
+        let peer = live.control();
+        peer.set_read_timeout(Some(START_TIMEOUT))?;
+        match read_frame(peer, 12) {
+            Ok(frame) => match Reply::read(&frame)? {
+                Reply::WriteAck(at) => live.first_write_ns = Some(at),
+                reply => return Err(reply.error()),
+            },
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 impl Host {
@@ -522,9 +610,8 @@ impl Host {
             Some(Ok((running, child))) => (running.active, running.retain_from, child),
             _ => {
                 let mut child = self.start(&assembly, &recipe, 0)?;
-                let (ready, retain_from) =
-                    opened(&mut child, assembly.identity, recipe.launch.n_place)?;
-                (ready, retain_from, child)
+                let opened = opened(&mut child, assembly.identity, recipe.launch.n_place)?;
+                (opened.active, opened.retain_from, child)
             }
         };
         self.records.set_active(found)?;
@@ -545,7 +632,11 @@ impl Host {
         let assembly = self.records.assembly(key)?;
         let recipe = self.recipe(assembly.recipe)?;
         let mut child = self.start(&assembly, &recipe, version)?;
-        let (active, retain_from) = opened(&mut child, key, recipe.launch.n_place)?;
+        let Opened {
+            active,
+            retain_from,
+            ..
+        } = opened(&mut child, key, recipe.launch.n_place)?;
         if active.version != version {
             return Err("ready activation differs from selected activation".into());
         }
@@ -750,7 +841,7 @@ impl Host {
         operator: &mut ControlConnection,
         old: &mut Running,
         live: &mut child::Place,
-    ) -> Result<(Report, Option<child::Place>), Error> {
+    ) -> Result<(Report, Option<Replacement>), Error> {
         let mut report = Report::default();
         let start = Instant::now();
         let added = match operator.deploy_permission(self.limits.timeout.unwrap()) {
@@ -845,7 +936,7 @@ impl Host {
                 .checked_add(1)
                 .ok_or("activation overflow")?;
             match outcome {
-                Reply::Installed(at) if at == version => {
+                Reply::Installed(at, waiting) if at == version => {
                     let active = Active {
                         store: old.active.store,
                         version: at,
@@ -862,18 +953,22 @@ impl Host {
                         replacement = self.start(&assembly, &recipe, at)?;
                         ready = opened(&mut replacement, assembly.identity, recipe.launch.n_place);
                     }
-                    let (observed, retain_from) = match ready {
-                        Ok((observed, retain_from))
-                            if observed.store == active.store && observed.version == at =>
+                    let opened = match ready {
+                        Ok(opened)
+                            if opened.active.store == active.store
+                                && opened.active.version == at =>
                         {
-                            (observed, retain_from)
+                            opened
                         }
                         refused => {
                             record.state = State::Failed;
                             self.records.write_deploy(&record)?;
                             let detail = match refused {
-                                Ok((found, _)) => {
-                                    format!("unexpected store or activation {}", found.version)
+                                Ok(found) => {
+                                    format!(
+                                        "unexpected store or activation {}",
+                                        found.active.version
+                                    )
                                 }
                                 Err(error) => error.to_string(),
                             };
@@ -887,16 +982,26 @@ impl Host {
                     self.records.write_deploy(&record)?;
                     self.records.clear_pending(record.attempt)?;
                     report.activation = Some(at);
-                    report.pause_ms = pause.elapsed().as_nanos().div_ceil(1_000_000);
                     live.wait_retired(START_TIMEOUT)?;
-                    self.collect(observed.store, retain_from)?;
+                    self.collect(opened.active.store, opened.retain_from)?;
                     *old = Running {
-                        active: observed,
-                        retain_from,
+                        active: opened.active,
+                        retain_from: opened.retain_from,
                         assembly,
                         recipe,
                     };
-                    return Ok((report, Some(replacement)));
+                    let pause = Pause {
+                        until_ready: opened.observed_at.duration_since(pause),
+                        ready_ns: opened.ready_ns,
+                        waiting,
+                    };
+                    return Ok((
+                        report,
+                        Some(Replacement {
+                            place: replacement,
+                            pause,
+                        }),
+                    ));
                 }
                 Reply::Drift if !retry && preparation.as_millis() < u128::from(self.max_pause) => {
                     drop(replacement);
@@ -996,15 +1101,17 @@ enum Reply {
         store: Attempt,
         version: u64,
         retain_from: u64,
+        ready_ns: u64,
     },
     Current(u64),
     Refused(String),
     Exported(u64, String),
     Imported(ContentHash),
-    Installed(u64),
+    Installed(u64, bool),
     Drift,
     Aborted,
     Uncertain,
+    WriteAck(u64),
 }
 
 #[derive(Debug)]
@@ -1041,6 +1148,7 @@ impl Reply {
                     store,
                     version,
                     retain_from,
+                    ready_ns: wire.word()?,
                 }
             }
             1 => {
@@ -1055,10 +1163,19 @@ impl Reply {
                     .try_into()
                     .map_err(|_| "prepared digest length")?,
             )),
-            5 => Self::Installed(wire.word()?),
+            5 => {
+                let version = wire.word()?;
+                let waiting = match wire.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err("invalid cutover wait flag".into()),
+                };
+                Self::Installed(version, waiting)
+            }
             6 => Self::Drift,
             7 => Self::Aborted,
             8 => Self::Uncertain,
+            9 => Self::WriteAck(wire.word()?),
             _ => return Err("place response tag".into()),
         };
         wire.done()?;
@@ -1074,26 +1191,33 @@ impl Reply {
     }
 }
 
-fn opened(
-    place: &mut child::Place,
-    assembly: ContentHash,
-    max: u64,
-) -> Result<(Active, u64), Error> {
+struct Opened {
+    active: Active,
+    retain_from: u64,
+    observed_at: Instant,
+    ready_ns: u64,
+}
+
+fn opened(place: &mut child::Place, assembly: ContentHash, max: u64) -> Result<Opened, Error> {
     place.control().set_read_timeout(Some(START_TIMEOUT))?;
     let frame = read_frame(place.control(), usize::try_from(max)?)?;
+    let observed_at = Instant::now();
     match Reply::read(&frame)? {
         Reply::Opened {
             store,
             version,
             retain_from,
-        } => Ok((
-            Active {
+            ready_ns,
+        } => Ok(Opened {
+            active: Active {
                 store,
                 version,
                 assembly,
             },
             retain_from,
-        )),
+            observed_at,
+            ready_ns,
+        }),
         reply => Err(reply.error()),
     }
 }
@@ -1124,7 +1248,14 @@ fn exchange(place: &mut child::Place, command: &[u8], max: u64) -> Result<Reply,
     peer.set_read_timeout(Some(DEPLOY_TIMEOUT))?;
     peer.set_write_timeout(Some(DEPLOY_TIMEOUT))?;
     write_frame(peer, command)?;
-    Reply::read(&read_frame(peer, usize::try_from(max)?)?)
+    let max = usize::try_from(max)?;
+    loop {
+        let reply = Reply::read(&read_frame(place.control(), max)?)?;
+        match reply {
+            Reply::WriteAck(at) => place.first_write_ns = Some(at),
+            reply => return Ok(reply),
+        }
+    }
 }
 
 fn command_prefix(tag: u32, attempt: Attempt) -> io::Result<Vec<u8>> {

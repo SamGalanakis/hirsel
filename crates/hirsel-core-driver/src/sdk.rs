@@ -18,7 +18,7 @@ impl<'a> Reader<'a> {
         self.at = end;
         Ok(out)
     }
-    fn byte(&mut self) -> Result<u8, Error> {
+    pub(crate) fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
     }
     pub(crate) fn count(&mut self) -> Result<usize, Error> {

@@ -337,8 +337,13 @@ the ones the preview reported for that record. A retry after drift keeps the rec
 fresh attempt and export. The write pause keeps hot deploy's own checks (attempt and prepared
 digest, store identity, version and activation, capacity, and the deadline), and no fetch,
 assembly or closure walk runs inside it. The deploy reports the fetch time, the assembly time
-and the write pause as three separate figures. A recorded digest is recovered from its retained
-bytes and never by assembling again.
+and the write pause as three separate figures. The write pause starts with the first cutover
+request. If OLD held a write during the pause, the host finishes the report when NEW's wire
+writer confirms that it flushed the first durable write outcome. Otherwise the pause ends at
+NEW's Ready. If NEW exits or retires without flushing a durable write outcome, its Ready ends
+the pause. The host can serve another deploy while a report waits for this notice, and the
+report wait has no deadline. A recorded digest is recovered from its retained bytes and never
+by assembling again.
 
 Laws: `grant_binding_order`, where a launch that reports which directory each `Dir` parameter
 received gives the given paths, and exchanging them exchanges the reports; `assemble_is_build`,

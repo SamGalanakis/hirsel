@@ -65,6 +65,9 @@ time in 256.
   well: `mac` with `verify` gives `verify`, and a use absent from either side is dropped.
   An empty result is still `Invalid`. Without the needed use, the operation gives
   `Denied` before issue, with no effect.
+- **Passwords.** A password used for SCRAM goes through `secret.scram_sha256`
+  ([TLS-6](../../../docs/spec/tls.md#tls-6-scram-sha-256)), never through these. Under
+  `mac`, a program could rebuild PBKDF2 one HMAC at a time and read `SaltedPassword`.
 - **Charging.** Nothing is admitted. The tag is an inline result. Neither operation waits.
 - **Failures.** `Denied` only. The secret's bytes are always present while the run lives.
 - **Replay.** Each operation is a provider operation

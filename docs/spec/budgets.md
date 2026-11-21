@@ -269,7 +269,10 @@ is core's plain record `{ steps: u64 }`.
   cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
   `?`, patterns and `match` run no user code and take none. A core function's call is one
-  step whatever it does; nothing inside it is counted but the user code it enters. Code an
+  step whatever it does; nothing inside it is counted but the user code it enters. The one
+  exception is `secret.scram_sha256`, which takes one further step for each PBKDF2 iteration
+  it admits, at the call and before any derivation, because its work is chosen by an untrusted
+  server, not by sizes a limit bounds ([TLS-6](tls.md#tls-6-scram-sha-256)). Code an
   engine adds of its own, such as drop, clone and growth code, takes none. So the steps a run
   takes follow from its source and its values alone.
 - **The current bound.** At each point exactly one step bound is current, or none: the

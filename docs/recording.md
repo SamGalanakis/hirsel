@@ -98,6 +98,11 @@ capacity and the deadline. Its delivery holds the addresses in the order deliver
 error. The header's grant snapshot records a `Resolve` rule with direction byte 3 and a
 `u16` count of patterns, each a length byte followed by its bytes, as a `Tls` rule's.
 
+**Terminal bits.** The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant carries one
+byte after its kind: 1 when the stream was a terminal at launch, 0 otherwise
+([stdin](../core/std/api/stdin.md#terminals)). `is_terminal` reads it and adds no frames, and
+a replay answers from it without probing its own descriptors.
+
 **Standard input and environment.** Each `stdin.read` issue holds the spare capacity of
 its buffer and its deadline. Its delivery holds the bytes in their original fragment
 sizes, or `Aborted`, `TimedOut` or the host error. An Env grant is recorded in the grant
@@ -110,14 +115,19 @@ environment.
 
 | operation | at issue (checked on replay) | at delivery (supplied on replay) |
 |---|---|---|
-| `TLS_CONNECT` | socket ordinal; canonical args = `name`, trust (`System`, or the SHA-256 of the roots bundle), the ALPN entries in order, `until` | the outcome. On success the new stream ordinal, the negotiated protocol and the 32-byte peer digest. |
+| `TLS_CONNECT` | socket ordinal; canonical args = `name`, trust (`System`, or the SHA-256 of the roots bundle), the ALPN entries in order, `until` | the outcome. On success the new stream ordinal, the negotiated protocol, the 32-byte peer digest and the binding value with its length (0 when absent). |
 | `RECV_BOUNDED` on a TLS half | as for a socket | the decrypted plaintext, in its original fragments |
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
 | `SEND_SECRET` | half ordinal; canonical args = `before`, the secret's designation, `after`, `until` | the outcome, and the committed count on failure |
 | `SECRET_MAC` | run-owned sink at object 0; canonical args = mode, secret designation, `data` (and `tag` for verify) | the 32-byte tag or the verdict |
+| `SCRAM` | half ordinal; canonical args = secret designation, `client_first`, `server_first`, `before`, `after`, `until` | the outcome, and the committed count on failure. The new `Scram`'s ordinal on success. |
+| `SCRAM_VERIFY` | `Scram` ordinal; canonical args = `server_final` | the verdict |
 
 A recording **never** holds ciphertext, handshake records, keys, client or server randoms,
-the certificate chain, the roots bundle, or the provider's verification time.
+the certificate chain, the roots bundle, or the provider's verification time. Nor does it
+hold any SCRAM value computed from a password: the normalized password, `SaltedPassword`,
+`ClientKey`, `StoredKey`, `ServerKey`, the client proof or the expected server signature
+([TLS-6](spec/tls.md#tls-6-scram-sha-256)).
 
 **Secret designations.** A granted secret is a grant. It takes a `GRANT` frame and an object
 ordinal in the order of the run's grants, like every other grant. The header's grant
@@ -202,6 +212,7 @@ Where cleartext can be in a recording:
 | bytes supplied by a `Secret` grant | never via the grant or send record | Replay uses the designation. |
 | a sealed secret | only where the bytes were already there, as the received plaintext they were computed from | Replay recomputes the same bytes from those deliveries, so the seal adds nothing. |
 | received plaintext (response bodies, cookies, minted tokens) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
+| a SCRAM exchange | the salt, iteration count, nonces and the server's `v=`, as received plaintext; never the proof | The server's messages are deliveries. With the client's first message they let a holder of the tape test password guesses offline, which is one reason every tape is credential-bearing. The proof would give the same, so it is not stored. |
 | sent plaintext | as the canonical-arguments rule stores it: 16 bytes or fewer literally, otherwise a digest | Replay only checks sends. |
 
 A replay gets the same results without a secret's bytes. The launcher does not read the
@@ -227,6 +238,7 @@ through the launch arguments to find and verify the pin.
   each a length byte followed by its bytes.
 - A `Secret` grant record holds the parameter name, the source label and the patterns, all
   length-prefixed.
+- The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant holds its terminal byte.
 - An `Env` grant record holds the pattern list and the sorted name and value pairs. Values
   retain their OS bytes, including when they are not UTF-8.
 - REPEAT stores periodic CHOOSE frames, and a replay expands them to their original

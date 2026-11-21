@@ -418,7 +418,14 @@ operations it names; nothing else about them may be inferred from an implementat
   reaches it there and `TimedOut` when `until` passes, in both cases having appended
   nothing. Bytes the host supplies afterwards go to the next read. The provider never
   changes the flags of the inherited descriptor
-  ([stdin](../../core/std/api/stdin.md)). An `Env` designates name patterns over a
+  ([stdin](../../core/std/api/stdin.md)). `stdin.is_terminal(i)`, `stdout.is_terminal(o)`
+  and `stderr.is_terminal(e)` return the stream's **terminal bit**: whether its descriptor
+  referred to a terminal when the run started. The launcher takes the bit once per granted
+  stream, before `main`, and it enters with the entry's grants
+  ([CAP-8](capabilities.md#cap-8-the-replay-point)), so these calls are not provider
+  operations, never wait or fail, admit nothing and take one step. The bit never changes
+  during the run, whatever happens to the descriptor
+  ([stdin](../../core/std/api/stdin.md#terminals)). An `Env` designates name patterns over a
   snapshot of the environment that the launcher takes before `main`. The snapshot holds
   the covered variables whose names are UTF-8, lives outside every limit and never
   changes. `env.get` gives `Denied` for a name no pattern covers, `None` for a covered
@@ -478,8 +485,8 @@ pub type StreamReply = Done | WriteFailed(WriteError)
 
 pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
 pub fn net(bytes n: u64) -> (Net, Served[NetOp])
-pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
-pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
+pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
+pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 pub fn dir_op(c: Call[DirOp]) -> DirOp
 pub fn net_op(c: Call[NetOp]) -> NetOp
@@ -541,9 +548,18 @@ pub fn trigger(take t: StopTrigger)
   queued and later call completes with `Closed` (`Dir`, `Stdout`, `Stderr`) or `Reset`
   (`Net`), and drops of its handles still succeed. `provide.next` returns `None` only at
   quiescence ([FAIL-15](failure.md#fail-15-run-stops)).
+- **Terminal bit.** `provide.stdout` and `provide.stderr` take the stream's terminal bit
+  explicitly, and `stdout.is_terminal` and `stderr.is_terminal` on the result return it for
+  the stream's whole life. It is answered by the capability itself, never queued on the port,
+  and a sealed port still answers it. There is no virtual `Stdin`; a model-world stream
+  answers `false`.
 - **Net authority.** A `provide.net` `Net` permits every address, name and TLS name, and
   `net.narrow` narrows it. Its TLS handshakes are answered by its server, so it never
-  authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)).
+  authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)). `net.join` reunites a
+  virtual socket's halves in the caller and asks the server nothing
+  ([NET-7](net.md#net-7-owned-connections)). `secret.scram_sha256` on a virtual TLS half
+  reaches its server only as `Send` calls, and only for a sealed `Secret`
+  ([TLS-6](tls.md#tls-6-scram-sha-256)).
 - **Cells.** `host.mono_ns`, `host.wall_ms`, `host.random` and `host.stopped` on a cell's
   capability answer at issue from the cell, never switch task and never allocate.
   `provide.clock` starts at the given times. `clock.advance_to(mut h, t)` raises monotonic

@@ -510,7 +510,7 @@ unsafe extern "C" fn invoke(
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
                             (*files)
                                 .registry
-                                .run
+                                .run_grants()
                                 .secrets
                                 .lock()
                                 .unwrap()

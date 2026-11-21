@@ -972,7 +972,7 @@ pub unsafe extern "C" fn hirsel_core_provide_clock(
     let files = unsafe { files(context) };
     // SAFETY: forwarded.
     let provider = match unsafe {
-        files.registry.run.cells.add(
+        files.registry.run_grants().cells.add(
             context,
             Cell::Clock(Mutex::new(ClockCell {
                 mono,
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn hirsel_core_provide_random(
     let provider = match unsafe {
         files
             .registry
-            .run
+            .run_grants()
             .cells
             .add(context, Cell::Random(Mutex::new(seed)), PROVIDE_CELL)
     } {
@@ -1029,7 +1029,7 @@ pub unsafe extern "C" fn hirsel_core_provide_process(context: *mut Context, _sit
     let files = unsafe { files(context) };
     // SAFETY: forwarded.
     let provider = match unsafe {
-        files.registry.run.cells.add(
+        files.registry.run_grants().cells.add(
             context,
             Cell::Process(Mutex::new(ProcessCell::default())),
             PROVIDE_CELL,
@@ -1228,7 +1228,7 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
     let provider = match unsafe {
         files
             .registry
-            .run
+            .run_grants()
             .cells
             .add(context, Cell::Port(Mutex::new(port)), charge)
     } {

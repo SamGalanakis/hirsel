@@ -1134,7 +1134,7 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
         let files = (*context).host_files;
         (*files)
             .registry
-            .run
+            .run_grants()
             .net_grants
             .lock()
             .unwrap()

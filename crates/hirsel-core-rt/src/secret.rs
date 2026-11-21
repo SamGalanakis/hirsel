@@ -122,7 +122,7 @@ pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
         if handle & DYNAMIC_GRANT != 0 {
             (*(*context).host_files)
                 .registry
-                .run
+                .run_grants()
                 .secrets
                 .lock()
                 .unwrap()
@@ -146,7 +146,7 @@ pub(crate) unsafe fn designate(context: *mut Context, secret: Secret) -> Outcome
         };
         let value = (*(*context).host_files)
             .registry
-            .run
+            .run_grants()
             .secrets
             .lock()
             .unwrap()
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
         }
         let mut secrets = (*(*context).host_files)
             .registry
-            .run
+            .run_grants()
             .secrets
             .lock()
             .unwrap();
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn hirsel_core_secret_narrow(
         secret.policy = policy;
         let value = (*(*context).host_files)
             .registry
-            .run
+            .run_grants()
             .secrets
             .lock()
             .unwrap()

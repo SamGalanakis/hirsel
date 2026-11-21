@@ -98,7 +98,7 @@ fn next_id(next: &mut u64) -> u64 {
 #[derive(Default)]
 pub(crate) struct Registry {
     owned: Mutex<Entries>,
-    pub(crate) run: Arc<RunGrants>,
+    run: Arc<RunGrants>,
 }
 
 /// Copyable designations and their backing storage live through the run.
@@ -132,6 +132,10 @@ pub(crate) struct Files {
     pub(crate) registry: Registry,
 }
 impl Registry {
+    pub(crate) fn run_grants(&self) -> &RunGrants {
+        &self.run
+    }
+
     pub(crate) fn for_unit(&self) -> Self {
         Self {
             owned: Mutex::default(),

@@ -1534,11 +1534,17 @@ fn push_shortest(mut s: String, x: f64, json: bool) {
 
 /// The number of decimal digits push_u64 writes for v: 1 for 0.
 fn decimal_len(v: u64) -> u64 {
-    let mut n: u64 = 1
-    while n < 20 && v >= POW10_U64[n] {
-        n += 1
+    // Treat zero as one. For other values the low bit cannot cross a power of ten.
+    let value = v | 1
+    let bits = 64 - leading_zeros(value)
+    // For bit widths 1 through 64 this is floor(bits * log10(2)).
+    // Values of one bit width span at most one decimal boundary.
+    let digits = (bits * 1233) >> 12
+    if value < POW10_U64[digits] {
+        digits
+    } else {
+        digits + 1
     }
-    n
 }
 
 fn push_zeros(mut s: String, n: u64) {

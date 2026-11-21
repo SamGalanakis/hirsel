@@ -12,12 +12,15 @@ fn sleeper(take work: Work) -> u64 waits {
 
 fn number(x: u64) -> u64 { x }
 
-pub fn main(c: Clock, tasks: Tasks) -> Result[(), Exit] waits {
+pub fn main(clock: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    if host.mono_ns(clock) != 1000u64 {
+        return Error(Exit(status: 2))
+    }
     let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(2))
-    let one = result.unwrap(task.spawn(tasks, bytes 4096, Work(clock: c, sender: channel.sender(tx), n: 1), sleeper))
-    let two = result.unwrap(task.spawn(tasks, bytes 4096, Work(clock: c, sender: channel.sender(tx), n: 2), sleeper))
-    let _ = result.unwrap(channel.receive(rx))
-    let _ = result.unwrap(channel.receive(rx))
+    let one = result.unwrap(task.spawn(tasks, bytes 4096, Work(clock: clock, sender: channel.sender(tx), n: 1), sleeper))
+    let two = result.unwrap(task.spawn(tasks, bytes 4096, Work(clock: clock, sender: channel.sender(tx), n: 2), sleeper))
+    let first = result.unwrap(channel.receive(rx))
+    let second = result.unwrap(channel.receive(rx))
     let _ = task.join(take one)
     let _ = task.join(take two)
     {
@@ -31,5 +34,9 @@ pub fn main(c: Clock, tasks: Tasks) -> Result[(), Exit] waits {
         if result.unwrap(arc.try_unwrap(take old)) != 3u64 { return Error(Exit(status: 6)) }
         if number(latest.read(root)) != 4u64 { return Error(Exit(status: 7)) }
     }
+    let mut order = string.new()
+    result.unwrap(string.push_u64(mut order, first))
+    result.unwrap(string.push_u64(mut order, second))
+    result.unwrap(stdout.write(out, order))
     Ok(())
 }

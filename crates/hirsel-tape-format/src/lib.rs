@@ -55,7 +55,7 @@ pub const ERROR: u8 = 1;
 pub const ABORTED: u8 = 2;
 pub const TIMED_OUT: u8 = 3;
 
-/// END's status: the recording reached `tape.end`.
+/// END's status: the recording reached the end of the run.
 pub const END_COMPLETE: u8 = 0;
 
 /// END's outcome kinds (v2.3 R9).

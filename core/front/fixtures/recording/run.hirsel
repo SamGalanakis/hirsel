@@ -1,4 +1,4 @@
-// Native oracle (tape_build_native.rs, tape_run_*): prints "taped", then
+// Native oracle (recording_build_native.rs, tape_run_*): prints "taped", then
 // the Clock's monotonic reading, "|", and the program's Args. With first arg
 // "x" exits with status 1 instead of 0.
 pub fn main(c: Clock, out: Stdout, a: Args) -> Result[(), Exit] {

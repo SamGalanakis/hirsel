@@ -239,7 +239,7 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
 }
 
 /// The oracle is the revision the build reports (revision.rs, from the checked
-/// IR, not from the link), which a Call header must also agree with. Wrong
+/// IR, not from the link), which a Run header must also agree with. Wrong
 /// implementations caught: a symbol that is the executable's key, the sources
 /// digest (a comment edit would refuse) or any other hash than the revision.
 #[test]
@@ -259,6 +259,9 @@ fn tape_code_revision_is_the_entry_revision() {
         assert!(product.accepted());
         let mut options = native_options(backend, dir.path());
         options.output = dir.path().join(format!("{backend:?}"));
+        options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+        options.runtime = env_record_runtime();
+        options.recording = true;
         let built = product.build(&entry, &options).unwrap();
         assert_eq!(
             code_revision_of(&built.executable),
@@ -268,8 +271,7 @@ fn tape_code_revision_is_the_entry_revision() {
     }
 }
 
-/// Builds core/front/tape/run.hirsel, with `edit` applied to its text,
-/// into `store`.
+/// Applies a source edit and builds the recording or replay fixture.
 fn tape_run_build(
     backend: Backend,
     dir: &Path,
@@ -278,9 +280,8 @@ fn tape_run_build(
     replay: Option<crate::ReplayPlan>,
 ) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = std::fs::read_to_string(root.join("core/front/tape/run.hirsel"))
-        .unwrap()
-        .replace(edit.0, edit.1);
+    let source =
+        include_str!("../../../core/front/fixtures/recording/run.hirsel").replace(edit.0, edit.1);
     let mut request = source_request(&source, dir);
     request.inputs.packages[1] =
         PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
@@ -326,8 +327,8 @@ fn tape_run(program: &Path, argv: &[&str], record: Option<&Path>) -> (Option<i32
 
 /// External recording and replay end to end: recording runs with HIRSEL_RECORD
 /// set, replays with no grants on either engine, refuses a changed revision
-/// with exit 2 unless `--diagnose` is set, and reports `Diverged(Arg)` with
-/// exit 1 when diagnosed across an edit.
+/// with exit 2 unless `--diagnose` is set, and checks both a changed write argument
+/// and a changed final outcome under diagnose.
 fn tape_run_replays(backend: Backend, other: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let tape = dir.path().join("run.tape");
@@ -344,7 +345,13 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         path: tape.to_str().unwrap().into(),
         diagnose: false,
     };
-    let replay_bin = tape_run_build(backend, dir.path(), "r", ("", ""), Some(replay_plan.clone()));
+    let replay_bin = tape_run_build(
+        backend,
+        dir.path(),
+        "r",
+        ("", ""),
+        Some(replay_plan.clone()),
+    );
     let (code, replayed, err) = tape_run(&replay_bin, &["two"], None);
     assert_eq!(code, Some(0), "replay: {err}");
     assert!(replayed.is_empty(), "replay must not write to live Stdout");
@@ -358,7 +365,13 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         "the other engine: {err}"
     );
 
-    let changed = tape_run_build(backend, dir.path(), "c", ("\"|\"", "\"/\""), Some(replay_plan));
+    let changed = tape_run_build(
+        backend,
+        dir.path(),
+        "c",
+        ("\"|\"", "\"/\""),
+        Some(replay_plan),
+    );
     let (code, printed, err) = tape_run(&changed, &["one"], None);
     assert_eq!((code, printed), (Some(2), String::new()), "refused: {err}");
     assert!(err.contains("replay: refused: revision"), "{err}");
@@ -379,14 +392,36 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         err.contains("replay: revision differs") && err.contains("replay: Diverged(Arg) at "),
         "{err}"
     );
+
+    let diagnose = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: true,
+    });
+    let same = tape_run_build(backend, dir.path(), "same", ("", ""), diagnose.clone());
+    let (code, out, err) = tape_run(&same, &[], None);
+    assert_eq!((code, out), (Some(0), String::new()), "{err}");
+    assert!(!err.contains("revision differs"), "{err}");
+
+    let changed_outcome = tape_run_build(
+        backend,
+        dir.path(),
+        "outcome",
+        ("else { Ok(()) }", "else { Error(Exit(status: 6)) }"),
+        diagnose,
+    );
+    let (code, out, err) = tape_run(&changed_outcome, &[], None);
+    assert_eq!((code, out), (Some(1), String::new()), "{err}");
+    assert!(
+        err.contains("revision differs") && err.contains("Outcome"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&tape).unwrap(), tape_bytes);
 }
 
 #[test]
 #[ignore = "explicit native integration target"]
 fn tape_run_replays_cranelift() {
     tape_run_replays(Backend::Cranelift, Backend::Llvm);
-    tape_schedule_engines();
-    tape_cli_replays();
 }
 
 #[test]
@@ -487,96 +522,152 @@ pub fn main(i: Stdin, e: Env, out: Stdout) -> Result[(), Exit] waits {
     );
 }
 
-/// Both emitters record identical scheduling coordinates and portable outcomes.
-fn tape_schedule_engines() {
-    use std::io::Write;
+/// A fixed clock and chooser drive two child waits. The engines must agree on
+/// task frames and channel results, and must replay each other's recording.
+#[test]
+#[ignore = "explicit native integration target"]
+fn recording_schedule_replays_across_engines() {
+    use hirsel_tape_format::{Blocks, CHOOSER_COMMIT, Decoder, END, Frame};
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
-    let cc = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
-    let source = std::fs::read_to_string(root.join("core/front/tape/schedule.hirsel")).unwrap();
+    let source = include_str!("../../../core/front/fixtures/recording/schedule.hirsel");
     let c = dir.path().join("provider.c");
-    std::fs::write(&c, include_str!("tape_schedule_provider.c")).unwrap();
-    let linker = dir.path().join("cc");
-    let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
-    let mut script = Vec::new();
-    writeln!(
-        script,
-        "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_run",
-        quote(&cc),
-        quote(&c),
-        quote(&root.join("crates/hirsel-core-rt/include"))
+    let object = dir.path().join("provider.o");
+    std::fs::write(&c, include_str!("recording_schedule_provider.c")).unwrap();
+
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    command(
+        Command::new(options.link.driver())
+            .arg("-c")
+            .arg(c)
+            .arg("-I")
+            .arg(root.join("crates/hirsel-core-rt/include"))
+            .arg("-o")
+            .arg(&object),
     )
     .unwrap();
-    crate::executable::write(&linker, &script, 0o755).unwrap();
-    let scripted_record = root.join(
+    options.link = Link::Driver(appending_driver(
+        dir.path(),
+        "clang-record-schedule",
+        &format!("'{}' -Wl,--wrap=hirsel_core_run", object.display()),
+    ));
+    options.runtime = root.join(
         std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE")
             .expect("scripted recording runtime archive"),
     );
-    let mut recorded = None;
-    for backend in [Backend::Cranelift, Backend::Llvm] {
-        let mut request = source_request(&source, dir.path());
-        request.inputs.packages[1] =
-            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-        let product = Driver::default()
-            .check(request, &mut Meter::new(false))
-            .unwrap();
-        assert!(
-            product.accepted(),
-            "{:?} {:?}",
-            product.diagnostics,
-            product.incomplete
+    options.recording = true;
+    options.grant_mask = (1 << grant_kind("Clock").unwrap())
+        | (1 << grant_kind("Tasks").unwrap())
+        | (1 << grant_kind("Stdout").unwrap());
+
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let frames = |mut bytes: &[u8]| {
+        let (mut blocks, header) =
+            Blocks::open(|buffer| std::io::Read::read(&mut bytes, buffer)).unwrap();
+        assert_eq!(
+            header.chooser, CHOOSER_COMMIT,
+            "scripted chooser was installed"
         );
-        let tape = dir.path().join(format!("schedule-{backend:?}.tape"));
-        let mut options = native_options(backend, dir.path());
-        options.output = dir.path().join(format!("schedule-{backend:?}"));
-        options.store = dir.path().join(format!("store-{backend:?}"));
-        options.grant_mask = (1 << 2) | (1 << 9);
-        options.link = Link::Driver(linker.clone());
-        options.runtime = scripted_record.clone();
-        options.recording = true;
-        let built = product
-            .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
+        let mut decoder = Decoder::default();
+        let mut frames = Vec::new();
+        while let Some((flags, payload)) = blocks
+            .next(|buffer| std::io::Read::read(&mut bytes, buffer))
+            .unwrap()
+        {
+            frames.extend(decoder.block(payload, flags & END != 0).unwrap());
+        }
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, Frame::Choose { .. })),
+            "recorded a task choice"
+        );
+        let sleepers = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Issue {
+                    task,
+                    op: hirsel_tape_format::op::SLEEP_UNTIL,
+                    ..
+                } => Some(*task),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(sleepers.len(), 2, "each child issues sleep");
+        for task_id in sleepers {
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::Wait { task, .. } if *task == task_id)),
+                "WAIT for child {task_id}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::Wake { task, .. } if *task == task_id)),
+                "WAKE for child {task_id}"
+            );
+        }
+        frames
+    };
+    let mut recorded = Vec::new();
+    for (backend, replay_backend) in [
+        (Backend::Cranelift, Backend::Llvm),
+        (Backend::Llvm, Backend::Cranelift),
+    ] {
+        let tape = dir.path().join(format!("{backend:?}.tape"));
+        options.backend = backend;
+        let built = product.build(&entry, &options).unwrap();
+        let output = Command::new(&built.executable)
+            .env("HIRSEL_RECORD", &tape)
+            .env("HIRSEL_RECORD_SCHEDULE", "1")
+            .env("HIRSEL_S8_WORKERS", "1")
+            .output()
             .unwrap();
-        let (code, out, err) = tape_run(&built.executable, &[], Some(&tape));
-        assert_eq!(code, Some(0), "{backend:?} record: {out} {err}");
-        let bytes = std::fs::read(&tape).unwrap();
-        options.output = dir.path().join(format!("schedule-replay-{backend:?}"));
-        options.grant_mask = 0;
-        options.replay = Some(crate::ReplayPlan {
+        assert!(output.status.success(), "{backend:?}: {output:?}");
+        assert!(
+            output.stdout == b"12" || output.stdout == b"21",
+            "each child sends one value: {:?}",
+            output.stdout
+        );
+        let sealed = std::fs::read(&tape).unwrap();
+        recorded.push(frames(&sealed));
+
+        let mut replay = options.clone();
+        replay.backend = replay_backend;
+        replay.grant_mask = 0;
+        replay.replay = Some(crate::ReplayPlan {
             path: tape.to_str().unwrap().into(),
             diagnose: false,
         });
-        let replayer = product
-            .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
-            .unwrap();
-        let (code, out, err) = tape_run(&replayer.executable, &[], None);
-        assert_eq!(code, Some(0), "{backend:?} replay: {out} {err}");
-        if let Some((prev_rev, prev_frames)) = &recorded {
-            assert_eq!(&built.revision, prev_rev, "engine entry revisions");
-            // Block 0 carries a per-run random tape_id and launch digest, so compare
-            // the recorded frame payload bytes from block 1 onward (excluding block
-            // checksums which fold in tape_id).
-            let payload_of = |b: &[u8]| {
-                let b0_len = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
-                let b1 = 16 + b0_len + 8;
-                b[b1 + 16..b.len() - 8].to_vec()
-            };
-            assert_eq!(
-                payload_of(&bytes),
-                *prev_frames,
-                "engine recordings must emit identical scheduling frames"
-            );
-        } else {
-            let b0_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-            let b1 = 16 + b0_len + 8;
-            recorded = Some((built.revision, bytes[b1 + 16..bytes.len() - 8].to_vec()));
-        }
+        let built = product.build(&entry, &replay).unwrap();
+        run_clean(&built.executable, 0);
+        assert_eq!(std::fs::read(&tape).unwrap(), sealed);
     }
+    assert_eq!(
+        recorded[0], recorded[1],
+        "engine recordings after the launch header"
+    );
 }
 
 /// S6's JSON/Args/Tasks run replays after its input grant is removed; diagnose
 /// names the first divergent request's rebound source, and show is standalone.
-fn tape_cli_replays() {
+#[test]
+#[ignore = "explicit native integration target"]
+fn recording_cli_replays() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -586,8 +677,8 @@ fn tape_cli_replays() {
     let data = dir.path().join("data");
     std::fs::create_dir(&app).unwrap();
     std::fs::create_dir(&data).unwrap();
-    let source = std::fs::read_to_string(root.join("core/front/tape/cli.hirsel")).unwrap();
-    std::fs::write(app.join("main.hirsel"), &source).unwrap();
+    let source = include_str!("../../../core/front/fixtures/recording/cli.hirsel");
+    std::fs::write(app.join("main.hirsel"), source).unwrap();
     std::fs::write(data.join("input.json"), b"{\"answer\":42}\n").unwrap();
     let tape = dir.path().join("run.tape");
     let runtime = env_record_runtime();
@@ -651,7 +742,11 @@ fn tape_cli_replays() {
     ];
     let (code, out, err) = process::tape_request(&shown, dir.path());
     assert_eq!(code, Some(0), "show: {err}");
-    assert!(out.contains("format 5") && out.contains("GRANT") && out.contains("END"));
+    assert!(
+        out.contains(&format!("format {}", hirsel_tape_format::FORMAT))
+            && out.contains("GRANT")
+            && out.contains("END")
+    );
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.
@@ -726,7 +821,8 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(Backend::Cranelift, dir.path());
     options.runtime = env_record_runtime();
-    options.grant_mask = (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
+    options.grant_mask =
+        (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
     options.recording = true;
     let built = product.build(&entry, &options).unwrap();
     let mut child = Command::new(&built.executable)
@@ -750,7 +846,10 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
         built.executable.file_name().unwrap().to_str().unwrap()
     );
     // SAFETY: this is the still-owned child, which wrote the ready marker.
-    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) }, 0);
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
     line.clear();
     output.read_line(&mut line).unwrap();
     assert_eq!(line, "stopped\n");
@@ -768,7 +867,10 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
     assert_eq!(replay.revision, built.revision);
     let result = Command::new(&replay.executable).output().unwrap();
     assert_eq!(result.status.code(), Some(0), "{:?}", result.stderr);
-    assert!(result.stdout.is_empty(), "replay wrote through the live Stdout");
+    assert!(
+        result.stdout.is_empty(),
+        "replay wrote through the live Stdout"
+    );
     assert_eq!(std::fs::read(tape).unwrap(), sealed);
 }
 
@@ -829,7 +931,7 @@ fn tape_http_replays_both_native_engines() {
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("app");
     std::fs::create_dir(&app).unwrap();
-    let fixture = std::fs::read_to_string(root.join("core/front/tape/http.hirsel")).unwrap();
+    let fixture = include_str!("../../../core/front/fixtures/recording/http.hirsel");
     let main = app.join("main.hirsel");
     let observer_src = dir.path().join("http-observe.c");
     let observer_obj = dir.path().join("http-observe.o");
@@ -855,7 +957,7 @@ fn tape_http_replays_both_native_engines() {
     );
 
     for engine in ["cranelift", "llvm"] {
-        std::fs::write(&main, &fixture).unwrap();
+        std::fs::write(&main, fixture).unwrap();
         let tape = dir.path().join(format!("{engine}.tape"));
         let common = [
             app.display().to_string(),
@@ -1046,7 +1148,14 @@ fn cli_tls_replay(with_secret: bool) {
     }
     let token = crate::call::hex(&raw);
     let expected_request = if with_secret {
-        [b"before:", token.as_bytes(), b":after\n", &file_bytes, b":after\nsealed:after\n"].concat()
+        [
+            b"before:",
+            token.as_bytes(),
+            b":after\n",
+            &file_bytes,
+            b":after\nsealed:after\n",
+        ]
+        .concat()
     } else {
         REQUEST.to_vec()
     };
@@ -1059,16 +1168,23 @@ fn cli_tls_replay(with_secret: bool) {
             assert!(refused.is_empty(), "plaintext reached plain TCP");
             let (socket, _) = listener.accept().unwrap();
             let mut beta = StreamOwned::new(
-                ServerConnection::new(server(BETA, BETA_KEY, false)).unwrap(), socket);
+                ServerConnection::new(server(BETA, BETA_KEY, false)).unwrap(),
+                socket,
+            );
             beta.read_to_end(&mut refused).unwrap();
             assert!(refused.is_empty(), "plaintext reached beta.test");
         }
         let (socket, _) = listener.accept().unwrap();
         let mut stream = StreamOwned::new(
-            ServerConnection::new(server(LEAF, KEY, !with_secret)).unwrap(), socket);
+            ServerConnection::new(server(LEAF, KEY, !with_secret)).unwrap(),
+            socket,
+        );
         let mut request = vec![0; expected_request.len()];
         stream.read_exact(&mut request).unwrap();
-        assert!(request == expected_request, "wrong plaintext reached the permitted peer");
+        assert!(
+            request == expected_request,
+            "wrong plaintext reached the permitted peer"
+        );
         stream.write_all(response.as_bytes()).unwrap();
         stream.conn.send_close_notify();
         stream.flush().unwrap();
@@ -1082,9 +1198,9 @@ fn cli_tls_replay(with_secret: bool) {
     let app = dir.path().join("app");
     std::fs::create_dir(&app).unwrap();
     let fixture = if with_secret {
-        include_str!("../../../core/front/tape/tls-secret.hirsel")
+        include_str!("../../../core/front/fixtures/recording/tls-secret.hirsel")
     } else {
-        include_str!("../../../core/front/tape/tls.hirsel")
+        include_str!("../../../core/front/fixtures/recording/tls.hirsel")
     };
     std::fs::write(
         app.join("main.hirsel"),
@@ -1148,15 +1264,20 @@ fn cli_tls_replay(with_secret: bool) {
     let from_file = format!("Secret:local=file:{} to alpha.test", file.display());
     if with_secret {
         std::fs::write(&file, file_bytes).unwrap();
-        grants.extend(["--grant", "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test", "--grant", &from_file]);
+        grants.extend([
+            "--grant",
+            "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test",
+            "--grant",
+            &from_file,
+        ]);
     }
     let record = invoke("run", &grants)
-    .env("HIRSEL_TL10_TOKEN", &token)
-    .env("SSL_CERT_FILE", &roots)
-    .env_remove("SSL_CERT_DIR")
-    .env_remove("HIRSEL_TL9_REPLAY")
-    .output()
-    .unwrap();
+        .env("HIRSEL_TL10_TOKEN", &token)
+        .env("SSL_CERT_FILE", &roots)
+        .env_remove("SSL_CERT_DIR")
+        .env_remove("HIRSEL_TL9_REPLAY")
+        .output()
+        .unwrap();
     let after = |bytes: &[u8]| {
         String::from_utf8_lossy(bytes)
             .split_once(process::CHILD_MARK)
@@ -1233,11 +1354,17 @@ fn cli_tls_replay(with_secret: bool) {
                 crate::call::base64(bytes).as_bytes(),
             ] {
                 for output in [
-                    sealed.as_slice(), &record.stdout, &record.stderr, &replay.stdout, &replay.stderr,
+                    sealed.as_slice(),
+                    &record.stdout,
+                    &record.stderr,
+                    &replay.stdout,
+                    &replay.stderr,
                     export.as_bytes(),
                 ] {
-                    assert!(!output.windows(form.len()).any(|word| word == form),
-                        "a Secret representation escaped");
+                    assert!(
+                        !output.windows(form.len()).any(|word| word == form),
+                        "a Secret representation escaped"
+                    );
                 }
             }
         }
@@ -1287,7 +1414,11 @@ fn simd_versions_preserve_run_tape_and_revision() {
             cmd.env("HIRSEL_RECORD", &tape);
         }
         let output = cmd.output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         (built.revision, output.stdout)
     };
     let levels = hirsel_core_layout::isa::X86_64_LEVELS;
@@ -1532,7 +1663,11 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
             let product = Driver::default()
                 .check(request, &mut Meter::new(false))
                 .unwrap();
-            assert!(product.accepted(), "{name} {backend:?}: {:?}", product.diagnostics);
+            assert!(
+                product.accepted(),
+                "{name} {backend:?}: {:?}",
+                product.diagnostics
+            );
             let entry = DefPath::from_full("app@1/main/main").unwrap();
 
             let mut rel_opts = native_options(backend, dir.path());
@@ -1551,12 +1686,20 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
                 .filter_map(|s| s.name().ok().map(str::to_owned))
                 .filter(|n| n.contains("hirsel_core_rt4tape") || n.contains("tape::"))
                 .collect();
-            assert!(tape_syms.is_empty(), "release binary has tape symbols: {tape_syms:?}");
+            assert!(
+                tape_syms.is_empty(),
+                "release binary has tape symbols: {tape_syms:?}"
+            );
 
             // Release executable must ignore HIRSEL_RECORD.
-            let unused_tape = dir.path().join(format!("rl1-{name}-{backend:?}-unused.tape"));
+            let unused_tape = dir
+                .path()
+                .join(format!("rl1-{name}-{backend:?}-unused.tape"));
             let rel_run = tape_run(&rel.executable, argv, Some(&unused_tape));
-            assert!(!unused_tape.exists(), "release binary created a recording file");
+            assert!(
+                !unused_tape.exists(),
+                "release binary created a recording file"
+            );
 
             let mut rec_opts = rel_opts.clone();
             rec_opts.runtime = record_rt.clone();
@@ -1577,8 +1720,14 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
 
             let rec_off = tape_run(&rec.executable, argv, None);
             let rec_on = tape_run(&rec.executable, argv, Some(&rec_tape));
-            assert_eq!(rec_off, rel_run, "{name} {backend:?}: recording-off != release");
-            assert_eq!(rec_on, rel_run, "{name} {backend:?}: recording-on != release");
+            assert_eq!(
+                rec_off, rel_run,
+                "{name} {backend:?}: recording-off != release"
+            );
+            assert_eq!(
+                rec_on, rel_run,
+                "{name} {backend:?}: recording-on != release"
+            );
             if *name == "capacity_and_args" {
                 assert_eq!(rec_on.1, "cap:ok");
             }
@@ -1593,7 +1742,11 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
                 });
                 let rep = product.build(&entry, &rep_opts).unwrap();
                 let (code, out, err) = tape_run(&rep.executable, argv, None);
-                assert_eq!((code, out), (Some(0), String::new()), "{name} {backend:?}: {err}");
+                assert_eq!(
+                    (code, out),
+                    (Some(0), String::new()),
+                    "{name} {backend:?}: {err}"
+                );
             }
         }
     }
@@ -1755,7 +1908,11 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
     let mut sealed = base.clone();
     sealed.extend(["--expect-verdict".into(), "Sealed".into()]);
     let (code, out, err) = process::tape_request(&sealed, dir.path());
-    assert_eq!(code, Some(0), "test --replay --expect-verdict Sealed: {out}\n{err}");
+    assert_eq!(
+        code,
+        Some(0),
+        "test --replay --expect-verdict Sealed: {out}\n{err}"
+    );
 
     let mut wrong_verdict = base;
     wrong_verdict.extend(["--expect-verdict".into(), "Diverged(Arg)".into()]);

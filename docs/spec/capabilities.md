@@ -221,19 +221,18 @@ a crash without repeating an outside effect wraps each such effect in the store'
 library, which commits a started row before the effect and its result before the result is
 used ([runner](../../core/std/api/runner.md#store-triggers)).
 
-**Simulation.** A test that needs controlled inputs grants a simulation provider (CAP-5);
-it never records from inside the program, since no program type is a tape. The simulation
-provider is the **model world**. On the evaluator it is the whole host: `Args`, `Stdout`,
+**Simulation.** Grant the **model world** simulation provider (CAP-5) to a test that
+needs controlled inputs. On the evaluator it is the whole host: `Args`, `Stdout`,
 `Stderr`, a virtual `Clock`, `Dir` and its files, `Random` and `Net`, each capability
 parameter of a law or case bound to a fresh one (`crates/hirsel-core-ir/src/eval.rs`). Its
 network and clock are the deterministic model of `crates/hirsel-core-net` (`model`), which
 native runs select through the runtime's model provider for `Net` and `Clock`, with every
-other operation going to the host. The program-held `Tape`, removed with `CauseKind::Tape`
-(whose wire number stays retired), is replaced use by use:
+other operation going to the host. Wire cause number 9 stays retired. Choose a testing or
+recording tool by what the run needs:
 
-| use of the program-held `Tape` | replacement |
+| need | tool |
 |---|---|
 | a substitute `Clock`, `Args`, `Stdout`, `Stderr` or `Dir` for a test | the model world on the evaluator; natively, a granted scratch directory and the host's streams |
 | controlled network input and time | the model world's network and virtual clock, on the evaluator and natively |
-| recording a run, its scheduling (`tape.tasks`) included, and replaying it with no host | a recording build and replay (above) |
+| recording a run and its scheduling, then replaying it with no host | a recording build and replay (above) |
 | a program's own record of its calls, for re-execution | ordinary code over the store, as the replay corpus (`core/corpus/m2b/replay`, `m2b.journal`) and the runner's durable replies do |

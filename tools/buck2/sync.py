@@ -464,6 +464,12 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                               **{**attrs, 'features': ['standalone', 'testing']})
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-test-pool-archives',
                               library=f'//:{name}-test-pool',
+                              archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-test-pool-record',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'testing', 'record']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-test-pool-record-archives',
+                              library=f'//:{name}-test-pool-record',
                               archive_name=f"lib{attrs['crate']}.a"))
     return call('hirsel_core_runtime_archives', name=f'{name}-archives',
                 library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
@@ -668,7 +674,7 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/langarena/**"]) + ["core/tools/request_cost.py", "core/tools/langarena.py", "core/tools/std_native.py", "core/tools/m1.py", "core/tools/measure.py", "tools/capped", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost-ceilings.json", "tools/native-toolchain/llvm-23.lock"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost-unit", script="crates/hirsel-core-front/test-check-cost.py", host=True,
                             data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost.py", "core/tools/request_cost.py", "core/tools/measure.py"]))
-    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**", "core/front/tape/**", "core/programs/m1/**"])')))
+    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**", "core/programs/m1/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-sites", case_filter="native::tests::failure_sites_",
                            data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-provider-m3", case_filter="native::tests::provider_m3::",

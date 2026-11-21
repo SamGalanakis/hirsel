@@ -1828,7 +1828,7 @@ mod tests {
     include!("image_unit_native.rs");
     include!("reach_native.rs");
     include!("link_closure_native.rs");
-    include!("tape_build_native.rs");
+    include!("recording_build_native.rs");
     include!("request_sequences.rs");
     include!("revision_native.rs");
     include!("build_identity.rs");

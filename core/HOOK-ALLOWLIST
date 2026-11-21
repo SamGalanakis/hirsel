@@ -103,8 +103,6 @@ core@1/core/Stderr
 core@1/core/Stdin
 core@1/core/Stdout
 core@1/core/String
-# DECISIONS.md 2026-11-16 ruling: replay core (REPLAY-SPEC v2 §9)
-core@1/core/Tape
 core@1/core/OutOfTime
 core@1/core/Task
 core@1/core/Tasks
@@ -361,15 +359,6 @@ core@1/task/cancel
 core@1/task/check_cancel
 core@1/task/join
 core@1/task/spawn
-# DECISIONS.md 2026-11-16 ruling: replay core (REPLAY-SPEC v2 §9)
-core@1/tape/across
-core@1/tape/args
-core@1/tape/clock
-core@1/tape/dir
-core@1/tape/end
-core@1/tape/open
-core@1/tape/stderr
-core@1/tape/stdout
 core@1/text/as_string
 core@1/text/copy_in
 core@1/text/len

@@ -309,8 +309,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         let list = self.types.mk(TyKind::Adt(list, vec![args[0]]));
                         let node = FieldTy::Box(self.shape(list)?);
                         let body = record(vec![("node", node)]);
-                        let held = Some(FieldTy::Scalar(Scalar::U64));
-                        return self.fill(r, ty, LRepr::Own, body, None, held);
+                        return self.fill(r, ty, LRepr::Own, body, None, None);
                     }
                     // Compact text or a span held as a value: a region reference to
                     // compact data in its region (core.md), plain. The locator names
@@ -639,10 +638,8 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::FrozenBytes) => FieldTy::FrozenBytes,
-                Some(Role::Map) => FieldTy::Inline(self.shape(ty)?),
-                Some(Role::Log | Role::StaticFn | Role::FlowEndpoint) => {
-                    FieldTy::Scalar(Scalar::U64)
-                }
+                Some(Role::Map | Role::Log) => FieldTy::Inline(self.shape(ty)?),
+                Some(Role::StaticFn | Role::FlowEndpoint) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Capability) => FieldTy::Handle(Handle::Capability),
                 Some(Role::ForeignHandle) => FieldTy::Inline(self.shape(ty)?),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),

@@ -3,11 +3,43 @@
 // from OTLP/JSON (opentelemetry-proto 09769935, docs/specification.md "JSON Protobuf
 // Encoding") in the member order of Python's json.dumps(sort_keys=True). The two-span
 // document is vectors/trace/two_spans.json, which tools/tests/obs_export.py also checks
-// against obs_export.py's span builder for the same input. Laws that keep a recorder to
-// the end finish it: the evaluator does not yet clean a Log held in a record field when the
-// record is dropped (the native engines do; core-form-883).
+// against obs_export.py's span builder for the same input.
 fn ok_context(hi: u64, lo: u64, span: u64) -> trace.Context {
     result.unwrap(trace.context(hi, lo, span))
+}
+
+fn filled_log() -> Log[u64] {
+    let entries: Log[u64] = log.new()
+    log.append(entries, 1u64)
+    entries
+}
+
+// Refunding every allocation (MEM-29) leaves the full reservation available again.
+// expect: run unfinished_log_drop_refunds_every_owner() = true
+fn unfinished_log_drop_refunds_every_owner() -> bool {
+    let (c, _hand) = provide.clock(0, 0)
+    result.unwrap(bound bytes 4096 {
+        let r = trace.recorder(c)
+        let span = result.unwrap(trace.start_with(r, c, None, ok_context(1, 1, 1), "x", Internal))
+        trace.end(r, c, take span)
+        drop(take r)
+        let variant: Option[Log[u64]] = Some(filled_log())
+        drop(take variant)
+        let mut logs: List[Log[u64]] = list.new()
+        list.push(mut logs, filled_log())
+        drop(take logs)
+        let captured = filled_log()
+        let callback: own fn() = fn() {
+            log.append(captured, 2u64)
+        }
+        drop(take callback)
+        match (bound bytes 4096 {
+            true
+        }) {
+            Ok(available) => available,
+            Error(_) => false,
+        }
+    })
 }
 
 // The virtual clock starts at mono 5000 ns and wall 1_700_000_000_000 ms, so the anchor is

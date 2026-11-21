@@ -369,6 +369,15 @@ pub(crate) fn memory() -> Option<&'static Memory> {
     let p = pool();
     (!p.stop.load(Ordering::Acquire)).then_some(&p.memory)
 }
+/// A spare must arm its signal stack even if the memory thread is blocked.
+pub(crate) fn signal_stack_memory() -> Option<&'static Memory> {
+    if !untied() {
+        return None;
+    }
+    let p = pool();
+    (p.handoff_ticks == 0 && !p.stop.load(Ordering::Acquire)).then_some(&p.memory)
+}
+
 struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));
 static RUN: OnceLock<RunFn> = OnceLock::new();
 struct Base(crate::entry::OsConfig);

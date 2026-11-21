@@ -357,9 +357,8 @@ struct Alternate {
 }
 impl Alternate {
     fn new() -> Self {
-        // A spare must be able to start while the memory thread is busy
-        // with the old worker's request.
-        let stack = Stack::new();
+        let stack = crate::units::signal_stack_memory()
+            .map_or_else(Stack::new, |memory| memory.map(Stack::new));
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();

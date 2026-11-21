@@ -226,3 +226,62 @@ fn invalid_path_denied(d: Dir) -> bool waits {
         _ => false
     }
 }
+
+type HandoffEcho: cross {
+    clock: Clock,
+    request: Client[Client[u64]],
+    reply: Client[(u64, u64)]
+}
+
+fn handoff_echo(take job: HandoffEcho) -> () waits {
+    let HandoffEcho(clock: clock, request: request, reply: reply) = take job
+    let (send, receive): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 16))
+    result.unwrap(conn.send(request, take send))
+    for _ in 0u64 .. 2 {
+        let n = result.unwrap(conn.receive(receive))
+        result.unwrap(conn.send(reply, (n * 2, host.mono_ns(clock))))
+    }
+}
+
+fn handoff_start(clock: Clock, tasks: Tasks) -> (Task[()], Client[u64], Inbox[(u64, u64)]) waits {
+    let (reply, replies): (Client[(u64, u64)], Inbox[(u64, u64)]) = result.unwrap(conn.new(2, bytes 32))
+    let (request, requests): (Client[Client[u64]], Inbox[Client[u64]]) = result.unwrap(conn.new(1, bytes 0))
+    let job = HandoffEcho(clock: clock, request: take request, reply: take reply)
+    let peer = result.unwrap(task.spawn_unit(tasks, bytes 8192, take job, handoff_echo))
+    (take peer, result.unwrap(conn.receive(requests)), take replies)
+}
+
+fn handoff_replies(replies: Inbox[(u64, u64)]) -> (bool, u64) waits {
+    let (first, a) = result.unwrap(conn.receive(replies))
+    let (second, b) = result.unwrap(conn.receive(replies))
+    (first == 14 && second == 22 && a <= b, b)
+}
+
+// The modeled sleep preserves the peer's reply order. The native FIFO
+// fixture below compares the two units' reply times against a real deadline.
+// expect: run peer_replies_during_sleep(network) = true
+fn peer_replies_during_sleep(_net: Net, clock: Clock, tasks: Tasks) -> bool waits {
+    let (take peer, requests, replies) = handoff_start(clock, tasks)
+    let start = host.mono_ns(clock)
+    result.unwrap(conn.send(requests, 7))
+    result.unwrap(conn.send(requests, 11))
+    host.sleep_until(clock, start + 50000000)
+    let (ok, _) = handoff_replies(replies)
+    result.unwrap(task.join(take peer))
+    ok
+}
+
+// The native FIFO fixture writes one byte 50 ms after it reads "ready".
+fn peer_replies_during_fifo(d: Dir, clock: Clock, tasks: Tasks, out: Stdout) -> bool waits {
+    let mut f = result.unwrap(host.open(d, "handoff.fifo", Read))
+    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    let (take peer, requests, replies) = handoff_start(clock, tasks)
+    result.unwrap(stdout.write(out, "ready\n"))
+    let start = host.mono_ns(clock)
+    result.unwrap(conn.send(requests, 7))
+    result.unwrap(conn.send(requests, 11))
+    let n = result.unwrap(host.read(mut f, mut b))
+    let (ok, last_reply) = handoff_replies(replies)
+    result.unwrap(task.join(take peer))
+    n == 1 && ok && last_reply < start + 40000000
+}

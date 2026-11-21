@@ -36,6 +36,7 @@ use std::{
     collections::VecDeque,
     ptr,
     sync::{Arc, OnceLock, atomic::Ordering},
+    time::Duration,
 };
 use sync::{AtomicU64, Mutex};
 
@@ -180,6 +181,7 @@ const S_STEALS: usize = 3;
 const S_OS_WAKES: usize = 4;
 const S_GPOLLS: usize = 5;
 const S_GPOLL_BLOCKS: usize = 6;
+const S_HANDOFF_AGE_NS: usize = 7;
 const S_TIMER_FIRES: usize = 8;
 const S_CREATED: usize = 9;
 const S_CREATE_NS: usize = 10;
@@ -187,6 +189,7 @@ const S_READY_TO_PARK_NS: usize = 11;
 const S_GPOLL_EVENTS: usize = 12;
 const S_NOTIFIED_REQUEUE: usize = 13;
 const S_LIFO: usize = 14;
+const S_HANDOFFS: usize = 15;
 fn bump(i: usize) {
     add_stat(i, 1);
 }
@@ -276,6 +279,8 @@ fn unit_ref(id: u32) -> Option<&'static Unit> {
 thread_local! {
     static CUR: Cell<*mut Unit> = const { Cell::new(std::ptr::null_mut()) };
     static WORKER_IX: Cell<usize> = const { Cell::new(usize::MAX) };
+    // Set when this thread owns a slot with handoff enabled.
+    static HOST_CALL: Cell<Option<&'static HostCall>> = const { Cell::new(None) };
     // Turns this worker has taken since it last looked at the injector first.
     static TURNS: Cell<u32> = const { Cell::new(0) };
 }
@@ -319,7 +324,12 @@ struct Pool {
     idle: Mutex<Vec<usize>>,
     nsleep: AtomicUsize,
     /// Per worker: its thread, and whether a wake handed it the search role.
-    threads: Vec<OnceLock<sync::thread::Thread>>,
+    threads: Vec<std::sync::Mutex<Option<sync::thread::Thread>>>,
+    handoff_ticks: u64,
+    handoff_tick_ns: u64,
+    host_calls: Vec<HostCall>,
+    spares: Mutex<Vec<Arc<Spare>>>,
+    monitor: OnceLock<sync::thread::Thread>,
     handed: Vec<AtomicBool>,
     poll: Mutex<()>,
     /// Set while a worker holds `poll`, for a probe or a blocking wait. A
@@ -336,10 +346,6 @@ struct Pool {
     /// Live park deadlines as (deadline, unit id): at most one per unit.
     timers: Mutex<BTreeSet<(u64, u32)>>,
     next_timer: AtomicU64,
-    /// Units admitted and not yet ended. The initial units count from the
-    /// start; any later unit is admitted with `admit`. Reaching zero is the
-    /// decision to stop and is final: `admit` refuses from zero.
-    live: AtomicUsize,
     stop: AtomicBool,
     last_poll: AtomicU64,
     spin_ns: u64,
@@ -349,6 +355,10 @@ struct Pool {
     spin_poll_ns: u64,
 }
 static POOL: OnceLock<Pool> = OnceLock::new();
+/// Units admitted and not yet ended. The initial units count from the
+/// start; any later unit is admitted with `admit`. Reaching zero is the
+/// decision to stop and is final: `admit` refuses from zero.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
 fn pool() -> &'static Pool {
     POOL.get().unwrap()
 }
@@ -375,8 +385,8 @@ fn now() -> u64 {
 /// Count one more live unit, unless the pool has decided to stop. Admission
 /// and the stop decision are the same count, so an admitted unit runs to its
 /// end before any worker leaves, and a refused one never starts.
-fn admit(p: &Pool) -> bool {
-    p.live
+fn admit() -> bool {
+    LIVE
         .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then_some(n + 1))
         .is_ok()
 }
@@ -401,7 +411,7 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
     }
     let p = pool();
     // The running spawner is live, so the pool cannot have decided to stop.
-    if !admit(p) {
+    if !admit() {
         crate::process::stop(b"UnitAfterStop");
     }
     let spare = SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).pop();
@@ -601,6 +611,9 @@ pub(crate) fn spin_connection(peer: &Unit, mut ready: impl FnMut() -> bool) -> b
         return false;
     }
     let ix = worker_ix();
+    if ix >= p.w {
+        return false;
+    }
     for _ in 0..p.connection_spins {
         if work_waiting(p, ix) || !matches!(peer.state.load(Ordering::Relaxed), RUNNING | NOTIFIED)
         {
@@ -614,11 +627,23 @@ pub(crate) fn spin_connection(peer: &Unit, mut ready: impl FnMut() -> bool) -> b
     false
 }
 
+/// Whether the current unit finished a host call after its slot was taken.
+pub(crate) fn lost_slot() -> bool {
+    untied() && worker_ix() == usize::MAX && !cur().is_null()
+}
+
 /// Requeue the running unit when another unit waits and its slice is over.
-#[inline]
+#[inline(always)]
 pub(crate) fn maybe_yield() {
     let p = pool();
-    if !work_waiting(p, worker_ix()) {
+    let ix = worker_ix();
+    let Some(private) = p.lifo.get(ix) else {
+        requeue_detached();
+        return;
+    };
+    #[cfg(test)]
+    check::slot_use(ix);
+    if p.queued.load(Ordering::Relaxed) == 0 && private.load(Ordering::Relaxed).is_null() {
         return;
     }
     // SAFETY: called on the unit's own stack while it runs.
@@ -633,6 +658,13 @@ pub(crate) fn maybe_yield() {
     }
     bump(S_YIELDS);
     leave(u, After::Yield);
+}
+
+#[cold]
+fn requeue_detached() {
+    if let Some(unit) = running() {
+        leave(unit, After::Yield);
+    }
 }
 
 /// Publish readiness to the next entry even when the unit already has a
@@ -699,6 +731,8 @@ const INJECTOR_EVERY: u32 = 61;
 fn enqueue(p: &Pool, u: &Unit) {
     let ix = worker_ix();
     if ix < p.w && p.lifo_on && !cur().is_null() {
+        #[cfg(test)]
+        check::slot_use(ix);
         // Woken by the unit running on this worker: it runs here next.
         // Only this worker accesses its private slot.
         let prev = p.lifo[ix].load(Ordering::Relaxed);
@@ -715,19 +749,231 @@ fn enqueue(p: &Pool, u: &Unit) {
 /// (a write to a full pipe, a file operation). A unit in this worker's private
 /// slot would wait that long, since only this worker takes it: queue it where
 /// any worker can take it, and tell the pool.
-pub(crate) fn before_blocking() {
-    if !untied() {
-        return;
-    }
-    let p = pool();
-    let ix = worker_ix();
-    if ix >= p.w || p.lifo[ix].load(Ordering::Relaxed).is_null() {
-        return;
-    }
+fn publish_private_slot(p: &Pool, ix: usize) {
     let l = p.lifo[ix].load(Ordering::Relaxed);
     if !l.is_null() {
         p.lifo[ix].store(ptr::null_mut(), Ordering::Relaxed);
         publish(p, &p.locals[ix], UP(l));
+    }
+}
+
+// 0 is idle, 1 records a completed call since the last scan, and larger
+// values are start ticks. Keep different workers' exchanges on separate lines.
+const HOST_ACTIVITY: u64 = 1;
+const FIRST_HOST_TICK: u64 = HOST_ACTIVITY + 1;
+const HOST_TICK_US: u64 = 250;
+const HOST_IDLE_TICKS: u64 = 80;
+
+#[repr(align(64))]
+struct HostCall(AtomicU64);
+
+static HOST_TICK: HostCall = HostCall(AtomicU64::new(FIRST_HOST_TICK));
+
+static HOST_MONITOR_PARKED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct Blocking {
+    call: Option<(&'static HostCall, u64)>,
+}
+
+/// Mark a synchronous call that cannot switch units or enter another marked
+/// call. A taken slot is no longer available once this call returns.
+#[inline]
+pub(crate) fn blocking() -> Blocking {
+    mark_blocking(false)
+}
+
+#[inline]
+pub(crate) fn blocking_file() -> Blocking {
+    mark_blocking(true)
+}
+
+#[inline(always)]
+fn mark_blocking(publish_private: bool) -> Blocking {
+    if let Some(word) = HOST_CALL.get() {
+        // A sole unit is the only thread that could admit a peer.
+        if LIVE.load(Ordering::Acquire) > 1 {
+            let stamp = HOST_TICK.0.load(Ordering::SeqCst);
+            word.0.store(stamp, Ordering::SeqCst);
+            if HOST_MONITOR_PARKED.load(Ordering::SeqCst) {
+                wake_host_monitor();
+            }
+            return Blocking { call: Some((word, stamp)) };
+        }
+    } else if publish_private && untied() {
+        publish_before_unmonitored_call();
+    }
+    Blocking { call: None }
+}
+
+#[cold]
+fn wake_host_monitor() {
+    // Only the first marker that consumes the parked flag sends a wake.
+    if HOST_MONITOR_PARKED.swap(false, Ordering::SeqCst) {
+        pool().monitor.get().unwrap().unpark();
+    }
+}
+
+#[cold]
+fn publish_before_unmonitored_call() {
+    let p = pool();
+    let ix = worker_ix();
+    if ix < p.w {
+        publish_private_slot(p, ix);
+    }
+}
+
+impl Drop for Blocking {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some((call, stamp)) = self.call
+            && call
+                .0
+                .compare_exchange(stamp, HOST_ACTIVITY, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            // The monitor cleared our stamp. The new owner can already have
+            // published its own stamp, so only a matching exchange may clear it.
+            HOST_CALL.set(None);
+            WORKER_IX.set(usize::MAX);
+        }
+    }
+}
+
+struct Spare {
+    state: Mutex<SpareState>,
+}
+
+#[derive(Default)]
+struct SpareState {
+    thread: Option<sync::thread::Thread>,
+    slot: Option<usize>,
+}
+
+impl Spare {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SpareState::default()),
+        }
+    }
+
+    fn wait(&self, p: &Pool) -> Option<usize> {
+        loop {
+            let mut state = self.state.lock().unwrap();
+            if let Some(ix) = state.slot.take() {
+                return Some(ix);
+            }
+            if p.stop.load(Ordering::Acquire) {
+                return None;
+            }
+            state.thread.get_or_insert_with(sync::thread::current);
+            drop(state);
+            sync::thread::park();
+        }
+    }
+
+    fn send(&self, slot: Option<usize>) {
+        let thread = {
+            let mut state = self.state.lock().unwrap();
+            state.slot = slot;
+            state.thread.clone()
+        };
+        if let Some(thread) = thread {
+            thread.unpark();
+        }
+    }
+}
+
+fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
+    let _ = p.monitor.set(sync::thread::current());
+    let mut tick = FIRST_HOST_TICK;
+    let mut next_tick = None;
+    let mut last_activity = None;
+    let idle_ns = HOST_IDLE_TICKS * p.handoff_tick_ns;
+    let probe_ns = p.handoff_ticks.min(4) * p.handoff_tick_ns;
+    while !p.stop.load(Ordering::Acquire) {
+        let t = now();
+        if next_tick.is_some_and(|at| t >= at) {
+            // Count one interval even if this thread was descheduled. Calls
+            // published while it was away must age before we can claim them.
+            tick += 1;
+            HOST_TICK.0.store(tick, Ordering::SeqCst);
+            next_tick = None;
+        }
+        let mut rescan = false;
+        let mut pending = false;
+        for (ix, call) in p.host_calls.iter().enumerate() {
+            // The tick publication and marked-slot operations share one
+            // sequentially consistent order. If this load sees an old call,
+            // the next call on that slot must read a tick after this load or
+            // have cleared the old call before this load. It cannot reuse
+            // the aged stamp while our claim is outstanding.
+            let stamp = call.0.load(Ordering::SeqCst);
+            if stamp == 0 {
+                continue;
+            }
+            last_activity = Some(t);
+            if stamp == HOST_ACTIVITY {
+                // A marker that starts and returns between ticks still counts.
+                let _ = call.0.compare_exchange(HOST_ACTIVITY, 0, Ordering::SeqCst, Ordering::SeqCst);
+                continue;
+            }
+            pending = true;
+            let age = tick - stamp;
+            if age < p.handoff_ticks {
+                continue;
+            }
+            let mut spares = p.spares.lock().unwrap();
+            if spares.is_empty() {
+                let spare = Arc::new(Spare::new());
+                if !spawn(spare.clone()) {
+                    continue;
+                }
+                spares.push(spare);
+            }
+            if call
+                .0
+                .compare_exchange(stamp, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                #[cfg(test)]
+                check::slot_taken(ix);
+                let spare = spares.pop().unwrap();
+                drop(spares);
+                spare.send(Some(ix));
+                bump(S_HANDOFFS);
+                add_stat(S_HANDOFF_AGE_NS, age.saturating_mul(p.handoff_tick_ns));
+            }
+            rescan = true;
+        }
+        if rescan {
+            continue;
+        }
+        if last_activity.is_some_and(|last| t.saturating_sub(last) < idle_ns) {
+            // When only completed calls were seen, probe less often for a
+            // live mark. A probe counts as one tick so a new call cannot
+            // inherit time spent waiting for the probe.
+            let interval = if pending { p.handoff_tick_ns } else { probe_ns };
+            let at = *next_tick.get_or_insert_with(|| t.saturating_add(interval));
+            let delay = at.saturating_sub(now());
+            if delay != 0 {
+                sync::thread::park_timeout(Duration::from_nanos(delay));
+            }
+        } else {
+            next_tick = None;
+            last_activity = None;
+            // Publish the parked flag before checking the slots again. In
+            // the shared SC order, a marker either sees the flag or its mark
+            // is visible to this check. A completed call leaves activity too.
+            HOST_MONITOR_PARKED.store(true, Ordering::SeqCst);
+            if p.host_calls.iter().all(|call| call.0.load(Ordering::SeqCst) == 0) {
+                sync::thread::park();
+            }
+            HOST_MONITOR_PARKED.store(false, Ordering::SeqCst);
+        }
+    }
+    let spares = std::mem::take(&mut *p.spares.lock().unwrap());
+    for spare in spares {
+        spare.send(None);
     }
 }
 
@@ -768,9 +1014,10 @@ fn hand_search(p: &Pool, mut idle: sync::MutexGuard<'_, Vec<usize>>) -> bool {
     p.nsleep.fetch_sub(1, Ordering::SeqCst);
     // The woken worker searches on this count.
     p.searching.fetch_add(1, Ordering::SeqCst);
+    let thread = p.threads[w].lock().unwrap().clone().unwrap();
     p.handed[w].store(true, Ordering::Release);
     drop(idle);
-    p.threads[w].get().unwrap().unpark();
+    thread.unpark();
     bump(S_OS_WAKES);
     true
 }
@@ -910,6 +1157,8 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
     // A worker kept busy by its private slot or its own queue still takes
     // from the injector every INJECTOR_EVERY turns (Go's schedtick % 61), so
     // yielded and outside-woken units are not held back behind it for ever.
+    #[cfg(test)]
+    check::slot_use(ix);
     let turns = TURNS.get() + 1;
     TURNS.set(turns);
     if turns >= INJECTOR_EVERY {
@@ -955,12 +1204,14 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
     }
     for j in 1..p.w {
         let v = (ix + j) % p.w;
-        if let Ok(mut q) = p.locals[v].try_lock()
-            && let Some(u) = q.pop_back()
-        {
-            drop(q);
-            bump_host(S_STEALS);
-            return taken(u);
+        if let Ok(mut q) = p.locals[v].try_lock() {
+            #[cfg(test)]
+            check::during_steal(v);
+            if let Some(u) = q.pop_back() {
+                drop(q);
+                bump_host(S_STEALS);
+                return taken(u);
+            }
         }
     }
     None
@@ -984,15 +1235,21 @@ fn poll_due(p: &Pool, t: u64, every: u64) {
 }
 
 /// Run one queued unit until it parks, yields or ends.
-unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
+unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
     // SAFETY: the dequeued record is live; this worker alone dequeued it.
     unsafe {
         let u = &*up.0;
         if (*u.sp.get()).is_null() {
             start_stack(p, u);
+            if WORKER_IX.get() != ix {
+                publish(p, &p.locals[ix], up);
+                return false;
+            }
         }
         // Acquire readiness published while this entry was already queued.
-        u.state.swap(RUNNING, Ordering::SeqCst);
+        let _prior = u.state.swap(RUNNING, Ordering::SeqCst);
+        #[cfg(test)]
+        assert_eq!(_prior, QUEUED, "unit {} dequeued twice", u.id);
         // Law 1: never two workers inside one unit.
         if u.inside.swap(true, Ordering::Acquire) {
             eprintln!("untied: law 1 violated: unit {} entered twice", u.id);
@@ -1012,6 +1269,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         CUR.set(std::ptr::null_mut());
         let after = u.after.replace(After::Run);
         u.inside.store(false, Ordering::Release);
+        let mut owns_slot = WORKER_IX.get() == ix;
         match after {
             After::Done => {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1024,23 +1282,33 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
+                owns_slot = WORKER_IX.get() == ix;
                 *u.sp.get() = std::ptr::null_mut();
                 if u.helper {
                     SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).push(up);
                 }
-                if p.live.fetch_sub(1, Ordering::SeqCst) == 1 {
+                if LIVE.fetch_sub(1, Ordering::SeqCst) == 1 {
                     p.stop.store(true, Ordering::SeqCst);
                     let parked = std::mem::take(&mut *p.idle.lock().unwrap());
                     for w in parked {
                         p.nsleep.fetch_sub(1, Ordering::SeqCst);
-                        p.threads[w].get().unwrap().unpark();
+                        let thread = p.threads[w].lock().unwrap().clone().unwrap();
+                        thread.unpark();
                     }
                     write_wake(p);
+                    if let Some(monitor) = p.monitor.get() {
+                        monitor.unpark();
+                    }
                 }
             }
             After::Yield => {
                 u.state.swap(QUEUED, Ordering::SeqCst);
-                publish(p, &p.injector, up);
+                let q = if owns_slot {
+                    &p.injector
+                } else {
+                    &p.locals[ix]
+                };
+                publish(p, q, up);
             }
             After::Wait(deadline) => {
                 if let Some(at) = deadline {
@@ -1061,24 +1329,32 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         }
         // Busy workers poll now and then when no idle worker is blocked in
         // the poller.
-        if !p.poller_blocked.load(Ordering::Relaxed) && has_poll_sources(p) {
+        if owns_slot && !p.poller_blocked.load(Ordering::Relaxed) && has_poll_sources(p) {
             poll_due(p, now(), p.poll_every_ns);
         }
+        owns_slot
     }
 }
 
-fn worker_main(p: &'static Pool, ix: usize) {
-    crate::fiber::arm();
+/// Returns true when a spare took over this slot, false on pool shutdown.
+fn run_slot(p: &'static Pool, ix: usize) -> bool {
+    #[cfg(test)]
+    check::slot_enter(ix);
     WORKER_IX.set(ix);
+    if p.handoff_ticks != 0 {
+        HOST_CALL.set(Some(&p.host_calls[ix]));
+    }
     let mut host: *mut u8 = std::ptr::null_mut();
-    let _ = p.threads[ix].set(sync::thread::current());
+    *p.threads[ix].lock().unwrap() = Some(sync::thread::current());
     // A wake handed this worker the search role (already counted).
     let mut handed = false;
     loop {
         if !handed && let Some(u) = find(p, ix) {
             keep_poller(p);
             // SAFETY: a dequeued unit.
-            unsafe { run_unit(p, ix, u, &mut host) };
+            if !unsafe { run_unit(p, ix, u, &mut host) } {
+                return true;
+            }
             continue;
         }
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
@@ -1122,7 +1398,9 @@ fn worker_main(p: &'static Pool, ix: usize) {
                 keep_poller(p);
             }
             // SAFETY: a dequeued unit.
-            unsafe { run_unit(p, ix, u, &mut host) };
+            if !unsafe { run_unit(p, ix, u, &mut host) } {
+                return true;
+            }
             continue;
         }
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
@@ -1178,6 +1456,36 @@ fn worker_main(p: &'static Pool, ix: usize) {
             }
         }
     }
+    false
+}
+
+fn worker_main(p: &'static Pool, mut slot: Option<usize>, mut spare: Option<Arc<Spare>>) {
+    crate::fiber::arm();
+    if slot.is_none() {
+        TURNS.set(INJECTOR_EVERY - 1);
+        slot = spare.as_ref().unwrap().wait(p);
+    }
+    while let Some(ix) = slot {
+        if !run_slot(p, ix) {
+            break;
+        }
+        let spare = spare.get_or_insert_with(|| Arc::new(Spare::new()));
+        {
+            let mut idle = p.spares.lock().unwrap();
+            if idle.len() >= p.w || p.stop.load(Ordering::Acquire) {
+                break;
+            }
+            idle.push(spare.clone());
+        }
+        // First check the injector when inheriting a slot. The predecessor
+        // may have left just before its periodic injector check.
+        TURNS.set(INJECTOR_EVERY - 1);
+        slot = spare.wait(p);
+    }
+    merge_stats();
+}
+
+fn merge_stats() {
     // The launch joins the workers before reading the totals.
     WORKER_STATS.with(|stats| {
         for (total, local) in USTATS.iter().zip(stats) {
@@ -1197,6 +1505,7 @@ pub(crate) fn launch(
     // One poller for every unit's descriptors; its wake eventfd is WAKE_TAG.
     let shared = hirsel_core_net::share_poller(shared_unit).unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
     let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
+    let handoff_ticks = env_u64("HIRSEL_UNTIED_HANDOFF_US", 1_000).div_ceil(HOST_TICK_US);
     let _ = POOL.set(Pool {
         w,
         locals: (0..w).map(|_| Mutex::new(VecDeque::new())).collect(),
@@ -1209,7 +1518,12 @@ pub(crate) fn launch(
         searching: AtomicUsize::new(0),
         idle: Mutex::new(Vec::with_capacity(w)),
         nsleep: AtomicUsize::new(0),
-        threads: (0..w).map(|_| OnceLock::new()).collect(),
+        threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
+        handoff_ticks,
+        handoff_tick_ns: HOST_TICK_US * 1000,
+        host_calls: (0..w).map(|_| HostCall(AtomicU64::new(0))).collect(),
+        spares: Mutex::new(Vec::new()),
+        monitor: OnceLock::new(),
         handed: (0..w).map(|_| AtomicBool::new(false)).collect(),
         poll: Mutex::new(()),
         poll_held: AtomicBool::new(false),
@@ -1221,7 +1535,6 @@ pub(crate) fn launch(
         net_used: AtomicBool::new(false),
         timers: Mutex::new(BTreeSet::new()),
         next_timer: AtomicU64::new(u64::MAX),
-        live: AtomicUsize::new(k),
         stop: AtomicBool::new(false),
         last_poll: AtomicU64::new(0),
         connection_spins: env_u64("HIRSEL_UNTIED_CONN_SPINS", 16).min(128),
@@ -1234,6 +1547,7 @@ pub(crate) fn launch(
     let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) = unsafe { std::mem::transmute(run) };
     let _ = RUN.set(RunFn(run));
     let _ = BASE.set(Base(*input));
+    LIVE.store(k, Ordering::SeqCst);
     UNTIED_ON.store(true, Ordering::SeqCst);
     let p = pool();
     let memory_thread = p.memory.start();
@@ -1241,11 +1555,27 @@ pub(crate) fn launch(
         create_unit(i as u32);
     }
     std::thread::scope(|scope| {
+        if p.handoff_ticks != 0 {
+            std::thread::Builder::new()
+                .name("hirsel-monitor".into())
+                .stack_size(128 << 10)
+                .spawn_scoped(scope, || {
+                    watch_blocking(p, |spare| {
+                        std::thread::Builder::new()
+                            .name("hirsel-spare".into())
+                            .stack_size(1 << 20)
+                            .spawn_scoped(scope, move || worker_main(p, None, Some(spare)))
+                            .is_ok()
+                    });
+                    merge_stats();
+                })
+                .unwrap();
+        }
         for ix in 0..w {
             std::thread::Builder::new()
                 .name(format!("hirsel-w{ix}"))
                 .stack_size(1 << 20)
-                .spawn_scoped(scope, move || worker_main(p, ix))
+                .spawn_scoped(scope, move || worker_main(p, Some(ix), None))
                 .unwrap();
         }
     });
@@ -1272,7 +1602,7 @@ pub(crate) fn launch(
         #[cfg(not(feature = "record"))]
         let tape_stats = "";
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={}{tape_stats}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={}{tape_stats}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1290,6 +1620,10 @@ pub(crate) fn launch(
             crate::sequencer::ACQUIRES.load(Ordering::Relaxed),
             hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
             g(S_LIFO),
+            g(S_HANDOFFS),
+            p.handoff_ticks.saturating_mul(p.handoff_tick_ns),
+            p.handoff_tick_ns,
+            g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

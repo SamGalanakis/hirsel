@@ -52,7 +52,7 @@
 //! - The statistics, log and untied-switch objects are not scheduling
 //!   points (they still block when held).
 //! - A host write that never returns (stalled standard output) blocks for
-//!   ever, after the pool's own `before_blocking`.
+//!   ever, after the pool records entry.
 //! - Outside producers (a client, a sync helper) are checker threads; a
 //!   helper waiting for work rechecks every 300 ns of modelled time.
 //! - Not modelled: the crossing eventfd and the reactor's own threads; no
@@ -91,6 +91,7 @@ enum Wait {
     Run,
     Lock(usize),
     Park,
+    ParkUntil(u64),
     Epoll(Option<u64>),
     Sleep(u64),
     Host,
@@ -135,6 +136,7 @@ struct State {
     goals: fn() -> bool,
     out: String,
     case: &'static str,
+    slot_owners: Vec<Option<usize>>,
     seed: u64,
     /// PCT: per-thread priorities and the steps at which the running
     /// thread's priority drops. Empty: uniform random choice.
@@ -209,7 +211,9 @@ impl State {
         let now = self.time;
         for t in &mut self.threads {
             match t.wait {
-                Wait::Epoll(Some(d)) | Wait::Sleep(d) if d <= now => t.wait = Wait::Run,
+                Wait::Epoll(Some(d)) | Wait::Sleep(d) | Wait::ParkUntil(d) if d <= now => {
+                    t.wait = Wait::Run
+                }
                 _ => {}
             }
         }
@@ -221,6 +225,12 @@ impl State {
             }
         }
     }
+    fn complete(&self) -> bool {
+        (self.goals)()
+            && (!self.case.starts_with("handoff_")
+                || self.threads.iter().all(|t| t.wait == Wait::Done))
+    }
+
     /// Pick the next thread to run, advancing time over idle stretches.
     fn choose(&mut self) -> usize {
         loop {
@@ -238,7 +248,7 @@ impl State {
                 .threads
                 .iter()
                 .filter_map(|t| match t.wait {
-                    Wait::Epoll(Some(d)) | Wait::Sleep(d) => Some(d),
+                    Wait::Epoll(Some(d)) | Wait::Sleep(d) | Wait::ParkUntil(d) => Some(d),
                     _ => None,
                 })
                 .min();
@@ -248,7 +258,7 @@ impl State {
                     self.wake_timed();
                 }
                 None => {
-                    if (self.goals)() {
+                    if self.complete() {
                         self.finish(0, "pass");
                     }
                     self.finish(
@@ -265,7 +275,7 @@ impl State {
         self.step += 1;
         self.time += self.delta;
         self.wake_timed();
-        if (self.goals)() {
+        if self.complete() {
             self.finish(0, "pass");
         }
         if let Some(q) = self.quiet_from
@@ -378,6 +388,49 @@ fn point(
     let text = line(&st);
     st.log(me, text);
 }
+pub(super) fn slot_enter(ix: usize) {
+    if let Some(id) = me() {
+        let mut st = lock();
+        if st.case.starts_with("handoff_") {
+            assert_eq!(
+                st.slot_owners[ix].replace(id),
+                None,
+                "two threads own slot {ix}"
+            );
+        }
+    }
+}
+
+pub(super) fn slot_use(ix: usize) {
+    if let Some(id) = me() {
+        let st = lock();
+        if st.case.starts_with("handoff_") {
+            assert_eq!(st.slot_owners[ix], Some(id), "thread {id} lost slot {ix}");
+        }
+    }
+}
+
+pub(super) fn slot_taken(ix: usize) {
+    if me().is_some() {
+        let mut st = lock();
+        assert!(
+            st.slot_owners[ix].take().is_some(),
+            "slot {ix} has no owner"
+        );
+    }
+}
+
+// Hold the queue lock across the transfer. Sleep on the model clock, so
+// the monitor runs while the victim remains blocked.
+pub(super) fn during_steal(ix: usize) {
+    if me().is_some() && lock().case == "handoff_steal" && ix == 0 && !FLAG[3].raw() {
+        FLAG[3].store(true, Ordering::SeqCst);
+        while pool().host_calls[ix].0.raw() > super::HOST_ACTIVITY {
+            sleep_producer(now() + 100);
+        }
+    }
+}
+
 fn short(f: &'static str) -> &'static str {
     f.rsplit('/').next().unwrap_or(f)
 }
@@ -761,7 +814,7 @@ pub(crate) mod seam {
                 );
                 let mut st = lock();
                 st.threads[t].token = true;
-                if st.threads[t].wait == Wait::Park {
+                if matches!(st.threads[t].wait, Wait::Park | Wait::ParkUntil(_)) {
                     st.threads[t].wait = Wait::Run;
                 }
             }
@@ -786,6 +839,28 @@ pub(crate) mod seam {
             }
             drop(st);
             point(m, Wait::Park, |_| "park: sleeps on its handle".into(), at);
+            lock().threads[m].token = false;
+        }
+
+        #[track_caller]
+        pub(crate) fn park_timeout(duration: std::time::Duration) {
+            let at = Location::caller();
+            let Some(m) = me() else {
+                return std::thread::park_timeout(duration);
+            };
+            point(m, Wait::Run, |_| "park with timeout".into(), at);
+            let mut st = lock();
+            if std::mem::take(&mut st.threads[m].token) {
+                return;
+            }
+            let at_ns = st.time + duration.as_nanos() as u64;
+            drop(st);
+            point(
+                m,
+                Wait::ParkUntil(at_ns),
+                |_| "park until timeout".into(),
+                at,
+            );
             lock().threads[m].token = false;
         }
     }
@@ -972,7 +1047,7 @@ fn pool_state() -> String {
         p.poller_blocked.raw(),
         rel(p.poll_until.raw()),
         rel(p.next_timer.raw()),
-        p.live.raw(),
+        super::LIVE.raw(),
         p.stop.raw()
     );
     for ix in 0..p.w {
@@ -1098,7 +1173,7 @@ fn wait_arrival(ident: u64) {
 }
 /// A blocking host call that never returns (a write to a stalled pipe).
 fn host_block() -> ! {
-    super::before_blocking(); // as os::issue does before a standard-output write
+    let _blocking = super::blocking_file();
     let m = me().unwrap();
     point(
         m,
@@ -1177,6 +1252,28 @@ fn producer_wait_flag(f: usize) {
 const SYNC_TOKEN: u64 = 0x5ec0;
 static SYNC_CELL: std::sync::atomic::AtomicPtr<crate::os_sync::SyncCell> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+fn host_for(delay: u64) {
+    let _blocking = super::blocking_file();
+    sleep_producer(now() + delay);
+}
+
+fn expect_arrivals(expected: &[u64]) {
+    let mut ids = Vec::new();
+    take_xready(|id, _| ids.push(id));
+    assert_eq!(ids, expected);
+    let mut stream = conn::OBS[this_unit() as usize].lock().unwrap();
+    stream.extend(ids.iter().map(|id| format!("I arrival {id}")));
+    stream.push("O consumed once in order".into());
+}
+
+fn host_until(flag: usize) {
+    let _blocking = super::blocking_file();
+    FLAG[2].store(true, Ordering::SeqCst);
+    producer_wait_flag(flag);
+}
+
+const HOST_THRESHOLD: u64 = 2_000;
 
 /// Iterations of the looping unit in the stale-bound case.
 const TICKS: u32 = 40;
@@ -1383,6 +1480,119 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
+    Case {
+        name: "handoff_return",
+        workers: 1,
+        units: 2,
+        body: |id| {
+            if id == 1 {
+                wait_flag(0);
+                return 0;
+            }
+            host_for(param(0));
+            host_for(param(0));
+            maybe_yield();
+            FLAG[0].store(true, Ordering::SeqCst);
+            wake_id(1);
+            served(0, "unit returns from its host call and keeps running once");
+            0
+        },
+        producers: &[],
+        goals: 0b1,
+        params: |r| PARAM[0].store(r(1_000, 5_000), Ordering::Relaxed),
+        pct: None,
+    },
+    Case {
+        name: "handoff_steal",
+        workers: 2,
+        units: 3,
+        body: |id| {
+            match id {
+                0 => {
+                    wait_flag(0);
+                    FLAG[1].store(true, Ordering::SeqCst);
+                    wake_id(1);
+                    wake_id(2);
+                    {
+                        let _blocking = super::blocking_file();
+                        FLAG[2].store(true, Ordering::SeqCst);
+                        while !GOAL[1].load(Ordering::Relaxed) {
+                            sleep_producer(now() + 300);
+                        }
+                    }
+                    maybe_yield();
+                }
+                1 => wait_flag(1),
+                _ => {
+                    FLAG[0].store(true, Ordering::SeqCst);
+                    wake_id(0);
+                    wait_flag(1);
+                }
+            }
+            served(id as usize, "unit completed its turn");
+            0
+        },
+        producers: &[],
+        goals: 0b111,
+        params: |_| {},
+        pct: None,
+    },
+    Case {
+        name: "handoff_private",
+        workers: 1,
+        units: 2,
+        body: |id| {
+            if id == 0 {
+                wait_flag(0);
+                FLAG[1].store(true, Ordering::SeqCst);
+                wake_id(1);
+                host_until(3);
+                maybe_yield();
+            } else {
+                FLAG[0].store(true, Ordering::SeqCst);
+                wake_id(0);
+                wait_flag(1);
+                FLAG[3].store(true, Ordering::SeqCst);
+            }
+            served(id as usize, "unit completed its turn");
+            0
+        },
+        producers: &[],
+        goals: 0b11,
+        params: |_| {},
+        pct: None,
+    },
+    Case {
+        name: "handoff_wake",
+        workers: 1,
+        units: 2,
+        body: |id| {
+            if id == 1 {
+                wait_flag(0);
+                return 0;
+            }
+            host_until(3);
+            // The wake was published while this unit was still running.
+            unit_park(None);
+            expect_arrivals(&[10, 11]);
+            FLAG[0].store(true, Ordering::SeqCst);
+            wake_id(1);
+            served(0, "unit received both arrivals after its host call");
+            0
+        },
+        producers: &[("client", || {
+            producer_wait_flag(2);
+            sleep_producer(now() + 4 * HOST_THRESHOLD);
+            let unit = unit_raw(0).unwrap();
+            super::push_arrival(unit, 10, 0);
+            super::push_arrival(unit, 11, 0);
+            super::wake(unit);
+            FLAG[3].store(true, Ordering::SeqCst);
+        })],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
     // 5-8. The connection path and the ledger on pool units
     // (`units_conn_check.rs`, which states the cases and their laws).
     Case {
@@ -1482,6 +1692,8 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         Ordering::Relaxed,
     );
     let w = case.workers;
+    let handoff = case.name.starts_with("handoff_");
+    let steal = case.name == "handoff_steal";
     let mut st = State {
         threads: Vec::new(),
         cur: usize::MAX,
@@ -1507,6 +1719,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         goals: goals_met,
         out: out.to_string(),
         case: case.name,
+        slot_owners: vec![None; w],
         seed,
         prio: Vec::new(),
         changes: Vec::new(),
@@ -1515,6 +1728,8 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     // Parameters come from the seed's stream before any scheduling choice.
     (case.params)(&mut |lo, hi| lo + st.rand() % (hi - lo + 1));
     NEEDED.store(case.goals, Ordering::Relaxed);
+    let spare = handoff.then(|| std::sync::Arc::new(super::Spare::new()));
+    super::LIVE.store(case.units as usize, Ordering::SeqCst);
     let _ = POOL.set(Pool {
         w,
         locals: (0..w).map(|_| super::Mutex::new(VecDeque::new())).collect(),
@@ -1529,7 +1744,14 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         searching: super::AtomicUsize::new(0),
         idle: super::Mutex::new(Vec::with_capacity(w)),
         nsleep: super::AtomicUsize::new(0),
-        threads: (0..w).map(|_| std::sync::OnceLock::new()).collect(),
+        threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
+        handoff_ticks: if handoff { 4 } else { 0 },
+        handoff_tick_ns: HOST_THRESHOLD / 4,
+        host_calls: (0..w)
+            .map(|_| super::HostCall(super::AtomicU64::new(0)))
+            .collect(),
+        spares: super::Mutex::new(spare.iter().cloned().collect()),
+        monitor: std::sync::OnceLock::new(),
         handed: (0..w).map(|_| super::AtomicBool::new(false)).collect(),
         poll: super::Mutex::new(()),
         poller_blocked: super::AtomicBool::new(false),
@@ -1541,7 +1763,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         net_used: super::AtomicBool::new(true),
         timers: super::Mutex::new(std::collections::BTreeSet::new()),
         next_timer: super::AtomicU64::new(u64::MAX),
-        live: super::AtomicUsize::new(case.units as usize),
         stop: super::AtomicBool::new(false),
         last_poll: super::AtomicU64::new(0),
         spin_ns: 5_000,
@@ -1576,7 +1797,9 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     n(addr(&p.poll_until), "poll_until".into());
     n(addr(&p.next_timer), "next_timer".into());
     n(addr(&p.last_poll), "last_poll".into());
-    n(addr(&p.live), "live".into());
+    n(addr(&super::LIVE), "live".into());
+    n(addr(&super::HOST_TICK.0), "host clock tick".into());
+    n(addr(&super::HOST_MONITOR_PARKED), "host monitor parked".into());
     n(addr(&p.stop), "stop".into());
     n(addr(&p.injector), "injector".into());
     n(addr(&p.idle), "idle list".into());
@@ -1587,6 +1810,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         n(addr(&p.lifo_runs[ix]), format!("lifo_runs {ix}"));
         n(addr(&p.locals[ix]), format!("local queue {ix}"));
         n(addr(&p.handed[ix]), format!("handed {ix}"));
+        n(addr(&p.host_calls[ix].0), format!("slot {ix} host call"));
     }
     for id in 0..case.units {
         let u = unit_raw(id).unwrap();
@@ -1604,12 +1828,17 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     st.quiet
         .push((addr(&USTATS), addr(&USTATS) + size_of_val(&USTATS)));
     st.quiet.push((addr(&UNTIED_ON), addr(&UNTIED_ON) + 1));
-    let nthreads = w + case.producers.len();
+    let base_threads = w + case.producers.len();
+    let nthreads = base_threads + if handoff { 2 } else { 0 };
     for i in 0..nthreads {
         let (name, producer) = if i < w {
             (format!("w{i}"), false)
-        } else {
+        } else if i < base_threads {
             (case.producers[i - w].0.to_string(), true)
+        } else if i == base_threads {
+            ("spare".into(), false)
+        } else {
+            ("monitor".into(), false)
         };
         st.threads.push(Th {
             name,
@@ -1649,7 +1878,10 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     seam::SCHED_ON.store(true, Ordering::SeqCst);
     let mut handles = Vec::new();
     for i in 0..nthreads {
-        let producer = (i >= w).then(|| case.producers[i - w].1);
+        let spare = spare.clone();
+        let producer = (w..base_threads)
+            .contains(&i)
+            .then(|| case.producers[i - w].1);
         let h = std::thread::Builder::new()
             .name(format!("check-{i}"))
             .stack_size(1 << 20)
@@ -1658,9 +1890,17 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
                 while lock().cur != i {
                     std::thread::park();
                 }
-                match producer {
-                    None => worker_main(pool(), i),
-                    Some(f) => f(),
+                if let Some(f) = producer {
+                    f();
+                } else if i < w {
+                    if steal && i == 1 {
+                        producer_wait_flag(2);
+                    }
+                    worker_main(pool(), Some(i), None);
+                } else if i == base_threads {
+                    worker_main(pool(), None, spare);
+                } else {
+                    super::watch_blocking(pool(), |_| false);
                 }
                 let mut st = lock();
                 st.threads[i].wait = Wait::Done;
@@ -1849,6 +2089,22 @@ mod tests {
     #[test]
     fn connection_spin_yields_to_work() {
         check("connection_spin_yields_to_work");
+    }
+    #[test]
+    fn handoff_return() {
+        check("handoff_return");
+    }
+    #[test]
+    fn handoff_steal() {
+        check("handoff_steal");
+    }
+    #[test]
+    fn handoff_private() {
+        check("handoff_private");
+    }
+    #[test]
+    fn handoff_wake() {
+        check("handoff_wake");
     }
     #[test]
     fn conn_wait_serve() {

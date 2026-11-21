@@ -204,7 +204,14 @@ impl Memory {
             let _ = send.send(map());
         }));
         self.ready.notify_one();
-        receive.recv().unwrap()
+        match receive.try_recv() {
+            Ok(value) => value,
+            Err(mpsc::TryRecvError::Empty) => {
+                let _blocking = super::blocking();
+                receive.recv().unwrap()
+            }
+            Err(mpsc::TryRecvError::Disconnected) => panic!("memory thread disconnected"),
+        }
     }
 
     pub(crate) fn native_metadata(
@@ -231,6 +238,7 @@ impl Memory {
     fn release(&self, bytes: usize, release: Reclaim) {
         let mut work = self.work.lock().unwrap();
         while work.releases.len() == RELEASE_SLOTS {
+            let _blocking = super::blocking();
             work = self.release_room.wait(work).unwrap();
         }
         work.releases.push_back((bytes, release));

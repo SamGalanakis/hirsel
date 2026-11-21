@@ -15,7 +15,7 @@ pub(crate) use std::sync::{
 };
 #[cfg(not(test))]
 pub(crate) mod thread {
-    pub(crate) use std::thread::{Thread, current, park};
+    pub(crate) use std::thread::{Thread, current, park, park_timeout};
 }
 
 #[cfg(test)]

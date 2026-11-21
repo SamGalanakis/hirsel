@@ -273,7 +273,7 @@ fn emit_ir_target_with_role_facts(
 }
 
 /// Deferred module items in the order of their LLVM text lines: globals, then
-/// declarations by result type and name, the shared byte order, module asm.
+/// declarations by result type and name, then the shared byte order.
 struct Items {
     function_symbols: Vec<String>,
     versioned: Option<Vec<bool>>,
@@ -292,7 +292,6 @@ enum Item {
     Global(Global),
     Declare(String, FnSig, FnAttrs),
     CompareBytes(bool),
-    Asm(String),
     /// A counted type's out-of-line last release, defined after every body
     /// that may call it (cleanup::release_lasts).
     ReleaseLast(u32, bool),
@@ -356,16 +355,12 @@ impl Items {
         });
         lasts
     }
-    pub fn asm(&mut self, text: String) {
-        self.insert(format!("module asm \"{text}\""), Item::Asm(text));
-    }
     fn emit(self, sink: &mut dyn Sink) -> Vec<source::ReleaseSite> {
         for item in self.pending.into_values() {
             match item {
                 Item::Global(global) => sink.global(&global),
                 Item::Declare(name, sig, attrs) => sink.declare(&name, &sig, &attrs),
                 Item::CompareBytes(facts) => bytes::define_compare_bytes(sink, facts),
-                Item::Asm(text) => sink.module_asm(&text),
                 Item::ReleaseLast(..) => unreachable!("last releases are defined before items"),
             }
         }
@@ -1922,7 +1917,8 @@ impl FunctionEmitter<'_> {
         // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
         // AAPCS64 needs an explicit private copy before passing its pointer.
         // Neither convention lets the callee mutate the shared constant.
-        let suffix = if fixed && self.relocatable_sites && site != int(0) {
+        let relocated = fixed && self.relocatable_sites && site != int(0);
+        let suffix = if relocated {
             if let Some(sites) = &self.items.release_sites {
                 let anchor = self.anchor.unwrap();
                 sites.names[&(anchor.item, anchor.start)].clone()
@@ -1939,10 +1935,9 @@ impl FunctionEmitter<'_> {
         let name = format!("hirsel_cause_{kind}_{suffix}");
         let prefix = Type::bytes(memory_layout::CAUSE_KIND as u64);
         let word = memory_layout::cause_kind_word(kind) as i64;
-        // Keep AArch64's relocated site in this object's constant bytes;
-        // folding that field into an external pointer would select the GOT.
-        let initialized =
-            fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux;
+        // A relocated word in a cause needs the same materialization as a
+        // standalone site word.
+        let initialized = relocated && self.keep_site_in_data();
         self.items.global(Global {
             name: name.clone().into(),
             linkage: Linkage::Private,

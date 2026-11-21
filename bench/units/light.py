@@ -30,8 +30,11 @@ CELLS = {
     # The fairness arms (queue waits recorded), for repeats outside the pair.
     "A2-0": scale.SCALE_CELLS["A1-8192"] | {"hot": False},
     "A2-1": scale.SCALE_CELLS["A1-8192"] | {"hot": True},
+    # The same cells with every turn over 20 ms written out (loadgen_detail).
+    "A1-256s": scale.SCALE_CELLS["A1-256"] | {"slow_turns": True},
+    "A1-8192s": scale.SCALE_CELLS["A1-8192"] | {"slow_turns": True},
 }
-GUESS = {"A1-256": (20000, 23000), "A1-8192": (14000, 18000), "F1-256": (18000, 19000), "P01-256": (2500, 1200)}
+GUESS = {"A1-256s": (19000, 20000), "A1-8192s": (16000, 21000), "A1-256": (20000, 23000), "A1-8192": (14000, 18000), "F1-256": (18000, 19000), "P01-256": (2500, 1200)}
 
 
 SERVER_CPUS = [c for part in part3u.SERVER.split(",") for c in (

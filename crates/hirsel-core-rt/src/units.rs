@@ -951,8 +951,7 @@ pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&cra
 // then parks on its own handle. A wake hands one parked worker the searching
 // role, so a burst of newly runnable units wakes one worker at a time.
 use std::cell::{RefCell as URefCell, UnsafeCell};
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
 
 /// mc-units-untied: a thread-local Cell whose every access computes the slot
@@ -1080,6 +1079,10 @@ pub(crate) struct Unit {
     queued_ns: AtomicU64,
     created_ns: u64,
     first_park: AtomicBool,
+    /// The deadline of this unit's one live timer registration, or
+    /// `u64::MAX`. Set when the unit parks with a deadline; cleared, and the
+    /// set entry removed, when the park ends.
+    timer_at: AtomicU64,
     /// The unit's scheduler-less waiter (replaces the thread's ALONE).
     pub(crate) alone: std::sync::OnceLock<Arc<crate::tasks::Readies>>,
     pub(crate) alone_depth: Cell<usize>,
@@ -1156,7 +1159,8 @@ struct Pool {
     gep: i32,
     gwake: i32,
     _shared: Arc<hirsel_core_net::Poller>,
-    timers: Mutex<BinaryHeap<Reverse<(u64, u32)>>>,
+    /// Live park deadlines as (deadline, unit id): at most one per unit.
+    timers: Mutex<BTreeSet<(u64, u32)>>,
     next_timer: AtomicU64,
     /// Units admitted and not yet ended. The initial units count from the
     /// start; any later unit is admitted with `admit`. Reaching zero is the
@@ -1281,6 +1285,7 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         queued_ns: AtomicU64::new(0),
         created_ns: t0,
         first_park: AtomicBool::new(false),
+        timer_at: AtomicU64::new(u64::MAX),
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
         _views: views,
@@ -1586,12 +1591,30 @@ fn write_wake(p: &Pool) {
     unsafe { libc::write(p.gwake, (&one as *const u64).cast(), 8) };
 }
 
-fn add_timer(p: &Pool, at: u64, id: u32) {
-    p.timers.lock().unwrap().push(Reverse((at, id)));
-    p.next_timer.fetch_min(at, Ordering::SeqCst);
+/// Register the parking unit's deadline. `next_timer` is the set's minimum,
+/// stored under the set's lock.
+fn add_timer(p: &Pool, at: u64, u: &Unit) {
+    {
+        let mut set = p.timers.lock().unwrap();
+        u.timer_at.store(at, Ordering::SeqCst);
+        set.insert((at, u.id));
+        p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
+    }
+    // The poller publishes `poll_until` and then reloads `next_timer`, so
+    // either it sees this deadline or this load sees its bound.
     if p.poller_blocked.load(Ordering::SeqCst) && at < p.poll_until.load(Ordering::SeqCst) {
         write_wake(p);
     }
+}
+/// End the unit's park: drop its timer registration if it still has one.
+fn clear_timer(p: &Pool, u: &Unit) {
+    let at = u.timer_at.swap(u64::MAX, Ordering::SeqCst);
+    if at == u64::MAX {
+        return;
+    }
+    let mut set = p.timers.lock().unwrap();
+    set.remove(&(at, u.id));
+    p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
 }
 fn fire_timers(p: &Pool) {
     let t = now();
@@ -1600,20 +1623,24 @@ fn fire_timers(p: &Pool) {
     }
     let mut due = Vec::new();
     {
-        let mut heap = p.timers.lock().unwrap();
-        while let Some(&Reverse((at, id))) = heap.peek() {
+        let mut set = p.timers.lock().unwrap();
+        while let Some(&(at, id)) = set.first() {
             if at > t {
                 break;
             }
-            heap.pop();
-            due.push(id);
+            set.pop_first();
+            // The registration is live unless its park already ended.
+            if let Some(u) = unit_ref(id)
+                && u.timer_at.compare_exchange(at, u64::MAX, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            {
+                due.push(u);
+            }
         }
-        let next = heap.peek().map_or(u64::MAX, |r| r.0.0);
-        p.next_timer.store(next, Ordering::SeqCst);
+        p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
     }
-    for id in due {
+    for u in due {
         bump(S_TIMER_FIRES);
-        wake_id(id);
+        wake(u);
     }
 }
 
@@ -1767,6 +1794,8 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             std::process::abort();
         }
         bump(S_RESUMES);
+        // Any park this entry ends is over: its deadline no longer applies.
+        clear_timer(p, u);
         CUR.set(up.0.cast_mut());
         let prev_fd = crate::fiber::set_stop_fd(u.stop_fd.get());
         *u.host.get() = host as *mut *mut u8;
@@ -1804,7 +1833,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             }
             After::Wait(deadline) => {
                 if let Some(at) = deadline {
-                    add_timer(p, at, u.id);
+                    add_timer(p, at, u);
                 }
                 if u
                     .state
@@ -1893,8 +1922,16 @@ fn worker_main(p: &'static Pool, ix: usize) {
             Some(_turn) => {
                 p.poller_blocked.store(true, Ordering::SeqCst);
                 if p.queued.load(Ordering::SeqCst) == 0 && !p.stop.load(Ordering::SeqCst) {
-                    let nt = p.next_timer.load(Ordering::SeqCst);
-                    p.poll_until.store(nt, Ordering::SeqCst);
+                    // Publish the bound, then reload: a deadline registered
+                    // before the store is seen here, and one after it sees
+                    // this bound and writes the wake.
+                    let nt = loop {
+                        let nt = p.next_timer.load(Ordering::SeqCst);
+                        p.poll_until.store(nt, Ordering::SeqCst);
+                        if p.next_timer.load(Ordering::SeqCst) >= nt {
+                            break nt;
+                        }
+                    };
                     let timeout = if nt == u64::MAX {
                         -1
                     } else {
@@ -1985,7 +2022,7 @@ fn launch_untied(
         gep,
         gwake,
         _shared: shared,
-        timers: Mutex::new(BinaryHeap::new()),
+        timers: Mutex::new(BTreeSet::new()),
         next_timer: AtomicU64::new(u64::MAX),
         live: AtomicUsize::new(k),
         stop: AtomicBool::new(false),

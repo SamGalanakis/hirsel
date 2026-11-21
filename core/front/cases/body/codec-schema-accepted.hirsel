@@ -109,7 +109,11 @@ fn hidden_from[T](take n: u64) -> Result[Hidden[T], ()] {
     Error(())
 }
 
-fn codec_hidden(x: Hidden[HostFile]) -> u64 {
+type Unencoded {
+    n: u64
+}
+
+fn codec_hidden(x: Hidden[Unencoded]) -> u64 {
     needs(x)
 }
 
@@ -117,6 +121,6 @@ type Outer[T]: codec {
     hidden: Hidden[T]
 }
 
-fn nested_hidden(x: Outer[HostFile]) -> u64 {
+fn nested_hidden(x: Outer[Unencoded]) -> u64 {
     needs(x)
 }

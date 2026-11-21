@@ -161,8 +161,9 @@ The bounds are:
   has it only when it declares it. Declaring it lets every module encode the type's fields
   and build its values from decoded bytes, so for an opaque type decoding is a
   construction outside its module that its owner has allowed. With `via`
-  ([SEM-10](semantics.md#sem-10-codecs)) the bound is checked against the type after it
-  instead of the fields, and every decode of the type passes its owner's `from`.
+  ([SEM-10](semantics.md#sem-10-codecs)), the type after it must have `codec` and every
+  decode passes the owner's `from`. Each actual field must still hold nothing
+  (OWN-2), including after substituting type arguments.
 - `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
   only on the type parameters of core declarations ([core](core.md)), and are refused
   anywhere else: numeric generics are not in v1

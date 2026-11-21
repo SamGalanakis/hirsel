@@ -291,8 +291,10 @@ never reads a default ([LANG-9](language.md#lang-9-nominal-types)); only decodin
 after its bounds: `pub opaque type Email: codec via String (to: text, from: parse) { text:
 String }`. So only the declaring module can write it, as only it can declare the bound.
 `R`, the type after `via`, must be `codec`, checked as a field's type is against the
-declaration's bounds ([OWN-4](ownership.md#own-4-bounds)); the fields are then not encoded
-and need not be `codec`, though the kinds that never have the bound are still refused.
+declaration's bounds ([OWN-4](ownership.md#own-4-bounds)). A `via` codec encodes only `R`.
+The actual fields need no codec of their own. OWN-4 still governs which types can
+declare `codec` and requires the actual fields to have an empty holds set
+([OWN-2](ownership.md#own-2-type-summaries)).
 `to` and `from` name functions of the declaring module: `to` takes the value as a view and
 returns a view of an `R` it holds, `fn text(e: Email) -> View[String] in e`, and `from` is
 `fn(take R) -> Result[T, E]` for some `E`. Encoding writes `to`'s `R` with R's codec, so a

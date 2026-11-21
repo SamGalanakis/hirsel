@@ -1148,6 +1148,7 @@ fn codec_overrides_and_tombstones() {
         "schema-accepted",
         "schema-refused",
         "via-refused",
+        "via-holds-refused",
         "via-generic-owners",
         "via-generic-owner-refused",
     ] {

@@ -570,6 +570,10 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
 
 /// Register sockets when the receiving unit takes an arrival.
 unsafe fn take_sockets(u: &mut LangUnit, h: &InboxH) {
+    // Only an item type with socket fields carries sockets.
+    if h.inbox.0.socket_offsets.is_empty() {
+        return;
+    }
     if let Some(sockets) = h
         .inbox
         .0

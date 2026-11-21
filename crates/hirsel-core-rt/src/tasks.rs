@@ -2397,10 +2397,12 @@ pub extern "C" fn hirsel_core_ready(token: u64) {
     }
 }
 /// mc-units-untied: at a park, this worker's thread-locals hold the idle
-/// values every unit sees at its park point, so none is carried across.
+/// values every unit sees at its park point, so none is carried across. One
+/// call reads each in place: nothing in it crosses a stack switch, so it
+/// needs no `Moved` accessor.
 #[inline(never)]
 pub(crate) fn check_idle_tls() {
-    if !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null() || !WORKER.get().is_null() {
+    if !CURRENT.0.get().is_null() || !CALLBACK_TASK.0.get().is_null() || !WORKER.0.get().is_null() {
         crate::process::stop(b"UntiedParkWithTask");
     }
     crate::limit::check_unbound();

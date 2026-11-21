@@ -525,8 +525,9 @@ fn thread() -> usize {
     THREAD.with(|v| v as *const u8 as usize)
 }
 #[inline(never)]
+#[inline(always)]
 pub(crate) fn check_unbound() {
-    if BOUND.get().is_some() || VACANT.with_borrow(Option::is_some) {
+    if BOUND.0.get().is_some() || VACANT.with_borrow(Option::is_some) {
         crate::process::stop(b"UntiedParkBound");
     }
 }

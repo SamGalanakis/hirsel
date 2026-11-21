@@ -760,8 +760,9 @@ crate::units::moved_tls! { static OWNER: *mut Owner = ptr::null_mut(); }
 /// mc-units-untied (law 4): times the cross-worker ordering token was taken.
 pub(crate) static ACQUIRES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[inline(never)]
+#[inline(always)]
 pub(crate) fn check_no_owner() {
-    if !OWNER.get().is_null() {
+    if !OWNER.0.get().is_null() {
         crate::process::stop(b"UntiedParkWithOwner");
     }
 }

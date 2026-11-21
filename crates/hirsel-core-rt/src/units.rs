@@ -158,6 +158,12 @@ const S_LIFO: usize = 14;
 fn bump(i: usize) {
     add_stat(i, 1);
 }
+/// `bump` on a worker's own host stack (`find`, `run_unit`). That stack
+/// always resumes on its own thread, so the counter is read in place.
+#[inline(always)]
+fn bump_host(i: usize) {
+    WORKER_STATS.with(|stats| stats[i].set(stats[i].get().wrapping_add(1)));
+}
 
 // A unit may resume on another worker. Resolve this worker's TLS in the
 // callee so the caller cannot cache its address across a stack switch.
@@ -887,7 +893,7 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
         let runs = p.lifo_runs[ix].load(Ordering::Relaxed);
         if runs < LIFO_RUNS {
             p.lifo_runs[ix].store(runs + 1, Ordering::Relaxed);
-            bump(S_LIFO);
+            bump_host(S_LIFO);
             return Some(UP(l));
         }
         // Out of private runs. Take the slot only when this worker's
@@ -921,7 +927,7 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
             && let Some(u) = q.pop_back()
         {
             drop(q);
-            bump(S_STEALS);
+            bump_host(S_STEALS);
             return taken(u);
         }
     }
@@ -960,7 +966,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             eprintln!("untied: law 1 violated: unit {} entered twice", u.id);
             std::process::abort();
         }
-        bump(S_RESUMES);
+        bump_host(S_RESUMES);
         // Any park this entry ends is over: its deadline no longer applies.
         clear_timer(p, u);
         CUR.set(up.0.cast_mut());
@@ -1013,7 +1019,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                     .is_err()
                 {
                     // Woken while it ran: run it again.
-                    bump(S_NOTIFIED_REQUEUE);
+                    bump_host(S_NOTIFIED_REQUEUE);
                     u.state.swap(QUEUED, Ordering::SeqCst);
                     publish(p, &p.locals[ix], up);
                 }

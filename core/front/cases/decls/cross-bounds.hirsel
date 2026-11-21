@@ -29,3 +29,21 @@ fn open() {
 // expect: refuse LANG-12 at 22:44
 // expect: compared LANG-12 at 22:27 | core@1/core/Arc[u64] | cross
 // expect: compared LANG-12 at 22:44 | core@1/core/Arc[u64] | cross
+
+// A socket half still moves between tasks in a unit, but cannot be sent to
+// another unit. Transfer the whole socket before splitting it.
+fn send_read(take half: ReadHalf, to: Client[ReadHalf]) waits {
+    let _ = conn.send(to, take half)
+}
+
+fn send_write(take half: WriteHalf, to: Client[WriteHalf]) waits {
+    let _ = conn.send(to, take half)
+}
+// expect: refuse LANG-12 at 35:46
+// expect: compared LANG-12 at 35:46 | core@1/core/ReadHalf | cross
+// expect: refuse LANG-12 at 39:48
+// expect: compared LANG-12 at 39:48 | core@1/core/WriteHalf | cross
+// expect: refuse CONC-2 at 36:23
+// expect: compared CONC-2 at 36:23 | core@1/core/ReadHalf | cross
+// expect: refuse CONC-2 at 40:23
+// expect: compared CONC-2 at 40:23 | core@1/core/WriteHalf | cross

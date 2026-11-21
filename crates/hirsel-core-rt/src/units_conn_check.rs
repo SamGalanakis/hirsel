@@ -518,8 +518,7 @@ fn socket_crosses_pending_readiness() {
     sender.dispatch_polled(source.poll(0).unwrap().unwrap(), |_| unreachable!());
     peer.write_all(b"x").unwrap();
 
-    let (moving, sibling) = sender.detach(key).unwrap();
-    assert!(!sibling);
+    let moving = sender.detach(key).unwrap();
     let old = source.poll(0).unwrap().unwrap();
     assert_eq!(sender.dispatch_polled(old, |_| unreachable!()), 0);
 

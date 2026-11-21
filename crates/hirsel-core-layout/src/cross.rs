@@ -1,14 +1,14 @@
 //! What a `cross` value owns as it moves between units (CONC-15, CONC-17): each
-//! sequence buffer and each client handle, by byte offset in the value. The
-//! runtime copies a buffer's content into the receiving unit and moves a client;
-//! moves a socket with its host state, outside either poller until it is taken.
+//! sequence buffer, client, socket and listener, by byte offset in the value.
+//! The runtime copies sequence contents and moves client handles. Sockets and
+//! listeners move with their host state, detached from the poller until taken.
 use crate::{Body, FieldTy, Handle, Layout, Recipe, Shape, TypeRef, field_size};
 
 /// A sequence carrier (pointer, length, capacity).
 pub const SEQ: u64 = 0;
 /// A `Client[T]` handle word.
 pub const CLIENT: u64 = 1;
-/// A socket, listener or directional half handle word.
+/// A whole socket or listener handle word.
 pub const SOCKET: u64 = 2;
 
 /// Each owner of a value of row `ty`, as `[offset, kind, element bytes, element

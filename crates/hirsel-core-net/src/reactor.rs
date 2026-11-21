@@ -2,7 +2,7 @@
 //! Slot generations identify sockets across poll and dispatch.
 use crate::model::Model;
 use std::{
-    collections::BTreeMap,
+    collections::BTreeSet,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, Mutex, MutexGuard, TryLockError},
@@ -194,16 +194,6 @@ fn shared_tag(unit: u32, index: usize, generation: u32) -> u64 {
     (u64::from(unit) << SHARED_UNIT_SHIFT) | (u64::from(generation & 0xffff) << 32) | index as u64
 }
 
-fn interests(owners: u8) -> u32 {
-    let read = if owners == 4 {
-        0
-    } else {
-        libc::EPOLLIN | libc::EPOLLRDHUP
-    };
-    let write = if owners == 2 { 0 } else { libc::EPOLLOUT };
-    (libc::EPOLLET | read | write) as u32
-}
-
 struct Record {
     fd: OwnedFd,
     owners: u8,
@@ -228,13 +218,6 @@ enum Detached {
 }
 
 impl SocketTransfer {
-    pub fn fd(&self) -> Option<i32> {
-        match self.0.as_ref()? {
-            Detached::Native(record) => Some(record.fd.as_raw_fd()),
-            Detached::Model(..) => None,
-        }
-    }
-
     pub fn model(&self) -> Option<&Model> {
         match self.0.as_ref()? {
             Detached::Native(_) => None,
@@ -245,19 +228,10 @@ impl SocketTransfer {
 
 impl Drop for SocketTransfer {
     fn drop(&mut self) {
-        match self.0.take() {
-            Some(Detached::Native(record)) if record.owners == 4 => {
-                shutdown_write(record.fd.as_raw_fd());
-            }
-            Some(Detached::Model(model, key)) => model.release(key),
-            _ => {}
+        if let Some(Detached::Model(model, key)) = self.0.take() {
+            model.release(key);
         }
     }
-}
-
-fn shutdown_write(fd: i32) {
-    // SAFETY: the caller owns the write direction and pins the descriptor.
-    unsafe { libc::shutdown(fd, libc::SHUT_WR) };
 }
 
 /// The model owns its socket keys and cleanup. Native registries hold no
@@ -265,20 +239,20 @@ fn shutdown_write(fd: i32) {
 trait ModelResources: Send + Sync {
     fn model(&self) -> &Model;
     fn adopt(&mut self, model: &Model, key: u64);
-    fn split(&mut self, key: u64);
-    fn detach(&mut self, key: u64) -> bool;
+    fn release(&mut self, key: u64) -> bool;
+    fn detach(&mut self, key: u64);
     fn len(&self) -> usize;
 }
 
 struct ModeledSockets {
     model: Model,
-    keys: BTreeMap<u64, u8>,
+    keys: BTreeSet<u64>,
 }
 impl ModeledSockets {
     fn new(model: Model) -> Self {
         Self {
             model,
-            keys: BTreeMap::new(),
+            keys: BTreeSet::new(),
         }
     }
 }
@@ -288,21 +262,18 @@ impl ModelResources for ModeledSockets {
     }
     fn adopt(&mut self, model: &Model, key: u64) {
         self.model = model.clone();
-        *self.keys.entry(key & !3).or_default() |= 1 << (key & 3);
+        self.keys.insert(key & !3);
     }
-    fn split(&mut self, key: u64) {
-        *self.keys.get_mut(&key).unwrap() = 6;
-    }
-    fn detach(&mut self, key: u64) -> bool {
-        let base = key & !3;
-        let owners = self.keys.get_mut(&base).unwrap();
-        *owners &= !(1 << (key & 3));
-        if *owners == 0 {
-            self.keys.remove(&base);
-            true
-        } else {
-            false
+    fn release(&mut self, key: u64) -> bool {
+        self.model.release(key);
+        let ended = !self.model.contains(key);
+        if ended {
+            self.keys.remove(&(key & !3));
         }
+        ended
+    }
+    fn detach(&mut self, key: u64) {
+        assert!(self.keys.remove(&key));
     }
     fn len(&self) -> usize {
         self.keys.len()
@@ -310,12 +281,8 @@ impl ModelResources for ModeledSockets {
 }
 impl Drop for ModeledSockets {
     fn drop(&mut self) {
-        for (base, owners) in std::mem::take(&mut self.keys) {
-            for dir in 0..3 {
-                if owners & (1 << dir) != 0 {
-                    self.model.release(base | dir);
-                }
-            }
+        for key in std::mem::take(&mut self.keys) {
+            self.model.release_all(key);
         }
     }
 }
@@ -384,7 +351,6 @@ impl Sockets {
     }
 
     fn insert_record(&mut self, record: Record) -> Option<u64> {
-        let direction = u64::from(record.owners.trailing_zeros());
         let index = if let Some(index) = self.free.pop() {
             index
         } else {
@@ -398,7 +364,7 @@ impl Sockets {
         let slot = &mut self.slots[index as usize];
         slot.record = Some(record);
         self.live += 1;
-        Some((u64::from(slot.generation) << 34) | (u64::from(index) << 2) | direction)
+        Some((u64::from(slot.generation) << 34) | (u64::from(index) << 2))
     }
 
     fn remove_record(&mut self, index: usize) -> Record {
@@ -414,50 +380,20 @@ impl Sockets {
         record
     }
 
-    /// Detach the carrier before publishing it. The boolean says whether its
-    /// old slot still owns the other direction.
-    pub fn detach(&mut self, key: u64) -> io::Result<(SocketTransfer, bool)> {
+    /// Detach a whole socket or listener before publishing it.
+    pub fn detach(&mut self, key: u64) -> io::Result<SocketTransfer> {
+        assert_eq!(key & 3, 0);
         if Model::owns(key) {
             let resources = self.model.as_mut().unwrap();
-            let sibling = !resources.detach(key);
-            return Ok((
-                SocketTransfer(Some(Detached::Model(resources.model().clone(), key))),
-                sibling,
-            ));
+            resources.detach(key);
+            return Ok(SocketTransfer(Some(Detached::Model(
+                resources.model().clone(),
+                key,
+            ))));
         }
         let index = ((key >> 2) as u32) as usize;
-        let direction = key & 3;
-        let owner = 1 << direction;
         let record = self.record(key);
-        let sibling = record.owners != owner;
-        if sibling {
-            assert!(record.waiters[(direction - 1) as usize].is_none());
-            let moved = Record {
-                fd: record.fd.try_clone()?,
-                owners: owner,
-                reset: record.reset,
-                ended: record.ended,
-                waiters: [None; 2],
-                registered: false,
-                read_drained: false,
-                read_terminal: record.read_terminal,
-            };
-            let slot = &mut self.slots[index];
-            let record = slot.record.as_mut().unwrap();
-            let remaining = record.owners & !owner;
-            if record.registered {
-                let poller = self.poller.as_ref().unwrap();
-                let token = Self::registration_tag(self.shared, index, slot.generation);
-                poller.ctl(
-                    libc::EPOLL_CTL_MOD,
-                    record.fd.as_raw_fd(),
-                    interests(remaining),
-                    token,
-                )?;
-            }
-            record.owners = remaining;
-            return Ok((SocketTransfer(Some(Detached::Native(moved))), true));
-        }
+        assert_eq!(record.owners, 1);
         assert_eq!(record.waiters, [None; 2]);
         if record.registered {
             self.poller
@@ -468,7 +404,7 @@ impl Sockets {
         let mut record = self.remove_record(index);
         record.registered = false;
         record.read_drained = false;
-        Ok((SocketTransfer(Some(Detached::Native(record))), false))
+        Ok(SocketTransfer(Some(Detached::Native(record))))
     }
 
     /// Give a carrier a fresh identity and register it for this unit.
@@ -524,10 +460,7 @@ impl Sockets {
     }
     pub fn split(&mut self, key: u64) -> (u64, u64) {
         if Model::owns(key) {
-            let resources = self.model.as_mut().unwrap();
-            let result = resources.model().split(key);
-            resources.split(key);
-            return result;
+            return self.model().unwrap().split(key);
         }
         self.record_mut(key).owners = 6;
         (key | 1, key | 2)
@@ -559,7 +492,7 @@ impl Sockets {
         self.poller.as_ref().unwrap().ctl(
             libc::EPOLL_CTL_ADD,
             record.fd.as_raw_fd(),
-            interests(record.owners),
+            (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32,
             Self::registration_tag(self.shared, index, slot.generation),
         )?;
         record.registered = true;
@@ -612,7 +545,7 @@ impl Sockets {
         };
         let failed = flags & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0;
         let terminal = failed || flags & libc::EPOLLRDHUP as u32 != 0;
-        if r.owners != 4 && (terminal || flags & libc::EPOLLIN as u32 != 0) {
+        if terminal || flags & libc::EPOLLIN as u32 != 0 {
             r.read_drained = false;
             r.read_terminal |= terminal;
             if let Some(token) = r.waiters[0].take() {
@@ -620,8 +553,7 @@ impl Sockets {
                 ready(token);
             }
         }
-        if r.owners != 2
-            && (failed || flags & libc::EPOLLOUT as u32 != 0)
+        if (failed || flags & libc::EPOLLOUT as u32 != 0)
             && let Some(token) = r.waiters[1].take()
         {
             *waiting -= 1;
@@ -670,14 +602,13 @@ impl Sockets {
 
     pub fn release(&mut self, key: u64) -> bool {
         if Model::owns(key) {
-            let resources = self.model.as_mut().unwrap();
-            resources.model().release(key);
-            return resources.detach(key);
+            return self.model.as_mut().unwrap().release(key);
         }
         let r = self.record_mut(key);
         let direction = key & 3;
         if direction == 2 {
-            shutdown_write(r.fd.as_raw_fd());
+            // SAFETY: the record owns the connected descriptor through final release.
+            unsafe { libc::shutdown(r.fd.as_raw_fd(), libc::SHUT_WR) };
         }
         r.owners &= !(1 << direction);
         if r.owners != 0 {

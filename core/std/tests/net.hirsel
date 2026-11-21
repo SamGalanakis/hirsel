@@ -45,6 +45,10 @@ fn upstream_invalid_ip_literals() -> bool {
     true
 }
 
+fn return_listener(take listener: Listener) -> Listener {
+    take listener
+}
+
 // test-env: HIRSEL_UNTIED=4
 fn serve_crossed_socket(take ready: Client[Client[Socket]]) waits {
     let (sockets, incoming): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(1, bytes 0))
@@ -61,7 +65,8 @@ fn serve_crossed_socket(take ready: Client[Client[Socket]]) waits {
 // expect: run socket_served_by_receiving_unit(network) = true
 fn socket_served_by_receiving_unit(n: Net, _clock: Clock, tasks: Tasks) -> bool waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
-    let mut listener = take listening
+    let owner = result.unwrap(task.spawn_unit(tasks, bytes 4096, take listening, return_listener))
+    let mut listener = result.unwrap(task.join(take owner))
     let client = result.unwrap(host.connect(n, addr, Never))
     let (socket, _) = result.unwrap(host.accept(mut listener, Never))
     let (ready, inbox): (Client[Client[Socket]], Inbox[Client[Socket]]) = result.unwrap(conn.new(1, bytes 0))

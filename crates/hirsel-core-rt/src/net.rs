@@ -712,17 +712,14 @@ fn publish_modeled_readiness(model: &hirsel_core_net::model::Model) {
     }
 }
 
-/// Owns exactly the resources of one socket carrier while it is in transit.
+/// Owns a socket or listener while it is in transit.
 pub(crate) struct CrossedSocket {
     carrier: Option<hirsel_core_net::SocketTransfer>,
     connected: Option<(Address, Provider)>,
-    session: Option<crate::os_tls::Session>,
-    write: Option<crate::secret::TlsWrite>,
-    direction: u64,
 }
 
 // SAFETY: the provider descriptor moves as opaque data and is used only
-// under its existing calling contract. The TLS session synchronizes its state.
+// under its existing calling contract.
 unsafe impl Send for CrossedSocket {}
 
 impl CrossedSocket {
@@ -731,31 +728,13 @@ impl CrossedSocket {
         if files.net_tape.is_some() {
             crate::process::stop(b"UnitRecording");
         }
-        let (carrier, sibling) = files
+        let carrier = files
             .sockets
             .detach(key)
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        let base = key & !3;
-        let direction = key & 3;
-        let connected = if sibling {
-            files.connected.get(&base).copied()
-        } else {
-            files.connected.remove(&base)
-        };
-        let mut session = files.tls.sessions.remove(&base);
-        if sibling && let Some(both) = session {
-            let (stay, moved) = both.split();
-            files.tls.sessions.insert(base, stay);
-            session = Some(moved);
-        }
         Self {
             carrier: Some(carrier),
-            connected,
-            session,
-            write: (direction == 2)
-                .then(|| files.tls_writes.remove(&base))
-                .flatten(),
-            direction,
+            connected: files.connected.remove(&key),
         }
     }
 
@@ -764,15 +743,8 @@ impl CrossedSocket {
             .sockets
             .attach(self.carrier.take().unwrap())
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        let base = key & !3;
         if let Some(connected) = self.connected.take() {
-            files.connected.insert(base, connected);
-        }
-        if let Some(session) = self.session.take() {
-            files.tls.sessions.insert(base, session);
-        }
-        if let Some(write) = self.write.take() {
-            files.tls_writes.insert(base, write);
+            files.connected.insert(key, connected);
         }
         key
     }
@@ -780,15 +752,6 @@ impl CrossedSocket {
 
 impl Drop for CrossedSocket {
     fn drop(&mut self) {
-        if self.direction == 2
-            && let Some(session) = &mut self.session
-            && let Some(fd) = self
-                .carrier
-                .as_ref()
-                .and_then(hirsel_core_net::SocketTransfer::fd)
-        {
-            session.with(|stream| stream.shutdown(fd));
-        }
         let model = self
             .carrier
             .as_ref()
@@ -858,7 +821,7 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             if source & 3 == 2
                 && let Some(stream) = (*files).tls.sessions.get_mut(&(source & !3))
             {
-                stream.with(|stream| stream.shutdown((*files).sockets.fd(source)));
+                stream.shutdown((*files).sockets.fd(source));
             }
             if (*files).sockets.release(source) {
                 (*files).connected.remove(&(key & !3));

@@ -39,7 +39,7 @@ fn expected(run: &Run, out: &mut Vec<u64>) {
     }
 }
 fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
-    let scratch = Scratch::new();
+    let scratch = NativeArtifacts::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let object = emit_object_for_test(
         module,
@@ -52,7 +52,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
-    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
     let mut source = String::from("#include <unistd.h>\n#include <sys/wait.h>\n");
     source.push_str(include_str!("providers.c"));
     declare_functions(&mut source, module, &c::source::module_sites(module));

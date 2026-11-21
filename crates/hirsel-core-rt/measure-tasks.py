@@ -14,6 +14,7 @@ from pathlib import Path
 import platform
 import re
 import subprocess
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -106,7 +107,9 @@ def sample(out, binary, workload, model, count):
                '-e', 'instructions:u,duration_time', '-o', str(perf), '--',
                '/usr/bin/time', '-f', '%e\t%M', '-o', str(stats), str(binary), model, workload, str(count)]
     started = time.monotonic()
-    result = subprocess.run(command, cwd=ROOT, env=MEASURE_ENV, capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(prefix='hirsel-task-cost-') as scratch:
+        result = subprocess.run(command, cwd=ROOT, env=MEASURE_ENV | {'TMPDIR': scratch},
+                                capture_output=True, text=True)
     (directory / 'stdout').write_text(result.stdout)
     (directory / 'stderr').write_text(result.stderr)
     expected = count if workload == 'spawn' else count * (count - 1) // 2 if workload in ('roundtrip', 'pipeline') else count * 1_000_000

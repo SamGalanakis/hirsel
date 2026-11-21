@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 import sys
 from types import SimpleNamespace
@@ -256,22 +257,31 @@ class ScratchOwnership(LauncherFixture):
         owner = f'{os.getpid()}-{helper["start_time"](os.getpid())}'
         parent = self.root / 'scratch'
         parent.mkdir()
-        for prefix in ('hirsel-test-', 'hirsel-native-inputs-'):
+        for prefix in helper['PREFIXES']:
             with self.subTest(prefix=prefix):
                 live = parent / f'{prefix}live'
                 dead = parent / f'{prefix}dead'
                 reused = parent / f'{prefix}reused'
                 retained = parent / f'{prefix}retained'
+                recent = parent / f'{prefix}recent'
+                foreign = parent / f'{prefix}unregistered'
                 unregistered = parent / f'{prefix}4294967295-0-interrupted'
                 for path, identity in ((live, owner), (dead, '4294967295-0'),
-                                       (reused, f'{os.getpid()}-0'), (retained, '4294967295-0')):
+                                       (reused, f'{os.getpid()}-0'), (retained, '4294967295-0'),
+                                       (recent, '4294967295-0')):
                     (path / '.hirsel-owners').mkdir(parents=True)
                     (path / '.hirsel-owners' / identity).touch()
                 (retained / '.hirsel-keep').touch()
                 unregistered.mkdir()
+                foreign.mkdir()
+                stale = time.time() - 2 * helper['STALE_SECONDS']
+                for path in (live, dead, reused, retained, unregistered, foreign):
+                    os.utime(path, (stale, stale))
                 helper['sweep'](parent, prefix)
                 self.assertTrue(live.is_dir())
                 self.assertTrue(retained.is_dir())
+                self.assertTrue(recent.is_dir())
+                self.assertTrue(foreign.is_dir())
                 self.assertFalse(dead.exists())
                 self.assertFalse(reused.exists())
                 self.assertFalse(unregistered.exists())
@@ -317,27 +327,23 @@ assert (scratch / os.environ['TOKEN']).read_text() == 'owned'
         materializer = self.root / 'materialize.py'
         materializer.write_text("import sys\nfrom pathlib import Path\np=Path(sys.argv[2]); p.mkdir(); print(p)\n")
         harness = self.root / 'harness'
-        harness.write_text("#!/bin/sh\nprintf '%s\\n' \"$LLVM_SYS_231_PREFIX\" \"$XDG_CACHE_HOME\"\nexit 17\n")
+        harness.write_text("#!/bin/sh\nprintf '%s\\n' \"$LLVM_SYS_231_PREFIX\" \"$XDG_CACHE_HOME\"\nexit \"$FIXTURE_STATUS\"\n")
         harness.chmod(0o755)
-        # A failed cache-removal command must not skip the remaining owners.
-        commands = self.root / 'commands'
-        commands.mkdir()
-        (commands / 'rm').write_text('#!/bin/sh\nexit 1\n')
-        (commands / 'rm').chmod(0o755)
-        for keep in ('', '1'):
-            with self.subTest(keep=keep):
+        for status, keep in ((17, ''), (0, '1'), (17, '1')):
+            with self.subTest(status=status, keep=keep):
                 env = self.env | dict(HIRSEL_NATIVE_ENVIRONMENT=str(environment),
-                                      HIRSEL_PRIVATE_NATIVE_INPUTS=str(materializer), HIRSEL_KEEP_TEST_SCRATCH=keep,
-                                      PATH=str(commands) + ':' + os.environ['PATH'])
+                                      HIRSEL_PRIVATE_NATIVE_INPUTS=str(materializer), HIRSEL_KEEP_TEST_SCRATCH=keep)
                 env.pop('HIRSEL_TEST_BINARY', None)
+                env['FIXTURE_STATUS'] = str(status)
                 run = subprocess.run(['sh', str(LAUNCHER), 'harness'], cwd=self.root,
                                      env=env, capture_output=True, text=True)
-                self.assertEqual(run.returncode, 17, run.stderr)
+                self.assertEqual(run.returncode, status, run.stderr)
                 native, cache = map(Path, run.stdout.splitlines())
                 scratch = Path(os.readlink(self.root / 'tmp'))
-                self.assertEqual(native.exists(), bool(keep))
-                self.assertEqual(cache.exists(), bool(keep))
-                self.assertEqual(scratch.exists(), bool(keep))
+                retained = bool(status and keep)
+                for path in (native, cache, scratch):
+                    self.assertEqual(path.exists(), retained)
+                self.assertEqual('Kept failed test scratch' in run.stderr, retained)
 
 
 class LauncherReporting(LauncherFixture):
@@ -716,7 +722,7 @@ class LauncherCache(LauncherFixture):
                     env[key] = value
             env['XDG_DATA_HOME'] = str(shared / 'data')
             run = self.launch_probe('''
-import json, os
+import json, os, tempfile
 from pathlib import Path
 cache = Path(os.environ['XDG_CACHE_HOME'])
 assert cache.is_absolute() and cache.is_dir()
@@ -724,12 +730,14 @@ assert cache.stat().st_mode & 0o777 == 0o700
 for key in ('XDG_CACHE_HOME', 'XDG_DATA_HOME'):
     path = Path(os.environ[key]); path.mkdir(parents=True, exist_ok=True)
     (path / 'written').write_text('owned')
-print(json.dumps(dict(cache=str(cache), data=os.environ['XDG_DATA_HOME'])))
+leaked = tempfile.mkdtemp(prefix='.tmp')
+print(json.dumps(dict(cache=str(cache), data=os.environ['XDG_DATA_HOME'], leaked=leaked)))
 ''', env=env)
             self.assertEqual(run.returncode, 0, run.stderr)
             paths = json.loads(run.stdout)
             action = Path(paths['cache']).parent
             self.assertEqual(Path(paths['data']).parent, action)
+            self.assertEqual(Path(paths['leaked']).parent.parent, action)
             self.assertFalse(action.exists())
             self.assertEqual(list(shared.iterdir()), [])
             self.assertEqual(blocked.read_text(), 'not a directory')
@@ -744,8 +752,7 @@ print(json.dumps(dict(cache=str(cache), data=os.environ['XDG_DATA_HOME'])))
             else:
                 self.assertEqual(run.returncode, 2, run.stderr)
                 self.assertIn('only-this', run.stderr)
-            scratch = Path(os.readlink(self.root / 'tmp'))
-            self.assertEqual(list(scratch.glob('action-*')), [])
+            self.assertEqual(list(Path(self.env['TMPDIR']).iterdir()), [])
 
     def test_parallel_launchers_never_share_a_cache(self):
         probe = self.root / 'probe'

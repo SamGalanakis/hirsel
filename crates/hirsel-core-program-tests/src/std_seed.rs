@@ -57,8 +57,8 @@ fn sources(dir: &Path, prefix: &[&str], signatures: bool) -> Vec<ModuleSource> {
 
 #[test]
 fn marked_contracts_run_only_in_the_native_walker() {
-    let dir = std::env::temp_dir().join(format!("hirsel-std-test-of-{}", std::process::id()));
-    std::fs::create_dir(&dir).expect("fixture directory");
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let marked = dir.join("private.hirsel");
     let public = dir.join("public.hirsel");
     let later = dir.join("later.hirsel");
@@ -69,17 +69,13 @@ fn marked_contracts_run_only_in_the_native_walker() {
         "// ordinary contract\n// test-of: std.pool\nfn later() {}\n",
     )
     .unwrap();
-    let selected = sources(&dir, &["tests"], false);
+    let selected = sources(dir, &["tests"], false);
     assert_eq!(
         selected.iter().map(|s| &s.file).collect::<Vec<_>>(),
         [&later, &public]
     );
     // The marker is a tests-loader convention, never a library-source exclusion.
-    assert_eq!(sources(&dir, &[], false).len(), 3);
-    for file in [marked, public, later] {
-        std::fs::remove_file(file).unwrap();
-    }
-    std::fs::remove_dir(dir).unwrap();
+    assert_eq!(sources(dir, &[], false).len(), 3);
 }
 
 #[test]
@@ -98,15 +94,12 @@ fn core_contract_directory_is_not_part_of_the_std_seed() {
             .all(|s| s.file.parent() == Some(repo().join("core/core").as_path()))
     );
     // Root-only discovery does not hide invalid real source files.
-    let dir = std::env::temp_dir().join(format!(
-        "hirsel-core-contract-source-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     std::fs::create_dir(dir.join("tests")).unwrap();
     std::fs::write(dir.join("tests/poison.hirsel"), "fn poison(x: Missing) {}").unwrap();
     std::fs::write(dir.join("bad.hirsel"), "fn bad(").unwrap();
-    let selected = sources(&dir, &[], true);
+    let selected = sources(dir, &[], true);
     assert_eq!(selected.len(), 1);
     let mut symbols = hirsel_core_syntax::Symbols::default();
     let package = PackageManifest {
@@ -120,7 +113,6 @@ fn core_contract_directory_is_not_part_of_the_std_seed() {
             .diagnostics
             .is_empty()
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// core (declarations) and std (library code, depends on core), laid out as the canonical

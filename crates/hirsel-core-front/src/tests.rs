@@ -283,9 +283,8 @@ fn growth_arm_calls_are_cold() {
 /// These bounds are written only in core, so the bodies are a module of a copy of core.
 #[test]
 fn integer_and_float_bounds_imply_their_types_bounds() {
-    let dir = std::env::temp_dir().join(format!("hirsel-own4-core-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     for e in std::fs::read_dir(core_dir()).unwrap() {
         let path = e.unwrap().path();
         if path.extension().is_some_and(|e| e == "hirsel") {
@@ -301,9 +300,8 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
          pub fn fractional[T: float](x: T) -> u64 { accepts(x) }\n",
     )
     .unwrap();
-    let (index, inputs) = inputs_with_core("", &dir);
+    let (index, inputs) = inputs_with_core("", dir);
     let p = Program::declare(&index, &inputs);
-    std::fs::remove_dir_all(&dir).unwrap();
     assert!(p.refusals.is_empty(), "{:?}", p.refusals);
     let mut rules = HashMap::new();
     for (f, fd) in p.fns.iter().enumerate() {
@@ -1244,8 +1242,8 @@ fn aggregate_constant_errors_are_checked_before_use() {
 
 #[test]
 fn core_bodies_check_waits_while_bodiless_rows_use_the_written_effect() {
-    let dir = std::env::temp_dir().join(format!("hirsel-waits-core-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     for file in std::fs::read_dir(core_dir()).unwrap() {
         let file = file.unwrap();
         if file.path().is_file() {
@@ -1262,8 +1260,7 @@ pub fn written()->u64 waits
 "#,
     )
     .unwrap();
-    let (index, inputs) = inputs_with_core("", &dir);
-    std::fs::remove_dir_all(&dir).unwrap();
+    let (index, inputs) = inputs_with_core("", dir);
     let p = Program::declare(&index, &inputs);
     assert!(p.refusals.is_empty(), "{:?}", p.refusals);
     for (f, fd) in p

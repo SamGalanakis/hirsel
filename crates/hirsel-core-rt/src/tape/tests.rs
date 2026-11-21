@@ -1569,7 +1569,8 @@ fn tape_frames(mut bytes: &[u8]) -> Vec<Frame> {
 fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     crate::openat2_required::require();
     super::run::check_launch_replay();
-    let root = std::env::temp_dir().join(format!("hirsel-tape-{}", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     let (world_dir, store_dir) = (root.join("world"), root.join("store"));
     std::fs::create_dir_all(&world_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
@@ -1797,7 +1798,6 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     assert_eq!(refuse.calls.get(), 0);
 
     drop(os);
-    std::fs::remove_dir_all(&root).unwrap();
 }
 
 /// Replay supplies directory records, file data, and metadata after the
@@ -1806,7 +1806,8 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
 fn filesystem_observations_survive_removing_the_recorded_directory() {
     super::run::check_launch_replay();
     crate::openat2_required::require();
-    let root = std::env::temp_dir().join(format!("hirsel-tape-fs-{}", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     let world = root.join("world");
     let store = root.join("store");
     std::fs::create_dir_all(world.join("child")).unwrap();
@@ -1908,7 +1909,6 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
         "the recorded filesystem observations changed"
     );
     drop(os);
-    std::fs::remove_dir_all(&root).unwrap();
 }
 
 /// A REPEAT needs two consecutive CHOOSE frames in its block and a positive

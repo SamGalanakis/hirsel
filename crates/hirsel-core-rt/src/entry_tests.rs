@@ -48,10 +48,8 @@ fn identity_stable() {
         println!("IDENTITY {}", digest());
         return;
     }
-    let directory =
-        std::env::temp_dir().join(format!("hirsel-launch-identity-{}", std::process::id()));
-    std::fs::create_dir(&directory).unwrap();
-    let child_path = directory.join("launch-child");
+    let directory = tempfile::tempdir().unwrap();
+    let child_path = directory.path().join("launch-child");
     std::fs::copy(&executable, &child_path).unwrap();
     let mut child = std::process::Command::new(&child_path)
         .args(["--exact", "entry_tests::identity_stable", "--nocapture"])
@@ -74,7 +72,7 @@ fn identity_stable() {
         }
     }
     assert_eq!(first.len(), 64);
-    let replacement = directory.join("replacement");
+    let replacement = directory.path().join("replacement");
     std::fs::write(&replacement, b"a different executable on disk").unwrap();
     std::fs::rename(replacement, &child_path).unwrap();
     child.stdin.take().unwrap().write_all(&[1]).unwrap();
@@ -85,7 +83,6 @@ fn identity_stable() {
         tail.lines().any(|line| line == format!("IDENTITY {first}")),
         "{tail}"
     );
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -104,8 +101,8 @@ fn identity_unavailable() {
 
 #[test]
 fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
-    let path =
-        std::env::temp_dir().join(format!("hirsel-describe-entry-{}.out", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("describe.out");
     let out = File::create(&path).unwrap();
     let arguments = [
         b"--hirsel-describe".as_slice(),
@@ -183,7 +180,6 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
     assert_eq!(fds(), before);
     assert_eq!(std::fs::read(&path).unwrap(), b"abc");
     drop(out);
-    std::fs::remove_file(path).unwrap();
 }
 #[test]
 fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {

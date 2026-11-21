@@ -1,28 +1,17 @@
 use super::*;
-use std::{
-    cell::Cell,
-    fs::File,
-    os::fd::AsRawFd,
-    sync::atomic::{AtomicU64, Ordering},
-};
-static NEXT: AtomicU64 = AtomicU64::new(0);
+use std::{cell::Cell, fs::File, os::fd::AsRawFd};
 struct Fixture {
-    root: std::path::PathBuf,
+    root: tempfile::TempDir,
     sink: File,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "hirsel-startup-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let sink = File::create(root.join("stderr")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let sink = File::create(root.path().join("stderr")).unwrap();
         Self { root, sink }
     }
     fn stderr(&self) -> Vec<u8> {
-        std::fs::read(self.root.join("stderr")).unwrap()
+        std::fs::read(self.root.path().join("stderr")).unwrap()
     }
     fn run(
         &self,
@@ -33,14 +22,14 @@ impl Fixture {
         entry: crate::process::Entry,
     ) -> u8 {
         use std::os::unix::ffi::OsStrExt;
-        let root = self.root.as_os_str().as_bytes();
+        let root = self.root.path().as_os_str().as_bytes();
         let dirs: Vec<_> = (0..directories)
             .map(|_| View {
                 data: root.as_ptr(),
                 len: root.len(),
             })
             .collect();
-        let marker = self.root.join("main-ran");
+        let marker = self.root.path().join("main-ran");
         let marker = marker.as_os_str().as_bytes();
         let args = [View {
             data: marker.as_ptr(),
@@ -104,11 +93,6 @@ impl Fixture {
         unsafe { run_with_probe(&input, names.as_ptr(), entry, probe) }
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.root).unwrap();
-    }
-}
 unsafe extern "C" fn entered(
     _: *mut crate::Context,
     config: *const Config,
@@ -140,8 +124,8 @@ fn unsupported_openat2_names_first_dir_and_refuses_before_main_without_effects()
         fixture.stderr(),
         b"not started: Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n"
     );
-    assert!(!fixture.root.join("main-ran").exists());
-    assert_eq!(std::fs::read_dir(&fixture.root).unwrap().count(), 1);
+    assert!(!fixture.root.path().join("main-ran").exists());
+    assert_eq!(std::fs::read_dir(fixture.root.path()).unwrap().count(), 1);
 }
 #[test]
 fn multiple_dirs_probe_once_before_main() {
@@ -159,7 +143,7 @@ fn multiple_dirs_probe_once_before_main() {
     );
     assert_eq!((status, probes.get()), (0, 1));
     assert_eq!(
-        std::fs::read(fixture.root.join("main-ran")).unwrap(),
+        std::fs::read(fixture.root.path().join("main-ran")).unwrap(),
         b"main"
     );
     assert!(fixture.stderr().is_empty());
@@ -175,7 +159,7 @@ fn no_dir_runs_and_never_probes_even_with_unused_configured_directories() {
         entered,
     );
     assert_eq!(status, 0);
-    assert!(fixture.root.join("main-ran").exists());
+    assert!(fixture.root.path().join("main-ran").exists());
     assert!(fixture.stderr().is_empty());
 }
 #[test]
@@ -195,7 +179,7 @@ fn missing_grant_is_a_named_not_started_refusal() {
         fixture.stderr(),
         b"not started: grant `scratch` is not in the run's configuration\n"
     );
-    assert!(!fixture.root.join("main-ran").exists());
+    assert!(!fixture.root.path().join("main-ran").exists());
 }
 #[test]
 fn insufficient_root_refuses_with_the_shared_startup_charge_before_main() {
@@ -213,7 +197,7 @@ fn insufficient_root_refuses_with_the_shared_startup_charge_before_main() {
         )
         .as_bytes()
     );
-    assert!(!fixture.root.join("main-ran").exists());
+    assert!(!fixture.root.path().join("main-ran").exists());
 }
 #[test]
 fn exit_cannot_select_the_not_started_status() {

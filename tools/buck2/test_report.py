@@ -13,7 +13,6 @@ import selectors
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 
 def report_phases(directory):
@@ -164,9 +163,14 @@ def supervise(command, *, raw_json=False):
     previous_subreaper = ctypes.c_int()
     if libc.prctl(37, ctypes.byref(previous_subreaper), 0, 0, 0) != 0 or libc.prctl(36, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), 'cannot establish test descendant ownership')
-    phases = tempfile.TemporaryDirectory(prefix='hirsel-test-phases-')
+    scratch = os.environ.get('HIRSEL_SCRATCH_OWNER', str(Path(__file__).with_name('scratch.py')))
+    owner = [sys.executable, scratch]
+    parent = '/dev/shm' if os.environ.get('HIRSEL_TEST_POOL') else os.environ.get('TMPDIR') or '/tmp'
+    phases = None
     try:
-        env = os.environ | {'HIRSEL_TEST_PHASE_DIR': phases.name}
+        phases = subprocess.check_output(
+            [*owner, 'create', parent, 'hirsel-report-', str(os.getpid()), ''], text=True).strip()
+        env = os.environ | {'HIRSEL_TEST_PHASE_DIR': phases}
         child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout, selectors.EVENT_READ)
@@ -180,11 +184,11 @@ def supervise(command, *, raw_json=False):
                             phase='child-teardown', status=child.returncode)),
                             file=sys.stderr, flush=True)
                     elif (not progress.running and not progress.finished
-                          and not any(Path(phases.name).iterdir())):
+                          and not any(Path(phases).glob('*.jsonl'))):
                         print('HIRSEL_TEST_PHASE_RUNNING ' + json.dumps(dict(
                             phase='launcher-setup-or-discovery')),
                             file=sys.stderr, flush=True)
-                    report_phases(phases.name)
+                    report_phases(phases)
                     return 128 + stopped
                 for key, _ in selector.select(0.1):
                     stream = key.fileobj
@@ -208,7 +212,7 @@ def supervise(command, *, raw_json=False):
                     if stream is child.stderr:
                         progress.unittest_line(pending[stream])
             status = child.wait()
-            report_phases(phases.name)
+            report_phases(phases)
             binary = os.environ.get('HIRSEL_TEST_BINARY')
             discovery = any(arg in ('--list', '--help', '-h') for arg in command)
             if (status == 0 and binary and not discovery and not progress.empty_partition
@@ -218,14 +222,17 @@ def supervise(command, *, raw_json=False):
                 return 2
             return status if status >= 0 else 128 - status
     finally:
-        if child is not None:
-            reap_owned_children(child)
-            child.stdout.close()
-            child.stderr.close()
-        phases.cleanup()
-        libc.prctl(36, previous_subreaper.value, 0, 0, 0)
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
+        try:
+            if child is not None:
+                reap_owned_children(child)
+                child.stdout.close()
+                child.stderr.close()
+        finally:
+            if phases is not None:
+                subprocess.run([*owner, 'release', phases, '', str(os.getpid()), ''], check=False)
+            libc.prctl(36, previous_subreaper.value, 0, 0, 0)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
 
 if __name__ == '__main__':

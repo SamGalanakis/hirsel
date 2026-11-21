@@ -17,6 +17,7 @@ object = { version = "=0.40.0", default-features = false, features = ["elf", "re
 llvm-sys = { version = "=231.0.1", default-features = false, features = ["strict-versioning", "force-dynamic"] }
 
 [dev-dependencies]
+tempfile = "3"
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "write", "std"] }
 hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }
 hirsel-intern = { path = "../hirsel-intern" }

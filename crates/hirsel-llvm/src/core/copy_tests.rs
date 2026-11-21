@@ -22,8 +22,8 @@ fn guarded_copy_preserves_partial_writes_and_first_failure() {
     assert!(ir.contains("vector.body"), "{ir}");
     assert!(ir.contains(".copy.checked"), "{ir}");
     assert_eq!(object, hirsel_llvm_lazy::compile_ir(COPY, true).unwrap());
-    let dir = std::env::temp_dir().join(format!("hirsel-checked-copy-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     std::fs::write(dir.join("copy.o"), object).unwrap();
     std::fs::write(
         dir.join("test.c"),
@@ -73,7 +73,6 @@ int main(void) {
     assert!(result.status.success(), "{result:?}");
     let result = Command::new(dir.join("test")).output().unwrap();
     assert!(result.status.success(), "{result:?}");
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -110,8 +109,8 @@ define void @raise_at(ptr %context, i64 %site) {
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
 "#;
     let (_, object) = optimized(source);
-    let dir = std::env::temp_dir().join(format!("hirsel-stack-cause-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     std::fs::write(dir.join("raise.o"), object).unwrap();
     std::fs::write(
         dir.join("test.c"),
@@ -151,5 +150,4 @@ int main(void) {
     assert!(result.status.success(), "{result:?}");
     let result = Command::new(dir.join("test")).output().unwrap();
     assert!(result.status.success(), "{result:?}");
-    std::fs::remove_dir_all(dir).unwrap();
 }

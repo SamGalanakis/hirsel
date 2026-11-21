@@ -2030,11 +2030,8 @@ b3:
     let object =
         emit_object_for_target(&module, target, Optimization::None, false, &module.sites())
             .unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "hirsel-core-llvm-isolate-cancel-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     fs::write(dir.join("input.o"), object).unwrap();
     let body = symbol(&module, FuncId(2));
     let c = format!(
@@ -2119,7 +2116,6 @@ int main(void) {{
         }
     };
     output(&mut executable);
-    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

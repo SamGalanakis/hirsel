@@ -261,11 +261,8 @@ fn native_host_file_exit_paths_close_once_and_open_admits_nothing() {
         "delivery_failure",
         "refusal",
     ] {
-        let root =
-            std::env::temp_dir().join(format!("hirsel-hostfile-{}-{mode}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        let out = child(&root, mode);
-        std::fs::remove_dir_all(&root).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let out = child(root.path(), mode);
         assert!(
             out.status.success(),
             "{mode}: {:?}\n{}\n{}",
@@ -278,20 +275,18 @@ fn native_host_file_exit_paths_close_once_and_open_admits_nothing() {
 #[test]
 fn run_stop_skips_host_file_cleanup_and_kernel_releases_the_descriptor() {
     crate::openat2_required::require();
-    let root = std::env::temp_dir().join(format!("hirsel-hostfile-{}-stop", std::process::id()));
-    std::fs::create_dir(&root).unwrap();
-    let out = child(&root, "stop");
+    let root = tempfile::tempdir().unwrap();
+    let out = child(root.path(), "stop");
     assert_eq!(out.status.code(), Some(102));
     assert_eq!(
         out.stderr,
         b"open; cleanup skipped\nrun stop: HostFileFixture\n"
     );
-    let file = File::open(root.join("file")).unwrap();
+    let file = File::open(root.path().join("file")).unwrap();
     // SAFETY: newly owned fd; lock success proves the exited child's locked file
     // description was closed by _exit without invoking any cleanup callback.
     assert_eq!(
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
         0
     );
-    std::fs::remove_dir_all(&root).unwrap();
 }

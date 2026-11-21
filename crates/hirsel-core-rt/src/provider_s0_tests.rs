@@ -2126,18 +2126,13 @@ struct OsSeen {
     file: Vec<u8>,
 }
 fn os_case(form: OsForm) -> (OsSeen, usize) {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "hirsel-s0-os-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&root).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     let mut os = Box::new(crate::os::OsProvider::new(
         std::fs::File::create(root.join("stdout")).unwrap().into(),
         std::fs::File::create(root.join("stderr")).unwrap().into(),
     ));
-    let directory = os.grant(&root).unwrap();
+    let directory = os.grant(root).unwrap();
     let mut own = os.provider();
     let wrapper = Provider {
         state: (&mut own as *mut Provider).cast(),
@@ -2171,7 +2166,6 @@ fn os_case(form: OsForm) -> (OsSeen, usize) {
         stdout: std::fs::read(root.join("stdout")).unwrap(),
         file: std::fs::read(root.join(format!("f{OS_LATER}"))).unwrap(),
     };
-    std::fs::remove_dir_all(&root).unwrap();
     (seen, direct)
 }
 /// The OS provider's own `wait` and `deliver` are selected by identity and

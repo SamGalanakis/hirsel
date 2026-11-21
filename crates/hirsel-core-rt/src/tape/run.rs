@@ -764,15 +764,8 @@ pub(super) fn check_launch_replay() {
         }
         0
     }
-    let root = std::env::temp_dir().join(format!(
-        "hirsel-tape-launch-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
     use std::os::fd::AsRawFd;
     let output = std::fs::File::create(root.join("describe")).unwrap();
     let path = std::ffi::CString::new(root.join("run.tape").as_os_str().as_bytes()).unwrap();
@@ -845,5 +838,4 @@ pub(super) fn check_launch_replay() {
     assert!(seen[0].emitted);
     assert_eq!(seen[1], seen[0]);
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
-    std::fs::remove_dir_all(root).unwrap();
 }

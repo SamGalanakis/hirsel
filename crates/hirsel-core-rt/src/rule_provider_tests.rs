@@ -5,7 +5,7 @@ use super::*;
 fn cap7_temporary_dir_never_widens_its_parent_authority() {
     crate::openat2_required::require();
     let mut f = Fixture::new();
-    std::fs::write(f.root.join("parent-only"), b"secret").unwrap();
+    std::fs::write(f.root.path().join("parent-only"), b"secret").unwrap();
     let mut name = [0; 40];
     name[..4].copy_from_slice(b"sub-");
     let (derived, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, 4);
@@ -16,19 +16,23 @@ fn cap7_temporary_dir_never_widens_its_parent_authority() {
     assert_eq!(f.simple(OPEN, child, b"../parent-only", 0).error.tag, 2);
     use std::os::unix::fs::symlink;
     let basename = std::str::from_utf8(&name[..len]).unwrap();
-    symlink("../parent-only", f.root.join(basename).join("escape")).unwrap();
+    symlink(
+        "../parent-only",
+        f.root.path().join(basename).join("escape"),
+    )
+    .unwrap();
     assert_eq!(f.simple(OPEN, child, b"escape", 0).error.tag, 2);
     let file = f.simple(OPEN, child, b"inside", 3);
     assert_eq!(file.error, IoError::OK);
     assert_eq!(f.simple(CLOSE, file.value, b"", 0).error, IoError::OK);
-    assert!(f.root.join(basename).join("inside").is_file());
-    assert!(!f.root.join("inside").exists());
+    assert!(f.root.path().join(basename).join("inside").is_file());
+    assert!(!f.root.path().join("inside").exists());
     assert_eq!(
         f.simple(REMOVE_TREE, f.dir, &name[..len], 0).error,
         IoError::OK
     );
     assert_eq!(
-        std::fs::read(f.root.join("parent-only")).unwrap(),
+        std::fs::read(f.root.path().join("parent-only")).unwrap(),
         b"secret"
     );
 }

@@ -101,17 +101,22 @@ class Ledger {
 
 export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
-  await writeFile(join(dir,'package.json'),'{"type":"module"}');
-  for(const name of ['client','persistence','browser','node']) {
-    let text=await readFile(new URL(name+'.ts',source),'utf8');
-    if(mutant)text=mutant(name,text);
-    await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
+  try {
+    await writeFile(join(dir,'package.json'),'{"type":"module"}');
+    for(const name of ['client','persistence','browser','node']) {
+      let text=await readFile(new URL(name+'.ts',source),'utf8');
+      if(mutant)text=mutant(name,text);
+      await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
+    }
+    const client=await import(pathToFileURL(join(dir,'client.js')).href);
+    const node=await import(pathToFileURL(join(dir,'node.js')).href);
+    const persistence=await import(pathToFileURL(join(dir,'persistence.js')).href);
+    const browser=await import(pathToFileURL(join(dir,'browser.js')).href);
+    return {...client,...node,...persistence,...browser,dir,dispose:()=>rm(dir,{recursive:true,force:true})};
+  }catch(error){
+    await rm(dir,{recursive:true,force:true});
+    throw error;
   }
-  const client=await import(pathToFileURL(join(dir,'client.js')).href);
-  const node=await import(pathToFileURL(join(dir,'node.js')).href);
-  const persistence=await import(pathToFileURL(join(dir,'persistence.js')).href);
-  const browser=await import(pathToFileURL(join(dir,'browser.js')).href);
-  return {...client,...node,...persistence,...browser,dir,dispose:()=>rm(dir,{recursive:true,force:true})};
 }
 
 export async function laws(codec, only, mutant) {
@@ -408,7 +413,7 @@ export async function laws(codec, only, mutant) {
     if(!cases)throw new Error('zero client laws selected');
     return {cases};
   }finally{
-    for(const client of clients)await client.close();
-    await runtime.dispose();
+    try{for(const client of clients)await client.close();}
+    finally{await runtime.dispose();}
   }
 }

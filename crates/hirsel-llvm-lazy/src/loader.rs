@@ -101,9 +101,9 @@ type Program = unsafe extern "C" fn(
     Option<Deliver>,
     *mut Output,
 );
-pub(crate) enum ProgramUnit<'a> {
+pub(crate) enum ProgramUnit {
     Native(crate::construction::NativeModule),
-    Text(&'a str),
+    Text(String),
 }
 struct Backend {
     compile: Compile,
@@ -341,7 +341,7 @@ pub(crate) fn compile_module(
 /// `held` did not hold: one per part on `jobs` threads, or with
 /// `jobs` 0 one for them all.
 pub(crate) fn program(
-    units: Vec<ProgramUnit<'_>>,
+    units: Vec<ProgramUnit>,
     exports: &[String],
     target: hirsel_core_layout::Target,
     jobs: u32,
@@ -525,7 +525,7 @@ unsafe extern "C" fn report_source_remark(
 }
 
 fn emit(
-    mut units: Vec<ProgramUnit<'_>>,
+    mut units: Vec<ProgramUnit>,
     exports: &[String],
     speed: bool,
     target: hirsel_core_layout::Target,

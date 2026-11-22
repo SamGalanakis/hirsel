@@ -15,16 +15,15 @@ fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
         if sh_flags.0 & object::elf::SHF_ALLOC.0 != 0)
 }
 
-/// Keep the runtime binders used by the actual link inputs. The separate
-/// DWARF object is already bound against the complete source map.
+/// Keep the runtime binders used by the actual link inputs and report whether
+/// those inputs call the unit spawn ABI. The separate DWARF object is already
+/// bound against the complete source map.
 pub(crate) fn retain_referenced(
     sources: &mut SourceMap,
     inputs: &[PathBuf],
-) -> std::io::Result<()> {
-    if sources.items.is_empty() {
-        return Ok(());
-    }
+) -> std::io::Result<bool> {
     let mut names = HashSet::new();
+    let mut spawns_units = false;
     for input in inputs {
         let cache = object::read::ReadCache::new(File::open(input)?);
         let object = object::File::parse(&cache).map_err(std::io::Error::other)?;
@@ -40,6 +39,7 @@ pub(crate) fn retain_referenced(
                     .symbol_by_index(index)
                     .map_err(std::io::Error::other)?;
                 let name = symbol.name_bytes().map_err(std::io::Error::other)?;
+                spawns_units |= name == b"hirsel_core_spawn_unit";
                 if let Some(item) = site_item_symbol(name)
                     && !names.contains(item)
                 {
@@ -47,6 +47,9 @@ pub(crate) fn retain_referenced(
                 }
             }
         }
+    }
+    if sources.items.is_empty() {
+        return Ok(spawns_units);
     }
     // A release site's symbol is named by its item's owner.
     sources.items.retain(|item, _| {
@@ -70,7 +73,7 @@ pub(crate) fn retain_referenced(
     for item in sources.items.values_mut() {
         item.file = file_numbers[item.file as usize].expect("retained source file");
     }
-    Ok(())
+    Ok(spawns_units)
 }
 
 /// Site relocations in a GC link with `--emit-relocs`. Absolute symbols

@@ -10,6 +10,7 @@ pub(super) fn emit(
     data: &data::Tables,
     entry: FuncId,
     foreign_waits: bool,
+    spawns_units: bool,
 ) -> Result<()> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I32, I64], Some(I32));
@@ -199,17 +200,30 @@ pub(super) fn emit(
             .declare_data("hirsel_code_revision", Linkage::Import, false, false)
             .map_err(error)?;
         let revision = f.address(revision);
+        let runner = if spawns_units {
+            "hirsel_core_os_run_recording_with_units"
+        } else {
+            "hirsel_core_os_run_recording"
+        };
         f.value_call(
-            "hirsel_core_os_run_recording",
+            runner,
             I8,
             &[config, names, sources, entry, identity, revision],
         )?
     } else if !plan.foreign.is_empty() {
         let waits = f.b.ins().iconst(I8, i64::from(foreign_waits));
+        let runner = if spawns_units {
+            "hirsel_core_os_run_foreign_with_units"
+        } else {
+            "hirsel_core_os_run_foreign_with_sources"
+        };
+        f.value_call(runner, I8, &[config, names, sources, entry, waits])?
+    } else if spawns_units {
+        let omit_digest = f.b.ins().iconst(I8, i64::from(plan.launch_digest_unused));
         f.value_call(
-            "hirsel_core_os_run_foreign_with_sources",
+            "hirsel_core_os_run_with_units",
             I8,
-            &[config, names, sources, entry, waits],
+            &[config, names, sources, entry, omit_digest],
         )?
     } else {
         let runner = if plan.launch_digest_unused {

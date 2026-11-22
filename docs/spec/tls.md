@@ -62,8 +62,17 @@ pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[St
   index in `alpn`. Otherwise it is `None`.
 - **Peer.** `Handshake.peer` is the SHA-256 of the DER encoding of the peer's leaf
   certificate, split into four big-endian `u64` words. The chain itself is never returned.
-- **No resumption.** There are no session tickets, no resumption and no early data, so a
-  handshake does not depend on earlier runs or earlier connections.
+- **Resumption.** The OS provider may resume TLS 1.3 using an in-memory ticket from this
+  run for the same verification name, trust configuration and ordered ALPN offer. It
+  limits the retained configurations and tickets. A resumed server proves possession of
+  the resumption secret. The provider uses the originally verified leaf for the peer
+  digest and channel binding. A server that declines the ticket completes a full
+  handshake with the usual certificate checks. TLS 1.2 always uses a full handshake.
+  Early data is disabled.
+- **Replay.** The recording captures the handshake outcome, negotiated ALPN, peer digest,
+  channel binding and the results of subsequent plaintext operations. TLS wire records
+  and tickets stay outside the recording. Replay delivers the captured results without
+  a live handshake or access to the ticket cache ([CONC-15](tasks.md#conc-15-units)).
 - **Channel binding.** The provider also computes the stream's **binding value**, RFC 5929
   §4.1's `tls-server-end-point`: the hash of the leaf's DER encoding with the hash function
   of the leaf's signature algorithm, where MD5 and SHA-1 are replaced by SHA-256. A leaf
@@ -598,6 +607,7 @@ computes.
 | **TL6** truncation | an unauthenticated EOF read as a clean end | The peer closes TCP after half of a body without `close_notify`, and the next receive gives `Tls(Truncated)`. With `close_notify`, the next receive gives `Ok(0)`. The oracle is RFC 8446 §6.1. |
 | **TL7** release on every exit | an fd or session leaked on abort or failure | Check four cases: cancel during a handshake parked on a peer that never answers (`Aborted`), a deadline expiry (`TimedOut`), TL1's failure, and a refusal from TL3. After each one, the process's open descriptor count, read from `/proc/self/fd`, is back to its value before `connect`. |
 | **TL8** ALPN | the wrong protocol reported, or a server choice outside the offer accepted | Offer `[h2, http/1.1]` to a server that lists `[http/1.1]`: the result is `Some(1)`. Against a server that lists only `[x]`: `Tls(Protocol(120))`. An entry of 0 bytes, an entry of 256 bytes, or a repeated entry: `Tls(Alpn)` before issue. The oracle is RFC 7301 §3.2. |
+| **TL9** TLS 1.3 resumption | no ticket reuse, or skipping verification on a full handshake after a ticket offer | Connect twice to the same loopback server with the same name, trust and ALPN. The server reports a full then a resumed handshake and the client sees the same peer digest and ALPN. At the same endpoint, replace the server with one that has no prior session and presents a leaf for a different name. The client gives `Tls(Certificate(NameMismatch))`. |
 | **TL10** a secret never renders | the bytes reaching a render, log line or diagnostic | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. Search stdout, stderr and the run's diagnostics for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value, and the server does not echo it. |
 | **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret granted `tls_send(alpha.test)`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |
 | **TL13** spent half | a resumed send that splits a secret | Make `send_secret` time out after it has committed a prefix (the scripted peer stops reading). The next `send_pair` on that half gives `Reset`. The scripted peer's received bytes are a prefix of `before ‖ secret ‖ after` and contain nothing after it. |
@@ -614,7 +624,7 @@ computes.
 | **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
 | **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, seal the owned bytes of `"pencil"` with `"tls_send(alpha.test)"`, unwrap the result, and use SC1's transcript. The server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
 
-TL1 to TL8, TL10, TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
+TL1 to TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
 evaluator is covered. SC9 runs on both engines. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).

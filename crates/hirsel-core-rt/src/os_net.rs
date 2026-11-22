@@ -850,11 +850,9 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             });
             let stream = {
                 let _blocking = crate::units::blocking();
-                crate::os_tls::Stream::new(
-                    s.name.take().unwrap(),
-                    roots,
-                    std::mem::take(&mut s.alpn),
-                )
+                streams
+                    .client_config(roots, std::mem::take(&mut s.alpn), s.cacheable)
+                    .and_then(|config| crate::os_tls::Stream::new(s.name.take().unwrap(), config))
             };
             match stream {
                 Ok(stream) => s.stream = Some(stream),

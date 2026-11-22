@@ -2,7 +2,7 @@ use super::*;
 use crate::{entry::*, host_file::Files, net::*, tasks::*};
 use hirsel_core_net::{Rule, RuleView, TlsRule};
 use rustls::{
-    ServerConfig, ServerConnection, StreamOwned,
+    HandshakeKind, ServerConfig, ServerConnection, StreamOwned,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
 use std::{
@@ -262,6 +262,73 @@ fn server_handshake(server: &mut StreamOwned<ServerConnection, TcpStream>) -> st
         server.conn.complete_io(&mut server.sock)?;
     }
     Ok(())
+}
+
+fn resumption(run: &mut Run) {
+    const PROTOCOL: &[u8] = b"http/1.1";
+    let listener = listener();
+    let port = listener.local_addr().unwrap().port();
+    let config = Arc::new(certificate_config(&[PROTOCOL]));
+    let peer = thread::spawn(move || {
+        let kinds = std::array::from_fn::<_, 2, _>(|_| {
+            let (socket, _) = listener.accept().unwrap();
+            let mut server =
+                StreamOwned::new(ServerConnection::new(config.clone()).unwrap(), socket);
+            server_handshake(&mut server).unwrap();
+            server.write_all(b"!").unwrap();
+            server.conn.handshake_kind().unwrap()
+        });
+        let wrong = certificate_for(
+            include_bytes!("../../testdata/tls/beta.pem"),
+            include_bytes!("../../testdata/tls/beta.key.pem"),
+            &[PROTOCOL],
+        );
+        // A replacement server has no corresponding session and must present its leaf.
+        let (socket, _) = listener.accept().unwrap();
+        let mut server = StreamOwned::new(ServerConnection::new(Arc::new(wrong)).unwrap(), socket);
+        assert!(server_handshake(&mut server).is_err());
+        kinds
+    });
+    let digest = ALPHA_DIGEST.trim();
+    let expected =
+        std::array::from_fn(|i| u64::from_str_radix(&digest[i * 16..][..16], 16).unwrap());
+    for _ in 0..2 {
+        let key = run.connect(port);
+        let result = run.upgrade(key, b"alpha.test", Some(CA), &[PROTOCOL]);
+        assert_eq!(
+            (result.outcome.error, result.outcome.written),
+            (IoError::OK, 1)
+        );
+        assert_eq!(result.peer, expected);
+        // The first application read also processes any pending TLS 1.3 tickets.
+        let mut byte = 0;
+        let mut buffer = Buffer {
+            data: &mut byte,
+            len: 0,
+            capacity: 1,
+        };
+        let out = unsafe {
+            hirsel_core_host_recv_bounded(
+                &raw mut *run.context,
+                key | 1,
+                &mut buffer,
+                1,
+                0,
+                0,
+                0,
+                3,
+            )
+        };
+        assert_eq!((out.error, out.value, byte), (IoError::OK, 1, b'!'));
+        run.release_halves(key);
+    }
+    let key = run.connect(port);
+    let result = run.upgrade(key, b"alpha.test", Some(CA), &[PROTOCOL]);
+    assert_error(result.outcome, tls_failure(0, 1));
+    assert_eq!(
+        peer.join().unwrap(),
+        [HandshakeKind::Full, HandshakeKind::Resumed]
+    );
 }
 
 fn fds() -> usize {
@@ -670,6 +737,7 @@ fn os_tls_loopback_laws() {
     }
     let mut run = Run::new();
     let baseline = fds();
+    resumption(&mut run);
     cert_case(&mut run, b"beta.test", Some(CA), Some(tls_failure(0, 1)));
     assert_eq!(fds(), baseline);
     cert_case(&mut run, b"alpha.test", Some(CA), None);

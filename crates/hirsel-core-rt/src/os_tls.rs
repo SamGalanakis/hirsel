@@ -4,23 +4,93 @@ use crate::{
     os_net,
     provider::*,
 };
-use hirsel_core_net::{Name, scram::Binding};
+use hirsel_core_net::{Name, TlsTrust, scram::Binding};
 use rustls::{
-    CertificateError, ClientConfig, ClientConnection, RootCertStore, client::Resumption,
+    CertificateError, ClientConfig, ClientConnection, RootCertStore,
+    client::{Resumption, Tls12Resumption},
     pki_types::ServerName,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::{self, IoSlice, Read, Write},
     sync::{Arc, OnceLock},
 };
 
 const RECORD: usize = 16 * 1024;
+const CACHED_ROOT_BUNDLES: usize = 16;
+const CACHED_CLIENT_CONFIGS: usize = 16;
+const TICKETS_PER_CONFIG: usize = 64;
+pub(crate) const CACHED_PEM_BYTES: usize = 64 * 1024;
+
+struct TrustedRoots {
+    pem: Box<[u8]>,
+    pin: TlsTrust,
+    store: Arc<RootCertStore>,
+}
 
 #[derive(Default)]
 pub(crate) struct Streams {
     pub sessions: BTreeMap<u64, Box<dyn SecureStream>>,
-    pub system: Arc<OnceLock<RootCertStore>>,
+    pub system: Arc<OnceLock<Arc<RootCertStore>>>,
+    custom_roots: VecDeque<TrustedRoots>,
+    clients: VecDeque<(Arc<RootCertStore>, Arc<ClientConfig>)>,
+}
+
+impl Streams {
+    pub(crate) fn custom_roots(&self, pem: &[u8]) -> Option<(TlsTrust, Arc<RootCertStore>)> {
+        self.custom_roots
+            .iter()
+            .find(|roots| &*roots.pem == pem)
+            .map(|roots| (roots.pin, roots.store.clone()))
+    }
+
+    pub(crate) fn remember_roots(&mut self, pem: &[u8], pin: TlsTrust, store: Arc<RootCertStore>) {
+        if self.custom_roots.len() == CACHED_ROOT_BUNDLES {
+            self.custom_roots.pop_front();
+        }
+        self.custom_roots.push_back(TrustedRoots {
+            pem: pem.into(),
+            pin,
+            store,
+        });
+    }
+
+    pub(crate) fn client_config(
+        &mut self,
+        roots: Arc<RootCertStore>,
+        alpn: Vec<Vec<u8>>,
+        cacheable: bool,
+    ) -> Result<Arc<ClientConfig>, Outcome> {
+        if cacheable
+            && let Some((_, config)) = self
+                .clients
+                .iter()
+                .find(|(store, config)| Arc::ptr_eq(store, &roots) && config.alpn_protocols == alpn)
+        {
+            return Ok(config.clone());
+        }
+        let mut config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .map_err(protocol_error)?
+                .with_root_certificates(roots.clone())
+                .with_no_client_auth();
+        config.resumption = if cacheable {
+            Resumption::in_memory_sessions(TICKETS_PER_CONFIG)
+                .tls12_resumption(Tls12Resumption::Disabled)
+        } else {
+            Resumption::disabled()
+        };
+        config.alpn_protocols = alpn;
+        let config = Arc::new(config);
+        if cacheable {
+            if self.clients.len() == CACHED_CLIENT_CONFIGS {
+                self.clients.pop_front();
+            }
+            self.clients.push_back((roots, config.clone()));
+        }
+        Ok(config)
+    }
 }
 
 pub(crate) struct Stream {
@@ -30,27 +100,14 @@ pub(crate) struct Stream {
 }
 
 impl Stream {
-    pub(crate) fn new(
-        name: Name,
-        roots: RootCertStore,
-        alpn: Vec<Vec<u8>>,
-    ) -> Result<Self, Outcome> {
+    pub(crate) fn new(name: Name, config: Arc<ClientConfig>) -> Result<Self, Outcome> {
         let server_name = match &name {
             Name::Ip(ip) => ServerName::from(*ip),
             Name::Dns(dns) => {
                 ServerName::try_from(dns.to_string()).map_err(|_| tls_failure(1, 0))?
             }
         };
-        let mut config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .map_err(protocol_error)?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        config.resumption = Resumption::disabled();
-        config.alpn_protocols = alpn;
-        let connection =
-            ClientConnection::new(Arc::new(config), server_name).map_err(protocol_error)?;
+        let connection = ClientConnection::new(config, server_name).map_err(protocol_error)?;
         Ok(Self {
             connection,
             read_error: None,
@@ -182,10 +239,10 @@ impl SecureStream for Stream {
     }
 }
 
-pub(crate) fn system_roots() -> RootCertStore {
+pub(crate) fn system_roots() -> Arc<RootCertStore> {
     let mut store = RootCertStore::empty();
     store.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-    store
+    Arc::new(store)
 }
 
 pub(crate) fn sha256(bytes: &[u8]) -> ring::digest::Digest {

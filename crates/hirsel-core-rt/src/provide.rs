@@ -21,7 +21,7 @@ use hirsel_core_net::exec::{ExecRules, served as exec};
 use std::{
     collections::BTreeMap,
     ptr,
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 enum Cell {
@@ -693,10 +693,23 @@ const PROVIDER: Provider = Provider {
     deliver,
 };
 
+struct SchedulerHooks {
+    wait: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait,
+    quiesce: fn(&dyn Fn(u64) -> bool) -> bool,
+    forget: fn(&mut Cells),
+}
+
+// A ordinary provider run has no cell callbacks. The first cell installs the
+// hooks before publishing its provider, so a native program that constructs no
+// cell does not link their wait, quiescence or cleanup paths through startup.
+static SCHEDULER_HOOKS: OnceLock<SchedulerHooks> = OnceLock::new();
+
 /// Whether `provider` is a cell's. Its waits are the program's to ready, so the
 /// scheduler does not count them as host work still to come (FAIL-15).
 pub(crate) fn owns(provider: &Provider) -> bool {
-    std::ptr::fn_addr_eq(provider.wait, PROVIDER.wait)
+    SCHEDULER_HOOKS
+        .get()
+        .is_some_and(|hooks| std::ptr::fn_addr_eq(provider.wait, hooks.wait))
 }
 
 fn deadline(request: &Request) -> u64 {
@@ -1173,6 +1186,11 @@ impl Cells {
         }
         let mut cells = lock(&self.0);
         cells.push((Box::new(cell), payer, charge));
+        SCHEDULER_HOOKS.get_or_init(|| SchedulerHooks {
+            wait: PROVIDER.wait,
+            quiesce: wake_quiescent,
+            forget: forget_cells,
+        });
         Ok(Provider {
             state: (&raw const *cells.last().unwrap().0).cast_mut().cast(),
             ..PROVIDER
@@ -2168,6 +2186,12 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
 /// waits, after pruning the deadlines of operations no longer parked. Returns
 /// whether it readied one; if not, the run stops with Deadlock.
 pub(crate) fn quiesce(live: &dyn Fn(u64) -> bool) -> bool {
+    SCHEDULER_HOOKS
+        .get()
+        .is_some_and(|hooks| (hooks.quiesce)(live))
+}
+
+fn wake_quiescent(live: &dyn Fn(u64) -> bool) -> bool {
     let mut idle = lock(&IDLE);
     let woken: Vec<(u64, usize)> = idle
         .iter()
@@ -2223,6 +2247,12 @@ pub(crate) fn quiesce(live: &dyn Fn(u64) -> bool) -> bool {
 /// Run teardown: forget the run's idle waits, free its cells and refund
 /// their charges.
 pub(crate) fn forget(cells: &mut Cells) {
+    if let Some(hooks) = SCHEDULER_HOOKS.get() {
+        (hooks.forget)(cells);
+    }
+}
+
+fn forget_cells(cells: &mut Cells) {
     let cells = std::mem::take(cells.0.get_mut().unwrap_or_else(|e| e.into_inner()));
     let states: Vec<usize> = cells
         .iter()

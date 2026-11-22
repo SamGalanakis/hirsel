@@ -1,3 +1,4 @@
 type State: shareable + send { inbox: Sender[u64] }
 // expect: refuse OWN-4 at 1:32
 // expect: message OWN-4 at 1:32 | For shared handler state, use shareable values such as immutable data or a granted Dir
+// expect: compared OWN-4 at 1:32 | core@1/core/Sender[u64] | shareable

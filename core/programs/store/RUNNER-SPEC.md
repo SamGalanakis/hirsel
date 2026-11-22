@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.27: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.27.1: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,18 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.27.1 (the place fixture is built; lane clock-fixture-1738)
+
+§12.3's fixture is built as the module `fixture` (fixture.hirsel). The text now states the signatures as built. `test_fixture_granted` in runner_calls.hirsel **RUN**s it natively: a Caller-bearing transact, a granted entry with `wire` set, and the same entry `Refused(NotAllowed)` without it. The evaluator path still waits on W8a.
+
+| # | Point | Decision | What v2.27.1 says | Basis |
+|---|---|---|---|---|
+| 1 | The test-side handle | **DECIDED (brief clock-fixture-1738)** | `Caller` is renamed `Client` and `caller` is renamed `client`, so the name no longer collides with `runner.Caller`, the principal that entries receive | §12.3 |
+| 2 | Typed entries | **AS BUILT** | `transact_entry` takes the registry's Caller-bearing signature `fn(mut store.Tx, H, Caller, take A) -> Result[R, E]`. `granted_entry` is in the API block. Every key comes from `runner.attempt_key` over the codecs that registration fingerprints | §12.3 |
+| 3 | Not `send` | **AS BUILT** | `Fixture` and `Client` own task handles, which are not `send` (CONC-2), as `places.Directory` does | §12.3 |
+| 4 | The client's credential | **DECIDED here; reversible** | `client` takes the Hello token. Without one, a place whose `wire` binds a credential gives the session no Caller | §12.3 |
+| 5 | Query entries | **AS BUILT** | A query `Callee` is `Callee[A, ()]`: its described result is the unit schema, and its rows arrive in Batches | §12.3 |
 
 ## CHANGES-v2.27 (amendments to v2.26 from astra's attack, platform-spec-attack-1748/REPORT.md; lane platform-spec-amend-1755)
 
@@ -1458,7 +1470,7 @@ That **extends D1** ("it runs `place`") to the manifest: there is no second entr
 
 ### 12.3 Place fixture for application tests
 
-`runner.fixture` starts a place in a test with the application's real `place` and `handles`, through `operate`. A test therefore runs the same lifecycle, sessions, head and publisher that production runs. It runs them over the wire path on the granted `Net`, never through the in-process seam (DECISIONS 2026-11-17, "W3e waits on W8a").
+The module `fixture` (package store, fixture.hirsel) starts a place in a test with the application's real `place` and `handles`, through `operate`. A test therefore runs the same lifecycle, sessions, head and publisher that production runs. It runs them over the wire path on the granted `Net`, never through the in-process seam (DECISIONS 2026-11-17, "W3e waits on W8a").
 
 ```hirsel
 pub type FixtureError: send = Start(StartError) | Deadline(u64) | Full(Capacity)
@@ -1467,19 +1479,21 @@ pub type Answer[R] = Returned(R) | Failed(Fault) | Refused(Refusal) | Abandoned
 pub type Replied[R] { answer: Answer[R], version: u64 }
 pub type Seen { version: u64, rows: List[Row] }
 
-pub opaque type Fixture: send
-pub opaque type Caller: send
+pub opaque type Fixture
+pub opaque type Client
 pub opaque type Callee[A, R]: shareable + send
 
 pub fn start[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], within_ms: u64) -> Result[Fixture, FixtureError] waits
-pub fn compute_entry[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
-pub fn transact_entry[H, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
-pub fn query_entry[H, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) -> Callee[A, Cover]
-pub fn query_as_entry[H, A](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]]) -> Callee[A, Cover]
-pub fn caller(f: Fixture, within_ms: u64) -> Result[Caller, CallError] waits
-pub fn call[A: codec, R: codec](mut c: Caller, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
-pub fn subscribe[A: codec](mut c: Caller, e: Callee[A, Cover], take a: A, within_ms: u64) -> Result[u32, CallError] waits
-pub fn seen_at(mut c: Caller, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits
+pub fn compute_entry[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
+pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
+pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits]) -> Callee[A, R]
+pub fn query_entry[H, A: codec](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) -> Callee[A, ()]
+pub fn query_as_entry[H, A: codec](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]]) -> Callee[A, ()]
+pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits
+pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
+pub fn subscribe[A: codec](mut c: Client, e: Callee[A, ()], take a: A, within_ms: u64) -> Result[u32, CallError] waits
+pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits
+pub fn close(take c: Client) -> () waits
 pub fn status(f: Fixture) -> Status
 pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 ```
@@ -1492,16 +1506,18 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 - If `within_ms` passes first, the result is `Deadline(within_ms)`. It is returned after the fixture has stopped `operate` and released everything it made.
 
 **Typed calls.**
-- `compute_entry`, `transact_entry`, `query_entry` and `query_as_entry` compute the entry's key with the function registration uses: identity and the two fingerprints. So a typed `Callee` cannot name another key.
-- `granted_entry` (v2.24) computes a granted entry's key as the others do. Its call succeeds only against a fixture whose `PlaceConfig.wire` is `Some`, and is `Refused(NotAllowed)` otherwise.
-- `caller` connects one wire client to `status.addr`, with a `Hello` that lists the fixture's entries, and owns one stream.
-- `call` assigns the next position by WIRE's client rules (P1–P3). It encodes `a` and sends one `Call` with `deadline_ms`. It returns when that send's Outcome row arrives, and V1 makes the place answer by `deadline_ms` (`Abandoned` at the latest). A transact `Returned` is decoded as `Result[R, E]`. A broken connection is `Closed`.
+- `compute_entry`, `transact_entry`, `granted_entry`, `query_entry` and `query_as_entry` compute the entry's key with `runner.attempt_key`: identity and the fingerprints of the codecs registration describes. A transact entry's reply codec is `Result[R, E]`, and a query's is the unit codec. So a typed `Callee` cannot name another key.
+- A `granted_entry` (v2.24) call succeeds only against a fixture whose `PlaceConfig.wire` is `Some`, and is `Refused(NotAllowed)` otherwise.
+- `client` connects one wire client to `status.addr`, with a `Hello` that carries `token` and lists the place's entries in registration order, and owns one stream. A place whose `wire` binds a credential needs the token to give the session a Caller.
+- `call` assigns the next position by WIRE's client rules (P1–P3). It encodes `a` and sends one `Call` with `deadline_ms`. It returns when that send's Outcome row arrives, and V1 makes the place answer by `deadline_ms` (`Abandoned` at the latest). A transact `Returned` is decoded as `Result[R, E]`. A broken connection is `Closed`. A `Callee` whose key the place does not export is answered `Refused(NoEntry)` without a send.
+- `subscribe` sends one `Subscribe` and returns once a Batch's `complete` names the new subscription. An `Ended` first gives `Closed`.
+- `close` closes the client's connection and joins its reader and writer.
 
 **A durable reply.** `Replied.version` is the version of the Batch that carried the Outcome. By V4, a reply that reports a commit is released only after `durable`, so a `Replied` that `call` returns is already durable at that version. Nothing extra waits.
 
-**The batch at or after a version.** `seen_at(c, sub, v, within_ms)` returns the subscription's full row set as of the first Batch at a version ≥ v. That is L6+L7's count form. It applies Batches in order, as the client cache does. A subscription that is `Ended` gives `Closed`.
+**The batch at or after a version.** `seen_at(c, sub, v, within_ms)` returns the subscription's full row set as of the first Batch at a version ≥ v. That is L6+L7's count form. It applies Batches in order, as the client cache does. If the last Batch the client applied is already at or after v, the result is as of that Batch. A subscription that is `Ended` gives `Closed`.
 
-**End.** `end` sends the stop and waits for `operate`'s `Ended`. It closes every `Caller` it made, and `operate` removes the `Temp` subdirectory. It returns `Ended`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
+**End.** `end` sends the stop and waits for `operate`'s `Ended`. The drain closes every session, so a `Client` used afterwards gets `Closed`, and `operate` removes the `Temp` subdirectory. It returns `Ended`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
 
 **Grants.** A test that uses the fixture needs `Net` (listen and connect on 127.0.0.1), `Tasks`, `Clock` and `Random`, plus `Dir` for `Temp`. It receives them as ordinary capability parameters (PROG-4) and places them in `PlaceConfig`.
 

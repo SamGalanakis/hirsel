@@ -346,7 +346,7 @@ closes the store. At D, every owed send is `Abandoned`, the head is cancelled,
 and the store is left at a crash cut for recovery. The result is `Stopped` or
 `Forced(n)`. The place serves `GET /hirsel/status`, a raw route that answers 200
 only when `Ready`, with the launch identity and `release_digest`.
-`runner.fixture` starts a place through `operate` on a memory or temporary
+The `fixture` module starts a place through `operate` on a memory or temporary
 store, with typed calls whose replies are durable, `seen_at` for the first
 batch at or after a version, relative bounds on the place's clock, and release
 of every resource on `end` or on drop. It runs natively until the evaluator's model

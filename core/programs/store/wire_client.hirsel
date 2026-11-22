@@ -1,15 +1,21 @@
 // Fixture client over the same wsock machines as the server. The HTTP challenge,
 // response checks, read-ahead tail and fresh client masks belong to std.wsock.
 pub type Command: send = Send(runner.Frame) | Control(u8, std.websocket.Control) | Close
+// The reader posts each frame, then Gone when it ends. A bounded wait posts Woke into the
+// same queue through `alarm`, so one receive sees a frame, the end or the bound in order.
+pub type Incoming: send = Got(runner.Frame) | Woke(u64) | Gone
+
 pub type Conn {
-    to: Sender[Command], from: Receiver[runner.Frame], credit: Sender[()], caller: runner.Caller,
+    to: Sender[Command], from: Receiver[Incoming], wake: Sender[Incoming], credit: Sender[()], caller: runner.Caller,
     reading: Task[()], writing: Task[()]
 }
 
-type Read: send { reader: std.wsock.Reader, to: Sender[runner.Frame], control: Sender[Command], credits: Receiver[()], clock: Clock }
+type Read: send { reader: std.wsock.Reader, to: Sender[Incoming], control: Sender[Command], credits: Receiver[()], clock: Clock, idle_ms: u64 }
 type Write: send { writer: std.wsock.Writer, outgoing: std.wsock.Outbound, from: Receiver[Command], clock: Clock }
 
-fn deadline(c: Clock) -> Until { At(c, int.saturating_add(host.mono_ns(c), 5000000000u64)) }
+fn deadline(c: Clock) -> Until { within(c, 5000u64) }
+
+fn within(c: Clock, ms: u64) -> Until { At(c, std.clock.deadline_after_ms(host.mono_ns(c), ms)) }
 
 fn send(mut w: std.wsock.Writer, mut out: std.wsock.Outbound, opcode: u8, payload: Bytes, c: Clock) -> Result[(), std.wsock.Error] waits {
     let encoded = std.wsock.encode(mut out, true, opcode, payload)?
@@ -19,9 +25,9 @@ fn send(mut w: std.wsock.Writer, mut out: std.wsock.Outbound, opcode: u8, payloa
     Ok(())
 }
 
-fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.Outbound, c: Clock) -> Result[runner.Frame, std.wsock.Error] waits {
+fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.Outbound, c: Clock, until: Until) -> Result[runner.Frame, std.wsock.Error] waits {
     loop {
-        match std.wsock.read(mut r, deadline(c))? {
+        match std.wsock.read(mut r, until)? {
             Message(take b) => {
                 let codec: std.codec.Codec[runner.Frame] = std.codec.of()
                 return match std.codec.decode(codec, b) { Ok(take f) => Ok(take f), _ => Error(Protocol(1007u16)) }
@@ -35,17 +41,23 @@ fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.
 }
 
 fn read(take seed: Read) -> () waits {
-    let Read(reader: take input, to: take to, control: take control, credits: take credits, clock: c) = take seed
+    let to = channel.sender(seed.to)
+    read_frames(take seed)
+    let _ = channel.send(to, Gone)
+}
+
+fn read_frames(take seed: Read) -> () waits {
+    let Read(reader: take input, to: take to, control: take control, credits: take credits, clock: c, idle_ms: idle_ms) = take seed
     let mut r = take input
     loop {
         if let Error(_) = channel.receive(credits) { return }
         let mut pending = true
         while pending {
-        match std.wsock.read(mut r, deadline(c)) {
+        match std.wsock.read(mut r, within(c, idle_ms)) {
             Ok(Message(take b)) => {
                 let codec: std.codec.Codec[runner.Frame] = std.codec.of()
                 let f = match std.codec.decode(codec, b) { Ok(take f) => take f, _ => return }
-                if let Error(_) = channel.send(to, take f) { return }
+                if let Error(_) = channel.send(to, Got(take f)) { return }
                 pending = false
             },
             Ok(Ping(p)) => { if let Error(_) = channel.send(control, Control(10u8, p)) { break } },
@@ -93,7 +105,13 @@ pub fn wants(keys: List[Bytes]) -> List[runner.Want] {
 }
 
 pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config) -> Result[Conn, std.wsock.Error] waits {
-    let socket = match host.connect(n, address, deadline(c)) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    connect_for(tasks, n, address, c, random, keys, take token, config, 5000u64, 5000u64)
+}
+
+// The Hello exchange completes within `within_ms`, and each later read waits at most `idle_ms`.
+pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
+    let until = within(c, within_ms)
+    let socket = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
     let mut host_name: Bytes = list.new()
     list.append(mut host_name, string.as_bytes("127.0.0.1"))
     let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, host_name, config, c, random)?
@@ -105,16 +123,17 @@ pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, ke
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, hello, mut b))
     send(mut w, mut out, 2u8, b, c)?
-    let who = match receive(mut r, mut w, mut out, c)? { Welcome(take p, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
-    for _ in keys { match receive(mut r, mut w, mut out, c)? { Placed(_) => (), _ => return Error(Protocol(1008u16)) } }
+    let who = match receive(mut r, mut w, mut out, c, until)? { Welcome(take p, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
+    for _ in keys { match receive(mut r, mut w, mut out, c, until)? { Placed(_) => (), _ => return Error(Protocol(1008u16)) } }
     let (to, commands): (Sender[Command], Receiver[Command]) = channel.new(64u64)
-    let (frames, from): (Sender[runner.Frame], Receiver[runner.Frame]) = channel.new(64u64)
+    let (frames, from): (Sender[Incoming], Receiver[Incoming]) = channel.new(64u64)
+    let wake = channel.sender(frames)
     let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let read_seed = Read(reader: take r, to: take frames, control: channel.sender(to), credits: take credits, clock: c)
+    let read_seed = Read(reader: take r, to: take frames, control: channel.sender(to), credits: take credits, clock: c, idle_ms: idle_ms)
     let reading = task.spawn(tasks, bytes 1048576u64, take read_seed, read)
     let write_seed = Write(writer: take w, outgoing: take out, from: take commands, clock: c)
     let writing = task.spawn(tasks, bytes 1048576u64, take write_seed, write)
-    Ok(Conn(to: take to, from: take from, credit: take credit, caller: take who, reading: take reading, writing: take writing))
+    Ok(Conn(to: take to, from: take from, wake: take wake, credit: take credit, caller: take who, reading: take reading, writing: take writing))
 }
 
 pub fn send_frame(c: Conn, take f: runner.Frame) -> () waits {
@@ -123,7 +142,7 @@ pub fn send_frame(c: Conn, take f: runner.Frame) -> () waits {
 
 pub fn close(take cn: Conn) -> bool waits {
     let _ = channel.send(cn.to, Close)
-    let Conn(to: _, from: _, credit: _, caller: _, reading: take reader_task, writing: take writing) = take cn
+    let Conn(to: _, from: _, wake: _, credit: _, caller: _, reading: take reader_task, writing: take writing) = take cn
     let mut reading = take reader_task
     let wrote = task.join(take writing)
     task.cancel(mut reading)
@@ -196,10 +215,26 @@ pub fn stream(caller: runner.Caller, s: u32) -> Bytes {
 // in the bounded transport rather than in a second fixture prefetch queue.
 pub fn next(c: Conn) -> Result[runner.Frame, ReceiveError] waits {
     if let Error(_) = channel.send(c.credit, ()) { return Error(Closed) }
-    match channel.receive(c.from) { Ok(take f) => Ok(take f), Error(_) => Error(Closed) }
+    loop {
+        match channel.receive(c.from) { Ok(Got(take f)) => return Ok(take f), Ok(Woke(_)) => (), _ => return Error(Closed) }
+    }
 }
 
 pub fn try_next(c: Conn) -> Result[runner.Frame, ReceiveError] {
     let _ = channel.try_send(c.credit, ())
-    channel.try_receive(c.from)
+    loop {
+        match channel.try_receive(c.from) { Ok(Got(take f)) => return Ok(take f), Ok(Woke(_)) => (), Ok(Gone) => return Error(Closed), Error(e) => return Error(e) }
+    }
+}
+
+// The next frame, the reader's end, or a Woke an alarm posted. A credit already
+// outstanding is kept, so a Woke never leaves a second read owed.
+pub fn wait(c: Conn) -> Incoming waits {
+    let _ = channel.try_send(c.credit, ())
+    match channel.receive(c.from) { Ok(take i) => take i, Error(_) => Gone }
+}
+
+// Posts Woke(generation) to `wait` at `at` on the clock (host.mono_ns).
+pub fn alarm(c: Conn, tasks: Tasks, clock: Clock, at: u64, generation: u64) -> Task[()] {
+    std.clock.alarm(tasks, clock, at, c.wake, Woke(generation))
 }

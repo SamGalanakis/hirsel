@@ -22,6 +22,7 @@ std = { major = 1 }
 "runner_laws.hirsel" = "runner_laws"
 "runner_calls.hirsel" = "runner_calls"
 "wire_client.hirsel" = "wire_client"
+"fixture.hirsel" = "fixture"
 
 [program]
 module = "main"
@@ -65,3 +66,6 @@ limit = 536870912
 
 [tool.workloads]
 s1 = { module = "main", grants = ["Stdout"] }
+
+[tests.runs."store@1/runner_calls/test_fixture_granted"]
+limit = 1342177280

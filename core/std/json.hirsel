@@ -160,23 +160,26 @@ pub fn parse_tree[T, E](s: String, before: scoped fn() -> Result[(), E], make: s
 
 fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E], make: scoped fn(take TreeValue[T]) -> T, wrap: scoped fn(take Error) -> E) -> Result[T, E] {
     before()?
+    skip(s, mut i)
+    let value_at = i
     let node: TreeValue[T] = match result.map_err(value_start(s, mut i), wrap)? {
-        ReadNull => Null,
-        ReadFalse => False,
-        ReadTrue => True,
-        ReadNumber => {
-            let start = i
+        JsonNull => Null,
+        JsonBool => if at(s, value_at) == b't' {
+            True
+        } else {
+            False
+        },
+        JsonNumber => {
             let _ = result.map_err(read_number(s, mut i), wrap)?
-            let spelling = string.from(string.slice(s, start, i))
+            let spelling = string.from(string.slice(s, value_at, i))
             Num(take spelling)
         },
-        ReadString => {
-            let start = i + 1
+        JsonString => {
             let _ = result.map_err(string_size(s, mut i), wrap)?
-            let value = result.map_err(decode_string(s, start), wrap)?
+            let value = result.map_err(decode_string(s, value_at + 1), wrap)?
             Str(take value)
         },
-        ReadArray => {
+        JsonArray => {
             let mut values: List[T] = list.new()
             if !ends(s, mut i, b']') {
                 loop {
@@ -189,7 +192,7 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
             }
             Arr(take values)
         },
-        ReadObject => {
+        JsonObject => {
             let mut members: Map[String, T] = map.new()
             if !ends(s, mut i, b'}') {
                 loop {

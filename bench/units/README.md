@@ -62,7 +62,7 @@ The receipt has these top-level fields.
 
 | Field | Meaning |
 |---|---|
-| `version`, `commit`, `config` | Schema version, source commit and selected workloads, CPU masks and repetition count |
+| `version`, `commit`, `config` | Schema version, source commit, workload selection, CPU masks, build budget, sync policy and hold policy |
 | `host`, `started`, `updated`, `host_load_start`, `host_load_last` | Host name, local timestamps with offset, and load averages |
 | `binary_sha256`, `toolchain` | SHA-256 by binary path relative to the commit's cache, plus compiler and runtime provenance |
 | `expected_rows`, `rows`, `failures`, `complete` | Expected and observed goal-board rows, recorded failures and completeness |
@@ -71,8 +71,9 @@ The receipt has these top-level fields.
 Rows use `goal`, `row`, `status`, `commit`, `metrics`, `samples` and
 `ratios`. Each `samples` map is keyed by `hirsel` and `tokio`.
 `ratios.tokio[metric]` divides the Hirsel metric by Tokio's. Ceiling rows use
-passing offered turns/s. Matched A1 rows use server CPU µs per turn, where a
-smaller ratio means less Hirsel CPU. Regime rows use work/s and speedup over
+passing offered turns/s, goodput and intended-arrival p99. Matched A1 rows
+use server CPU µs per turn, where a smaller ratio means less Hirsel CPU.
+Full also publishes the intended-arrival p99 ratio for its matched rows. Regime rows use work/s and speedup over
 that port's width-1 work/s. A1 samples also include the actual offer,
 intended-arrival p99 and server-added p99 in nanoseconds, goodput, sync
 groups per turn, SHA backend and raw trial identifier. A missing result or

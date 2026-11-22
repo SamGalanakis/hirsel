@@ -35,7 +35,9 @@ CPU_DEFAULTS = {
     "controller": (26, 27),
 }
 MEASURE_CPUS = set().union(*CPU_DEFAULTS.values())
-BUILD_CPUS = "8-11"
+BUILD_CPUS = (8, 9, 10, 11)
+BUILD_MEMORY = "4G"
+REGIME_MEMORY = "3G"
 MATCHED_OFFER = 3000
 CONNECTIONS = (256, 2048, 8192)
 QUICK_REGIMES = ("fanin", "pipeline")
@@ -72,8 +74,8 @@ def mask(cpus):
 def build_command(arguments, *, local=False, env=None, **kwargs):
     env = os.environ | (env or {})
     if local:
-        env.update(HIRSEL_JOBS="4", UNITS_BUILD_UNDER_CAP="1")
-        arguments = ("taskset", "-c", BUILD_CPUS, ROOT / "tools/capped", *arguments)
+        env.update(HIRSEL_JOBS="4", HIRSEL_MEMORY_LIMIT=BUILD_MEMORY, UNITS_BUILD_UNDER_CAP="1")
+        arguments = ("taskset", "-c", mask(BUILD_CPUS), ROOT / "tools/capped", *arguments)
     return subprocess.run(list(map(str, arguments)), cwd=ROOT, env=env,
                           check=True, text=True, **kwargs)
 
@@ -126,7 +128,8 @@ def prepare(cache, commit, suites, cases):
     if "a1" in suites:
         need["a1"] = A1_BINARIES
     if "regimes" in suites:
-        need["regimes"] = REGIME_BINARIES
+        if any(case != "checkbox" for case in cases):
+            need["regimes"] = REGIME_BINARIES
         if "checkbox" in cases:
             need["checkbox"] = CHECKBOX_BINARIES
 
@@ -174,7 +177,7 @@ def guard(cpu_sets, output):
 
 def scope(cpus, command, *, limit=55):
     return ["taskset", "-c", cpus, "systemd-run", "--user", "--scope", "--quiet", "--collect",
-            "--unit", f"hirsel-fair-{os.getpid()}-{next(SCOPE)}.scope", "-p", "MemoryMax=3G",
+            "--unit", f"hirsel-fair-{os.getpid()}-{next(SCOPE)}.scope", "-p", f"MemoryMax={REGIME_MEMORY}",
             "-p", "MemorySwapMax=0", "-p", f"RuntimeMaxSec={limit}s", "-p", "TimeoutStopSec=2s",
             "--", *map(str, command)]
 
@@ -421,7 +424,8 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                 cell_name = f"A1-{connections}"
                 cell = scale.SCALE_CELLS[cell_name] | {"journal": storage, "software_sha": software}
                 label = f"{storage}/{connections}/{'software' if software else 'hardware'}"
-                metrics = ("offer_turns_per_s",) if full else ("cpu_us_per_turn",)
+                metrics = (("offer_turns_per_s", "goodput_turns_per_s", "intended_arrival_p99_ns")
+                           if full else ("cpu_us_per_turn",))
                 path = report.out / f"{label.replace('/', '-')}-{'search' if full else 'matched'}.jsonl"
                 with path.open("w") as raw:
                     if full:
@@ -444,7 +448,7 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                         paired = matched_a1(runner, raw, cell_name, cell, offer, 1,
                                             reverse + len(found), profile="cpu")
                     group_ratio = ratio(paired, "sync_groups_per_turn")
-                    report.row("A1", label + "/matched", paired, ("cpu_us_per_turn",),
+                    report.row("A1", label + "/matched", paired, ("intended_arrival_p99_ns", "cpu_us_per_turn"),
                                filesystem=storage, connections=connections, kind="matched", raw=raw_path.name,
                                sync_groups_match=group_ratio is not None and abs(group_ratio - 1) <= .05)
         if not software and 256 in found and 8192 in found:
@@ -535,7 +539,10 @@ def main():
     repeats = args.repeats or (1 if args.full else 3)
     config = {"mode": "full" if args.full else "quick", "families": suites,
               "regimes": list(cases) if "regimes" in suites else [], "repeats": repeats,
-              "reverse": args.reverse,
+              "reverse": args.reverse, "build_cpus": BUILD_CPUS, "build_jobs": 4,
+              "build_memory_limit_bytes": 4 << 30, "regime_scope_memory_limit_bytes": 3 << 30,
+              "sync_policy": {"wait_us": 400, "max_writes": 4096, "durable_syncs_per_group": 1},
+              "hold_policy": "server-cpu-isolation",
               **{f"{role}_cpus": cpus for role, cpus in cpu_sets.items()}}
     expected = expected_rows(suites, cases, args.full)
     report = Report(out, commit, config, expected)

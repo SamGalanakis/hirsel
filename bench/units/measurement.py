@@ -149,7 +149,6 @@ def classify_tasks(path, server, roots, start, end, busy_ticks):
 @contextmanager
 def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
     server = cpu_sets["server"]
-    trace_cpus = set().union(*cpu_sets.values())
     while True:
         if board_window_open():
             busy = idle_sample(server)
@@ -160,6 +159,9 @@ def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
                         locks.enter_context(measurement_slot(Path(path), blocking=False))
                 except BlockingIOError:
                     locks.close()
+                except BaseException:
+                    locks.close()
+                    raise
                 else:
                     if board_window_open():
                         break
@@ -176,7 +178,7 @@ def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
                        cpu_trace=trace.name, idle_cpu_busy=busy, board_window_open=True,
                        load_start=os.getloadavg()[0], cc1plus_start=compiler_processes())
         try:
-            with record_tasks(trace, trace_cpus):
+            with record_tasks(trace, server):
                 before = cpu_ticks(server)
                 receipt["timed_start_ns"] = time.monotonic_ns()
                 try:
@@ -187,6 +189,7 @@ def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
                     receipt["server_busy_ticks"] = {cpu: after[cpu][0] - before[cpu][0] for cpu in server}
         finally:
             receipt.update(hold_s=time.monotonic() - started, load_end=os.getloadavg()[0],
+                           finished=datetime.now().astimezone().isoformat(),
                            cc1plus_end=compiler_processes())
     receipt.update(classify_tasks(trace, server, receipt["arm_pids"],
                                   receipt["timed_start_ns"], receipt["timed_end_ns"],

@@ -4234,9 +4234,6 @@ impl Machine<'_> {
             return reply;
         }
         match op {
-            HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal => {
-                std::panic::resume_unwind(Box::new(RunStop("NativeExec")))
-            }
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::ScramSha256 => return self.scram_send(t, a),
@@ -4319,6 +4316,9 @@ impl Machine<'_> {
             | HostOp::PortFill
             | HostOp::StreamTerminal => {
                 unreachable!()
+            }
+            HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal => {
+                std::panic::resume_unwind(Box::new(RunStop("NativeExec")))
             }
             HostOp::ExecNarrow => panic!("Exec evaluation uses the native reference"),
             HostOp::Resolve => return self.network_resolve(t, a),

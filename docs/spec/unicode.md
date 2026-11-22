@@ -4,7 +4,7 @@ This chapter specifies std's Unicode character classification and case conversio
 `std.char` members `UNICODE_VERSION`, `Category`, `category`, `is_alphabetic`, `is_letter`,
 `is_numeric`, `is_decimal`, `is_alphanumeric`, `is_whitespace`, `is_uppercase`,
 `is_lowercase`, and the `std.string` members `push_upper`, `push_lower`, `to_upper` and
-`to_lower`. It is unbuilt design. `char` and `string` extend core, so their members are written
+`to_lower`. `char` and `string` extend core, so their members are written
 bare everywhere (`char.is_letter(c)`, `string.to_lower(s)`), and the type is `char.Category`.
 
 **Rule numbers.** UNI-n are std Unicode rules.
@@ -44,7 +44,7 @@ and in replay ([SEM-8](semantics.md#sem-8-determinism)).
   not used. Adding any of them later changes answers, so it would be a change to this rule,
   not an addition beside it.
 
-```hirsel unbuilt
+```hirsel
 pub const UNICODE_VERSION: (u8, u8, u8) = (18, 0, 0)
 ```
 
@@ -53,7 +53,7 @@ pub const UNICODE_VERSION: (u8, u8, u8) = (18, 0, 0)
 Each classifier takes a `char` and returns whether it has a property of the pinned database
 (UNI-1), with no allocation and no failure.
 
-```hirsel unbuilt
+```hirsel
 pub fn is_alphabetic(c: char) -> bool
 pub fn is_letter(c: char) -> bool
 pub fn is_numeric(c: char) -> bool
@@ -89,7 +89,7 @@ pub fn is_lowercase(c: char) -> bool
   U+200D (the UTS #18 word class of [regex](regex.md)). `\d` matches exactly when
   `is_decimal(c)`, and `\s` exactly when `is_whitespace(c)`.
 
-```hirsel unbuilt
+```hirsel
 fn word_char(c: char) -> bool {
     char.is_letter(c) || char.is_decimal(c)
 }
@@ -100,7 +100,7 @@ fn word_char(c: char) -> bool {
 `char.category(c)` returns the General_Category of `c` in the pinned database (UNI-1), as a
 `char.Category` named by the database's short alias.
 
-```hirsel unbuilt
+```hirsel
 pub type Category: key = Lu | Ll | Lt | Lm | Lo | Mn | Mc | Me | Nd | Nl | No | Pc | Pd | Ps | Pe | Pi | Pf | Po | Sm | Sc | Sk | So | Zs | Zl | Zp | Cc | Cf | Co | Cn
 pub fn category(c: char) -> Category
 ```
@@ -115,7 +115,7 @@ pub fn category(c: char) -> Category
   ([LANG-7](language.md#lang-7-names)), so `Lu` in a `match` on `char.category(c)` is never
   confused with a type of its own module.
 
-```hirsel unbuilt
+```hirsel
 fn is_symbol(c: char) -> bool {
     match char.category(c) {
         Sm => true,
@@ -132,7 +132,7 @@ fn is_symbol(c: char) -> bool {
 A scalar's uppercase and lowercase are full case mappings, possibly several scalars, and a
 string's is the concatenation of its scalars' mappings, in order.
 
-```hirsel unbuilt
+```hirsel
 pub fn push_upper(mut out: String, c: char)
 pub fn push_lower(mut out: String, c: char)
 pub fn to_upper(s: String) -> String
@@ -160,7 +160,7 @@ pub fn to_lower(s: String) -> String
   case folding, and std has no folding operation outside regex `(?i)`.
 - **Titlecase** is not provided.
 
-```hirsel unbuilt
+```hirsel
 fn key(word: String) -> String {
     string.to_lower(word)   // "Straße" and "STRASSE" give "straße" and "strasse": different keys
 }

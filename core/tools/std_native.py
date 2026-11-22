@@ -149,6 +149,8 @@ class Contract:
     run_env: tuple[tuple[str, str], ...] = ()
     # Exact Env grant names. None means absent, and byte values can be non-UTF-8.
     env_fixture: tuple[tuple[str, bytes | None], ...] = ()
+    # A per-law reason why the evaluator cannot run this native contract.
+    native_only: str | None = None
 
     @property
     def name(self):
@@ -265,6 +267,7 @@ def discover(root, filters):
         schedule = None
         root_limit = 64 << 20
         evaluator_instructions = 1_000_000_000
+        native_only = None
         for line, text in enumerate(source.splitlines(), 1):
             if text.startswith("// test-limit: "):
                 root_limit = int(text.removeprefix("// test-limit: "))
@@ -274,6 +277,10 @@ def discover(root, filters):
                 evaluator_instructions = int(text.removeprefix("// test-instructions: "))
                 if not 0 < evaluator_instructions < 1 << 64:
                     raise ValueError(f'{file}:{line}: evaluator instruction limit is outside u64')
+            if text.startswith("// test-native-only:"):
+                native_only = text.removeprefix("// test-native-only:").strip()
+                if not native_only or evaluator_only:
+                    raise ValueError(f'{file}:{line}: native-only law needs a reason and cannot be evaluator-only')
             if text.startswith("// schedule: "):
                 words = text.removeprefix("// schedule: ").split()
                 if len(words) not in (2, 4) or words[0] != 'seeds' or words[2:3] not in ([], ['max_events']):
@@ -311,10 +318,12 @@ def discover(root, filters):
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
             package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture,
+                            native_only=native_only)
             schedule = None
             root_limit = 64 << 20
             evaluator_instructions = 1_000_000_000
+            native_only = None
             stdout = stderr = b""
             first_write = None
             host_op = 0
@@ -704,6 +713,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            engine=engine, profile=None if engine == 'evaluator' else llvm_profile if engine == 'llvm' else 'dev',
                            call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
                            cause=None, owner=None, native_only=False)
+                if engine == 'evaluator' and case.native_only:
+                    row.update(applicable=False, passed=None, native_only=True, cause=case.native_only)
+                    save_row(rows, row, output)
+                    continue
                 # The evaluator models tasks and the clock (virtual time); a law
                 # whose entry takes another host capability runs natively only.
                 if (engine == 'evaluator' or emulator) and '(exec, tasks)' in case.call:

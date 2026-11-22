@@ -106,9 +106,13 @@ using namespace llvm;
 // `n`, or as a phi with the fact; an assumption an edge refutes is withdrawn
 // until the rest hold. Every path, early exit and nested loop is in the fixed
 // point; a count that grows faster than its index has no bound.
+// Only loops that call nothing but intrinsics and failures are discharged: a
+// check beside a call costs little, and folding it moves the unroller's and
+// the specialize inliner's choices (AWFY Queens unrolled its ten solves and
+// lost the inlined levels of its recursion, +17% instructions).
 // Discharges. When `n + D <= limit + 1` holds for every value (constant
-// operands, or the range of `n`), the check is removed as above. Otherwise,
-// after inlining, the outermost loop around the check whose preheader sees
+// operands, or the range of `n`), the check is removed as above. Otherwise
+// the outermost loop around the check whose preheader sees
 // the same `n` and pair is versioned (loop_version.h): the preheader tests the
 // condition once, in 128 bits, frozen; the loop runs without the check when
 // it holds, and its unchanged checked copy runs when it does not, so a
@@ -1754,6 +1758,16 @@ private:
             return chosen;
         }
 
+        // Whether the loop calls nothing but intrinsics and failures.
+        static bool callFree(const Loop &loop) {
+            for (BasicBlock *block : loop.blocks())
+                for (Instruction &i : *block)
+                    if (auto *call = dyn_cast<CallBase>(&i);
+                        call && !isa<IntrinsicInst>(call) && !call->doesNotReturn())
+                        return false;
+            return true;
+        }
+
         // A copy of the loop must behave like the loop.
         static bool clonable(Loop &loop) {
             unsigned size = 0;
@@ -1816,9 +1830,12 @@ private:
             auto plan = bounded.plan(check);
             if (!plan) continue;
             if (auto t = Bounded::threshold(*plan); t && *t < 0) continue;
+            Loop *inner = loops.getLoopFor(check.site->getParent());
+            if (!inner || !Bounded::callFree(*inner)) continue;
             if (bounded.always(*plan)) proved.push_back(check.site);
             else if (version)
-                if (Loop *loop = bounded.versioned(*plan)) groups[loop].push_back(*plan);
+                if (Loop *loop = bounded.versioned(*plan); loop && Bounded::callFree(*loop))
+                    groups[loop].push_back(*plan);
         }
         // The facts the plans read stay intact until every plan is made.
         for (Instruction *site : proved) {

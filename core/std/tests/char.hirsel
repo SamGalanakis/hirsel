@@ -1,8 +1,10 @@
+// test-of: std.regex
+// test-reason: The Unicode agreement law reads the private regex class ranges.
 // Contract tests for `char` (core/std/char.hirsel), written to run once an engine runs
 // library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
 // gives the result derived by hand from the contract, or `fail Cause` for the failure the
 // contract names. Lists are read back as numbers, one decimal digit per element.
-fn value(o: Option[u32]) -> u32 {
+fn digit_or_sentinel(o: Option[u32]) -> u32 {
     match o {
         Some(v) => v,
         None => 99,
@@ -76,9 +78,9 @@ fn digit_probes() -> bool {
     let p = probes()
     let mut out = string.new()
     let mut at: u64 = 0
-    while let Some((c, next)) = string.next_scalar(p, at) {
+    while let Some((c, next_at)) = string.next_scalar(p, at) {
         mark(mut out, char.is_ascii_digit(c))
-        at = next
+        at = next_at
     }
     out == "0000000110000000000000"
 }
@@ -89,9 +91,9 @@ fn alpha_probes() -> bool {
     let p = probes()
     let mut out = string.new()
     let mut at: u64 = 0
-    while let Some((c, next)) = string.next_scalar(p, at) {
+    while let Some((c, next_at)) = string.next_scalar(p, at) {
         mark(mut out, char.is_ascii_alpha(c))
-        at = next
+        at = next_at
     }
     out == "0000000000011001100000"
 }
@@ -102,49 +104,102 @@ fn whitespace_probes() -> bool {
     let p = probes()
     let mut out = string.new()
     let mut at: u64 = 0
-    while let Some((c, next)) = string.next_scalar(p, at) {
+    while let Some((c, next_at)) = string.next_scalar(p, at) {
         mark(mut out, char.is_ascii_whitespace(c))
-        at = next
+        at = next_at
     }
     out == "1101110000000000000000"
 }
 
 // expect: run digit_hex_lower() = 15
 fn digit_hex_lower() -> u32 {
-    value(char.digit('f', 16))
+    digit_or_sentinel(char.digit('f', 16))
 }
 
 // expect: run digit_hex_upper() = 15
 fn digit_hex_upper() -> u32 {
-    value(char.digit('F', 16))
+    digit_or_sentinel(char.digit('F', 16))
 }
 
 // expect: run digit_past_base() = 99
 fn digit_past_base() -> u32 {
-    value(char.digit('g', 16))
+    digit_or_sentinel(char.digit('g', 16))
 }
 
 // expect: run digit_decimal() = 9
 fn digit_decimal() -> u32 {
-    value(char.digit('9', 10))
+    digit_or_sentinel(char.digit('9', 10))
 }
 
 // expect: run digit_base_36() = 35
 fn digit_base_36() -> u32 {
-    value(char.digit('z', 36))
+    digit_or_sentinel(char.digit('z', 36))
 }
 
 // expect: run digit_at_base() = 99
 fn digit_at_base() -> u32 {
-    value(char.digit('7', 7))
+    digit_or_sentinel(char.digit('7', 7))
 }
 
 // expect: run digit_base_37() = fail Fail
 fn digit_base_37() -> u32 {
-    value(char.digit('0', 37))
+    digit_or_sentinel(char.digit('0', 37))
 }
 
 // expect: run digit_base_1() = fail Fail
 fn digit_base_1() -> u32 {
-    value(char.digit('0', 1))
+    digit_or_sentinel(char.digit('0', 1))
+}
+
+// UNI-7. The general category and derived properties differ for letter numbers,
+// combining marks, titlecase letters and the feminine ordinal.
+// expect: run unicode_classification_examples() = true
+fn unicode_classification_examples() -> bool {
+    let half: char.Category = char.category('½')
+    char.UNICODE_VERSION == (18, 0, 0) && char.category('ß') == Ll && char.is_lowercase('ß') && char.category('ᾈ') == Lt && !char.is_uppercase('ǅ') && !char.is_lowercase('ǅ') && char.category('Ⅷ') == Nl && char.is_alphabetic('Ⅷ') && !char.is_letter('Ⅷ') && char.is_numeric('Ⅷ') && char.is_uppercase('Ⅷ') && char.category('\u{345}') == Mn && char.is_alphabetic('\u{345}') && !char.is_letter('\u{345}') && char.is_lowercase('\u{345}') && char.category('ª') == Lo && char.is_lowercase('ª') && char.is_decimal('٠') && !char.is_alphabetic('٠') && char.is_alphanumeric('٠') && half == No && char.is_numeric('½') && !char.is_decimal('½') && char.is_whitespace('\u{b}') && !char.is_ascii_whitespace('\u{b}') && char.category('\u{b}') == Cc && char.is_whitespace('\u{85}') && char.category('一') == Lo && char.category('\u{f0000}') == Co && char.category('\u{ffff}') == Cn && char.category('ʕ') == Lo && !char.is_lowercase('ʕ') && char.category('\u{a7dd}') == Lu
+}
+
+// UNI-5. ASCII whitespace differs only at vertical tab.
+// expect: run unicode_ascii_classification() = true
+fn unicode_ascii_classification() -> bool {
+    for code in 0u64 .. 128 {
+        let c = option.unwrap(char.from_u32(int.narrow(code)))
+        let letter = char.is_ascii_alpha(c)
+        let digit = char.is_ascii_digit(c)
+        let space = char.is_ascii_whitespace(c) || code == 11
+        if char.is_letter(c) != letter || char.is_alphabetic(c) != letter || char.is_numeric(c) != digit || char.is_decimal(c) != digit || char.is_alphanumeric(c) != (letter || digit) || char.is_whitespace(c) != space {
+            return false
+        }
+    }
+    true
+}
+
+fn unicode_char_word(c: char) -> bool {
+    if char.is_alphabetic(c) || c == '\u{200c}' || c == '\u{200d}' {
+        return true
+    }
+    match char.category(c) {
+        Mn => true,
+        Mc => true,
+        Me => true,
+        Nd => true,
+        Pc => true,
+        _ => false,
+    }
+}
+
+// UNI-2. The Unicode Perl classes compile from these independent regex ranges.
+// Check each scalar against the ranges used by perl_ranges.
+// test-native-only: The exhaustive regex sweep exceeds the evaluator instruction budget.
+// expect: run unicode_regex_agreement() = 1114112
+fn unicode_regex_agreement() -> u64 {
+    for code in 0u64 .. 0x110000 {
+        let Some(c) = char.from_u32(int.narrow(code)) else {
+            continue
+        }
+        if table_contains(WORD_LO, WORD_HI, code) != unicode_char_word(c) || table_contains(DECIMAL_LO, DECIMAL_HI, code) != char.is_decimal(c) || table_contains(SPACE_LO, SPACE_HI, code) != char.is_whitespace(c) {
+            return code
+        }
+    }
+    0x110000
 }

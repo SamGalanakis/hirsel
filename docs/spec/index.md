@@ -95,8 +95,7 @@ workspaces, library roots and package archives. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.
 The [Unicode text specification](unicode.md) defines std's Unicode character classification,
-general category and case conversion in `char` and `string`, pinned to Unicode 18.0.0. It is
-unbuilt design.
+general category and case conversion in `char` and `string`, pinned to Unicode 18.0.0.
 The standard library contracts define [scripted simulation plans](../../core/std/api/sim/world.md#scripted-plans)
 and [shrinking and replaying them with `std.prop`](../../core/std/api/prop.md#scripted-simulation).
 

@@ -121,12 +121,6 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     if m == 0 {
         return Some(start)
     }
-    if m >= 2 && m <= 8 && rest - m >= 127 {
-        return match find_short(hay, needle, m, rest - m - 31) {
-            Some(found) => Some(start + found),
-            None => None,
-        }
-    }
     let first = needle[0]
     let last = m - 1
     let last_byte = needle[last]
@@ -155,16 +149,27 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
                 }
             }
         }
+        // A sparse last byte is cheap to scan on its own. After two rejected
+        // hits, check both endpoints together if there is a long span left.
+        if m <= 8 {
+            misses += 1
+            if misses == 2 && rest - m - at >= 128 {
+                return match find_short(hay, from, needle, m, rest - m - 31) {
+                    Some(found) => Some(start + found),
+                    None => None,
+                }
+            }
+        }
     }
     None
 }
 
 // Filter 32 candidate starts at once. The last load in each pair ends at or
 // before the end of hay, including when the final group overlaps the one before it.
-fn find_short(hay: Bytes, needle: Bytes, m: u64, last_group: u64) -> Option[u64] {
+fn find_short(hay: Bytes, from: u64, needle: Bytes, m: u64, last_group: u64) -> Option[u64] {
     let first: Simd[u8, 32] = simd.splat(needle[0])
     let last: Simd[u8, 32] = simd.splat(needle[m - 1])
-    let mut at: u64 = 0
+    let mut at = from
     loop {
         let heads: Simd[u8, 32] = list.lanes(hay, at)
         let tails: Simd[u8, 32] = list.lanes(hay, at + m - 1)

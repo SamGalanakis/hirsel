@@ -406,13 +406,22 @@ fn find_short_endpoint_groups() -> bool {
             } else {
                 "abaaaaaa"
             }
-            let mut hay = string.repeat("a", n)
+            let mut hay = if shape == 0 {
+                let mut decoys = string.from("zbzb")
+                string.push(mut decoys, string.repeat("z", n - 4))
+                take decoys
+            } else {
+                string.repeat("a", n)
+            }
             for start in 0u64 .. 3 {
                 if string.find(hay, start, pat) != None {
                     return false
                 }
             }
             string.push(mut hay, pat)
+            if n % 2 == 0 {
+                string.push(mut hay, string.repeat("z", 128))
+            }
             for start in 0u64 .. 3 {
                 if string.find(hay, start, pat) != find_oracle(hay, start, pat) {
                     return false

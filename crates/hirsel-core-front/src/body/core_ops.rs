@@ -224,6 +224,8 @@ operations! {
     ("list", "lanes", Lane::Simd(SimdCall::Value(SimdOp::Lanes)), "A", "simd-impl-1344", false),
     ("list", "put_lanes", Lane::Simd(SimdCall::PutLanes), "A", "simd-impl-1344", false),
     ("list", "set_lanes", Lane::Simd(SimdCall::SetLanes), "A", "simd-impl-1344", false),
+    ("inline", "lanes", Lane::Simd(SimdCall::InlineLanes), "A", "core-perf-primitives-1606", false),
+    ("inline", "set_lanes", Lane::Simd(SimdCall::InlineSetLanes), "A", "core-perf-primitives-1606", false),
     ("list", "word_le", Lane::Value, "A", "core-check-index-912", false),
     ("list", "put_word_le", Lane::Value, "A", "core-ops-914", false),
     ("list", "word_be", Lane::Value, "A", "dedup-1357", false),

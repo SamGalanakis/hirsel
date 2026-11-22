@@ -5,6 +5,8 @@ pub(super) enum SimdCall {
     Value(SimdOp),
     PutLanes,
     SetLanes,
+    InlineLanes,
+    InlineSetLanes,
 }
 
 impl Cx<'_, '_, '_> {
@@ -47,6 +49,10 @@ impl Cx<'_, '_, '_> {
         let expected = want
             .filter(|w| w.payload == 0)
             .and_then(|w| self.vector_shape(w.ty));
+        if let SimdCall::InlineLanes | SimdCall::InlineSetLanes = op {
+            let shape = expected;
+            return self.inline_lane_call(op == SimdCall::InlineSetLanes, f, n, args, shape);
+        }
         let SimdCall::Value(op) = op else {
             if self.patterns.guard {
                 self.refuse("LANG-17", n, "a match guard cannot call a mut parameter");
@@ -78,7 +84,9 @@ impl Cx<'_, '_, '_> {
                     let shape = self.require_vector(ty, args[2]);
                     (args[2], value, at, shape, "set_lanes")
                 }
-                SimdCall::Value(_) => unreachable!(),
+                SimdCall::Value(_) | SimdCall::InlineLanes | SimdCall::InlineSetLanes => {
+                    unreachable!()
+                }
             };
             self.unfreeze(held, |h| match h {
                 Hold::CallView(c, _) | Hold::CallMut(c, _) if c == call => None,
@@ -101,7 +109,9 @@ impl Cx<'_, '_, '_> {
             let value = match op {
                 SimdCall::PutLanes => self.put_lanes(header, value, other, shape, n),
                 SimdCall::SetLanes => self.set_lanes(header, other, value, shape, n),
-                SimdCall::Value(_) => unreachable!(),
+                SimdCall::Value(_) | SimdCall::InlineLanes | SimdCall::InlineSetLanes => {
+                    unreachable!()
+                }
             };
             return (result, value);
         };
@@ -316,6 +326,130 @@ impl Cx<'_, '_, '_> {
             n,
         );
         Some(self.pointer(from, n))
+    }
+
+    /// Types `inline.lanes(a, at)` and `inline.set_lanes(mut a, at, v)` at the call:
+    /// the array from the argument, the vector from the expected type or from `v`.
+    fn inline_lane_call(
+        &mut self,
+        write: bool,
+        f: usize,
+        n: NodeId,
+        args: &[NodeId],
+        expected: Option<Vector>,
+    ) -> (TyId, Option<ValueId>) {
+        if write && self.patterns.guard {
+            self.refuse("LANG-17", n, "a match guard cannot call a mut parameter");
+            return (ERROR, None);
+        }
+        if !write && expected.is_none() {
+            return self.simd_expected(n);
+        }
+        let g = &self.p.fns[f];
+        let (param, result, generics) = (g.params[0].ty, g.result, g.generics.len());
+        self.call_seq += 1;
+        let call = self.call_seq;
+        let held = self.freezes.len();
+        let mut found = vec![None; generics];
+        let mut data = None;
+        let mode = if write { Mode::Mut } else { Mode::View };
+        if !self.argument(mode, param, call, 0, args[0], &mut found, &mut data) {
+            let (ty, value) = self.expr(args[0], None);
+            found[0] = Some(ty);
+            data = value;
+        }
+        let (_, at) = self.expr(args[1], expect(scalar(Scalar::U64)));
+        let (shape, value) = if write {
+            let (ty, value) = self.expr(args[2], None);
+            (self.require_vector(ty, args[2]), value)
+        } else {
+            (expected, None)
+        };
+        self.unfreeze(held, |h| match h {
+            Hold::CallView(c, _) | Hold::CallMut(c, _) if c == call => None,
+            _ => Some(h),
+        });
+        let Some(shape) = shape else {
+            return (ERROR, None);
+        };
+        let Some(array) = found[0].map(|ty| self.bare(ty)) else {
+            self.refuse(
+                "SEM-11",
+                args[0],
+                "an Inline lane access takes an Inline array of u8",
+            );
+            return (ERROR, None);
+        };
+        self.builtin_use(f, n);
+        self.source_step(n);
+        let vector = self.vector_type(shape);
+        let value = match at {
+            Some(at) if self.live() => self.inline_lanes(array, vector, data, at, value, write, n),
+            _ => None,
+        };
+        (if write { result } else { vector }, value)
+    }
+
+    /// `inline.lanes` and `inline.set_lanes`: one vector of u8 lanes read from or
+    /// written to an `Inline[u8, N]` at a byte offset. Bounds unless
+    /// `at + lanes <= N` without overflow, checked before the access.
+    #[allow(clippy::too_many_arguments)]
+    fn inline_lanes(
+        &mut self,
+        array: TyId,
+        vector: TyId,
+        data: Option<ValueId>,
+        at: ValueId,
+        value: Option<ValueId>,
+        write: bool,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let len = match *self.t.kind(array) {
+            TyKind::Array(item, len) if item == scalar(Scalar::U8) => len,
+            _ => {
+                self.refuse(
+                    "SEM-11",
+                    n,
+                    "an Inline lane access takes an Inline array of u8",
+                );
+                return None;
+            }
+        };
+        let Some(shape) = self.vector_shape(vector).filter(|v| v.lane() == Scalar::U8) else {
+            self.refuse(
+                "SEM-11",
+                n,
+                "an Inline lane access takes a vector of u8 lanes",
+            );
+            return None;
+        };
+        let u64_ty = Ty::Scalar(Scalar::U64);
+        let bound = self.konst(u64_ty, len, n)?;
+        let width = self.konst(u64_ty, shape.lanes(), n)?;
+        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
+        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let within = self.list_compare(CompareOp::Le, end, bound, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
+        self.simd_bounds(valid, n);
+        let address = self.address(
+            AddressBase::Value(data?),
+            &[Step::Byte(at)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        if write {
+            self.inst(
+                Inst::PutLanes {
+                    to: address,
+                    vector: value?,
+                    count: width,
+                },
+                n,
+            );
+            return None;
+        }
+        let pointer = self.pointer(address, n);
+        self.emit_simd(SimdOp::Lanes, vector, Some(pointer), None, n)
     }
 
     fn put_lanes(

@@ -455,3 +455,63 @@ fn truncate_keeps_prefix() -> bool {
     list.truncate(mut xs, 5)
     list.len(xs) == 1 && list.capacity(xs) == capacity && xs[0] == "a"
 }
+
+// Byte k of a is k. A 16-lane read at 3 holds bytes 3..19, so only lane 15 (byte 18)
+// exceeds 17 and the bitmask is 0x8000 by hand. A write of splat(255) at 32 of 48 sets
+// bytes 32..48 only, which a 32-lane read at 16 sees as lanes 16..32: 0xffff0000.
+// expect: run inline_lanes_offset() = true
+fn inline_lanes_offset() -> bool {
+    let mut a: Inline[u8, 48] =[0; 48]
+    for i in 0u64 .. 48 {
+        a[i] = int.truncate(i)
+    }
+    let v: Simd[u8, 16] = inline.lanes(a, 3)
+    let high = simd.bitmask(simd.lt((simd.splat(17) : Simd[u8, 16]), v))
+    inline.set_lanes(mut a, 32, (simd.splat(255) : Simd[u8, 16]))
+    let wide: Simd[u8, 32] = inline.lanes(a, 16)
+    let top = simd.bitmask(simd.eq(wide, (simd.splat(255) : Simd[u8, 32])))
+    high == 0x8000 && a[31] == 31 && a[32] == 255 && a[47] == 255 && top == 0xffff0000
+}
+
+// A 32-lane read at 17 of 48 bytes needs 49.
+// expect: run inline_lanes_past_end() = fail Bounds
+fn inline_lanes_past_end() -> bool {
+    let a: Inline[u8, 48] =[0; 48]
+    let v: Simd[u8, 32] = inline.lanes(a, 17)
+    simd.any(v)
+}
+
+// 2^64 - 8 plus 16 lanes wraps to 8, which a wrapping end check would accept.
+// expect: run inline_set_lanes_overflow() = fail Bounds
+fn inline_set_lanes_overflow() -> u8 {
+    let mut a: Inline[u8, 16] =[0; 16]
+    inline.set_lanes(mut a, 18446744073709551608, (simd.splat(1) : Simd[u8, 16]))
+    a[0]
+}
+
+type LaneRecord {
+    tag: u8,
+    raw: Inline[u8, 48]
+}
+
+fn record_lanes(r: LaneRecord) -> u64 {
+    let v: Simd[u8, 16] = inline.lanes(r.raw, 1)
+    simd.bitmask(simd.eq(v, (simd.splat(7) : Simd[u8, 16])))
+}
+
+fn record_set_lanes(mut r: LaneRecord) {
+    inline.set_lanes(mut r.raw, 32, (simd.splat(9) : Simd[u8, 16]))
+}
+
+// A field reached through a view parameter and a mut parameter, the std.check shape.
+// Bytes 2 and 16 are 7, so a 16-lane read at 1 has them in lanes 1 and 15: 0x8002 by
+// hand. The write through mut r sets bytes 32..48 and leaves byte 31 and the tag.
+// expect: run inline_lanes_through_field() = true
+fn inline_lanes_through_field() -> bool {
+    let mut r = LaneRecord(tag: 5, raw:[0; 48])
+    r.raw[2] = 7
+    r.raw[16] = 7
+    let mask = record_lanes(r)
+    record_set_lanes(mut r)
+    mask == 0x8002 && r.raw[31] == 0 && r.raw[32] == 9 && r.raw[47] == 9 && r.tag == 5
+}

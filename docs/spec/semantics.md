@@ -482,6 +482,11 @@ depends on the engine, the build or the CPU.
   `Bounds` when `k > n`, before changing anything; otherwise it grows `b` as
   [MEM-24](budgets.md#mem-24-logical-charges) says with `needed` = `len + k`, and a refused
   growth leaves `b` unchanged.
+  `list.set_lanes(mut b, at, v)` overwrites the `n` bytes of `b` from `at` with the lanes
+  of a `Simd[u8, n]` under the same check, made before any write, and keeps the length.
+  `inline.lanes(a, at)` and `inline.set_lanes(mut a, at, v)` do the same on an
+  `Inline[u8, N]`, failing with `Bounds` unless `at + n ≤ N` with no overflow; any other
+  array or a vector of other lanes is refused at compile time.
 
 Each `simd` and `list` operation is a core call and takes one step, and the operators take
 none ([MEM-30](budgets.md#mem-30-step-bounds)).

@@ -141,6 +141,8 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("indexed", "get", 1),
     ("inline", "copy_from_slice", 1),
     ("inline", "copy_within", 1),
+    ("inline", "lanes", 1),
+    ("inline", "set_lanes", 1),
     ("inline", "set_word_be", 1),
     ("inline", "set_word_le", 1),
     ("inline", "word_be", 1),

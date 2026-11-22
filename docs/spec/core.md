@@ -240,6 +240,12 @@ operations it names; nothing else about them may be inferred from an implementat
   only what the cleaned elements own, admits nothing, and takes one Step
   ([MEM-30](budgets.md#mem-30-step-bounds)); for plain elements it does no work per
   element.
+- **Inline lanes.** `inline.lanes(a, at)` reads bytes `at .. at + n` of an
+  `Inline[u8, N]` as the expected `Simd[u8, n]`, `n` being 16 or 32, and
+  `inline.set_lanes(mut a, at, v)` overwrites them with the lanes of `v`. Each raises
+  `Bounds` unless `at + n ≤ N` with no overflow, checked once before the access; any
+  other array or lane type is refused at compile time
+  ([SEM-11](semantics.md#sem-11-vectors)). Neither admits bytes, and each takes one Step.
 - **Words.** `list.word_le(b, at)` and `list.word_be(b, at)` read a little- or big-endian
   word from `b` at a byte offset. The expected `u16`, `u32` or `u64` type fixes the width.
   Without an expected type the result is `u64`. An invalid range, including an overflowing

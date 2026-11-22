@@ -18,6 +18,7 @@ pub(super) enum Payer {
 pub(super) enum PointerOrigin {
     Address(AddressId),
     Read(AddressId),
+    Static(StaticId),
     Parameter(PlaceTy),
 }
 
@@ -42,6 +43,9 @@ pub(super) fn pointer_origins(body: &Body, sig: &Signature) -> Box<[Option<Point
         match *inst {
             Inst::Pointer { result, address } => {
                 origins[result.index()] = Some(PointerOrigin::Address(address));
+            }
+            Inst::ReadStatic { result, data } => {
+                origins[result.index()] = Some(PointerOrigin::Static(data));
             }
             Inst::Read {
                 result, address, ..
@@ -251,7 +255,7 @@ impl FunctionEmitter<'_> {
     /// A typed data word of a scalar sequence points into an element buffer.
     /// Its bytes hold no carriers. Raw projections preserve that fact for
     /// accesses within the buffer, which the CoreIR producer bounds.
-    fn scalar_buffer(&self, mut address: AddressId) -> bool {
+    pub(super) fn scalar_buffer(&self, mut address: AddressId) -> bool {
         loop {
             let info = &self.body.addresses[address.index()];
             let steps = info.steps.get(&self.body.pools.steps).unwrap();
@@ -279,7 +283,9 @@ impl FunctionEmitter<'_> {
                                 At::Seq(element) if matches!(*element, FieldTy::Scalar(_))
                             );
                         }
-                        Some(PointerOrigin::Parameter(_)) | None => return false,
+                        Some(PointerOrigin::Parameter(_) | PointerOrigin::Static(_)) | None => {
+                            return false;
+                        }
                     }
                 }
             }
@@ -289,7 +295,7 @@ impl FunctionEmitter<'_> {
     /// A constant byte access inside the physical scalar array cannot reach
     /// other fields in the same allocation. Leave dynamic Inline offsets
     /// unclassified when this projection has no extent proof.
-    fn inline_scalar_extent(&self, base: AddressBase) -> Option<u64> {
+    pub(super) fn inline_scalar_extent(&self, base: AddressBase) -> Option<u64> {
         let declared = match base {
             AddressBase::Slot(slot) => self.body.slots[slot.index()],
             AddressBase::Value(value) => {

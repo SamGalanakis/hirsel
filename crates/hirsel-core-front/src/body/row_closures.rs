@@ -87,31 +87,31 @@ impl Emitter {
             Ok(name) => name,
             Err(row) => return Some(row),
         };
-        let built = match p.row_closures.built.lock().unwrap().entry(key.clone()) {
+        let (build, closure) = match p.row_closures.built.lock().unwrap().entry(key.clone()) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Entry::Seen);
-                None
+                (false, None)
             }
             std::collections::hash_map::Entry::Occupied(o) => match o.get() {
-                Entry::Built(closure) => Some(closure.clone()),
-                Entry::Seen => Some(None),
+                Entry::Built(closure) => (false, closure.clone()),
+                Entry::Seen => (true, None),
             },
         };
         // Built outside the lock: the build names other rows, whose closures it may
-        // look up. Two bodies building one closure at once build the same one.
-        let built = match built {
-            Some(None) => {
-                let closure = Closure::build(p, &mut *t, ty).map(Arc::new);
-                p.row_closures
-                    .built
-                    .lock()
-                    .unwrap()
-                    .insert(key, Entry::Built(closure.clone()));
-                Some(closure)
-            }
-            built => built,
+        // look up. Two bodies building one closure at once build the same one. A
+        // refused build stays refused, as the same types refuse it again.
+        let closure = if build {
+            let closure = Closure::build(p, &mut *t, ty).map(Arc::new);
+            p.row_closures
+                .built
+                .lock()
+                .unwrap()
+                .insert(key, Entry::Built(closure.clone()));
+            closure
+        } else {
+            closure
         };
-        match built.flatten() {
+        match closure {
             Some(closure) if self.holds_none_of(&closure) => {
                 if self.recipes_ready(p, &closure) {
                     return Some(self.copy_closure(&closure));

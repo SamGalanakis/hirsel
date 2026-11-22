@@ -180,14 +180,15 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    let mut timing: Option[CutTiming] = None
     let started = host.mono_ns(c)
     if mode == "R7" || mode == "R8-open" {
         options.create = false
         let opened = result.unwrap(open(tasks, child, c, r, options))
         list.push(mut holder, take opened)
     } else if mode == "R6" {
-        let cut = result.unwrap(checkpoint(mut holder[0]))
-        result.unwrap(durable(mut holder[0], cut))
+        timing = Some(CutTiming(pause_ns: 0, removal_ns: 0, removal_attempts: 0, drain_groups: 0))
+        let _ = result.unwrap(disk_cut_timed(mut holder[0], NoHolderChange, seal_page_manifest_file, mut timing))
     } else if let Some(take target) = take migration {
         let cut = result.unwrap(migrate(mut holder[0], take t, take target, disk_bench_upgrade))
         result.unwrap(durable(mut holder[0], cut))
@@ -205,6 +206,19 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     result.unwrap(stdout.write(out, rendered))
     list.clear(mut byte)
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    if let Some(measured) = timing {
+        let mut stats = string.new()
+        string.push(mut stats, "CUT ")
+        string.push_u64(mut stats, measured.pause_ns)
+        string.push(mut stats, " REMOVAL ")
+        string.push_u64(mut stats, measured.removal_ns)
+        string.push(mut stats, " REMOVE_ATTEMPTS ")
+        string.push_u64(mut stats, measured.removal_attempts)
+        string.push(mut stats, " DRAIN_GROUP_SYNCS ")
+        string.push_u64(mut stats, measured.drain_groups)
+        string.push(mut stats, "\n")
+        result.unwrap(stdout.write(out, stats))
+    }
     // Full values are verified after the phase counters and RSS have stopped.
     let sh = if migrating {
         let target = result.unwrap(table(mut holder[0], "migrated", std.codec.key_u64(), dictionary))

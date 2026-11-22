@@ -6,11 +6,29 @@ import json
 import os
 from pathlib import Path
 import re
+from struct import error as StructError
 
 from measurement_artifacts import allocation_linker, check, phase_allocations
 from omap_bench import command, measure
 from std_native import ROOT
+from store_r6 import Manifest, check_r6
 from store_tests import inputs
+
+
+def r6_result(row, output, before):
+    timing = re.search(r'CUT (\d+) REMOVAL (\d+) REMOVE_ATTEMPTS (\d+) DRAIN_GROUP_SYNCS (\d+)\n', output)
+    if timing is None:
+        raise ValueError('R6 cut timing missing')
+    if not isinstance(before, Manifest):
+        raise ValueError(f'R6 failed to read the pre-cut store: {before}')
+    row.update(pause_ns=int(timing[1]), removal_ns=int(timing[2]),
+               removal_attempts=int(timing[3]), drain_group_syncs=int(timing[4]))
+    classified = check_r6(before, Manifest(before.directory))
+    if any(row.get(key) != classified[key] for key in ('pack_bytes', 'new_pages')):
+        raise ValueError('R6 pack totals differ from the independent parse')
+    row.update(classified)
+    if row['r6_violations']:
+        raise ValueError(', '.join(row['r6_violations']))
 
 
 def main():
@@ -87,8 +105,20 @@ def main():
                         # R4's DONE is the sum of c over 64..10064; R5's is its commit count.
                         n = {'R4': 50635000, 'R5': None}.get(mode, 1000000 if mode.startswith('R8') else 100000)
                         tag = f'{profile}-{mode}-i{index}{suffix}'
+                        before = None
+                        existing = set(host.glob('store-law-*'))
+
+                        def before_phase():
+                            nonlocal before
+                            try:
+                                directory, = set(host.glob('store-law-*')) - existing
+                                before = Manifest(directory)
+                            except (ValueError, OSError, KeyError, StructError) as error:
+                                before = error
+
                         row = measure([out / (profile + suffix), mode, str(index)], out, env, tag, n,
-                                      host_directory=host, events=None if args.allocations else 'instructions:u')
+                                      host_directory=host, events=None if args.allocations else 'instructions:u',
+                                      before_phase=before_phase if mode == 'R6' else None)
                         text = (out / tag / 'stdout').read_text()
                         extra = re.search(r'PACK_BYTES (\d+) NEW_PAGES (\d+) ACCOUNT (\d+)\n', text)
                         journal = re.search(r'COMMITS (\d+) VERSION (\d+)\n', text)
@@ -100,6 +130,12 @@ def main():
                         else:
                             row['complete'] = False
                             row['censored'] = row['censored'] or 'post-phase store validation did not finish'
+                        if mode == 'R6':
+                            try:
+                                r6_result(row, text, before)
+                            except (ValueError, OSError, KeyError, StructError) as error:
+                                row['complete'] = False
+                                row['censored'] = row['censored'] or str(error)
                         if args.allocations:
                             try:
                                 row['allocations'] = phase_allocations((out / tag / 'stderr').read_text())

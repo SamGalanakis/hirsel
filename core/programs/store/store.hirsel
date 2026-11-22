@@ -1760,6 +1760,12 @@ fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped
 }
 
 pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
+    let _ = durable_groups(mut db, t)?
+    Ok(())
+}
+
+// The worker sends one Journaled ack after each successful group sync.
+fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     if !same(db.store, t.store) || t.open != open_number(db) {
         return Error(Foreign)
     }
@@ -1768,10 +1774,11 @@ pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
     }
     if let Cut(generation) = t.mark {
         if list.len(db.disk) != 0 {
-            return disk_wait_cut(db, generation)
+            disk_wait_cut(db, generation)?
+            return Ok(0)
         }
     }
-    journal_poll(mut db)?
+    let mut groups = journal_poll_groups(mut db)?
     let has_journal = match db.acks {
         Some(_) => true,
         None => false
@@ -1780,9 +1787,10 @@ pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
         while !covered(db, t.mark) {
             let ack = journal_receive(db)
             journal_ack(mut db, take ack)?
+            groups += 1
         }
     }
-    Ok(())
+    Ok(groups)
 }
 
 fn covered(db: Db, mark: Mark) -> bool {
@@ -11702,11 +11710,28 @@ type PreparedDiskCut {
     manifest: Bytes
 }
 
+type CutTiming {
+    pause_ns: u64,
+    removal_ns: u64,
+    removal_attempts: u64,
+    drain_groups: u64
+}
+
 fn disk_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
+    let mut timing: Option[CutTiming] = None
+    disk_cut_timed(mut db, take delta, seal, mut timing)
+}
+
+fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     healthy(db)?
     db.since_cut = 0
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
-    durable(mut db, last)?
+    let observe = match timing {
+        Some(_) => true,
+        None => false,
+    }
+    let started = if observe { host.mono_ns(db.clock) } else { 0 }
+    let drain_groups = durable_groups(mut db, last)?
     let Some(generation) = int.checked_add(db.checkpointed, 1) else {
         return Error(Limit(Ids))
     }
@@ -11779,8 +11804,17 @@ fn disk_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
     db.settled = db.changes
     db.uncovered = 0
     install_holder_delta(mut db, take delta)
+    let installed = if observe { host.mono_ns(db.clock) } else { 0 }
+    let removals_count = if observe {
+        list.len(removals.packs) + 2 * (removals.before.end - removals.before.first + removals.after.end - removals.after.first)
+    } else {
+        0
+    }
     if let Error(take problem) = remove_cut_files(d, take removals) {
         return Error(cut_io_error(mut db, take problem))
+    }
+    if observe {
+        timing = Some(CutTiming(pause_ns: installed - started, removal_ns: host.mono_ns(db.clock) - installed, removal_attempts: removals_count, drain_groups: drain_groups))
     }
     Ok(Ticket(store: id, open: open_number(db), mark: Cut(generation)))
 }
@@ -14902,10 +14936,18 @@ fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
 }
 
 fn journal_poll(mut db: Db) -> Result[(), Error] {
+    let _ = journal_poll_groups(mut db)?
+    Ok(())
+}
+
+fn journal_poll_groups(mut db: Db) -> Result[u64, Error] {
+    let mut groups = 0u64
     while let Some(take ack) = close_ack(db) {
         journal_ack(mut db, take ack)?
+        groups += 1
     }
-    healthy(db)
+    healthy(db)?
+    Ok(groups)
 }
 
 // L18c/L21a: commits without an explicit cut survive close and reopen, and

@@ -54,8 +54,10 @@ pub(crate) fn retain_referenced(
     // A release site's symbol is named by its item's owner.
     sources.items.retain(|item, _| {
         names.contains(site_symbol(item).as_bytes())
-            || names
-                .contains(site_symbol(&hirsel_core_ir::source::release_site_owner(item)).as_bytes())
+            || (hirsel_core_ir::source::numbers_unit_sites(item)
+                && names.contains(
+                    site_symbol(&hirsel_core_ir::source::release_site_owner(item)).as_bytes(),
+                ))
     });
     let mut file_numbers = vec![None; sources.files.len()];
     for item in sources.items.values() {

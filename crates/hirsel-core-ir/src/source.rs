@@ -1,7 +1,6 @@
 //! Current source bindings for native diagnostics, separate from semantic bodies.
 use hirsel_core_ids::DefPath;
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 mod native;
 pub use native::*;
@@ -199,12 +198,14 @@ pub fn module_sites(module: &crate::Module) -> Vec<u64> {
 /// item-relative start. The fresh entry unit defines the symbol as the item's
 /// first site word (`SourceMap::site_starts` plus its file offset).
 pub fn site_symbol(item: &DefPath) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let hash = item.fingerprint();
-    let mut symbol = String::from(SITE_SYMBOL_PREFIX);
+    let mut symbol = Vec::with_capacity(SITE_SYMBOL_PREFIX.len() + 2 * hash.0.len());
+    symbol.extend_from_slice(SITE_SYMBOL_PREFIX.as_bytes());
     for byte in hash.0 {
-        write!(symbol, "{byte:02x}").unwrap();
+        symbol.extend([HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]]);
     }
-    symbol
+    String::from_utf8(symbol).expect("hex digits are ASCII")
 }
 
 const SITE_SYMBOL_PREFIX: &str = "hirsel_core_site_";
@@ -231,13 +232,17 @@ pub struct ReleaseSite {
 /// unit's code. Any other item numbers its own.
 pub fn release_site_owner(item: &DefPath) -> DefPath {
     let mut owner = item.clone();
-    if let [unit, symbol] = owner.0.modules.as_slice()
-        && unit == "unit"
-    {
-        owner.0.name = symbol.clone();
+    if numbers_unit_sites(item) {
+        owner.0.name = owner.0.modules[1].clone();
         owner.0.modules.truncate(1);
     }
     owner
+}
+
+/// Whether `item` is a recipe unit's site item, whose owner
+/// ([`release_site_owner`]) is another item.
+pub fn numbers_unit_sites(item: &DefPath) -> bool {
+    matches!(item.0.modules.as_slice(), [unit, _] if unit == "unit")
 }
 
 /// Synthetic DWARF file identity for release-code locations numbered by

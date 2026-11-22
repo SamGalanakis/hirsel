@@ -1830,6 +1830,64 @@ void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, ui
     }
 }
 
+/// A dead chain of a million boxes, released from a local, is cleaned in place
+/// near its root and handed to the drain once below (LANG-19: constant stack),
+/// and every box is refunded. Hand-derived: `Link` is 8 + 8 (`Option[Box]`)
+/// plus 8, so each box charges 24 (MEM-24) and the run peaks at 24n with
+/// nothing retained; one hand-over traces once, a single box none. The million
+/// deep chain overflows any native recursion over its boxes.
+#[test]
+fn deep_box_chain_drops_with_one_drain_hand_over() {
+    let source = r#"
+type Link {
+    next: Option[Box[Link]],
+    value: u64
+}
+
+fn chain(n: u64) -> u64 {
+    let mut head: Option[Box[Link]] = None
+    let mut i = 0u64
+    while i < n {
+        let next = take head
+        head = Some(box.new(Link(next, value: i)))
+        i = i + 1
+    }
+    n
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let cases = [1, 1_000, 1_000_000].map(|length| Case {
+        function: names["chain"],
+        args: vec![length],
+        limit: 24 * length,
+        injection: None,
+    });
+    let bindings = r#"
+bool __real_hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t);
+bool __wrap_hirsel_core_release(HirselCoreContext *ctx, void *node, const HirselCoreFixedDescriptor *d, uint64_t site) {
+    hirsel_core_test_drop_trace(1);
+    return __real_hirsel_core_release(ctx, node, d, site);
+}
+"#;
+    let reports = execute_optimized(&module, &cases, bindings, "", Optimization::Speed);
+    for (case, report) in cases.iter().zip(reports) {
+        let length = case.args[0];
+        // The evaluator's cleanup recurses natively, so it checks the shallow chains.
+        if length <= 1_000 {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(expected.outcome, report.outcome);
+            assert_eq!(expected.used, 0);
+            assert_eq!(expected.peak_reserved, 24 * length);
+        }
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![length]));
+        assert_eq!(report.used, 0);
+        if let Some(peak) = report.peak_reserved {
+            assert_eq!(peak, 24 * length);
+        }
+        assert_eq!(report.trace, if length == 1 { vec![] } else { vec![1] });
+    }
+}
+
 impl NativeInput for hirsel_core_program_tests::SourceProgram {
     fn module(&self) -> &Module {
         self

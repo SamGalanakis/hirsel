@@ -283,6 +283,8 @@ struct Items {
     step_dispatch: Vec<Option<FuncId>>,
     pending: std::collections::BTreeMap<String, Item>,
     release_sites: Option<ReleaseSites>,
+    /// The types ordinary glue cleans with `core_direct_T` (cleanup::direct_types).
+    direct: BTreeSet<usize>,
 }
 #[derive(Default)]
 struct ReleaseSites {
@@ -307,6 +309,7 @@ impl Items {
             step_dispatch: vec![None; module.functions.len()],
             pending: Default::default(),
             release_sites: None,
+            direct: BTreeSet::new(),
         }
     }
     fn is_versioned(&self, function: FuncId) -> bool {

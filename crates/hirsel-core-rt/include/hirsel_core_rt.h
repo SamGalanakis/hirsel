@@ -144,6 +144,8 @@ typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_
 typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreFixedDescriptor;
 typedef struct { uint64_t back, cursor, a, b, index; } HirselCoreFixedPoint;
 bool hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t site);
+/* A dead box compiled glue cleaned in place, freed as the drain frees it. */
+void hirsel_core_free_box(HirselCoreContext *, void *node, uint64_t charge);
 /* Inline Arc completion hooks. Call with ctx[CONTEXT_EVENTS] != 0.
    The event word and sink are pinned for the run. The hook folds owner
    credits and records the operation. Release precedes last-release glue. */

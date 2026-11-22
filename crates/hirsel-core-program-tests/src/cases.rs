@@ -1478,6 +1478,12 @@ pub fn worker() -> u64 { 0 }
 }
 
 #[test]
+fn diagnostic_delimiter_openers() {
+    let failures = run_case(&root().join("cases/body/diag-unclosed-delimiters.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn corpus() {
     let cases = root().join("cases");
     let paths = case_source::files(&cases).expect("cases dir");

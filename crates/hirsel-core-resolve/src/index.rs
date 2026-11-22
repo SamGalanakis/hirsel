@@ -128,7 +128,16 @@ impl Refusal {
                 item: u32::MAX,
                 span: diagnostic.primary,
             },
-            causal: vec![],
+            causal: diagnostic
+                .causal
+                .iter()
+                .map(|&span| Site {
+                    module,
+                    source: Some(source),
+                    item: u32::MAX,
+                    span,
+                })
+                .collect(),
             declared: diagnostic.declared.clone(),
             required: diagnostic.required.clone(),
             message: diagnostic.message.clone(),

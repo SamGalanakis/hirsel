@@ -8,7 +8,8 @@ source span of the construct that the rule's statement is about (the moved use f
 [OWN-5](ownership.md#own-5-availability), the conflicting loan for
 [OWN-10](ownership.md#own-10-freezes), the missing arm's `match` for
 [LANG-17](language.md#lang-17-match)). It may add secondary sites, such as the move or the
-freeze that a use conflicts with. The rule named is the one whose statement the program
+freeze that a use conflicts with. An unclosed delimiter refusal points back to its
+opening token. The rule named is the one whose statement the program
 breaks; when a construct breaks a specific rule and the general rule it restates, the
 specific rule is named: a maybe slot's use names OWN-16, not OWN-5; overlapping
 arguments of one call name OWN-11, not OWN-9. A refusal never names a rule the program does not break.

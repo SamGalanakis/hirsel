@@ -1,0 +1,14 @@
+// expect: refuse LANG-5 at 4:42
+// expect: cause LANG-5 at 4:42 from 4:35
+// expect: compared LANG-5 at 4:42 | } | )
+fn missing_paren(x: u64) -> u64 { (x + 1 }
+fn missing_bracket() {
+    let xs = [1u64, 2u64
+}
+// expect: refuse LANG-5 at 7:1
+// expect: cause LANG-5 at 7:1 from 6:14
+// expect: compared LANG-5 at 7:1 | } | ]
+// expect: refuse LANG-5 at 14:24
+// expect: cause LANG-5 at 14:24 from 14:20
+// expect: compared LANG-5 at 14:24 | end of file | }
+fn missing_brace() { ()

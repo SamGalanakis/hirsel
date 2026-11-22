@@ -142,6 +142,7 @@ pub(crate) fn parse_derived(
         base: 0,
         whitespace: 0,
         depth: 0,
+        delimiters: smallvec![],
         diagnostics: output.diagnostics,
         resource: None,
         mode,
@@ -154,6 +155,7 @@ pub(crate) fn parse_derived(
             continue;
         }
         let start = p.pos;
+        p.delimiters.clear();
         let diagnostic_start = p.diagnostics.len();
         let file_offset = p.tokens[p.current_index].span.start;
         p.base = file_offset;
@@ -233,10 +235,21 @@ struct Parser<'a> {
     base: u32,
     whitespace: usize,
     depth: usize,
+    delimiters: smallvec::SmallVec<[(usize, Symbol); 8]>,
     diagnostics: Vec<Diagnostic>,
     resource: Option<ResourceRefusal>,
     mode: ParseMode,
 }
+
+fn closing_delimiter(word: Symbol) -> Option<Symbol> {
+    match word {
+        sym::LPAREN => Some(sym::RPAREN),
+        sym::LBRACKET => Some(sym::RBRACKET),
+        sym::LBRACE => Some(sym::RBRACE),
+        _ => None,
+    }
+}
+
 impl Parser<'_> {
     fn index(&self) -> usize {
         self.current_index
@@ -261,6 +274,15 @@ impl Parser<'_> {
     fn bump(&mut self) -> TokenId {
         let id = TokenId(self.index() as u32);
         if !self.eof() {
+            if let Some(close) = closing_delimiter(self.current.symbol) {
+                self.delimiters.push((self.pos, close));
+            } else if self
+                .delimiters
+                .last()
+                .is_some_and(|&(_, close)| self.at(close))
+            {
+                self.delimiters.pop();
+            }
             self.pos += 1;
             self.current_index = self.significant[self.pos];
             self.current = self.tokens[self.current_index];
@@ -284,7 +306,35 @@ impl Parser<'_> {
             self.expected(word)
         }
     }
-    fn expected(&mut self, word: Symbol) -> Parsed<()> {
+    fn expected<T>(&mut self, word: Symbol) -> Parsed<T> {
+        if let Some(&(opener, close)) = self.delimiters.last()
+            && (word == close
+                || word == sym::COMMA
+                    && (self.eof()
+                        || self.newline() && close != sym::RBRACE
+                        || matches!(self.word(0), sym::RPAREN | sym::RBRACKET | sym::RBRACE)))
+        {
+            let required = self.symbols.text(close);
+            let declared = if self.eof() {
+                "end of file"
+            } else {
+                self.text_token(self.index())
+            };
+            let mut diagnostic = Diagnostic::error(
+                "LANG-5",
+                self.current.span,
+                format!(
+                    "expected `{required}` to close `{}`",
+                    self.text_token(self.significant[opener])
+                ),
+            )
+            .with_comparison(declared, required);
+            diagnostic
+                .causal
+                .push(self.tokens[self.significant[opener]].span);
+            self.diagnostics.push(diagnostic);
+            return Err(());
+        }
         self.fail_expected(
             "LANG-5",
             self.symbols.text(word),
@@ -463,14 +513,7 @@ impl Parser<'_> {
             && !(self.at(sym::SCOPED) && self.word(1) == sym::FN)
     }
     fn recover(&mut self, start: usize, item: bool) {
-        let mut braces = 0usize;
-        for i in start..self.pos {
-            match self.tokens[self.significant[i]].symbol {
-                sym::LBRACE => braces += 1,
-                sym::RBRACE => braces = braces.saturating_sub(1),
-                _ => {}
-            }
-        }
+        let outer = self.delimiters.partition_point(|&(pos, _)| pos < start);
         if self.pos == start && !self.eof() && (item || !self.at(sym::RBRACE)) {
             self.bump();
         }
@@ -478,21 +521,24 @@ impl Parser<'_> {
             if self.item_start() && self.newline() {
                 break;
             }
-            if braces == 0 {
+            let inner = &self.delimiters[outer..];
+            if !inner.iter().any(|&(_, close)| close == sym::RBRACE) {
                 if !item && (self.at(sym::RBRACE) || self.newline()) {
                     break;
                 }
-                if self.eat(sym::SEMICOLON) {
+                if inner.is_empty() && self.at(sym::SEMICOLON) {
+                    self.bump();
                     break;
                 }
             }
-            match self.word(0) {
-                sym::LBRACE => braces += 1,
-                sym::RBRACE => braces = braces.saturating_sub(1),
-                _ => {}
+            if matches!(self.word(0), sym::RPAREN | sym::RBRACKET | sym::RBRACE)
+                && let Some(i) = inner.iter().rposition(|&(_, close)| self.at(close))
+            {
+                self.delimiters.truncate(outer + i + 1);
             }
             self.bump();
         }
+        self.delimiters.truncate(outer);
     }
     fn text_token(&self, i: usize) -> &str {
         let s = self.tokens[i].span;
@@ -631,7 +677,7 @@ impl Parser<'_> {
             let mut fields: Nodes = smallvec![];
             while !self.eat(sym::RBRACE) {
                 if self.eof() {
-                    return self.fail("LANG-5", "unclosed fields");
+                    return self.expected(sym::RBRACE);
                 }
                 let fs = self.pos;
                 let removed = self.at(sym::REMOVED) && self.word(1) != sym::COLON;
@@ -1007,7 +1053,7 @@ impl Parser<'_> {
         let result = (|| {
             while !self.eat(sym::RBRACE) {
                 if self.eof() || self.item_start() {
-                    return self.fail("LANG-5", "unclosed block");
+                    return self.expected(sym::RBRACE);
                 }
                 if self.eat(sym::SEMICOLON) {
                     continue;
@@ -1401,7 +1447,7 @@ impl Parser<'_> {
             let mut c: Nodes = smallvec![subject];
             while !self.eat(sym::RBRACE) {
                 if self.eof() {
-                    return self.fail("LANG-5", "unclosed match");
+                    return self.expected(sym::RBRACE);
                 }
                 let st = self.pos;
                 let mut a: Nodes = smallvec![self.pattern()?];

@@ -734,6 +734,7 @@ fn emit_module(
                 step_counter: None,
                 neutral_step_call: false,
                 view_invariants: Vec::new(),
+                view_ends_before_exit: false,
                 aliases,
                 pointer_origins: if facts {
                     storage::pointer_origins(body, &module.signatures[f.signature.index()])
@@ -971,6 +972,13 @@ fn emit_module(
                         e.view_invariants.push((token, pointer, bytes));
                     }
                 }
+                // The inliner prices a loop body with its exits. Keep the
+                // ends on the incoming paths of an existing scoped exit so
+                // folding the epilogue does not change that decision early.
+                e.view_ends_before_exit = !e.view_invariants.is_empty()
+                    && attrs.inline == Inline::Default
+                    && e.scoped.slots.iter().any(|&scoped| scoped)
+                    && !empty::loop_free(body);
             }
             let fills = hirsel_core_ir::fills::fills(body);
             e.br(Label::block(0u32));
@@ -1621,6 +1629,7 @@ struct FunctionEmitter<'a> {
     step_counter: Option<Value>,
     neutral_step_call: bool,
     view_invariants: Vec<(Value, Value, u64)>,
+    view_ends_before_exit: bool,
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
@@ -1741,20 +1750,24 @@ impl FunctionEmitter<'_> {
         self.effect(Operation::Conditional(c, yes, no, false));
     }
     fn ret(&mut self, t: &Type, v: &Value) {
-        if !self.to_exit(Some((t, v))) {
-            self.end_view_invariants();
-            self.flush_steps();
-            self.end_scoped();
-            self.effect(Operation::Return(Some((t, v))));
-        }
+        self.return_from(Some((t, v)));
     }
     fn ret_void(&mut self) {
-        if !self.to_exit(None) {
+        self.return_from(None);
+    }
+    fn return_from(&mut self, value: Option<(&Type, &Value)>) {
+        if self.view_ends_before_exit {
             self.end_view_invariants();
-            self.flush_steps();
-            self.end_scoped();
-            self.effect(Operation::Return(None));
         }
+        if self.to_exit(value) {
+            return;
+        }
+        if !self.view_ends_before_exit {
+            self.end_view_invariants();
+        }
+        self.flush_steps();
+        self.end_scoped();
+        self.effect(Operation::Return(value));
     }
     /// Branches a return to the shared exit to end scoped slots and view
     /// invariants once.
@@ -1795,14 +1808,16 @@ impl FunctionEmitter<'_> {
             let v = self.emit(Operation::Phi(&t, &incoming));
             (t, v)
         });
-        self.end_view_invariants();
+        if !self.view_ends_before_exit {
+            self.end_view_invariants();
+        }
         self.end_scoped();
         self.effect(Operation::Return(value.as_ref().map(|(t, v)| (t, v))));
     }
     /// Keep a raised status out of the ordinary return's result phi so LLVM
     /// can optimize the normal result and the failure path separately.
     fn to_raised_exit(&mut self) -> bool {
-        if self.view_invariants.is_empty() {
+        if self.view_ends_before_exit || self.view_invariants.is_empty() {
             return false;
         }
         let exit = self.raised_exit.get_or_insert_with(|| RaisedExit {

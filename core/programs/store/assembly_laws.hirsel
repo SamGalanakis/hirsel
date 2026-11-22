@@ -266,7 +266,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     result.unwrap(durable(mut db, ticket(complete)))
     let original_at = 0x8000_0000_0000_0000u64
     db.heads[0].at = original_at
-    let plan = Plan(n_e: 4096, s_e: 8192, reply_max: 4096)
+    let plan = Plan(n_e: 8192, s_e: 8192, reply_max: 4096)
     if room_refusal { db.ceiling = db.resident }
     let fault_at = if room_refusal { original_at + 1u64 } else { original_at }
     let tried = serve(mut db, take complete, plan, Some(take rec),
@@ -274,10 +274,9 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let (take stopped, way) = match take tried {
         Ok(Failed(take pending_run, Raised(2u32))) if !room_refusal => (take pending_run, 1u8),
         // The admitted row costs 118 (62 + 8 + 48). The replied row costs
-        // 126 (62 + 8 + 56, its value 41 + 8 rounded up). Its stream-only
-        // frame adds 108 (59 + that 49-byte value) and CALL adds 158
-        // (22 + 32 + 16 + 8 + 32 + 48), so the refusal requests 392.
-        Ok(NoRoom(take pending_run, reason)) if room_refusal && reason.requested == 392 &&
+        // 126 (62 + 8 + 56, its value 41 + 8 rounded up). Its frame uses
+        // journal credit, so the resident refusal requests 126.
+        Ok(NoRoom(take pending_run, Resident(reason))) if room_refusal && reason.requested == 126 &&
             reason.available == 118 => (take pending_run, 2u8),
         _ => return false,
     }

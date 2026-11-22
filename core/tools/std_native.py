@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 
 from case_progress import Case
 
@@ -555,9 +556,12 @@ def source_manifest(root, package, modules, source, *, replace=False):
         {'package': core, 'sources': library_sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': library_sources(root / 'core/std', False), 'dependencies': [core]}]
     if package == 'store':
+        directory = root / 'core/programs/store'
+        with (directory / 'hirsel.toml').open('rb') as manifest:
+            sources = tomllib.load(manifest)['sources']
         packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
-                         'sources': [{'file': str(root / 'core/programs/store' / (name + '.hirsel')),
-                                      'modules': [name], 'signatures': False} for name in ['runner', 'store', 'ingress', 'triggers']]})
+                         'sources': [{'file': str(directory / name), 'modules': module.split('.'), 'signatures': False}
+                                     for name, module in sources.items()]})
     files = next(p['sources'] for p in packages if p['package']['name'] == package)
     if replace:
         original = next(f for f in files if f['modules'] == modules)

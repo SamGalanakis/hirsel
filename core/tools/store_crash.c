@@ -72,6 +72,16 @@ extern HirselCoreHostOutcome __real_hirsel_core_host_rename(HirselCoreContext*,u
 HirselCoreHostOutcome __wrap_hirsel_core_host_rename(HirselCoreContext *ctx,uint64_t handle,HirselCoreBuffer *from,HirselCoreBuffer *to,uint64_t site) {
     cancel_wait(ctx); return __real_hirsel_core_host_rename(ctx,handle,from,to,site);
 }
+extern HirselCoreHostOutcome __real_hirsel_core_host_at(HirselCoreContext*,uint8_t,uint64_t,uint64_t,HirselCoreBuffer*,uint64_t);
+HirselCoreHostOutcome __wrap_hirsel_core_host_at(HirselCoreContext *ctx,uint8_t op,uint64_t handle,uint64_t at,HirselCoreBuffer *data,uint64_t site) {
+    cancel_wait(ctx);
+    return __real_hirsel_core_host_at(ctx,op,handle,at,data,site);
+}
+extern HirselCoreHostOutcome __real_hirsel_core_host_stat(HirselCoreContext*,uint8_t,uint64_t,HirselCoreBuffer*,uint8_t,uint64_t);
+HirselCoreHostOutcome __wrap_hirsel_core_host_stat(HirselCoreContext *ctx,uint8_t op,uint64_t handle,HirselCoreBuffer *data,uint8_t mode,uint64_t site) {
+    cancel_wait(ctx);
+    return __real_hirsel_core_host_stat(ctx,op,handle,data,mode,site);
+}
 extern HirselCoreTransfer __real_hirsel_core_send(HirselCoreContext*,HirselCoreChannel*,void*,uint64_t);
 HirselCoreTransfer __wrap_hirsel_core_send(HirselCoreContext *ctx,HirselCoreChannel *channel,void *value,uint64_t site) {
     cancel_wait(ctx); return __real_hirsel_core_send(ctx,channel,value,site);
@@ -98,17 +108,19 @@ static void schedule_event(void *state,HirselCoreEvent event) {
 /* journal-ack (L24 (iv)(a)): each Sync answers Until(now) twice, so it stays
  * parked across exactly one scheduler turn of the other tasks. Counted in
  * turns, not time: an expired Until re-runs wait at the next turn. */
-static struct { int enabled; uint64_t token[64], calls[64]; } hold;
+static struct { int enabled, schedule_probe; uint64_t token[64], calls[64]; } hold;
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
     (void)state;
     /* SleepUntil (the runner's deadline timers) waits on host time and never reaches the
      * W2 filesystem; its deadlines are far, so a timer ends only by being dropped. */
     if(request->operation==15) return (HirselCoreWait){1,UINT64_MAX};
-    if(hold.enabled && request->operation==16) {
+    const int probe=hold.schedule_probe && request->operation==12 &&
+        request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
+    if((hold.enabled && request->operation==16) || probe) {
         /* Tokens are unique per operation; concurrent syncs keep separate counts. */
         uint64_t *calls=&hold.calls[token%64];
         if(hold.token[token%64]!=token) {hold.token[token%64]=token; *calls=0;}
-        if((*calls)++<2) {
+        if((*calls)++<(probe?1u:2u)) {
             struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
             return (HirselCoreWait){1,(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec};
         }
@@ -143,7 +155,7 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
     HirselCoreHostOutcome out=store_crash_op(state,r->operation,r->mode,r->handle,
         used_path,path_len,r->buffer.data,r->buffer.len,r->buffer.capacity);
     if(!out.error.tag) {
-        if(r->operation==1) r->buffer.len+=(size_t)out.value;
+        if(r->operation==1 || r->operation==37) r->buffer.len+=(size_t)out.value;
         if(r->operation==18) r->buffer.len+=(size_t)out.written;
     }
     if(parked.enabled && (r->operation==16 || r->operation==17)) {
@@ -229,6 +241,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
         parked.phase=phase; parked.worker=0;
         hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
+        hold.schedule_probe=seed && phase==1 &&
+            (!strcmp(scenario,"journal-group") || !strcmp(scenario,"journal-rotate"));
         const char *expected=store_crash_acked(state)?"new":"prefix";
         char floor[32];
         snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));

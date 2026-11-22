@@ -168,17 +168,33 @@ impl Bridge {
                     ..Outcome::default()
                 }
             }
-            1 => {
+            1 | 37 => {
                 let file = self
                     .files
                     .get_mut(&handle)
                     .expect("live provider descriptor");
                 let bytes = self.fs.read(&file.name).unwrap_or(&[]);
-                let count = (data.len() - len).min(bytes.len().saturating_sub(file.cursor));
-                data[len..len + count].copy_from_slice(&bytes[file.cursor..file.cursor + count]);
-                file.cursor += count;
+                let offset = if op == 37 {
+                    let position = u64::from_le_bytes(path.try_into().expect("ReadAt offset"));
+                    usize::try_from(position).unwrap_or(usize::MAX)
+                } else {
+                    file.cursor
+                };
+                let remaining = bytes.get(offset..).unwrap_or(&[]);
+                let count = (data.len() - len).min(remaining.len());
+                data[len..len + count].copy_from_slice(&remaining[..count]);
+                if op == 1 {
+                    file.cursor += count;
+                }
                 Outcome {
                     value: count as u64,
+                    ..Outcome::default()
+                }
+            }
+            47 => {
+                let file = self.files.get(&handle).expect("live stat descriptor");
+                Outcome {
+                    value: self.fs.read(&file.name).unwrap_or(&[]).len() as u64,
                     ..Outcome::default()
                 }
             }

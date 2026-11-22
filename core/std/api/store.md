@@ -1,8 +1,8 @@
 # Store
 
 Package `store`, root module `store` (reached as `store.x`, LANG-7), implements the M4 store in Hirsel over
-`std.omap.OMap[Bytes, Arc[Bytes]]`. Keys remain inline and stored values are shared
-when a path is copied. The S1 package has memory stores, typed tables and
+copy-on-write B+ trees of packed pages. Each table and index has its own
+tree. The S1 package has memory stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
 CallInfo, followers, resident admission and foreign-handle checks.
 
@@ -36,9 +36,9 @@ while ids identify table and index incarnations and are never reused.
 runs on a reader task without a Db. The checker refuses a write or `info(mut tx)`
 in that body with OWN-5. CallInfo belongs only to `run` and helpers taking mut Tx.
 `changes(a, b)` compares data-tree bytes in ascending logical key order, skipping
-shared nodes by node id. Each change holds an Arc to its stored value. Deletions have value None. Different stores or opens
+shared pages by stamp. Each change holds an Arc to its stored value. Deletions have value None. Different stores or opens
 are Foreign; branches of one open are allowed. Catalog and stream roots do not
-contribute changes. Node visits are O(k log n), where k counts keys written
+contribute changes. Page visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage
 for w keys whose values differ, with w <= k.
 
@@ -73,21 +73,22 @@ index entries with equal keys are neither repeated nor skipped. A different
 Snapshot gives `Moved(version)`, and another incarnation gives `Stale(id)`. The
 law is L36.
 
-The resident account is `62 + r8(key length) + r8(value length)` per live entry,
-exact after each memory commit on main without pins or other branches. An
-overwrite replaces the previous entry's charge and an ordinary main-branch
-delete subtracts. Accounting with retained roots is conservative between cuts.
-Issued node-id ranges are logged before a map operation, so a
-fault or Capacity cannot return issued ids to the allocator.
+The logical account charges each distinct row version
+`62 + r8(key length) + r8(value length)` and each distinct collection 126
+bytes. It is exact on main without pins or other branches. Accounting with
+retained roots can be conservative between settles. The writer logs reserved
+stamp ranges before editing pages and consumes them even if the body fails.
 
 The transaction limit is 16,777,280 COMMIT payload bytes, excluding the 16-byte
 head. Body-time arithmetic enforces it before publishing. The account uses the
 stored value's length, including its schema number, when subtracting an old row.
 
-The contract follows STORE-SPEC v2.20. `open(tasks, dir, clock, random, options)`
-locks the directory, decodes its manifest and packs, replays journal frames and
-rotates to a new segment. Zero `group_commits` or `group_bytes` returns
-`Missing` naming that field before taking LOCK; memory ignores these bounds.
+The disk contract follows STORE-SPEC v2.40 §11.
+`open(tasks, dir, clock, random, options)` validates the options, locks the
+directory, and validates the selected manifest and page graph before removing
+unreachable files. It replays the journal and rotates to a new segment.
+Zero `group_commits` or `group_bytes` returns `Missing` naming that field
+before taking LOCK. Memory ignores these bounds.
 The journal queue holds twice `group_commits` messages. Frames use a 16-byte
 head and seed-zero XXH3-64 bound to store identity, role, sequence, offset,
 head bytes 0–8 and payload. Unknown optional frames are checked and skipped.
@@ -102,10 +103,11 @@ failure leaves covered results deliverable and fails uncovered tickets.
 The source's delivery callback owns the request and can drop a disconnected
 client's reply. Grouping changes I/O only. END records identify synced
 boundaries, while recovery stops at a torn last tail. `checkpoint` rotates
-before taking its cut, writes only new nodes, and publishes the manifest after
-packs are synced and named. Capacity refuses a cut without poisoning or ending
-the worker; a later cut can retry. Schema changes publish on the cut's ack.
-`close` waits for frames and cuts, joins both tasks, releases LOCK, and returns
+before taking its cut. The writer emits fresh and relocated pages and blobs,
+then publishes the manifest after the packs are synced and named. An allocation
+refusal leaves the selected generation and journal available for a later cut.
+Schema changes publish with the cut.
+`close` waits for frames, joins the journal task, releases LOCK, and returns
 the first stored I/O error. It never requests a cut. Snapshots remain readable.
 
 The journal ack channel holds 3 × `group_commits` + 3 acks (`open` returns
@@ -114,9 +116,9 @@ task's ack send never waits.
 
 `recorded(db, branch, version)` waits on a write barrier without consuming
 journal acks, skipping it only when every frame this Db has sent is acked. It
-returns a CALL section from live segments. Compaction is
-measured by the latest cut this Db has taken, with the previous cut restored
-when a refusal is learned. A covering cut or memory mode gives None. A journal
+returns the CALL attached to a Replied operation in the live segments.
+The last published generation sets the boundary. A covering cut or memory
+mode gives None. A journal
 failure is retained on the write-notice channel, so repeated calls return the
 same `Poisoned` error. CALL carries key, args, stream and revision; the frame
 supplies CallInfo and the stream operation supplies position. `revision` is the
@@ -141,15 +143,15 @@ again with the bound digest and answers `Abandoned` with the new ticket. Below
 latest is `HistoryUnavailable`, and above `latest + 1` is `Rejected(latest)`.
 An admit over `resident_limit` is `Full` and binds nothing. `reply(mut tx,
 stream, p, r)` is `Missing("reply")` unless the stream is Admitted at `p`,
-and keeps the bound digest. `record(mut tx, call)` adds the CALL
-section once (`Exists("call")` after that) and is `Missing("reply")` unless
-this Tx replied on the call's stream. Each stream op adds `9 + key + value`
-COMMIT bytes, with a value of `41 + reply`, and a CALL `17 + key + args +
-stream + revision`; a frame with only stream ops has no data head. A body that
+and keeps the bound digest. `record(mut tx, call)` attaches one CALL to the
+transaction's Replied stream operation. It returns `Exists("call")` for a
+second CALL and `Missing("reply")` unless the transaction replied on that
+stream. A stream operation adds `9 + key + value` bytes, with a value of
+`41 + reply`. A CALL adds `17 + key + args + revision + code` bytes, plus 24
+for a nonzero settle. A frame with only stream operations has no data section. A body that
 returns Error after a reply commits its reply writes and CALL on the base data
 and catalog (F2) and answers `Undone { value, ticket: Some(t) }`; past the
-admission bound it is `Refused` and keeps nothing. The I4 settle re-encodes
-every section.
+admission bound it is `Refused` and keeps nothing.
 
 The store does no authorization (STORE v2.30 AN1): a Tx may read and write
 every key of its store. A program decides access itself, from the Caller it is
@@ -162,10 +164,10 @@ between subscriptions, so one Caller's result never reaches another.
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
 from)` makes a branch at a Snapshot of this open. Before making a cut, it
-counts the exact union of nodes reached by the proposed heads and existing
-named pins against `resident_limit` (§1.11 I4). Shared nodes count once, and
-nodes previously held only by a reader count if the new head reaches them.
-If the union exceeds the limit, `fork` returns `Full` with the exact requested
+counts the distinct row versions and collections reached by the proposed
+heads and named pins against `resident_limit` (AP15). A row version previously
+held only by a reader joins the account if the new head reaches it.
+If the account exceeds the limit, `fork` returns `Full(Resident(c))` with the exact requested
 bytes and the limit. It makes no cut and creates no branch. `branch(db, name)`
 finds a branch.
 `adopt(mut db, b)` makes b's head main's head only when b is not main, b's parent
@@ -203,18 +205,16 @@ successor segment whose HEADER binds their end. An empty journal, consecutive
 cuts and Barrier-only traffic require no additional ack. A failed prior sync or
 a closed rotation sender poisons the Db and takes no Cut.
 
-## M1 target (not yet built)
+## Format 3
 
-Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.40 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
-it to built. Everything above describes the store as built.
+STORE-SPEC §11 specifies the paged store. The scoped view API in AP12
+and journaled fork in AP17–AP19 are follow-up slices.
 
-- **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
-  target) in place of `std.omap` nodes. A cut writes each page in canonical form;
-  a published in-memory image may be unsealed, and readers find entries by slot
+- **Pages.** Trees use packed pages (`Arc[Page]`, 4 KiB target). A cut writes
+  the canonical format. A published in-memory image may be unsealed, and readers find entries by slot
   (AP2, AP3).
 - **Format 3.** A format-2 directory is `Unsupported(format)`, with no migration.
-  The new kinds are PAGE, BLOB, FORK and MANIFEST 0x0031. NODE 0x0020 and
+  The new kinds are PAGE, BLOB and MANIFEST 0x0031. NODE 0x0020 and
   MANIFEST 0x0030 are retired and refused whatever their MUST bit (AP1). The
   MANIFEST's pack and retirement lists are page trees in their own packs, so
   the MANIFEST holds only fixed fields and branch and pin records, and no cut
@@ -234,18 +234,18 @@ it to built. Everything above describes the store as built.
   `VALUE_LIMIT` = 16,711,680 bytes (`Limit(Value)`); readers check only format
   3's fixed decode ceiling, so a value stored under a larger limit stays
   readable (AP4, AP8).
-- **Writes.** A Tx copies a page on its first write to it and edits that private
-  copy in place afterwards. A body never edits a page the head shares, so a
-  failed, aborted, stopped or refused body leaves the head untouched. A
-  writer-side apply on a published head makes every fallible step first
-  (AP9, AP10). `migrate` sorts its output, refuses duplicate keys with
-  `Exists`, and builds bottom-up. It charges its workspace and its catalog
-  rows while it collects, and publishes only if the exact account of the roots
-  it would publish fits (AP13).
-- **Reads.** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` return the raw
-  stored bytes as `Option[View[Bytes]]` anchored to the Tx or Snapshot. The owned
-  `fetch` and `get` decode from the view, transcoding old-schema rows.
-  `scan_bytes` returns a `ViewRows`, a scoped cursor that is not `send`:
+- **Writes.** A Tx stages row and stream edits against an immutable head.
+  Its reads see the staged values and deletes. It builds a private tree when a
+  cursor needs page-backed rows. The writer checks admission and prepares
+  storage before applying under a continuously unique path (AP9, AP10).
+  Failing, aborting or refusing the body leaves the head unchanged.
+  `migrate` sorts the output, refuses duplicate keys with `Exists`, and builds
+  bottom-up. It publishes only if the exact account of its new roots fits
+  (AP13).
+- **Planned view reads (AP12).** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` will return the raw
+  stored bytes as `Option[View[Bytes]]` anchored to the Tx or Snapshot.
+  The owned `fetch` and `get` already transcode old-schema rows.
+  The planned `scan_bytes` returns a scoped `ViewRows` cursor:
   it is declared `pub opaque scoped type ViewRows`, like `RangeRows`.
   `next_view(mut c)` returns the next logical key, and `value_view(c)` the
   current value as `View[Bytes] in c`; on `Poisoned` the cursor does not move
@@ -280,10 +280,10 @@ it to built. Everything above describes the store as built.
 - **Journal cap.** Until a cut succeeds the journal keeps growing, up to
   `journal_limit` (default 268,435,456 bytes; at least `checkpoint_bytes` +
   `FRAME_LIMIT`, or open is `Full(Journal(c))` before it takes the lock). The
-  journal counts accepted COMMIT and FORK bytes. A write whose frame would pass
+  journal counts accepted COMMIT bytes. A write whose frame would pass
   the limit is refused at once, never waiting, through each operation's own
-  result: `run` and `run_on` return `Refused(Journal(c))`, a committing `admit`
-  and a live-head `fork` return `Full(Journal(c))`, `serve` returns
+  result: `run` and `run_on` return `Refused(Journal(c))`. A committing `admit`
+  returns `Full(Journal(c))`, `serve` returns
   `Before(Full(Journal(c)), None)`, and `conclude` returns
   `Before(Full(Journal(c)), Some(p))`, handing its Pending back so a retry after
   a checkpoint writes the original context. Here c is
@@ -291,17 +291,11 @@ it to built. Everything above describes the store as built.
   A journal refusal is never `NoRoom`, so it never counts toward a claim's
   resident refusals or settle 2. A `checkpoint` or any other cut-made
   operation is the way out (AP15, AP16).
-- **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
-  journal frame, waits for its sync, and returns the branch with an already
-  durable journal ticket: no walk, settle or cut, the account is unchanged, and
-  it is never refused by admission. Everything that can fail (allocation, and
-  the journal cap) is checked before the frame is sent and returns with nothing
-  sent; its latency is O(1), one group sync. A failed send
-  poisons the Db.
-  A fork from an older Snapshot still makes a cut. The empty name is allowed.
+- **Fork.** A disk `fork` makes a cut for any Snapshot of the open, including a
+  Snapshot at a live branch head. The empty name is allowed.
   A fork past the id counter is `Limit(Ids)`. A fork or `pin` whose record
   would take the branch and pin records past 16 MiB is `Limit(Manifest)`; the
-  pack lists never cause it (AP4, AP17–AP19).
+  pack lists never cause it (AP4).
 - **Install.** A release install edits each collection by remove (a dropped id,
   with its empty drop record), replace (a created id; zero rows give an empty
   collection) or keep (no range). A schema-only change to a populated table keeps its rows,

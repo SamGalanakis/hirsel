@@ -49,7 +49,7 @@ fn encode[A: codec](a: A) -> Result[Bytes, store.Error] {
 }
 
 fn stored_bytes(take raw: Result[Bytes, Capacity]) -> Result[Bytes, store.Error] {
-    match take raw { Ok(take data) => Ok(take data), Error(cap) => Error(Full(cap)) }
+    match take raw { Ok(take data) => Ok(take data), Error(cap) => Error(Full(Allocation(cap))) }
 }
 
 fn decode[A: codec](raw: Bytes) -> Result[A, store.Error] {

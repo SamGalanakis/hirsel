@@ -231,7 +231,7 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
     let on_disk = match backing { Memory => false, _ => true }
     if on_disk {
         let journal: u64 = int.widen(options.group_bytes)
-        total = int.saturating_add(total, options.checkpoint_task_bytes)
+        total = int.saturating_add(total, order.max(options.pack_bytes, 16777476))
         total = int.saturating_add(total, if journal > 16777296u64 { journal } else { 16777296u64 })
     }
     int.saturating_add(total, 2097152u64)
@@ -529,6 +529,14 @@ fn check_call_reserve(n_e: u64, s_e: u64) -> Result[(), RegisterError] {
 
 fn room(c: Capacity) -> Room {
     Room(requested: c.requested, available: c.available)
+}
+
+fn store_capacity(cause: store.StoreCapacity) -> Capacity {
+    match cause {
+        Journal(c) => c,
+        Resident(c) => c,
+        Allocation(c) => c,
+    }
 }
 
 // RUNNER-SPEC §1.1's fixed Bad.kind table.
@@ -1103,7 +1111,7 @@ pub opaque type Cover: send {
 pub fn cover[K, V](t: store.Shape[K, V], lo: store.Bound[K], hi: store.Bound[K]) -> Result[Cover, Capacity] {
     let (take low, take high) = match store.key_span(t, lo, hi) {
         Ok(Span(take l, take h)) => (take l, take h),
-        Error(Full(c)) => return Error(c),
+        Error(Full(c)) => return Error(store_capacity(c)),
         _ => fail("runner: a Cover's bounds do not encode"),
     }
     let mine: store.Shape[K, V] = clone(t)
@@ -1174,7 +1182,7 @@ fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], s: sto
             }
         },
         Ok(Ok(Failed(cs))) => Stopped(Failed(Raised(raised(cs)))),
-        Ok(Ok(Refused(c))) => Stopped(Failed(OutOfBytes(room(c)))),
+        Ok(Ok(Refused(c))) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
         Ok(Ok(Stopped(e))) => Stopped(Failed(OutOfTime(e.steps))),
         Ok(Error(e)) => Lost(e),
         Error(c) => Stopped(Refused(Budget(room(c)))),
@@ -1589,7 +1597,7 @@ fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, input
 
 fn projection_error(take e: store.Error) -> Queried {
     match take e {
-        Full(c) => Stopped(Failed(OutOfBytes(room(c)))),
+        Full(c) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
         take other => Lost(take other),
     }
 }
@@ -2559,7 +2567,7 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
     let _ = take temporary
     match take ended {
         Ok(()) => Ok(()),
-        Error(Store(Full(cap))) => Error(Full(cap)),
+        Error(Store(Full(cap))) => Error(Full(store_capacity(cap))),
         Error(take problem) => Error(Open(take problem)),
     }
 }
@@ -2633,7 +2641,7 @@ fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenEr
 fn activation_identity(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> Result[Bytes, OpenError] {
     match replay_identity_of(place_id, migrate_id, handles_id) {
         Ok(take digest) => Ok(take digest),
-        Error(problem) => Error(Store(Full(problem))),
+        Error(problem) => Error(Store(Full(Allocation(problem)))),
     }
 }
 
@@ -2710,7 +2718,7 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
     let source = prepare_result(store.open_export(p.scratch, p.clock, p.attempt, p.options))?
     let digest = match launch_digest() {
         Ok(take hash) => take hash,
-        Error(c) => return Error(Open(Store(Full(c)))),
+        Error(c) => return Error(Open(Store(Full(Allocation(c))))),
     }
     if list.len(digest) != 32 || digest != p.image_digest { return Error(Identity) }
     let registered = match placed(p.place, p.n_place) {
@@ -2730,7 +2738,8 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
     let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
     let ReleaseRecord(release: take release, digest: take image) = take record
     let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
-        resident_limit: p.options.resident_limit, checkpoint_task_bytes: p.options.checkpoint_task_bytes)
+        resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes,
+        checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit)
     prepare_result(store.write_prepared(source, staged, p.scratch, take target))
 }
 
@@ -2751,7 +2760,7 @@ fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.D
 fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
     let description = match prepare_activation(reg, n_place) {
         Ok((take description, _)) => take description,
-        Error(Full(c)) => { store.release_export(mut db, request.attempt); return Error(Store(Full(c))) },
+        Error(Full(c)) => { store.release_export(mut db, request.attempt); return Error(Store(Full(Allocation(c)))) },
         Error(_) => { store.release_export(mut db, request.attempt); return Error(Drift) },
     }
     let selected = current_description(db)
@@ -3210,7 +3219,7 @@ fn record_request(q: Request, revision: Option[Bytes], n: u64, s: u64, replay_id
     let rev = match revision { Some(bytes_in) => Some(copy_bytes(bytes_in)?), None => None }
     let code = match code_bytes(n, s, replay_identity) {
         Ok(take bytes_in) => take bytes_in,
-        Error(problem) => return Error(Full(problem)),
+        Error(problem) => return Error(Full(Allocation(problem))),
     }
     Ok(store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev, code: take code))
 }
@@ -3227,7 +3236,7 @@ fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes
     }
     match encode_runner_reply(outcome) {
         Ok(take wire_bytes) => if keep { Ok(take wire_bytes) } else { Error(take wire_bytes) },
-        Error(Full(problem)) => { store.body_capacity(mut tx, problem); Error(list.new()) },
+        Error(Full(problem)) => { store.body_capacity(mut tx, store_capacity(problem)); Error(list.new()) },
         Error(_) => fail("runner: reply encoding failed"),
     }
 }
@@ -3275,8 +3284,8 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Request, take complete:
         Ok(Kept(take receipt)) => answered(mut hd, take q, take receipt),
         Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)),
         Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
-        Error(Before(Full(_))) => commitless(mut hd, take q, Refused(Overloaded)),
-        Error(Before(take problem)) => Error(take problem),
+        Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(take problem, _)) => Error(take problem),
         Error(After(take problem)) => Error(take problem),
     }
 }
@@ -3299,7 +3308,8 @@ fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take pendin
             worker(mut hd, take q, take outcome, receipt.ticket, version)
         },
         Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
-        Error(Before(take problem)) => Error(take problem),
+        Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(take problem, _)) => Error(take problem),
         Error(After(take problem)) => Error(take problem),
         _ => fail("runner: invalid conclude outcome"),
     }
@@ -3453,7 +3463,7 @@ type TriggerDrive[G: send] {
 
 fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let tables = store.with_schema(db, code.describe(triggers.tables))?
-    let image = match launch_digest() { Ok(take digest) => take digest, Error(cap) => return Error(Full(cap)) }
+    let image = match launch_digest() { Ok(take digest) => take digest, Error(cap) => return Error(Full(Allocation(cap))) }
     let stamp = if list.len(image) == 0u64 { copy_bytes(revision)? } else { take image }
     let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
     let (grants, inbox): (Sender[GrantRequest[G]], Receiver[GrantRequest[G]]) = channel.new(1u64)
@@ -3605,7 +3615,10 @@ fn invoke_trigger_transaction[G: send, H: send](mut db: store.Db, r: Registry[G,
             Ok(Aborted(store.Undone(value: Store(take problem), ..))) => return Error(trigger_store_error(take problem)),
             Ok(Failed(causes)) => Raised(raised(causes)),
             Ok(Stopped(limit)) => OutOfTime(limit.steps),
-            Ok(Refused(cap)) => OutOfBytes(cap.requested, cap.available),
+            Ok(Refused(cause)) => {
+                let cap = store_capacity(cause)
+                OutOfBytes(cap.requested, cap.available)
+            },
             Error(take problem) => return Error(take problem),
         }
     } else { Gone }
@@ -3650,7 +3663,7 @@ fn launch_trigger[G: send, H: send](r: Registry[G, H], mut drive: Box[TriggerDri
     let source = FromPlace(channel.sender(drive.grants), take context)
     let raw: Bytes = match copy_bytes(triggers.argument(p)) {
         Ok(take payload) => take payload,
-        Error(Full(cap)) => return Error(Budget(room(cap))),
+        Error(Full(cap)) => return Error(Budget(room(store_capacity(cap)))),
         Error(_) => return Error(NoEntry),
     }
     let notice = TriggerReport(attempt: a, to: channel.sender(drive.to))
@@ -3802,7 +3815,7 @@ fn mark_trigger_hold[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDri
     match take written {
         Ok(Committed(done)) => { publish_trigger(mut hd, done.ticket)?; Ok(Ok(())) },
         Ok(Aborted(store.Undone(value: take problem, ..))) => Ok(Error(take problem)),
-        Ok(Refused(cap)) => Ok(Error(Capacity(cap))),
+        Ok(Refused(cap)) => Ok(Error(Capacity(store_capacity(cap)))),
         Error(take problem) => Error(take problem),
         _ => Error(Missing("trigger hold")),
     }
@@ -3819,7 +3832,7 @@ fn trigger_effect[G: send, H: send](mut hd: Head[G, H], trigger_tables: triggers
         Ok(Aborted(store.Undone(value: Refusal(take problem), ..))) => Ok(Error(take problem)),
         Ok(Failed(causes)) => Ok(Ok(Failed(Raised(raised(causes))))),
         Ok(Stopped(limit)) => Ok(Ok(Failed(OutOfTime(limit.steps)))),
-        Ok(Refused(cap)) => Ok(Error(Capacity(cap))),
+        Ok(Refused(cap)) => Ok(Error(Capacity(store_capacity(cap)))),
         Error(take problem) => Error(take problem),
     }
 }

@@ -37,7 +37,7 @@ def main():
         app.write_text((ROOT / 'core/programs/store/index_bench.hirsel').read_text())
         manifest = inputs(ROOT)
         for source in manifest['packages'][-1]['sources']:
-            if source['modules'] == ['store']:
+            if Path(source['file']).name == 'store.hirsel':
                 source['file'] = str(frozen)
         manifest['packages'][-1]['sources'].append(dict(file=str(app), modules=['index_bench'], signatures=False))
         path = directory / 'inputs.json'

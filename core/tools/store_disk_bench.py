@@ -71,7 +71,7 @@ def main():
             command(command_line, out / (binary + '-build.json'), build_env)
             print('prepared', binary, flush=True)
         (out / f'environment{suffix}.json').write_text(json.dumps(dict(
-            artifacts=identity, root_limit=1073741824, task_limit=262400276,
+            artifacts=identity, root_limit=1073741824,
             population='R4/R5 16 keys after 64 durable commits, 100k R6/R7/migrate, 1M R8; Account codec30 with schema2, tree key12',
             indexes='none or one J=id%4', sample='one per configuration',
             cpu=16, protocol='READY/DONE; population, validation and final drops excluded'), indent=2) + '\n')
@@ -90,13 +90,13 @@ def main():
                         row = measure([out / (profile + suffix), mode, str(index)], out, env, tag, n,
                                       host_directory=host, events=None if args.allocations else 'instructions:u')
                         text = (out / tag / 'stdout').read_text()
-                        extra = re.search(r'PACK_BYTES (\d+) NEW_NODES (\d+) ACCOUNT (\d+)\n', text)
+                        extra = re.search(r'PACK_BYTES (\d+) NEW_PAGES (\d+) ACCOUNT (\d+)\n', text)
                         journal = re.search(r'COMMITS (\d+) VERSION (\d+)\n', text)
                         row.update(profile=profile, workload=mode, indexes=index, artifacts=identity)
                         if mode in ('R4', 'R5') and journal:
                             row.update(commits=int(journal[1]), version=int(journal[2]))
                         elif extra:
-                            row.update(pack_bytes=int(extra[1]), new_nodes=int(extra[2]), account=int(extra[3]))
+                            row.update(pack_bytes=int(extra[1]), new_pages=int(extra[2]), account=int(extra[3]))
                         else:
                             row['complete'] = False
                             row['censored'] = row['censored'] or 'post-phase store validation did not finish'

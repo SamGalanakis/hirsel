@@ -354,7 +354,7 @@ pub fn law_directory(d: Dir) -> Dir waits {
 
 pub fn law_options() -> store.Options {
     let mut options = store.defaults()
-    options.checkpoint_task_bytes = 1048576u64
+
     options.resident_limit = 1048576u64
     options.pack_bytes = 512u64
     options.group_commits = 2u32

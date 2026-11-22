@@ -151,7 +151,7 @@ static void service(void *state,Child *child,int server,int phase,int stop_case)
         }
     }
     HirselCoreHostOutcome out=store_crash_op(state,q.op,q.mode,q.handle,path,q.path_len,data,q.len,q.capacity);
-    uint64_t bytes=!out.error.tag?(q.op==1?out.value:q.op==18?out.written:0):0;
+    uint64_t bytes=!out.error.tag?((q.op==1 || q.op==37)?out.value:q.op==18?out.written:0):0;
     Response response={out,bytes,(uint8_t)(server && phase==1 && store_crash_crashed(state))};
     if(second) {
         signal_child(child,SIGTERM);

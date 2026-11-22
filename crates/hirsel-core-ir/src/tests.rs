@@ -87,65 +87,118 @@ fn evaluator_identity_unavailable() {
 }
 
 /// A slot gets storage markers only if every use is under a begin on all paths
-/// in and no begin is reached while it may be live. Expected answers are read
-/// off each body by hand: a begin reached again round a loop, a use reached on a
-/// path with no begin, and a failure edge leaving before the begin that
-/// follows its instruction are refused; the same shapes with their ends are
-/// admitted.
+/// in and its address leaves only on a loan that lasts the call; it then ends
+/// where no path reaches a use before its next begin or end. Expected answers
+/// are read off each body by hand: a use reached on a path with no begin, a
+/// failure edge leaving before the begin that follows its instruction, and a
+/// `mut` loan to a direct call with a result (Ruling 7) are refused; a begin
+/// round a loop with or without an end is admitted. The ends are listed as (block, instruction after which the
+/// slot ends, or `None` at the block's entry); a slot lent `view` to a call
+/// with a pointer result, which may be anchored to it (OWN-20), ends only at its
+/// `StorageDead`. An end is kept only where a `StorageLive` may follow, since
+/// only a later begin can take the bytes; elsewhere the return ends the slot.
 #[test]
 fn slot_markers_follow_liveness_round_loops_joins_and_failure_edges() {
     let begin =
         |v: u32| format!("  live s0\n  address a0\n  store a0, v0\n  v{v}: ptr = pointer a0\n");
-    let cases = [
+    let cases: [(&str, String, bool, &[(usize, Option<usize>)]); 9] = [
         (
             "straight",
             format!(
-                "b0(v0: i32, v1: i32):\n{}  dead s0\n  return v0\n",
+                "fn f0 = n0 g0 {{\nb0(v0: i32, v1: i32):\n{}  dead s0\n  return v0\n",
                 begin(2)
             ),
             true,
+            &[],
         ),
         (
             "loop with an end",
             format!(
-                "b0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  dead s0\n  jump b1\nb3:\n  return v0\n",
+                "fn f0 = n0 g0 {{\nb0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  dead s0\n  jump b1\nb3:\n  return v0\n",
                 begin(3)
             ),
             true,
+            &[(2, Some(3))],
         ),
         (
             "begun again round a loop",
             format!(
-                "b0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  jump b1\nb3:\n  return v0\n",
+                "fn f0 = n0 g0 {{\nb0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  jump b1\nb3:\n  return v0\n",
                 begin(3)
             ),
-            false,
+            true,
+            &[(2, Some(3))],
+        ),
+        (
+            "begun round a loop whose failure edge reaches a use",
+            format!(
+                "fn f0 = n0 g0 {{\nb0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  v4: i32 = add v0, v1 fail b4\n  jump b1\nb3:\n  return v0\nb4:\n  address a0\n  v5: ptr = pointer a0\n  propagate\n",
+                begin(3)
+            ),
+            true,
+            &[(2, Some(4))],
         ),
         (
             "used after a join with one unbegun path",
             format!(
-                "b0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n{}  jump b3\nb2:\n  jump b3\nb3:\n  address a0\n  v4: ptr = pointer a0\n  return v0\n",
+                "fn f0 = n0 g0 {{\nb0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n{}  jump b3\nb2:\n  jump b3\nb3:\n  address a0\n  v4: ptr = pointer a0\n  return v0\n",
                 begin(3)
             ),
             false,
+            &[],
         ),
         (
             "used where a failure before the begin lands",
             format!(
-                "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n{}  return v2\nb1:\n  address a0\n  v4: ptr = pointer a0\n  propagate\n",
+                "fn f0 = n0 g0 {{\nb0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n{}  return v2\nb1:\n  address a0\n  v4: ptr = pointer a0\n  propagate\n",
                 begin(3)
             ),
             false,
+            &[],
+        ),
+        (
+            "lent mut to a direct call with a result",
+            "fn f0 = n0 g0 {\nb0(v0: i32, v1: i32):\n  live s0\n  address a0\n  v2: i32 = call f1 g1 (v0, &a0)\n  address a0\n  v3: ptr = pointer a0\n  return v0\n".into(),
+            false,
+            &[],
+        ),
+        (
+            "needed on one arm only, begun again after the join",
+            "fn f0 = n0 g0 {\nb0(v0: i32, v1: i32):\n  live s0\n  address a0\n  store a0, v0\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  v3: ptr = pointer a0\n  dead s0\n  jump b3\nb2:\n  jump b3\nb3:\n  live s0\n  dead s0\n  return v0\n".into(),
+            true,
+            &[(1, Some(0)), (2, None)],
+        ),
+        (
+            "lent view to a call with a pointer result",
+            "fn f0 = n0 g0 {\nb0(v0: i32, v1: i32):\n  live s0\n  address a0\n  store a0, v0\n  v2: ptr = call f2 g4 (&a0)\n  v3: i32 = add v0, v1\n  dead s0\n  return v0\n".into(),
+            true,
+            &[],
         ),
     ];
-    for (case, body, scoped) in cases {
+    for (case, body, scoped, ends) in cases {
         let text = format!(
-            "core v1\nsig g0 = (i32, i32) -> (i32)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {{\n  slot s0 = i32\n  addr a0 = s0 : i32\n{body}}}\n"
+            "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (i32, &mut i32) -> (i32)\nsig g2 = (ptr, &mut i32) -> (bool)\nsig g3 = (i32, i32, ptr) -> (i32)\nsig g4 = (&view i32) -> (ptr)\ninst n0 = p@0/m/f [] []\n{}}}\nfn f1 = n0 g1 {{\nb0(v0: i32, v1: ptr):\n  return v0\n}}\nfn f2 = n0 g4 {{\nb0(v0: ptr):\n  return v0\n}}\n",
+            body.replacen("{\n", "{\n  slot s0 = i32\n  addr a0 = s0 : i32\n", 1)
         );
         let m = parse(&text).unwrap_or_else(|e| panic!("{case}: {e:?}"));
         let b = m.functions[0].body.as_ref().unwrap();
         let answer = crate::extent::scoped_slots(b, &m.signatures);
         assert_eq!(answer.slots[0], scoped, "{case}");
+        let mut placed = vec![];
+        for (bi, blk) in b.blocks.iter().enumerate() {
+            if answer.ends_at_entry(bi)[0] & 1 != 0 {
+                placed.push((bi, None));
+            }
+            for j in 0..blk.insts.get(&b.insts).unwrap_or_default().len() {
+                if answer
+                    .ends_after(blk.insts.start as usize + j)
+                    .any(|s| s == 0)
+                {
+                    placed.push((bi, Some(j)));
+                }
+            }
+        }
+        assert_eq!(placed, ends, "{case}");
     }
 }
 

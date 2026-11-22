@@ -11649,6 +11649,18 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
     Ok(take participants)
 }
 
+fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
+    let records = match delta {
+        AddHead(head, _) => db.record_bytes + branch_record_bytes(head.name),
+        RemoveHead(slot) => db.record_bytes - branch_record_bytes(db.heads[slot].name),
+        ReplaceMain(_, Some(slot)) => db.record_bytes - branch_record_bytes(db.heads[slot].name),
+        AddPin(held) => db.record_bytes + pin_record_bytes(held.name),
+        RemovePin(slot) => db.record_bytes - pin_record_bytes(db.pins[slot].name),
+        _ => db.record_bytes,
+    }
+    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, db.fence)
+}
+
 fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let tables = match delta {
         ReplaceMain(main, _) => main.tables,
@@ -11747,6 +11759,16 @@ fn disk_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
 }
 
 fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+    let target = db_target(db)
+    let pack_bytes = match target {
+        Some(wanted) => wanted.pack,
+        None => db.disk[0u64].options.pack_bytes,
+    }
+    let limit = order.max(pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
+    disk_cut_with_limit(mut db, take delta, seal, target, pack_bytes, limit, mut timing)
+}
+
+fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     healthy(db)?
     db.since_cut = 0
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
@@ -11762,13 +11784,7 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
     let Some(seq) = int.checked_add(db.file_seq, 1) else {
         return Error(Limit(Ids))
     }
-    let previous = db.file_end
     let id = db.store
-    if let Error(take problem) = disk_rotate(mut db, id, seq, previous) {
-        return Error(cut_io_error(mut db, take problem))
-    }
-    db.file_seq = seq
-    db.file_end = 72
     prepare_holder_slot(mut db, delta)?
     prune_scrubs(mut db.disk[0u64].scrubs)
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
@@ -11777,31 +11793,35 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
     let CutParticipants(holders: take holders, roots: take roots) = take participants
     let base = page_retry_base(db.disk[0u64].pages.locations, db.disk[0u64].pages.owners, holders, roots)?
     over_ceiling(base.account, db.ceiling)?
-    let target = db_target(db)
-    let cap = match target {
-        Some(wanted) => wanted.pack,
-        None => db.disk[0u64].options.pack_bytes
-    }
+    let manifest_bytes = cut_manifest_size(db, delta)
     let d = db.disk[0u64].d
     let mut next_stamp = stamp_after(db.next_node)?
-    let attempt = {
-        let installed = view db.disk[0u64].pages
-        let prev_first = match installed.deferred {
-            Some(low) => low,
-            None => db.disk[0u64].record_cut
-        }
-        prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
-            let written = write_page_cut(d, id, base, holders, installed.lists, installed.carried, installed.next_pack, cap, marks, relocated, mut stamp)?
-            let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
-            let PackBuffers(out: take out, ..) = take reserved
-            let mut manifest = take out
-            let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
-                cut_retirement(layout, holders, db.disk[0u64].lease, db.disk[0u64].scrubs, prev_first, seq)
-            })?
-            fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, seal)?
-            Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
-        })
+    let prev_first = match db.disk[0u64].pages.deferred {
+        Some(low) => low,
+        None => db.disk[0u64].record_cut,
     }
+    let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
+        let planned = {
+            let installed = view db.disk[0u64].pages
+            plan_page_cut(base, holders, installed.lists, installed.carried, installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
+        }
+        let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
+        // A retry after emission reuses the segment created by the first attempt.
+        if db.file_seq != seq {
+            let previous = db.file_end
+            disk_rotate(mut db, id, seq, previous)?
+            db.file_seq = seq
+            db.file_end = 72
+        }
+        let layout = write_page_cut(d, id, take planned, mut buffers)?
+        let PackBuffers(out: take out, ..) = take buffers
+        let mut manifest = take out
+        let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
+            cut_retirement(layout, holders, db.disk[0u64].lease, db.disk[0u64].scrubs, prev_first, seq)
+        })?
+        fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, seal)?
+        Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
+    })
     db.next_node = next_stamp - 1
     let prepared = match take attempt {
         Ok(take cut) => take cut,
@@ -12322,8 +12342,7 @@ pub fn disk_law_watermark_reissue(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
 // or manifest generation, and deleting the oversized row permits the retry.
 pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut options = defaults()
-    // S3 also admits the queued1MiB frame. The2MiB data budget and the
-    //128KiB checkpoint task allowance stay unchanged.
+    // S3 also admits the queued 1 MiB frame.
     options.resident_limit = 2097152 + 1048639
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
@@ -12343,7 +12362,7 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if before != 2 {
         return false
     }
-    match (bound bytes 2097152 {
+    match (bound bytes 524288 {
         checkpoint(mut db)
     }) {
         Ok(Error(Full(Allocation(_)))) => {},
@@ -12427,7 +12446,7 @@ fn disk_test_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
 // Q1/K1: sweep task allowances through open and schema-cut refusal. A refused
 // create_table leaves the base reader roots and durable generation unchanged.
 pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let limits: Inline[u64, 4] =[1048576, 2097152, 20971520, 33554432]
+    let limits: Inline[u64, 4] =[8192, 32768, 131072, 1048576]
     let mut refusals: u64 = 0
     let mut successes: u64 = 0
     for allowance in limits {
@@ -12494,31 +12513,55 @@ fn disk_test_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     }
 }
 
-// L28(a). The empty cut cannot reserve its output buffer in a smaller
-// writer grant. The old MANIFEST remains selected across that rotation.
+// L28(a). One BLOB dominates the scratch reservation, including its store
+// header, frame header, stamp and Bytes codec envelope.
 fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
-    let mut options = defaults()
-    options.pack_bytes = 512
+    let options = defaults()
     let mut db = open(tasks, directory, c, r, options)?
-    let original = disk_read_paged_file(directory, "MANIFEST", 4096)?
-    let refused = bound bytes 1048576 {
-        checkpoint(mut db)
+    let codec = std.codec.of_bytes()
+    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let t = table(mut db, "values", std.codec.key_u64(), codec)?
+    let saved = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let mut value: Bytes = list.with_capacity(1024)
+        list.fill(mut value, 1024, 7u8)
+        put(mut tx, t, 1, value)
+    })?
+    let Committed(done) = saved else {
+        return Error(Foreign)
     }
-    match take refused {
-        Ok(Error(Full(Allocation(_)))) => (),
+    durable(mut db, done.ticket)?
+    let entries = result.unwrap(std.dir.list(directory))
+    let mut original: List[Bytes] = list.with_capacity(list.len(entries))
+    for file in entries {
+        list.push(mut original, disk_read_paged_file(directory, file.name, 4096)?)
+    }
+    let planned = 72u64 + 16 + 8 + 6 + 1024
+    let pack = paged_pack_path(db.disk[0u64].pages.next_pack)?
+    let mut timing: Option[CutTiming] = None
+    match disk_cut_with_limit(mut db, NoHolderChange, seal_page_manifest_file, None, options.pack_bytes, planned - 1, mut timing) {
+        Error(Full(Allocation(problem))) if problem.requested == planned && problem.available == planned - 1 => (),
         _ => return Error(Foreign),
     }
-    if disk_read_paged_file(directory, "MANIFEST", 4096)? != original {
+    let after = result.unwrap(std.dir.list(directory))
+    if list.len(after) != list.len(entries) {
         return Error(Foreign)
     }
-    if db.file_seq != 2 || db.checkpointed != 1 {
-        return Error(Foreign)
+    for i in 0u64 .. list.len(entries) {
+        if after[i].name != entries[i].name || disk_read_paged_file(directory, after[i].name, 4096)? != original[i] {
+            return Error(Foreign)
+        }
     }
-    let committed_at = checkpoint(mut db)?
+    let committed_at = disk_cut_with_limit(mut db, NoHolderChange,
+        scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+            if list.capacity(raw) != planned {
+                return Error(Foreign)
+            }
+            seal_page_manifest_file(mut raw, context, fence)
+        }, None, options.pack_bytes, planned, mut timing)?
     durable(mut db, committed_at)?
-    let (_, take selected) = read_page_manifest_file(directory)?
-    if selected.generation != 2 || selected.first_live != 3 {
+    let written = disk_read_paged_file(directory, pack, planned)?
+    if list.len(written) != planned || read_le(written, 72, 2) != 0x0022 {
         return Error(Foreign)
     }
     close(take db)
@@ -12899,7 +12942,7 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
             Committed(_) => {},
             _ => fail("crash refusal put")
         }
-        let cut = bound bytes 2097152 {
+        let cut = bound bytes 524288 {
             checkpoint(mut db)
         }
         match take cut {
@@ -15865,7 +15908,8 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
 }
 
 // AP17. A 73-byte put and a 38-byte FORK cross 110 bytes. A successful
-// cut covers both. A refused cut leaves both in the predecessor segment.
+// cut covers both. An allocation refusal during planning leaves both in
+// the original segment.
 @test
 fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut options = journal_crash_options()
@@ -15880,12 +15924,15 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         }
         let previous = db.file_seq
         let generation = db.checkpointed
-        if refuse {
-            db.disk[0].options.pack_bytes = 2147483648
-        }
         let saved = snapshot(db)
-        let (beta, receipt) = fork(mut db, "beta", saved)?
-        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != previous + 1 {
+        let (beta, receipt) = if refuse {
+            let attempt = bound bytes 4096 { fork(mut db, "beta", saved) }
+            result.unwrap(take attempt)?
+        } else {
+            fork(mut db, "beta", saved)?
+        }
+        let expected_segment = if refuse { previous } else { previous + 1 }
+        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != expected_segment || db.since_cut != 0 {
             return Error(Foreign)
         }
         let expected_journal = if refuse {
@@ -17611,8 +17658,8 @@ fn journal_full_frame(mut tx: Tx, rows: Table[u64, Bytes]) -> Result[(), Error] 
     put(mut tx, rows, 3, body)
 }
 
-// L28(d) and L50(e). With an oversized pack buffer request, the threshold
-// cut must refuse after rotating. Both frames remain in the recovered suffix.
+// L28(d) and L50(e). Give the threshold cut less room than the large BLOB
+// needs. Both frames remain in the recovered suffix.
 fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
@@ -17622,9 +17669,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let _ = create_table(mut first, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     close(take first)?
-    let fitting_pack = options.pack_bytes
     options.create = false
-    options.pack_bytes = 1073741824
     let mut db = open(tasks, d, c, r, options)?
     let initial_generation = db.checkpointed
     let initial_segment = db.file_seq
@@ -17639,14 +17684,15 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if db.uncovered != 4096 || db.since_cut != 4096 || db.file_seq != initial_segment {
         return Error(Foreign)
     }
-    let final_frame = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let final_frame = append_transaction(mut db, 0, None, None, fn(mut tx: Tx) -> Result[(), Error] {
         journal_full_frame(mut tx, rows)
     })?
     let Committed(last) = final_frame else {
         return Error(Foreign)
     }
     durable(mut db, last.ticket)?
-    if db.checkpointed != initial_generation || db.file_seq != initial_segment + 1 || db.uncovered != 16781392 || db.since_cut != 0 || db.inflight != 0 {
+    result.unwrap(bound bytes 1048576 { maybe_checkpoint(mut db) })?
+    if db.checkpointed != initial_generation || db.file_seq != initial_segment || db.uncovered != 16781392 || db.since_cut != 0 || db.inflight != 0 {
         return Error(Foreign)
     }
     let previous_head = version(snapshot(db))
@@ -17687,7 +17733,6 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         return Error(Foreign)
     }
     close(take db)?
-    options.pack_bytes = fitting_pack
     let mut recovered = open(tasks, d, c, r, options)?
     if accounts(recovered).journal != 16781392 || recovered.since_cut != 0 || version(snapshot(recovered)) != previous_head {
         return Error(Foreign)
@@ -17732,7 +17777,6 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let rows = result.unwrap(table(mut created, "rows", std.codec.key_u64(), std.codec.of_bytes()))
     result.unwrap(close(take created))
     options.create = false
-    options.pack_bytes = 268435456
     let mut db = result.unwrap(open(tasks, directory, c, r, options))
     let first_stream = string.as_bytes("stream01")
     let other_stream = string.as_bytes("stream02")
@@ -17764,7 +17808,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     let crossing = bound bytes 134217728 {
-        run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        append_transaction(mut db, 0, None, None, fn(mut tx: Tx) -> Result[(), Error] {
             journal_full_frame(mut tx, rows)
         })
     }
@@ -17772,6 +17816,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     result.unwrap(durable(mut db, last.ticket))
+    result.unwrap(result.unwrap(bound bytes 1048576 { maybe_checkpoint(mut db) }))
     let before = version(snapshot(db))
     let frames = db.frame_seq
     if accounts(db).journal != 16781392 || db.since_cut != 0 {

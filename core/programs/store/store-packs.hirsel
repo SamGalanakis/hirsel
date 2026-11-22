@@ -164,9 +164,22 @@ type PackBuffers {
     temporary: String
 }
 
-fn pack_buffers(pack_bytes: u64) -> Result[PackBuffers, Error] {
+fn cut_output_buffers(cut: PagedCutLayout, manifest_bytes: u64, limit: u64) -> Result[PackBuffers, Error] {
+    let mut width = manifest_bytes
+    for pack in cut.blobs.packs {
+        width = order.max(width, pack.size)
+    }
+    for pack in cut.data_pages.packs {
+        width = order.max(width, pack.size)
+    }
+    for pack in cut.lists.run_packs.packs {
+        width = order.max(width, pack.size)
+    }
+    if width > limit {
+        return Error(Full(Allocation(Capacity(requested: width, available: limit))))
+    }
     disk_allocation(scoped fn() -> Result[PackBuffers, Error] {
-        Ok(PackBuffers(out: list.with_capacity(order.max(pack_bytes, 16777476)), destination: string.with_capacity(22), temporary: string.with_capacity(26)))
+        Ok(PackBuffers(out: list.with_capacity(width), destination: string.with_capacity(22), temporary: string.with_capacity(26)))
     })
 }
 
@@ -416,24 +429,13 @@ fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedL
     take proposed
 }
 
-type WrittenPageCut {
-    layout: PagedCutLayout,
-    buffers: PackBuffers
-}
-
-fn write_page_cut(d: Dir, id: StoreId, base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut next_stamp: u64) -> Result[WrittenPageCut, Error] waits {
-    let mut cut = plan_page_cut(base, holders, installed, carried, first_pack, cap, marks, relocated, mut next_stamp)?
-    let mut buffers = pack_buffers(cap)?
-    {
-        // Keep the pack layout and the record state in disjoint places.
-        let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take cut
-        let mut known = take locations
-        write_pack_run(d, id, blobs, mut known, mut buffers)?
-        write_pack_run(d, id, data_pages, mut known, mut buffers)?
-        write_pack_run(d, id, lists.run_packs, mut known, mut buffers)?
-        cut = PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists)
-    }
-    Ok(WrittenPageCut(layout: take cut, buffers: take buffers))
+fn write_page_cut(d: Dir, id: StoreId, take cut: PagedCutLayout, mut buffers: PackBuffers) -> Result[PagedCutLayout, Error] waits {
+    let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take cut
+    let mut known = take locations
+    write_pack_run(d, id, blobs, mut known, mut buffers)?
+    write_pack_run(d, id, data_pages, mut known, mut buffers)?
+    write_pack_run(d, id, lists.run_packs, mut known, mut buffers)?
+    Ok(PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists))
 }
 
 fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64,
@@ -542,10 +544,10 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     list.push(mut all, take roots)
     let base = page_retry_base(new_page_locations(), map.new(), holders, all)?
     let installed = PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: std.page.empty(0, 0, Unprefixed))
-    let written = write_page_cut(directory, id, base, holders, installed, list.new(), 1, 512, map.new(), None, mut next_stamp)?
-    let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
-    let mut buffers = take reserved
     let mut manifest = page_manifest_empty()
+    let planned = plan_page_cut(base, holders, installed, list.new(), 1, 512, map.new(), None, mut next_stamp)?
+    let mut buffers = cut_output_buffers(planned, page_manifest_file_size(page_manifest_size(manifest), manifest.fence), page_manifest_file_size(MANIFEST_LIMIT, 1))?
+    let layout = write_page_cut(directory, id, take planned, mut buffers)?
     manifest.generation = 2
     locate_page_cut(mut manifest, layout, all, next_stamp, base.account)
     publish_page_manifest(directory, id, manifest, None, mut buffers.out)?

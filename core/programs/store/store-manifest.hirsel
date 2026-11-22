@@ -1,6 +1,6 @@
-const MANIFEST_LIMIT: u64 = 16777368
-
 const META_LIMIT: u64 = 16777216
+const MANIFEST_FIXED_BYTES: u64 = 152
+const MANIFEST_LIMIT: u64 = MANIFEST_FIXED_BYTES + META_LIMIT
 
 const PAGE_LIMIT: u64 = 8384
 
@@ -74,14 +74,18 @@ fn page_manifest_empty() -> PageManifest {
 }
 
 fn page_manifest_size(m: PageManifest) -> u64 {
-    let mut size = 152u64
+    let mut size = MANIFEST_FIXED_BYTES
     for item in m.branches {
-        size = int.saturating_add(size, 143 + string.byte_len(item.name))
+        size = int.saturating_add(size, branch_record_bytes(item.name))
     }
     for held in m.pins {
-        size = int.saturating_add(size, 122 + string.byte_len(held.name))
+        size = int.saturating_add(size, pin_record_bytes(held.name))
     }
     size
+}
+
+fn page_manifest_file_size(payload: u64, fence: u32) -> u64 {
+    72 + 16 + payload + (if fence == 0 { 0u64 } else { 20u64 })
 }
 
 fn put_page_ptr(mut out: Bytes, ptr: std.page.PagePtr) {
@@ -320,11 +324,7 @@ fn disk_page_manifest_bytes(id: StoreId, m: PageManifest) -> Result[Bytes, Error
     if size > MANIFEST_LIMIT {
         return Error(Limit(Manifest))
     }
-    let mut raw: Bytes = list.with_capacity(72 + 16 + size + (if m.fence == 0 {
-        0u64
-    } else {
-        20u64
-    }))
+    let mut raw: Bytes = list.with_capacity(page_manifest_file_size(size, m.fence))
     fill_page_manifest_file(mut raw, id, m)?
     Ok(take raw)
 }

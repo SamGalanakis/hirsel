@@ -632,6 +632,83 @@ pub fn dedup[T: key](mut xs: List[T]) {
     truncate(mut xs, write)
 }
 
+/// Calls f on each element in order and collects the results. Reserves exactly
+/// len(xs) slots before calling f. A refused reservation raises Capacity.
+/// U cannot be a view (OWN-19). A scoped fn cannot wait. Use a for loop for waiting calls.
+pub fn map[T, U](xs: List[T], f: scoped fn(T) -> U) -> List[U] {
+    let mut out: List[U] = list.with_capacity(list.len(xs))
+    for x in xs {
+        list.push(mut out, f(x))
+    }
+    take out
+}
+
+/// Calls f in order and collects its Ok values or returns the first Error.
+/// Reserves exactly len(xs) slots before calling f. A refused reservation raises Capacity.
+/// A scoped fn cannot wait. A ? in f exits only f (LANG-18).
+pub fn try_map[T, U, E](xs: List[T], f: scoped fn(T) -> Result[U, E]) -> Result[List[U], E] {
+    let mut out: List[U] = list.with_capacity(list.len(xs))
+    for x in xs {
+        let value = f(x)?
+        list.push(mut out, take value)
+    }
+    Ok(take out)
+}
+
+/// Keeps elements for which keep returns true, preserving their order.
+/// Alloc: nothing. Cleans removed elements after the last keep call.
+/// If keep fails, xs still holds each element exactly once, in an unspecified order.
+/// The closure cannot capture xs (OWN-11).
+pub fn retain[T](mut xs: List[T], keep: scoped fn(T) -> bool) {
+    let n = list.len(xs)
+    let mut write: u64 = 0
+    for read in 0u64 .. n {
+        if keep(xs[read]) {
+            list.swap(mut xs, read, write)
+            write += 1
+        }
+    }
+    truncate(mut xs, write)
+}
+
+/// A view of the first element that satisfies pred, or None.
+/// The returned view freezes xs (OWN-10). Use position to find an element for mutation.
+pub fn find[T](xs: List[T], pred: scoped fn(T) -> bool) -> Option[View[T]] in xs {
+    let i = position(xs, pred)?
+    list.get(xs, i)
+}
+
+/// The index of the first element that satisfies pred, or None.
+/// Use this index to mutate a found element. Views do not allow mutation (OWN-8).
+pub fn position[T](xs: List[T], pred: scoped fn(T) -> bool) -> Option[u64] {
+    for i in 0u64 .. list.len(xs) {
+        if pred(xs[i]) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// True at the first element that satisfies pred. False for an empty list.
+pub fn any[T](xs: List[T], pred: scoped fn(T) -> bool) -> bool {
+    for x in xs {
+        if pred(x) {
+            return true
+        }
+    }
+    false
+}
+
+/// False at the first element that does not satisfy pred. True for an empty list.
+pub fn all[T](xs: List[T], pred: scoped fn(T) -> bool) -> bool {
+    for x in xs {
+        if !pred(x) {
+            return false
+        }
+    }
+    true
+}
+
 /// Appends copies of ys. Fails: Capacity leaves xs unchanged.
 /// Alloc: one list GROWTH. Cost: O(len ys), plus growth copies.
 pub fn extend[T: plain](mut xs: List[T], ys: List[T]) {

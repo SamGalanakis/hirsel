@@ -23,6 +23,269 @@ fn digits(xs: List[u64]) -> u64 {
     v
 }
 
+// The nested lists have lengths 5, 4 and 2. Mapping keeps their order and
+// reserves three slots even though an initially empty list would grow to four.
+// expect: run helpers_map_nested_lists() = true
+fn helpers_map_nested_lists() -> bool {
+    let mut xs: List[List[u64]] = list.with_capacity(3)
+    list.push(mut xs, five(1, 2, 3, 4, 5))
+    let mut four = five(1, 2, 3, 4, 5)
+    list.truncate(mut four, 4)
+    list.push(mut xs, take four)
+    let mut two = five(1, 2, 3, 4, 5)
+    list.truncate(mut two, 2)
+    list.push(mut xs, take two)
+    let ys = list.map(xs, fn(row: List[u64]) -> u64 {
+        list.len(row)
+    })
+    list.len(xs) == 3 && list.len(ys) == 3 && list.capacity(ys) == 3 && digits(ys) == 542
+}
+
+// Every owned String result reaches the output in input order.
+// expect: run helpers_try_map_success() = true
+fn helpers_try_map_success() -> bool {
+    let mut xs: List[String] = list.new()
+    list.push(mut xs, string.from("abc"))
+    list.push(mut xs, string.from("de"))
+    let ys = result.unwrap(list.try_map(xs, fn(s: String) -> Result[String, u64] {
+        let mut t = string.from(s)
+        string.push(mut t, "!")
+        Ok(take t)
+    }))
+    list.len(ys) == 2 && list.capacity(ys) == 2 && ys[0] == "abc!" && ys[1] == "de!"
+}
+
+// Two elements could return errors. The first of those is 2, after visiting 1.
+// expect: run helpers_try_map_first_error() = true
+fn helpers_try_map_first_error() -> bool {
+    let xs = five(1, 2, 3, 4, 5)
+    let mut seen: u64 = 0
+    let r = list.try_map(xs, scoped fn(x: u64) -> Result[String, String] {
+        seen = seen * 10 + x
+        let candidate: Result[u64, String] = if x == 2 {
+            Error(string.from("first"))
+        } else if x == 4 {
+            Error(string.from("second"))
+        } else {
+            Ok(x)
+        }
+        let _ = candidate?
+        Ok(string.from("mapped"))
+    })
+    match r {
+        Ok(_) => false,
+        Error(e) => e == "first" && seen == 12,
+    }
+}
+
+// The callback fails with Fail if it runs. Capacity must come first.
+// expect: run helpers_map_capacity_before_callback() = fail Capacity
+fn helpers_map_capacity_before_callback() -> bool {
+    let xs = five(1, 2, 3, 4, 5)
+    result.unwrap(bound bytes 0 {
+        let _ = list.map(xs, fn(x: u64) -> u64 {
+            fail("list.map called before reserving")
+        })
+        false
+    })
+}
+
+// expect: run helpers_try_map_capacity_before_callback() = fail Capacity
+fn helpers_try_map_capacity_before_callback() -> bool {
+    let xs = five(1, 2, 3, 4, 5)
+    result.unwrap(bound bytes 0 {
+        let _ = list.try_map(xs, fn(x: u64) -> Result[u64, u64] {
+            fail("list.try_map called before reserving")
+        })
+        false
+    })
+}
+
+// The empty input supplies no callback argument to any helper.
+// expect: run helpers_empty() = true
+fn helpers_empty() -> bool {
+    let mut xs: List[u64] = list.new()
+    let pred = scoped fn(x: u64) -> bool {
+        fail("predicate called on an empty list")
+    }
+    list.retain(mut xs, pred)
+    let ys = list.map(xs, fn(x: u64) -> u64 {
+        fail("list.map called on an empty list")
+    })
+    let zs = result.unwrap(list.try_map(xs, fn(x: u64) -> Result[u64, u64] {
+        fail("list.try_map called on an empty list")
+    }))
+    let empty_map = list.len(ys) == 0 && list.capacity(ys) == 0
+    let empty_try_map = list.len(zs) == 0 && list.capacity(zs) == 0
+    let absent = option.copied(list.find(xs, pred)) == None && list.position(xs, pred) == None
+    list.len(xs) == 0 && empty_map && empty_try_map && absent && !list.any(xs, pred) && list.all(xs, pred)
+}
+
+// Each predicate visits strings of length 1, 2 and 3, then stops. find
+// lends the third string. position yields the index used to remove it.
+// expect: run helpers_predicate_order() = true
+fn helpers_predicate_order() -> bool {
+    let mut xs: List[String] = list.with_capacity(5)
+    list.push(mut xs, string.from("a"))
+    list.push(mut xs, string.from("bb"))
+    list.push(mut xs, string.from("ccc"))
+    list.push(mut xs, string.from("dddd"))
+    list.push(mut xs, string.from("eeeee"))
+    let mut seen: u64 = 0
+    let matches_third = match list.find(xs, scoped fn(s: String) -> bool {
+        let n = string.byte_len(s)
+        seen = seen * 10 + n
+        n >= 3
+    }) {
+        Some(s) => s == "ccc",
+        None => false,
+    }
+    if !matches_third || seen != 123 {
+        return false
+    }
+    seen = 0
+    let index = option.unwrap(list.position(xs, scoped fn(s: String) -> bool {
+        let n = string.byte_len(s)
+        seen = seen * 10 + n
+        n >= 3
+    }))
+    if index != 2 || seen != 123 {
+        return false
+    }
+    seen = 0
+    let any = list.any(xs, scoped fn(s: String) -> bool {
+        let n = string.byte_len(s)
+        seen = seen * 10 + n
+        n >= 3
+    })
+    if !any || seen != 123 {
+        return false
+    }
+    seen = 0
+    let all = list.all(xs, scoped fn(s: String) -> bool {
+        let n = string.byte_len(s)
+        seen = seen * 10 + n
+        n < 3
+    })
+    if all || seen != 123 || list.remove(mut xs, index) != "ccc" || list.len(xs) != 4 || xs[2] != "dddd" {
+        return false
+    }
+    let too_large = scoped fn(s: String) -> bool {
+        string.byte_len(s) > 5
+    }
+    let in_range = scoped fn(s: String) -> bool {
+        string.byte_len(s) <= 5
+    }
+    let absent = match list.find(xs, too_large) {
+        Some(_) => false,
+        None => list.position(xs, too_large) == None,
+    }
+    absent && !list.any(xs, too_large) && list.all(xs, in_range)
+}
+
+// Reject odd-length strings and preserve the two distinct even-length ones.
+// expect: run helpers_retain_in_place() = true
+fn helpers_retain_in_place() -> bool {
+    let mut xs: List[String] = list.with_capacity(5)
+    list.push(mut xs, string.from("a"))
+    list.push(mut xs, string.from("bc"))
+    list.push(mut xs, string.from("def"))
+    list.push(mut xs, string.from("ghij"))
+    list.push(mut xs, string.from("klmno"))
+    let mut seen: u64 = 0
+    result.unwrap(bound bytes 0 {
+        list.retain(mut xs, scoped fn(s: String) -> bool {
+            let n = string.byte_len(s)
+            seen = seen * 10 + n
+            n % 2 == 0
+        })
+    })
+    seen == 12345 && list.len(xs) == 2 && list.capacity(xs) == 5 && xs[0] == "bc" && xs[1] == "ghij"
+}
+
+resource type RetainAudit {
+    xs: List[String]
+} drop(audit) {
+    let first_pair = list.contains(audit.xs, "a") && list.contains(audit.xs, "bb")
+    let second_pair = list.contains(audit.xs, "ccc") && list.contains(audit.xs, "dddd")
+    if list.len(audit.xs) != 4 || !first_pair || !second_pair {
+        fail("list.retain lost or duplicated an element")
+    }
+}
+
+// Reject a, move bb, then fail on ccc. The audit sees all four inputs when
+// it unwinds. Any lost or duplicated string adds another failure cause.
+// expect: run helpers_retain_failure() = true
+fn helpers_retain_failure() -> bool {
+    let r = result.unwrap(isolate(fn() {
+        let mut xs: List[String] = list.with_capacity(4)
+        list.push(mut xs, string.from("a"))
+        list.push(mut xs, string.from("bb"))
+        list.push(mut xs, string.from("ccc"))
+        list.push(mut xs, string.from("dddd"))
+        let mut audit = result.unwrap(RetainAudit(xs: take xs))
+        list.retain(mut audit.xs, fn(s: String) -> bool {
+            if s == "ccc" {
+                let missing: Option[u64] = None
+                let _ = option.unwrap(missing)
+            }
+            s == "bb"
+        })
+    }))
+    let Error(take causes) = take r else {
+        return false
+    }
+    let mut count: u64 = 0
+    for cause in causes {
+        match cause.kind {
+            Unwrap => {
+                count += 1
+            },
+            _ => return false,
+        }
+    }
+    count == 1
+}
+
+resource type RetainDrop {
+    id: u64
+} drop(item) {
+    if item.id == 1 {
+        fail("removed item cleaned")
+    }
+}
+
+// The first item is rejected and its finalizer fails. All three predicate
+// calls must have happened before that failure. The log survives isolation.
+// expect: run helpers_retain_delays_cleanup() = true
+fn helpers_retain_delays_cleanup() -> bool {
+    let seen: Log[u64] = log.new()
+    let r = result.unwrap(isolate(scoped fn() {
+        let mut xs: List[RetainDrop] = list.with_capacity(3)
+        for id in 1u64 .. 4 {
+            list.push(mut xs, result.unwrap(RetainDrop(id)))
+        }
+        list.retain(mut xs, scoped fn(item: RetainDrop) -> bool {
+            log.append(seen, item.id)
+            item.id != 1
+        })
+    }))
+    let Error(take causes) = take r else {
+        return false
+    }
+    let mut count: u64 = 0
+    for cause in causes {
+        match cause.kind {
+            Fail(_) => {
+                count += 1
+            },
+            _ => return false,
+        }
+    }
+    let calls = log.finish(take seen)
+    count == 1 && digits(calls) == 123
+}
+
 fn present(o: Option[View[u64]]) -> u64 {
     match o {
         Some(v) => v,

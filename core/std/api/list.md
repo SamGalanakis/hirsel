@@ -22,3 +22,24 @@ Both allocate nothing.
 in O(len) on nondecreasing or strictly descending input and O(len log len) in
 the worst case. A failing comparator or one that does not give a total order
 leaves every original element in the list.
+
+`list.map` and `list.try_map` call their callbacks in list order and reserve
+exactly `len(xs)` output slots first. A refused reservation raises `Capacity`
+before the callback runs. `map` cannot collect views (OWN-19). `try_map` stops
+at the first `Error` and returns it. A `?` within the callback exits only that
+callback (LANG-18). Scoped callbacks cannot wait. Use a `for` loop for waiting
+calls.
+
+`list.retain` keeps matching elements in order without allocating. It cleans
+removed elements after the last predicate call. A failing predicate leaves
+every original element in the list exactly once, in unspecified order. The
+predicate cannot capture the list (OWN-11).
+
+`list.find` and `list.position` stop at the first match, returning a view or
+an index respectively. Both return `None` if no element matches. The view
+freezes the list (OWN-10). Use `position` to find an element for mutation
+because Hirsel has no mutable views (OWN-8).
+
+`list.any` stops at the first match and returns `false` for an empty list.
+`list.all` stops at the first nonmatch and returns `true` for an empty list.
+All seven helpers accept non-plain elements and pass them to callbacks by view.

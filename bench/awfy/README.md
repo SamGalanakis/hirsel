@@ -159,7 +159,10 @@ The size row reuses verification of all 14 original workloads. The cold and edit
 LangArena suite against Cargo. The warm build changes Spectralnorm's checksum
 from 1051192944 to 1051192945. It must compile at least one Hirsel part and
 rebuild the Cargo benchmark crate. Both executables must pass the new checksum
-fixture. The checkbox rows compare the same wire load on a fresh private Hirsel
+fixture. Each Hirsel build must take its release std from the std product's
+prebuild: the suite's inputs name the std package exactly as the product holds
+it, and a build that lowers std itself (`native.reach.std_lowered` above zero)
+fails its row as `std-lowered`. The checkbox rows compare the same wire load on a fresh private Hirsel
 server and the Rust reference, using an ephemeral port.
 
 Use at least two measurement CPUs. The first runs AWFY, LangArena and the

@@ -1274,6 +1274,8 @@ impl Publication {
         counters: crate::reach::ReachCounters,
         std: Option<StdSide>,
     ) -> Result<BuildProduct, NativeStop> {
+        let mut counters = counters;
+        counters.std_lowered = std.as_ref().map_or(0, |std| std.lowered);
         let entry_identity = self.recipe.entry.clone();
         let (options, decl) = self.launch(options)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)

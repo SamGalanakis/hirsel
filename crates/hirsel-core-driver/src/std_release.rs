@@ -106,6 +106,10 @@ pub(crate) struct StdSide {
     pub objects: Vec<ObjectProduct>,
     /// The bodies the std lends a program's inliner, as bitcode.
     pub lent: Vec<u8>,
+    /// How many units this build lowered for the side: none when it was
+    /// read from a store. A build over a prebuilt std product that lowers
+    /// its std pays the whole side, and reports it here.
+    pub lowered: u64,
 }
 
 /// The units a side lowers, each reached from its roots.
@@ -307,6 +311,7 @@ pub(crate) fn std_side(
             points: BTreeMap::new(),
             objects: Vec::new(),
             lent: Vec::new(),
+            lowered: 0,
         });
     }
     let owners = units
@@ -352,7 +357,7 @@ pub(crate) fn std_side(
     };
     if let Some(i) = chosen {
         let (store, key, record) = candidates.swap_remove(i);
-        return side(store, key, record);
+        return side(store, key, record, 0);
     }
     let lowered = match image {
         Some(product) => product.image_side()?,
@@ -368,13 +373,13 @@ pub(crate) fn std_side(
                 .collect(),
         },
     };
-    let (key, record) = lower(&generator, kin, lowered, &shared)?;
+    let (key, record, lowered) = lower(&generator, kin, lowered, &shared)?;
     if !own(&record) {
         return Err(NativeStop::Entry(
             "the release std lowered for this program holds other bodies than it".into(),
         ));
     }
-    side(&shared, key, record)
+    side(&shared, key, record, lowered)
 }
 
 impl SideUnits {
@@ -389,13 +394,14 @@ impl SideUnits {
 
 /// Join, specialize and lower a side's units, publish its parts and record
 /// into `store` under the key its content derives, and name it first in its
-/// toolchain and variant's index there.
+/// toolchain and variant's index there. Also returns how many units it
+/// lowered: none when `store` already holds the side.
 fn lower(
     options: &Generator<'_>,
     kin: ContentHash,
     side: SideUnits,
     store: &Store,
-) -> Result<(ContentHash, StdRecord), NativeStop> {
+) -> Result<(ContentHash, StdRecord, u64), NativeStop> {
     let SideUnits {
         whole,
         roots,
@@ -409,7 +415,7 @@ fn lower(
     let key = side_key(kin, whole, &requested, &owners)?;
     if let Some(record) = load_record(store, key, kin)? {
         write_index(store, kin, key)?;
-        return Ok((key, record));
+        return Ok((key, record, 0));
     }
     let reached: Vec<Identity> = units.keys().cloned().collect();
     let points = super::recipe_build::bind_annexes(&mut units, &BTreeMap::new(), false)?.points;
@@ -562,7 +568,8 @@ fn lower(
     };
     store.put_keyed(key, &encode(&record)?)?;
     write_index(store, kin, key)?;
-    Ok((key, record))
+    let lowered = record.units.len() as u64;
+    Ok((key, record, lowered))
 }
 
 /// What a release std's lowering reads besides its units: the toolchain and
@@ -645,8 +652,14 @@ fn write_index(store: &Store, kin: ContentHash, key: ContentHash) -> io::Result<
 pub(crate) const PREBUILT: &str = "release-std";
 
 /// The std side `record`, stored in `store` under `key`, names: its parts and
-/// lent bodies, each checked under the name its own key derives.
-fn side(store: &Store, key: ContentHash, record: StdRecord) -> Result<StdSide, NativeStop> {
+/// lent bodies, each checked under the name its own key derives. This build
+/// lowered `lowered` of its units.
+fn side(
+    store: &Store,
+    key: ContentHash,
+    record: StdRecord,
+    lowered: u64,
+) -> Result<StdSide, NativeStop> {
     let instance = record
         .roots
         .first()
@@ -674,6 +687,7 @@ fn side(store: &Store, key: ContentHash, record: StdRecord) -> Result<StdSide, N
     Ok(StdSide {
         key,
         lent,
+        lowered,
         roots: record.roots.into_iter().collect(),
         summaries: record.summaries.into_iter().collect(),
         points: record.points,

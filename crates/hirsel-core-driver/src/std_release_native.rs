@@ -201,6 +201,13 @@ fn a_separate_std_is_the_std_products_alone() {
         let std = std_of(&product, &options, &publication).expect("an optimised build's std");
         let store = Store::new(if cache == "cache" { &image } else { &options.parts }).unwrap();
         let record = store.get(std.key).unwrap().expect("the std record");
+        // A build over the prebuild lowers none of the std; one whose image
+        // holds none lowers the whole side itself, and says so.
+        if cache == "cache" {
+            assert_eq!(std.lowered, 0, "a build over the prebuilt std lowers none of it");
+        } else {
+            assert!(std.lowered > 0, "a build that lowers the std counts what it lowered");
+        }
         let bytes: Vec<Vec<u8>> =
             std.objects.iter().map(|object| std::fs::read(&object.path).unwrap()).collect();
         assert!(!std.lent.is_empty(), "the std lends bodies");

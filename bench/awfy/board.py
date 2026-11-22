@@ -525,8 +525,8 @@ def prepare_hirsel_compile(out, artifacts, env):
     for source in manifest["packages"][-1]["sources"]:
         if source["modules"] == ["clbg"]:
             source["file"] = str(clbg)
-    for package in manifest["packages"]:
-        package["sources"] = [entry for entry in package["sources"] if len(entry["modules"]) == 1]
+    suite_package = manifest["packages"][-1]
+    suite_package["sources"] = [entry for entry in suite_package["sources"] if len(entry["modules"]) == 1]
     source = out / "suite.hirsel"
     source.write_text(suite.suite_source())
     manifest["packages"][-1]["sources"].append({"file": str(source), "modules": ["suite"], "signatures": False})
@@ -587,6 +587,9 @@ def compile_rows(board, out, prepared, fixture, tools):
                                                    path=target / "build.json")
                 record = receipt.build_record(report)
                 sample["compiled_parts"] = report["native"]["compiled"]
+                # prepare_hirsel_compile prebuilt the release std into the
+                # std product, so a build that lowers std itself missed it.
+                sample["std_lowered"] = report["native"]["reach"]["std_lowered"]
                 rebuilt = sample["compiled_parts"] > 0
             else:
                 messages = (json.loads(line) for line in (target / "stdout").read_text().splitlines())
@@ -602,6 +605,8 @@ def compile_rows(board, out, prepared, fixture, tools):
                 re.fullmatch(marker, line) for line in verify.stdout.splitlines())
             if not sample["verified"]:
                 sample["status"] = "wrong-result"
+            elif sample.get("std_lowered"):
+                sample["status"] = "std-lowered"
             elif sample["status"] == "ok" and not sample["seconds"]:
                 sample["status"] = "missing-duration"
             elif mode == "edit" and not rebuilt:

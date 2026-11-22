@@ -627,6 +627,9 @@ pub struct ReachCounters {
     pub record_bytes: u64,
     /// The vector's length.
     pub vector: u64,
+    /// Units this build lowered for its release std. Zero when it took the
+    /// std from a store, as every build over a prebuilt std product should.
+    pub std_lowered: u64,
 }
 
 /// The program-index view the walk reads through.

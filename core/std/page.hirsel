@@ -2519,20 +2519,71 @@ pub fn install_planned(mut root: Arc[Page], take replacement: Arc[Page]) {
 
 type CursorSlot: send {
     page: Arc[Page],
-    next_slot: u64
+    next_slot: u64,
+    stop_slot: u64
 }
 
 pub opaque type Cursor: send {
     path: List[CursorSlot],
     key_buffer: Bytes,
     has_prefix: bool,
-    reverse: bool
+    reverse: bool,
+    stop: Option[Bytes],
+    last_leaf: bool
 }
 
 pub type CursorRow: send {
     key: Bytes,
     value: Arc[Bytes],
     collection: Option[Arc[Page]]
+}
+
+fn compare_leaf_key(image: Image, slot: u64, key: Bytes) -> Order {
+    let width = u16_at(image.raw, 4)
+    let head = order.min(width, list.len(key))
+    let compared = list.compare_bytes(list.slice(image.raw, HEADER, HEADER + head), list.slice(key, 0, head))
+    if compared != Equal {
+        return compared
+    }
+    if head != width {
+        return Greater
+    }
+    let at = entry_at(image, slot)
+    let tail = u16_at(image.raw, at)
+    list.compare_bytes(list.slice(image.raw, at + 2, at + 2 + tail), list.slice(key, width, list.len(key)))
+}
+
+// Forward excludes the stop key. Reverse includes it.
+fn cursor_leaf_stop(image: Image, n: u64, stop: Option[Bytes], reverse: bool) -> (u64, bool) {
+    let edge = if reverse {
+        0u64
+    } else {
+        n
+    }
+    match stop {
+        None => (edge, false),
+        Some(key) => {
+            let compared = compare_leaf_key(image, if reverse {
+                0
+            } else {
+                n - 1
+            }, key)
+            if (reverse && compared == Greater) || (!reverse && compared == Less) {
+                return (edge, false)
+            }
+            let slot = if compared == Equal {
+                if reverse {
+                    0u64
+                } else {
+                    n - 1
+                }
+            } else {
+                let (position, _) = search(image, key)
+                position
+            }
+            (slot, true)
+        },
+    }
 }
 
 fn cursor_path(mut cursor: Cursor, root: Arc[Page], boundary: Option[Bytes], inclusive: bool) {
@@ -2555,7 +2606,9 @@ fn cursor_path(mut cursor: Cursor, root: Arc[Page], boundary: Option[Bytes], inc
                     }
                 },
             }
-            list.push(mut cursor.path, CursorSlot(page: take walking, next_slot: position))
+            let (stop_slot, last_leaf) = cursor_leaf_stop(walking.image, n, cursor.stop, cursor.reverse)
+            cursor.last_leaf = last_leaf
+            list.push(mut cursor.path, CursorSlot(page: take walking, next_slot: position, stop_slot: stop_slot))
             return ()
         }
         let selected = match boundary {
@@ -2572,13 +2625,23 @@ fn cursor_path(mut cursor: Cursor, root: Arc[Page], boundary: Option[Bytes], inc
         } else {
             selected + 1
         }
-        list.push(mut cursor.path, CursorSlot(page: take walking, next_slot: following))
+        let stop_slot = if cursor.reverse {
+            0u64
+        } else {
+            n
+        }
+        list.push(mut cursor.path, CursorSlot(page: take walking, next_slot: following, stop_slot: stop_slot))
         walking = take descendant
     }
 }
 
 pub fn cursor_open(root: Arc[Page], boundary: Option[Bytes], inclusive: bool, reverse: bool) -> Cursor {
-    let mut cursor = Cursor(path: list.new(), key_buffer: list.new(), has_prefix: false, reverse: reverse)
+    cursor_open_bounded(root, boundary, inclusive, reverse, None)
+}
+
+/// Seek from boundary and stop below the lower bound in reverse or at the exclusive upper bound forward.
+pub fn cursor_open_bounded(root: Arc[Page], boundary: Option[Bytes], inclusive: bool, reverse: bool, take stop: Option[Bytes]) -> Cursor {
+    let mut cursor = Cursor(path: list.new(), key_buffer: list.new(), has_prefix: false, reverse: reverse, stop: take stop, last_leaf: false)
     cursor_path(mut cursor, root, boundary, inclusive)
     take cursor
 }
@@ -2606,9 +2669,13 @@ fn cursor_row(page: Arc[Page], slot: u64) -> CursorRow {
 fn cursor_step(mut cursor: Cursor) -> Option[u64] {
     while list.len(cursor.path) != 0 {
         let top = list.len(cursor.path) - 1
-        let n = count(cursor.path[top].page.image)
+        let stop = cursor.path[top].stop_slot
         let candidate = cursor.path[top].next_slot
-        if (cursor.reverse && candidate == 0) || (!cursor.reverse && candidate == n) {
+        if (cursor.reverse && candidate <= stop) || (!cursor.reverse && candidate >= stop) {
+            if cursor.last_leaf {
+                list.clear(mut cursor.path)
+                return None
+            }
             cursor.has_prefix = false
             let _ = list.pop(mut cursor.path)
             continue
@@ -2672,11 +2739,12 @@ pub fn cursor_read[T](mut cursor: Cursor, visit: scoped[view] fn(Bytes, Bytes) -
     let mut stepped = false
     if depth != 0 && level(cursor.path[depth - 1].page.image) == 0 {
         let candidate = cursor.path[depth - 1].next_slot
-        if cursor.reverse && candidate != 0 {
+        let stop = cursor.path[depth - 1].stop_slot
+        if cursor.reverse && candidate > stop {
             slot = candidate - 1
             cursor.path[depth - 1].next_slot = slot
             stepped = true
-        } else if !cursor.reverse && candidate < count(cursor.path[depth - 1].page.image) {
+        } else if !cursor.reverse && candidate < stop {
             slot = candidate
             cursor.path[depth - 1].next_slot = candidate + 1
             stepped = true

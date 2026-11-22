@@ -533,8 +533,11 @@ so keeping it is caching, not state. Its operations are these:
   reports each child's exit to the host, with the Clean report of RUNNER-SPEC §14.4 when the
   child sends one.
 - **Collect.** It removes objects only when the host names the full root set: the union
-  that "Durable publication" lists, which the host reads from `groups`, `deploys` and `pins`.
-  A launcher that has no current root set from the host removes nothing.
+  that "Durable publication" lists, which the host reads from `groups`, `deploys` and `pins`,
+  together with the launcher's own live reservations. A reservation is an object set that
+  the launcher has synced for an attempt whose pending row the host has not yet committed;
+  it lives in the launcher's memory and ends when the host commits or abandons the row. A
+  launcher that has no current root set from the host removes nothing.
 
 On a restart the launcher has nothing to recover. It removes staging, and it reports to the
 host that every child it had has ended. Under containment it has first emptied each child's
@@ -548,10 +551,26 @@ which decides and records each request before it asks the launcher. `hirsel host
 pair: the launcher, plus the platform host it starts as its first group. `hirsel deploy`
 sends its request to the host.
 
-**Exec is not the launch path.** The host does not start groups through an `Exec` grant. An
-`Exec` profile pins one image at launch (EXEC-4), but a platform launches a new image at
-each deploy. The launcher, which the operator starts, is the only process that starts a
-group's children, and it owns their containers.
+**The launcher is the parent, not an `Exec` child.** The host does not start groups
+through an `Exec` grant, and it does not start the launcher as one either. An `Exec`
+profile could pin the launcher's own image (EXEC-4), so the pin is not the reason. These
+are:
+
+- **Groups outlive the host.** A run's children die with it (EXEC-6). If the launcher were
+  the host's `Exec` child, a host crash would end the launcher, every live group and every
+  listener, so one fault in the operator's group would stop every tenant. With the launcher
+  as the parent, a host crash ends only the host: live groups keep serving, cold groups'
+  listeners keep their backlogs, and the restarted host reconciles (below).
+- **Descriptors.** An `Exec` child receives only descriptors 0, 1 and 2 (EXEC-1, EXEC-3).
+  The launcher must hold one listener per group and pass each to its serving child, which
+  no `Exec` spawn can carry.
+- **Containment needs setup that `Exec` forbids.** EXEC-3 starts each child with
+  no-new-privileges and keeps it out of the run's private state (EXEC-7). The launcher must
+  create and own each child's container (R27), which the operator's start gives it.
+
+`Exec` is still built under this item as a grant that a group of a trusted author may hold
+(to run tools), contained by R27 like the rest of the group's processes. The launcher, which the operator starts, is
+the only process that starts a group's children, and it owns their containers.
 
 ### Containment (R27)
 
@@ -590,22 +609,29 @@ prepare child, after `migrate` is staged and both handle sets are open, and befo
 in the export directory. The `PREPARED` format does not change.
 
 For each pending trigger row of the staged catalog (`store.triggers.pending`, branch 0), the
-child classifies it against NEW exactly as NEW's head will at dispatch (RUNNER-SPEC §14.6):
+child classifies it against NEW exactly as NEW's head will at dispatch (RUNNER-SPEC §14.6).
+The classes are tried in this order, which is the order of `advance_trigger`, and a row
+takes the first that applies:
 
-- **`gone`**: NEW's trigger entry list does not allow its entry, or no registered entry of
-  NEW has its kind, path and argument schema. NEW's head will consume it with the terminal
-  `Gone` when it comes due.
-- **`held`**: a granted trigger whose attempt is at least 1. Its revision stamp is the
-  launch image digest of the code that started it, and NEW's digest differs. So NEW will
-  park it with a `Revision` hold at its next start, until a release on NEW's revision.
-- **`changed`**: an allowed entry whose `revision` (PROG-9) differs from OLD's. It runs
-  NEW's code when it comes due.
-- **`unchanged`**: every other row.
+1. **`cancelling`**: a row whose cancel was requested. NEW's head finishes it as cancelled
+   before it looks at its entry, so NEW's entries do not matter.
+2. **`held`**: a granted trigger that is parked under a hold, or whose attempt is at least
+   1 so that NEW's start compares its revision stamp. The stamp is the launch image digest
+   of the code that started it, and NEW's digest differs. So NEW parks it with a `Revision`
+   hold at its next start, or keeps it parked, until a release on NEW's revision. This
+   class comes before `gone`: `triggers.start` runs before the head looks for the entry,
+   so a started granted run whose entry NEW removes is held, not consumed.
+3. **`gone`**: NEW's trigger entry list does not allow its entry, or no registered entry of
+   NEW has its kind, path and argument schema. NEW's head will consume it with the terminal
+   `Gone` when it comes due.
+4. **`changed`**: an allowed entry whose `revision` (PROG-9) differs from OLD's. It runs
+   NEW's code when it comes due.
+5. **`unchanged`**: every other row.
 
 The report is one row per (class, kind, entry path, argument schema): the count of
 triggers and the earliest due time. These are exact. A report that does not fit the prepare
 child's bound fails the preview with `Limit(triggers)`. It is never truncated. The deploy
-output prints the rows, `gone` and `held` first. Like the rest of the preview, it gates
+output prints the rows, `held` and `gone` first. Like the rest of the preview, it gates
 nothing. The image-digest guard on started granted runs stays as it is: `Exported.revision`
 does not cover a change of `handles` (a table name, a binding, a key codec), and the image
 digest does, so a revision-keyed guard would let a started run continue against changed

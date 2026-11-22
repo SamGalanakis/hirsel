@@ -30,8 +30,10 @@ Agent Platform 2027 (ratified 2026-11-22, Topics 2 and 3) runs places cold by de
 |---|---|---|---|---|
 | 1 | Waking a cold place | **RATIFIED (T3-Q1 = A)** | One generation-fenced row per place in the host catalog, `Dirty(gen) \| Clean(Option[next_due])`; the host wakes a `Clean(Some(t))` place at wall time t | §14.1, §14.3 |
 | 2 | Capacity | **RATIFIED** | Checked before `Dirty` is written; `dirty` ≤ `max_places` in every committed state; lowering below it is refused | §14.2 |
-| 3 | Only a clean stop writes `Clean` | **RATIFIED** | `Ended` becomes `Stopped(Option[u64]) \| Forced(u64)`; `runner.main --hirsel-wake` reports `next_due`; any other end leaves `Dirty` and a probe | §14.4, §14.5 |
+| 3 | Only a clean stop writes `Clean` | **RATIFIED** | `Ended` becomes `Stopped(Option[u64]) \| Unstarted \| Forced(u64)`; `runner.main --hirsel-wake` reports `next_due`; any other end leaves `Dirty` and a probe | §14.4, §14.5 |
 | 4 | Idle stop | **DECIDED here; reversible** | `PlaceConfig.idle`; idle needs no session, no worker, no active run and no trigger due within the idle time | §14.4 |
+| 8 | A wake of a live group, and an arrival during a drain | **DECIDED here; reversible** | A wake of a live group changes nothing; the launcher checks the listener before it reports a child's end, so an arrival during a drain relaunches at `gen + 1` instead of writing `Clean` (L46) | §14.3 |
+| 9 | One listener per group, and `Arrived` | **DECIDED here; outward-facing; reversible until P4 lands** | Each group has one TCP listener that the launcher holds for its life; clients find it in the host's routing table, and the host never proxies. Changing to a shared front listener later changes every client's address | launch.md "Routing" |
 | 5 | Deploy trigger scan | **RATIFIED** | Runs in the prepare child after the staged migration, with the head's own dispatch code; exact, or `Limit(triggers)` | §14.6, launch.md |
 | 6 | Image-digest retry guard | **RATIFIED: kept** | Started granted runs keep the launch image-digest stamp; the scan reports them `held` | §14.6 |
 | 7 | The §13 directory | **DECIDED here; reversible until P6 lands** | Superseded by the platform host; deleted once the host's harness covers PD1 to PD4 | §14.8 row 9 |
@@ -1289,11 +1291,11 @@ pub type PlaceConfig[G: send, H: send, S: send]: send {
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
     triggers: Option[TriggerConfig[G, S]],
-    idle: Option[u64],   // v2.26: the idle stop (§14.4); None for runner.main and the fixture
+    idle: Option[u64],   // v2.26 (unbuilt): the idle stop (§14.4); None for runner.main and the fixture
     wire: Option[Wire[G]],   // v2.24: None refuses wire calls to Granted entries and gives every session a fresh anonymous Caller
 }
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
-pub type Ended: codec + send = Stopped(Option[u64]) | Forced(u64)   // v2.26: Stopped carries next_due (§14.4)
+pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)   // v2.26 (unbuilt): Stopped carries next_due, Unstarted is a stop before Ready (§14.4); as built: Stopped | Forced(u64)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
@@ -1332,7 +1334,7 @@ Each child sends one last message to `operate` before it ends.
 A failure after the activation commit and before `Ready` leaves the new activation rows on disk, because it happens in `Publishing` or `Listening`. The process never reported `Ready`, so a confirmation fails (§12.2). Restart the selected image. Restoring an earlier activation requires an explicit install and a compatible migration (§6).
 
 **A stop during `Starting`.** `operate` takes `StopRequested` in any phase. During `Starting`, it fixes D = t₀ + `grace_ms` as below, publishes `Draining`, spawns T, and answers H's next step result with `Close`. Nothing has been accepted yet, so there is nothing to refuse.
-- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Stopped)`.
+- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Unstarted)` (v2.26; before, `Ok(Stopped)`). The head never ran its trigger drive, so it cannot say when its next trigger is due, and `Unstarted` carries nothing.
 - A step still running at D (a long recovery) is not waited for: at `Expired`, `operate` cancels H and joins it. H is cancelled at its next cancellation point inside the step, and the `Db`, if it exists, is dropped without `close` (§1.10, §3.7). `operate` returns `Ok(Forced(0))`.
 - `Ready` is never published after a stop is taken. If S has already prepared, its acceptor is released without accepting and S is joined.
 
@@ -1358,7 +1360,7 @@ A failure after the activation commit and before `Ready` leaves the new activati
    - Nothing that reached `admit` is answered by the drain.
    - When the head holds no worker and no FIFO entry, it sends `Settled` to `operate` and keeps serving its inbox, which can only bring more `Overloaded` answers or joins.
 5. **Sessions end.** A session that owes no send ends. A WebSocket session closes with 1001 (going away). Its subscriptions end with it through its one end path (v2.14: `Left` or the mark), and no `Ended` is sent for them; the client re-subscribes elsewhere. S joins each session as it ends, and once it has none it sends `Done(0)` to `operate` and ends.
-6. **Finish.** When `operate` holds `Settled` and S's `Done`, it sends `Finish` to H. H sends `Halt` to the publisher, joins it, calls `store.close` and ends. Sessions are gone before `Halt`, so every Release the head made has reached its sessions. `operate` joins W, T, S and H, and returns `Ok(Stopped)`.
+6. **Finish.** When `operate` holds `Settled` and S's `Done`, it sends `Finish` to H. H sends `Halt` to the publisher, joins it, calls `store.close` and ends. Sessions are gone before `Halt`, so every Release the head made has reached its sessions. `operate` joins W, T, S and H, and returns `Ok(Stopped(next_due))`, where `next_due` is H's last message (§14.4; `Stopped(None)` for a place without triggers).
 
 **At D (extends V1).**
 - Each send still owed at D is logically `Abandoned`. A session applies this cut before processing any post-D event. The server can attempt to deliver the answers and Close 1001, but the forced path cancels the writer instead of waiting for delivery. A peer that is not reading observes a disconnect and retries under H4. S sends `Done(n)`, where n is the number of sends its sessions settled as `Abandoned` at D, and ends.
@@ -1380,7 +1382,7 @@ A failure after the activation commit and before `Ready` leaves the new activati
 - Before entering a program that holds `Process`, the runtime installs the handler. A program without that grant keeps the default action, which ends the process as a crash cut. A replay tool supplies the recorded stop and installs no handler (docs/recording.md).
 - A second SIGTERM or SIGINT after the first ends the process at once, also as a crash cut.
 - `runner.main` spawns one task that calls `host.stopped` and then drops the stop `Sender`, so W reads `Closed`.
-- `main` returns `Ok(())` for `Stopped`. For `Forced(n)` and for a `StartError` it writes one stderr line and returns `Error(Exit(status: 1u8))`. The line is `place: forced at the drain deadline, n sends abandoned`, or the error.
+- `main` returns `Ok(())` for `Stopped(_)` and `Unstarted`. For `Forced(n)` and for a `StartError` it writes one stderr line and returns `Error(Exit(status: 1u8))`. The line is `place: forced at the drain deadline, n sends abandoned`, or the error.
 
 **Readiness is read through a status route on the place's own listener.** The place serves `GET /hirsel/status` as a raw route (HTTP-11), beside `GET /hirsel` (http.md §6).
 - The handler calls `latest.read(status)`. It answers 200 when the phase is `Ready` or `Paused` and 503 when it is `Draining`.
@@ -1577,8 +1579,8 @@ Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-back
 | Law | Wrong implementation it catches | Oracle |
 |---|---|---|
 | PD1 `dir_one_head`: two concurrent first opens both get leases on one instance (same port), and the watch shows one `Up` | each open that finds no Ready instance starts one, so two heads run and the second open is refused | §13.2 coalesced first opens |
-| PD2 `dir_open_during_close`: an open sent while a `close` drains gets an instance whose phase is `Ready`; the close returns `Stopped`; the watch shows `Up`, `Down`, `Up` | the open is answered with the closing instance (phase `Draining`) | §13.2 never the closing instance |
-| PD3 `dir_idle_unload`: after the idle unload begins (`Draining`), an open gets a `Ready` instance, and the first instance's `Down` is `Ok(Stopped)` | the directory forgets the instance once it asks it to stop, so the reopen's store open is refused `Held` | §13.2 unload waits for operate |
+| PD2 `dir_open_during_close`: an open sent while a `close` drains gets an instance whose phase is `Ready`; the close returns `Stopped(_)`; the watch shows `Up`, `Down`, `Up` | the open is answered with the closing instance (phase `Draining`) | §13.2 never the closing instance |
+| PD3 `dir_idle_unload`: after the idle unload begins (`Draining`), an open gets a `Ready` instance, and the first instance's `Down` is `Ok(Stopped(_))` | the directory forgets the instance once it asks it to stop, so the reopen's store open is refused `Held` | §13.2 unload waits for operate |
 | PD4 `dir_reopen_keeps`: a write and a trigger due 1 s later are committed; the place is closed before the due time and reopened after it; the write reads back and the trigger's outcome appears | the reopen starts on a fresh, empty store (mutant: a new `create_temp` directory per start, with the pin dropped so the reopen is not refused first: the write is gone), or at the listed selection rather than the pinned activation (the reopen is refused) | §13.3, §13.5 |
 
 ### 13.7 Prior art (each source opened)
@@ -1605,6 +1607,7 @@ pub type WakeRow: codec + send { wake: Wake, gen: u64 }
 - `Dirty(gen)`: a process with generation `gen` may hold, or may have held, the place's store, and the host does not know the place's triggers. The place must run to find out.
 - `Clean(next_due)`: no process holds the store, and `next_due` is the due time of the place's first pending trigger, in `at` units (`store.CallInfo.at`, wall milliseconds), or `None` when it has none that can run.
 - `gen` counts the starts of the place. It only grows, and each start gets the next value.
+- **A new group.** Adding a group writes `Clean(None)` with `gen` 0, in the transaction that adds its `groups` row: its store does not exist yet, so it has no trigger. Its genesis is an operator launch and goes through `Dirty` like any other (§14.3).
 
 Every change of a wake row is a transaction of the host's own store. The host waits for that commit to be durable before it acts on it (it launches nothing on a `Dirty` that could still be lost). So every argument below is about the order of the host's commits and of the facts the launcher reports, never about the order of tasks in one run (CONC-10, SEM-8 and CAP-8 promise none that this needs).
 
@@ -1612,7 +1615,7 @@ Every change of a wake row is a transaction of the host's own store. The host wa
 
 The host's `config` row holds `max_places`, and the `wake` table keeps a count `dirty` of its `Dirty` rows, updated in the same transaction as every row change.
 
-- **Check before `Dirty`.** A transaction that turns a `Clean` row into `Dirty` first reads `dirty`. If `dirty` ≥ `max_places`, it commits nothing and the start is refused `Full(Count(max_places))`. Otherwise it writes `Dirty(gen + 1)`, raises `gen` and `dirty`, and commits. A row that is already `Dirty` (the place is live, being started, or being probed) is re-marked `Dirty(gen + 1)` without a check, because `dirty` does not change.
+- **Check before `Dirty`.** A transaction that turns a `Clean` row into `Dirty` first reads `dirty`. If `dirty` ≥ `max_places`, it commits nothing and the start is refused `Full(Count(max_places))`. Otherwise it writes `Dirty(gen + 1)`, raises `gen` and `dirty`, and commits. A row that is already `Dirty` is re-marked `Dirty(gen + 1)` without a check, because `dirty` does not change, but only when the host launches a new serving child for it: a cutover's NEW, a probe, or a restart after an arrival during a drain (§14.3). A wake of a group whose child is live changes nothing (§14.3, the table).
 - **The invariant.** `dirty` ≤ `max_places` holds in every committed state, because the host's store runs one writer and every transaction that raises `dirty` checks it.
 - **Lowering the bound.** A `config` change that sets `max_places` below the current `dirty` is refused `Busy(dirty)`. The operator stops places first. So the invariant holds across changes, and no rule reads a historical bound.
 - **No eviction** (§13.4). A full host refuses or queues a start. It never stops a live place to make room.
@@ -1626,22 +1629,33 @@ A place is woken by any of these:
 - **Due time.** The host keeps an index of `Clean(Some(t))` rows by `t`. It waits for the earliest `t` with an absolute wall-time wait on its `Clock`, and wakes that place when the wall clock reads `t` or later. A trigger is due when the next commit's `at` is at least its due time (ENDSTATE T1), and that `at` is at least the wall clock, so the trigger is due when the woken head reads it. A wake that comes early because the clock stepped back is harmless: the head arms its timer for the trigger as at any open, and the idle rule (§14.4) keeps the place up until it runs.
 - **Operator or deploy.** A deploy, an install, a genesis or an operator request to a cold place first wakes it. Every launch that opens the place's store goes through `Dirty`, so `next_due` is never stale after one of them.
 
+**What a wake does, by the group's state.** The host knows a group as cold or live from its own records and the launcher's child reports, never from the child's phase. The launcher reports a child's start and its end; between them the group is live, whether the child is `Starting`, `Ready` or `Draining`.
+
+| Group state (host) | Row | Arrival | Due time | Deploy or operator request | The child ends with a clean report for `gen` | The child ends otherwise |
+|---|---|---|---|---|---|---|
+| Cold | `Clean(t)` | the check of §14.2, then `Dirty(gen + 1)` and a launch | the same | wake first, then act | (no child) | (no child) |
+| Live, child `gen` | `Dirty(gen)` | not reported: the launcher watches a listener only while its group has no live child | no host timer: the index holds `Clean` rows only, and the live head arms its own | acts on the live child; a cutover launches NEW at `gen + 1` | `Clean(next_due)`, unless the end report says the listener is readable: then the row stays `Dirty`, is re-marked `gen + 1`, and the group is launched again | stays `Dirty(gen)`; a probe at `gen + 1` (§14.5) |
+| Cutover, OLD `gen` and NEW `gen + 1` | `Dirty(gen + 1)` | not reported | none | refused `Busy` until the cutover ends | OLD's report names `gen` and changes nothing | OLD's end changes nothing; NEW's end is as the live row |
+| Failing (§14.5), no child | `Dirty(gen)` | starts the retry now, without the backoff | the same | a deploy, retry or removal ends the failing state | (no child) | (no child) |
+
+**An arrival during a drain.** A drain closes the acceptor, so a connection that arrives while the child drains waits in the listener's backlog, which the launcher still holds. When the child ends, the launcher checks the listener for readability before it reports the end, puts the answer in the end report, and only then starts watching the listener again (level-triggered). So a connection that came before the end is in the report, and one that came after it is an `Arrived`. Neither waits behind a `Clean` row.
+
 A wake runs the check of §14.2. On success the host launches the serving child with the selected activation, and the launcher tags the child with `gen`. On `Full`, the wake stays queued in the host's memory, in (time of the wake's cause, group name) order, and is retried when a place's row leaves `Dirty`. The trigger then runs late, which ENDSTATE T2 already allows: it runs once, and sees how late it is from its own `at`. The host reports each queued wake and its age in its status, so a lateness is never hidden.
 
 ### 14.4 The idle stop and the clean report
 
 **Idle (extends §12.1).** `PlaceConfig` gains `idle: Option[u64]`, an idle time in milliseconds; `Some(0)` is refused `Missing("idle")`. With `Some(i)`, `operate` stops the place itself when it is idle for `i`. A place is **idle** when all of these hold:
 - S holds no session;
-- H holds no worker and no FIFO entry, and its trigger drive has no active run;
+- H holds no worker and no FIFO entry, its trigger drive has no active run, and it holds no export lease (§5 "Prepared deployment"; a hot deploy's export keeps its place up until the cutover or the attempt ends);
 - H has no pending trigger, other than a parked one, that is due before `at` + `i`, where `at` is `store.next_call_info(db).at`.
 
 H and S send `operate` a message each time their part becomes true or false. `operate` checks on a sweep every `i / 2` (at least 1 ms), as §13.2's directory does: a place idle at two sweeps `i` apart is stopped, by the same path as `StopRequested` (§12.1 "Draining"). An active granted run therefore keeps its place up. Without this rule, a drain would cut the run and the next start would run attempt n + 1, so a cold place would churn its attempts. The platform host sets `idle` for every place. `runner.main` and the fixture pass `None`.
 
 **The clean report (extends §12.1).** `Ended` becomes `Stopped(Option[u64]) | Forced(u64)`. On the drain's finish (§12.1 step 6), after the last commit is durable and before `store.close`, H reads `triggers.next_pending` on its last snapshot with no active run. It sends that row's due time, or `None`, to `operate` in its last message, and `operate` returns `Ok(Stopped(next_due))`. A parked trigger is skipped, as at dispatch: only a release, which is a transaction through an entry and so a wake, can make it runnable. A run that a drain cut is pending again, so its due time is in the past and the place is woken at once. A place without triggers returns `Stopped(None)`.
 
-`runner.main` launched with the private option `--hirsel-wake` writes `next_due` on the launcher's private report descriptor when it gets `Stopped(next_due)`, as one value-codec `Option[u64]`, and exits 0. It writes nothing for `Forced` or a `StartError`. The launcher forwards the report with the child's `gen` and its exit status.
+`runner.main` launched with the private option `--hirsel-wake` writes `next_due` on the launcher's private report descriptor when it gets `Stopped(next_due)`, as one value-codec `Option[u64]`, and exits 0. It writes nothing for `Unstarted`, `Forced` or a `StartError`. The launcher forwards the report with the child's `gen` and its exit status.
 
-**Only a clean `Stopped` writes `Clean`.** The host writes `Clean(next_due)` in one transaction that requires the row to be `Dirty(gen)` with the report's `gen`, the exit status to be 0 and the report to be present, and it lowers `dirty`. Any other end leaves the row `Dirty(gen)`: a crash, a kill, `Forced`, a `StartError`, an exit 0 with no report, a report from an older generation, or a lost report. The generation fence matters at a cutover: NEW is started at `gen + 1` while OLD drains, so OLD's later report names the old `gen` and changes nothing.
+**Only a clean `Stopped` writes `Clean`.** The host writes `Clean(next_due)` in one transaction that requires the row to be `Dirty(gen)` with the report's `gen`, the exit status to be 0 and the report to be present, and it lowers `dirty`. Any other end leaves the row `Dirty(gen)`: a crash, a kill, `Unstarted`, `Forced`, a `StartError`, an exit 0 with no report, a report from an older generation, or a lost report. The generation fence matters at a cutover: NEW is started at `gen + 1` while OLD drains, so OLD's later report names the old `gen` and changes nothing.
 
 ### 14.5 Crashes and probes
 
@@ -1655,23 +1669,24 @@ After a host or launcher restart, the launcher reports every child it had as end
 
 A deploy runs on a live place, so its row is `Dirty` for the whole deploy, and NEW's serving start re-marks it at `gen + 1`.
 
-**The preview scan** is launch.md "Deploy preview of pending triggers". It runs in the prepare child against the staged catalog, after `migrate`. `PrepareConfig` gains `triggers: triggers.Entries`, the same list the place passes in `TriggerConfig`. The scan classifies each pending row with the head's own dispatch code, as the manifest preview uses `answer_want` (§12.2): `trigger_key` is the one function that says whether NEW has the row's entry, and `triggers.start`'s revision comparison says whether a started granted run is held. So the scan cannot disagree with what NEW's head does. Its classes are `gone`, `held`, `changed` and `unchanged`. OLD's revisions come from the export's `current` activation row. The report is exact, and one that does not fit the prepare child's bound fails the preview with `Limit(triggers)`, never a truncated list.
+**The preview scan** is launch.md "Deploy preview of pending triggers". It runs in the prepare child against the staged catalog, after `migrate`. `PrepareConfig` gains `triggers: triggers.Entries`, the same list the place passes in `TriggerConfig`. The scan classifies each pending row with the head's own dispatch code, as the manifest preview uses `answer_want` (§12.2): `trigger_key` is the one function that says whether NEW has the row's entry, and `triggers.start`'s revision comparison says whether a started granted run is held. So the scan cannot disagree with what NEW's head does. Its classes are tried in `advance_trigger`'s order, and a row takes the first that applies: `cancelling` (the head finishes a cancel before it looks at the entry), `held` (a granted row that is parked, or whose attempt is at least 1 so that `triggers.start` compares its stamp, which runs before the head looks for the entry), `gone`, `changed` and `unchanged`. So a started granted run whose entry NEW removes is `held`, not `gone`. OLD's revisions come from the export's `current` activation row. The report is exact, and one that does not fit the prepare child's bound fails the preview with `Limit(triggers)`, never a truncated list.
 
 **The image-digest guard stays.** A granted trigger's revision stamp is the launch image digest (`make_trigger_drive`), and a start of attempt ≥ 2 under another digest parks the run with a `Revision` hold. `Exported.revision` does not cover `handles` (a table name, a binding, a key codec, an index extractor), so a revision-keyed guard would let a started run resume against changed handles. The scan reports these runs as `held`, so the operator sees, before the cutover, which runs need a release.
 
 ### 14.7 Laws
 
-Each law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited.
+L40 runs in the runner's prepare harness and L44 in the runner's place harness, since each needs one place and no host. Every other law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited.
 
 | Law | Wrong implementation it catches | Oracle |
 |---|---|---|
 | L39 `wake_due_after_unload`: a place commits a trigger due at t + 2 s and goes idle; its process ends with `Stopped(Some(t + 2000))`; with no arrival, the trigger's outcome is committed after wall time t + 2 s | the host keeps §13.5's no-wake rule, or writes `Clean(None)`, so the trigger never runs | §14.3, §14.4 |
-| L40 `trigger_scan_classes`: one OLD store holds a pending transact trigger for an entry NEW removes, a started granted run, one for an entry whose body NEW changes, and one for an unchanged entry; the scan reports `gone`, `held`, `changed` and `unchanged`, one each; NEW's head then consumes the first with `Gone` and parks the second with a `Revision` hold | the scan reads OLD's registry or the pre-migration catalog, or compares revisions for granted runs | §14.6, launch.md |
+| L40 `trigger_scan_classes`: one OLD store holds a pending transact trigger for an entry NEW removes, a started granted run, a started granted run whose entry NEW removes, a cancelling row for an entry NEW removes, one for an entry whose body NEW changes, and one for an unchanged entry; the scan reports `gone`, `held` (two), `cancelling`, `changed` and `unchanged`; NEW's head then consumes the first with `Gone`, parks both started runs with a `Revision` hold, and finishes the cancel | the scan reads OLD's registry or the pre-migration catalog, compares revisions for granted runs, or tries `gone` before `held` or `cancelling` | §14.6, launch.md, `advance_trigger` |
 | L41 `wake_dirty_capacity`: with `max_places` 2, two places are live and a third's due time comes; it is not started, its row stays `Clean`, and it starts when one of the two writes `Clean` | the host writes `Dirty` before the check, so a restart probes 3 > `max_places` places | §14.2 |
 | L42 `wake_only_clean_stop`: a child killed after its drain began, a child that ends `Forced`, and a child that exits 0 without a report each leave the row `Dirty`; each is started again as a probe, and so is each one left `Dirty` across a host restart, and its due trigger runs | the host writes `Clean` on any exit 0 or on `Draining` | §14.4, §14.5 |
 | L43 `wake_generation_fence`: during a cutover, OLD's clean report arrives after NEW is Ready; the row stays `Dirty(gen + 1)`, and NEW's idle stop then writes `Clean` | a report is accepted without its `gen`, so the host believes the place stopped while NEW serves, and a second start is refused `Held` | §14.4 |
 | L44 `idle_keeps_runs`: a granted run that waits on its outside step for 3 × `idle` keeps its place up, and records one attempt | idle counts sessions only, so the place drains, the run is cut, and attempt 2 runs | §14.4 |
 | L45 `wake_probe_bound`: after `max_places` places are left `Dirty` by kills and the host restarts with 10,000 `Clean` rows, it starts exactly the `Dirty` ones, and lowering `max_places` below them is refused `Busy` | the host probes every row, or accepts a lower bound and breaks the invariant | §14.2, §14.5 |
+| L46 `wake_arrival_during_drain`: a place's idle stop begins; while it drains, a client connects; the connection is answered by the next process, and the row goes `Dirty(gen)` → `Dirty(gen + 1)` → `Clean` with no `Clean` between | the launcher reports the end before it checks the listener, the host writes `Clean`, and the connection waits until the next due time or forever | §14.3 |
 
 ### 14.8 What this changes elsewhere, and the conflicts
 
@@ -1680,7 +1695,7 @@ Each law runs in a platform host harness (lane P3 in platform-host-spec-1741/REP
 | 1 | §13.5 "the directory does not wake an unloaded place" | the platform must wake one | §13.5 now names §14 for platform places. The directory keeps its rule until it is retired (row 9). |
 | 2 | §13.7 Durable Objects "Not taken: alarm wake-up" | §14 takes it | §13.7 is amended to say so. |
 | 3 | §13.6 PD4 `dir_reopen_keeps` | none: it tests the directory, which still runs a due trigger at the next open | unchanged |
-| 4 | §12.1 `Ended = Stopped \| Forced(u64)` | the clean report needs `next_due` | `Stopped(Option[u64])`. Every match on `Stopped` (the directory, the fixture, `main`) gains the field. Pre-1.0, nothing migrates. |
+| 4 | §12.1 `Ended = Stopped \| Forced(u64)` | the clean report needs `next_due`, and a stop during `Starting` cannot know it | `Stopped(Option[u64]) \| Unstarted \| Forced(u64)`. The drain's finish returns `Stopped(next_due)`, a stop during `Starting` returns `Unstarted`, and `main` exits 0 for both but reports only `Stopped`. Every match on `Stopped` (the directory, the fixture, `main`) changes with it. Pre-1.0, nothing migrates. |
 | 5 | §12.1 "operate publishes at each phase change"; the watch channel of capacity 6 | the idle stop adds inputs to `operate` | The idle stop adds messages on `operate`'s own inbox, not phases. No new phase, no new `Status` publish, and the watch channel stays at six sends. |
 | 6 | §12.2 "the preview opens no store" | the trigger scan needs the store's rows | The scan runs in the prepare child, which already opens the export and stages the migration. The manifest preview is unchanged. |
 | 7 | ENDSTATE `storage-triggers` "after a long outage every trigger … runs once at the next open" | none | A wake is an open. Lateness under `Full` is T2's lateness. |

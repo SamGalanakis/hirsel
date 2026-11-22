@@ -721,6 +721,10 @@ enum Loans {
     Escape,
     /// A loan to a direct call lasts the call (crate docs, "Loans").
     Direct,
+    /// As `Direct`, and so does the destination loan of a channel receive:
+    /// the engine writes the item into it during the call and keeps no
+    /// pointer to it after, and its result is a flag, not a place.
+    Scoped,
 }
 
 fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: Loans) -> Vec<bool> {
@@ -741,10 +745,17 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: Loans)
                 }
                 let sig = signatures.get(site.signature.index());
                 let dest = sig.is_some_and(|g| g.dest.is_some());
-                let lent = loans != Loans::Escape && matches!(site.callee, Callee::Direct(_));
+                let received = loans == Loans::Scoped
+                    && matches!(
+                        site.callee,
+                        Callee::Runtime(RtOp::Receive { .. } | RtOp::TryReceive { .. })
+                    );
+                let lent =
+                    received || loans != Loans::Escape && matches!(site.callee, Callee::Direct(_));
                 // A `mut` loan to a call with results may leave a result
                 // anchored to the place (crate docs, "Loans", Ruling 7).
-                let anchored = sig.is_some_and(|g| g.dest.is_some() || !g.results.is_empty());
+                let anchored =
+                    !received && sig.is_some_and(|g| g.dest.is_some() || !g.results.is_empty());
                 for (i, arg) in site
                     .args
                     .get(&b.pools.args)
@@ -811,7 +822,8 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: Loans)
 /// share frame bytes whatever their types. A slot qualifies when its address
 /// leaves the body only as a loan whose extent is the call: to a direct call
 /// (crate docs, "Loans"), but not as a `mut` loan to one with results, which
-/// may stay anchored to the place. And every use must follow a `StorageLive` on every path from the entry, failure
+/// may stay anchored to the place; or as a channel receive's destination. And
+/// every use must follow a `StorageLive` on every path from the entry, failure
 /// edges included.
 ///
 /// A qualifying slot also ends where it stops being needed
@@ -844,7 +856,7 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> ScopedSlots {
         return ScopedSlots::none(k);
     }
     let from = provenance(b);
-    let mut out: Vec<bool> = escaping(b, signatures, &from, Loans::Direct)
+    let mut out: Vec<bool> = escaping(b, signatures, &from, Loans::Scoped)
         .into_iter()
         .map(|e| !e)
         .collect();

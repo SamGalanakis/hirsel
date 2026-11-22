@@ -92,7 +92,8 @@ fn evaluator_identity_unavailable() {
 /// are read off each body by hand: a use reached on a path with no begin, a
 /// failure edge leaving before the begin that follows its instruction, and a
 /// `mut` loan to a direct call with a result (Ruling 7) are refused; a begin
-/// round a loop with or without an end is admitted. The ends are listed as (block, instruction after which the
+/// round a loop with or without an end, and a channel receive's destination,
+/// are admitted. The ends are listed as (block, instruction after which the
 /// slot ends, or `None` at the block's entry); a slot lent `view` to a call
 /// with a pointer result, which may be anchored to it (OWN-20), ends only at its
 /// `StorageDead`. An end is kept only where a `StorageLive` may follow, since
@@ -101,7 +102,14 @@ fn evaluator_identity_unavailable() {
 fn slot_markers_follow_liveness_round_loops_joins_and_failure_edges() {
     let begin =
         |v: u32| format!("  live s0\n  address a0\n  store a0, v0\n  v{v}: ptr = pointer a0\n");
-    let cases: [(&str, String, bool, &[(usize, Option<usize>)]); 9] = [
+    /// A case's name, body, whether the slot is scoped, and its ends.
+    type Case = (
+        &'static str,
+        String,
+        bool,
+        &'static [(usize, Option<usize>)],
+    );
+    let cases: [Case; 10] = [
         (
             "straight",
             format!(
@@ -154,6 +162,12 @@ fn slot_markers_follow_liveness_round_loops_joins_and_failure_edges() {
                 begin(3)
             ),
             false,
+            &[],
+        ),
+        (
+            "received into",
+            "fn f0 = n0 g3 {\nb0(v0: i32, v1: i32, v2: ptr):\n  live s0\n  address a0\n  v3: bool = call rt.receive[t0] g2 (v2, &a0)\n  address a0\n  v4: ptr = pointer a0\n  return v0\n".into(),
+            true,
             &[],
         ),
         (

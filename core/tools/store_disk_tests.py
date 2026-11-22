@@ -20,7 +20,7 @@ from store_crash_tests import run_crashes
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact', 'import_read_boundaries',
-        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
+        'draft_refusal', 'worker_refusal', 'opening', 'db', 'watermark_reissue', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
 
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
 # Execute and report every law; only this exact failure family is nonblocking.
@@ -76,7 +76,8 @@ def main():
                 try:
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, crash_manifest, work, engine,
-                                       count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals'))
+                                       count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
+                                                   'watermark-absent', 'watermark-torn'))
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

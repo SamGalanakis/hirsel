@@ -161,7 +161,13 @@ every repair, and its Cover is that subscription's alone: no result is shared
 between subscriptions, so one Caller's result never reaches another.
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
-from)` makes a branch at a Snapshot of this open; `branch(db, name)` finds one.
+from)` makes a branch at a Snapshot of this open. Before making a cut, it
+counts the exact union of nodes reached by the proposed heads and existing
+named pins against `resident_limit` (§1.11 I4). Shared nodes count once, and
+nodes previously held only by a reader count if the new head reaches them.
+If the union exceeds the limit, `fork` returns `Full` with the exact requested
+bytes and the limit. It makes no cut and creates no branch. `branch(db, name)`
+finds a branch.
 `adopt(mut db, b)` makes b's head main's head only when b is not main, b's parent
 is 0 and main's head is still b's fork point; otherwise, or when b is no longer
 live, it is `Diverged(b)`. `delete_branch` removes a branch. `pin(mut db, name,

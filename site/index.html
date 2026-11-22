@@ -567,7 +567,21 @@ function graze(key, t) {
   const pt = k => { const a = hh(key, k * 2 + 11) * 2 - 1, b = hh(key, k * 2 + 12) * 2 - 1; return [(a + b) / 2, (a - b) / 2]; };
   const A = pt(e - 1), B = pt(e), m = f < .4 ? ease(f / .4) : 1;
   const bob = f >= .4 ? Math.max(0, Math.sin((f - .4) * 40)) * .5 : 0;
-  return [lerp(A[0], B[0], m), lerp(A[1], B[1], m), B[0] >= A[0] ? 1 : -1, bob];
+  return [lerp(A[0], B[0], m), lerp(A[1], B[1], m), B[0] >= A[0] ? 1 : -1, bob, crop(key, e, f)];
+}
+/* now and then, standing after a step, the sheep puts its head down to the grass: it lowers, takes
+   a mouthful or two, and lifts again well before its next step. About one stand in six, seeded by
+   sheep and step, so a field has only a few heads down at once. 0 is head up, 1 is down. */
+function crop(key, e, f) {
+  if (f < .44 || f > .97 || hh(key + e * 977, 21) > .18) return 0;
+  const d = sm((f - .44) / .1) * (1 - sm((f - .87) / .1)), u = (f - .56) / .3;
+  return d * (u > 0 && u < 1 ? 1 - .2 * Math.max(0, Math.sin(u * Math.PI * 4)) : 1);
+}
+/* 0 inside a scene's window [t0, t1) on its loop of P ticks, easing to 1 within r ticks either side:
+   a sheep keeps its head up through the part it plays */
+function away(t, t0, t1, P, r) {
+  const u = ((t % P) + P) % P, d = u >= t0 && u < t1 ? 0 : Math.min(((t0 - u) % P + P) % P, ((u - t1) % P + P) % P);
+  return sm(d / r);
 }
 
 /* ---------- drawing primitives ---------- */
@@ -579,12 +593,30 @@ const INK = '#11110F', RED = '#CB271F', BG = '#FBF6EC';
    to grazing ground inside a wall; red stays with the one red ram and Capacity. */
 const GROUND = '#ECE3CF', GROUND2 = '#E2D7BE', HILL = '#F3EBDB';
 const OAT = '#E6DCC4', PEAT = '#8C7458', PEAT_D = '#4E3E2E', MOSS = '#DFDCC0';
-function sheep(x, y, s, face, red, a) {
+/* the ram-mark grazing: the horned head (the whole hexagon, cut from the body across the neck) comes away,
+   swings forward and down and tips its nose into the grass; the body keeps its place, cut back
+   a hair round the lowered head so the two never merge. Glyph units, head facing left. */
+const HEAD = new Path2D("M-200,-200 L175,-200 L175,96 L64.5,150 L-200,150 Z");
+const BODY = new Path2D("M-200,150 L64.5,150 L175,96 L175,-200 L500,-200 L500,500 L-200,500 Z");
+const HULL = [96, 12, 149, 44, 149, 92, 104, 134, 67, 153, 60, 153, 23, 127, 23, 55], HPX = 86, HPY = 85, HANG = -.45, HDX = -50, HDY = 70;
+function sheep(x, y, s, face, red, a, hd) {
   if (a <= .01) return;
   if (s > 14) { ctx.save(); ctx.globalAlpha = a * .085; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x + (face > 0 ? -1 : 1) * s * .02, y + s * .02, s * .4, s * .095, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
   ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y);
   const k = s / 225; ctx.scale(face > 0 ? -k : k, k); ctx.translate(-128, -236);
-  ctx.fillStyle = red ? RED : INK; ctx.fill(MARK); ctx.restore();
+  ctx.fillStyle = red ? RED : INK;
+  if (!(hd > .005)) { ctx.fill(MARK); ctx.restore(); return; }
+  const c = Math.cos(HANG * hd), sn = Math.sin(HANG * hd), ox = HPX + HDX * hd, oy = HPY + HDY * hd;
+  /* a tuft under the muzzle as it comes down */
+  if (s > 14 && hd > .3) {
+    ctx.save(); ctx.globalAlpha = a * .5 * sm((hd - .3) / .5); ctx.strokeStyle = PEAT_D; ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.beginPath();
+    ctx.moveTo(6, 236); ctx.lineTo(-2, 222); ctx.moveTo(16, 236); ctx.lineTo(16, 218); ctx.moveTo(26, 236); ctx.lineTo(34, 224); ctx.stroke(); ctx.restore();
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(-300, -300, 900, 900);
+  for (let j = 0; j < HULL.length; j += 2) { const u = HULL[j] - HPX, v = HULL[j + 1] - HPY, X = ox + u * c - v * sn, Y = oy + u * sn + v * c; if (j) ctx.lineTo(X, Y); else ctx.moveTo(X, Y); }
+  ctx.closePath(); ctx.clip('evenodd'); ctx.clip(BODY); ctx.fill(MARK); ctx.restore();
+  ctx.transform(c, sn, -sn, c, ox - HPX * c + HPY * sn, oy - HPX * sn - HPY * c); ctx.clip(HEAD); ctx.fill(MARK);
+  ctx.restore();
 }
 function dia(x, y, hw, hh2) { ctx.beginPath(); ctx.moveTo(x, y - hh2); ctx.lineTo(x + hw, y); ctx.lineTo(x, y + hh2); ctx.lineTo(x - hw, y); ctx.closePath(); }
 function fillDia(x, y, hw, hh2, col, a) { ctx.globalAlpha = a; ctx.fillStyle = col; dia(x, y, hw, hh2); ctx.fill(); ctx.globalAlpha = 1; }
@@ -894,7 +926,7 @@ SC.hill = (g) => {
   const rp = MOB ? [W * .66, g.rTo + (ex.t - g.rTo) * .45] : [W * .36, g.rTo + (H - g.rTo) * .22];
   let redSlot = 0; slots.forEach((l, j) => { if (Math.hypot(l.cx - rp[0], l.cy - rp[1]) < Math.hypot(slots[redSlot].cx - rp[0], slots[redSlot].cy - rp[1])) redSlot = j; });
   return {
-    slots, redSlot, ids: [], key: 0,
+    slots, redSlot, ids: [], key: 0, redGrazes: true,
     ground(t, a) {
       for (const w of segs) drawWall(w.A, w.B, w.st, a * .19 * w.fa, w.k);
       for (const p of posts) { const k = (MOB ? .5 : .6) + .3 * cl01((p[1] - g.rTo) / (H - g.rTo)); post(p[0], p[1], a * .3 * sm((p[1] - top) / 220), k); }
@@ -912,6 +944,8 @@ SC.safe = (g) => {
   const phase = (k, t) => { const c = Math.floor(t / C) % 9; return order[c] === k ? (t % C) / C : -1; };
   return {
     slots, redSlot: 4, ids, key: 175, start: 130,
+    /* a sheep keeps its head up from a little before it is lifted out until it is back */
+    calm(i, l, t) { const c = order.indexOf(l.slot); return away(t, c * C, (c + 1) * C, 9 * C, 20); },
     ext: [Math.min(...slots.map(l => l.y - s - ch * .22 - 4)), Math.max(...P.map(p => p[1] + ch * .44 + 4))],
     pose(i, l, t) {
       const f = phase(l.slot, t); if (f < 0) return null;
@@ -950,12 +984,14 @@ SC.parallel = (g) => {
     const off = MOB ? 17 : 21;
     return [m[0] + nx * off, m[1] + ny * off];
   });
-  const C = 130, TR2 = 78, ys = [];
+  const C = 130, TR2 = 78, ys = [], legTo = P.map((p, k) => legs.findIndex(q => q.to === k));
   P.forEach(p => ys.push(p[1] - s * .95 - 20, p[1] + ch * .4 + 3));
   legs.forEach(l => { for (let k = 0; k <= 12; k++) ys.push(qpt(ep(l.from), l.c(), ep(l.to), k / 12)[1]); });
   tagAt.forEach(q => ys.push(q[1] - 9, q[1] + 9));
   return {
     slots, redSlot: 3, ids, key: 175, ext: [Math.min(...ys), Math.max(...ys)],
+    /* the sheep the token comes to keeps its head up while it holds it */
+    calm(i, l, t) { const lg = legTo[l.slot]; return lg < 0 ? 1 : away(t, lg * C + TR2 - 24, (lg + 1) * C, 3 * C, 20); },
     ground(t, a) {
       P.forEach(p => patch(p[0], p[1], cw * .4, ch * .4, a));
       legs.forEach(l => { const p = ep(l.from), q = ep(l.to), c = l.c(); dashed([p, c, q], .38 * a, true); });
@@ -1008,7 +1044,7 @@ SC.bounded = (g) => {
     ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.lineTo(Cc[0], Cc[1]); ctx.lineTo(D[0], D[1]); ctx.closePath(); ctx.stroke(); ctx.restore();
   };
   return {
-    slots, redSlot: 0, ids, key: 232, start: 468, ext: bext,
+    slots, redSlot: 0, ids, key: 232, start: 468, ext: bext, redGrazes: true,
     pose(i, l, t) {
       if (l.slot !== 0) return null;
       t %= C; const g2 = graze(77, gT);
@@ -1018,7 +1054,9 @@ SC.bounded = (g) => {
       else if (t >= WALK2[0] && t < WALK2[1]) { const e = ease((t - WALK2[0]) / (WALK2[1] - WALK2[0])); p = [lerp(OUT[0], HOME[0], e), lerp(OUT[1], HOME[1], e)]; face = HOME[0] >= OUT[0] ? 1 : -1; }
       else face = 1;
       const still = !(t >= WALK1[0] && t < WALK1[1]) && !(t >= WALK2[0] && t < WALK2[1]);
-      return { x: p[0] + (still ? g2[0] * ts * .06 : 0), y: p[1] + (still ? g2[1] * ts * .02 - g2[3] : 0), face };
+      /* it grazes only once it has carried on, out in the limit, and is up again before it walks home */
+      const hd = g2[4] * sm((t - WALK1[1] - 6) / 18) * (1 - sm((t - WALK2[0] + 24) / 18));
+      return { x: p[0] + (still ? g2[0] * ts * .06 : 0), y: p[1] + (still ? g2[1] * ts * .02 - g2[3] : 0), face, hd };
     },
     ground(t, a) {
       t %= C;
@@ -1182,6 +1220,7 @@ SC.authority = (g) => {
   const route = (home, dest) => [[0, 70, home, gin], [70, 116, gin, gout], [116, 176, gout, dest], [176, 236, dest, dest], [236, 296, dest, gout], [296, 342, gout, gin], [342, 410, gin, home]];
   return {
     slots, redSlot: 2, ids, key: 93, start: 329,
+    calm(i, l) { return holders[l.slot] ? 0 : 1; },
     ext: [Math.min(b.y - 8, ...P.map(p => p[1] - s * 1.12 - 32), gin[1] - s * 1.12 - 32), Math.max(b.y + b.h + 6, ...P.concat(D).map(p => p[1] + ch * .4 + 3))],
     pose(i, l, t) {
       const h = holders[l.slot]; if (!h) return null;
@@ -1343,7 +1382,7 @@ SC.local = (g) => {
     pose(i, l, t) {
       const g2 = graze(i * 7 + 3, gT), [own, nm] = lit(t), o = own[l.slot], n = nm[l.slot];
       const base = i === REDI ? .55 : .22;
-      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: o > .5 ? side(l.slot) : g2[2], a: base + (1 - base) * Math.max(o, n * .55) };
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: o > .5 ? side(l.slot) : g2[2], a: base + (1 - base) * Math.max(o, n * .55), hd: g2[4] * (1 - sm(o / .4)) };
     },
     ground(t, a) {
       const [own, nm] = lit(t);
@@ -1426,7 +1465,7 @@ SC.fast = (g) => {
         return { x: p[0], y: p[1] - Math.abs(Math.sin(t * .2 + l.slot)) * 1.6, face: 1, a: edge };
       }
       const g2 = graze(i * 7 + 3, gT), st = at(t), hop = l.slot === CH && st.edit >= 0 ? Math.sin(st.edit * Math.PI) * s * .16 : 0;
-      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3] - hop, face: g2[2] };
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3] - hop, face: g2[2], hd: g2[4] };
     },
     ground(t, a) {
       const st = at(t);
@@ -1480,7 +1519,7 @@ SC.memory = (g) => {
   const arcC = [M[0], M[1] - ch * 1.15];
   const mys = [O[1] + ch * .08 - s * 1.02 - ch * .3, crO[1] - s * 1.4 * 1.18, FK(0, 0)[1] - fs - 4, S[1] - s * 1.25 - 6, qpt(MA, arcC, MB, .5)[1] - 4, ...crS.map(p => p[1] - s * 1.15 * 1.18), S[1] + ch * .08 - s * 1.02 - ch * .3,
     O[1] + ch * .5 + (MOB ? 16 : 22) + 8, FK(2, 2)[1] + (MOB ? 16 : 22) + 8, S[1] + ch * .5 + (MOB ? 16 : 22) + 8, M[1] + ch * .45 + (MOB ? 16 : 22) + 8];
-  const lifted = (l, a, i) => { const g2 = graze(i * 7 + 3, gT); return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3] - (1 - a) * ch * .3, face: g2[2], a }; };
+  const lifted = (l, a, i) => { const g2 = graze(i * 7 + 3, gT); return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3] - (1 - a) * ch * .3, face: g2[2], a, hd: g2[4] * sm((a - .7) / .3) }; };
   return {
     slots, redSlot: 6, ids, key: 100, start: 350, ext: [Math.min(...mys), Math.max(...mys)],
     pose(i, l, t) {
@@ -1578,7 +1617,7 @@ const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let scene = null, fading = [], view = null;
 let gT = 0, sT = 0, tr = 1, arr = -1, refit = false;
 const TR = 104;
-const rend = Array.from({ length: N }, () => ({ x: 0, y: 0, s: 0, a: 0, face: 1 }));
+const rend = Array.from({ length: N }, () => ({ x: 0, y: 0, s: 0, a: 0, face: 1, hd: 0 }));
 let snap = null, hop = new Float32Array(N);
 
 function resize() {
@@ -1681,13 +1720,18 @@ function pose() {
   const moving = tr < 1 && snap;
   for (let i = 0; i < N; i++) {
     const l = scene.L[i]; let p = scene.pose && !l.ridge ? scene.pose(i, l, sT) : null;
-    if (!p) { const g2 = graze(i * 7 + 3, gT); p = { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: g2[2] }; }
+    if (!p) { const g2 = graze(i * 7 + 3, gT); p = { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: g2[2], hd: g2[4] }; }
     const s = p.s ?? l.s, a = (p.a ?? 1) * l.a, r = rend[i];
+    /* heads stay up under reduced motion, for a red ram the view does not let graze, and through a sheep's part in its scene */
+    let hd = reduced || (i === REDI && !scene.redGrazes) ? 0 : p.hd || 0;
+    if (hd && scene.calm && !l.ridge) hd *= scene.calm(i, l, sT);
     if (moving) {
       const e = progOf(i, tr), o = snap[i];
       r.face = Math.abs(p.x - o.x) > 4 && e > 0 && e < 1 ? (p.x > o.x ? 1 : -1) : (e >= 1 ? p.face : o.face);
       const m = moveAt(i, tr, o, p.x, p.y, s, a); r.x = m[0]; r.y = m[1]; r.s = m[2]; r.a = m[3];
-    } else { r.x = p.x; r.y = p.y; r.s = s; r.a = a; r.face = p.face; }
+      /* a walk between views: heads come up as it starts and may go down again once it has settled */
+      r.hd = Math.max(o.hd * (1 - sm(tr / .12)), hd * sm((tr - .85) / .15));
+    } else { r.x = p.x; r.y = p.y; r.s = s; r.a = a; r.face = p.face; r.hd = hd; }
     if (arr >= 0) arrive(i, r);
   }
 }
@@ -1697,7 +1741,7 @@ const ARR_D = 30, ARR_RED = 74, ARR_END = ARR_RED + ARR_D + 26;
 function arrive(i, r) {
   const top = rb, d = i === REDI ? ARR_RED : 6 + cl01((r.y - top) / Math.max(1, H - top)) * 42 + hh(i, 9) * 16;
   const f = cl01((arr - d) / ARR_D), e = 1 - Math.pow(1 - f, 3);
-  r.a *= e; r.y -= (1 - e) * Math.max(6, r.s * .3);
+  r.a *= e; r.y -= (1 - e) * Math.max(6, r.s * .3); r.hd *= e * e;
   if (i === REDI) { const u = (arr - d - ARR_D) / 22; if (u > 0 && u < 1) r.y -= Math.sin(u * Math.PI) * r.s * .16; }
 }
 function draw() {
@@ -1708,7 +1752,7 @@ function draw() {
   if (tr < 1) for (const f of fading) f.sc.ground && f.sc.ground(f.t, f.g * (1 - sm(e * 1.6)));
   scene.ground && scene.ground(sT, sm((e - .35) / .65) * ga);
   const order = rend.map((r, i) => i).sort((p, q) => rend[p].y - rend[q].y);
-  for (const i of order) { const r = rend[i]; sheep(r.x, r.y, r.s, r.face, i === REDI, r.a); }
+  for (const i of order) { const r = rend[i]; sheep(r.x, r.y, r.s, r.face, i === REDI, r.a, r.hd); }
   if (tr < 1) for (const f of fading) f.sc.over && f.sc.over(f.t, f.o * (1 - sm(e * 1.5)));
   scene.over && scene.over(sT, sm((e - .5) / .5) * (arr >= 0 ? sm((arr - 40) / 40) : 1));
 }

@@ -321,7 +321,7 @@ the test fails with `prop: replay token no longer fails`.
 
 A malformed token fails the test with `prop: config: bad replay token`.
 
-```hirsel unbuilt
+```hirsel
 @test
 fn sum_stays_small() -> Result[(), ()] {
     prop.check(prop.config(), prop.list_of(prop.u64_in(0, 100), 0, 50), fn(xs: List[u64]) -> Result[(), String] {

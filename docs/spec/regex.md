@@ -53,6 +53,7 @@ std regex has no replace or split operation. Each is a loop over `next` or `next
 ### RE-2: Syntax
 
 `new(p)` accepts exactly the patterns the crate accepts, and refuses every other pattern with the crate's error.
+Use `unicode_property_message(p, e)` for an unsupported property's name and the supported properties.
 
 - **Constructs:**
   - literals and escapes;
@@ -62,7 +63,8 @@ std regex has no replace or split operation. Each is a loop over `next` or `next
   - capturing, non-capturing and named groups;
   - the flags `i m s U u R x`, set inline or scoped;
   - the assertions `^ $ \A \z \b \B \< \>`, `\b{start}`, `\b{end}`, `\b{start-half}` and `\b{end-half}`.
-- **Unicode.** Under the `u` flag, which is on by default, `\d`, `\s` and `\w` are the crate's Unicode tables, and `i` uses the crate's Unicode simple case folding. So `(?i)k` matches the Kelvin sign, `(?i)[^k]` does not, and `(?i)ss` does not match `ß`. The tables are std constants ([LANG-20](language.md#lang-20-constants)) and are never charged.
+- **Unicode.** Under the `u` flag, which is on by default, `\d`, `\s` and `\w` are the crate's Unicode tables, and `i` uses the crate's Unicode simple case folding.
+  The Unicode word class is the UTS #18 simple word class: Alphabetic, marks (M), decimal digits (Nd), connector punctuation (Pc) and Join_Control. It includes U+0301 COMBINING ACUTE ACCENT and U+2167 ROMAN NUMERAL EIGHT, an alphabetic letter number. `[^\W_]` uses the same class with ASCII underscore removed. So `(?i)k` matches the Kelvin sign, `(?i)[^k]` does not, and `(?i)ss` does not match `ß`. The tables are std constants ([LANG-20](language.md#lang-20-constants)) and are never charged.
 - **Unicode properties.** `\p{..}`, `\P{..}` and the one-letter forms are looked up as the crate looks them up. The name is normalized (UAX44-LM3: case, spaces, `_`, `-` and a leading `is` are ignored), then resolved through the crate's property-name and property-value alias tables, with its special cases for `cf`, `sc` and `lc`.
   - A query that resolves to the general category `Decimal_Number` or the binary property `White_Space` is accepted. These are the only properties this build has data for, and they are the `\d` and `\s` tables. So `\p{Nd}`, `\p{digit}`, `\p{gc=Nd}`, `\P{Nd}`, `\p{gc!=Nd}`, `\p{White_Space}` and `\p{space}` are accepted.
   - Every other query is refused with the crate's error: `UnicodePropertyValueNotFound` when the crate cannot resolve a value (`\p{gc=Nope}`, `\p{sc=Nope}`), and `UnicodePropertyNotFound` otherwise (`\pL`, `\pN`, `\p{Greek}`, `\p{sc=Greek}`, `\p{Any}`, `\p{Alphabetic}`, `\p{Nope}`).
@@ -72,7 +74,11 @@ std regex has no replace or split operation. Each is a loop over `next` or `next
   - a pattern whose syntax tree is nested more than 250 deep, counted as the crate counts it: `NestLimitExceeded`.
 - **Which error.** When a pattern has several errors, the error is the crate's. Parse errors come first, in the order the parser meets them. Then the nest limit is checked over the parsed tree. Then translation errors come, in translation order.
 
-A refused pattern returns `Error(Syntax(SyntaxError(at, kind)))`. `at` is the byte offset in `p` where the crate's error span starts, and `kind` is the crate's error kind of the same name. The kinds are the crate's syntax and translation error kinds, less three this build cannot raise (`UnicodePerlClassNotFound`, `UnicodeCaseUnavailable` and `InvalidLineTerminator`):
+A refused pattern returns `Error(Syntax(SyntaxError(at, kind)))`. `at` is the byte offset in `p` where the crate's error span starts, and `kind` is the crate's error kind of the same name. `unicode_property_message(pattern, e)` formats either unsupported-property error with
+the query from the original pattern and the two supported properties. It returns
+`None` for other syntax kinds or when the pattern has no property at that offset.
+It parses the supplied pattern with the usual parser scratch admission.
+The kinds are the crate's syntax and translation error kinds, less three this build cannot raise (`UnicodePerlClassNotFound`, `UnicodeCaseUnavailable` and `InvalidLineTerminator`):
 
 ```hirsel unbuilt
 pub type SyntaxKind: key = CaptureLimitExceeded | ClassEscapeInvalid | ClassRangeInvalid

@@ -57,3 +57,23 @@ fn regex_dfa_quit() -> bool {
     let s = "!˗"
     forward_end(re, mut c, s, 0) == Retry && find(re, mut c, s, 0) == Some(Match(start: 0, end: 3))
 }
+
+// expect: run unsupported_unicode_property_names_query() = true
+fn unsupported_unicode_property_names_query() -> bool {
+    let pattern = "(?x)\\p {gc=Greek}"
+    let Error(Syntax(e)) = new(pattern) else {
+        return false
+    }
+    let Some(take message) = unicode_property_message(pattern, e) else {
+        return false
+    }
+    message == "Unsupported Unicode property `gc=Greek`. Supported properties are Decimal_Number (Nd) and White_Space."
+}
+
+// expect: run simple_unicode_word_includes_marks_and_letter_numbers() = true
+fn simple_unicode_word_includes_marks_and_letter_numbers() -> bool {
+    let re = result.unwrap(new("[^\\W_]+"))
+    let mut c = cache(re, 0)
+    let text = "é_Ⅷ"
+    find(re, mut c, text, 0) == Some(Match(start: 0, end: 3)) && find(re, mut c, text, 3) == Some(Match(start: 4, end: 7))
+}

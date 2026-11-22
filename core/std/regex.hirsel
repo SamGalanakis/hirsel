@@ -3413,6 +3413,26 @@ fn write_prefilter(mut table: Bytes, p: Prefilter, needles: Needles) {
     }
 }
 
+/// Describes an unsupported Unicode property in the pattern that produced the error.
+pub fn unicode_property_message(pattern: String, error: SyntaxError) -> Option[String] {
+    if error.kind != UnicodePropertyNotFound && error.kind != UnicodePropertyValueNotFound {
+        return None
+    }
+    let Ok(take parsed) = ast(pattern) else {
+        return None
+    }
+    for n in parsed.ast {
+        if n.kind == PROPERTY && n.at == error.at {
+            let mut message = string.new()
+            string.push(mut message, "Unsupported Unicode property `")
+            string.push(mut message, string.slice(pattern, n.a, n.b))
+            string.push(mut message, "`. Supported properties are Decimal_Number (Nd) and White_Space.")
+            return Some(take message)
+        }
+    }
+    None
+}
+
 pub fn new(pattern: String) -> Result[Regex, Error] {
     let hir = compile_hir(pattern)?
     compile_new(pattern, take hir)

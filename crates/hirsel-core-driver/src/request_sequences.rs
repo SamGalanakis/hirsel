@@ -2384,15 +2384,7 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
             .collect::<Vec<_>>()
             .join("\n")
     };
-    // The checked-definitions count is work, not an answer (REPORT D2).
-    let stdout = after(&out.stdout)
-        .lines()
-        .map(|line| match line.rsplit_once(", ") {
-            Some((head, tail)) if tail.ends_with(" checked definitions") => format!("{head}, _"),
-            _ => line.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let stdout = after(&out.stdout);
     let output = std::fs::read(run.join(step.output))
         .ok()
         .map(|bytes| ContentHash::of_bytes(&bytes));

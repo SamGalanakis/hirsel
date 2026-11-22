@@ -8,6 +8,12 @@ the options accepted by a command.
 Build, pack, and SDK generation accept `-o` or `--output`. Use a file
 path for `build` and `pack`, and a directory for `sdk ts`.
 
+## Checking packages
+
+`hirsel check` reports the number of definitions checked in the sources,
+including cached checks. With `--json`, this is `checked_definitions`.
+The `rechecked` field counts bodies recomputed on this request.
+
 ## Native build options
 
 `hirsel run` uses a temporary executable in the compiler cache by default.

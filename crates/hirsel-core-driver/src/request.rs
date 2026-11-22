@@ -18,6 +18,7 @@ struct Output<'a> {
     accepted: bool,
     root: String,
     files: usize,
+    checked_definitions: usize,
     rechecked: usize,
     source_bytes: usize,
     diagnostics: Vec<crate::Diagnostic<'a>>,
@@ -1506,6 +1507,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             String::new()
         },
         files: product.files.len(),
+        checked_definitions: product.checked_definitions(),
         rechecked: product.rechecked.len(),
         source_bytes: product.bytes,
         diagnostics: if let Some(r) = &reach {
@@ -1631,6 +1633,7 @@ fn answer_hit(
             String::new()
         },
         files: rendered.files,
+        checked_definitions: rendered.checked_definitions,
         rechecked: 0,
         source_bytes: rendered.source_bytes,
         diagnostics: rendered.diagnostics,
@@ -1710,7 +1713,7 @@ fn finish(
                     "not accepted"
                 },
                 output.files,
-                output.rechecked
+                output.checked_definitions
             );
         }
     }

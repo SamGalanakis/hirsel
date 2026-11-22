@@ -513,6 +513,10 @@ impl CheckProduct {
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty()
     }
+    /// Definitions in the request's sources, including those with reused check results.
+    pub(crate) fn checked_definitions(&self) -> usize {
+        self.index.definitions.len() - self.index.definitions.base_len()
+    }
     /// The identities of the rechecked bodies, independent of traversal order.
     pub fn rechecked_paths(&self) -> BTreeSet<&DefPath> {
         self.rechecked.iter().collect()

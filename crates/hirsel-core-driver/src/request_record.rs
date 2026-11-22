@@ -7,7 +7,7 @@
 //! with this request's tuple: its command and check variant, every native
 //! option that changes the answer, and the toolchain it observed (link
 //! inputs, runtime, recipe and keyed environment). The value holds what the
-//! request answers: check root, check and build acceptance kept apart,
+//! request answers: check root, checked definition count, check and build acceptance kept apart,
 //! diagnostics, incomplete and resource rows, the reach census, and the
 //! executable's key. Paths are never stored: a site names its file by its
 //! position in the normalised source order (R1) and a byte span, and a
@@ -83,7 +83,7 @@ impl Request {
         })
     }
     pub(crate) fn key(&self, snapshot: ContentHash) -> ContentHash {
-        ContentHash::of_parts("hirsel.request-record.v3", [&snapshot.0[..], &self.tuple])
+        ContentHash::of_parts("hirsel.request-record.v4", [&snapshot.0[..], &self.tuple])
     }
 }
 /// Every native option, by name: those that change the executable enter the
@@ -231,6 +231,7 @@ pub(crate) struct Value {
     /// The check's acceptance; a build's is the reach's.
     check_accepted: bool,
     files: usize,
+    checked_definitions: usize,
     source_bytes: usize,
     diagnostics: Vec<Row>,
     incomplete: Vec<IncompleteRow>,
@@ -357,6 +358,7 @@ impl Value {
             root: product.root,
             check_accepted: product.accepted(),
             files: product.files.len(),
+            checked_definitions: product.checked_definitions(),
             source_bytes: product.bytes,
             diagnostics: answer
                 .diagnostics
@@ -454,6 +456,7 @@ pub(crate) struct Rendered<'a> {
     pub(crate) accepted: bool,
     pub(crate) root: ContentHash,
     pub(crate) files: usize,
+    pub(crate) checked_definitions: usize,
     pub(crate) source_bytes: usize,
     pub(crate) diagnostics: Vec<Diagnostic<'a>>,
     pub(crate) incomplete: Vec<IncompleteDiagnostic<'a>>,
@@ -485,6 +488,7 @@ impl Hit {
                 .map_or(value.check_accepted, |r| r.accepted),
             root: value.root,
             files: value.files,
+            checked_definitions: value.checked_definitions,
             source_bytes: value.source_bytes,
             diagnostics: value
                 .diagnostics

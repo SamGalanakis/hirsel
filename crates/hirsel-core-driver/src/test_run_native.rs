@@ -1292,6 +1292,18 @@ fn package_l11_store_hits_validate_every_incoming_edge() {
 }
 
 #[test]
+fn check_reports_definition_count_on_a_request_hit() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    law.write("app/main.hirsel", format!("type Pair {{ a: u64, b: u64 }}\n{PACKAGE_MAIN}"));
+    let core = law.path("core-product");
+    for _ in 0..2 {
+        let stdout = PackageLaw::pass(law.run(&["check", "app", "--core-product", core.to_str().unwrap()]));
+        assert_eq!(stdout, "accepted: 1 files, 2 checked definitions\n");
+    }
+}
+
+#[test]
 fn package_l13_explicit_image_uses_only_the_closure() {
     let law = PackageLaw::new();
     law.manifest("core_only", "core_only", 1, "[sources]\n\"main.hirsel\" = \"main\"\n[dependencies]\nstd = { major = 1 }\n");

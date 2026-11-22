@@ -1279,7 +1279,10 @@ pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> 
 }
 
 pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()] {
-    let outcome = search(c, g, law)
+    finish_check(search(c, g, law))
+}
+
+fn finish_check(take outcome: Outcome) -> Result[(), ()] {
     let mut out = string.new()
     match outcome {
         Passed(_) => return Ok(()),
@@ -1293,4 +1296,115 @@ pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> R
         Falsified(f) => report(f, mut out),
     }
     fail(take out)
+}
+
+pub type Case[T: send]: send {
+    value: T,
+    index: u64,
+    world_seed: u64,
+    tasks: Tasks
+}
+
+fn mix(seed: u64) -> u64 {
+    // SplitMix64, as used for the first draw of std.sim.world.plan.
+    let advanced = int.wrapping_add(seed, 0x9e3779b97f4a7c15)
+    let a = int.wrapping_mul(advanced ^ (advanced >> 30), 0xbf58476d1ce4e5b9)
+    let b = int.wrapping_mul(a ^ (a >> 27), 0x94d049bb133111eb)
+    b ^ (b >> 31)
+}
+
+pub fn world_seed(sim: u64, index: u64) -> u64 {
+    mix(sim ^ mix(index))
+}
+
+fn task_failure[T: send](tasks: Tasks, cfg: Config, take value: T, index: u64, law: fn(take Case[T]) -> Result[(), String] waits) -> Option[FailureInfo] waits {
+    let sim = match cfg.sim_seed {
+        Some(seed) => seed,
+        None => 0,
+    }
+    let input = Case(value: take value, index, world_seed: world_seed(sim, index), tasks)
+    let spawned = bound steps cfg.case_steps {
+        task.try_spawn(tasks, bytes cfg.case_bytes, take input, law)
+    }
+    let child = match take spawned {
+        Error(_) => return Some(failure_info(TimedOut, "OutOfTime")),
+        Ok(Error(_)) => config_bytes(cfg.case_bytes),
+        Ok(Ok(take handle)) => take handle,
+    }
+    match task.join(take child) {
+        Ok(Ok(())) => None,
+        Ok(Error(text)) => Some(failure_info(Returned, text)),
+        Error(Failed(causes)) => Some(cause_failure(causes)),
+        Error(Cancelled(causes)) => Some(cause_failure(causes)),
+    }
+}
+
+fn tasks_candidate[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, prefix: Option[List[u64]]) -> Option[Counterexample] waits {
+    let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
+        return None
+    }
+    if s.invalid || s.overrun {
+        return None
+    }
+    let Some(take info) = task_failure(tasks, cfg, take value, index, law) else {
+        return None
+    }
+    Some(counterexample(take s, take info))
+}
+
+fn shrink_tasks_case[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, take original: Counterexample) -> (Counterexample, u64) waits {
+    let mut state = Shrink(best: take original, cursor: cursor(1), trials: 0, changed: false)
+    while let Some(take values) = next_trial(mut state, cfg.max_shrinks) {
+        let trial = tasks_candidate(tasks, cfg, g, law, index, Some(take values))
+        review_trial(mut state, take trial)
+    }
+    let Shrink(best: take best, trials, ..) = take state
+    (take best, trials)
+}
+
+fn replay_tasks_one[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, text: String) -> Outcome waits {
+    let Replay(index, values: take values) = parse_token(text, cfg.max_choices)
+    let prefix = Some(take values)
+    let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
+        generation_failed(index)
+    }
+    if !s.overrun && !s.invalid {
+        if let Some(take info) = task_failure(tasks, cfg, take value, index, law) {
+            return Falsified(found(cfg, g, index, 1, 0, counterexample(take s, take info)))
+        }
+    }
+    fail("prop: replay token no longer fails")
+}
+
+fn search_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Outcome waits {
+    if let Some(text) = c.replay {
+        return replay_tasks_one(tasks, c, g, law, text)
+    }
+    let empty: Option[List[u64]] = None
+    let mut cases: u64 = 0
+    let mut rejected: u64 = 0
+    let mut index: u64 = 0
+    while cases < c.cases {
+        let Some((take value, take s)) = generate(c, g, index, empty) else {
+            generation_failed(index)
+        }
+        if s.overrun || s.invalid {
+            rejected += 1
+            if rejected > c.max_rejects {
+                return GaveUp(cases, rejected)
+            }
+        } else {
+            cases += 1
+            if let Some(take info) = task_failure(tasks, c, take value, index, law) {
+                let (take smallest, n) = shrink_tasks_case(tasks, c, g, law, index, counterexample(take s, take info))
+                return Falsified(found(c, g, index, cases, n, take smallest))
+            }
+        }
+        index += 1
+    }
+    Passed(cases)
+}
+
+pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits {
+    finish_check(search_tasks(tasks, c, g, law))
 }

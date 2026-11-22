@@ -434,3 +434,52 @@ fn prop_shrink_sibling_order() -> bool {
     let result = shrink_from(config(), g, unsorted_or_sorted_failure, take tape)
     result.rendered == "(1, 2, 3)"
 }
+
+// Catches mixing only once or mixing the two inputs in the opposite order.
+// expect: run prop_tasks_world_vectors() = true
+fn prop_tasks_world_vectors() -> bool {
+    world_seed(5, 7) == 0x88bf589a5ce00596 && world_seed(0, 0) == 0xa706dd2f4d197e6f
+}
+
+fn seed_case(take trial: Case[(u64, (u64, u64))]) -> Result[(), String] {
+    let (actual, (sim, data_value)) = trial.value
+    if actual == data_value && trial.world_seed == sim && trial.index == 0 {
+        Ok(())
+    } else {
+        Error(string.from("seed or case index drift"))
+    }
+}
+
+// Catches either seed affecting the other stream at the spawn boundary.
+// expect: run prop_tasks_seed_isolation(tasks) = true
+fn prop_tasks_seed_isolation(tasks: Tasks) -> bool waits {
+    let vectors: Inline[(u64, u64, u64, u64), 3] =[(5, 5, 0x3eb2ecbc903907fc, 4), (5, 6, 0x7fe2811fc126dc6f, 4), (2, 5, 0x3eb2ecbc903907fc, 8)]
+    for (data_seed, sim_seed, expected_world, expected_value) in vectors {
+        let mut c = config()
+        c.seed = data_seed
+        c.sim_seed = Some(sim_seed)
+        c.cases = 1
+        c.max_shrinks = 0
+        let g = pair(u64_in(0, 9), just((expected_world, expected_value)))
+        let _ = check_tasks(tasks, c, g, seed_case)
+    }
+    true
+}
+
+fn endless_case(take trial: Case[u64]) -> Result[(), String] {
+    loop {
+        task.check_cancel()
+    }
+}
+
+// Catches joining a child with an unbounded root step budget.
+// expect: run prop_tasks_out_of_time(tasks) = true
+fn prop_tasks_out_of_time(tasks: Tasks) -> bool waits {
+    let mut c = config()
+    c.case_steps = 1000
+    let trial = task_failure(tasks, c, 0u64, 0, endless_case)
+    if let Some(info) = trial {
+        return info.class == TimedOut
+    }
+    false
+}

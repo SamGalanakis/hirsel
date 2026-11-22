@@ -155,8 +155,8 @@ pub fn token(f: Found, mut out: String)
 `Passed(cases)` counts valid cases, and `GaveUp(cases, rejected)` also counts
 discarded cases.
 
-```hirsel unbuilt
-pub type Case[T] { value: T, index: u64, world_seed: u64, tasks: Tasks }
+```hirsel
+pub type Case[T: send]: send { value: T, index: u64, world_seed: u64, tasks: Tasks }
 pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits
 pub fn world_seed(sim: u64, index: u64) -> u64
 ```
@@ -230,14 +230,20 @@ Vectors:
 The data depends on `seed` alone, and the worlds on `sim_seed` and the case index
 alone. While a case shrinks its index stays the same, so its world stays the same.
 
-```hirsel unbuilt
+```hirsel
 @test
-fn queue_keeps_order(e: Env, tasks: Tasks) -> Result[(), ()] waits {
-    let mut c = prop.config()
+fn world_matches_plan(e: Env, tasks: Tasks) -> Result[(), ()] waits {
+    let mut c = std.prop.config()
     c.sim_seed = std.sim.world.test_seed(e)
-    prop.check_tasks(tasks, c, prop.list_of(prop.u64_in(0, 99), 0, 20), fn(take k: prop.Case[List[u64]]) -> Result[(), String] waits {
-        let (w, clock) = std.sim.world.new(k.world_seed, 0, 0)
-        drive(k.tasks, take w, clock, k.value)
+    std.prop.check_tasks(tasks, c, std.prop.u64_in(1, 99), fn(take k: std.prop.Case[u64]) -> Result[(), String] {
+        let (world, _) = std.sim.world.new(k.world_seed, 0, 0)
+        let mut w = take world
+        let mut p = std.sim.world.plan(k.world_seed)
+        if std.sim.world.choose(mut w, k.value) == std.sim.world.pick(mut p, k.value) {
+            Ok(())
+        } else {
+            Error(string.from("world and plan chose different values"))
+        }
     })
 }
 ```
@@ -320,11 +326,12 @@ searches nor shrinks. If the run fails, the engine reports it. If the run passes
 the test fails with `prop: replay token no longer fails`.
 
 A malformed token fails the test with `prop: config: bad replay token`.
+In a package that depends on std, write `std.prop.replay(cfg, token)`.
 
 ```hirsel
 @test
 fn sum_stays_small() -> Result[(), ()] {
-    prop.check(prop.config(), prop.list_of(prop.u64_in(0, 100), 0, 50), fn(xs: List[u64]) -> Result[(), String] {
+    std.prop.check(std.prop.config(), std.prop.list_of(std.prop.u64_in(0, 100), 0, 50), fn(xs: List[u64]) -> Result[(), String] {
         let mut total: u64 = 0
         for x in xs { total += x }
         if total < 10 { Ok(()) } else { Error(string.from("sum >= 10")) }

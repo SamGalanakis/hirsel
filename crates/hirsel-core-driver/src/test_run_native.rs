@@ -2306,3 +2306,59 @@ fn seeded(e: Env) -> Result[(), ()] {
     );
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
 }
+
+#[test]
+fn property_simulation_keeps_world_and_data_seeds_separate() {
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\ngrants = [\"Tasks\"]\n",
+    );
+    law.write(
+        "app/main.hirsel",
+        r#"
+fn odd_world_counterexample(take sample: std.prop.Case[u64]) -> Result[(), String] {
+    if sample.world_seed % 2 == 1 && sample.value >= 3 {
+        Error(string.from("odd world and value >= 3"))
+    } else {
+        Ok(())
+    }
+}
+
+@test
+fn prop_seeds(e: Env, tasks: Tasks) -> Result[(), ()] waits {
+    let mut c = std.prop.config()
+    c.seed = 5
+    c.cases = 1
+    c.sim_seed = std.sim.world.test_seed(e)
+    std.prop.check_tasks(tasks, c, std.prop.u64_in(0, 9), odd_world_counterexample)
+}
+"#,
+    );
+
+    // With data seed 5, case 0 draws 4. The world seed is odd for sim
+    // seed 0 and even for sim seed 1. Only the former shrinks to 3.
+    let (status, stdout, stderr) = law.run(&["test", "app", "--sim", "--seeds", "2"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    let failure = stdout
+        .lines()
+        .find(|line| line.starts_with("fail executed app@1/main/prop_seeds (seed 0): "))
+        .unwrap_or_else(|| panic!("missing sim seed 0 failure\n{stdout}\n{stderr}"));
+    assert!(
+        failure.contains(r#"sim seed 0; reproduce: prop.replay(cfg, \"AQABAw==\")"#),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("shrinks: 3; law: odd world and value >= 3"),
+        "{failure}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("pass executed app@1/main/prop_seeds (seed 1)")),
+        "{stdout}"
+    );
+}

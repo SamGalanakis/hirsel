@@ -12,14 +12,17 @@ write every top-level signature in full, and repeat each `mut` and `take` mode a
 ## The loop
 
 1. Write the code. Start a package with `hirsel new app` (`--lib` for a library).
-2. Run `hirsel check` in the package directory. Each refusal is one line naming one
-   rule and one site:
+2. Run `hirsel check` in the package directory. Each refusal starts with one line naming its
+   rule and primary site:
 
    ```text
    ./main.hirsel:2:32-34: OWN-7 a moving place is passed as `take xs`
    ```
 
-3. Read the rule ID and the span first, then the message. Fix only that site.
+3. Read the rule ID and the span first, then the message. For automation,
+   `hirsel check --json` supplies source coordinates, causal roles and `fixes`.
+   Apply each selected fix's edits together at their byte spans. Review
+   `maybe` fixes and fill in bodies supplied by `placeholder` fixes.
 4. Run `hirsel explain OWN-7` for the rule's exact statement and a refused example.
    Fix to the rule, not to the message's wording.
 5. Repeat from step 2 until it prints `accepted`.

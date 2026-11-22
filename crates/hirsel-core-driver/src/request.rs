@@ -1616,17 +1616,17 @@ fn finish(
     } else {
         for d in &output.diagnostics {
             eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
-            for site in &d.causal {
-                eprintln!("  caused by {}", sources.render(site));
+            for cause in &d.causal {
+                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
             }
-            if let Some(hint) = &d.hint {
-                eprintln!("  {hint}");
+            for edit in d.fixes.iter().flat_map(|fix| &fix.edits) {
+                eprintln!("  {}", edit.description());
             }
         }
         for g in &output.incomplete {
             eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
-            for site in &g.causal {
-                eprintln!("  caused by {}", sources.render(site));
+            for cause in &g.causal {
+                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
             }
         }
         for r in &output.resources {

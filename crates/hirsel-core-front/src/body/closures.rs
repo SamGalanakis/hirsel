@@ -364,13 +364,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.call_seq += 1;
         let call = self.call_seq;
         let holds = self.freezes.len();
+        let before = self.out.refusals.len();
         let (ty, value) = match self.place(callee) {
             Ok(Some(at)) => {
                 self.use_place(at, Use::View(Hold::CallView(call, u32::MAX)), callee);
                 (at.ty, self.emit_place(at, callee))
             }
             Ok(None) => self.expr(callee, None),
-            Err(()) => return (ERROR, None),
+            Err(()) => {
+                let callee = self.cause(callee);
+                let call = self.span(n);
+                if let Some(r) = self
+                    .out
+                    .refusals
+                    .get_mut(before..)
+                    .and_then(|new| new.last_mut())
+                    && r.primary == callee
+                    && let Some(RefusalDetail::OpaqueField {
+                        receiver_type,
+                        receiver,
+                        member,
+                    }) = r.detail.as_deref()
+                    && member.end == callee.span.end
+                {
+                    r.detail = Some(Box::new(RefusalDetail::OpaqueMethod {
+                        receiver_type: receiver_type.clone(),
+                        receiver: *receiver,
+                        member: *member,
+                        call,
+                        arity: args.len(),
+                    }));
+                }
+                return (ERROR, None);
+            }
         };
         let mut written = callee;
         while self.kind(written) == NodeKind::Group {
@@ -2435,7 +2461,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse_from(
                 "OWN-21",
                 self.close_brace(n),
-                vec![cause],
+                vec![Cause::declared(cause)],
                 "a captured slot must outlive its scoped callback",
             );
         }
@@ -2569,7 +2595,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse_from(
                         "OWN-21",
                         self.span(n),
-                        vec![cause],
+                        vec![Cause::declared(cause)],
                         "a value installed through a captured slot reads an undeclared anchor",
                     );
                     return false;
@@ -2632,7 +2658,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse_from(
                         "OWN-21",
                         self.span(n),
-                        vec![cause],
+                        vec![Cause::declared(cause)],
                         "a stored callback cannot capture a callee slot",
                     );
                     return false;
@@ -2658,7 +2684,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_from(
                     "OWN-21",
                     self.span(n),
-                    vec![cause],
+                    vec![Cause::declared(cause)],
                     "a scoped callback cannot outlive a captured slot",
                 );
                 return false;
@@ -2715,7 +2741,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse_from(
                 "OWN-21",
                 self.span(n),
-                vec![cause],
+                vec![Cause::declared(cause)],
                 "a callback invocation parameter cannot escape into a capture",
             );
         }

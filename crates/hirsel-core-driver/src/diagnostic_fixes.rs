@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn rendered_hints_follow_the_current_index_on_warm_and_cold_checks() {
+fn rendered_edits_follow_the_current_index_on_warm_and_cold_checks() {
     let dir = tempfile::tempdir().unwrap();
     let warm_store = dir.path().join("warm");
     let mut driver = Driver::default();
@@ -70,18 +70,28 @@ fn rendered_hints_follow_the_current_index_on_warm_and_cold_checks() {
                 ("LANG-11", Some("Ready")),
             ] {
                 let row = rows.iter().find(|row| row.rule == rule).unwrap();
+                let written = match rule {
+                    "LANG-7" => "carth",
+                    "LANG-9" => "grein",
+                    _ => "Reedy",
+                };
+                let start = main.rfind(written).unwrap();
+                let expected = expected.map_or_else(
+                    || json!([]),
+                    |name| {
+                        json!([{
+                            "applicability": "maybe",
+                            "edits": [{
+                                "module": "app@1/main",
+                                "span": {"start": start, "end": start + written.len()},
+                                "text": name,
+                            }],
+                        }])
+                    },
+                );
                 let value = serde_json::to_value(row).unwrap();
-                assert_eq!(
-                    value.get("hint"),
-                    expected
-                        .map(|name| json!({"kind": "did_you_mean", "replacement": name}))
-                        .as_ref(),
-                    "edit {step}, {rule}",
-                );
-                assert_eq!(
-                    row.hint.as_ref().map(ToString::to_string),
-                    expected.map(|name| format!("did you mean `{name}`?")),
-                );
+                assert_eq!(value["fixes"], expected, "edit {step}, {rule}");
+                assert!(value.get("hint").is_none());
             }
             assert!(
                 crate::request_record::Value::of(crate::request_record::Answer {
@@ -93,14 +103,14 @@ fn rendered_hints_follow_the_current_index_on_warm_and_cold_checks() {
                     native: None,
                 })
                 .is_none(),
-                "a whole-request hit has no index from which to render the hints",
+                "a whole-request hit has no index from which to derive the edits",
             );
         }
     }
 }
 
 #[test]
-fn unresolved_library_path_hints_name_existing_public_declarations() {
+fn unresolved_library_path_edits_name_existing_public_declarations() {
     let dir = tempfile::tempdir().unwrap();
     let source = "fn one() { let _ = time.from_unix_ms(5u64); }\n\
                   fn absent() { time.unknown() }\n\
@@ -113,28 +123,28 @@ fn unresolved_library_path_hints_name_existing_public_declarations() {
         .check(request, &mut Meter::new(false))
         .unwrap();
     let diagnostics = product.machine_diagnostics().unwrap();
-    let hint = |line: &str| {
+    let fixes = |line: &str| {
         let start = source.find(line).unwrap() as u32;
-        diagnostics
+        &diagnostics
             .iter()
             .find(|row| row.primary.module == "app@1/main" && row.primary.span.start == start)
             .unwrap()
-            .hint
-            .as_ref()
+            .fixes
     };
-    let Some(DiagnosticHint::StdPath {
-        replacement,
-        merged_modules,
-    }) = hint("time.from_unix_ms")
-    else {
-        panic!("expected an exact std path for time.from_unix_ms");
-    };
-    assert_eq!(replacement, "std.time.from_unix_ms");
-    assert!(merged_modules.iter().any(|name| name == "clock"));
-    assert!(merged_modules.iter().any(|name| name == "list"));
-    assert!(hint("time.unknown").is_none());
-    assert_eq!(
-        hint("net.listen").map(ToString::to_string).as_deref(),
-        Some("did you mean `host.listen`?")
-    );
+    for (written, replacement) in [
+        ("time.from_unix_ms", "std.time.from_unix_ms"),
+        ("net.listen", "host.listen"),
+    ] {
+        let [fix] = fixes(written).as_slice() else {
+            panic!("expected a fix for {written}");
+        };
+        let [edit] = fix.edits.as_slice() else {
+            panic!("expected one edit for {written}");
+        };
+        let start = source.find(written).unwrap();
+        let mut fixed = source.to_owned();
+        fixed.replace_range(edit.span.start as usize..edit.span.end as usize, &edit.text);
+        assert_eq!(&fixed[start..start + replacement.len()], replacement);
+    }
+    assert!(fixes("time.unknown").is_empty());
 }

@@ -36,6 +36,7 @@ use hirsel_core_ir::{
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
 };
+use hirsel_core_resolve::{CausalRole, Cause, RefusalDetail};
 use hirsel_core_resolve::{NameScope, Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -1556,7 +1557,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         &mut self,
         rule: &str,
         span: Span,
-        causal: Vec<hirsel_core_resolve::Site>,
+        causal: Vec<Cause>,
         message: impl Into<String>,
     ) {
         let mut r = refusal(rule, self.p.site_span(self.at, span), message);

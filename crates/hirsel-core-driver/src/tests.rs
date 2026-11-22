@@ -1,8 +1,8 @@
 use super::*;
 use hirsel_core_ir::{FuncId, eval};
 
-#[path = "diagnostic_hints.rs"]
-mod diagnostic_hints;
+#[path = "diagnostic_fixes.rs"]
+mod diagnostic_fixes;
 
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
@@ -3077,8 +3077,8 @@ fn legal() -> u64 {
         let [causal] = diagnostic.causal.as_slice() else {
             panic!("{function} must name one conflicting binding");
         };
-        assert_eq!(causal.module, cause_module);
-        assert_eq!(causal.span, cause);
+        assert_eq!(causal.site.module, cause_module);
+        assert_eq!(causal.site.span, cause);
 
         let definition = path(&format!("main/{function}"));
         let root = hirsel_core_ir::Identity::plain(definition.clone());
@@ -3093,7 +3093,7 @@ fn legal() -> u64 {
         assert_eq!(
             message,
             format!(
-                "app@1/main:{}: LANG-7 `{name}` shadows a visible name\n  caused by {cause_module}:{}",
+                "app@1/main:{}: LANG-7 `{name}` shadows a visible name\n  declared here: {cause_module}:{}",
                 terminal(source, at),
                 terminal(cause_source, cause)
             )

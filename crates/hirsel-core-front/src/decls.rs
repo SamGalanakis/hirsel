@@ -816,7 +816,9 @@ impl Program<'_> {
                         item.tree.token_text(item.text, token)
                     ),
                 );
-                r.causal.push(self.site(at, *e.get()));
+                r.causal.push(hirsel_core_resolve::Cause::declared(
+                    self.site(at, *e.get()),
+                ));
                 self.refusals.push(r);
             }
         }
@@ -950,7 +952,9 @@ impl Program<'_> {
         };
         if let Some(first) = self.decls[d.index()].clone_body {
             let mut r = refusal("MEM-17", site, "a type has one clone body");
-            r.causal.push(self.fns[first as usize].site);
+            r.causal.push(hirsel_core_resolve::Cause::declared(
+                self.fns[first as usize].site,
+            ));
             self.refusals.push(r);
             return;
         }
@@ -2166,7 +2170,7 @@ impl Program<'_> {
         r.causal = members
             .iter()
             .filter(|m| m.0 != least)
-            .map(|m| self.decls[m.0.index()].site)
+            .map(|m| hirsel_core_resolve::Cause::declared(self.decls[m.0.index()].site))
             .collect();
         self.refusals.push(r);
     }
@@ -2192,7 +2196,7 @@ impl Program<'_> {
         r.causal = members
             .iter()
             .filter(|m| m.0 != least.0)
-            .map(|m| self.decls[m.0.index()].site)
+            .map(|m| hirsel_core_resolve::Cause::declared(self.decls[m.0.index()].site))
             .collect();
         self.refusals.push(r);
     }
@@ -2506,7 +2510,7 @@ impl Program<'_> {
                         for (site, explanation) in
                             missing_codec_declarations(&self.decls, &self.types, f.ty, &params)
                         {
-                            r.causal.push(site);
+                            r.causal.push(hirsel_core_resolve::Cause::declared(site));
                             r.message += &format!("; {explanation}");
                         }
                     }

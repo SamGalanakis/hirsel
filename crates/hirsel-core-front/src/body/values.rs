@@ -593,9 +593,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return (ERROR, None);
                 };
                 let mut value = value;
-                for token in
-                    &self.item.tree.tokens[u.projections.start as usize..u.projections.end as usize]
-                {
+                for token_id in u.projections.start..u.projections.end {
+                    let token_id = hirsel_core_syntax::TokenId(token_id);
+                    let token = &self.item.tree.tokens[token_id.0 as usize];
                     if token.kind == TokenKind::Ident {
                         let name = p.index.symbols.text(token.symbol);
                         let field = match p.constant_field(
@@ -608,6 +608,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 self.push_refusal(p.constant_field_refusal(
                                     rule,
                                     self.cause(n),
+                                    self.item.token_span(token_id),
                                     value,
                                     name,
                                 ));
@@ -840,7 +841,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.push_refusal(
                 refusal("LANG-11", self.cause(n), message)
                     .with_comparison(text, a)
-                    .with_unresolved(text, NameScope::Variant(decl.path.clone())),
+                    .with_unresolved(
+                        text,
+                        self.op_span(if self.kind(n) == NodeKind::Call {
+                            self.kids(n)[0]
+                        } else {
+                            n
+                        }),
+                        NameScope::Variant(decl.path.clone()),
+                    ),
             );
             return (ERROR, None);
         };

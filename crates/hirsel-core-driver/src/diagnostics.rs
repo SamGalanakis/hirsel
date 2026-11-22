@@ -1,62 +1,118 @@
 //! Tool encoding of PROG-7 sites. Cached item-local anchors bind to current file bytes.
 use super::*;
-use hirsel_core_resolve::{DefinitionKind, ModulePath, NameScope, Namespace};
+use hirsel_core_resolve::{
+    CausalRole, DefinitionKind, ModulePath, NameScope, Namespace, RefusalDetail,
+};
 use hirsel_core_syntax::{Span, Symbol};
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SourceSite {
     /// The file: its path relative to the request's manifest, or without a
     /// manifest its module (`app@1/main`).
     pub module: String,
     pub span: Span,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub line_text: Option<String>,
+}
+impl SourceSite {
+    fn new(module: String, span: Span, bytes: Option<&[u8]>) -> Self {
+        let (line, column, line_text) = bytes.map_or((None, None, None), |text| {
+            let offset = (span.start as usize).min(text.len());
+            let (line, column) = line_column(text, offset);
+            let start = text[..offset]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |n| n + 1);
+            let end = text[offset..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(text.len(), |n| offset + n);
+            let row = &text[start..end];
+            let row = if end < text.len() {
+                row.strip_suffix(b"\r").unwrap_or(row)
+            } else {
+                row
+            };
+            (
+                Some(line),
+                Some(column),
+                Some(String::from_utf8_lossy(row).into_owned()),
+            )
+        });
+        Self {
+            module,
+            span,
+            line,
+            column,
+            line_text,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticCause {
+    pub site: SourceSite,
+    pub role: CausalRole,
 }
 #[derive(Serialize)]
 pub struct Diagnostic<'a> {
     pub rule: &'a str,
     pub primary: SourceSite,
-    pub causal: Vec<SourceSite>,
+    pub causal: Vec<DiagnosticCause>,
     pub declared: Option<&'a str>,
     pub required: Option<&'a str>,
     pub message: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<DiagnosticHint>,
+    pub fixes: Vec<Fix>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub missing_patterns: &'a [String],
 }
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DiagnosticHint {
-    DidYouMean {
-        replacement: String,
-    },
-    StdPath {
-        replacement: String,
-        merged_modules: Vec<String>,
-    },
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Applicability {
+    Safe,
+    Maybe,
+    Placeholder,
 }
-impl std::fmt::Display for DiagnosticHint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DidYouMean { replacement } => write!(f, "did you mean `{replacement}`?"),
-            Self::StdPath {
-                replacement,
-                merged_modules,
-            } => {
-                write!(f, "did you mean `{replacement}`?")?;
-                if !merged_modules.is_empty() {
-                    write!(
-                        f,
-                        " Std extensions use bare names in these core modules: {}.",
-                        merged_modules.join(", ")
-                    )?;
-                }
-                Ok(())
-            }
+
+#[derive(Debug, Serialize)]
+pub struct Fix {
+    pub applicability: Applicability,
+    pub edits: Vec<Edit>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Edit {
+    pub module: String,
+    pub span: Span,
+    pub text: String,
+}
+impl Edit {
+    pub(crate) fn description(&self) -> String {
+        if self.text.is_empty() {
+            format!(
+                "delete {} bytes {}..{}",
+                self.module, self.span.start, self.span.end
+            )
+        } else if self.span.is_empty() {
+            format!(
+                "insert {:?} at {} byte {}",
+                self.text, self.module, self.span.start
+            )
+        } else {
+            format!(
+                "replace {} bytes {}..{} with {:?}",
+                self.module, self.span.start, self.span.end, self.text
+            )
         }
     }
 }
+
 #[derive(Serialize)]
 pub struct IncompleteDiagnostic<'a> {
     pub primary: SourceSite,
-    pub causal: Vec<SourceSite>,
+    pub causal: Vec<DiagnosticCause>,
     pub message: &'a str,
 }
 /// A resource refusal (PROG-6) names no rule: only its site and the limit it passes.
@@ -73,21 +129,25 @@ impl CheckProduct {
         let own = site
             .source
             .and_then(|source| self.files.iter().find(|f| f.file == source));
-        let (base, name) = if let Some(file) = own {
+        let (base, name, image_source) = if let Some(file) = own {
             let base = file
                 .syntax
                 .items
                 .get(site.item as usize)
                 .map_or(0, |i| i.file_offset);
-            (base, file.name.clone())
+            (base, file.name.clone(), None)
         } else if let (Some(image), Some(at)) = (&self.image, item_at(site)) {
-            (image.file_offset(at)?, image.source_name(at.0)?)
+            let (name, source) = image.source_file(at.0)?;
+            (image.file_offset(at)?, name, Some(source))
         } else {
-            (0, None)
+            (0, None, None)
         };
+        let bytes = own
+            .map(|f| self.source_bytes(f))
+            .or_else(|| image_source.as_deref().map(str::as_bytes));
         let id = self.index.module_path(site.module);
-        Ok(SourceSite {
-            module: name.unwrap_or_else(|| {
+        Ok(SourceSite::new(
+            name.unwrap_or_else(|| {
                 format!(
                     "{}@{}/{}",
                     id.package.name,
@@ -95,11 +155,18 @@ impl CheckProduct {
                     id.modules.join("/")
                 )
             }),
-            span: Span {
+            Span {
                 start: base + site.span.start,
                 end: base + site.span.end,
             },
-        })
+            bytes,
+        ))
+    }
+    fn source_bytes<'a>(&'a self, file: &'a FileProduct) -> &'a [u8] {
+        self.unparsed_sources
+            .iter()
+            .find_map(|(id, bytes)| (*id == file.file).then_some(bytes.as_ref()))
+            .unwrap_or(file.syntax.source.as_bytes())
     }
     pub fn machine_diagnostics(&self) -> io::Result<Vec<Diagnostic<'_>>> {
         self.diagnostics_for(self.diagnostics.iter())
@@ -113,13 +180,17 @@ impl CheckProduct {
             refusal.rule,
             refusal.message
         );
-        for site in &refusal.causal {
-            write!(text, "\n  caused by {}", self.render_site(site)?).unwrap();
+        for cause in &refusal.causal {
+            write!(
+                text,
+                "\n  {}: {}",
+                cause.role.label(),
+                self.render_site(&cause.site)?
+            )
+            .unwrap();
         }
-        if let Some(hint) =
-            hirsel_core_ids::published::catch_io(|| Ok(name_hint(&self.index, refusal)))?
-        {
-            write!(text, "\n  {hint}").unwrap();
+        for edit in self.fixes(refusal)?.iter().flat_map(|fix| &fix.edits) {
+            write!(text, "\n  {}", edit.description()).unwrap();
         }
         Ok(text)
     }
@@ -131,7 +202,7 @@ impl CheckProduct {
         Ok(match file {
             Some(file) => render_span(
                 Path::new(&location.module),
-                file.syntax.source.as_bytes(),
+                self.source_bytes(file),
                 location.span,
             ),
             None => SourceFiles::none().render(&location),
@@ -149,12 +220,23 @@ impl CheckProduct {
                     causal: r
                         .causal
                         .iter()
-                        .map(|s| self.source_site(s))
+                        .map(|c| {
+                            Ok(DiagnosticCause {
+                                site: self.source_site(&c.site)?,
+                                role: c.role,
+                            })
+                        })
                         .collect::<io::Result<_>>()?,
                     declared: r.declared.as_deref(),
                     required: r.required.as_deref(),
                     message: &r.message,
-                    hint: hirsel_core_ids::published::catch_io(|| Ok(name_hint(&self.index, r)))?,
+                    fixes: self.fixes(r)?,
+                    missing_patterns: match r.detail.as_deref() {
+                        Some(RefusalDetail::MissingPattern { pattern, .. }) => {
+                            std::slice::from_ref(pattern)
+                        }
+                        _ => &[],
+                    },
                 })
             })
             .collect()
@@ -189,7 +271,12 @@ impl CheckProduct {
                     causal: g
                         .causal
                         .iter()
-                        .map(|s| self.source_site(s))
+                        .map(|s| {
+                            Ok(DiagnosticCause {
+                                site: self.source_site(s)?,
+                                role: CausalRole::DerivedHere,
+                            })
+                        })
                         .collect::<io::Result<_>>()?,
                     message: &g.message,
                 })
@@ -198,7 +285,236 @@ impl CheckProduct {
     }
 }
 
-fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
+impl CheckProduct {
+    fn fixes(&self, r: &Refusal) -> io::Result<Vec<Fix>> {
+        let Some(file) = self.files.iter().find(|f| Some(f.file) == r.primary.source) else {
+            return Ok(vec![]);
+        };
+        let base = file
+            .syntax
+            .items
+            .get(r.primary.item as usize)
+            .map_or(0, |item| item.file_offset);
+        let source = file.syntax.text();
+        let span_text =
+            |span: Span| source.get((base + span.start) as usize..(base + span.end) as usize);
+
+        let edit = if r.rule == "LANG-8"
+            && r.declared.as_deref() == Some("waits")
+            && r.required.as_deref() == Some("not waits")
+            && span_text(r.primary.span) == Some("waits")
+        {
+            Some((Applicability::Safe, r.primary.span, String::new()))
+        } else if let Some(RefusalDetail::MissingPattern { pattern, close }) = r.detail.as_deref() {
+            let close = Span {
+                start: close.start,
+                end: close.start,
+            };
+            Some((
+                Applicability::Placeholder,
+                close,
+                format!("\n    {pattern} => fail(\"TODO: handle missing case\"),\n"),
+            ))
+        } else if let Some(RefusalDetail::MethodEdit {
+            name,
+            receiver,
+            callee_end,
+            call,
+            arity,
+        }) = r.detail.as_deref()
+        {
+            let Some(receiver_text) = span_text(*receiver) else {
+                return Ok(vec![]);
+            };
+            // Retain the argument list and any trivia after the member name.
+            let start = (base + callee_end) as usize;
+            let end = (base + call.end) as usize;
+            let Some(open) = file.syntax.tree.tokens.iter().find(|t| {
+                t.span.start as usize >= start && (t.span.end as usize) < end && !t.kind.is_trivia()
+            }) else {
+                return Ok(vec![]);
+            };
+            let after_open = open.span.end as usize;
+            let rest = &source[after_open..end];
+            let separator = if *arity == 0 { "" } else { ", " };
+            Some((
+                Applicability::Maybe,
+                *call,
+                format!(
+                    "{name}{}({receiver_text}{separator}{rest}",
+                    &source[start..open.span.start as usize]
+                ),
+            ))
+        } else if r.causal.iter().any(|c| c.role == CausalRole::OpenedHere)
+            && let Some(close @ (")" | "]" | "}")) = r.required.as_deref()
+        {
+            let before = base + r.primary.span.start;
+            let token = file.syntax.tree.tokens.iter().rev().find(|t| {
+                t.span.end <= before
+                    && !t.kind.is_trivia()
+                    && !matches!(t.kind, hirsel_core_syntax::TokenKind::Eof)
+            });
+            token.and_then(|token| {
+                let end = token.span.end;
+                (r.declared.as_deref() == Some("end of file")
+                    || source.get(end as usize..before as usize)?.contains('\n'))
+                .then_some((
+                    Applicability::Maybe,
+                    Span {
+                        start: end - base,
+                        end: end - base,
+                    },
+                    close.to_owned(),
+                ))
+            })
+        } else {
+            hirsel_core_ids::published::catch_io(|| {
+                Ok(
+                    name_edit(&self.index, r).and_then(|(span, expected, text)| {
+                        (expected.is_none() || span_text(span) == expected).then_some((
+                            Applicability::Maybe,
+                            span,
+                            text,
+                        ))
+                    }),
+                )
+            })?
+        };
+        let Some((applicability, span, text)) = edit else {
+            return Ok(vec![]);
+        };
+        let module = source_name(file.name.as_deref(), &self.index.module_path(file.module));
+        Ok(vec![Fix {
+            applicability,
+            edits: vec![Edit {
+                module,
+                span: Span {
+                    start: base + span.start,
+                    end: base + span.end,
+                },
+                text,
+            }],
+        }])
+    }
+}
+
+pub(crate) fn source_name(name: Option<&str>, module: &ModulePath) -> String {
+    name.map_or_else(
+        || {
+            format!(
+                "{}@{}/{}",
+                module.package.name,
+                module.package.version,
+                module.modules.join("/")
+            )
+        },
+        str::to_owned,
+    )
+}
+
+pub(crate) fn resolve_method_edits(program: &hirsel_core_front::Program<'_>, rows: &mut [Refusal]) {
+    use hirsel_core_front::{Def, Mode, TyKind};
+
+    let index = program.index;
+    for row in rows {
+        let Some(RefusalDetail::OpaqueMethod {
+            receiver_type,
+            receiver,
+            member,
+            call,
+            arity,
+        }) = row.detail.as_deref()
+        else {
+            continue;
+        };
+        let Some(source) = row
+            .primary
+            .source
+            .and_then(|id| program.modules.iter().find(|m| m.source == id))
+        else {
+            continue;
+        };
+        let path = &receiver_type.0;
+        let item = source.syntax.item(row.primary.item as usize);
+        let name = &item.source_text()[member.start as usize..member.end as usize];
+        // Core declares its prelude types together, with their operations in
+        // modules named for the types (List in the prelude, list.len in list).
+        let modules = if path.package.name_is("core") && path.modules == ["core"] {
+            vec![path.name.to_ascii_lowercase()]
+        } else {
+            path.modules.clone()
+        };
+        let Some(module) = index.module_at(&path.package, &modules) else {
+            continue;
+        };
+        let Some(symbol) = index.symbols.find(name) else {
+            continue;
+        };
+        let mut members =
+            index.members_named(row.primary.module, module, symbol, Namespace::Value, false);
+        let Some(id) = members.next() else {
+            continue;
+        };
+        if members.next().is_some() || !index.get(id).public || index.get(id).site.module != module
+        {
+            continue;
+        }
+        let Some(Def::Fn(f)) = program.by_definition[id.0 as usize] else {
+            continue;
+        };
+        let f = &program.fns[f as usize];
+        let Some(first) = f.params.first() else {
+            continue;
+        };
+        if f.params.len() != *arity + 1 || f.is_test || first.mode != Mode::View {
+            continue;
+        }
+        let TyKind::Adt(d, types) = program.types.kind(first.ty) else {
+            continue;
+        };
+        if &program.decls[d.index()].path != receiver_type
+            || !types.iter().enumerate().all(
+                |(i, ty)| matches!(program.types.kind(*ty), TyKind::Param(p) if *p as usize == i),
+            )
+        {
+            continue;
+        }
+        // Find a written module path from this request's visible module heads.
+        let qualified = [false, true].into_iter().find_map(|package_head| {
+            let mut names = if package_head {
+                let mut qualified = vec![path.package.name.as_str()];
+                qualified.extend(modules.iter().map(String::as_str));
+                qualified
+            } else {
+                modules.iter().map(String::as_str).collect()
+            };
+            let head = index.symbols.find(names.first()?)?;
+            let mut resolved = index.module_head(row.primary.module, head)?;
+            for segment in &names[1..] {
+                resolved = index.child(resolved, index.symbols.find(segment)?)?;
+            }
+            if resolved != module {
+                return None;
+            }
+            names.push(name);
+            Some(names.join("."))
+        });
+        if let Some(name) = qualified {
+            row.detail = Some(Box::new(RefusalDetail::MethodEdit {
+                name,
+                receiver: *receiver,
+                callee_end: member.end,
+                call: *call,
+                arity: *arity,
+            }));
+        }
+    }
+}
+
+fn name_edit<'a>(
+    index: &NameIndex,
+    refusal: &'a Refusal,
+) -> Option<(Span, Option<&'a str>, String)> {
     let lookup = refusal.unresolved.as_deref()?;
     let from = refusal.primary.module;
     let module_at = |path: &ModulePath| index.module_at(&path.package, &path.modules);
@@ -220,9 +536,14 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
                 && let Some(symbol) = index.symbols.find(&lookup.written)
                 && visible_member(index, from, host, symbol, *namespace, *constructor).is_some()
             {
-                return Some(DiagnosticHint::DidYouMean {
-                    replacement: format!("host.{}", lookup.written),
-                });
+                return Some((
+                    Span {
+                        start: refusal.primary.span.start,
+                        end: lookup.span.end,
+                    },
+                    None,
+                    format!("host.{}", lookup.written),
+                ));
             }
             let module = module_at(module)?;
             let names = index.member_names_in(module).filter(|&name| {
@@ -254,7 +575,6 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
             constructor,
         } => {
             let std = crate::package("std");
-            let core = crate::package("core");
             let root = index.module_at(&std, &[])?;
             if index.module_head(from, index.symbols.find("std")?) != Some(root) {
                 return None;
@@ -262,16 +582,8 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
             let module = index.module_at(&std, modules)?;
             let member = index.symbols.find(&lookup.written)?;
             visible_member(index, from, module, member, *namespace, *constructor)?;
-            let mut merged_modules: Vec<_> = index
-                .child_names(root)
-                .map(|name| index.symbols.text(name).to_owned())
-                .filter(|name| index.module_at(&core, std::slice::from_ref(name)).is_some())
-                .collect();
-            merged_modules.sort_unstable();
-            return Some(DiagnosticHint::StdPath {
-                replacement: format!("std.{}.{}", modules.join("."), lookup.written),
-                merged_modules,
-            });
+            let start = refusal.primary.span.start;
+            return Some((Span { start, end: start }, None, "std.".into()));
         }
         NameScope::Field(path) | NameScope::Variant(path) => {
             let path = &path.0;
@@ -305,9 +617,11 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
             }
         }
     }?;
-    Some(DiagnosticHint::DidYouMean {
-        replacement: index.symbols.text(best).into(),
-    })
+    Some((
+        lookup.span,
+        Some(&lookup.written),
+        index.symbols.text(best).into(),
+    ))
 }
 
 fn visible_member(

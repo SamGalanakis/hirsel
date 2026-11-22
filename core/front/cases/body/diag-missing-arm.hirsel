@@ -1,0 +1,8 @@
+fn get(x: Option[u64]) -> u64 {
+    match x { Some(n) => n }
+}
+
+// expect: refuse LANG-17 at 2:5
+// expect: missing-pattern 2:5 None
+// expect: fix LANG-17 at 2:5 placeholder | None => fail("TODO: handle missing case"),
+// expect: cached

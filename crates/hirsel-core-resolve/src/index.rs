@@ -51,21 +51,93 @@ pub struct Site {
     pub item: u32,
     pub span: Span,
 }
+/// The earlier construct's relation to the primary refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CausalRole {
+    DeclaredHere,
+    ConflictsHere,
+    MovedHere,
+    ViewedHere,
+    LentMutHere,
+    ReservedHere,
+    OpenedHere,
+    DerivedHere,
+}
+impl CausalRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DeclaredHere => "declared here",
+            Self::ConflictsHere => "conflicts here",
+            Self::MovedHere => "moved here",
+            Self::ViewedHere => "viewed here",
+            Self::LentMutHere => "lent mut here",
+            Self::ReservedHere => "reserved here",
+            Self::OpenedHere => "opened here",
+            Self::DerivedHere => "derived here",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Cause {
+    pub site: Site,
+    pub role: CausalRole,
+}
+impl Cause {
+    pub fn declared(site: Site) -> Self {
+        Self {
+            site,
+            role: CausalRole::DeclaredHere,
+        }
+    }
+}
+
+/// Evidence owned by the primary item's bytes. These spans share its anchor.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RefusalDetail {
+    MissingPattern {
+        pattern: String,
+        close: Span,
+    },
+    OpaqueField {
+        receiver_type: DefPath,
+        receiver: Span,
+        member: Span,
+    },
+    OpaqueMethod {
+        receiver_type: DefPath,
+        receiver: Span,
+        member: Span,
+        call: Span,
+        arity: usize,
+    },
+    MethodEdit {
+        name: String,
+        receiver: Span,
+        callee_end: u32,
+        call: Span,
+        arity: usize,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Refusal {
     pub rule: String,
     pub primary: Site,
-    pub causal: Vec<Site>,
+    pub causal: Vec<Cause>,
     pub declared: Option<String>,
     pub required: Option<String>,
     pub message: String,
     pub unresolved: Option<Box<UnresolvedName>>,
+    pub detail: Option<Box<RefusalDetail>>,
 }
 
 /// A failed lookup, expressed in paths and text so it survives index renumbering.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnresolvedName {
     pub written: String,
+    pub span: Span,
     pub scope: NameScope,
 }
 
@@ -91,9 +163,15 @@ pub enum NameScope {
 }
 
 impl Refusal {
-    pub fn with_unresolved(mut self, written: impl Into<String>, scope: NameScope) -> Self {
+    pub fn with_unresolved(
+        mut self,
+        written: impl Into<String>,
+        span: Span,
+        scope: NameScope,
+    ) -> Self {
         self.unresolved = Some(Box::new(UnresolvedName {
             written: written.into(),
+            span,
             scope,
         }));
         self
@@ -117,6 +195,7 @@ impl Refusal {
             required: None,
             message: message.into(),
             unresolved: None,
+            detail: None,
         }
     }
     pub fn syntax(module: ModuleId, source: SourceId, diagnostic: &Diagnostic) -> Self {
@@ -131,17 +210,21 @@ impl Refusal {
             causal: diagnostic
                 .causal
                 .iter()
-                .map(|&span| Site {
-                    module,
-                    source: Some(source),
-                    item: u32::MAX,
-                    span,
+                .map(|&span| Cause {
+                    site: Site {
+                        module,
+                        source: Some(source),
+                        item: u32::MAX,
+                        span,
+                    },
+                    role: CausalRole::OpenedHere,
                 })
                 .collect(),
             declared: diagnostic.declared.clone(),
             required: diagnostic.required.clone(),
             message: diagnostic.message.clone(),
             unresolved: None,
+            detail: None,
         }
     }
 }
@@ -392,12 +475,12 @@ impl NameIndex {
             self.symbols.text(name),
             "a name distinct from the package's modules",
         );
-        refusal.causal.push(Site {
+        refusal.causal.push(Cause::declared(Site {
             module: conflict,
             source: None,
             item: u32::MAX,
             span: Span::default(),
-        });
+        }));
         self.diagnostics.push(refusal);
     }
     #[inline]
@@ -686,7 +769,7 @@ impl NameIndex {
                 if let Some(&old) = self.members.get(&(core, d.name)) {
                     let mut r =
                         Refusal::new("LANG-7", d.site, "extension redeclares a core member");
-                    r.causal.push(self.get(old).site);
+                    r.causal.push(Cause::declared(self.get(old).site));
                     r = r.with_comparison(
                         self.symbols.text(d.name),
                         "an extension member name absent from the core module",
@@ -754,7 +837,7 @@ impl NameIndex {
         };
         if let Some(old) = old {
             let mut r = Refusal::new("LANG-7", site, "duplicate definition");
-            r.causal.push(self.get(old).site);
+            r.causal.push(Cause::declared(self.get(old).site));
             r = r.with_comparison(
                 self.symbols.text(name),
                 "one definition of this name in the module namespace",

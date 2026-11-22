@@ -1,3 +1,4 @@
 fn bad(f: scoped fn() -> u64) { let alias = f; let _ = isolate(fn() -> u64 { alias() }); }
 // expect: refuse OWN-7 at 1:45
 // expect: compared OWN-7 at 1:45 | view | take
+// expect: cause OWN-7 at 1:45 from 1:8

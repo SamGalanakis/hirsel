@@ -220,6 +220,7 @@ impl Program<'_> {
         &self,
         rule: &str,
         site: Site,
+        span: hirsel_core_syntax::Span,
         value: ConstValue,
         name: &str,
     ) -> Refusal {
@@ -228,7 +229,11 @@ impl Program<'_> {
             && let TyKind::Adt(d, _) = self.types.kind(value.ty)
         {
             let path = self.decls[d.index()].path.clone();
-            return refusal.with_unresolved(name, hirsel_core_resolve::NameScope::Field(path));
+            return refusal.with_unresolved(
+                name,
+                span,
+                hirsel_core_resolve::NameScope::Field(path),
+            );
         }
         refusal
     }
@@ -257,7 +262,14 @@ impl ConstCx<'_, '_> {
             self.fail(n, message)
         }
     }
-    fn project(&mut self, n: NodeId, value: ConstValue, name: &str) -> Option<ConstValue> {
+    fn project(
+        &mut self,
+        n: NodeId,
+        value: ConstValue,
+        token: hirsel_core_syntax::TokenId,
+    ) -> Option<ConstValue> {
+        let item = self.p.item(self.at);
+        let name = item.tree.token_text(item.text, token);
         match self
             .p
             .constant_field(self.p.modules[self.at.module as usize].id, value, name)
@@ -267,6 +279,7 @@ impl ConstCx<'_, '_> {
                 self.p.refusals.push(self.p.constant_field_refusal(
                     rule,
                     self.p.site(self.at, n),
+                    item.token_span(token),
                     value,
                     name,
                 ));
@@ -345,16 +358,10 @@ impl ConstCx<'_, '_> {
                     Target::Definition(def) if self.p.constant_ids[def.0 as usize].is_some() => {
                         let id = self.p.constant_ids[def.0 as usize]?;
                         let mut value = self.p.constants[id as usize].value?;
-                        for token in &item.tree.tokens
-                            [use_.projections.start as usize..use_.projections.end as usize]
-                        {
-                            if token.kind == TokenKind::Ident {
-                                let field = self.project(
-                                    n,
-                                    value,
-                                    self.p.index.symbols.text(token.symbol),
-                                )?;
-                                value = field;
+                        for token in use_.projections.start..use_.projections.end {
+                            if item.tree.tokens[token as usize].kind == TokenKind::Ident {
+                                value =
+                                    self.project(n, value, hirsel_core_syntax::TokenId(token))?;
                             }
                         }
                         value
@@ -383,7 +390,7 @@ impl ConstCx<'_, '_> {
             }
             NodeKind::Projection => {
                 let value = self.expr(kids[0], None, active)?;
-                self.project(n, value, text)?
+                self.project(n, value, node.token.unwrap())?
             }
             NodeKind::Index => {
                 let value = self.expr(kids[0], None, active)?;

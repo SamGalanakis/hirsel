@@ -1,0 +1,11 @@
+type Collection { items: List[u8] }
+fn both(mut left: List[u8], right: List[u8]) {}
+fn clash(mut c: Collection) {
+    both(mut c.items, c.items)
+}
+
+// expect: refuse OWN-9 at 4:23
+// expect: cause OWN-9 at 4:23 from 4:10
+// expect: role OWN-9 at 4:23 lent_mut_here from 4:10
+// expect: message OWN-9 at 4:23 | `c.items` is lent `mut`
+// expect: cached

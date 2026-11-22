@@ -1,0 +1,7 @@
+fn length(xs: List[u64]) -> u64 {
+    xs.len()
+}
+
+// expect: refuse PROG-2 at 2:5
+// expect: fix PROG-2 at 2:5 maybe | list.len(xs)
+// expect: cached

@@ -275,6 +275,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if let Some(Target::ContextualConstructor { name }) = target {
                 refusal = refusal.with_unresolved(
                     p.index.symbols.text(name),
+                    self.op_span(path),
                     NameScope::Variant(decl.path.clone()),
                 );
             }
@@ -328,8 +329,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let Some(i) = fs.iter().position(|f| f.name == name) else {
                     let mut refusal = refusal("LANG-17", self.cause(arg), "unknown pattern field");
                     if case.is_none() {
-                        refusal =
-                            refusal.with_unresolved(name, NameScope::Field(decl.path.clone()));
+                        refusal = refusal.with_unresolved(
+                            name,
+                            self.op_span(if label { arg } else { child }),
+                            NameScope::Field(decl.path.clone()),
+                        );
                     }
                     self.push_refusal(refusal);
                     require_all = false;
@@ -1004,7 +1008,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.refuse_from(
                             "OWN-14",
                             self.span(pat.site),
-                            vec![cause],
+                            vec![Cause::declared(cause)],
                             "a resource is destructured only in its defining module",
                         );
                     }
@@ -1434,7 +1438,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         if let Some(missing) = self.pattern_missing(matrix, subject.ty) {
-            self.refuse("LANG-17", n, format!("match is missing `{missing}`"));
+            let mut r = refusal(
+                "LANG-17",
+                self.cause(n),
+                format!("match is missing `{missing}`"),
+            );
+            r.detail = Some(Box::new(RefusalDetail::MissingPattern {
+                pattern: missing,
+                close: self.close_brace(n),
+            }));
+            self.push_refusal(r);
         }
         if let Some(i) = temp {
             let avail = match (took, kept) {
@@ -2277,7 +2290,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse_from(
                 "MEM-7",
                 self.span(body),
-                cause.into_iter().collect(),
+                cause.into_iter().map(Cause::declared).collect(),
                 message,
             );
         }

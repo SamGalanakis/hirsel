@@ -795,8 +795,8 @@ impl Keys {
         };
         for r in &check.refusals {
             capture(&r.primary);
-            for site in &r.causal {
-                capture(site);
+            for cause in &r.causal {
+                capture(&cause.site);
             }
         }
         for g in incomplete {

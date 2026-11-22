@@ -670,7 +670,8 @@ fn claim(
             if entry.get().module != site.module =>
         {
             let mut r = refusal(rule, site, message);
-            r.causal.push(*entry.get());
+            r.causal
+                .push(hirsel_core_resolve::Cause::declared(*entry.get()));
             refusals.push(r);
         }
         _ => {}

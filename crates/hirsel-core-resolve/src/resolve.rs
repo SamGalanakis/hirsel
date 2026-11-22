@@ -412,8 +412,10 @@ impl<'a> Resolver<'a, '_> {
             );
             d.primary.span = self.item.token_span(t);
             match target {
-                Target::Binder(b) => d.causal.push(self.out.binders[b as usize].site),
-                Target::Definition(id) => d.causal.push(self.index.get(id).site),
+                Target::Binder(b) => d
+                    .causal
+                    .push(Cause::declared(self.out.binders[b as usize].site)),
+                Target::Definition(id) => d.causal.push(Cause::declared(self.index.get(id).site)),
                 _ => {}
             }
             d.declared = Some(self.index.symbols.text(name).into());
@@ -464,7 +466,7 @@ impl<'a> Resolver<'a, '_> {
                 self.site(n),
                 format!("`{}` is private or opaque", self.index.definition_path(id)),
             );
-            refusal.causal.push(d.site);
+            refusal.causal.push(Cause::declared(d.site));
             if matches!(result, LookupResult::Private(_)) {
                 refusal = refusal.with_comparison(
                     "private definition",
@@ -593,7 +595,7 @@ impl<'a> Resolver<'a, '_> {
     fn missing(&mut self, n: NodeId) -> Target {
         self.missing_name(n, None)
     }
-    fn missing_name(&mut self, n: NodeId, lookup: Option<(Symbol, NameScope)>) -> Target {
+    fn missing_name(&mut self, n: NodeId, lookup: Option<(TokenId, NameScope)>) -> Target {
         let path = path_tokens(self.item, n)
             .map(|t| self.index.symbols.text(self.name(t)))
             .collect::<Vec<_>>()
@@ -603,8 +605,12 @@ impl<'a> Resolver<'a, '_> {
             self.site(n),
             format!("name `{path}` was not found"),
         );
-        if let Some((written, scope)) = lookup {
-            refusal = refusal.with_unresolved(self.index.symbols.text(written), scope);
+        if let Some((token, scope)) = lookup {
+            refusal = refusal.with_unresolved(
+                self.index.symbols.text(self.name(token)),
+                self.item.token_span(token),
+                scope,
+            );
         }
         self.out.diagnostics.push(refusal);
         Target::Missing
@@ -652,7 +658,10 @@ impl<'a> Resolver<'a, '_> {
             d.causal.extend(
                 self.index
                     .member_rows_from(self.module, self.package, module, name, ns, construct)
-                    .map(|(_, d)| d.site),
+                    .map(|(_, d)| Cause {
+                        site: d.site,
+                        role: CausalRole::ConflictsHere,
+                    }),
             );
             self.out.diagnostics.push(d);
             Some(Target::Missing)
@@ -670,7 +679,9 @@ impl<'a> Resolver<'a, '_> {
             "a function cannot be the head of a dotted path",
         );
         diagnostic.primary.span = self.item.token_span(token);
-        diagnostic.causal.push(self.index.get(id).site);
+        diagnostic
+            .causal
+            .push(Cause::declared(self.index.get(id).site));
         diagnostic = diagnostic.with_comparison(
             "function",
             "local, module, package or constant as a dotted-path head",
@@ -790,7 +801,7 @@ impl<'a> Resolver<'a, '_> {
                     self.missing_name(
                         n,
                         Some((
-                            symbol,
+                            t,
                             NameScope::ModulePrefix {
                                 module: self.index.module_path(module),
                                 children_of: self.index.module_path(scope),
@@ -827,7 +838,7 @@ impl<'a> Resolver<'a, '_> {
                 self.missing_name(
                     n,
                     Some((
-                        self.name(last),
+                        last,
                         NameScope::ModuleMember {
                             module: self.index.module_path(module),
                             namespace: ns,
@@ -858,7 +869,7 @@ impl<'a> Resolver<'a, '_> {
         let mut site = self.site(n);
         site.span = self.item.token_span(name);
         let mut refusal = Refusal::new("FFI-2", site, message);
-        refusal.causal.push(declared);
+        refusal.causal.push(Cause::declared(declared));
         self.out.diagnostics.push(refusal);
         Target::Missing
     }
@@ -991,6 +1002,7 @@ impl<'a> Resolver<'a, '_> {
                                 .collect();
                             diagnostic = diagnostic.with_unresolved(
                                 self.index.symbols.text(self.name(last)),
+                                self.item.token_span(last),
                                 NameScope::UnqualifiedPath {
                                     modules,
                                     namespace: ns,
@@ -1320,7 +1332,8 @@ impl<'a> Resolver<'a, '_> {
                     if let Some(b) = old {
                         let mut d =
                             Refusal::new("LANG-15", self.site(n), "active label is shadowed");
-                        d.causal.push(self.out.binders[b as usize].site);
+                        d.causal
+                            .push(Cause::declared(self.out.binders[b as usize].site));
                         d = d.with_comparison(
                             self.index.symbols.text(name),
                             "a label name not already active in this function",

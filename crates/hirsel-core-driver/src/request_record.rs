@@ -21,6 +21,7 @@
 //! interrupt or an I/O failure is never published; an executable the output
 //! could not be written to is (D3), since the build itself succeeded.
 use super::*;
+use hirsel_core_resolve::CausalRole;
 use hirsel_core_syntax::Span;
 
 /// What one request adds to its snapshot to make the record's key.
@@ -82,7 +83,7 @@ impl Request {
         })
     }
     pub(crate) fn key(&self, snapshot: ContentHash) -> ContentHash {
-        ContentHash::of_parts("hirsel.request-record.v2", [&snapshot.0[..], &self.tuple])
+        ContentHash::of_parts("hirsel.request-record.v3", [&snapshot.0[..], &self.tuple])
     }
 }
 /// Every native option, by name: those that change the executable enter the
@@ -158,14 +159,46 @@ pub(crate) enum File {
 pub(crate) struct StoredSite {
     file: File,
     span: Span,
+    line: Option<usize>,
+    column: Option<usize>,
+    line_text: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub(crate) struct Row {
+struct StoredCause {
+    site: StoredSite,
+    role: CausalRole,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct StoredEdit {
+    file: File,
+    span: Span,
+    text: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct StoredFix {
+    applicability: Applicability,
+    edits: Vec<StoredEdit>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct Row {
     rule: String,
     primary: StoredSite,
-    causal: Vec<StoredSite>,
+    causal: Vec<StoredCause>,
     declared: Option<String>,
     required: Option<String>,
+    message: String,
+    fixes: Vec<StoredFix>,
+    missing_patterns: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct IncompleteRow {
+    primary: StoredSite,
+    causal: Vec<StoredCause>,
+    message: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct ResourceRow {
+    primary: StoredSite,
     message: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -200,8 +233,8 @@ pub(crate) struct Value {
     files: usize,
     source_bytes: usize,
     diagnostics: Vec<Row>,
-    incomplete: Vec<Row>,
-    resources: Vec<Row>,
+    incomplete: Vec<IncompleteRow>,
+    resources: Vec<ResourceRow>,
     reach: Option<Reach>,
     native: Option<Native>,
 }
@@ -273,17 +306,7 @@ pub(crate) fn publish(store: &Path, key: ContentHash, value: &Value) -> io::Resu
 /// The name a site's file is rendered with: its manifest-relative name, or
 /// without a manifest its module.
 pub(crate) fn file_name(name: Option<&str>, module: &ModulePath) -> String {
-    name.map_or_else(
-        || {
-            format!(
-                "{}@{}/{}",
-                module.package.name,
-                module.package.version,
-                module.modules.join("/")
-            )
-        },
-        str::to_owned,
-    )
+    diagnostics::source_name(name, module)
 }
 
 /// What a missed request answered, for its value.
@@ -298,7 +321,7 @@ pub(crate) struct Answer<'a> {
 impl Value {
     pub(crate) fn of(answer: Answer<'_>) -> Option<Self> {
         let product = answer.product;
-        // This shortcut has no index. Even a lookup that yielded no hint
+        // This shortcut has no index. Even a lookup that yielded no edit
         // needs to go through the render path.
         let has_lookup = if let Some(reach) = answer.reach {
             reach.diagnostics.iter().any(|d| d.unresolved.is_some())
@@ -317,24 +340,17 @@ impl Value {
                 .entry(file_name(file.name.as_deref(), &module))
                 .or_insert(position as u32);
         }
-        let site = |site: &SourceSite| StoredSite {
-            file: positions
-                .get(&site.module)
-                .map_or_else(|| File::Named(site.module.clone()), |p| File::Request(*p)),
-            span: site.span,
+        let file = |module: &str| {
+            positions
+                .get(module)
+                .map_or_else(|| File::Named(module.to_owned()), |p| File::Request(*p))
         };
-        let row = |rule: &str,
-                   primary: &SourceSite,
-                   causal: &[SourceSite],
-                   declared: Option<&str>,
-                   required: Option<&str>,
-                   message: &str| Row {
-            rule: rule.to_owned(),
-            primary: site(primary),
-            causal: causal.iter().map(site).collect(),
-            declared: declared.map(str::to_owned),
-            required: required.map(str::to_owned),
-            message: message.to_owned(),
+        let site = |site: &SourceSite| StoredSite {
+            file: file(&site.module),
+            span: site.span,
+            line: site.line,
+            column: site.column,
+            line_text: site.line_text.clone(),
         };
         Some(Self {
             limits: Limits::current(),
@@ -345,21 +361,62 @@ impl Value {
             diagnostics: answer
                 .diagnostics
                 .iter()
-                .map(|d| {
-                    row(
-                        d.rule, &d.primary, &d.causal, d.declared, d.required, d.message,
-                    )
+                .map(|d| Row {
+                    rule: d.rule.to_owned(),
+                    primary: site(&d.primary),
+                    causal: d
+                        .causal
+                        .iter()
+                        .map(|cause| StoredCause {
+                            site: site(&cause.site),
+                            role: cause.role,
+                        })
+                        .collect(),
+                    declared: d.declared.map(str::to_owned),
+                    required: d.required.map(str::to_owned),
+                    message: d.message.to_owned(),
+                    fixes: d
+                        .fixes
+                        .iter()
+                        .map(|fix| StoredFix {
+                            applicability: fix.applicability,
+                            edits: fix
+                                .edits
+                                .iter()
+                                .map(|edit| StoredEdit {
+                                    file: file(&edit.module),
+                                    span: edit.span,
+                                    text: edit.text.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    missing_patterns: d.missing_patterns.to_vec(),
                 })
                 .collect(),
             incomplete: answer
                 .incomplete
                 .iter()
-                .map(|g| row("", &g.primary, &g.causal, None, None, g.message))
+                .map(|g| IncompleteRow {
+                    primary: site(&g.primary),
+                    causal: g
+                        .causal
+                        .iter()
+                        .map(|cause| StoredCause {
+                            site: site(&cause.site),
+                            role: cause.role,
+                        })
+                        .collect(),
+                    message: g.message.to_owned(),
+                })
                 .collect(),
             resources: answer
                 .resources
                 .iter()
-                .map(|r| row("", &r.primary, &[], None, None, r.message))
+                .map(|r| ResourceRow {
+                    primary: site(&r.primary),
+                    message: r.message.to_owned(),
+                })
                 .collect(),
             reach: answer.reach.map(|r| Reach {
                 accepted: r.accepted(),
@@ -404,13 +461,19 @@ pub(crate) struct Rendered<'a> {
     pub(crate) reach: Option<(usize, usize, BTreeMap<&'a str, usize>, Vec<GapStop>)>,
 }
 impl Hit {
+    fn name(&self, file: &File) -> String {
+        match file {
+            File::Request(position) => self.names[*position as usize].clone(),
+            File::Named(name) => name.clone(),
+        }
+    }
     fn site(&self, site: &StoredSite) -> SourceSite {
         SourceSite {
-            module: match &site.file {
-                File::Request(position) => self.names[*position as usize].clone(),
-                File::Named(name) => name.clone(),
-            },
+            module: self.name(&site.file),
             span: site.span,
+            line: site.line,
+            column: site.column,
+            line_text: site.line_text.clone(),
         }
     }
     pub(crate) fn render(&self) -> Rendered<'_> {
@@ -429,11 +492,34 @@ impl Hit {
                 .map(|r| Diagnostic {
                     rule: &r.rule,
                     primary: self.site(&r.primary),
-                    causal: r.causal.iter().map(|s| self.site(s)).collect(),
+                    causal: r
+                        .causal
+                        .iter()
+                        .map(|c| DiagnosticCause {
+                            site: self.site(&c.site),
+                            role: c.role,
+                        })
+                        .collect(),
                     declared: r.declared.as_deref(),
                     required: r.required.as_deref(),
                     message: &r.message,
-                    hint: None,
+                    fixes: r
+                        .fixes
+                        .iter()
+                        .map(|fix| Fix {
+                            applicability: fix.applicability,
+                            edits: fix
+                                .edits
+                                .iter()
+                                .map(|edit| Edit {
+                                    module: self.name(&edit.file),
+                                    span: edit.span,
+                                    text: edit.text.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    missing_patterns: &r.missing_patterns,
                 })
                 .collect(),
             incomplete: value
@@ -441,7 +527,14 @@ impl Hit {
                 .iter()
                 .map(|r| IncompleteDiagnostic {
                     primary: self.site(&r.primary),
-                    causal: r.causal.iter().map(|s| self.site(s)).collect(),
+                    causal: r
+                        .causal
+                        .iter()
+                        .map(|c| DiagnosticCause {
+                            site: self.site(&c.site),
+                            role: c.role,
+                        })
+                        .collect(),
                     message: &r.message,
                 })
                 .collect(),

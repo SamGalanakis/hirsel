@@ -161,10 +161,13 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
     let mut names: Vec<&str> = bindings.iter().map(|&i| text(i)).collect();
     names.sort_unstable();
     let distinct = names.windows(2).all(|w| w[0] != w[1]);
+    // The lexer is context-free, so a token spelling a binding's name lexes
+    // to a binding's kind; tokens of any other kind spell none.
+    let mut kinds: Vec<TokenKind> = bindings.iter().map(|&i| tree.tokens[i].kind).collect();
+    kinds.dedup();
     let spelled = (start..stop).any(|i| {
         let t = &tree.tokens[i];
-        !t.kind.is_trivia()
-            && !matches!(t.kind, TokenKind::Eof)
+        kinds.contains(&t.kind)
             && bindings.binary_search(&i).is_err()
             && names.binary_search(&text(i)).is_ok()
     });

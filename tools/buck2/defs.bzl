@@ -84,7 +84,13 @@ LLVM_RPATH = [
 # every link uploads to the cache and every test run fetches. lld compresses
 # them; std's backtraces read zlib sections (zstd ones lose file and line), so
 # failing tests keep their locations.
-EXECUTABLE_LINK_FLAGS = LLVM_RPATH + ["-Clink-arg=-Wl,--compress-debug-sections=zlib"]
+# The driver's compiler identity is its linker build ID (reuse.rs
+# compiler_identity); without the note it hashes the whole executable on every
+# request. The bootstrap clang does not pass --build-id by default.
+EXECUTABLE_LINK_FLAGS = LLVM_RPATH + [
+    "-Clink-arg=-Wl,--compress-debug-sections=zlib",
+    "-Clink-arg=-Wl,--build-id=sha1",
+]
 
 def _env_set(key, value):
     return "--env-set={}={}".format(key, value)
@@ -198,7 +204,6 @@ def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manif
         "root//tools/buck2:profile_dist": [
             "-Clinker-features=-lld",
             "-Clink-arg=-fuse-ld=bfd",
-            "-Clink-arg=-Wl,--build-id=sha1",
             "-Clink-arg=-Wl,-z,nodynamic-undefined-weak",
         ],
         "DEFAULT": [],

@@ -9,11 +9,18 @@ pub(crate) fn task_child(
     record: &mut crate::block::Block,
     bytes: u64,
     task: u64,
+    share_heap: bool,
 ) -> Context {
     let reservation = record.partition(bytes).prepaid(bytes);
     reservation.task_owner(task);
     let primary = record.partition(hirsel_core_layout::charge::CAUSE_CELL);
     let mut context = Context::with_funding(reservation);
+    if share_heap {
+        // SAFETY: the serial dispatcher runs both tasks, and the spawn
+        // record has already initialized their heap in the parent.
+        let heap = unsafe { (*parent).heap.get().unwrap() };
+        context.share_heap(heap.clone());
+    }
     context.primary = Some(crate::causes::Cell::prepaid(primary));
     // SAFETY: the running parent owns its flushed step counter.
     crate::steps::inherit(&mut context, unsafe { &*parent });

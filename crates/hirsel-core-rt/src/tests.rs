@@ -307,7 +307,7 @@ fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
     ctx.limit_enter(32).unwrap();
     // SAFETY: same live block; the new scope cannot reuse a byte-retained slot.
     unsafe {
-        let payer = *crate::block::funding(survivor);
+        let payer = crate::block::funding(survivor);
         assert_ne!(payer.record_pointer(), ctx.limit_record());
         inline_own_free(&ctx, survivor, 24, 24, 8);
     }
@@ -561,9 +561,9 @@ fn reexecute_heap_test(name: &str, child_flag: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn shared_page_keeps_other_heaps_live_after_a_foreign_return() {
+fn shared_heap_keeps_other_tasks_live_after_a_foreign_return() {
     if reexecute_heap_test(
-        "tests::shared_page_keeps_other_heaps_live_after_a_foreign_return",
+        "tests::shared_heap_keeps_other_tasks_live_after_a_foreign_return",
         "HIRSEL_SHARED_PAGE_TEST_CHILD",
     ) {
         return;
@@ -572,24 +572,17 @@ fn shared_page_keeps_other_heaps_live_after_a_foreign_return() {
     const LIMIT: u64 = 17;
     use crate::task_heap::{page_bytes, purge};
     let native_page = |block: &Block| block.pointer().addr().get() / page_bytes();
-    let mut clients: Vec<(Context, Block)> = Vec::new();
-    let (first, second) = loop {
-        assert!(clients.len() <= 16, "no two heaps shared a page");
-        let context = Context::new(LIMIT);
-        let block = Block::new(&context, Some(LIMIT), 24, 8).unwrap();
-        if let Some(index) = clients
-            .iter()
-            .position(|(_, other)| native_page(other) == native_page(&block))
-        {
-            break (clients.swap_remove(index), (context, block));
-        }
-        clients.push((context, block));
-    };
-    let (first, returned) = first;
-    let (second, survivor) = second;
+    let heap = std::sync::Arc::<crate::task_heap::Heap>::default();
+    let mut first = Context::new(LIMIT);
+    first.share_heap(heap.clone());
+    let mut second = Context::new(LIMIT);
+    second.share_heap(heap.clone());
+    let returned = Block::new(&first, Some(LIMIT), 24, 8).unwrap();
+    let survivor = Block::new(&second, Some(LIMIT), 24, 8).unwrap();
     let page = native_page(&survivor) * page_bytes();
-    assert!(*survivor.payer() == second.payer());
-    assert!(*returned.payer() == first.payer());
+    assert_eq!(native_page(&returned), native_page(&survivor));
+    assert!(survivor.payer() == second.payer());
+    assert!(returned.payer() == first.payer());
     // SAFETY: the survivor owns 24 writable bytes.
     unsafe { survivor.pointer().cast::<u64>().write(17) };
     let address = returned.pointer().as_ptr().expose_provenance();
@@ -605,6 +598,8 @@ fn shared_page_keeps_other_heaps_live_after_a_foreign_return() {
     first.current.drain();
     assert_eq!(first.available(), LIMIT);
     drop(first);
+    // SAFETY: this thread is the shared heap's custodian.
+    unsafe { heap.trim() };
     purge();
 
     let mut flag = 0;
@@ -621,6 +616,12 @@ fn shared_page_keeps_other_heaps_live_after_a_foreign_return() {
     assert_eq!(unsafe { survivor.pointer().cast::<u64>().read() }, 17);
     drop(survivor);
     assert_eq!(second.available(), LIMIT);
+    let next = Block::new(&second, Some(LIMIT), 24, 8).unwrap();
+    // SAFETY: the same unit can still allocate and release after its peer ended.
+    unsafe { crate::block::free_in(&second, next.into_raw(), LIMIT) };
+    drop(second);
+    // SAFETY: both contexts have stopped using this heap and this thread owns it.
+    unsafe { heap.close() };
 }
 
 fn pause_foreign_return(
@@ -651,7 +652,7 @@ fn pause_foreign_return(
 fn migrated_context_keeps_the_slot_of_an_in_flight_foreign_return() {
     const LIMIT: u64 = 64;
     const CHARGE: u64 = 8;
-    const BYTES: usize = 32 * 1024;
+    const BYTES: usize = 31 * 1024;
     struct Custody(*mut Context);
     // SAFETY: only the receiving worker uses the context after native unbind.
     unsafe impl Send for Custody {}
@@ -761,7 +762,7 @@ fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
             .collect();
         let first = blocks[0].pointer().addr().get();
         let second = blocks[1].pointer().addr().get();
-        assert_eq!(second.abs_diff(first), 24);
+        assert_eq!(second.abs_diff(first), 32);
         drop(blocks);
         assert_eq!(context.available(), 1_000_000);
         let requests = MAP_REQUESTS.with(std::cell::Cell::get);
@@ -773,16 +774,20 @@ fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
         }
     }
 
-    // Two payers have partial pages of the same class above 256 bytes.
-    // The newest page belongs to the inner payer, even after forwarding.
+    // A forwarded inner payer's slot stays in the same class as its
+    // neighbors. The owning prefix and payer tag both fit its stride.
     let outer = Block::new(&context, Some(24), 320, 8).unwrap();
     context.limit_enter(64).unwrap();
     let inner = Block::new(&context, Some(24), 320, 8).unwrap();
     context.limit_exit();
     let sibling = Block::new(&context, Some(24), 320, 8).unwrap();
     assert_eq!(
-        sibling.pointer().addr().get() - outer.pointer().addr().get(),
-        320
+        inner.pointer().addr().get() - outer.pointer().addr().get(),
+        384
+    );
+    assert_eq!(
+        sibling.pointer().addr().get() - inner.pointer().addr().get(),
+        384
     );
     assert_eq!(context.available(), 1_000_000 - 72);
     drop((outer, inner, sibling));
@@ -814,6 +819,8 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
     });
     context.current.drain();
     assert_eq!(context.available(), 4096);
+    // SAFETY: the custodian collects the completed physical return.
+    unsafe { context.heap.get().unwrap().trim() };
     let block = Block::new(&context, Some(24), 24, 8).unwrap();
     assert_eq!(block.pointer().addr().get(), original);
     assert_eq!(MAP_REQUESTS.with(std::cell::Cell::get), requests);
@@ -916,7 +923,7 @@ fn closed_task_heaps_unmap_their_emptied_pages() {
         let before = MAP_REQUESTS.with(std::cell::Cell::get);
         let context = Context::new(4096);
         let mut blocks: Vec<_> = (0..65)
-            .map(|_| Block::new(&context, Some(24), 32 * 1024, 8).unwrap())
+            .map(|_| Block::new(&context, Some(24), 31 * 1024, 8).unwrap())
             .collect();
         let requests = MAP_REQUESTS.with(std::cell::Cell::get) - before;
         assert!(

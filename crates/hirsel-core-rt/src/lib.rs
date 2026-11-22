@@ -101,6 +101,8 @@ pub struct Context {
     pub(crate) run: *const crate::process::Config,
     pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) cancel_requested: AtomicBool,
+    // Standalone roots and concurrent test tasks close their own heaps.
+    owns_heap: bool,
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
     pub(crate) bound_depth: usize,
@@ -129,6 +131,19 @@ impl Context {
         Self::with_funding(Funding::root(bytes))
     }
 
+    pub(crate) fn with_unit_heap(bytes: u64) -> Self {
+        let mut context = Self::new(bytes);
+        if let Some(heap) = units::heap_for_context() {
+            context.share_heap(heap);
+        }
+        context
+    }
+
+    pub(crate) fn share_heap(&mut self, heap: std::sync::Arc<task_heap::Heap>) {
+        self.heap = std::cell::OnceCell::from(heap);
+        self.owns_heap = false;
+    }
+
     pub(crate) fn with_funding(current: Funding) -> Self {
         current.normalize();
         Self {
@@ -142,6 +157,7 @@ impl Context {
             run: std::ptr::null(),
             map_hash_key: hirsel_core_layout::map_hash::PreparedKey::new(&[0; 16]),
             cancel_requested: AtomicBool::new(false),
+            owns_heap: true,
             cancel_shield: 0,
             finalizing: 0,
             bound_depth: 0,
@@ -232,7 +248,7 @@ impl Drop for Context {
         while self.bound_depth != 0 {
             self.limit_exit();
         }
-        if let Some(heap) = self.heap.take() {
+        if let Some(heap) = self.heap.take().filter(|_| self.owns_heap) {
             // SAFETY: context destruction has exclusive custody and runs once.
             unsafe { heap.close() };
         }

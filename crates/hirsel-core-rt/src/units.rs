@@ -231,6 +231,8 @@ pub(crate) struct Unit {
     /// The running worker's host stack slot.
     host: UnsafeCell<*mut *mut u8>,
     stack: UnsafeCell<Option<UnitStack>>,
+    /// Only the running unit reads or changes this heap owner.
+    heap: UnsafeCell<std::cell::OnceCell<Arc<crate::task_heap::Heap>>>,
     state: AtomicU8,
     inside: AtomicBool,
     after: Cell<After>,
@@ -458,6 +460,7 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         sp: UnsafeCell::new(std::ptr::null_mut()),
         host: UnsafeCell::new(std::ptr::null_mut()),
         stack: UnsafeCell::new(None),
+        heap: UnsafeCell::new(std::cell::OnceCell::new()),
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),
         after: Cell::new(After::Run),
@@ -523,6 +526,11 @@ unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
                 status
             }
         };
+        // The program and all its local tasks have returned. A page with
+        // outstanding slots still owns its Arc, even across record reuse.
+        if let Some(heap) = (*u.heap.get()).take() {
+            heap.close();
+        }
         u.status.store(status, Ordering::Relaxed);
         u.after.set(After::Done);
         hirsel_stack::switch(u.sp.get(), **u.host.get());
@@ -561,6 +569,19 @@ pub(crate) fn running() -> Option<&'static Unit> {
     // SAFETY: a live unit record (records are never freed).
     (!u.is_null()).then(|| unsafe { &*u })
 }
+/// Attach a root context while its unit is running serially. The concurrent
+/// testing pool keeps each context's heap under its own custody.
+pub(crate) fn heap_for_context() -> Option<Arc<crate::task_heap::Heap>> {
+    let unit = running()?;
+    #[cfg(any(test, feature = "testing"))]
+    if crate::tasks::worker_count() > 1 {
+        return None;
+    }
+    // SAFETY: the caller is inside the unit, whose dispatcher is exclusive.
+    let heap = unsafe { &*unit.heap.get() };
+    Some(heap.get_or_init(Arc::default).clone())
+}
+
 pub(crate) fn unit_id(u: &Unit) -> u32 {
     u.id
 }

@@ -447,12 +447,13 @@ mod tests {
                 fields.add(i).write(child.as_ptr());
             }
         }
-        // Charges are 16+16+40. The parent's spare word adds eight native bytes.
+        // The 16-byte leaves use 24-byte slots. The 48-byte parent uses a
+        // 56-byte slot, which includes its payer tag and the spare payload word.
         assert_eq!(
             figures(),
             Figures {
                 charged: 72,
-                retained: 80,
+                retained: 24 + 24 + 56,
                 slack: 0
             }
         );
@@ -466,7 +467,7 @@ mod tests {
             figures(),
             Figures {
                 charged: 16,
-                retained: 16,
+                retained: 24,
                 slack: 0
             }
         );
@@ -490,14 +491,14 @@ mod tests {
             figures(),
             Figures {
                 charged: 48,
-                retained: 24 + 64,
+                retained: 32 + 80,
                 slack: 0
             }
         );
         context.limit_enter(200).unwrap();
         let survivor = crate::block::Block::new(&context, Some(24), 17, 8).unwrap();
         assert_eq!(figures().charged, 248);
-        assert_eq!(figures().retained, 112);
+        assert_eq!(figures().retained, 32 + 80 + 32);
         context.limit_exit();
         assert_eq!(figures().charged, 72);
         drop((plain, graph, survivor));
@@ -591,11 +592,8 @@ mod tests {
                 .unwrap()
             };
             assert_eq!(carrier, [replacement.as_ptr().addr() as u64, 1, 2048]);
-            let (old_slot, new_slot) = if kind == crate::block::PLAIN {
-                (1024, 2048)
-            } else {
-                (1280, 2560)
-            };
+            // In both layouts the payer word crosses a size-class boundary.
+            let (old_slot, new_slot) = (1280, 2560);
             assert_eq!(
                 figures(),
                 Figures {
@@ -663,7 +661,7 @@ mod tests {
             assert_eq!(figures().charged, 16 + 32 + 64);
             assert_eq!(
                 figures().retained,
-                24 + size_of::<crate::causes::Cell>() as u64
+                32 + size_of::<crate::causes::Cell>() as u64
                     + size_of::<crate::causes::Resource>() as u64
             );
             crate::causes::resource_free(resource, 16);
@@ -676,7 +674,7 @@ mod tests {
         let outer = Context::new(1000);
         let outer_run = Run::start(&outer);
         let block = crate::block::Block::new(&outer, Some(40), 40, 8).unwrap();
-        assert_eq!(figures().retained, 40);
+        assert_eq!(figures().retained, 48);
         let inner = Context::new(200);
         let inner_run = Run::start(&inner);
         drop(block);

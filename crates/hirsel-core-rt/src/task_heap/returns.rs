@@ -1,7 +1,9 @@
-//! A queued slot remains live until a consumer takes its return. Its payload's
-//! first word links the queue, so publishing needs no allocation.
+//! A returned slot stays live until its custodian collects it. Producers
+//! link slots in their page's inbox. The first producer links the page into
+//! the heap's notification queue. Neither publication allocates.
 
-use super::{Page, page_of};
+use super::{Page, PagePointer};
+use std::cell::UnsafeCell;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,14 +16,71 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Returns that outlive their context. Idle purge or a mapping miss retires
-/// them. Open heaps have one consumer, but this queue allows many consumers.
-pub(super) static ORPHANED: Queue = Queue::new();
+/// Arrivals after the heap seals go here. Many workers may take batches;
+/// only their atomic live-count decrements touch a sealed page.
+static ORPHANED: Queue = Queue::new();
+
+pub(super) fn orphaned_pending() -> bool {
+    ORPHANED.pending()
+}
 
 pub(super) fn purge() {
-    // SAFETY: this queue stays open and only receives slots after their heap
-    // has closed.
+    // SAFETY: the orphan inbox stays open and serves sealed heaps.
     unsafe { ORPHANED.take().retire() };
+}
+
+pub(super) struct Inbox {
+    slots: AtomicUsize,
+    next: UnsafeCell<usize>,
+}
+
+impl Inbox {
+    pub(super) const fn new() -> Self {
+        Self {
+            slots: AtomicUsize::new(0),
+            next: UnsafeCell::new(0),
+        }
+    }
+
+    /// # Safety
+    /// The caller exclusively owns this cleaned slot, which pins its page.
+    /// The heap queue is the one retained by the page.
+    #[cold]
+    #[inline(never)]
+    pub(super) unsafe fn publish(&self, heap: &Queue, page: PagePointer, payload: NonNull<u8>) {
+        let address = payload.as_ptr().expose_provenance();
+        let mut head = self.slots.load(Ordering::Acquire);
+        #[cfg(test)]
+        if let Some(pause) = BEFORE_PUBLISH.take() {
+            pause();
+        }
+        loop {
+            // SAFETY: until the CAS succeeds, only this producer can access
+            // the returned slot's link. It never dereferences the previous link.
+            unsafe {
+                #[cfg(feature = "memcheck")]
+                super::allocation_check::link_access(payload, true);
+                payload.cast::<usize>().write(head);
+                #[cfg(feature = "memcheck")]
+                super::allocation_check::link_access(payload, false);
+            }
+            match self.slots.compare_exchange_weak(
+                head,
+                address,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(0) => {
+                    // SAFETY: the first slot owns publication of the page.
+                    // It pins the page until a notification consumer takes it.
+                    unsafe { heap.notify(page, self.next.get()) };
+                    return;
+                }
+                Ok(_) => return,
+                Err(current) => head = current,
+            }
+        }
+    }
 }
 
 pub(super) struct Queue(AtomicUsize);
@@ -36,31 +95,21 @@ impl Queue {
     }
 
     /// # Safety
-    /// The caller owns the cleaned payload, and its live slot pins this queue.
-    #[cold]
-    pub(super) unsafe fn publish(&self, payload: NonNull<u8>) {
-        let address = payload.as_ptr().expose_provenance();
+    /// This producer owns the page's notification link, which is embedded
+    /// in the page and pinned by its nonempty slot list.
+    unsafe fn notify(&self, page: PagePointer, next: *mut usize) {
+        let address = page.as_ptr().expose_provenance();
         let mut head = self.0.load(Ordering::Acquire);
-        #[cfg(test)]
-        if let Some(pause) = BEFORE_PUBLISH.take() {
-            pause();
-        }
         loop {
             if head == CLOSED {
-                // SAFETY: the acquire sees the context's final writes to
-                // the slot counts. The global queue remains open forever.
-                unsafe { ORPHANED.publish(payload) };
+                // SAFETY: this acquire sees the custodian's final slot counts.
+                // The producer still owns the link and the orphan queue is open.
+                unsafe { ORPHANED.notify(page, next) };
                 return;
             }
-            // SAFETY: this payload stays exclusively held by the publisher
-            // until a CAS succeeds. The previous address is never dereferenced.
-            unsafe {
-                #[cfg(feature = "memcheck")]
-                super::allocation_check::link_access(payload, true);
-                payload.cast::<usize>().write(head);
-                #[cfg(feature = "memcheck")]
-                super::allocation_check::link_access(payload, false);
-            }
+            // SAFETY: the previous consumer reads the link before it releases
+            // the empty slot list that grants this producer custody of the link.
+            unsafe { next.write(head) };
             match self
                 .0
                 .compare_exchange_weak(head, address, Ordering::AcqRel, Ordering::Acquire)
@@ -82,8 +131,7 @@ impl Queue {
     }
 
     /// # Safety
-    /// The context custodian is the sole consumer and calls this once, after
-    /// its last non-atomic access to any live slot count.
+    /// The custodian calls this once after its last plain access to any live count.
     pub(super) unsafe fn close(&self) -> Batch {
         Batch(self.0.swap(CLOSED, Ordering::AcqRel))
     }
@@ -92,13 +140,46 @@ impl Queue {
 pub(super) struct Batch(usize);
 
 impl Batch {
+    pub(super) fn pop(&mut self) -> Option<(PagePointer, Slots)> {
+        // The producer exposed provenance. The detached notification pins
+        // the descriptor until this consumer takes its outstanding slots.
+        let page = NonNull::new(ptr::with_exposed_provenance_mut::<Page>(self.0))?;
+        // SAFETY: only this consumer can read the page link while its slots
+        // list stays nonempty. Clearing the list allows a new notification.
+        let slots = unsafe {
+            let inbox = &page.as_ref().returned;
+            self.0 = inbox.next.get().read();
+            inbox.slots.swap(0, Ordering::AcqRel)
+        };
+        Some((page, Slots(slots)))
+    }
+
+    /// # Safety
+    /// The batch belongs to sealed heaps whose former custodians no longer
+    /// access their slot counts or page links.
+    pub(super) unsafe fn retire(mut self) {
+        while let Some((page, mut slots)) = self.pop() {
+            while slots.pop().is_some() {
+                // SAFETY: each slot owns one count. The seal precedes atomic
+                // access. The final decrement acquires all previous returns.
+                unsafe {
+                    let live = &raw mut (*page.as_ref().slots.get()).live;
+                    if AtomicUsize::from_ptr(live).fetch_sub(1, Ordering::AcqRel) == 1 {
+                        Page::destroy(page);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(super) struct Slots(usize);
+
+impl Slots {
     pub(super) fn pop(&mut self) -> Option<NonNull<u8>> {
-        // Addresses carry exposed provenance because another producer may
-        // see a queue head detach and return at the same address. Every
-        // address in the detached batch denotes a currently pinned slot.
         let payload = NonNull::new(ptr::with_exposed_provenance_mut(self.0))?;
-        // SAFETY: only this batch can access its payload link. Publishing
-        // initialized the link before the acquire that detached the batch.
+        // SAFETY: the acquire detach gave this consumer the slot and its link.
+        // The original payer may have retired. Only the physical link is read.
         unsafe {
             #[cfg(feature = "memcheck")]
             super::allocation_check::link_access(payload, true);
@@ -107,23 +188,5 @@ impl Batch {
             super::allocation_check::link_access(payload, false);
         }
         Some(payload)
-    }
-
-    /// # Safety
-    /// Every slot belongs to a sealed heap whose custodian has stopped
-    /// accessing its counts or page links.
-    pub(super) unsafe fn retire(mut self) {
-        while let Some(payload) = self.pop() {
-            // SAFETY: each batch entry still owns its live count. The seal
-            // orders all former plain accesses to live before atomic ones.
-            // The last decrement acquires all earlier returns before destroy.
-            unsafe {
-                let page = page_of(payload);
-                let live = &raw mut (*page.as_ref().slots.get()).live;
-                if AtomicUsize::from_ptr(live).fetch_sub(1, Ordering::AcqRel) == 1 {
-                    Page::destroy(page);
-                }
-            }
-        }
     }
 }

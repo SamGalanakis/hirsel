@@ -1607,6 +1607,67 @@ fn net_deadline(tasks: Tasks) -> bool waits {
     expired && quiet
 }
 
+fn host_timed_resolve(take request: Timed) -> bool waits {
+    let Timed(n, v) = take request
+    let mut out: List[Ip] = list.with_capacity(2)
+    let deadline = host.mono_ns(v) + 100000000
+    match host.resolve(n, "alpha.test", mut out, At(v, deadline)) {
+        Error(TimedOut) => list.len(out) == 0 && host.mono_ns(v) >= deadline,
+        _ => false
+    }
+}
+
+// A host-owned clock expires a resolve after the server has taken it. The
+// caller sees TimedOut with no bytes appended and the server loses reply.
+// expect: run net_host_deadline(clock, tasks) = true
+fn net_host_deadline(c: Clock, tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 128)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, Timed(n: n, v: c), host_timed_resolve)
+    let Some(take call) = resolve_call(mut served, "alpha.test", 34) else {
+        return false
+    }
+    let expired = result.unwrap(task.join(take child))
+    match provide.reply(mut served, take call, provide.net_reply(Count(0))) {
+        Error(Withdrawn()) => expired,
+        _ => false
+    }
+}
+
+fn timed_connect(take request: Timed) -> bool waits {
+    let Timed(n, v) = take request
+    let addr = Addr(ip: V4(2130706433), port: 443)
+    match host.connect(n, addr, At(v, 75)) {
+        Error(TimedOut) => host.mono_ns(v) == 75,
+        _ => false
+    }
+}
+
+// Connect registers its own Until on the virtual Clock. After expiry a
+// Socket reply is withdrawn, so the id never becomes a live handle.
+// expect: run net_connect_deadline(tasks) = true
+fn net_connect_deadline(tasks: Tasks) -> bool waits {
+    let (v, h) = provide.clock(0, 0)
+    let mut hand = take h
+    let (n, s) = provide.net(bytes 128)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, Timed(n: n, v: v), timed_connect)
+    let Some(take call) = provide.next(mut served) else {
+        return false
+    }
+    let address = match provide.net_op(call) {
+        Connect(addr: addr) => addr,
+        _ => return false
+    }
+    let waiting = clock.idle(mut hand) == Some(75)
+    clock.advance_to(mut hand, 75)
+    let expired = result.unwrap(task.join(take child))
+    match provide.reply(mut served, take call, provide.net_reply(Socket(1, address))) {
+        Error(Withdrawn()) => waiting && expired,
+        _ => false
+    }
+}
+
 fn ten_443(a: Addr) -> bool {
     a.port == 443 && match a.ip {
         V4(x) => x == 167772161,

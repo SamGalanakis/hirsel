@@ -1,6 +1,7 @@
 //! Immutable, indexed package prefixes with request-owned suffixes.
 //! Only external decoding can fail during an otherwise infallible table lookup.
 use crate::ContentHash;
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
@@ -159,9 +160,28 @@ impl<T> Sparse<T> {
     }
 }
 
-// Lookup keys use the existing fixed-width codec, written once into a reused
-// per-thread buffer. serialize() would walk the value once to size it and again
-// to write. A lookup allocates no key.
+/// Encode a published row. Its small ordinals and lengths take fewer bytes
+/// than the compiler's fixed-width record encoding.
+pub fn encode_row<T: Serialize + ?Sized>(row: &T) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(64);
+    bincode::DefaultOptions::new()
+        .with_varint_encoding()
+        .serialize_into(&mut bytes, row)
+        .map_err(io::Error::other)?;
+    Ok(bytes)
+}
+
+/// Decode exactly one published row, rejecting trailing bytes.
+pub fn decode_row<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
+    bincode::DefaultOptions::new()
+        .with_varint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .map_err(io::Error::other)
+}
+
+// Keys share the row encoding, written once into a reused per-thread buffer.
 /// A key's lookup bytes, as the image writer stores them and a lookup probes.
 pub fn with_lookup_key<R>(key: &(impl Serialize + ?Sized), f: impl FnOnce(&[u8]) -> R) -> R {
     thread_local! {
@@ -170,7 +190,10 @@ pub fn with_lookup_key<R>(key: &(impl Serialize + ?Sized), f: impl FnOnce(&[u8])
     // Taken, not borrowed: a lookup inside `f` gets its own buffer.
     let mut bytes = KEY.take();
     bytes.clear();
-    bincode::serialize_into(&mut bytes, key).expect("published lookup key encoding");
+    bincode::DefaultOptions::new()
+        .with_varint_encoding()
+        .serialize_into(&mut bytes, key)
+        .expect("published lookup key encoding");
     let result = f(&bytes);
     KEY.set(bytes);
     result
@@ -357,16 +380,8 @@ impl Reader {
 struct Decoder<T>(Descriptor, Arc<Reader>, std::marker::PhantomData<T>);
 impl<T: serde::de::DeserializeOwned + Send + Sync> Provider<T> for Decoder<T> {
     fn row(&self, index: u32) -> io::Result<T> {
-        use bincode::Options;
         let bytes = self.1.source.row(self.0, index)?;
-        self.1.decode(|| {
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(bytes.len() as u64)
-                .reject_trailing_bytes()
-                .deserialize(&bytes)
-                .map_err(io::Error::other)
-        })
+        self.1.decode(|| decode_row(&bytes))
     }
     fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
         self.1.source.find(self.0, key)
@@ -833,13 +848,38 @@ pub trait Publisher {
         &mut self,
         map: &Map<K, V>,
     ) -> io::Result<Map<K, V>>;
+    /// As [`Publisher::table`], for a table whose rows `outward` marks are the
+    /// ones other packages can name: a dependent request reads those, so the
+    /// writer may keep them together. Row ordinals are unchanged.
+    fn outward_table<T: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static>(
+        &mut self,
+        table: &Table<T>,
+        outward: &[bool],
+    ) -> io::Result<Table<T>>;
+    /// As [`Publisher::map`], with `outward` marking the entries other packages
+    /// can name, as for [`Publisher::outward_table`].
+    fn outward_map<
+        K: Clone
+            + Ord
+            + std::hash::Hash
+            + Serialize
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+        V: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+    >(
+        &mut self,
+        map: &Map<K, V>,
+        outward: &dyn Fn(&V) -> bool,
+    ) -> io::Result<Map<K, V>>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn lookup_key_encoding_visits_once_and_keeps_the_fixed_bytes() {
+    fn lookup_key_encoding_visits_once_and_keeps_the_compact_bytes() {
         struct Counted<'a>(&'a std::cell::Cell<u32>);
         impl Serialize for Counted<'_> {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -848,15 +888,20 @@ mod tests {
             }
         }
         let count = std::cell::Cell::new(0);
-        assert_eq!(encode_lookup_key(&Counted(&count)), [42, 0, 0, 0]);
+        assert_eq!(encode_lookup_key(&Counted(&count)), [42]);
         assert_eq!(count.get(), 1);
         let path = crate::DefPath::from_full("library@1/parent/child/answer").unwrap();
         let long = "long\0borrowed\u{00e9}".repeat(64);
         let key = (&path, long.as_str(), vec![0u32, 42, u32::MAX]);
-        assert_eq!(encode_lookup_key(&key), bincode::serialize(&key).unwrap());
+        assert_eq!(
+            encode_lookup_key(&key),
+            bincode::DefaultOptions::new().serialize(&key).unwrap()
+        );
         assert_eq!(
             encode_lookup_key("borrowed"),
-            bincode::serialize("borrowed").unwrap()
+            bincode::DefaultOptions::new()
+                .serialize("borrowed")
+                .unwrap()
         );
     }
 
@@ -907,7 +952,7 @@ mod tests {
             Ok((7, 42))
         }
         fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
-            Ok((key == [7, 0, 0, 0]).then_some(0))
+            Ok((key == [7]).then_some(0))
         }
     }
     /// Law: an id at or past the published prefix is a local row, and a local
@@ -972,14 +1017,22 @@ mod tests {
             let tag = self.0 * 100 + table * 10;
             match table {
                 0 => vec![
-                    bincode::serialize(&(7u32, tag)).unwrap(),
-                    bincode::serialize(&(9u32, tag + 1)).unwrap(),
+                    bincode::DefaultOptions::new()
+                        .serialize(&(7u32, tag))
+                        .unwrap(),
+                    bincode::DefaultOptions::new()
+                        .serialize(&(9u32, tag + 1))
+                        .unwrap(),
                 ],
                 1 => vec![
-                    bincode::serialize(&(9u32, tag)).unwrap(),
-                    bincode::serialize(&(7u32, tag + 1)).unwrap(),
+                    bincode::DefaultOptions::new()
+                        .serialize(&(9u32, tag))
+                        .unwrap(),
+                    bincode::DefaultOptions::new()
+                        .serialize(&(7u32, tag + 1))
+                        .unwrap(),
                 ],
-                _ => vec![bincode::serialize(&tag).unwrap()],
+                _ => vec![bincode::DefaultOptions::new().serialize(&tag).unwrap()],
             }
         }
     }
@@ -1062,8 +1115,8 @@ mod tests {
         fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
             assert_eq!(ASKED.with(|asked| asked.index_of(&7)), Some(0));
             Ok(match key {
-                [7, 0, 0, 0] => Some(0),
-                [8, 0, 0, 0] => Some(1),
+                [7] => Some(0),
+                [8] => Some(1),
                 _ => None,
             })
         }
@@ -1098,7 +1151,7 @@ mod tests {
             (map.get(&Asking(10)), map.index_of(&Asking(7))),
             (None, Some(0))
         );
-        assert_eq!(encode_lookup_key(&Asking(8)), [8, 0, 0, 0]);
+        assert_eq!(encode_lookup_key(&Asking(8)), [8]);
     }
 
     /// An index and rows that each fail once before answering.
@@ -1120,7 +1173,7 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             {
                 0 => Err(io::Error::other("find failed")),
-                _ => Ok((key == [7, 0, 0, 0]).then_some(0)),
+                _ => Ok((key == [7]).then_some(0)),
             }
         }
     }

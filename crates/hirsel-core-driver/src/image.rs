@@ -478,6 +478,7 @@ impl Driver {
         let indexed = Arc::new(crate::image_index::DiskIndex::new(&store_path)?);
         let reader = Reader::new(namespace, indexed.clone());
         let mut writer = crate::image_index::Writer::new(reader.clone());
+        let outward = product.index.outward();
         let directory = ImageDirectory {
             compiler: compiler_identity()?,
             inputs,
@@ -485,10 +486,15 @@ impl Driver {
             index: Arc::new(product.index.publish(&mut writer)?),
             files: writer.table(&files.into())?,
             sources: writer.map(&sources)?,
-            headers: Arc::new(product.headers.seal(&product.index)?.publish(&mut writer)?),
+            headers: Arc::new(
+                product
+                    .headers
+                    .seal(&product.index)?
+                    .publish(&mut writer, &outward)?,
+            ),
             anchors: writer.map(&anchors)?,
             offsets: writer.map(&offsets)?,
-            declarations: store.put(&encode(&library.publish(&mut writer)?)?)?,
+            declarations: store.put(&encode(&library.publish(&mut writer, &outward)?)?)?,
             definitions: writer.map(&definitions)?,
             diagnostics: writer.table(&product.diagnostics.clone().into())?,
             incomplete: writer.table(&product.incomplete.clone().into())?,
@@ -496,7 +502,7 @@ impl Driver {
         };
         let directory_hash = store.put(&encode(&directory)?)?;
         let (sections, pages) = writer.finish(&store)?;
-        let sections_hash = store.put(&encode(&sections)?)?;
+        let sections_hash = store.put(&sections.encode()?)?;
         let identity = store.put(&encode(&ImageRoot {
             compiler: compiler_identity()?,
             directory: directory_hash,

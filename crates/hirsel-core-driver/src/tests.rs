@@ -1286,7 +1286,8 @@ fn a_damaged_section_page_refuses_the_request_and_names_the_image() {
     let root: crate::image::ImageRoot =
         decode(&store.get(image.identity).unwrap().unwrap()).unwrap();
     let sections: crate::image_index::Sections =
-        decode(&store.get(root.sections).unwrap().unwrap()).unwrap();
+        hirsel_core_ids::published::decode_row(&store.get(root.sections).unwrap().unwrap())
+            .unwrap();
     for page in &sections.pages {
         // One payload byte, inside an intact envelope: only the hash tells.
         let mut bytes = std::fs::read(store.path(*page)).unwrap();

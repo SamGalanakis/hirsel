@@ -190,13 +190,20 @@ pub struct NameIndex {
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
+    /// Which definitions other packages can name: the public ones.
+    pub fn outward(&self) -> Vec<bool> {
+        self.definitions.iter().map(|d| d.public).collect()
+    }
     pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
         let mut result = self.clone();
         result.symbols = Arc::new(self.symbols.publish(writer)?);
         result.modules = writer.table(&self.modules)?;
         result.packages = writer.table(&self.packages)?;
-        result.definitions = writer.table(&self.definitions)?;
-        result.members = writer.map(&self.members)?;
+        let outward = self.outward();
+        result.definitions = writer.outward_table(&self.definitions, &outward)?;
+        result.members = writer.outward_map(&self.members, &|d: &DefinitionId| {
+            outward.get(d.0 as usize).copied().unwrap_or(false)
+        })?;
         result.clone_items = writer.map(&self.clone_items)?;
         result.children = writer.map(&self.children)?;
         result.package_ids = writer.map(&self.package_ids)?;

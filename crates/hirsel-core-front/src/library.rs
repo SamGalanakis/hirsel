@@ -106,7 +106,8 @@ pub struct Library {
     pub definitions: Arc<Table<Option<Def>>>,
 }
 impl Library {
-    pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
+    /// `outward` marks the definitions other packages can name.
+    pub fn publish(&self, writer: &mut impl Publisher, outward: &[bool]) -> std::io::Result<Self> {
         Ok(Self {
             has_test_functions: self.has_test_functions,
             types: Arc::new(self.types.publish(writer)?),
@@ -118,7 +119,7 @@ impl Library {
             constant_ids: Arc::new(writer.table(&self.constant_ids)?),
             paths: writer.map(&self.paths)?,
             modules: self.modules,
-            definitions: Arc::new(writer.table(&self.definitions)?),
+            definitions: Arc::new(writer.outward_table(&self.definitions, outward)?),
             core_operations: Arc::new(writer.table(&self.core_operations)?),
         })
     }

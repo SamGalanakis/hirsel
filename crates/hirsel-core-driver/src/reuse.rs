@@ -254,11 +254,12 @@ impl Headers {
     pub(crate) fn publish(
         &self,
         writer: &mut impl hirsel_core_ids::published::Publisher,
+        outward: &[bool],
     ) -> io::Result<Self> {
         Ok(Self {
             rows: writer.table(&self.rows)?,
             names: writer.map(&self.names)?,
-            closures: writer.table(&self.closures)?,
+            closures: writer.outward_table(&self.closures, outward)?,
             prelude: self.prelude,
         })
     }

@@ -227,8 +227,11 @@ A verdict other than `Sealed` ends the replay at the position where it is found:
 divergent issue has no effect and is not delivered, and no further program code, cleanup or
 finalizer runs. The program observes nothing of it. The replay writes one line,
 `replay: VERDICT at N`, where N is the position of the frame it was checked against, counted
-after the header, and with `--diagnose` the source position of the divergent issue too. It
-then exits 1. A `Sealed` replay exits 0.
+after the header. A divergence appends the scheduler event, recorded frame kind and
+available expected and observed fields. Read capacities and sleep deadlines are shown as
+numbers. Other argument bytes and outcome payloads are redacted. With `--diagnose`, the
+line also includes the source position when one is available. Replay then exits 1. A
+`Sealed` replay exits 0.
 
 ## Credentials
 

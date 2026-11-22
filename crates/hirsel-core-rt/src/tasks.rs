@@ -1761,7 +1761,11 @@ impl Scheduler {
                             match usize::try_from(index).ok().and_then(|i| live.get(i)) {
                                 Some(&(id, at)) if (*at).state == State::Ready => group.choose(id),
                                 Some(&(_, at)) if (*at).state == State::Flow => {}
-                                _ => group.fail(),
+                                _ => group.fail_choice(
+                                    live.iter()
+                                        .filter(|&&(_, at)| (*at).state == State::Ready)
+                                        .count(),
+                                ),
                             }
                             break;
                         }

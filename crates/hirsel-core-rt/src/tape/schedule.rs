@@ -74,8 +74,8 @@ impl Hooks for TapeHooks {
             .with(|live| live.mode == Mode::Replay)
             .unwrap_or(false)
     }
-    fn fail(&self, group: Group) {
-        group.with(Live::schedule_fault);
+    fn fail(&self, group: Group, ready: Option<usize>) {
+        group.with(|live| live.schedule_fault(ready));
     }
     fn wake(&self, group: Group, request: *mut Request) {
         group.with(|live| {
@@ -231,9 +231,19 @@ impl Schedule {
     }
 }
 impl Live {
-    pub(super) fn schedule_fault(&mut self) {
+    fn schedule_fault(&mut self, ready: Option<usize>) {
         if self.fault.is_none() {
-            let at = self.replayer.as_ref().map_or(1, |r| r.taken + 1);
+            let at = self.replayer.as_mut().map_or(1, |r| {
+                if let Some(ready) = ready {
+                    r.note_next(format_args!("choice unavailable, ready_tasks={ready}"));
+                } else {
+                    r.note_next(format_args!(
+                        "scheduler cannot take frame at event {}",
+                        self.schedule.events
+                    ));
+                }
+                r.taken + 1
+            });
             let f = Fault::Diverged(Divergence {
                 at,
                 kind: Mismatch::Schedule,
@@ -271,7 +281,7 @@ impl Live {
                     (gap, Turn::Choose(index))
                 }
                 Frame::Choose { .. } => {
-                    self.schedule_fault();
+                    self.schedule_fault(None);
                     return Turn::Fifo;
                 }
                 _ => return event,
@@ -295,7 +305,7 @@ impl Live {
                 Turn::Fifo
             }
             Some(_) => {
-                self.schedule_fault();
+                self.schedule_fault(None);
                 Turn::Fifo
             }
         }

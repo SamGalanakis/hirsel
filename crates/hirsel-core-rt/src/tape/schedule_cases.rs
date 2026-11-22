@@ -1713,7 +1713,16 @@ fn replay_schedule_fault(bytes: &[u8], chooser: u8, case: &str, at: Option<u64>)
         });
     assert!(source.is_empty() || source.starts_with("replay: "));
     if let Some(at) = at {
-        assert_eq!(position.parse::<u64>().unwrap(), at, "{case}");
+        assert_eq!(
+            position
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+            at,
+            "{case}"
+        );
     }
 }
 

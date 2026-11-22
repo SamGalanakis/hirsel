@@ -16,7 +16,7 @@ pub(super) trait Hooks: Sync {
     fn turn(&self, group: Group) -> Turn;
     fn choose(&self, group: Group, task: u64);
     fn replaying(&self, group: Group) -> bool;
-    fn fail(&self, group: Group);
+    fn fail(&self, group: Group, ready: Option<usize>);
     fn wake(&self, group: Group, request: *mut Request);
     fn cancel(&self, group: Group, source: Option<Group>) -> bool;
     fn consume_input(&self, group: Group);
@@ -87,7 +87,10 @@ impl Group {
         self.cell.hooks.replaying(self)
     }
     pub fn fail(self) {
-        self.cell.hooks.fail(self);
+        self.cell.hooks.fail(self, None);
+    }
+    pub fn fail_choice(self, ready: usize) {
+        self.cell.hooks.fail(self, Some(ready));
     }
     pub fn wake(self, request: *mut Request) {
         self.cell.hooks.wake(self, request);

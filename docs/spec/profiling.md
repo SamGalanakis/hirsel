@@ -1,5 +1,13 @@
 # CPU profiling
 
+## Native unwind information
+
+LLVM emits asynchronous `.eh_frame` unwind information for defined Hirsel
+functions on x86-64 and AArch64. Hirsel failures still use the call ABI.
+Linker garbage collection discards the unwind records of discarded code.
+Release builds can reuse whole modules on both architectures. x86-64 ELF
+also supports splitting and reusing individual definitions.
+
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =

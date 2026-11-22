@@ -340,7 +340,7 @@ extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool fra
             }))
             f.addFnAttr("tune-cpu", "x86-64-v3");
         // Hirsel failures propagate through the call ABI with source sites.
-        f.removeFnAttr(Attribute::UWTable);
+        f.setUWTableKind(UWTableKind::Async);
         f.setDoesNotThrow();
         if (frame_pointers) f.addFnAttr("frame-pointer", "all");
         // Probe at the smallest supported fiber guard size.

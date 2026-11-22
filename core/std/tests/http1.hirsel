@@ -799,13 +799,14 @@ fn llhttp_request_targets() -> bool {
 // Missing reasons, LF-only heads, and partial heads retain committed fields.
 // expect: run upstream_response_heads() = true
 fn upstream_response_heads() -> bool {
-    for (input, progress, end, version, status, reason, count, fields) in[
+    let cases: Inline[(String, http1.Progress, u64, u8, u16, String, u64, Inline[(String, String), 3]), 4] =[
     // llhttp simple response.
     ("HTTP/1.1 200 OK\r\nHeader1: Value1\r\nHeader2:\t Value2\r\nContent-Length: 0\r\n\r\n", Complete, 73u64, 1u8, 200u16, "OK", 3u64,[("Header1", "Value1"), ("Header2", "Value2"), ("Content-Length", "0")]),
     // httparse test_response_reason_missing_no_space_with_headers and test_response_no_cr.
     ("HTTP/1.1 200\r\nFoo: bar\r\n\r\n", Complete, 26u64, 1u8, 200u16, "", 1u64,[("Foo", "bar"), ("", ""), ("", "")]), ("HTTP/1.0 200\nContent-type: text/html\n\n", Complete, 38u64, 0u8, 200u16, "", 1u64,[("Content-type", "text/html"), ("", ""), ("", "")]),
     // httparse test_response_partial_parses_headers_as_much_as_it_can.
-    ("HTTP/1.1 200 OK\r\nServer: yolo\r\n", Partial, 0u64, 1u8, 200u16, "OK", 1u64,[("Server", "yolo"), ("", ""), ("", "")]),] {
+    ("HTTP/1.1 200 OK\r\nServer: yolo\r\n", Partial, 0u64, 1u8, 200u16, "OK", 1u64,[("Server", "yolo"), ("", ""), ("", "")]),]
+    for (input, progress, end, version, status, reason, count, fields) in cases {
         let b = string.as_bytes(input)
         let mut h = http1.head()
         if http1.response(b, mut h) != progress || h.version != version || h.status != status || h.count != count {

@@ -626,14 +626,15 @@ with its mode's row. A mode narrows the grants; it never adds one.
 
 | Mode | Runs | Store | `Dir` bindings | `Net` bindings | Inherited listener | Private descriptors |
 |---|---|---|---|---|---|---|
-| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store directory | none | none | none | none |
+| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store directory | the group's | none | none | none |
 | describe | `place` | none | none | none | none | its answer |
 | preview | `place` | none | none | none | none | its answer |
 | prepare | `place`, `migrate`, `handles` | the export directory only ("Place activation") | none | none | none | its private endpoint to the launcher |
 | serving | the place | the group's store directory | the group's | the group's | the group's listener, descriptor 3 | its private endpoint (4) and its wake report (5) |
 
-A private endpoint reaches only the launcher's handler for that one child; it is never the
-launcher's control socket.
+The store column is the `Dir` binding that names the store (the `--dir` grant of RUNNER-SPEC
+§12.1 `Disk`); prepare's export directory replaces it. A private endpoint reaches only the
+launcher's handler for that one child; it is never the launcher's control socket.
 A launcher that cannot enforce `contained` on its host refuses at startup to admit any
 contained group, and it never runs such a group uncontained. A group whose author is not
 the operator or a named first-party author is `contained`, so no external or multi-customer

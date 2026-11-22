@@ -361,7 +361,9 @@ schema migration and setting `PlaceConfig.triggers` before calling
 Caller for triggered transactions, and the seed grants of type `S`. Its plain
 callback `fn(S, take TriggerContext) -> Result[G, Capacity] waits` makes the
 entry's grants for each attempt in a task with the configured `grant_bytes`.
-Use `None` or an empty entry list to run without triggers.
+With `None` or an empty entry list a place starts no new trigger, but its head still
+settles the rows already in its store: cancels and holds run, and a row whose entry is
+gone is consumed `Gone` (RUNNER-SPEC §12.1).
 
 A transaction uses `triggers.write(mut tx, tables, entries, target, arg, when)`
 with a typed entry reference from `triggers.transact` or `triggers.granted`.

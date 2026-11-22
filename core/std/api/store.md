@@ -35,14 +35,14 @@ while ids identify table and index incarnations and are never reused.
 `Seen { value, version, reads }`, `Failed` or `Refused`. It publishes nothing and
 runs on a reader task without a Db. The checker refuses a write or `info(mut tx)`
 in that body with OWN-5. CallInfo belongs only to `run` and helpers taking mut Tx.
-`changes(a, b)` compares data-tree bytes in ascending physical-key order, skipping
+`changes(a, b)` compares data-tree bytes in ascending logical key order, skipping
 shared nodes by node id. Each change holds an Arc to its stored value. Deletions have value None. Different stores or opens
 are Foreign; branches of one open are allowed. Catalog and stream roots do not
 contribute changes. Node visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage
 for w keys whose values differ, with w <= k.
 
-Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over physical data-tree keys,
+Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over logical keys,
 including the table or index id prefix, with half-open span bounds.
 `range` and `range_reverse` return `RangeRows` scoped to the Tx. Each
 `next_range` records the gap it inspected, including the row it finds, before
@@ -68,7 +68,7 @@ A row counts its data-tree key plus its stored value, and a page holds at least
 one row when one remains. `Page{rows, byte_count, next}` has `next` = None exactly
 on the last page. `Resume` is `send`, not `codec`. It binds the Snapshot's
 identity, the table or index id, the upper bound and the last row's full
-physical key. `scan_next` and `find_next` resume strictly after that key, so
+logical key. `scan_next` and `find_next` resume strictly after that key, so
 index entries with equal keys are neither repeated nor skipped. A different
 Snapshot gives `Moved(version)`, and another incarnation gives `Stale(id)`. The
 law is L36.
@@ -225,9 +225,8 @@ it to built. Everything above describes the store as built.
   page. `count` over a whole table is O(1) after the lookup. `drop_table` removes
   the table's and its indexes' map entries in one schema commit (AP7).
 - **Keys.** Read sets, `Change`, `Resume`, covers and COMMIT ops carry the
-  logical key (`id u32 BE ‖ encoded key`), the bytes this page calls the physical
-  data-tree key. Pages store only the suffix past the id and the page prefix
-  (AP5).
+  logical key (`id u32 BE ‖ encoded key`). Pages store only the suffix past the
+  id and the page prefix (AP5).
 - **Values.** A stored value up to the store's inline threshold is inline, and
   a longer one is a `BlobRef` to an immutable BLOB in a blob pack. A new store's
   threshold is 1024 bytes; an existing store keeps the threshold its MANIFEST

@@ -40,6 +40,117 @@ b0(v0: i64):
 }
 "#;
 
+#[test]
+fn masked_cell_loops_match_the_evaluator_in_release() {
+    // CoreIR isolates the release loop from source-level step charging. The trip
+    // count stays a parameter so the unroller needs a runtime remainder.
+    let shapes: [(&str, u64, u64, &str, &[u64]); 6] = [
+        ("eight", 8, 0, "const 0", &[0, 1, 7, 8, 9, 19]),
+        ("four", 4, 0, "const 0", &[5, 11]),
+        ("aligned_start", 8, 8, "const 0", &[9, 19]),
+        ("unaligned_start", 8, 3, "const 0", &[9, 19]),
+        ("six", 6, 0, "const 0", &[7, 15]),
+        ("aliased", 8, 0, "read a2", &[9, 19]),
+    ];
+    let mut source = String::from("core v1\nsig g0 = (u64) -> (u64)\n");
+    let mut cases = Vec::new();
+    for (index, &(name, width, start, other_cell, counts)) in shapes.iter().enumerate() {
+        use std::fmt::Write as _;
+        write!(
+            source,
+            r#"
+type t{index} = own "{name}" {{ cells: array {width} u64 }}
+inst n{index} = app@1/masked/{name} [] []
+fn f{index} = n{index} g0 {{
+  slot s0 = t{index}
+  addr a0 = s0 field 0 element v5 : u64
+  addr a1 = s0 field 0 element v10 : u64
+  addr a2 = s0 field 0 element v1 : u64
+  addr a3 = s0 field 0 element v18 : u64
+b0(v0: u64):
+  live s0
+  v1: u64 = const 0
+  v2: u64 = const 1
+  v3: u64 = const 8
+  v4: u64 = const {width}
+  address a2
+  jump b1(v1)
+b1(v5: u64):
+  address a0 fail b5
+  v6: u64 = add v5, v2
+  store a0, v6
+  v7: bool = lt v6, v4
+  branch v7, b1(v6), b2
+b2:
+  v8: u64 = const {start}
+  v9: bool = eq v0, v1
+  v17: u64 = wrapping_add v0, v8
+  branch v9, b4(v1, v1), b3(v8)
+b3(v16: u64):
+  v10: u64 = rem v16, v4
+  address a1 fail b5
+  v11: u64 = read a1
+  v12: u64 = {other_cell}
+  v13: u64 = wrapping_add v11, v12
+  v14: u64 = wrapping_add v16, v2
+  v15: u64 = wrapping_add v13, v14
+  store a1, v15
+  v23: bool = ne v14, v17
+  branch v23, b3(v14), b4(v1, v1)
+b4(v18: u64, v19: u64):
+  address a3 fail b5
+  v20: u64 = read a3
+  v21: u64 = const 255
+  v22: u64 = bitand v20, v21
+  v24: u64 = mul v18, v3
+  v25: u64 = shl v22, v24
+  v26: u64 = bitor v19, v25
+  v27: u64 = add v18, v2
+  v28: bool = lt v27, v4
+  branch v28, b4(v27, v26), b6
+b5:
+  propagate
+b6:
+  return v26
+}}
+"#
+        )
+        .unwrap();
+        cases.extend(counts.iter().map(|&count| Case {
+            function: FuncId(index as u32),
+            args: vec![count],
+            limit: u64::MAX,
+            injection: None,
+        }));
+    }
+    let program = hirsel_core_ir::text::parse(&source).unwrap();
+    hirsel_core_ir::wf::module(&program).unwrap();
+    let facts = hirsel_core_ir::roles::Facts::new(&program);
+    let units = [Unit::Core {
+        module: &program,
+        facts: &facts,
+        observe_charge: false,
+        debug_lines: false,
+    }];
+    let exports = (0..shapes.len())
+        .map(|i| symbol(&program, FuncId(i as u32)))
+        .collect::<Vec<_>>();
+    let object =
+        hirsel_llvm_lazy::emit_program_for_target(&units, &exports, Target::X86_64Linux).unwrap();
+    let reports = execute_object(&program, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, native) in cases.iter().zip(reports) {
+        let oracle = eval::run(&program, case.function, &case.args, case.limit);
+        let name = shapes[case.function.0 as usize].0;
+        assert!(
+            matches!(oracle.outcome, eval::Outcome::Returned(_)),
+            "{name}({:?}): {:?}",
+            case.args,
+            oracle.outcome
+        );
+        assert_eq!(native.outcome, oracle.outcome, "{name}({:?})", case.args);
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Kernel {
     Lookup,

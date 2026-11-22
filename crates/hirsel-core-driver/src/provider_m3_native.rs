@@ -120,7 +120,13 @@ mod provider_m3 {
     fn closed_stdout(backend: Backend) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let dir = tempfile::tempdir().unwrap();
-        let source = "pub fn main(out:Stdout, err:Stderr)->Result[(),Exit] { result.unwrap(stderr.write(err,\"MAIN RAN\")); result.unwrap(stdout.write(out,\"out\")); Ok(()) }";
+        let source = r#"
+pub fn main(out: Stdout, err: Stderr) -> Result[(), WriteError] waits {
+    if stdout.is_terminal(out) { fail("closed stdout reports a terminal") }
+    stderr.write(err, "MAIN RAN\n")?
+    stdout.write(out, "out")
+}
+"#;
         let mut request = source_request(source, dir.path());
         request.inputs.packages[1] =
             PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
@@ -144,21 +150,21 @@ mod provider_m3 {
             });
         }
         let output = bounded_output(&mut command);
-        assert_eq!(output.status.code(), Some(103), "{output:?}");
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(output.stdout.is_empty());
         assert_eq!(
             output.stderr,
-            b"not started: host grants could not be configured: Bad file descriptor (os error 9)\n"
+            b"MAIN RAN\nerror: WriteError(written: 0, error: Closed)\n"
         );
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn closed_stdout_is_named_before_main_cranelift() {
+    fn closed_stdout_reports_write_error_cranelift() {
         closed_stdout(Backend::Cranelift);
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn closed_stdout_is_named_before_main_llvm() {
+    fn closed_stdout_reports_write_error_llvm() {
         closed_stdout(Backend::Llvm);
     }
 }

@@ -79,6 +79,14 @@ program code and has no host effect, and reports as
 [PROG-3](programs.md#prog-3-entry) says. Nothing else in a program receives authority from
 the host.
 
+At native Unix launch, a standard stream may be absent. `EBADF` while acquiring its
+corresponding inherited descriptor (0 for `Stdin`, 1 for `Stdout`, 2 for `Stderr`)
+still allows the grant, with a false terminal bit. A read that needs input reports
+`StdinError.Other(EBADF)`. A nonempty write reports `WriteError(written: 0, error: Closed)`.
+`EBADF` while acquiring a descriptor explicitly supplied in place of the inherited
+one is a startup error. Once the provider owns a descriptor, `EBADF` from an
+operation on it is an error under that operation's contract.
+
 ### CAP-5: Provider operations
 
 The **provider operations** are exactly the host primitives listed in [core](core.md). A

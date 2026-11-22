@@ -714,8 +714,8 @@ unsafe fn run_taped(
     unsafe {
         let input = &*input;
         let sink = match (
-            entry::duplicate_stream(input.stderr_fd),
-            entry::duplicate_stream(input.stderr_fd),
+            entry::duplicate_stream(input.stderr_fd, libc::STDERR_FILENO),
+            entry::duplicate_stream(input.stderr_fd, libc::STDERR_FILENO),
         ) {
             (Ok(out), Ok(err)) => Box::new(crate::os::OsProvider::from_streams(out, err)),
             _ => return process::NOT_STARTED,

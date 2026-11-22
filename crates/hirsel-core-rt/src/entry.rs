@@ -305,13 +305,12 @@ pub(crate) fn duplicate(fd: i32) -> io::Result<OwnedFd> {
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 }
-/// A closed inherited stream is still an entry grant. Its terminal bit is
-/// false and any later write reports the descriptor error. A negative
-/// descriptor is invalid launcher input.
-pub(crate) fn duplicate_stream(fd: i32) -> io::Result<Option<OwnedFd>> {
+/// A missing inherited standard stream is a closed stream. An invalid
+/// descriptor supplied in its place is a startup error.
+pub(crate) fn duplicate_stream(fd: i32, inherited_fd: i32) -> io::Result<Option<OwnedFd>> {
     match duplicate(fd) {
         Ok(owned) => Ok(Some(owned)),
-        Err(error) if fd >= 0 && error.raw_os_error() == Some(libc::EBADF) => Ok(None),
+        Err(error) if fd == inherited_fd && error.raw_os_error() == Some(libc::EBADF) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -531,14 +530,13 @@ impl OsProcess {
             });
             let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
                 .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
-            let mut os = Box::new(OsProvider::from_streams(
-                duplicate_stream(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
-                    input.stdout_fd
-                } else {
-                    input.stderr_fd
-                })?,
-                duplicate_stream(input.stderr_fd)?,
-            ));
+            let stdout = if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
+                duplicate_stream(input.stdout_fd, libc::STDOUT_FILENO)?
+            } else {
+                duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?
+            };
+            let stderr = duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?;
+            let mut os = Box::new(OsProvider::from_streams(stdout, stderr));
             if !describe_mode && prepare_path.is_none() {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
             }

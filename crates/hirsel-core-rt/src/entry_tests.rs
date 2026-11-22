@@ -438,15 +438,17 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         assert!(failed.process.is_null());
         assert_eq!(failed.error.tag, 2);
     }
-    let invalid = OsConfig {
-        stderr_fd: -1,
-        ..config
-    };
-    // SAFETY: fcntl checks the external host descriptor.
-    unsafe {
-        let failed = hirsel_core_os_process_new(&invalid);
-        assert!(failed.process.is_null());
-        assert_eq!(failed.error.tag, 4);
+    for stderr_fd in [-1, i32::MAX] {
+        let invalid = OsConfig {
+            stderr_fd,
+            ..config
+        };
+        // SAFETY: fcntl checks the external host descriptor.
+        unsafe {
+            let failed = hirsel_core_os_process_new(&invalid);
+            assert!(failed.process.is_null(), "stderr fd {stderr_fd}");
+            assert_eq!(failed.error.tag, 4, "stderr fd {stderr_fd}");
+        }
     }
     let argv = [View {
         data: b"\xff".as_ptr(),

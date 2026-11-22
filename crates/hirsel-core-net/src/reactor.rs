@@ -1,8 +1,6 @@
 //! Persistent edge-triggered interests, adapted from Go runtime/netpoll_epoll.go.
 //! Slot generations identify sockets across poll and dispatch.
-use crate::model::Model;
 use std::{
-    collections::BTreeSet,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, Mutex, MutexGuard, TryLockError},
@@ -210,82 +208,7 @@ struct Slot {
 }
 /// A carrier outside either registry. Kernel receive bytes stay on the socket.
 /// A fresh registration sees current readiness, including edges queued during transit.
-pub struct SocketTransfer(Option<Detached>);
-
-enum Detached {
-    Native(Record),
-    Model(Model, u64),
-}
-
-impl SocketTransfer {
-    pub fn model(&self) -> Option<&Model> {
-        match self.0.as_ref()? {
-            Detached::Native(_) => None,
-            Detached::Model(model, _) => Some(model),
-        }
-    }
-}
-
-impl Drop for SocketTransfer {
-    fn drop(&mut self) {
-        if let Some(Detached::Model(model, key)) = self.0.take() {
-            model.release(key);
-        }
-    }
-}
-
-/// The model owns its socket keys and cleanup. Native registries hold no
-/// reference to the simulation's resource implementation.
-trait ModelResources: Send + Sync {
-    fn model(&self) -> &Model;
-    fn adopt(&mut self, model: &Model, key: u64);
-    fn release(&mut self, key: u64) -> bool;
-    fn detach(&mut self, key: u64);
-    fn len(&self) -> usize;
-}
-
-struct ModeledSockets {
-    model: Model,
-    keys: BTreeSet<u64>,
-}
-impl ModeledSockets {
-    fn new(model: Model) -> Self {
-        Self {
-            model,
-            keys: BTreeSet::new(),
-        }
-    }
-}
-impl ModelResources for ModeledSockets {
-    fn model(&self) -> &Model {
-        &self.model
-    }
-    fn adopt(&mut self, model: &Model, key: u64) {
-        self.model = model.clone();
-        self.keys.insert(key & !3);
-    }
-    fn release(&mut self, key: u64) -> bool {
-        self.model.release(key);
-        let ended = !self.model.contains(key);
-        if ended {
-            self.keys.remove(&(key & !3));
-        }
-        ended
-    }
-    fn detach(&mut self, key: u64) {
-        assert!(self.keys.remove(&key));
-    }
-    fn len(&self) -> usize {
-        self.keys.len()
-    }
-}
-impl Drop for ModeledSockets {
-    fn drop(&mut self) {
-        for key in std::mem::take(&mut self.keys) {
-            self.model.release_all(key);
-        }
-    }
-}
+pub struct SocketTransfer(Record);
 
 /// O(1) host storage per live descriptor. No table is sized from the fd limit.
 #[derive(Default)]
@@ -295,30 +218,10 @@ pub struct Sockets {
     poller: Option<Arc<Poller>>,
     live: usize,
     waiting: usize,
-    model: Option<Box<dyn ModelResources>>,
     /// mc-units-light: registered in the pool's shared poller as this unit.
     shared: Option<u32>,
 }
 impl Sockets {
-    pub fn model(&self) -> Option<&Model> {
-        self.model.as_ref().map(|resources| resources.model())
-    }
-    pub fn with_model(model: Model) -> Self {
-        Self {
-            slots: Vec::new(),
-            free: Vec::new(),
-            poller: None,
-            live: 0,
-            waiting: 0,
-            model: Some(Box::new(ModeledSockets::new(model))),
-            shared: None,
-        }
-    }
-    pub fn adopt_model(&mut self, model: &Model, key: u64) {
-        self.model
-            .get_or_insert_with(|| Box::new(ModeledSockets::new(model.clone())))
-            .adopt(model, key);
-    }
     /// Lazily created once per run, at its first real socket operation.
     pub fn poller(&mut self) -> io::Result<Arc<Poller>> {
         if self.poller.is_none() {
@@ -383,14 +286,6 @@ impl Sockets {
     /// Detach a whole socket or listener before publishing it.
     pub fn detach(&mut self, key: u64) -> io::Result<SocketTransfer> {
         assert_eq!(key & 3, 0);
-        if Model::owns(key) {
-            let resources = self.model.as_mut().unwrap();
-            resources.detach(key);
-            return Ok(SocketTransfer(Some(Detached::Model(
-                resources.model().clone(),
-                key,
-            ))));
-        }
         let index = ((key >> 2) as u32) as usize;
         let record = self.record(key);
         assert_eq!(record.owners, 1);
@@ -404,27 +299,19 @@ impl Sockets {
         let mut record = self.remove_record(index);
         record.registered = false;
         record.read_drained = false;
-        Ok(SocketTransfer(Some(Detached::Native(record))))
+        Ok(SocketTransfer(record))
     }
 
     /// Give a carrier a fresh identity and register it for this unit.
-    pub fn attach(&mut self, mut carrier: SocketTransfer) -> io::Result<u64> {
-        match carrier.0.take().unwrap() {
-            Detached::Native(record) => {
-                let key = self
-                    .insert_record(record)
-                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EMFILE))?;
-                if let Err(error) = self.register(key) {
-                    self.release(key);
-                    return Err(error);
-                }
-                Ok(key)
-            }
-            Detached::Model(model, key) => {
-                self.adopt_model(&model, key);
-                Ok(key)
-            }
+    pub fn attach(&mut self, carrier: SocketTransfer) -> io::Result<u64> {
+        let key = self
+            .insert_record(carrier.0)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EMFILE))?;
+        if let Err(error) = self.register(key) {
+            self.release(key);
+            return Err(error);
         }
+        Ok(key)
     }
 
     fn record(&self, key: u64) -> &Record {
@@ -459,20 +346,12 @@ impl Sockets {
         r.read_drained = false;
     }
     pub fn split(&mut self, key: u64) -> (u64, u64) {
-        if Model::owns(key) {
-            return self.model().unwrap().split(key);
-        }
         self.record_mut(key).owners = 6;
         (key | 1, key | 2)
     }
     /// Restore whole ownership of a known client socket without touching its fd.
     pub fn rejoin_client(&mut self, key: u64) {
-        if Model::owns(key) {
-            let joined = self.model().unwrap().rejoin_client(key);
-            debug_assert!(joined);
-        } else {
-            self.record_mut(key).owners = 1;
-        }
+        self.record_mut(key).owners = 1;
     }
     pub fn read_drained(&self, key: u64) -> bool {
         self.record(key).read_drained
@@ -610,9 +489,6 @@ impl Sockets {
     }
 
     pub fn release(&mut self, key: u64) -> bool {
-        if Model::owns(key) {
-            return self.model.as_mut().unwrap().release(key);
-        }
         let r = self.record_mut(key);
         let direction = key & 3;
         if direction == 2 {
@@ -636,7 +512,7 @@ impl Sockets {
         true
     }
     pub fn len(&self) -> usize {
-        self.live + self.model.as_ref().map_or(0, |resources| resources.len())
+        self.live
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -644,7 +520,6 @@ impl Sockets {
 }
 impl Drop for Sockets {
     fn drop(&mut self) {
-        drop(self.model.take());
         for slot in &mut self.slots {
             if let Some(r) = slot.record.take() {
                 if r.registered {

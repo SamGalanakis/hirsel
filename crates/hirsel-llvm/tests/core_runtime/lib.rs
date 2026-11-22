@@ -167,50 +167,6 @@ pub unsafe extern "C" fn hirsel_core_test_socket_adopt(
     unsafe { (*context).adopt_fixture_socket(std::os::fd::OwnedFd::from_raw_fd(fd)) }
 }
 
-/// Starts one native source law with the same socket and clock model as the evaluator.
-/// The linker substitutes this entry only for model-network law executables.
-///
-/// # Safety
-/// The generated executable supplies the OS entry's configuration, complete
-/// source table, and matching entry thunk. All are valid for this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __wrap_hirsel_core_os_run_with_sources(
-    input: *const hirsel_core_rt::entry::OsConfig,
-    _names: *const hirsel_core_rt::process::View,
-    sources: *const hirsel_core_rt::abi_sites::SourceTable,
-    entry: hirsel_core_rt::process::Entry,
-) -> u8 {
-    use hirsel_core_rt::{abi_sites, entry::*, model_net::ModelProvider, process};
-
-    // SAFETY: the generated configuration and its borrowed tables live through startup.
-    let opened = unsafe { hirsel_core_os_process_new(input) };
-    if opened.process.is_null() {
-        return process::NOT_STARTED;
-    }
-    // SAFETY: we own the process; the generated source table outlives it.
-    unsafe { abi_sites::hirsel_core_os_process_set_sources(opened.process, sources) };
-    // SAFETY: the process pins its configuration, grant records and fallback provider.
-    let mut cfg = unsafe { *hirsel_core_os_process_config(opened.process) };
-    let mut model = ModelProvider::new(Default::default(), unsafe { *cfg.provider });
-    let provider = model.provider();
-    // SAFETY: the model laws grant at least Net, so the pointer names a live grant table.
-    let mut grants =
-        unsafe { std::slice::from_raw_parts(cfg.capabilities, cfg.capabilities_len) }.to_vec();
-    for grant in &mut grants {
-        if matches!(grant.kind, NET | CLOCK) {
-            grant.provider = &provider;
-        }
-    }
-    cfg.capabilities = grants.as_ptr();
-    cfg.provider = &provider;
-    // SAFETY: the model, grant table and provider pointers remain pinned through
-    // the generated entry, structured task cleanup, and grant closure.
-    let status = unsafe { process::hirsel_core_run(&cfg, entry) };
-    // SAFETY: the process is still owned here and the run has ended.
-    unsafe { hirsel_core_os_process_free(opened.process) };
-    status
-}
-
 /// Run a linked native fixture with T1's last-runnable schedule.
 /// # Safety
 /// The runner and entry obey the process ABI. The configuration stays live

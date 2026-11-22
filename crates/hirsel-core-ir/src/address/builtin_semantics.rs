@@ -162,6 +162,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("list", "clear", 1),
     ("list", "copy_from_slice", 1),
     ("list", "fill", 2),
+    ("list", "fill_slice", 1),
     ("list", "get", 1),
     ("list", "lanes", 1),
     ("list", "len", 1),

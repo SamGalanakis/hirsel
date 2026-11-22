@@ -1132,7 +1132,9 @@ fn http_configured_head_bounds(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut input = take r
     let mut output = take w
     let until = after_ms(host.mono_ns(c), 60)
-    let long = string.as_bytes("GET /abcdefghijklmnopqrstuvwxyzabcdefghijklmnop HTTP/1.1\r\n")
+    // The unfinished request line hits the 40-byte head bound. Stop sending
+    // there so the client can read the error even on a bounded pipe.
+    let long = string.as_bytes("GET /abcdefghijklmnopqrstuvwxyzabcdefghi")
     if empty_get(mut output, mut input, long, c, until) != 414 {
         return false
     }
@@ -1412,7 +1414,9 @@ fn http_lazy_scratch_read_and_drain(n: Net, c: Clock, tasks: Tasks) -> bool wait
     let (r2, w2) = net.split(result.unwrap(host.connect(n, addr, Never)))
     let mut drain_in = take r2
     let mut drain_out = take w2
-    let skip_head = string.as_bytes("POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 10\r\n\r\n")
+    // L5 allows two drain reads with this drain_max. Two unread bytes fit
+    // even when the pipe returns one byte per read.
+    let skip_head = string.as_bytes("POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\n\r\n")
     if !client_send(mut drain_out, skip_head, At(c, until)) {
         return false
     }
@@ -1421,7 +1425,7 @@ fn http_lazy_scratch_read_and_drain(n: Net, c: Clock, tasks: Tasks) -> bool wait
     if st2 != 200 {
         return false
     }
-    let tail = string.as_bytes("abcdefghijGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    let tail = string.as_bytes("abGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
     if !client_send(mut drain_out, tail, At(c, until)) {
         return false
     }

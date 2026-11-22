@@ -26,15 +26,64 @@ import time
 from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL_NET_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535', 'Tls *.test 0-65535 System')
+LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535', 'Tls *.test 0-65535 System')
 
 
-def model_network(case):
+def simulation_support(module):
+    """Hirsel declarations shared by source-only simulation adapters."""
+    return f"""
+type ContractSimulationWorker: send {{
+    port: Served[NetOp],
+    clock: Clock,
+    window: u64
+}}
+
+fn contract_simulation_clock(take input: {module}.world.World) waits {{
+    let mut world = take input
+    {module}.world.run(mut world)
+}}
+
+fn contract_simulation_network(take input: ContractSimulationWorker) waits {{
+    let ContractSimulationWorker(port: take port, clock: time, window: window) = take input
+    let config = {module}.net.Config(queue_bytes: window, fragment_bytes: window, latency_ns: 0)
+    let mut plan = {module}.world.plan(1)
+    let _ = {module}.net.serve({module}.net.new(config), mut plan, time, take port)
+}}
+
+fn start_contract_simulation(tasks: Tasks, window: u64) -> (Net, Clock, Task[()], Task[()]) {{
+    let (world, time) = {module}.world.new(1, 0, 0)
+    let (network, port) = provide.net(bytes 65536)
+    let driver = task.spawn(tasks, bytes 65536, take world, contract_simulation_clock)
+    let server = task.spawn(tasks, bytes 4194304,
+        ContractSimulationWorker(port: take port, clock: time, window: window), contract_simulation_network)
+    (network, time, take server, take driver)
+}}
+"""
+
+
+def network_adapter(call, expected, module):
+    return simulation_support(module) + f"""
+@test
+pub fn native_contract(tasks: Tasks) -> Result[(), ()] waits {{
+    let (network, time, server, driver) = start_contract_simulation(tasks, 8)
+    let verdict = {call}
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    if verdict == {expected} {{ Ok(()) }} else {{ Error(()) }}
+}}
+"""
+
+
+def network_case(case):
     return '(network)' in case.call
 
 
-def model_grants():
-    return ['--grant', 'Net=' + ';'.join(MODEL_NET_RULES), '--grant', 'Clock', '--grant', 'Tasks']
+def unit_socket_case(case):
+    return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket')
+
+
+def loopback_grants():
+    return ['--grant', 'Net=' + ';'.join(LOOPBACK_RULES), '--grant', 'Clock', '--grant', 'Tasks']
 
 LANES = {'895': 'core-check-895', '910': 'core-check-calls-910', '912': 'core-check-index-912',
          '913': 'core-check-callables-913', '914': 'core-ops-914'}
@@ -247,7 +296,7 @@ def discover(root, filters):
 def host_parameter(case):
     if '(https)' in case.call:
         return 'native_net:Net,native_clock:Clock,token:Secret,native_out:Stdout,native_err:Stderr', ''
-    if model_network(case):
+    if network_case(case):
         return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
     if '(granted, tasks)' in case.call:  # An entry-grant Secret: native only.
         return 'native_tasks:Tasks,native_granted:Secret', ''
@@ -352,15 +401,13 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, network=False, events=False, progress=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, events=False, progress=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if events:
             # CONC-10 events are recorded only on request (22f95498).
             request["events"] = True
         if instructions is not None:
             request["instructions"] = instructions
-        if network:
-            request["model_net"] = MODEL_NET_RULES
         if sdk_out is not None:
             request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
         if sdk_compiler is not None:
@@ -417,24 +464,48 @@ def wrapper(case, port=None):
     return f'\n@test\npub fn native_contract({parameters})->Result[(),()]{effect} {{\n{body}\n}}\n'
 
 
+def simulated_case(root, case, source, adapted, scratch):
+    module = case.test_of or 'tests/' + case.file.stem
+    call = case.call.replace('(network)', '(network,time,tasks)')
+    if case.package != 'core':
+        adapted.write_text(source + network_adapter(call, case.expected, 'sim' if case.package == 'std' else 'std.sim'))
+        return manifest(root, case, adapted), f'{case.package}@1/{module}/native_contract'
+
+    entry = case.call.split('(')[0]
+    adapted.write_text(source + f"""
+pub fn simulation_case(n: Net, c: Clock, tasks: Tasks) -> bool waits {{
+    {entry}(n,c,tasks)
+}}
+""")
+    bridge = scratch / 'sim_contract.hirsel'
+    bridge_call = f"core.{module.replace('/', '.')}.simulation_case(network,time,tasks)"
+    bridge.write_text(network_adapter(bridge_call, case.expected, 'sim'))
+    inputs = manifest(root, case, adapted)
+    std = next(p for p in inputs['packages'] if p['package']['name'] == 'std')
+    std['sources'].append({'file': str(bridge), 'modules': ['tests', 'sim_contract'], 'signatures': False})
+    return inputs, 'std@1/tests/sim_contract/native_contract'
+
+
 def manifest(root, case, adapted):
     if case.test_of:
         return source_manifest(root, case.package, [case.test_of], adapted, replace=True)
     return source_manifest(root, case.package, ['tests', case.file.stem], adapted)
 
 
+def library_sources(directory, signatures):
+    return [
+        {'file': str(p.resolve()), 'modules': list(relative.with_suffix('').parts), 'signatures': signatures}
+        for p in sorted(directory.rglob('*.hirsel'))
+        if (relative := p.relative_to(directory)).parts[0] != 'tests'
+    ]
+
+
 def source_manifest(root, package, modules, source, *, replace=False):
     core = {'name': 'core', 'version': '1'}
     std = {'name': 'std', 'version': '1'}
-    def sources(directory, signatures):
-        return [
-            {'file': str(p.resolve()), 'modules': list(relative.with_suffix('').parts), 'signatures': signatures}
-            for p in sorted(directory.rglob('*.hirsel'))
-            if (relative := p.relative_to(directory)).parts[0] != 'tests'
-        ]
     packages = [
-        {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
-        {'package': std, 'sources': sources(root / 'core/std', False), 'dependencies': [core]}]
+        {'package': core, 'sources': library_sources(root / 'core/core', True), 'dependencies': []},
+        {'package': std, 'sources': library_sources(root / 'core/std', False), 'dependencies': [core]}]
     if package == 'store':
         packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
                          'sources': [{'file': str(root / 'core/programs/store' / (name + '.hirsel')),
@@ -551,7 +622,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None, schedule_runtime=None, record_runtime=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -585,6 +656,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            cause=None, owner=None, native_only=False)
                 # The evaluator models tasks and the clock (virtual time); a law
                 # whose entry takes another host capability runs natively only.
+                if engine == 'evaluator' and unit_socket_case(case):
+                    row.update(applicable=False, passed=None, native_only=True,
+                               cause='stay on host walker until R8b')
+                    save_row(rows, row, output)
+                    continue
                 if engine == 'evaluator' and host_parameter(case)[0] and not host_parameter(case)[0].endswith((':Tasks', ':Clock')):
                     row.update(applicable=False, passed=None, native_only=True,
                                cause='native-only: entry takes a host capability')
@@ -684,10 +760,16 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 https = '(https)' in case.call
                 if https:
                     port, roots, raw, token, peer = active.enter_context(https_fixture(root))
-                adapted.write_text(source + wrapper(case, port if https else None))
+                simulated = (network_case(case) and not unit_socket_case(case)
+                             and (evaluating or case.call != 'net_parity(network)'))
+                if simulated:
+                    source_rows, entry = simulated_case(root, case, source, adapted, scratch)
+                else:
+                    adapted.write_text(source + wrapper(case, port if https else None))
+                    source_rows = manifest(root, case, adapted)
+                    entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 inputs = scratch / 'inputs.json'
-                inputs.write_text(json.dumps(manifest(root, case, adapted)))
-                entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
+                inputs.write_text(json.dumps(source_rows))
                 command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
                            '--runtime', str(record_runtime or runtime) if https else str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
                            '-o', str(scratch / 'programs')]
@@ -704,8 +786,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--test-timeout', str(timeout), '--dir', str(host)])
                 if evaluating:
                     law_started = time.monotonic()
-                    result = resident.evaluate(inputs, entry, network=model_network(case),
-                                               instructions=case.evaluator_instructions, progress=progress)
+                    result = resident.evaluate(inputs, entry, instructions=case.evaluator_instructions, progress=progress)
                     row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
                         row['revision'] = json.loads(result.stdout).get('revision')
@@ -716,12 +797,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         reference = [str(compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', entry,
                                      '--backend', 'cranelift', '--runtime', str(runtime), '--store', str(work / 'revision-store'),
                                      '--json', '--limit', str(case.root_limit), '-o', str(scratch / 'revision-program')]
-                        if model_network(case):
-                            reference.extend(model_grants())
-                        else:
-                            for capability in ('Tasks', 'Clock'):
-                                if host_parameter(case)[0].endswith(':' + capability):
-                                    reference.extend(['--grant', capability])
+                        for capability in ('Tasks', 'Clock'):
+                            if simulated and capability == 'Tasks' or not simulated and ':' + capability in host_parameter(case)[0]:
+                                reference.extend(['--grant', capability])
                         if cc:
                             reference.extend(['--cc', str(cc)])
                         built = progress.run(reference, capture_output=True, cwd=host)
@@ -779,18 +857,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                             environment[name.encode()] = value
                 linker = cc
                 scripts = []
-                if model_network(case):
-                    if model_runtime is None:
-                        raise ValueError('native model-network laws require --model-runtime')
-                    if case.schedule or case.first_write is not None:
-                        raise ValueError('a model-network law uses its own provider and scheduler')
-                    command[command.index('--runtime') + 1] = str(model_runtime)
-                    command.extend(model_grants())
-                    linker = scratch / 'model-net-cc'
-                    actual = str(cc or Path(shutil.which('cc')))
-                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) +
-                                      ' "$@" -Wl,--wrap=hirsel_core_os_run_with_sources\n')
-                    linker.chmod(0o755)
+                if simulated:
+                    command.extend(['--grant', 'Tasks'])
+                elif network_case(case):
+                    command.extend(loopback_grants())
                 if case.first_write is not None:
                     wrapped = 'hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io'
                     scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],
@@ -852,7 +922,6 @@ def main():
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--record-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_RECORD_ARCHIVE'))
-    parser.add_argument('--model-runtime', type=Path)
     parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
@@ -879,7 +948,6 @@ def main():
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
                typescript=args.typescript, node=args.node,
-               model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
                schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
     ran = {(row['test'], row['file']) for row in rows if row['ran']}

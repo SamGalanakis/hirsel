@@ -1942,7 +1942,7 @@ mod tests {
 
     #[test]
     fn concurrent_foreign_returns_to_one_page_reuse_every_slot_once() {
-        use hirsel_core_net::model::SplitMix64;
+        use hirsel_core_net::SplitMix64;
 
         const LIMIT: u64 = 4096;
         const COUNT: usize = 8;

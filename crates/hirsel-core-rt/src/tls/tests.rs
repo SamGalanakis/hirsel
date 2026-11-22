@@ -1132,3 +1132,50 @@ fn scram_loopback_laws() {
     scram_iteration_steps(&mut run);
     scram_channel_binding(&mut run);
 }
+
+#[test]
+fn expired_secret_send_issues_no_host_tls_bytes() {
+    let mut run = Run::new();
+    let (port, peer) = serve(listener(), certificate_config(&[]), |mut server| {
+        let mut received = [0; 2];
+        server.read_exact(&mut received).unwrap();
+        received
+    });
+    let key = run.connect(port);
+    let sealed = run.seal_secret(b"BCD", b"alpha.test");
+    let upgrade = run.upgrade(key, b"alpha.test", Some(CA), &[]);
+    assert_eq!(upgrade.outcome.error, IoError::OK);
+    let deadline = run.now();
+    let expired = unsafe {
+        hirsel_core_host_send_secret(
+            &raw mut *run.context,
+            key | 2,
+            &input(b"A"),
+            sealed,
+            &input(b"E"),
+            1,
+            run.clock,
+            deadline,
+            4,
+        )
+    };
+    let sent = unsafe {
+        hirsel_core_host_send_pair(
+            &raw mut *run.context,
+            key | 2,
+            &input(b"ok"),
+            &input(b""),
+            0,
+            0,
+            0,
+            4,
+        )
+    };
+    run.release_halves(key);
+    let received = peer.join().unwrap();
+    assert_error(expired, crate::os_net::signal(6));
+    assert_eq!(expired.written, 0);
+    assert_eq!(sent.error, IoError::OK);
+    assert_eq!(sent.value, 2);
+    assert_eq!(&received, b"ok");
+}

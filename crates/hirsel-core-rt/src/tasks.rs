@@ -1275,7 +1275,6 @@ struct Scheduler {
     #[cfg(feature = "record")]
     tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
-    model: Option<Arc<dyn ModelClock>>,
     /// Events left before a live run's next in-task kernel probe.
     probes_left: u32,
     parked: WaitArms<*mut Task>,
@@ -1603,13 +1602,9 @@ impl Scheduler {
         }
     }
 
-    unsafe fn take_timers(&mut self) {
+    unsafe fn take_timers_at(&mut self, now: u64) {
         // SAFETY: this turn owns the timer heap and pinned operation frames.
         unsafe {
-            if self.timers.root.is_null() {
-                return;
-            }
-            let now = self.now();
             // Detach every expired timer first: a wait that answers Until(now)
             // again re-arms for the next turn, so the other tasks still run.
             // Detached timers lend their unused parent link to this wake batch.
@@ -1631,6 +1626,17 @@ impl Scheduler {
                 (*task).timer.parent = ptr::null_mut();
                 self.wake_operation(task, Wake::Timer);
             }
+        }
+    }
+
+    unsafe fn take_timers(&mut self) {
+        if !self.timers.root.is_null() {
+            #[cfg(test)]
+            let sample = TIMER_SAMPLE.get();
+            #[cfg(not(test))]
+            let sample: Option<u64> = None;
+            // SAFETY: the scheduler owns the timer heap during this turn.
+            unsafe { self.take_timers_at(sample.unwrap_or_else(crate::os::monotonic_ns)) };
         }
     }
 
@@ -1786,11 +1792,6 @@ impl Scheduler {
         crate::process::stop(b"Deadlock");
     }
 
-    fn now(&self) -> u64 {
-        self.model
-            .as_ref()
-            .map_or_else(crate::os::monotonic_ns, |m| m.now())
-    }
     fn set_net(
         &mut self,
         sockets: *mut hirsel_core_net::Sockets,
@@ -1815,16 +1816,6 @@ impl Scheduler {
     }
 
     fn poll_net(&mut self, timeout: i32) {
-        if let Some(model) = &self.model {
-            // Readiness is taken before timers by take_wakes, including ties.
-            let deadline = self.timers.deadline();
-            // A modeled network can serve several units. The scheduler
-            // that polls it need not own the operation that became ready.
-            for token in model.poll(deadline, timeout != 0) {
-                hirsel_core_ready(token);
-            }
-            return;
-        }
         if !self.net.is_null() && crate::units::untied() {
             let readies = &self.readies;
             let net = self.net;
@@ -1858,42 +1849,13 @@ impl Scheduler {
             return;
         }
         let deadline = self.timers.deadline();
-        if crate::units::untied() && self.model.is_none() {
+        if crate::units::untied() {
             if deadline.is_none() && !self.has_outside_wait() && !flow_pending {
                 self.stop_quiescent();
             }
             crate::units::park(deadline);
             if !self.net.is_null() {
                 self.poll_net(0);
-            }
-            return;
-        }
-        if self.model.is_some() {
-            let now = self.now();
-            self.poll_net(-1);
-            // Read before the ready flag: a sync's ready is pushed before its
-            // count drops, so zero here and no ready below is quiescence.
-            let syncing = self.readies.outside();
-            if !self.readies.has_pending()
-                && self.now() == now
-                && deadline.is_none_or(|at| at > now)
-                && !flow_pending
-            {
-                // SAFETY: the scheduler pins its unit for this turn.
-                let peer = unsafe { self.lang.as_ref() }.is_some_and(|unit| unit.has_peer());
-                if syncing || peer {
-                    // The modeled clock cannot make a host sync or a peer run.
-                    if crate::units::untied() {
-                        crate::units::park(None);
-                    } else {
-                        std::thread::park();
-                    }
-                    return;
-                }
-                if self.quiesce() {
-                    return;
-                }
-                self.stop_quiescent();
             }
             return;
         }
@@ -2186,7 +2148,6 @@ pub(crate) struct Readies {
     worker: std::thread::Thread,
     peers: Mutex<Vec<std::thread::Thread>>,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
-    model: Mutex<Option<Arc<dyn ModelClock>>>,
     /// Host work this waiter depends on whose ready is still to come (a
     /// queued or running sync). It drops only after that ready is pushed, so
     /// a waiter that reads zero and then no pending ready is quiescent.
@@ -2206,7 +2167,6 @@ impl Readies {
             worker: std::thread::current(),
             peers: Mutex::default(),
             net: Mutex::new(None),
-            model: Mutex::new(None),
             outside: AtomicUsize::new(0),
             unit,
         })
@@ -2790,11 +2750,6 @@ unsafe fn alone(
     impl Drop for AloneNet {
         fn drop(&mut self) {
             self.0.net.lock().unwrap_or_else(|e| e.into_inner()).take();
-            self.0
-                .model
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
         }
     }
     let _network = AloneNet(readies.clone());
@@ -2802,33 +2757,6 @@ unsafe fn alone(
     // Wait until readiness (true) or the deadline (false).
     let block = |deadline: Option<u64>| -> bool {
         loop {
-            let model = readies
-                .model
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if let Some(model) = model {
-                // Read before the ready flag, as the scheduler's model idle.
-                let syncing = readies.outside();
-                let before = model.now();
-                for token in model.poll(deadline, true) {
-                    readies.push(token);
-                }
-                if readies.pending.load(Ordering::Acquire) && readies.take(token) {
-                    return true;
-                }
-                if deadline.is_some_and(|at| at <= model.now()) {
-                    return false;
-                }
-                if model.now() != before {
-                    continue;
-                }
-                if syncing {
-                    std::thread::park();
-                    continue;
-                }
-                crate::process::stop(b"Deadlock");
-            }
             if crate::units::running().is_some() {
                 // mc-units-untied: the unit parks; its worker runs other units.
                 if !unsafe { (*context).host_files }.is_null() {
@@ -3270,16 +3198,10 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
             Some(_) => hirsel_core_layout::event::is_poll(kind, value),
         };
         if !(*run).net.is_null() && preemptible() {
-            // A model's readiness is part of the replayed input, so it is read at
-            // every event; a live kernel is asked at one event in an interval.
-            if (*run).model.is_some() {
+            (*run).probes_left -= 1;
+            if (*run).probes_left == 0 {
+                (*run).probes_left = LIVE_PROBE_INTERVAL;
                 (*run).poll_net(0);
-            } else {
-                (*run).probes_left -= 1;
-                if (*run).probes_left == 0 {
-                    (*run).probes_left = LIVE_PROBE_INTERVAL;
-                    (*run).poll_net(0);
-                }
             }
             // Readiness another worker already queued is taken at every event.
             if (*run).readies.as_ref().pending.load(Ordering::Acquire) {
@@ -3423,32 +3345,6 @@ pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     // SAFETY: CURRENT pins its task, or is null outside a task.
     unsafe { task.as_ref().and_then(|t| t.group) }
 }
-/// A model's clock and readiness drive the scheduler only after its provider
-/// attaches. Keeping these callbacks with the provider lets native-only runs
-/// link the scheduler without the deterministic network simulation.
-pub(crate) trait ModelClock: Send + Sync {
-    fn now(&self) -> u64;
-    fn poll(&self, deadline: Option<u64>, idle: bool) -> Vec<u64>;
-}
-
-pub(crate) fn attach_model(model: Arc<dyn ModelClock>) {
-    let task = if CURRENT.get().is_null() {
-        CALLBACK_TASK.get()
-    } else {
-        CURRENT.get()
-    };
-    if task.is_null() {
-        *alone_waiter()
-            .model
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(model);
-    } else {
-        // SAFETY: the provider callback's task pins its run on this worker.
-        unsafe {
-            (*(*task).run).model = Some(model);
-        }
-    }
-}
 pub(crate) fn attach_net(
     sockets: *mut hirsel_core_net::Sockets,
     poller: Arc<hirsel_core_net::Poller>,
@@ -3579,6 +3475,18 @@ pub unsafe fn checkpoint() {
     }
 }
 
+#[cfg(test)]
+thread_local! { static TIMER_SAMPLE: Local<Option<u64>> = const { Local::new(None) }; }
+
+/// Use a specified instant on the next scheduler turn of a single-worker test.
+#[cfg(test)]
+pub(crate) unsafe fn checkpoint_at(now: u64) {
+    TIMER_SAMPLE.set(Some(now));
+    // SAFETY: the test calls this at an active fiber's checkpoint.
+    unsafe { checkpoint() };
+    TIMER_SAMPLE.set(None);
+}
+
 /// The task's thread-locals before its unit parks and after it resumes, in
 /// one call each: both run on the unit's stack between switches.
 #[inline(never)]
@@ -3668,8 +3576,7 @@ pub(crate) unsafe fn park_unit_alone(task: *mut Task, spin: impl FnOnce() -> boo
         {
             return false;
         }
-        if run.model.is_some()
-            || run.pool.is_some()
+        if run.pool.is_some()
             || !run.net.is_null()
             || !run.head.is_null()
             || !run.deferred.is_null()
@@ -4067,7 +3974,6 @@ pub unsafe fn run_root(
         #[cfg(feature = "record")]
         tapes: Tapes::default(),
         net: ptr::null_mut(),
-        model: None,
         probes_left: LIVE_PROBE_INTERVAL,
         parked: WaitArms::default(),
         lang: ptr::null_mut(),
@@ -4342,7 +4248,6 @@ impl RunPtr {
                     let no_live_tapes = true;
                     let wait_for_net = pool.is_none()
                         && !run.net.is_null()
-                        && run.model.is_none()
                         && run.head.is_null()
                         && run.deferred.is_null()
                         && no_live_tapes
@@ -5184,7 +5089,6 @@ mod ready_routing_laws {
                 #[cfg(feature = "record")]
                 tapes: Tapes::default(),
                 net: ptr::null_mut(),
-                model: None,
                 probes_left: LIVE_PROBE_INTERVAL,
                 parked: WaitArms::default(),
                 lang: ptr::null_mut(),

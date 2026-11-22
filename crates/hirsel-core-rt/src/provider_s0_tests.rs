@@ -963,19 +963,6 @@ struct TimerScenario {
 
 #[test]
 fn s0_expiry_follows_deadlines_and_fifo_arm_order_after_rearms_and_cancels() {
-    #[derive(Default)]
-    struct Clock(AtomicU64);
-
-    impl ModelClock for Clock {
-        fn now(&self) -> u64 {
-            self.0.load(Ordering::Relaxed)
-        }
-
-        fn poll(&self, _: Option<u64>, _: bool) -> Vec<u64> {
-            Vec::new()
-        }
-    }
-
     fn arm(rec: &mut Rec, _: u64, _: u64, _: usize) -> Step {
         pending(rec.timer_scenario.as_ref().unwrap().deadline)
     }
@@ -985,9 +972,9 @@ fn s0_expiry_follows_deadlines_and_fifo_arm_order_after_rearms_and_cancels() {
         unsafe {
             const SLOTS: usize = 256;
             const STEPS: usize = 2048;
-            let clock = Arc::new(Clock::default());
-            attach_model(clock.clone());
-            let mut now = 0;
+            // Host time stays below this range. The test supplies each expiry
+            // instant directly to the same wake pass the scheduler runs.
+            let mut now = u64::MAX - 8192;
             let mut slots = [None; SLOTS];
             let mut armed = Vec::<(usize, u64)>::new();
             let mut next_site = 1;
@@ -1010,8 +997,7 @@ fn s0_expiry_follows_deadlines_and_fifo_arm_order_after_rearms_and_cancels() {
                     // Iteration starts in arm order. Stable sort preserves
                     // that order for ties without sharing the runtime key.
                     due.sort_by_key(|&(_, deadline)| deadline);
-                    clock.0.store(now, Ordering::Relaxed);
-                    checkpoint();
+                    checkpoint_at(now);
                     for (slot, _) in due {
                         let (task, site) = slots[slot].take().unwrap();
                         (*rec)

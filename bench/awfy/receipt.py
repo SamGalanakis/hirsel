@@ -834,10 +834,10 @@ def profile(args):
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
         raise ValueError("use a new evidence directory outside the checkout")
-    baseline = left["sample"]["instructions"]
-    candidate = right["sample"]["instructions"]
-    percent = Decimal(100) * (candidate - baseline) / baseline
-    print(f"{args.row} PMU instructions:u {baseline:,} -> {candidate:,} ({percent:+.3f}%)", flush=True)
+    base_count = left["sample"]["instructions"]
+    candidate_count = right["sample"]["instructions"]
+    percent = Decimal(100) * (candidate_count - base_count) / base_count
+    print(f"{args.row} PMU instructions:u {base_count:,} -> {candidate_count:,} ({percent:+.3f}%)", flush=True)
     for field, before_value, after_value in zip(CANDIDATE_HASHES, base_identity, candidate):
         if before_value != after_value:
             print(f"{field} {before_value} -> {after_value}")

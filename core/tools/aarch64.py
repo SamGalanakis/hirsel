@@ -17,7 +17,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--evaluator', type=Path)
-    parser.add_argument('--model-runtime', type=Path)
     parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--phase', choices=['front', 'std', 'm1'], required=True)
     parser.add_argument('--facts', choices=['both', 'on', 'off'], default='both')
@@ -48,7 +47,6 @@ def main():
                 owners = json.loads((ROOT / 'core/tools/std_native_owners.json').read_text())
                 rows = std_native.run(ROOT, compiler, runtime, contracts, ['llvm'], None, owners,
                                       cc, 30, evaluator, target, emulator, sysroot,
-                                      model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
                                       schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                                       record_runtime=record_runtime)
                 executed += sum(r['ran'] for r in rows if r['engine'] == 'llvm')

@@ -338,7 +338,6 @@ fn evaluate(
             Some(&mut destination),
             INSTRUCTIONS,
             &revisions,
-            None,
             false,
             &sites,
             None,

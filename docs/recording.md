@@ -122,10 +122,10 @@ them may contain such values.
 | `DGRAM_OPEN`, `DGRAM_BIND`, `DGRAM_CONNECT` | Net or datagram ordinal; root label and path where given | the new ordinal or the outcome |
 | `DGRAM_SEND`, `DGRAM_SEND_TO` | datagram ordinal; root label and path for send-to; the packet; `until` | the outcome |
 | `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |
-| `RELEASE` | the ordinal and part of a dropped `Proc`, pipe half, Unix socket half, listener or datagram socket | none: it completes at issue |
+| `CLOSE` of a `Proc`, listener or datagram socket | the ordinal and part, as for every dropped host handle | the outcome |
 
-A replay starts no process and opens no socket. It checks each `RELEASE` at its position, so
-a moved drop diverges there (RL2). It then changes local ownership only: nothing is killed,
+A replay starts no process and opens no socket. It checks each `CLOSE` at its position, so a moved
+drop diverges there (RL2). It then changes local ownership only: nothing is killed,
 closed or unlinked on the host. A delivery that its issue could not have produced, such as a
 packet whose length and flag contradict its room, is `Corrupt`
 ([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).

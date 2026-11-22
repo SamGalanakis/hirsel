@@ -964,6 +964,8 @@ unsafe extern "C" fn abort(
             // A host deadline that fired times the call out (NOTES 35).
             let end = if reason == ABORT_DEADLINE {
                 TIMED_OUT
+            } else if lock(port).vocab == Vocab::Net {
+                crate::os_net::signal(7)
             } else {
                 cancelled
             };

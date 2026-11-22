@@ -17,7 +17,7 @@ import tempfile
 import tomllib
 
 from case_progress import run_case
-from std_native import ROOT
+from std_native import ROOT, library_sources
 
 
 BYTE_LAWS = ('refused_reply',
@@ -36,8 +36,7 @@ def inputs(root, tests=False):
         packages.append({
             'package': {'name': name, 'version': '1'},
             'dependencies': [] if name == 'core' else [{'name': 'core', 'version': '1'}],
-            'sources': [{'file': str(p), 'modules': [p.stem], 'signatures': name == 'core'}
-                        for p in sorted((root / 'core' / name).glob('*.hirsel'))]})
+            'sources': library_sources(root / 'core' / name, name == 'core')})
     directory = root / 'core/programs/store'
     with (directory / 'hirsel.toml').open('rb') as file:
         manifest = tomllib.load(file)

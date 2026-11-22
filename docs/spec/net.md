@@ -269,7 +269,8 @@ pub fn accept_unix(mut l: UnixListener, until: Until) -> Result[Socket, NetError
 
 An endpoint that the rules do not permit, or a root label of no `UnixRoot`, gives `Denied`
 before issue. So does a path whose bytes do not fit the host's socket address, which is never
-truncated. Everything that depends on host files is decided after issue and delivered, and a
+truncated. Each operation admits its result handle before issue, so a node is never created
+for a result that cannot be delivered. Everything that depends on host files is decided after issue and delivered, and a
 replay supplies it without looking at a host path. A connect, bind or listen resolves `path`
 beneath its root as a `Dir` path is resolved, through no symbolic link and never out of the
 root, and acts on what that resolution found. There is no fallback that checks a path and then
@@ -334,7 +335,8 @@ pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Resul
 - `send_to` needs a `UnixSend` rule for its destination in the originating Net;
 - `send_datagram` needs a connected socket, and `recv_datagram` a bound one.
 
-Each of these checks is made before issue and gives `Denied` with no host effect. No Net is
+Each of these checks is made before issue and gives `Denied` with no host effect. Each
+operation that makes a socket admits it before issue, as NET-13's operations do. No Net is
 passed per send, so a datagram never combines two capabilities' authority
 ([CAP-7](capabilities.md#cap-7-attenuation)). The provider sends to the very socket it
 resolved, as NET-13 connects.
@@ -357,7 +359,7 @@ never a root's host path. An issue holds the Net or handle ordinal, the root lab
 the backlog or deadline where the operation has one, and the offered bytes or room. A
 delivery holds the new ordinal, the committed outcome, or the packet with its length and
 truncation flag. Dropping a host-issued `UnixListener`, `UnixDatagram` or Unix socket half
-records a `RELEASE` at its position, as EXEC-8 does for a `Proc`
+is the provider's `CLOSE` at its position, as for every host handle and for a `Proc`
 ([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)). A packet delivery whose
 appended bytes, length and flag break the law above is `Corrupt`, found before the buffer
 changes.

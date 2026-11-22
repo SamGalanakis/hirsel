@@ -697,10 +697,8 @@ def first_party(meta: dict) -> str:
         arguments = ["--phase", phase, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel"]
         if phase == "std":
             binaries["hirsel-core-contract-eval"] = "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"
-            binaries["model-runtime.a"] = "//:core-llvm-runtime-fixtures[aarch64]"
             binaries["schedule-runtime.a"] = "//:core-scripted-runtime-archives[aarch64]"
             arguments += ["--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval",
-                          "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
                           "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"]
         tls = ' + glob(["crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"])' if phase == "std" else ""
         env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"}
@@ -887,11 +885,10 @@ def first_party(meta: dict) -> str:
                                 host=True, args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel",
                                                              "--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval",
                                                              "--node", "buck-out/tmp/cargo-bin-exe/" + name + "/node",
-                                                             "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
                                                              "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"],
                                 bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
-                                          "node": "//tools/buck2:sdk-node[bin/node]", "model-runtime.a": "//:core-native-runtime-fixture-pic",
+                                          "node": "//tools/buck2:sdk-node[bin/node]",
                                           "schedule-runtime.a": "//:core-scripted-runtime-pic"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                            "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},

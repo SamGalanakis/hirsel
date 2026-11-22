@@ -16,10 +16,9 @@ hirsel_guard::install!();
 // user loops independently of process scheduling or the host's current load.
 const INSTRUCTIONS: u64 = 1_000_000_000;
 
-/// What one law's run is given: its budget, its model world and whether it records events.
+/// What one law's run is given: its budget, whether it records events and its launch identity.
 struct Setting {
     instructions: u64,
-    network: Option<eval::Network>,
     events: bool,
     launch: Option<Metadata>,
 }
@@ -119,7 +118,6 @@ fn run(
         destination.as_deref_mut(),
         setting.instructions,
         revisions,
-        setting.network,
         setting.events,
         &sites,
         setting.launch.as_ref(),
@@ -182,42 +180,6 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
         let manifest = input["manifest"].as_str().ok_or("expected manifest")?;
         let entry = DefPath::from_full(input["entry"].as_str().ok_or("expected entry")?)
             .ok_or("invalid entry")?;
-        let network = if let Some(rules) = input["model_net"].as_array() {
-            let rules = rules
-                .iter()
-                .map(|rule| {
-                    hirsel_core_net::GrantRule::parse(rule.as_str().ok_or("expected a net rule")?)
-                        .map_err(|_| "invalid net rule")
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            // These laws observe runner events, not the network explorer's
-            // per-byte choice trace. Keep identical prefixes and seed choices.
-            let defaults = hirsel_core_net::model::Config::default();
-            // A flood law's window: its queues and reads, in bytes. The 8-byte
-            // default splits every read, which is what framing laws explore.
-            let window = match input.get("model_window") {
-                None => defaults.queue_bytes,
-                Some(bytes) => bytes
-                    .as_u64()
-                    .and_then(|n| usize::try_from(n).ok())
-                    .filter(|&n| n > 0)
-                    .ok_or("model_window must be a positive byte count")?,
-            };
-            let model = hirsel_core_net::model::Model::new(hirsel_core_net::model::Config {
-                record_decisions: false,
-                queue_bytes: window,
-                max_prefix: window,
-                ..defaults
-            });
-            let mut net = eval::Network {
-                grants: Default::default(),
-                sockets: hirsel_core_net::Sockets::with_model(model),
-            };
-            net.grants.insert(0, rules);
-            Some(net)
-        } else {
-            None
-        };
         let launch = input["launch_image"]
             .as_str()
             .map(|image| {
@@ -244,7 +206,6 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 input["program_entry"].as_bool().unwrap_or(false),
                 Setting {
                     instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
-                    network,
                     launch,
                     // CONC-10 events only for a law that reads them: a flood makes millions.
                     events: input["events"].as_bool().unwrap_or(false),

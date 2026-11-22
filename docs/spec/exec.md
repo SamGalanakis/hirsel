@@ -27,15 +27,18 @@ promises exactly these things about a child, and nothing else:
    descriptor of the run survives into it.
 3. **Run memory.** No child can trace the run, read or write its memory, or take its
    descriptors (EXEC-7). The run holds no OS privilege, and each child starts with no new
-   privileges, so no child holds the host's tracing privilege over the run.
+   privileges, so no child holds the host's tracing privilege over the run. A child that asks
+   an outside service holding privilege (a service manager, `sudo`, a remote shell) to act
+   for it is outside this promise. Where the run's user can reach such a service, it is
+   trusted as the child is.
 4. **Direct child.** Dropping a live `Proc` sends its direct child SIGKILL, and the run reaps
    it (EXEC-6). Nothing is promised about the processes a child starts: they can outlive the
    `Proc`, and they can outlive the run.
 
 **Trust boundary.** An approved profile, together with every program and service it invokes,
 is trusted with everything the run's OS user can reach. That includes the run's files, its
-recording and every other process of that user. A child cannot reach run memory (promise 3),
-but it can change anything the user can write, including a recording of this run or an
+recording and every other process of that user. A child cannot itself reach run memory
+(promise 3), but it can change anything the user can write, including a recording of this run or an
 earlier one. What a child does reaches the program only through this chapter's operations
 and through host state that later provider operations read, and each of these is a delivery
 at the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)). EXEC-8 states what a
@@ -171,9 +174,10 @@ at least that length. Two forms `A` and `B` intersect in three steps:
 So `[a, Rest] ∩ [a, b, c]` is `[a, b, c]`, `[a] ∩ [a, b, Rest]` is empty, `[Any] ∩ [Any]` is
 `[Any]`, and `[] ∩ [Rest]` is `[]`, which admits only the empty argument list.
 
-A profile left with no form or no label is dropped. A `Rest` anywhere but last, an empty
-form list, a literal with a NUL, or a malformed name list gives `Invalid` and changes
-nothing.
+A profile left with no form or no label is dropped. An empty list is a valid narrowing:
+`Programs` with no names keeps no profile, `EnvKeys` with no keys leaves the profile only its
+fixed keys, and `Dirs` with no labels drops the profile. A `Rest` anywhere but last, a literal
+with a NUL, or a list with an empty or repeated name gives `Invalid` and changes nothing.
 
 Rule storage is admitted at the narrowing and stays charged to its payer until the run ends
 ([NET-6](net.md#net-6-network-rules)). Its logical size is 32, plus for each kept profile 8
@@ -226,9 +230,12 @@ caller's data decide on their own. Each that fails gives `Denied` with no host e
 - `path` is empty or a valid path ([core](core.md#contracts-the-signatures-do-not-state));
 - each field's length and each list's count fits in a `u32`.
 
-The spawn then admits every result handle's block and the supervisor's record for the child
+The spawn then admits every result handle's block
 ([MEM-24](budgets.md#mem-24-logical-charges)). A refused admission raises `Capacity` with no
-host effect. So once the host has created a child, its result can always be delivered.
+host effect. The provider reserves the supervisor's record for the child in its own storage,
+outside every limit, and a failed reservation gives `Other(errno)` with no host effect. So
+once the host has created a child, its result can always be delivered and its drop can
+always be handled.
 
 **At the host.** Each failure from here on depends on the host. It is a delivered result,
 and a recording supplies it on replay:
@@ -377,7 +384,7 @@ Laws:
 
 Dropping a `Proc` whose child has not been reaped sends that child SIGKILL through its pidfd
 and hands the pidfd to the run's **supervisor**, which reaps it. The finalizer never waits.
-The record the supervisor needs was admitted at spawn, so a drop cannot fail.
+The record the supervisor needs was reserved at spawn, so a drop cannot fail.
 
 **The registry.** The supervisor keeps one registry of every process the run created: each
 pending or live `Exec` child, and each of the runtime's own helper processes. A child is
@@ -396,8 +403,8 @@ keeps its own orphans. So no completion bound is given, and no descendant is att
 a particular `Proc`.
 
 **The run's end.** An orderly end, whether a return, a failure or a run stop that runs
-cleanup ([FAIL-15](failure.md#fail-15-run-stops)), kills and reaps every registered child
-and makes the orphan pass above. When the host kills the run, no cleanup runs. Each direct
+cleanup ([FAIL-15](failure.md#fail-15-run-stops)), kills and reaps every registered `Exec`
+child and makes the orphan pass above. Helpers are ended by the runtime that owns them. When the host kills the run, no cleanup runs. Each direct
 child then receives SIGKILL from its parent-death signal (EXEC-3), unless the image has
 changed that setting itself. The supervisor creates every child from a thread that lives as
 long as the run, so the signal fires only when the run dies. A child whose parent has already
@@ -469,16 +476,17 @@ a child has on the program arrives as a recorded delivery (EXEC-1), unlike forei
   delivery. A cached wait makes no host call and is not recorded.
 - *A signal* holds the ordinal and the signal at issue, and the outcome at delivery.
 - *Pipe I/O* uses the half rows ([recording](../recording.md#what-a-recording-holds)).
-- *A release.* Dropping a host-issued `Proc` or pipe half records a `RELEASE` with its ordinal
-  and part, at its position in the run's order. It records only that the run asked for the
+- *A release.* Dropping a host-issued `Proc` or pipe half issues the provider's `CLOSE`
+  operation with its ordinal and part, as dropping any host handle does, and the recording
+  holds it at its position in the run's order. It records only that the run asked for the
   kill or close, never that the child died or read end of input.
 - *An impossible delivery*, one that its issue could not have produced, is `Corrupt`. That
   covers a pipe count above the room or the offer, a spawn result without exactly the piped
   ordinals, and an error a host spawn never returns, such as `TimedOut`. The replay finds it
   before it changes any buffer or ownership.
 
-A replay starts no process. It creates local handles, and it checks each release at its
-position: a release that moved diverges there
+A replay starts no process. It creates local handles, and it checks each `CLOSE` at its
+position: a drop that moved diverges there
 ([RL2](../recording.md#laws)). On a release it updates local ownership only, and it issues
 no kill, close or reap.
 
@@ -558,4 +566,4 @@ Laws:
 - end of input follows a closed stdin pipe;
 - a sealed port answers queued waits with `Other(0)` and pipe I/O with `Reset`;
 - a replay of a run edited to move a `Proc` drop, or a stdin half's drop, past another issue
-  diverges at the release.
+  diverges at its `CLOSE`.

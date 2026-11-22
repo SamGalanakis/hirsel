@@ -141,7 +141,7 @@ const PORT_HANDLE: u64 = 1 << 61;
 const SERVED_BASE: u64 = 0x90_0000;
 const CALL_BASE: u64 = 1 << 62;
 /// A served Net caller's keys (native `provide::PORT_KEYS`): clear of the
-/// model's small sequential socket keys.
+/// host registry keys.
 const PORT_KEYS: u64 = 1 << 33;
 /// One call on a served port (native `provide::PortCall`). The caller's bytes
 /// are copied at issue: they cannot change while it waits, and `payload`
@@ -1106,21 +1106,13 @@ struct Sched {
 }
 impl Sched {
     /// One turn's wakes before its pop (native `take_wakes`): cancellations of
-    /// provider-parked tasks, readiness, then expired timers in deadline order.
-    fn take_wakes(&mut self, now: u64, readies: Vec<u64>) {
+    /// provider-parked tasks, then expired timers in deadline order.
+    fn take_wakes(&mut self, now: u64) {
         for k in std::mem::take(&mut self.cancels) {
             let r = &mut self.tasks[k];
             if r.state == State::Provider && r.cancel && r.cancellable {
                 r.cancelled = true;
                 r.state = State::Ready;
-                self.timers.retain(|&(_, j)| j != k);
-                self.ready.push_back(k);
-            }
-        }
-        for token in readies {
-            let k = token as usize - 1;
-            if self.tasks[k].state == State::Provider {
-                self.tasks[k].state = State::Ready;
                 self.timers.retain(|&(_, j)| j != k);
                 self.ready.push_back(k);
             }
@@ -1286,8 +1278,7 @@ pub fn run_nans_into(
 }
 
 /// Run an entry with the root task's startup charge and teardown, as the native
-/// process entry does. The limit must cover startup. May supply a deterministic
-/// network and record CONC-10 events.
+/// process entry does. The limit must cover startup. May record CONC-10 events.
 /// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
 /// module's items); an empty `sites` means the module's own (`source::module_sites`).
 #[allow(clippy::too_many_arguments)]
@@ -1300,7 +1291,6 @@ pub fn run_entry(
     destination: Option<&mut [u8]>,
     instructions: u64,
     revisions: &Revisions,
-    network: Option<Network>,
     events: bool,
     sites: &[u64],
     launch: Option<&hirsel_core_ids::launch::Metadata>,
@@ -1315,7 +1305,6 @@ pub fn run_entry(
             destination,
             instructions,
             revisions: Some(revisions),
-            network,
             events,
             process_entry: true,
             sites,
@@ -1381,17 +1370,10 @@ pub fn run_injected(
     .0
 }
 /// Harness-owned socket descriptors and explicit rules. Never constructed by source code.
+#[derive(Default)]
 pub struct Network {
     pub grants: BTreeMap<u64, Vec<hirsel_core_net::GrantRule>>,
     pub sockets: hirsel_core_net::Sockets,
-}
-impl Default for Network {
-    fn default() -> Self {
-        Self {
-            grants: BTreeMap::new(),
-            sockets: hirsel_core_net::Sockets::with_model(Default::default()),
-        }
-    }
 }
 /// Run with the network harness's configured authority and owned descriptors.
 pub fn run_network_into(
@@ -1410,20 +1392,6 @@ pub fn run_network_into(
         WorldInput {
             network: Some(network),
             network_out: Some(remaining),
-            ..WorldInput::default()
-        },
-    )
-    .0
-}
-/// Run with the network harness's configured authority and owned descriptors.
-pub fn run_network(m: &Module, f: FuncId, args: &[u64], limit: u64, network: Network) -> Report {
-    run_world(
-        m,
-        f,
-        args,
-        limit,
-        WorldInput {
-            network: Some(network),
             ..WorldInput::default()
         },
     )
@@ -1763,26 +1731,16 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
             }
         };
         loop {
-            let model = baton.world.network.sockets.model().cloned().unwrap();
-            model.advance_to(baton.world.clock);
-            let readies = model.poll(None, false);
-            let now = model.now();
-            baton.world.clock = now;
             let s = &mut baton.sched;
-            s.take_wakes(now, readies);
+            s.take_wakes(baton.world.clock);
             if s.ready.is_empty() {
                 std::mem::swap(&mut s.ready, &mut s.deferred);
             }
-            if s.ready.is_empty() {
-                let deadline = s.timers.first().map(|&(at, _)| at);
-                let readies = model.poll(deadline, true);
-                baton.world.clock = model.now();
-                s.take_wakes(model.now(), readies);
-                if s.ready.is_empty() && model.now() != now {
-                    // A delivery can move accepted bytes into transit without
-                    // making the receiver ready yet. Continue to its next event.
-                    continue;
-                }
+            if s.ready.is_empty()
+                && let Some(&(at, _)) = s.timers.first()
+            {
+                baton.world.clock = at;
+                s.take_wakes(at);
             }
             if s.ready.is_empty() && baton.quiesce() {
                 continue;
@@ -2128,6 +2086,11 @@ impl Machine<'_> {
             timers.push((at, k));
         }
     }
+    fn remove_cell_timer(&mut self, c: usize, k: usize) {
+        if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c] {
+            timers.retain(|&(_, task)| task != k);
+        }
+    }
     fn ready_provider(&mut self, k: usize) {
         if self.sched.tasks[k].state == State::Provider {
             self.sched.tasks[k].state = State::Ready;
@@ -2211,7 +2174,7 @@ impl Machine<'_> {
         out: Option<u64>,
         live: bool,
     ) -> X<Vec<u64>> {
-        self.port_call_with(t, c, words, fields, out, live, None, None)
+        self.port_call_with(t, c, words, fields, out, live, &mut None, None)
     }
 
     /// `port_call` for a Net call, with its `until` (NOTES 35) and, for a
@@ -2227,7 +2190,7 @@ impl Machine<'_> {
         fields: Vec<Vec<u8>>,
         out: Option<u64>,
         live: bool,
-        secret: Option<EvalSecret>,
+        secret: &mut Option<EvalSecret>,
         deadline: Option<Due>,
     ) -> X<Vec<u64>> {
         let VirtualCell::Port { vocab, sealed, .. } = &self.world.cells[c] else {
@@ -2275,7 +2238,7 @@ impl Machine<'_> {
                 held: false,
                 answer: None,
                 finished: false,
-                secret,
+                secret: secret.take(),
             },
         );
         let servers: Vec<usize> = servers.iter().map(|&(k, _)| k).collect();
@@ -2309,6 +2272,9 @@ impl Machine<'_> {
                 None => None,
             };
             self.park(Some(Wait::Network(host)));
+            if let Some(Due::Cell(clock, _)) = deadline {
+                self.remove_cell_timer(clock, t.k);
+            }
             if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
                 let cell = &mut self.world.cells[c];
                 let call = cell.port().0.get_mut(&id).unwrap();
@@ -2317,6 +2283,9 @@ impl Machine<'_> {
                     cell.free_staged(id);
                     cell.closed_call(id);
                     cell.prune(id);
+                    if vocab == Vocab::Net {
+                        return Ok(port_outcome(vocab, words[0], [0, 7, 0, 0, 0]));
+                    }
                     self.check_cancel(t)?;
                 }
             }
@@ -3579,7 +3548,7 @@ impl Machine<'_> {
             HostOp::Resolve | HostOp::RecvBounded | HostOp::SendPair => self.until(a, 3),
             _ => None,
         };
-        self.port_call_with(t, c, w, fields, out, live, None, deadline)
+        self.port_call_with(t, c, w, fields, out, live, &mut None, deadline)
     }
 
     /// `net.join` on a served Net socket's live halves (native
@@ -3649,192 +3618,59 @@ impl Machine<'_> {
     }
 
     fn network_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
-        use hirsel_core_net::model::{Address, Operation, Reply};
-        let kind = match op {
-            HostOp::Accept => Some(4),
-            HostOp::RecvBounded | HostOp::SendPair => Some(3),
-            _ => None,
-        };
-        if let Some((c, id, live)) = kind.and_then(|kind| self.port_socket(a[0], kind)) {
-            return self.net_call(t, op, c, id, live, a);
-        }
-        let address = || Address {
-            family: a[1] as u8,
-            hi: a[2],
-            lo: a[3],
-            port: a[4] as u16,
-        };
-        let operation = match op {
+        match op {
             HostOp::Connect | HostOp::Listen => {
-                let address = address();
-                let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
-                    rules.iter().any(|r| {
+                let grants = self.world.network.grants.get(&a[0]);
+                let allowed = grants.is_some_and(|rules| {
+                    rules.iter().any(|rule| {
                         matches!(
-                            r,
-                            hirsel_core_net::GrantRule::Address(r) if r.permits(
+                            rule,
+                            hirsel_core_net::GrantRule::Address(rule) if rule.permits(
                                 u8::from(op == HostOp::Listen),
-                                address.family,
-                                address.hi,
-                                address.lo,
-                                address.port,
+                                a[1] as u8,
+                                a[2],
+                                a[3],
+                                a[4] as u16,
                             )
                         )
                     })
                 });
-                if !allowed {
-                    let mut r = vec![0, 1, 0, 0];
-                    if op == HostOp::Listen {
-                        r.extend([0; 4]);
-                    }
-                    return Ok(r);
-                }
-                if let Some(&c) = self.world.net_ports.get(&a[0]) {
-                    // A served Net's rules permitted the address: its server
-                    // answers.
+                if allowed && let Some(&c) = self.world.net_ports.get(&a[0]) {
                     return self.net_call(t, op, c, 0, true, a);
                 }
-                if op == HostOp::Connect {
-                    Operation::Connect(address)
-                } else {
-                    Operation::Listen(address, a[5] as u16)
+            }
+            HostOp::Accept | HostOp::RecvBounded | HostOp::SendPair => {
+                let kind = if op == HostOp::Accept { 4 } else { 3 };
+                if let Some((c, id, live)) = self.port_socket(a[0], kind) {
+                    return self.net_call(t, op, c, id, live, a);
                 }
             }
-            HostOp::Accept => Operation::Accept(a[0]),
-            HostOp::RecvBounded => Operation::Recv(a[0]),
-            HostOp::SendPair => Operation::Send(a[0]),
             _ => unreachable!(),
-        };
-        let model = self.world.network.sockets.model().unwrap().clone();
-        model.advance_to(self.world.clock);
-        let (input, data, len, cap) = if matches!(op, HostOp::RecvBounded | HostOp::SendPair) {
-            self.carrier(a[1])
-        } else {
-            (vec![], 0, 0, 0)
-        };
-        let tail = if op == HostOp::SendPair {
-            self.carrier(a[2]).0
-        } else {
-            vec![]
-        };
-        let until = match op {
-            HostOp::Connect => 5,
-            HostOp::Accept => 1,
-            HostOp::SendPair | HostOp::RecvBounded => 3,
-            _ => 2,
-        };
-        let deadline = if op == HostOp::Listen {
-            None
-        } else {
-            self.until(a, until)
-        };
-        let spare = if op == HostOp::RecvBounded {
-            cap.saturating_sub(len).min(a[2]) as usize
-        } else {
-            0
-        };
-        let reply = self.network_attempt(t, &model, deadline, |token| {
-            model.attempt_parts(operation, [&input, &tail], spare, token)
-        });
-        let Reply {
-            value,
-            error,
-            code,
-            address,
-            bytes,
-            ..
-        } = reply;
-        if error == 0 {
-            if matches!(op, HostOp::Connect | HostOp::Listen | HostOp::Accept) {
-                self.world.network.sockets.adopt_model(&model, value);
-            }
-            if op == HostOp::RecvBounded {
-                if !bytes.is_empty() {
-                    self.put(data + len, &bytes);
-                }
-                self.store(a[1] + 8, 8, len + bytes.len() as u64);
-            }
         }
-        let mut result = vec![value, u64::from(error), u64::from(code), 0];
+        let mut denied = vec![0, 1, 0, 0];
         if matches!(op, HostOp::Listen | HostOp::Accept) {
-            result.extend([
-                u64::from(address.family),
-                address.hi,
-                address.lo,
-                u64::from(address.port),
-            ]);
+            denied.extend([0; 4]);
         }
-        Ok(result)
+        Ok(denied)
     }
+
     fn network_resolve(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
-        use hirsel_core_net::{GrantRule, Ip, Name};
+        use hirsel_core_net::{GrantRule, Name};
         let Some(name) = std::str::from_utf8(self.carrier_bytes(a[1]))
             .ok()
             .and_then(Name::parse)
         else {
             return Ok(vec![0, 1, 0, 0]);
         };
-        if !self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+        let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
             rules
                 .iter()
                 .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
-        }) {
-            return Ok(vec![0, 1, 0, 0]);
-        }
-        if let Some(&c) = self.world.net_ports.get(&a[0]) {
-            // A served Net's rules covered the name: its server answers with
-            // address records (NOTES 34).
+        });
+        if allowed && let Some(&c) = self.world.net_ports.get(&a[0]) {
             return self.net_call(t, HostOp::Resolve, c, 0, true, a);
         }
-        if self.until(a, 3).is_some_and(|due| self.passed(due)) {
-            return Ok(vec![0, 6, 0, 0]);
-        }
-        let (data, len, cap) = (
-            self.load(a[2], 8),
-            self.load(a[2] + 8, 8),
-            self.load(a[2] + 16, 8),
-        );
-        let model = self.world.network.sockets.model().unwrap();
-        let addresses = model.resolve(&name, cap.saturating_sub(len) as usize);
-        let count = addresses.len() as u64;
-        for (index, address) in addresses.into_iter().enumerate() {
-            let offset = (len + index as u64) * Ip::SIZE as u64;
-            self.put(data + offset, &Ip::from(address).layout_bytes());
-        }
-        self.store(a[2] + 8, 8, len + count);
-        Ok(vec![count, 0, 0, 0])
-    }
-
-    fn network_attempt(
-        &mut self,
-        t: &Task,
-        model: &hirsel_core_net::model::Model,
-        deadline: Option<Due>,
-        mut attempt: impl FnMut(u64) -> Option<hirsel_core_net::model::Reply>,
-    ) -> hirsel_core_net::model::Reply {
-        let token = t.k as u64 + 1;
-        let reply = loop {
-            if let Some(reply) = attempt(token) {
-                break reply;
-            }
-            if deadline.is_some_and(|due| self.passed(due)) {
-                break model.abort(token, false);
-            }
-            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-            let host = match deadline {
-                Some(Due::Host(at)) => Some(at),
-                Some(Due::Cell(c, at)) => {
-                    self.cell_timer(c, at, t.k);
-                    None
-                }
-                None => None,
-            };
-            self.park(Some(Wait::Network(host)));
-            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
-                break model.abort(token, true);
-            }
-        };
-        self.world.clock = model.now();
-        reply
+        Ok(vec![0, 1, 0, 0])
     }
 
     fn tls_offer(&self, a: &[u64], port: u16) -> Result<Vec<Vec<u8>>, (u64, u64)> {
@@ -3874,58 +3710,8 @@ impl Machine<'_> {
         if let Some(&(c, _, peer)) = self.world.port_keys.get(&(key & !3)) {
             return self.port_tls(t, a, c, peer, served);
         }
-        if served.is_some() {
-            // A served Net cannot answer for another provider's socket.
-            self.world.network.sockets.release(key);
-            return Ok(vec![0, 1, 0, 0, 0, 0, 0, 0]);
-        }
-        let model = self.world.network.sockets.model().unwrap().clone();
-        let offered = match model
-            .connected_peer(key)
-            .ok_or((1, 0))
-            .and_then(|peer| self.tls_offer(a, peer.port))
-        {
-            Ok(offered) => offered,
-            Err((tag, code)) => {
-                self.world.network.sockets.release(key);
-                return Ok(vec![0, tag, code, 0, 0, 0, 0, 0]);
-            }
-        };
-        if let Err(cancelled) = self.check_cancel(t) {
-            self.world.network.sockets.release(key);
-            return Err(cancelled);
-        }
-        model.advance_to(self.world.clock);
-        let deadline = self.until(a, 6);
-        let reply = self.network_attempt(t, &model, deadline, |token| {
-            model.attempt_tls(key, &offered, token)
-        });
-        if reply.error != 0 {
-            self.world.network.sockets.release(key);
-            return Ok(vec![
-                0,
-                reply.error.into(),
-                reply.code.into(),
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]);
-        }
-        self.world.network.sockets.split(key);
-        let name = hirsel_core_net::tls::verification_name(self.carrier_bytes(a[2])).unwrap();
-        self.world
-            .tls_writes
-            .insert(key & !3, (name, false, reply.binding));
-        let protocol = if reply.bytes.is_empty() {
-            0
-        } else {
-            offered.iter().position(|p| *p == reply.bytes).unwrap() as u64 + 1
-        };
-        let mut result = vec![reply.value, 0, 0, protocol];
-        result.extend(hirsel_core_net::tls::peer_words(reply.peer));
-        Ok(result)
+        self.world.network.sockets.release(key);
+        Ok(vec![0, 1, 0, 0, 0, 0, 0, 0])
     }
 
     /// `tls.connect` on a served Net's socket (native `tls::connect` through
@@ -3973,7 +3759,7 @@ impl Machine<'_> {
         let row = match self.check_cancel(t).and_then(|()| {
             let deadline = self.until(a, 6);
             let fields = vec![vec![], canonical, wire];
-            self.port_call_with(t, c, w, fields, None, live, None, deadline)
+            self.port_call_with(t, c, w, fields, None, live, &mut None, deadline)
         }) {
             Ok(row) => row,
             Err(stop) => {
@@ -4098,7 +3884,12 @@ impl Machine<'_> {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {
-            return Ok(vec![0, 5, 0, 0]);
+            let error = if self.port_socket(key, 3).is_some() {
+                1
+            } else {
+                5
+            };
+            return Ok(vec![0, error, 0, 0]);
         }
         let Some(secret) = self.world.secrets.get(a[2] as usize) else {
             return Ok(vec![0, 1, 0, 0]);
@@ -4116,7 +3907,6 @@ impl Machine<'_> {
             policy: SecretPolicy::exactly(name),
             bytes: secret.bytes.clone(),
         };
-        let bytes = secret.bytes.clone();
         let before = self.carrier_bytes(a[1]).to_vec();
         let after = self.carrier_bytes(a[3]).to_vec();
         if let Some((c, id, live)) = self.port_socket(key, 3) {
@@ -4127,32 +3917,16 @@ impl Machine<'_> {
             let mut w = [0; 8];
             w[..4].copy_from_slice(&[7, id, before.len() as u64, after.len() as u64]);
             let fields = vec![vec![], before, after];
-            let row = self.check_cancel(t).and_then(|()| {
-                let deadline = self.until(a, 4);
-                self.port_call_with(t, c, w, fields, None, live, Some(narrowed), deadline)
-            });
-            if !matches!(&row, Ok(row) if row[1] == 0) {
+            self.check_cancel(t)?;
+            let deadline = self.until(a, 4);
+            let mut secret = Some(narrowed);
+            let row = self.port_call_with(t, c, w, fields, None, live, &mut secret, deadline);
+            if secret.is_none() && !matches!(&row, Ok(row) if row[1] == 0) {
                 self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
             }
             return row;
         }
-        self.check_cancel(t)?;
-        let model = self.world.network.sockets.model().unwrap().clone();
-        model.advance_to(self.world.clock);
-        let deadline = self.until(a, 4);
-        let mut committed = 0;
-        let reply = self.network_attempt(t, &model, deadline, |token| {
-            model.attempt_secret(
-                key,
-                [&before, bytes.as_slice(), &after],
-                &mut committed,
-                token,
-            )
-        });
-        if reply.error != 0 && committed != 0 {
-            self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
-        }
-        Ok(vec![0, reply.error.into(), reply.code.into(), 0])
+        Ok(vec![0, 1, 0, 0])
     }
 
     fn scram_send(&mut self, t: &mut Task, args: &[u64]) -> X<Vec<u64>> {
@@ -4185,6 +3959,9 @@ impl Machine<'_> {
         }
         if spent {
             self.refund(payer, CHARGE);
+            if self.port_socket(key, 3).is_some() {
+                return Ok(vec![0, 1, 0, 0]);
+            }
             return Ok(vec![0, 5, 0, 5]);
         }
         if let Err(cancelled) = self.check_cancel(t) {
@@ -4204,14 +3981,15 @@ impl Machine<'_> {
                 w[..4].copy_from_slice(&[5, id, (joined.len() - at) as u64, 0]);
                 let fields = vec![vec![], joined[at..].to_vec(), vec![]];
                 let deadline = self.until(args, 6);
-                let row = match self.port_call_with(t, c, w, fields, None, live, None, deadline) {
-                    Ok(row) => row,
-                    Err(stop) => {
-                        self.refund(payer, CHARGE);
-                        self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
-                        return Err(stop);
-                    }
-                };
+                let row =
+                    match self.port_call_with(t, c, w, fields, None, live, &mut None, deadline) {
+                        Ok(row) => row,
+                        Err(stop) => {
+                            self.refund(payer, CHARGE);
+                            self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                            return Err(stop);
+                        }
+                    };
                 if row[1] != 0 {
                     self.refund(payer, CHARGE);
                     self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
@@ -4224,24 +4002,8 @@ impl Machine<'_> {
             self.world.scrams.insert(id, (signature, payer));
             return Ok(vec![id, 0, 0, 0]);
         }
-        let model = self.world.network.sockets.model().unwrap().clone();
-        model.advance_to(self.world.clock);
-        let deadline = self.until(args, 6);
-        let mut committed = 0;
-        let reply = self.network_attempt(t, &model, deadline, |token| {
-            model.attempt_secret(key, [&before, &message, &after], &mut committed, token)
-        });
-        if reply.error != 0 {
-            self.refund(payer, CHARGE);
-            if committed != 0 {
-                self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
-            }
-            return Ok(vec![0, 5, reply.code.into(), reply.error.into()]);
-        }
-        let id = SCRAM_BASE + self.world.next_scram;
-        self.world.next_scram += 1;
-        self.world.scrams.insert(id, (signature, payer));
-        Ok(vec![id, 0, 0, 0])
+        self.refund(payer, CHARGE);
+        Ok(vec![0, 1, 0, 0])
     }
 
     fn scram_final_len(&self, args: &[u64]) -> Vec<u64> {
@@ -4298,7 +4060,12 @@ impl Machine<'_> {
                     .get(&(a[0] & !3))
                     .is_some_and(|record| record.1) =>
             {
-                return Ok(vec![0, 5, 0, 0]);
+                let error = if self.port_socket(a[0], 3).is_some() {
+                    1
+                } else {
+                    5
+                };
+                return Ok(vec![0, error, 0, 0]);
             }
             _ => {}
         }
@@ -4408,24 +4175,7 @@ impl Machine<'_> {
             {
                 ok(a[0] & !3, 0)
             }
-            HostOp::NetJoin => {
-                let (read, write) = (a[0], a[1]);
-                let key = read & !3;
-                if key != write & !3
-                    || self.world.tls_writes.contains_key(&key)
-                    || !self
-                        .world
-                        .network
-                        .sockets
-                        .model()
-                        .unwrap()
-                        .rejoin_client(key)
-                {
-                    vec![read, 1, 0, write]
-                } else {
-                    ok(key, 0)
-                }
-            }
+            HostOp::NetJoin => vec![a[0], 1, 0, a[1]],
             HostOp::NetNarrow => {
                 let r = hirsel_core_net::Rule {
                     dir: a[1] as u8,
@@ -4483,9 +4233,7 @@ impl Machine<'_> {
                 // The host clock is monotonic (native reads CLOCK_MONOTONIC,
                 // hirsel-core-rt os::monotonic_ns): a read after a sleep to the
                 // maximum deadline stays there instead of wrapping (CONC-7).
-                let model = self.world.network.sockets.model().unwrap();
-                model.advance_to(self.world.clock);
-                self.world.clock = model.clock_read();
+                self.world.clock = self.world.clock.saturating_add(1);
                 vec![self.world.clock]
             }
             HostOp::Stdout | HostOp::Stderr => {

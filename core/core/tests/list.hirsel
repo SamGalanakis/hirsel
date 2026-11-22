@@ -266,3 +266,35 @@ fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
         None => 99,
     }
 }
+
+// fill_slice (core.md, Bulk overwrite) over a tuple stride: the last two of five
+// elements, ending exactly at len, then an empty fill at len. By hand: [a, a, b, x, x]
+// with a = (1, 10), b = (3, 30), x = (9, 99); length and capacity unchanged.
+// expect: run fill_slice_end() = true
+fn fill_slice_end() -> bool {
+    let mut xs: List[(u8, u64)] = list.new()
+    list.fill(mut xs, 5, (1u8, 10u64))
+    xs[2] = (3u8, 30u64)
+    let capacity = list.capacity(xs)
+    list.fill_slice(mut xs, 3, 2, (9u8, 99u64))
+    list.fill_slice(mut xs, 5, 0, (7u8, 77u64))
+    list.len(xs) == 5 && list.capacity(xs) == capacity && xs[1] == (1u8, 10u64) && xs[2] == (3u8, 30u64) && xs[3] == (9u8, 99u64) && xs[4] == (9u8, 99u64)
+}
+
+// One element past the end: 4 + 2 > 5.
+// expect: run fill_slice_past_end() = fail Bounds
+fn fill_slice_past_end() -> bool {
+    let mut b: Bytes = list.new()
+    list.fill(mut b, 5, 0)
+    list.fill_slice(mut b, 4, 2, 1)
+    b[4] == 1
+}
+
+// 1 + (2^64 - 1) wraps to 0, which a wrapping end check would accept.
+// expect: run fill_slice_overflow() = fail Bounds
+fn fill_slice_overflow() -> bool {
+    let mut b: Bytes = list.new()
+    list.fill(mut b, 5, 0)
+    list.fill_slice(mut b, 1, 18446744073709551615, 1)
+    b[1] == 1
+}

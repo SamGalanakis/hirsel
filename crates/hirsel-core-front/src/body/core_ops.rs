@@ -276,6 +276,7 @@ operations! {
     ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("list", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
+    ("list", "fill_slice", Lane::Value, "A", "core-perf-primitives-1606", false),
     ("inline", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
     ("inline", "word_le", Lane::Value, "A", "dedup-1357", false),
     ("inline", "word_be", Lane::Value, "A", "dedup-1357", false),

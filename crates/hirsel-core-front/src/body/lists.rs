@@ -1019,6 +1019,58 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.copy_plain_range(item, dst, at, src, count, n)
     }
 
+    /// `list.fill_slice`: Bounds unless `at + count <= len`, checked before any
+    /// store; then one store of `value` per element of the range, ascending.
+    pub(super) fn list_fill_slice(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        at: ValueId,
+        count: ValueId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<()> {
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        self.require_copy_range(at, count, len, n);
+        let rep = match self.rep(item) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let Some(place) = rep.stored() else {
+            return Some(());
+        };
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let stride = self.layout_size(item, false, n)?;
+        let zero = self.konst(u64_, 0, n)?;
+        let one = self.konst(u64_, 1, n)?;
+        let empty = self.list_compare(CompareOp::Eq, stride, zero, n);
+        let setup = self.new_block(&[]);
+        let test = self.new_block(&[u64_]);
+        let store = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(empty, done, setup, n);
+        self.start(setup);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        let (end, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, at, count, n);
+        self.jump(test, &[at], n);
+        self.start(test);
+        let index = self.block_params(test)[0];
+        let more = self.list_compare(CompareOp::Lt, index, end, n);
+        self.list_branch(more, store, done, n);
+        self.start(store);
+        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, stride, n);
+        let target = self.address(AddressBase::Value(data), &[Step::Byte(offset)], place, n);
+        self.install(target, rep, value, n);
+        let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
+        self.jump(test, &[next], n);
+        self.start(done);
+        Some(())
+    }
+
     pub(super) fn inline_copy_from_slice(
         &mut self,
         array: TyId,

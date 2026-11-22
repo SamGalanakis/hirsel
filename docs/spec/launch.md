@@ -507,7 +507,8 @@ added and held by it for the group's whole life. A serving child receives it as 
 inherited listener ([net](net.md), `LISTEN_FDS`). Dropping it in the child closes only the
 child's descriptor, so the accept queue outlives the child. Cutover and a restart therefore
 lose no connection that is in the backlog. A connection to a group that is not live waits in
-that backlog. The launcher reports the first readable listener of a cold group to the host
+that backlog. This holds across a child's end and a host restart; a launcher loss loses
+the backlog with its only holder (RUNNER-SPEC §14.5). The launcher reports the first readable listener of a cold group to the host
 as `Arrived(group)`, and the host wakes the group (RUNNER-SPEC §14.3). Clients find a group's
 address from the host's routing table. The host never proxies bytes.
 
@@ -527,22 +528,43 @@ so keeping it is caching, not state. Its operations are these:
   untrusted authors, and assembles images. It writes objects with the "Durable publication"
   order above, steps 1-3. Step 4, the pending record, is a host catalog row, which the host
   commits only after the launcher has answered that steps 1-3 are synced.
-- **Launch.** It starts a group's children: describe, preview, prepare and serving (below),
-  and the install launch of genesis. Each child runs a retained image by digest, from the
-  image store, in the group's working directory, with the group's grant bindings. It
-  reports each child's exit to the host, with the Clean report of RUNNER-SPEC §14.4 when the
-  child sends one.
+- **Launch.** It starts a group's children: install (genesis and standalone install),
+  describe, preview, prepare and serving. Each child runs a retained image by digest, from
+  the image store, in the group's working directory, with the authority of its mode
+  ("Child modes" below), which never exceeds the group's approved grant bindings. Each
+  launch is keyed by the child's identity, and the launcher holds at most one serving
+  launch per group outside a cutover (RUNNER-SPEC §14.3). It reports each child's end to
+  the host, with the Clean report of RUNNER-SPEC §14.4 when the child sends one.
 - **Collect.** It removes objects only when the host names the full root set: the union
   that "Durable publication" lists, which the host reads from `groups`, `deploys` and `pins`,
   together with the launcher's own live reservations. A reservation is an object set that
   the launcher has synced for an attempt whose pending row the host has not yet committed;
-  it lives in the launcher's memory and ends when the host commits or abandons the row. A
+  it lives in the launcher's memory and ends when the host commits or abandons the row. The
+  host releases a reservation only after its pending row's commit is durable. "Durable
+  publication" requires one collection lock; the root read and the unlink are now in two
+  processes, so the lock becomes a **collection fence** that spans both, in this order:
+  1. The host sends `CollectBegin`. The launcher takes the fence and answers. While it is
+     held, the launcher still makes reservations, but it ends none: a release the host
+     sends is deferred until the fence ends.
+  2. The host reads the roots from a snapshot taken after that answer, and sends them in
+     `Collect(roots)`.
+  3. The launcher removes each object that neither those roots nor any reservation it holds
+     reaches, then ends the fence and applies the deferred releases.
+
+  An object synced under a reservation is therefore either named by a pending row that was
+  durable before the host's snapshot, or still reserved when the launcher unlinks. A new
+  control session drops a fence without removing anything (RUNNER-SPEC §14.5), and a
   launcher that has no current root set from the host removes nothing.
 
-On a restart the launcher has nothing to recover. It removes staging, and it reports to the
-host that every child it had has ended. Under containment it has first emptied each child's
-container (below). The host then reconciles from its catalog: each pending deploy as "When
-the host starts" says above, and each `Dirty` wake row as RUNNER-SPEC §14.5 says.
+**Restarts.** The launcher keeps no decision record, but a live launcher does know its
+children. The host learns them over the control session: `Hello` ends the old session, and
+its answer is an inventory taken in the launcher's one state loop, after which every event
+follows in order (RUNNER-SPEC §14.5). A **host restart** adopts the live children the
+inventory names, reconciles each pending deploy as "When the host starts" says above, and
+probes only the `Dirty` rows left without a child. A **launcher loss** is fenced by the
+launcher lock: the new launcher empties every container it owns, removes staging, binds the
+groups' addresses again (their backlogs were lost with their only holder), and answers
+`Hello` with no child; the host then probes every `Dirty` row.
 
 **One control socket.** The launcher's control socket is the platform's single
 authority boundary, as the control socket of "Authority" is. Its filesystem permission
@@ -560,7 +582,7 @@ are:
   the host's `Exec` child, a host crash would end the launcher, every live group and every
   listener, so one fault in the operator's group would stop every tenant. With the launcher
   as the parent, a host crash ends only the host: live groups keep serving, cold groups'
-  listeners keep their backlogs, and the restarted host reconciles (below).
+  listeners keep their backlogs, and the restarted host adopts the live children (above).
 - **Descriptors.** An `Exec` child receives only descriptors 0, 1 and 2 (EXEC-1, EXEC-3).
   The launcher must hold one listener per group and pass each to its serving child, which
   no `Exec` spawn can carry.
@@ -570,7 +592,8 @@ are:
 
 `Exec` is still built under this item as a grant that a group of a trusted author may hold
 (to run tools), contained by R27 like the rest of the group's processes. The launcher, which the operator starts, is
-the only process that starts a group's children, and it owns their containers.
+the only process that starts a group's children, and it owns their containers. Its control socket is the host's alone: no child
+receives it, in any mode.
 
 ### Containment (R27)
 
@@ -590,9 +613,27 @@ Every child of a group carries one **containment label**, fixed in the group's c
   operator names, may carry this label. Its program is compiled from source by the
   platform, reaches no foreign code, and holds credentials only in connector groups.
 
-The label covers **every** child kind of the group: serving, describe, preview and
-prepare/migrate. Each of these runs code from the group's program (`place`, `migrate` and
-`handles` included), so a confined server with an unconfined preview would confine nothing.
+The label covers **every** process that runs the group's code: the install child of
+genesis and of a standalone install, and the describe, preview, prepare and serving
+children, with every descendant any of them starts, `Exec` tools included. Each of these
+runs code from the group's program (`place`, `migrate` and `handles` included), so a
+confined server with an unconfined preview would confine nothing. A tool descendant runs in
+its child's container, with no more than its child's authority, and the child is reported
+ended only when that container is empty.
+
+**Child modes.** A child's authority is the group's approved grant bindings intersected
+with its mode's row. A mode narrows the grants; it never adds one.
+
+| Mode | Runs | Store | `Dir` bindings | `Net` bindings | Inherited listener | Private descriptors |
+|---|---|---|---|---|---|---|
+| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store directory | none | none | none | none |
+| describe | `place` | none | none | none | none | its answer |
+| preview | `place` | none | none | none | none | its answer |
+| prepare | `place`, `migrate`, `handles` | the export directory only ("Place activation") | none | none | none | its private endpoint to the launcher |
+| serving | the place | the group's store directory | the group's | the group's | the group's listener, descriptor 3 | its private endpoint (4) and its wake report (5) |
+
+A private endpoint reaches only the launcher's handler for that one child; it is never the
+launcher's control socket.
 A launcher that cannot enforce `contained` on its host refuses at startup to admit any
 contained group, and it never runs such a group uncontained. A group whose author is not
 the operator or a named first-party author is `contained`, so no external or multi-customer
@@ -646,8 +687,17 @@ handles.
 Laws (unbuilt): `group_one_head`, where a cutover's NEW head opens the store only after
 OLD's head has closed it, and an extra launch of the group is refused `Held`;
 `launcher_restart_stateless`, where a launcher killed at every step of a deploy and
-restarted gives the host's reconciliation the same result as the host's records alone;
-`contained_all_children`, where a describe, preview, prepare and serving child of a
-contained group each fail to read a file outside its bindings and leave no process after
-it ends; `contained_refused_uncontainable`, where a launcher on a host without the
+restarted gives the host's reconciliation the same result as the host's records alone,
+and a host killed at every step adopts the live children and starts no second serving
+child of any group;
+`contained_all_children`, where an install, describe, preview, prepare and serving child
+of a contained group, and a tool descendant of the serving child, each fail to read a
+file outside its mode's row and to connect outside its `Net` bindings (all connections,
+for every mode but serving), and leave no process after it ends, and where a launcher
+killed while they run is replaced by one that reports them ended only after their
+containers are empty; `child_mode_authority`, where a prepare child can write only its
+export directory and holds no listener, and no child holds the control socket;
+`collect_reservation_handoff`, where a deploy's reservation is released between the host's
+`CollectBegin` and its root read and the pending record's image can still be opened after
+collection; `contained_refused_uncontainable`, where a launcher on a host without the
 mechanism admits no contained group; and `trigger_scan_classes` (RUNNER-SPEC §14.7, L40).

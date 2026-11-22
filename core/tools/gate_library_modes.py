@@ -418,6 +418,8 @@ def main():
                         self.assertEqual(created.returncode, 0, created.stderr)
                         source, settings = examples(title)
                         (app / filename).write_text(source)
+                        if filename == 'main.hirsel':
+                            (app / 'tests.hirsel').write_text('')
                         manifest = app / 'hirsel.toml'
                         config = manifest.read_text()
                         if settings is None:
@@ -427,7 +429,7 @@ def main():
                         manifest.write_text(config)
                         common = ['--runtime', str(runtime), '--libraries', str(ROOT / 'core')]
                         tested = self.progress.run(
-                            [str(compiler), 'test', '--filter', '/' + test, *common], cwd=app,
+                            [str(compiler), 'test', *common], cwd=app,
                             capture_output=True, text=True)
                         self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
                         self.assertIn('/' + test, tested.stdout)

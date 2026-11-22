@@ -355,7 +355,8 @@ again. Look up an operation with `hirsel inspect --core --interface` or
 
 ## 11. A command that reads a file
 
-Save this as `main.hirsel` in a package created with `hirsel new`. Index zero in
+Replace `main.hirsel` in a package created with `hirsel new` and empty its
+generated `tests.hirsel`. This example keeps its test beside `main`. Index zero in
 `Args` is the first argument after `--`. The `Dir` grants access to names under
 the directory supplied with `--dir`.
 
@@ -399,8 +400,8 @@ hirsel test
 
 ## 12. An HTTP server and client test
 
-Put the server and test in `main.hirsel`. The test listens on port zero and
-connects to the bound address returned by `host.listen`.
+Replace `main.hirsel` in a new package and empty its generated `tests.hirsel`.
+The test listens on port zero and connects to the bound address returned by `host.listen`.
 
 ```hirsel
 fn hello(req: std.http.Request, scratch: Region, mut out: std.http.Responder, state: ()) -> Result[std.http.Outcome, std.http.HandlerError] {

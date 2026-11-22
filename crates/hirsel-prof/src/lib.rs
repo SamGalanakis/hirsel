@@ -16,4 +16,4 @@ mod linux;
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-pub use linux::{CaptureOptions, Launch, SymbolSource, run};
+pub use linux::{CaptureOptions, Launch, SymbolSource, attach, run};

@@ -10,6 +10,34 @@ pub(crate) fn process(pid: u32) -> PathBuf {
     PathBuf::from(format!("/proc/{pid}"))
 }
 
+pub(crate) fn executable(pid: u32) -> Result<(PathBuf, File)> {
+    let link = process(pid).join("exe");
+    Ok((fs::read_link(&link)?, File::open(link)?))
+}
+
+pub(crate) fn thread_count(pid: u32) -> Result<usize> {
+    fs::read_to_string(process(pid).join("status"))?
+        .lines()
+        .find_map(|line| line.strip_prefix("Threads:"))
+        .ok_or_else(|| "missing Threads in /proc/PID/status".into())
+        .and_then(|count| Ok(count.trim().parse()?))
+}
+
+pub(crate) fn threads(pid: u32) -> Result<Vec<(u32, String)>> {
+    let dir = process(pid).join("task");
+    let mut threads = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let tid = entry.file_name().to_string_lossy().parse()?;
+        match fs::read_to_string(entry.path().join("comm")) {
+            Ok(name) => threads.push((tid, name.trim_end_matches('\n').to_owned())),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(threads)
+}
+
 pub(crate) fn mappings(pid: u32) -> Result<Vec<Mapping>> {
     use std::os::unix::ffi::OsStrExt;
 

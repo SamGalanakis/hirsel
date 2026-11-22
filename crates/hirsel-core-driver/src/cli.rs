@@ -62,6 +62,8 @@ pub enum OptionId {
     ProfFrequency,
     ProfPmu,
     ProfStackBytes,
+    ProfDuration,
+    ProfDebug,
     Image,
     Lib,
     Help,
@@ -123,6 +125,7 @@ commands! {
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
+    "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Sample a running Linux process without stopping it.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
@@ -501,21 +504,21 @@ static OPTIONS: &[OptionSpec] = &[
         ProfOut,
         ["--out"],
         Some("FILE.hprof"),
-        ["prof run"],
+        ["prof run", "prof attach"],
         "Write the profile to this file (default profile.hprof)."
     ),
     option!(
         ProfFrequency,
         ["--freq"],
         Some("HZ"),
-        ["prof run"],
+        ["prof run", "prof attach"],
         "Sample at this frequency per event (default 997)."
     ),
     option!(
         ProfPmu,
         ["--pmu"],
         Some("LIST"),
-        ["prof run"],
+        ["prof run", "prof attach"],
         "Sample a comma-separated list of events (default cycles)."
     ),
     option!(
@@ -524,6 +527,20 @@ static OPTIONS: &[OptionSpec] = &[
         Some("BYTES"),
         ["prof run"],
         "Capture this many bytes of user stack (default 32768)."
+    ),
+    option!(
+        ProfDuration,
+        ["--duration"],
+        Some("SECS"),
+        ["prof attach"],
+        "Stop sampling after this many seconds."
+    ),
+    option!(
+        ProfDebug,
+        ["--debug"],
+        Some("PATH"),
+        ["prof attach"],
+        "Use detached DWARF verified against the sampled image."
     ),
     option!(
         Json,

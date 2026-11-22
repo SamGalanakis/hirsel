@@ -92,14 +92,14 @@ pub fn run(
     Ok(status.expect("child status"))
 }
 
-struct Provenance {
-    main: Rc<Image>,
-    identity: Identity,
+pub(super) struct Provenance {
+    pub(super) main: Rc<Image>,
+    pub(super) identity: Identity,
     tier: &'static str,
 }
 
 impl Provenance {
-    fn load(
+    pub(super) fn load(
         path: &Path,
         file: &mut File,
         resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
@@ -118,19 +118,19 @@ impl Provenance {
     }
 }
 
-struct Capture {
-    mode: &'static str,
-    cmdline: String,
-    start: u64,
-    end: u64,
-    samples_lost: u64,
-    freq: u64,
-    fallback: String,
-    event: Event,
-    provenance: Provenance,
+pub(super) struct Capture {
+    pub(super) mode: &'static str,
+    pub(super) cmdline: String,
+    pub(super) start: u64,
+    pub(super) end: u64,
+    pub(super) samples_lost: u64,
+    pub(super) freq: u64,
+    pub(super) fallback: String,
+    pub(super) event: Event,
+    pub(super) provenance: Provenance,
 }
 
-fn finish(profile: ProfileWriter, capture: Capture) -> Result<()> {
+pub(super) fn finish(profile: ProfileWriter, capture: Capture) -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     let target = "x86_64-unknown-linux-gnu";
     #[cfg(target_arch = "aarch64")]
@@ -156,7 +156,7 @@ fn finish(profile: ProfileWriter, capture: Capture) -> Result<()> {
     })
 }
 
-fn open_perf(
+pub(super) fn open_perf(
     pid: u32,
     cpus: &[i32],
     options: &CaptureOptions<'_>,
@@ -188,7 +188,7 @@ fn open_perf(
     }
 }
 
-fn open_rings(
+pub(super) fn open_rings(
     group: &mut PerfGroup,
     tid: u32,
     cpus: &[i32],

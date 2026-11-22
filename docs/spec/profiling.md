@@ -115,3 +115,10 @@ produce `eval_error` with a `failed` root.
 `symtab_only` for ELF symbols, or `offsets_only` if only mapping-relative
 addresses are available. A function's `module_kind` is `hirsel`, `runtime`,
 `foreign`, `kernel` or `unknown`.
+
+`hirsel prof attach` enables mapping, command and task records before it
+reads the target's thread list or mappings. It snapshots the vDSO build ID.
+The profiler opens per-CPU events until the CPU count times the target's
+thread count plus one reaches 1000, when it uses one set of events per thread
+that follows the thread across CPUs. Samples captured before the initial
+mapping snapshot can remain unresolved.

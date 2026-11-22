@@ -77,6 +77,21 @@ impl<'a> Import<'a> {
         }
     }
 
+    pub(crate) fn initialize(
+        &mut self,
+        threads: Vec<(u32, String)>,
+        maps: Vec<Mapping>,
+        time: u64,
+    ) -> Result<()> {
+        for (tid, name) in threads {
+            self.thread(tid, &name, time)?;
+        }
+        for mapping in maps {
+            self.mapping(mapping, time)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn record(&mut self, record: Record) -> Result<()> {
         let Record {
             time,

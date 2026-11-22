@@ -22,6 +22,8 @@ const REGISTERS: u64 = (1 << 6) | (1 << 7) | (1 << 8); // BP, SP, IP
 const REGISTERS: u64 = (1 << 29) | (1 << 30) | (1 << 31) | (1 << 32); // X29, LR, SP, PC
 
 const PERF_FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
+const PERF_ENABLE: libc::c_ulong = 0x2400;
+const PERF_DISABLE: libc::c_ulong = 0x2401;
 
 // Linux perf_event_attr, through PERF_ATTR_SIZE_VER3 (96 bytes).
 #[repr(C)]
@@ -191,7 +193,7 @@ impl PerfGroup {
         settings: PerfSettings,
     ) -> io::Result<()> {
         let mut flags = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 10) | (1 << 18) | (1 << 25);
-        if cpu != -1 {
+        if settings.enable_on_exec && cpu != -1 {
             flags |= (1 << 1) | (1 << 35); // Inherit within the thread group.
         }
         if settings.sideband {
@@ -233,7 +235,7 @@ impl PerfGroup {
         }
         // SAFETY: a successful syscall transfers the descriptor to this process.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        self.rings.push(Ring::map(fd, event)?);
+        self.rings.push(Ring::map(tid, fd, event)?);
         Ok(())
     }
 
@@ -264,9 +266,43 @@ impl PerfGroup {
         }
         Ok(())
     }
+    pub(crate) fn enable(&self, from: usize) -> io::Result<()> {
+        for ring in &self.rings[from..] {
+            ring.control(PERF_ENABLE)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.rings.len()
+    }
+
+    pub(crate) fn disable(&self) -> io::Result<()> {
+        for ring in &self.rings {
+            ring.control(PERF_DISABLE)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.rings.truncate(len);
+    }
+
+    pub(crate) fn remove_tid(&mut self, tid: u32) -> Result<()> {
+        let mut index = 0;
+        while index < self.rings.len() {
+            if self.rings[index].tid as u32 == tid {
+                let mut ring = self.rings.swap_remove(index);
+                ring.read(&mut self.sorter.pending)?;
+            } else {
+                index += 1;
+            }
+        }
+        Ok(())
+    }
 }
 
 struct Ring {
+    tid: i32,
     fd: OwnedFd,
     base: NonNull<u8>,
     map_len: usize,
@@ -283,7 +319,7 @@ const OFFSET: usize = 1040;
 const SIZE: usize = 1048;
 
 impl Ring {
-    fn map(fd: OwnedFd, event: Event) -> io::Result<Self> {
+    fn map(tid: i32, fd: OwnedFd, event: Event) -> io::Result<Self> {
         // SAFETY: sysconf has no pointer argument.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         let page = usize::try_from(page).map_err(|_| io::Error::last_os_error())?;
@@ -311,6 +347,7 @@ impl Ring {
             )
         };
         let ring = Self {
+            tid,
             fd,
             base,
             map_len,
@@ -323,6 +360,14 @@ impl Ring {
             return Err(io::Error::other("unexpected perf mmap ring layout"));
         }
         Ok(ring)
+    }
+
+    fn control(&self, request: libc::c_ulong) -> io::Result<()> {
+        // SAFETY: these perf ioctls take a zero argument and a live perf descriptor.
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), request, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     fn copy(&self, tail: u64, out: &mut [u8]) {

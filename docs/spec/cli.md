@@ -15,6 +15,7 @@ The native unwind records mark where a stack walk ends at a fiber boundary.
 
 ```text
 hirsel prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
+hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
 ```
 
 `prof run` takes the native build options of `run`. It passes arguments after
@@ -23,3 +24,7 @@ its exit status. `--out` names the profile and defaults to `profile.hprof`.
 The command writes a [portable SQLite profile](profiling.md) after the
 process exits. The sampler resolves verified detached DWARF, embedded DWARF
 and ELF symbols.
+
+`prof attach` samples a running process without stopping it. It ends the
+capture after `--duration`, at process exit, or on Ctrl+C. `--debug` selects a
+detached DWARF file to verify when the executable has no embedded DWARF.

@@ -357,6 +357,52 @@ b0(v0: ptr):
 }
 
 #[test]
+fn view_invariants_end_once_at_the_shared_return() {
+    let module = text::parse(
+        r#"core v1
+type t0 = own "Bytes" { data: seq u8 }
+sig g0 = (&view t0, bool) -> ()
+sig g1 = (&view t0, bool) -> (u64)
+inst n0 = tests@1/view_exit/empty [] []
+inst n1 = tests@1/view_exit/value [] []
+fn f0 = n0 g0 {
+b0(v0: ptr, v1: bool):
+  branch v1, b1, b2
+b1:
+  return
+b2:
+  return
+}
+fn f1 = n1 g1 {
+b0(v0: ptr, v1: bool):
+  branch v1, b1, b2
+b1:
+  v2: u64 = const 7
+  return v2
+b2:
+  v3: u64 = const 9
+  return v3
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let ir = emit_ir_with_facts(&module, false, true).unwrap();
+    verify_ir(&ir);
+
+    let start = "call ptr @llvm.invariant.start.p0(";
+    let end = "call void @llvm.invariant.end.p0(";
+    assert_eq!(ir.matches(start).count(), 2, "{ir}");
+    assert_eq!(ir.matches(end).count(), 2, "{ir}");
+    for body in ir.split("\n}\n").filter(|body| body.contains(start)) {
+        assert_eq!(body.matches(start).count(), 1, "{body}");
+        assert_eq!(body.matches("\n  ret ").count(), 1, "{body}");
+        let exit = body.rsplit_once("\nexit:\n").unwrap().1;
+        assert!(exit.contains(end), "{body}");
+    }
+}
+
+#[test]
 fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
     let mut source = String::from("core v1\n");
     for (i, t) in ["u8", "i8"].iter().enumerate() {

@@ -188,7 +188,8 @@ and one, a `verdict` and `warnings`. A share is null when no samples were
 captured. Query results encode unsigned integers above 2^53 as decimal
 strings. `summary` groups hotspots by event and shows at most five rows
 per event. Function grouping deduplicates the definition across all
-instances in a stack.
+instances in a stack. A frame with a source location and no function name
+appears as `<file>:<line>` in hotspots.
 
 `annotate` aggregates CPU events by source line and event. It aggregates
 compiler remarks by source line, kind, outcome and evidence level. It

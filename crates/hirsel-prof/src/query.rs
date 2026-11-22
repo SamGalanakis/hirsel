@@ -381,8 +381,8 @@ fn totals(
 ) -> Result<Vec<Total>> {
     register_totals(db)?;
     let group = match group {
-        Group::DefPath => "coalesce(f.def_path,f.instance_label)",
-        Group::Instance => "f.instance_label",
+        Group::DefPath => "nullif(f.def_path,''),nullif(f.instance_label,'')",
+        Group::Instance => "nullif(f.instance_label,'')",
     };
     let order = match by {
         By::SelfCost => "self_total",
@@ -391,11 +391,15 @@ fn totals(
     // Group after forming a distinct membership per sample leaf. Summing
     // inclusive rows from separate monomorphs would count common stacks twice.
     let sql = format!(
-        "WITH RECURSIVE {CHAIN}, membership(leaf, label, is_self) AS (
-            SELECT a.leaf,{group},max(a.leaf=a.site)
+        "WITH RECURSIVE {CHAIN}, labelled(leaf, site, label, name, def_path) AS (
+            SELECT a.leaf,a.site,coalesce({group},nullif(f.name,''),fr.file || ':' || fr.line),
+                   f.name,f.def_path
             FROM chain a JOIN callsite c ON c.id=a.site JOIN frame fr ON fr.id=c.frame_id
-            JOIN function f ON f.id=fr.function_id
-            WHERE {group} GLOB ?2 OR f.name GLOB ?2 OR f.def_path GLOB ?2 GROUP BY a.leaf,{group}
+            LEFT JOIN function f ON f.id=fr.function_id
+        ), membership(leaf, label, is_self) AS (
+            SELECT leaf,label,max(leaf=site)
+            FROM labelled WHERE label IS NOT NULL AND (label GLOB ?2 OR name GLOB ?2 OR def_path GLOB ?2)
+            GROUP BY leaf,label
         ), totals AS (
             SELECT label,u64_sum(CASE WHEN is_self THEN weight ELSE 0 END) AS self_total,
                 u64_sum(weight) AS inclusive_total,u64_sum(samples) AS sample_count
@@ -641,6 +645,36 @@ mod tests {
     use crate::{ProfileWriter, RunMeta};
 
     use super::*;
+
+    #[test]
+    fn top_names_anonymous_frames_by_source_location() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute_batch(
+            "INSERT INTO thread VALUES (1,1,1,'main',0,NULL);
+             INSERT INTO function VALUES (1,'','','','hirsel');
+             INSERT INTO frame(id,function_id,file,line,inlined) VALUES
+                 (1,1,'math.hirsel',7,0),(2,1,'math.hirsel',12,0),(3,NULL,'loop.hirsel',3,0);
+             INSERT INTO callsite VALUES (1,NULL,1,0),(2,1,2,1),(3,NULL,3,0);
+             INSERT INTO cpu_sample VALUES
+                 (1,1,1,NULL,NULL,0,2,'0x20',11,'fiber','fiber_root'),
+                 (2,2,1,NULL,NULL,0,3,'0x30',5,'fiber','fiber_root');
+             INSERT INTO sample_counter VALUES (1,'cycles',11),(2,'cycles',5);",
+        )
+        .unwrap();
+
+        for group in [Group::DefPath, Group::Instance] {
+            let top = totals(&db, "cycles", By::SelfCost, group, "*", Some(10)).unwrap();
+            assert_eq!(
+                top.iter().map(Total::json).collect::<Vec<_>>(),
+                [
+                    json!({"function":"math.hirsel:12","self_total":11,"inclusive_total":11,"sample_count":1}),
+                    json!({"function":"loop.hirsel:3","self_total":5,"inclusive_total":5,"sample_count":1}),
+                    json!({"function":"math.hirsel:7","self_total":0,"inclusive_total":11,"sample_count":1}),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn annotate_aggregates_cpu_remarks_and_allocations_before_joining_lines() {

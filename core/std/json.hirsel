@@ -1158,6 +1158,11 @@ pub fn typed[T: codec]() -> Result[Format[T], TypedError] {
     prepare(Strict)
 }
 
+/// Prepares the external-API JSON profile of T.
+pub fn interop[T: codec]() -> Result[Format[T], TypedError] {
+    prepare(Interop)
+}
+
 fn prepare[T: codec](profile: Profile) -> Result[Format[T], TypedError] {
     let binary: codec.Codec[T] = codec.of()
     let description = codec.describe(binary) ?=> CodecFormat
@@ -1568,13 +1573,17 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
         source_mark(mut d, list.len(out), false)?
     }
     match plan.shapes[form] {
-        Atom(op) => read_atom(op, s, mut d, mut out),
+        Atom(op) => read_atom(plan.profile, op, s, mut d, mut out),
         Array(item) => if let Atom(3) = plan.shapes[item] {
             read_base64(s, mut d, mut out)
         } else {
             read_sequence(plan, item, None, s, depth, mut d, mut out)
         },
-        Pairs(key, value) => read_sequence(plan, key, Some(value), s, depth, mut d, mut out),
+        Pairs(key, value) => if string_map(plan, key) {
+            read_string_map(plan, value, s, depth, mut d, mut out)
+        } else {
+            read_sequence(plan, key, Some(value), s, depth, mut d, mut out)
+        },
         Optional(item) => {
             if at(s, d.pos) == b'n' {
                 let parsed = literal(s, mut d.pos, "null")
@@ -1637,6 +1646,40 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
         }
     }
     patch_typed_count(mut out, start, n)
+}
+
+fn string_map(plan: JsonPlan, key: u64) -> bool {
+    plan.profile == Interop && match plan.shapes[key] {
+        Atom(13) => true,
+        _ => false,
+    }
+}
+
+fn read_string_map(plan: JsonPlan, value: u64, s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+    open_typed(s, depth, b'{', mut d)?
+    let start = list.len(out)
+    codec.put_u32(0, mut out)
+    let mut seen: Map[String, ()] = map.new()
+    let path = string.byte_len(d.path)
+    if !ends(s, mut d.pos, b'}') {
+        loop {
+            skip(s, mut d.pos)
+            let pos = d.pos
+            let name = typed_name(s, mut d)?
+            field_path(mut d, name)?
+            if let Some(_) = map.get(seen, name) {
+                return input_error(mut d, pos, DuplicateMember)
+            }
+            codec.put_string(name, mut out) ?=> |_| LengthOverflow
+            map.insert(mut seen, take name, ())
+            read_shape(plan, value, s, depth + 1, mut d, mut out)?
+            string.truncate(mut d.path, path)
+            if after_typed(s, b'}', mut d)? {
+                break
+            }
+        }
+    }
+    patch_typed_count(mut out, start, map.len(seen))
 }
 
 fn single_member_end(s: String, name: String, mut d: ReadTyped) -> Result[(), TypedError] {
@@ -1808,7 +1851,7 @@ fn read_sum(plan: JsonPlan, variants: List[Variant], s: String, depth: u64, mut 
     input_error(mut d, start, UnknownMember)
 }
 
-fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
     match op {
         0 => {
@@ -1837,15 +1880,15 @@ fn read_atom(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), 
             codec.put_char(scalar, mut out)
             Ok(())
         },
-        11 => read_float(op, s, mut d, mut out),
-        12 => read_float(op, s, mut d, mut out),
+        11 => read_float(profile, op, s, mut d, mut out),
+        12 => read_float(profile, op, s, mut d, mut out),
         13 => {
             let text = typed_string(s, mut d)?
             codec.put_string(text, mut out) ?=> |_| LengthOverflow
             Ok(())
         },
         20 => input_error(mut d, start, ExpectedValue),
-        _ => read_integer(op, s, mut d, mut out),
+        _ => read_integer(profile, op, s, mut d, mut out),
     }
 }
 
@@ -1873,9 +1916,9 @@ fn canonical_decimal(s: String) -> bool {
     start < n && (b[start] != b'0' || n == 1)
 }
 
-fn read_integer(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+fn read_integer(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
-    if op == 6 || op == 10 {
+    if profile == Strict && (op == 6 || op == 10) {
         let spelling = typed_string(s, mut d)?
         return put_integer(op, spelling, start, mut d, mut out)
     }
@@ -1938,9 +1981,9 @@ fn read_integer_value[T](take parsed: Result[T, ParseError], start: u64, mut d: 
     }
 }
 
-fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
-    if at(s, start) == b'"' {
+    if profile == Strict && at(s, start) == b'"' {
         let word = typed_string(s, mut d)?
         let bits: u64 = if word == "NaN" {
             0x7ff8000000000000
@@ -1985,7 +2028,7 @@ fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(),
     }
 }
 
-pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow
+pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow | NonFinite
 
 type WritePass: key = Measure | CheckAndWrite | WriteMeasured
 
@@ -2112,6 +2155,8 @@ const FRAME_OBJECT: u64 = 3
 
 const FRAME_VARIANT: u64 = 4
 
+const FRAME_STRING_MAP: u64 = 5
+
 // Frame word 0 holds a shape node and a kind. A resident Shape takes more
 // than eight bytes, so its node fits above the three kind bits. Word 1 holds
 // the progress within that shape. A multi-field variant packs its u32 tag
@@ -2134,7 +2179,7 @@ fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, T
             pending = None
             let id = plan.facts[node].form
             match plan.shapes[id] {
-                Atom(op) => write_atom(op, binary, mut pos, w, mut length)?,
+                Atom(op) => write_atom(plan.profile, op, binary, mut pos, w, mut length)?,
                 Optional(item) => if binary_read(codec.take_tag(binary, mut pos, 2))? == 0 {
                     output_literal(w, mut length, "null")?
                 } else {
@@ -2156,8 +2201,15 @@ fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, T
                         }
                     }
                 },
-                Pairs(_, _) => {
+                Pairs(key, _) => {
                     let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
+                    if plan.profile == Interop {
+                        if let Atom(13) = plan.shapes[key] {
+                            emit_open(w, mut length, mut depth, b'{')?
+                            emit_frame(mut frames, mut top, id, FRAME_STRING_MAP, n << 1)
+                            continue
+                        }
+                    }
                     emit_open(w, mut length, mut depth, b'[')?
                     emit_frame(mut frames, mut top, id, FRAME_MAP, n * 3)
                 },
@@ -2261,15 +2313,14 @@ fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, T
                     emit_close(w, mut length, mut depth, b'}')?
                     top -= 1
                 } else {
-                    let shape = fields[field].shape
+                    let mut shape = fields[field].shape
                     if plan.profile == Interop {
-                        if let Optional(_) = plan.shapes[plan.facts[shape].form] {
-                            binary_read(codec.need(binary, pos, 1))?
-                            if binary[pos] == 0 {
-                                pos += 1
+                        if let Optional(child) = plan.shapes[plan.facts[shape].form] {
+                            if binary_read(codec.take_tag(binary, mut pos, 2))? == 0 {
                                 frames[top - 1] = (code, state + 2)
                                 continue
                             }
+                            shape = child
                         }
                     }
                     if state & 1 != 0 {
@@ -2278,6 +2329,24 @@ fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, T
                     write_key(w, mut length, fields[field].name)?
                     frames[top - 1] = (code, (state + 2) | 1)
                     pending = Some(shape)
+                }
+            },
+            5 => {
+                let remaining = state >> 1
+                if remaining == 0 {
+                    emit_close(w, mut length, mut depth, b'}')?
+                    top -= 1
+                } else {
+                    let Pairs(_, value) = plan.shapes[id] else {
+                        fail("string map frame has a map shape")
+                    }
+                    if state & 1 != 0 {
+                        output_byte(w, mut length, b',')?
+                    }
+                    write_atom(plan.profile, 13, binary, mut pos, w, mut length)?
+                    output_byte(w, mut length, b':')?
+                    frames[top - 1] = (code, (state - 2) | 1)
+                    pending = Some(value)
                 }
             },
             _ => {
@@ -2394,7 +2463,7 @@ fn write_base64(w: TypedWriter, mut length: u64, b: Bytes) -> Result[(), TypedWr
     output_byte(w, mut length, b'"')
 }
 
-fn write_atom(op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u64) -> Result[(), TypedWriteError] {
+fn write_atom(profile: Profile, op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u64) -> Result[(), TypedWriteError] {
     match op {
         0 => output_literal(w, mut length, "null"),
         1 => if binary_read(codec.take_bool(binary, mut pos))? {
@@ -2407,17 +2476,27 @@ fn write_atom(op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u
         4 => write_unsigned(w, mut length, int.widen(binary_read(codec.take_u16(binary, mut pos))?)),
         5 => write_unsigned(w, mut length, int.widen(binary_read(codec.take_u32(binary, mut pos))?)),
         6 => {
-            output_byte(w, mut length, b'"')?
-            write_unsigned(w, mut length, binary_read(codec.take_u64(binary, mut pos))?)?
-            output_byte(w, mut length, b'"')
+            let value = binary_read(codec.take_u64(binary, mut pos))?
+            if profile == Interop {
+                write_unsigned(w, mut length, value)
+            } else {
+                output_byte(w, mut length, b'"')?
+                write_unsigned(w, mut length, value)?
+                output_byte(w, mut length, b'"')
+            }
         },
         7 => write_signed(w, mut length, int.widen(binary_read(codec.take_i8(binary, mut pos))?)),
         8 => write_signed(w, mut length, int.widen(binary_read(codec.take_i16(binary, mut pos))?)),
         9 => write_signed(w, mut length, int.widen(binary_read(codec.take_i32(binary, mut pos))?)),
         10 => {
-            output_byte(w, mut length, b'"')?
-            write_signed(w, mut length, binary_read(codec.take_i64(binary, mut pos))?)?
-            output_byte(w, mut length, b'"')
+            let value = binary_read(codec.take_i64(binary, mut pos))?
+            if profile == Interop {
+                write_signed(w, mut length, value)
+            } else {
+                output_byte(w, mut length, b'"')?
+                write_signed(w, mut length, value)?
+                output_byte(w, mut length, b'"')
+            }
         },
         11 => {
             let v = binary_read(codec.take_f32(binary, mut pos))?
@@ -2426,7 +2505,7 @@ fn write_atom(op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u
                 let (coefficient, exponent) = float.shortest32(v)
                 write_decimal(w, mut length, float.to_bits32(v) >> 31 != 0, coefficient, exponent)
             } else {
-                write_nonfinite(w, mut length, widened)
+                write_nonfinite(profile, w, mut length, widened)
             }
         },
         12 => {
@@ -2435,7 +2514,7 @@ fn write_atom(op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u
                 let (coefficient, exponent) = float.shortest64(v)
                 write_decimal(w, mut length, float.to_bits64(v) >> 63 != 0, coefficient, exponent)
             } else {
-                write_nonfinite(w, mut length, v)
+                write_nonfinite(profile, w, mut length, v)
             }
         },
         20 => Error(Binary(Invalid(pos))),
@@ -2474,7 +2553,10 @@ fn write_signed(w: TypedWriter, mut length: u64, n: i64) -> Result[(), TypedWrit
     }
 }
 
-fn write_nonfinite(w: TypedWriter, mut length: u64, v: f64) -> Result[(), TypedWriteError] {
+fn write_nonfinite(profile: Profile, w: TypedWriter, mut length: u64, v: f64) -> Result[(), TypedWriteError] {
+    if profile == Interop {
+        return Error(NonFinite)
+    }
     let bits = float.to_bits64(v)
     output_literal(w, mut length, if bits & 0xfffffffffffff != 0 {
         "\"NaN\""

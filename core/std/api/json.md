@@ -40,12 +40,23 @@ reserves room before appending JSON to Bytes. It returns the appended byte
 count. A refused measurement or reservation leaves the output bytes intact.
 `to_string(format, value)` returns a new String containing the same JSON.
 
-The format follows [HTTP B-4 and B-5](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
+The `typed()` format follows [HTTP B-4 and B-5](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
 In particular, 64-bit integers are strings, Bytes use padded base64, and maps
 are arrays of pairs in insertion order. Records are written in declaration
 order. The writer uses `\u00XX` for control characters and shortest round-trip
 decimal digits at the original float width. It preserves negative zero.
 Named nonfinite values are JSON strings.
+
+Use `json.interop()` to prepare the external-API profile for T. It uses the
+same 64-container limit, including containers in ignored record members.
+Records skip unknown members and reject duplicate names, including escaped
+spellings and duplicate names inside skipped values. Result member names and
+sum variant names remain strict. Records omit fields whose value is None.
+
+`i64` and `u64` use bare exact decimals. `Map[String, V]` uses a JSON object,
+preserves insertion order on write and wire order on read, and rejects
+duplicate names. Floats must be finite. Measurement returns
+`TypedWriteError.NonFinite` before emitting any output.
 
 ## Documents, callback readers and writers
 

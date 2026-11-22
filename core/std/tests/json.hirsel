@@ -787,6 +787,119 @@ fn typed_json_buffer_helpers() -> bool {
     }
 }
 
+type InteropRecord: codec {
+    a: Option[bool],
+    b: Option[u64],
+    c: Option[bool],
+    d: Option[bool]
+}
+
+fn ignored_arrays(count: u64) -> String {
+    let mut s = string.from("{\"x\":")
+    string.push(mut s, string.repeat("[", count))
+    string.push(mut s, "null")
+    string.push(mut s, string.repeat("]", count))
+    string.push(mut s, "}")
+    take s
+}
+
+fn interop_ignored_members(format: json.Format[InteropRecord]) -> bool {
+    let good = result.unwrap(json.from_string(format, ignored_arrays(63), 1048576))
+    let boundary = match json.from_string(format, ignored_arrays(64), 1048576) {
+        Error(Input(68, _, DepthLimit)) => true,
+        _ => false,
+    }
+    let far = match json.from_string(format, ignored_arrays(129), 1048576) {
+        Error(Input(68, _, DepthLimit)) => true,
+        _ => false,
+    }
+    let escaped = match json.from_string(format, "{\"x\":1,\"\\u0078\":2}", 65536) {
+        Error(Input(7, path, DuplicateMember)) => path == "/x",
+        _ => false,
+    }
+    let literal = match json.from_string(format, "{\"x\":1,\"x\":2}", 65536) {
+        Error(Input(7, path, DuplicateMember)) => path == "/x",
+        _ => false,
+    }
+    let nested = match json.from_string(format, "{\"ignored\":{\"a\":1,\"\\u0061\":2}}", 65536) {
+        Error(Input(18, path, DuplicateMember)) => path == "/ignored/a",
+        _ => false,
+    }
+    let malformed = match json.from_string(format, "{\"x\":[true,]}", 65536) {
+        Error(Input(11, path, ExpectedValue)) => path == "/x/1",
+        _ => false,
+    }
+    result.unwrap(json.to_string(format, good)) == "{}" && boundary && far && escaped && literal && nested && malformed
+}
+
+fn interop_record_commas(format: json.Format[InteropRecord]) -> bool {
+    let value = result.unwrap(json.from_string(format, "{\"d\":false,\"c\":null,\"b\":7,\"x\":{\"b\":true}}", 65536))
+    result.unwrap(json.to_string(format, value)) == "{\"b\":7,\"d\":false}"
+}
+
+fn interop_numbers_and_maps() -> bool {
+    let map_format: json.Format[Map[String, u64]] = result.unwrap(json.interop())
+    let value = result.unwrap(json.from_string(map_format, "{\"z\":18446744073709551615,\"a\":0}", 65536))
+    let encoded = result.unwrap(json.to_string(map_format, value))
+    let decoded = match (map.get(value, "z"), map.get(value, "a")) {
+        (Some(z), Some(a)) => z == 18446744073709551615 && a == 0,
+        _ => false,
+    }
+    let duplicate = match json.from_string(map_format, "{\"a\":1,\"\\u0061\":2}", 65536) {
+        Error(Input(7, path, DuplicateMember)) => path == "/a",
+        _ => false,
+    }
+    let i64_format: json.Format[i64] = result.unwrap(json.interop())
+    let minimum = result.unwrap(json.from_string(i64_format, "-9223372036854775808", 65536))
+    let quoted = match json.from_string(i64_format, "\"1\"", 65536) {
+        Error(Input(0, _, ExpectedValue)) => true,
+        _ => false,
+    }
+    let too_big = match json.from_string(i64_format, "9223372036854775808", 65536) {
+        Error(Input(0, _, InvalidNumber)) => true,
+        _ => false,
+    }
+    let other_map: json.Format[Map[u8, bool]] = result.unwrap(json.interop())
+    let pairs = result.unwrap(json.from_string(other_map, "[[4,true]]", 65536))
+    encoded == "{\"z\":18446744073709551615,\"a\":0}" && decoded && duplicate && minimum == -9223372036854775808 && result.unwrap(json.to_string(i64_format, minimum)) == "-9223372036854775808" && quoted && too_big && result.unwrap(json.to_string(other_map, pairs)) == "[[4,true]]"
+}
+
+fn interop_closed() -> bool {
+    let outcome: json.Format[Result[bool, ()]] = result.unwrap(json.interop())
+    let extra = match json.from_string(outcome, "{\"ok\":true,\"x\":null}", 65536) {
+        Error(Input(11, path, UnknownMember)) => path == "/x",
+        _ => false,
+    }
+    let choice: json.Format[ProfileSum] = result.unwrap(json.interop())
+    let invalid = match json.from_string(choice, "{\"Missing\":null}", 65536) {
+        Error(Input(1, path, UnknownMember)) => path == "/Missing",
+        _ => false,
+    }
+    let real: json.Format[f64] = result.unwrap(json.interop())
+    let small: json.Format[f32] = result.unwrap(json.interop())
+    let named = match json.from_string(real, "\"NaN\"", 65536) {
+        Error(Input(0, _, ExpectedValue)) => true,
+        _ => false,
+    }
+    let mut out = typed_input("keep")
+    let mut scratch: Bytes = list.new()
+    let inf = match json.push_typed(small, float.from_bits32(0xff800000), mut out, mut scratch) {
+        Error(NonFinite) => true,
+        _ => false,
+    }
+    let nan = match json.push_typed(real, float.from_bits64(0x7ff8000000000000), mut out, mut scratch) {
+        Error(NonFinite) => true,
+        _ => false,
+    }
+    extra && invalid && named && inf && nan && out == typed_input("keep")
+}
+
+// expect: run typed_json_interop_contract() = true
+fn typed_json_interop_contract() -> bool {
+    let format: json.Format[InteropRecord] = result.unwrap(json.interop())
+    interop_ignored_members(format) && interop_record_commas(format) && interop_numbers_and_maps() && interop_closed()
+}
+
 // The primary cause of a caught failure, when it is a refused admission.
 fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {

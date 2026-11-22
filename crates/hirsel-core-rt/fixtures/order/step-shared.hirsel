@@ -1,10 +1,11 @@
 // hand-derived step slices: 3
-// hand-derived try-send by task: 43690,43690
-// Spawn costs the parent one step, so the child starts with 131071.
-// The parent's unwrap and the child's entry each cost one. Both then have
-// 131070 steps for trips of send, receive and latch. Each stops at its
-// 43691st send, regardless of which one runs first. The parent has two
-// slice ends and the child has one.
+// hand-derived try-send by task: 43691,43690
+// Spawn costs the parent one step, so the child starts with 131071 and the
+// parent keeps 131071. The child's entry costs one, leaving 131070 steps for
+// 43690 trips of send, receive and latch: it stops at its 43691st send. The
+// parent's 131071 give 43690 trips and one more send: it stops at its 43691st
+// receive. Neither depends on which one runs first. The parent has two slice
+// ends and the child has one.
 type Pair: send { tx: Sender[u64], rx: Receiver[u64] }
 fn spin(take p: Pair) {
     loop { let _ = channel.try_send(p.tx, 0u64); let _ = channel.try_receive(p.rx) }

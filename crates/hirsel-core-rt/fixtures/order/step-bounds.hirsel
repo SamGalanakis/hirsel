@@ -254,8 +254,8 @@ fn sort_callback(k: u64) -> u64 {
         Error(e) => e.steps,
     }
 }
-// S1, S2, S6 and S7: five loop forms send 3 each. The children send 8 and 6.
-// hand-derived try-send: 29
+// S1, S2, S6 and S7: five loop forms send 3 each. The children send 8 and 7.
+// hand-derived try-send: 30
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
     if callback_both(3) != 133 || callback_both(4) != 33 { return Error(Exit(status: 2)) }
     if loop_count(5, 0) == 3 && loop_count(5, 1) == 3 && loop_count(5, 2) == 3 && loop_count(5, 3) == 3 && loop_count(5, 4) == 3 && callback(1) == 7 && core_callback(1) == 1 && core_callback(2) == 7 && finalizer(1) == 1 && finalizer(2) == 7 && glue(0) == 7 && glue(100) == 7 && sort_callback(1) == 1 && sort_callback(2) == 7 && isolate_stop() == 50 && optimized_spin() == 1000 && chunk_range(8, 3) == 3 && chunk_range(8, 8) == 7 && chunk_range(100000, 65536) == 65536 && chunk_list(3) == 3 && merged_calls(1) == 1 && merged_calls(2) == 7 && chunk_nested(1, 9) == 9 && chunk_nested(1, 10) == 7 && chunk_nested(7000, 65536) == 65536 && copy_spawn_budget(tasks) == 15 && isolated_mixed(0) == 12 && mixed_chain(tasks) && partial_sweep() {

@@ -6,7 +6,7 @@ fn leaf() -> u64 { 7u64 }
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
     let ran = bound steps 5u64 {
         let tried = bound bytes 0u64 {
-            match task.spawn(tasks, bytes 0u64, 7u64, child) {
+            match task.try_spawn(tasks, bytes 0u64, 7u64, child) {
                 Error((c, 7u64)) => c.requested == 296u64 && c.available == 0u64,
                 _ => false,
             }

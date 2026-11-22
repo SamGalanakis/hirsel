@@ -181,7 +181,12 @@ fn regex_literal_ninety_thousand() -> bool {
     }
 }
 
-fn walk_bounded(re: Regex, take c: Cache, s: String, steps: u64,) -> Result[(Cache, Cursor, Option[Match]), OutOfTime] {
+fn walk_bounded(
+    re: Regex,
+    take c: Cache,
+    s: String,
+    steps: u64,
+) -> Result[(Cache, Cursor, Option[Match]), OutOfTime] {
     let start = cursor(0)
     bound steps steps {
         let mut inside = take c

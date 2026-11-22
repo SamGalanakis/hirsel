@@ -1347,7 +1347,27 @@ fn truncate_literal() -> u64 {
 // give independent single-, double- and triple-byte malformed prefixes.
 // expect: run rust_utf8_admission() = true
 fn rust_utf8_admission() -> bool {
-    let invalid: Inline[Bytes, 19] =[b"A\xC3\xA9 \xFF ", b"A\xC3\xA9 \x80 ", b"A\xC3\xA9 \xC1 ", b"A\xC3\xA9 \xC1", b"A\xC3\xA9 \xC2", b"A\xC3\xA9 \xC2 ", b"A\xC3\xA9 \xC2\xC0", b"A\xC3\xA9 \xE0", b"A\xC3\xA9 \xE0\x9F", b"A\xC3\xA9 \xE0\xA0", b"A\xC3\xA9 \xE0\xA0\xC0", b"A\xC3\xA9 \xE0\xA0 ", b"A\xC3\xA9 \xED\xA0\x80 ", b"A\xC3\xA9 \xF1", b"A\xC3\xA9 \xF1\x80", b"A\xC3\xA9 \xF1\x80\x80", b"A\xC3\xA9 \xF1 ", b"A\xC3\xA9 \xF1\x80 ", b"A\xC3\xA9 \xF1\x80\x80 ",]
+    let invalid: Inline[Bytes, 19] =[
+        b"A\xC3\xA9 \xFF ",
+        b"A\xC3\xA9 \x80 ",
+        b"A\xC3\xA9 \xC1 ",
+        b"A\xC3\xA9 \xC1",
+        b"A\xC3\xA9 \xC2",
+        b"A\xC3\xA9 \xC2 ",
+        b"A\xC3\xA9 \xC2\xC0",
+        b"A\xC3\xA9 \xE0",
+        b"A\xC3\xA9 \xE0\x9F",
+        b"A\xC3\xA9 \xE0\xA0",
+        b"A\xC3\xA9 \xE0\xA0\xC0",
+        b"A\xC3\xA9 \xE0\xA0 ",
+        b"A\xC3\xA9 \xED\xA0\x80 ",
+        b"A\xC3\xA9 \xF1",
+        b"A\xC3\xA9 \xF1\x80",
+        b"A\xC3\xA9 \xF1\x80\x80",
+        b"A\xC3\xA9 \xF1 ",
+        b"A\xC3\xA9 \xF1\x80 ",
+        b"A\xC3\xA9 \xF1\x80\x80 ",
+    ]
     for input in invalid {
         match string.from_utf8(clone(input)) {
             Error(original) => if original != input {

@@ -1252,13 +1252,16 @@ fn write_value[in r](s: String, mut i: u64, take w: core.Writer[Json, in r]) -> 
             while at(s, i) != b'}' {
                 writer.append(mut ms, fn(take m: core.Writer[Member, in r]) -> Result[Child[Member], BuildError] {
                     skip(s, mut i)
-                    emit(take m, Member(key: emit(fn(take t: core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-                        write_string(s, mut i, take t)
-                    }), value: emit(fn(take v: core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
-                        skip(s, mut i)
-                        i += 1
-                        write_value(s, mut i, take v)
-                    }),))
+                    emit(take m, Member(
+                        key: emit(fn(take t: core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                            write_string(s, mut i, take t)
+                        }),
+                        value: emit(fn(take v: core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                            skip(s, mut i)
+                            i += 1
+                            write_value(s, mut i, take v)
+                        }),
+                    ))
                 })?
                 skip(s, mut i)
                 if at(s, i) == b',' {

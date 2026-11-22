@@ -6,14 +6,17 @@
 // expect: run wpt_eventsource_data() = true
 fn wpt_eventsource_data() -> bool {
     let rows: Inline[(String, Option[String], String), 6] =[
-    // format-field-data.any.js. Even an empty data field dispatches an event.
-    ("", None, "data: \n\n"), ("\n", None, "data: \ndata: \n\n"), ("test", None, "data: test\n\n"),
-    // format-leading-space.any.js. A tab is event data after the single separator.
-    ("\ttest\r\r\ntest", None, "data: \ttest\ndata: \ndata: test\n\n"),
-    // format-newlines.any.js. CRLF and LF are each one separator.
-    ("test\r\n\ntest", None, "data: test\ndata: \ndata: test\n\n"),
-    // format-field-id.any.js. Preserve the first event's non-ASCII ID.
-    ("hello", Some("…"), "id: …\ndata: hello\n\n"),]
+        // format-field-data.any.js. Even an empty data field dispatches an event.
+        ("", None, "data: \n\n"),
+        ("\n", None, "data: \ndata: \n\n"),
+        ("test", None, "data: test\n\n"),
+        // format-leading-space.any.js. A tab is event data after the single separator.
+        ("\ttest\r\r\ntest", None, "data: \ttest\ndata: \ndata: test\n\n"),
+        // format-newlines.any.js. CRLF and LF are each one separator.
+        ("test\r\n\ntest", None, "data: test\ndata: \ndata: test\n\n"),
+        // format-field-id.any.js. Preserve the first event's non-ASCII ID.
+        ("hello", Some("…"), "id: …\ndata: hello\n\n"),
+    ]
     for (data, id, wire) in rows {
         let mut out = sse.buffer(64)
         if sse.event(mut out, None, id, string.as_bytes(data)) != Ok(()) || sse.as_bytes(out) != string.as_bytes(wire) {
@@ -45,7 +48,13 @@ fn sse_split(wire: Bytes, split: u64, expected: String, last: String, retry: Opt
 // block, including its uncommitted ID. The final row covers the field rules.
 // expect: run eventsource_fragments() = true
 fn eventsource_fragments() -> bool {
-    let rows: Inline[(String, String, String, Option[u64]), 5] =[("data: YHOO\ndata: +2\ndata: 10\n\n", "message|YHOO\n+2\n10|;", "", None), (": test stream\r\n\r\ndata: first event\r\nid: 1\r\rdata:second event\nid\n\ndata:  third event\n\n", "message|first event|1;message|second event|;message| third event|;", "", None), ("data\n\ndata\ndata\n\ndata:", "message||;message|\n|;", "", None), ("data:test\n\ndata: test\n\n", "message|test|;message|test|;", "", None), ("\u{feff}id: é\r\nretry: 0025\r\n\r\nevent: update\ndata: café\nid: no\0pe\nretry: +30\nretry: 99ms\n\nid: ignored\ndata: unfinished\n", "update|café|é;", "é", Some(25)),]
+    let rows: Inline[(String, String, String, Option[u64]), 5] =[
+        ("data: YHOO\ndata: +2\ndata: 10\n\n", "message|YHOO\n+2\n10|;", "", None),
+        (": test stream\r\n\r\ndata: first event\r\nid: 1\r\rdata:second event\nid\n\ndata:  third event\n\n", "message|first event|1;message|second event|;message| third event|;", "", None),
+        ("data\n\ndata\ndata\n\ndata:", "message||;message|\n|;", "", None),
+        ("data:test\n\ndata: test\n\n", "message|test|;message|test|;", "", None),
+        ("\u{feff}id: é\r\nretry: 0025\r\n\r\nevent: update\ndata: café\nid: no\0pe\nretry: +30\nretry: 99ms\n\nid: ignored\ndata: unfinished\n", "update|café|é;", "é", Some(25)),
+    ]
     for (source, expected, last, retry) in rows {
         let raw = string.as_bytes(source)
         for i in 0u64 .. list.len(raw) + 1 {

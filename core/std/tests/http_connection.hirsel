@@ -1223,7 +1223,15 @@ fn invalid_response(wire: Bytes, over_head: bool) -> bool {
 // interim and final heads, must preserve the decoded bytes and the next head.
 // expect: run http_client_response_fragments() = true
 fn http_client_response_fragments() -> bool {
-    let rows: Inline[(String, u16, String, bool, bool), 7] =[("HTTP/1.1 200 OK\r\nX-Test: yes\r\nTransfer-Encoding: chunked\r\n\r\n2;tag=\"a;b\"\r\nhi\r\n3\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n", 200, "hibye", false, true), ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello", 200, "hello", false, true), ("HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nhello", 200, "hello", false, false), ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 200, "", true, true), ("HTTP/1.1 204 No Content\r\nX-Test: yes\r\n\r\n", 204, "", false, true), ("HTTP/1.1 304 Not Modified\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 304, "", false, true), ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 3\r\n\r\nyes", 200, "yes", false, true),]
+    let rows: Inline[(String, u16, String, bool, bool), 7] =[
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nTransfer-Encoding: chunked\r\n\r\n2;tag=\"a;b\"\r\nhi\r\n3\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n", 200, "hibye", false, true),
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello", 200, "hello", false, true),
+        ("HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nhello", 200, "hello", false, false),
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 200, "", true, true),
+        ("HTTP/1.1 204 No Content\r\nX-Test: yes\r\n\r\n", 204, "", false, true),
+        ("HTTP/1.1 304 Not Modified\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 304, "", false, true),
+        ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 3\r\n\r\nyes", 200, "yes", false, true),
+    ]
     for (response, status, body, head_only, next) in rows {
         let mut wire: Bytes = list.with_capacity(512)
         list.append(mut wire, string.as_bytes(response))

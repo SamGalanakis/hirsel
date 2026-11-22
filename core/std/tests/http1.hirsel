@@ -779,7 +779,12 @@ fn resume_exact_prefix_progress() -> bool {
 // second question mark, absolute authority, vertical bar, or fragment.
 // expect: run llhttp_request_targets() = true
 fn llhttp_request_targets() -> bool {
-    for (input, target, end) in[("GET /test.cgi?foo=bar?baz HTTP/1.1\r\n\r\n", "/test.cgi?foo=bar?baz", 38u64), ("GET http://hypnotoad.org:1234?hail=all HTTP/1.1\r\n\r\n", "http://hypnotoad.org:1234?hail=all", 51u64), ("GET /test.cgi?query=| HTTP/1.1\r\n\r\n", "/test.cgi?query=|", 34u64), ("GET /forums/1/topics/2375?page=1#posts-17408 HTTP/1.1\r\n\r\n", "/forums/1/topics/2375?page=1#posts-17408", 57u64),] {
+    for (input, target, end) in[
+        ("GET /test.cgi?foo=bar?baz HTTP/1.1\r\n\r\n", "/test.cgi?foo=bar?baz", 38u64),
+        ("GET http://hypnotoad.org:1234?hail=all HTTP/1.1\r\n\r\n", "http://hypnotoad.org:1234?hail=all", 51u64),
+        ("GET /test.cgi?query=| HTTP/1.1\r\n\r\n", "/test.cgi?query=|", 34u64),
+        ("GET /forums/1/topics/2375?page=1#posts-17408 HTTP/1.1\r\n\r\n", "/forums/1/topics/2375?page=1#posts-17408", 57u64),
+    ] {
         let b = string.as_bytes(input)
         let mut h = http1.head()
         if http1.request(b, mut h) != Complete || h.end != end || h.version != 1 || h.count != 0 {
@@ -800,12 +805,14 @@ fn llhttp_request_targets() -> bool {
 // expect: run upstream_response_heads() = true
 fn upstream_response_heads() -> bool {
     let cases: Inline[(String, http1.Progress, u64, u8, u16, String, u64, Inline[(String, String), 3]), 4] =[
-    // llhttp simple response.
-    ("HTTP/1.1 200 OK\r\nHeader1: Value1\r\nHeader2:\t Value2\r\nContent-Length: 0\r\n\r\n", Complete, 73u64, 1u8, 200u16, "OK", 3u64,[("Header1", "Value1"), ("Header2", "Value2"), ("Content-Length", "0")]),
-    // httparse test_response_reason_missing_no_space_with_headers and test_response_no_cr.
-    ("HTTP/1.1 200\r\nFoo: bar\r\n\r\n", Complete, 26u64, 1u8, 200u16, "", 1u64,[("Foo", "bar"), ("", ""), ("", "")]), ("HTTP/1.0 200\nContent-type: text/html\n\n", Complete, 38u64, 0u8, 200u16, "", 1u64,[("Content-type", "text/html"), ("", ""), ("", "")]),
-    // httparse test_response_partial_parses_headers_as_much_as_it_can.
-    ("HTTP/1.1 200 OK\r\nServer: yolo\r\n", Partial, 0u64, 1u8, 200u16, "OK", 1u64,[("Server", "yolo"), ("", ""), ("", "")]),]
+        // llhttp simple response.
+        ("HTTP/1.1 200 OK\r\nHeader1: Value1\r\nHeader2:\t Value2\r\nContent-Length: 0\r\n\r\n", Complete, 73u64, 1u8, 200u16, "OK", 3u64,[("Header1", "Value1"), ("Header2", "Value2"), ("Content-Length", "0")]),
+        // httparse test_response_reason_missing_no_space_with_headers and test_response_no_cr.
+        ("HTTP/1.1 200\r\nFoo: bar\r\n\r\n", Complete, 26u64, 1u8, 200u16, "", 1u64,[("Foo", "bar"), ("", ""), ("", "")]),
+        ("HTTP/1.0 200\nContent-type: text/html\n\n", Complete, 38u64, 0u8, 200u16, "", 1u64,[("Content-type", "text/html"), ("", ""), ("", "")]),
+        // httparse test_response_partial_parses_headers_as_much_as_it_can.
+        ("HTTP/1.1 200 OK\r\nServer: yolo\r\n", Partial, 0u64, 1u8, 200u16, "OK", 1u64,[("Server", "yolo"), ("", ""), ("", "")]),
+    ]
     for (input, progress, end, version, status, reason, count, fields) in cases {
         let b = string.as_bytes(input)
         let mut h = http1.head()
@@ -832,12 +839,13 @@ fn upstream_response_heads() -> bool {
 // expect: run httparse_rejects_malformed_response_heads() = true
 fn httparse_rejects_malformed_response_heads() -> bool {
     for input in[
-    // test_response_reason_with_nul_byte.
-    "HTTP/1.1 200 \0\r\n\r\n",
-    // test_forbid_response_with_whitespace_between_header_name_and_colon.
-    "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Credentials : true\r\nBread: baguette\r\n\r\n",
-    // test_forbid_response_with_obsolete_line_folding_at_start.
-    "HTTP/1.1 200 OK\r\nLine-Folded-Header: \r\n   \r\n hello there\r\n\r\n",] {
+        // test_response_reason_with_nul_byte.
+        "HTTP/1.1 200 \0\r\n\r\n",
+        // test_forbid_response_with_whitespace_between_header_name_and_colon.
+        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Credentials : true\r\nBread: baguette\r\n\r\n",
+        // test_forbid_response_with_obsolete_line_folding_at_start.
+        "HTTP/1.1 200 OK\r\nLine-Folded-Header: \r\n   \r\n hello there\r\n\r\n",
+    ] {
         let mut h = http1.head()
         if http1.response(string.as_bytes(input), mut h) != Bad {
             return false

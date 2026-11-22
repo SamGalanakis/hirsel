@@ -25,7 +25,7 @@ keeps one absolute deadline through readiness retries.
 
 An address argument outside the grant returns `Denied` before issue.
 `listen` has a backlog, with no `Until` parameter.
-`NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure)`.
+`NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32)`.
 [TLS-1](tls.md#tls-1-client-handshake) defines `Tls`. On a TLS stream, receive and send
 move plaintext ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stream)).
 
@@ -202,11 +202,12 @@ and makes no query ([recording](../recording.md#what-a-recording-holds)).
 
 ## Unix-domain sockets
 
-NET-12 to NET-14 are unbuilt design. Their fences are marked `hirsel unbuilt`.
+The NET-12 to NET-14 core declarations are checked. The laws describe the required
+runtime behavior.
 
 ### NET-12: Unix rules
 
-```hirsel unbuilt
+```hirsel core
 pub type UnixDirection = UnixConnect | UnixListen | UnixBind | UnixSend
 pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
 ```
@@ -258,7 +259,7 @@ were made with. The host, a replay and a served Net make the same checks.
 
 ### NET-13: Unix streams
 
-```hirsel unbuilt
+```hirsel core
 pub opaque resource type UnixListener
 pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32)
 
@@ -325,7 +326,7 @@ Laws:
 
 ### NET-14: Unix datagrams
 
-```hirsel unbuilt
+```hirsel core
 pub opaque resource type UnixDatagram
 pub type Received = Received(len: u64, truncated: bool)
 

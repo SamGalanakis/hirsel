@@ -255,7 +255,8 @@ pub enum Handle {
     /// A host file (CAP-5): a mechanical resource with no cause cell; cleaning it
     /// closes the file through its provider and ignores the outcome (MEM-24).
     HostFile,
-    /// Socket, directional half or listener. The key retains its direction.
+    /// Socket, directional half, listener, datagram endpoint or child process.
+    /// The key retains its provider object kind.
     Socket,
     /// Owner-only graph, mechanically discarding buffers on cleanup.
     Flow,

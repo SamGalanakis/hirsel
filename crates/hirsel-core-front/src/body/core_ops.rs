@@ -70,6 +70,7 @@ enum Lane {
     Language,
     Simd(SimdCall),
     PendingCode,
+    Declaration,
     Runtime(Kernel),
 }
 struct Entry {
@@ -409,6 +410,19 @@ operations! {
     ("writer", "close", Lane::Language, "A", "core-check-895", false),
     ("writer", "completed", Lane::Language, "A", "core-check-895", false),
     ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
+    ("exec", "narrow", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("exec", "spawn", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("exec", "wait", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("exec", "signal", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "connect_unix", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "listen_unix", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "accept_unix", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "open_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "bind_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "connect_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "send_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "send_to", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "recv_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {

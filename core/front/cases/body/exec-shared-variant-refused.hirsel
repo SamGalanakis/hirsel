@@ -1,0 +1,7 @@
+// expect: refuse LANG-7 at 4:13
+fn ambiguous() {
+    // Both ExecError and NetError declare TimedOut.
+    let _ = TimedOut
+}
+
+fn typed() -> (ExecError, NetError) { (TimedOut, TimedOut) }

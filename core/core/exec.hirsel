@@ -1,0 +1,8 @@
+// Launch-profile authority and child process operations (EXEC-2, EXEC-3, EXEC-5).
+pub fn narrow(e: Exec, r: ExecRule) -> Result[Exec, RuleError]
+
+pub fn spawn(e: Exec, l: Launch) -> Result[Spawned, ExecError] waits
+
+pub fn wait(mut p: Proc, until: Until) -> Result[Termination, ExecError] waits
+
+pub fn signal(mut p: Proc, s: Signal) -> Result[(), ExecError] waits

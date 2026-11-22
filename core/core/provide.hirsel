@@ -261,6 +261,7 @@ fn net_words(e: NetError) -> (u64, u64) {
             }
             (9, code)
         },
+        BoundNotListening(code) => (10, int.widen(code)),
     }
 }
 

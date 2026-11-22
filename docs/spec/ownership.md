@@ -384,14 +384,14 @@ fn f(mut m: Inbox) {
 }
 ```
 ```hirsel
-type N = Lit(i64)
-fn ev(n: N) -> i64 { match n { Lit(x) => x } }
-fn f() -> i64 { let b = box.new(Lit(6i64)); ev(b) }
+type N = Num(i64)
+fn ev(n: N) -> i64 { match n { Num(x) => x } }
+fn f() -> i64 { let b = box.new(Num(6i64)); ev(b) }
 fn g(b: Box[Option[u64]]) -> u64 { match b { Some(x) => x, None => 0 } }   // Some reads the payload
 fn h(b: Box[u64]) -> u64 { match b { x => x } }                            // x is the Box, read as u64
 fn grow(mut b: Box[List[u64]]) { list.push(mut b, 1) }
 fn deep(b: Box[Box[N]]) -> i64 { ev(b) }                    // reads through both holders
-fn mixed(b: Box[Rc[N]]) -> i64 { match b { Lit(x) => x } }  // Lit reads the N
+fn mixed(b: Box[Rc[N]]) -> i64 { match b { Num(x) => x } }  // Num reads the N
 ```
 ```hirsel
 type P { n: u64 }

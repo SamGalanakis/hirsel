@@ -65,3 +65,21 @@ pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError]
 pub fn recv_bounded(mut r: ReadHalf, mut buf: Bytes, max_receive: u64, until: Until) -> Result[u64, NetError] waits
 
 pub fn send_pair(mut w: WriteHalf, prefix: Bytes, tail: Bytes, until: Until) -> Result[u64, NetError] waits
+
+pub fn connect_unix(n: Net, root: String, path: String, until: Until) -> Result[Socket, NetError] waits
+
+pub fn listen_unix(n: Net, root: String, path: String, backlog: u16) -> Result[UnixListener, NetError] waits
+
+pub fn accept_unix(mut l: UnixListener, until: Until) -> Result[Socket, NetError] waits
+
+pub fn open_datagram(n: Net) -> Result[UnixDatagram, NetError] waits
+
+pub fn bind_datagram(n: Net, root: String, path: String) -> Result[UnixDatagram, NetError] waits
+
+pub fn connect_datagram(mut d: UnixDatagram, root: String, path: String) -> Result[(), NetError] waits
+
+pub fn send_datagram(mut d: UnixDatagram, b: Bytes, until: Until) -> Result[(), NetError] waits
+
+pub fn send_to(mut d: UnixDatagram, root: String, path: String, b: Bytes, until: Until) -> Result[(), NetError] waits
+
+pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Result[Received, NetError] waits

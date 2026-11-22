@@ -318,8 +318,8 @@ fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwr
                                                           // refused: LANG-12, at None: T is open
 ```
 ```hirsel
-type N = Lit(i64)
-fn ev(n: N) -> i64 { match n { Lit(x) => x } }
+type N = Num(i64)
+fn ev(n: N) -> i64 { match n { Num(x) => x } }
 fn f(take o: Option[Box[N]]) -> i64 { ev(option.unwrap(take o)) }  // refused: LANG-11, at take o: T is N
 ```
 ```hirsel

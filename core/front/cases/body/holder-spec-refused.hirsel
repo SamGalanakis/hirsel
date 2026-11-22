@@ -4,9 +4,9 @@
 
 fn plain(take b:Box[Option[u64]])->u64 { match b {Some(take x)=>x,None=>0} }
 fn k(take b:Box[Option[String]])->String { match b {Some(take s)=>s,None=>string.new()} }
-type N = Lit(i64)
-fn ev(n:N)->i64 { match n {Lit(x)=>x} }
-fn nested()->i64 { ev(box.new(Lit(6i64))) }
+type N = Num(i64)
+fn ev(n:N)->i64 { match n {Num(x)=>x} }
+fn nested()->i64 { ev(box.new(Num(6i64))) }
 type P:shareable { n:u64 }
 fn bump(mut b:Box[Rc[P]]) { b.n=1u64 }
 fn rc_write(mut r:Rc[List[u64]]) { let _=list.push(mut r,1u64) }

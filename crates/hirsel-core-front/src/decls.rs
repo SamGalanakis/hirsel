@@ -235,7 +235,8 @@ impl Role {
             "HostFile" | "HostEntries" | "ClockHand" | "StopTrigger" | "Served" | "Call" => {
                 Role::HostFile
             }
-            "Socket" | "ReadHalf" | "WriteHalf" | "Listener" => Role::Socket,
+            "Socket" | "ReadHalf" | "WriteHalf" | "Listener" | "UnixListener" | "UnixDatagram"
+            | "Proc" => Role::Socket,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,
             "IndexedSpan" => Role::IndexedSpan,
@@ -256,7 +257,7 @@ impl Role {
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Secret" | "Foreign" => Role::Capability,
+            | "Process" | "Tasks" | "Secret" | "Foreign" | "Exec" => Role::Capability,
             _ => return None,
         })
     }

@@ -122,6 +122,35 @@ pub opaque type Secret
 
 pub opaque type Foreign[I]
 
+pub opaque type Exec
+
+pub opaque resource type Proc
+
+pub type Stdio = Discard | Piped
+
+pub type Launch {
+    program: String,
+    args: List[Bytes],
+    env: List[(String, Bytes)],
+    dir: String,
+    path: String,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio
+}
+
+pub type Spawned = Spawned(Proc, Option[WriteHalf], Option[ReadHalf], Option[ReadHalf])
+
+pub type ExecError = Denied | TimedOut | Aborted | Other(u32)
+
+pub type Termination = Exited(u8) | Signalled(u8)
+
+pub type Signal = SigInt | SigTerm | SigKill
+
+pub type ArgToken = Lit(Bytes) | Any | Rest
+
+pub type ExecRule = Programs(names: String) | Form(program: String, form: List[ArgToken]) | EnvKeys(program: String, keys: String) | Dirs(program: String, labels: String)
+
 pub type SecretError = Invalid()
 
 pub type MacError = Denied()
@@ -134,6 +163,12 @@ pub opaque resource type WriteHalf
 
 pub opaque resource type Listener
 
+pub opaque resource type UnixListener
+
+pub opaque resource type UnixDatagram
+
+pub type Received = Received(len: u64, truncated: bool)
+
 pub type Ip = V4(u32) | V6(u64, u64)
 
 pub type Addr {
@@ -143,7 +178,7 @@ pub type Addr {
 
 pub type Until = Never | At(Clock, u64)
 
-pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure)
+pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32)
 
 pub type Trust = System | Roots(Bytes)
 
@@ -160,7 +195,9 @@ pub type NetDirection = Connect | Listen
 
 pub type TlsPin = SystemPin | Sha256(Bytes)
 
-pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String)
+pub type UnixDirection = UnixConnect | UnixListen | UnixBind | UnixSend
+
+pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
 
 pub type RuleError = Invalid()
 

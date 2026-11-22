@@ -6,9 +6,8 @@ executable image by its digest and lists the argument forms, environment and wor
 directories a child may receive. The program supplies literal argument bytes and owns the
 child through a `Proc` handle, with optional pipes on the child's standard streams.
 
-The rules are EXEC-1 to EXEC-8. These rules are unbuilt design. Every fence on this page is
-marked `hirsel unbuilt`, and the laws of each rule state what the implementation must make
-true.
+The rules are EXEC-1 to EXEC-8. The core declarations and source example are checked.
+The laws describe the required runtime behavior.
 
 ## Trust
 
@@ -166,7 +165,8 @@ directories, sorted where they are sets. Every variable field carries a `u32` li
 length, and every list carries a `u32` count. The digest covers everything a spawn can
 depend on. Printing it in place of the fixed values keeps those values off the approval line.
 
-```hirsel unbuilt
+```hirsel core
+pub opaque type Exec
 pub type ArgToken = Lit(Bytes) | Any | Rest
 pub type ExecRule = Programs(names: String) | Form(program: String, form: List[ArgToken]) | EnvKeys(program: String, keys: String) | Dirs(program: String, labels: String)
 
@@ -241,7 +241,7 @@ Laws:
 
 ### EXEC-3: Spawn
 
-```hirsel unbuilt
+```hirsel core
 pub opaque resource type Proc
 pub type Stdio = Discard | Piped
 pub type Launch {
@@ -334,7 +334,7 @@ gives `Reset`. `net.join` refuses a pipe's halves (NET-7 check 1), so no pipe re
 issue ([CONC-7](tasks.md#conc-7-cancellation-points)). `TimedOut` and `Aborted` come only
 from a served Exec (EXEC-8).
 
-```hirsel unbuilt
+```hirsel
 fn status(e: Exec, out: Stdout, until: Until) -> Result[u64, ExecError] waits {
   let l = Launch(program: "git", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Discard, stdout: Piped, stderr: Discard)
   let Spawned(p, _, o, _) = exec.spawn(e, l)?
@@ -394,7 +394,7 @@ entry, the image may change its own private pages, as any native program may.
 
 ### EXEC-5: Wait and signal
 
-```hirsel unbuilt
+```hirsel core
 pub type Termination = Exited(u8) | Signalled(u8)
 pub type Signal = SigInt | SigTerm | SigKill
 

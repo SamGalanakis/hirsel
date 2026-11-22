@@ -160,7 +160,7 @@ it is **mechanical**: its cleanup can never add a cause. These mechanical resour
 handle releases its root. If cleaning a queued item or result raises a cause, the
 value's finalizer owns that cause. A `Flow` discards its entries and refunds every
 charge during cleanup. Its stages run no user cleanup ([CONC-14](tasks.md#conc-14-flows)).
-`HostFile` closes the host file and ignores the outcome. Unbuilt: `Proc`, `UnixListener`
+`HostFile` closes the host file and ignores the outcome. `Proc`, `UnixListener`
 and `UnixDatagram` are mechanical too ([EXEC-3](exec.md#exec-3-spawn),
 [NET-13](net.md#net-13-unix-streams), [NET-14](net.md#net-14-unix-datagrams)). A child's pipe
 ends are the existing `ReadHalf` and `WriteHalf`. The supervisor's records and the host's

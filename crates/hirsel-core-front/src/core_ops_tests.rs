@@ -75,7 +75,15 @@ fn accepting(mut l: Listener) waits { let _ = host.accept(mut l, Never) }
 
 #[test]
 fn wire_socket_resources_are_move_only_send_and_size_eight() {
-    for name in ["Socket", "ReadHalf", "WriteHalf", "Listener"] {
+    for name in [
+        "Socket",
+        "ReadHalf",
+        "WriteHalf",
+        "Listener",
+        "UnixListener",
+        "UnixDatagram",
+        "Proc",
+    ] {
         let source = format!("fn f(take x: {name}) {{ let y = x }}");
         let (index, modules) = canonical(&source);
         let p = Program::declare(&index, &modules);

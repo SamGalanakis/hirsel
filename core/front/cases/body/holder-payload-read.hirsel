@@ -11,30 +11,30 @@
 // expect: run temporary() = 6
 // expect: run matched() = 123
 // expect: run tupled() = 42
-type N: shareable + send = Lit(i64) | Add(Box[N], Box[N])
+type N: shareable + send = Num(i64) | Add(Box[N], Box[N])
 
 fn ev(n: N) -> i64 {
     match n {
-        Lit(x) => x,
+        Num(x) => x,
         Add(l, r) => ev(l) + ev(r)
     }
 }
 
 fn calculator() -> i64 {
-    let a = box.new(Lit(3i64))
-    let b = box.new(Lit(7i64))
+    let a = box.new(Num(3i64))
+    let b = box.new(Num(7i64))
     let tree = box.new(Add(take a, take b))
     ev(tree)
 }
 
 fn counted() -> i64 {
-    let a = rc.new(Lit(5i64))
-    let b = arc.new(Lit(7i64))
+    let a = rc.new(Num(5i64))
+    let b = arc.new(Num(7i64))
     ev(a) + ev(b) + ev(a) + ev(b)
 }
 
 fn nested() -> i64 {
-    let a = box.new(box.new(Lit(9i64)))
+    let a = box.new(box.new(Num(9i64)))
     ev(a)
 }
 
@@ -70,7 +70,7 @@ fn borrowed() -> u64 {
 }
 
 fn make() -> Box[N] {
-    box.new(Lit(6i64))
+    box.new(Num(6i64))
 }
 
 fn temporary() -> i64 {
@@ -126,7 +126,7 @@ fn positive() -> bool {
 }
 
 fn go() -> i64 {
-    let b = box.new(Lit(3i64));
+    let b = box.new(Num(3i64));
     ev(b)
 }
 
@@ -136,7 +136,7 @@ fn go() -> i64 {
 // expect: run h_run() = 11
 // expect: run grow_run() = 19
 fn f() -> i64 {
-    let b = box.new(Lit(6i64));
+    let b = box.new(Num(6i64));
     ev(b)
 }
 
@@ -192,13 +192,13 @@ fn set(mut b: Box[Box[P]]) {
 }
 
 fn deep_run() -> i64 {
-    let p = box.new(Lit(5i64));
+    let p = box.new(Num(5i64));
     let b = box.new(take p);
     deep(b)
 }
 
 fn mixed_run() -> i64 {
-    let p = rc.new(Lit(7i64));
+    let p = rc.new(Num(7i64));
     let b = box.new(take p);
     mixed(b)
 }

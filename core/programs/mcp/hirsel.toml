@@ -1,0 +1,16 @@
+[package]
+name = "mcp"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"rpc.hirsel" = "rpc"
+
+[dependencies]
+std = { major = 1 }
+
+[tests]
+limit = 33554432
+
+[tests.sources]
+"tests/rpc.hirsel" = "laws"

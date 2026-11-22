@@ -22,7 +22,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
-from measure import source_lines, sample
+from measure import read_json, sample, source_lines
 
 # Frozen, absolute allowances owned by core-check-index-912. They never scale
 # with source growth and never apply to the fixed finished-process budget.
@@ -136,10 +136,10 @@ def sample_sources(compiler, output, profile_front=False, *, names=('m1', 'std')
         # A tool crash or missing counter never passes as a cheap check.
         if observed['status'] not in accepted_statuses:
             raise ValueError(f'{name}: driver exited {observed["status"]}')
-        product = json.loads((directory / 'result.json').read_text())
+        product = read_json(directory / 'result.json')
         if 'incomplete' not in product or 'diagnostics' not in product:
             raise ValueError(f'{name}: driver did not return a check result')
-        metrics = json.loads((directory / 'metrics.json').read_text())
+        metrics = read_json(directory / 'metrics.json')
         process = observed['instructions']
         yield name, lines, product, metrics, process
 
@@ -241,7 +241,7 @@ def product_sample(compiler, inputs, entry, mode, directory, cache):
                       str(directory / 'metrics.json')], directory, compiler_only=True)
     if observed['status'] != 'ok':
         raise ValueError(f'{directory.name}: {observed["status"]}')
-    result = json.loads((directory / 'stdout').read_text())
+    result = read_json(directory / 'stdout')
     expected = sum(len(p['sources']) for p in inputs['packages']
                    if p['package']['name'] not in ['core', 'std'])
     if not result['accepted'] or result['files'] != expected:
@@ -315,7 +315,7 @@ def main():
     parser.add_argument('--ceilings', type=Path, default=Path(__file__).with_name('cost-ceilings.json'))
     parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
     args = parser.parse_args()
-    ceilings = json.loads(args.ceilings.read_text())
+    ceilings = read_json(args.ceilings)
     ceilings['policy'] = ceilings.get('policy', 'Compare observations against the committed ceilings.')
     if args.out:
         args.out.mkdir(parents=True, exist_ok=False)

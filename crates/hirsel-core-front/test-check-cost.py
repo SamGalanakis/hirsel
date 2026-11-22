@@ -67,6 +67,33 @@ class FrontStageCeiling(unittest.TestCase):
 
 
 class SuiteFailure(unittest.TestCase):
+    def test_capped_wait_output_does_not_corrupt_the_build_result(self):
+        import os
+        import subprocess
+        from unittest.mock import patch
+
+        suite_edit = FRONT['suite_edit']
+        wait = b'capped: waiting 0.0 s for a short slot, 0 ahead; holders:\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+
+            def build(command, *, stdout, stderr, **kwargs):
+                os.write(stderr.fileno(), wait)
+                os.write(stdout.fileno(), b'{"accepted": true, "rechecked": 1, "root": "edit-root"}\n')
+                (out / 'edit.metrics.json').write_text('{"counters": {"body_keys": 1}}')
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(FRONT['request_cost'], 'manifests'), \
+                    patch.dict(FRONT['GUARD'], admit=lambda: None), \
+                    patch.dict(suite_edit.__globals__, front=lambda metrics: metrics), \
+                    patch('subprocess.run', side_effect=build):
+                (out / 'base.snapshot').mkdir()
+                _, result = suite_edit(Path('hirsel'), Path('runtime.a'), out,
+                                       dict(llvm='/llvm', kit='/kit', clang='/llvm/bin/clang',
+                                            linker='/llvm/bin/ld.lld', linker_sha256='fixture'), prepare=False)
+            self.assertEqual(result['root'], 'edit-root')
+            self.assertEqual((out / 'edit.stderr.log').read_bytes(), wait)
+
     def test_failed_request_includes_panic_before_temporary_logs_are_deleted(self):
         import subprocess
         from unittest.mock import patch
@@ -75,7 +102,7 @@ class SuiteFailure(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             out = Path(temporary)
             def fail(command, **kwargs):
-                kwargs['stderr'].write('request output\n' + panic + '\n')
+                kwargs['stderr'].write(('request output\n' + panic + '\n').encode())
                 return subprocess.CompletedProcess(command, 101)
             with patch.object(FRONT['request_cost'], 'manifests'), \
                     patch.dict(FRONT['GUARD'], admit=lambda: None), \
@@ -109,7 +136,7 @@ class PinnedRequestToolchain(unittest.TestCase):
             root = Path(temporary)
             llvm, kit, linker = self.fixture(root)
             outputs = json.dumps({'root//tools/buck2/native-toolchain:llvm': str(llvm),
-                                  'root//tools/buck2/native-toolchain:kit': str(kit)})
+                                  'root//tools/buck2/native-toolchain:kit': str(kit)}).encode()
             with patch('subprocess.check_output', side_effect=[outputs, str(linker) + '\n']) as capture, \
                     patch('os.getloadavg', return_value=(0, 0, 0)), \
                     patch.dict('os.environ', {'LLVM_SYS_231_PREFIX': '/stale/config/llvm'}):
@@ -121,6 +148,17 @@ class PinnedRequestToolchain(unittest.TestCase):
             metrics.write_text('{"instructions": 123}')
             FRONT['request_cost'].stamp_metrics(metrics, tools)
             self.assertEqual(json.loads(metrics.read_text())['linker_sha256'], tools['linker_sha256'])
+
+    def test_invalid_metrics_name_the_file_and_first_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'edit.metrics.json'
+            for contents in (b'', b'warning: metrics unavailable\n', b'\xff{bad UTF-8}'):
+                with self.subTest(contents=contents):
+                    path.write_bytes(contents)
+                    with self.assertRaises(ValueError) as failure:
+                        FRONT['request_cost'].stamp_metrics(path, {})
+                    self.assertIn(str(path), str(failure.exception))
+                    self.assertIn(f'first bytes: {contents!r}', str(failure.exception))
 
     def test_wrong_linker_is_refused_before_running_any_request(self):
         from unittest.mock import patch

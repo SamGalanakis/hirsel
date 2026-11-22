@@ -14,6 +14,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
 import request_cost
+from measure import read_json
+
 GUARD = runpy.run_path(str(Path(__file__).with_name('check-cost.py')))
 STAGES = ('parse', 'input counts', 'index', 'resolve', 'declarations', 'body keys/new', 'body keys/for_body',
           'body keys', 'image index', 'image read', 'image digest')
@@ -109,23 +111,23 @@ def suite_edit(compiler, runtime, out, tools, profile_front=False, prepare=True)
         if tag == 'edit':
             command = ['perf', 'stat', '--no-big-num', '-x', ';', '-e', 'instructions:u',
                        '-o', str(out / 'process-perf.txt'), '--', *command]
-        with (out / (tag + '.log')).open('w') as log:
+        stdout = out / (tag + '.log')
+        stderr = out / (tag + '.stderr.log')
+        with stdout.open('wb') as output, stderr.open('wb') as diagnostics:
             result = subprocess.run(['taskset', '-c', '16', str(ROOT / 'tools/capped'), *command],
-                                    cwd=ROOT, env=env, stdout=log, stderr=log)
+                                    cwd=ROOT, env=env, stdout=output, stderr=diagnostics)
         if result.returncode:
-            path = out / (tag + '.log')
-            tail = '\n'.join(path.read_text(errors='replace').splitlines()[-40:])
-            raise ValueError(f'suite {tag}: exit {result.returncode}; {path}\n{tail}')
-        request_cost.stamp_metrics(out / (tag + '.metrics.json'), tools)
-    result = json.loads((out / 'edit.log').read_text().splitlines()[0])
-    # Capped summaries use stderr and the compiler emits one JSON line.
+            tails = [f'{path}:\n' + '\n'.join(path.read_text(errors='replace').splitlines()[-40:])
+                     for path in (stdout, stderr)]
+            raise ValueError(f'suite {tag}: exit {result.returncode}\n' + '\n'.join(tails))
+        metrics = request_cost.stamp_metrics(out / (tag + '.metrics.json'), tools)
+    result = read_json(out / 'edit.log')
     if not result.get('accepted') or result['rechecked'] != 1:
         raise ValueError(f'suite edit must check exactly one body: {result}')
-    metrics = json.loads((out / 'edit.metrics.json').read_text())
     # B2: an unchanged body keeps its recorded key; only the edited body's is derived.
     if metrics['counters']['body_keys'] != 1:
         raise ValueError(f"suite edit must derive exactly one body key: {metrics['counters']['body_keys']}")
-    return front(metrics)
+    return front(metrics), result
 
 
 def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None, report_only=False):
@@ -136,17 +138,17 @@ def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None, 
             raise ValueError(name + ': source corpus did not check to the end')
         rows[name] = front(metrics)
     suite = out / 'suite-edit'
-    rows['suite-edit'] = suite_edit(compiler, runtime, suite, tools)
-    for name in ['edit.log', 'edit.metrics.json', 'process-perf.txt']:
+    artifacts = ('edit.log', 'edit.stderr.log', 'edit.metrics.json', 'process-perf.txt')
+    rows['suite-edit'], _ = suite_edit(compiler, runtime, suite, tools)
+    for name in artifacts:
         (suite / name).rename(suite / ('plain-' + name))
     # Executable identity keys the store. Prime the diagnostic compiler's own
     # snapshot, then compare its two modes without mixing executable identities.
-    suite_edit(image_profiler or compiler, runtime, suite, tools, prepare=True)
-    control_result = json.loads((suite / 'edit.log').read_text().splitlines()[0])
-    for name in ['edit.log', 'edit.metrics.json', 'process-perf.txt']:
+    _, control_result = suite_edit(image_profiler or compiler, runtime, suite, tools, prepare=True)
+    for name in artifacts:
         (suite / name).rename(suite / ('image-control-' + name))
-    profiled = suite_edit(image_profiler or compiler, runtime, suite, tools, profile_front=True, prepare=False)
-    profiled_result = json.loads((suite / 'edit.log').read_text().splitlines()[0])
+    profiled, profiled_result = suite_edit(image_profiler or compiler, runtime, suite, tools,
+                                          profile_front=True, prepare=False)
     if control_result['root'] != profiled_result['root']:
         raise ValueError('image profiling changed the published product root')
     row = rows['suite-edit']
@@ -196,7 +198,7 @@ def main():
     if runtime is None:
         runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVES']) / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
     compiler, runtime = args.compiler.resolve(), runtime.resolve()
-    limits = json.loads(args.ceilings.read_text())
+    limits = read_json(args.ceilings)
     inputs = dict(llvm=os.environ['LLVM_SYS_231_PREFIX'], kit=os.environ['HIRSEL_LINK_KIT']) if args.buck_tool_inputs else None
     tools = request_cost.toolchain(ROOT, inputs)
     def execute(out):

@@ -47,14 +47,17 @@ fn prog4_runs(backend: Backend) {
     let mut options = native_options(backend, dir.path());
     let test = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
     for (name, limit, grants, code, stdout, stderr) in [
-        ("error", 4096, 0, 1, "", ""),
+        // PROG-3: a test run is a run, so `Error(e)`, `E` not `Exit`, writes
+        // `error: ` and `e` as Hirsel source.
+        ("error", 4096, 0, 1, "", "error: ()\n"),
         ("exit_zero", 4096, 0, 1, "", ""),
         ("exit_seven", 4096, 0, 7, "", ""),
         ("failed", 4096, 0, 101, "", "Fail"),
         ("stopped", 4096, 0, 102, "", "run stop: Stack\n"),
         ("own_error", 4096, 0, 101, "", "Division"),
         ("own_success", 288, 0, 0, "", ""),
-        ("allocation", 288, 0, 1, "", ""),
+        // No room beyond main's 288: reserving 8 one-byte elements asks for 8.
+        ("allocation", 288, 0, 1, "", "error: Capacity(requested: 8, available: 0)\n"),
         ("allocation", 296, 0, 0, "", ""),
         ("good", 287, 0, 103, "", "not started: the root limit is below main's startup charge of 288 bytes\n"),
         ("granted", 4096, 0, 103, "", "not started: grant `out` is not in the run's configuration\n"),
@@ -183,7 +186,9 @@ fn prog4_pass_cache(backend: Backend) {
         Backend::Cranelift => Backend::Llvm,
         Backend::Llvm => Backend::Cranelift,
     };
-    for (label, options, identity) in [
+    // Debug lines embed DWARF and change no object (profiling.md), so the pass
+    // recorded without them is the same program's; the others change its code.
+    for (label, options, identity, expected) in [
         (
             "backend",
             NativeOptions {
@@ -191,6 +196,7 @@ fn prog4_pass_cache(backend: Backend) {
                 ..limited.clone()
             },
             None,
+            Source::Executed,
         ),
         (
             "optimize",
@@ -199,6 +205,7 @@ fn prog4_pass_cache(backend: Backend) {
                 ..limited.clone()
             },
             None,
+            Source::Executed,
         ),
         (
             "debug lines",
@@ -207,17 +214,19 @@ fn prog4_pass_cache(backend: Backend) {
                 ..limited.clone()
             },
             None,
+            Source::Cached,
         ),
         (
             "compiler",
             limited.clone(),
             Some(ContentHash::of_bytes(b"test compiler identity")),
+            Source::Executed,
         ),
     ] {
         let old = crate::reuse::TOOLCHAIN.replace(identity);
         let (outcome, source) = run(&product, "good", &options, false);
         crate::reuse::TOOLCHAIN.set(old);
-        assert_eq!(source, Source::Executed, "{label}");
+        assert_eq!(source, expected, "{label}");
         assert!(outcome.passed(), "{label}: {outcome:?}");
     }
 

@@ -426,7 +426,10 @@ fn disk_index_get[T: shareable + send](table_index: DiskIndex[T], key: u64) -> O
 }
 
 fn disk_index_put[T: shareable + send](mut table_index: DiskIndex[T], key: u64, take value: T) -> Result[(), Capacity] {
-    let (take values, _) = std.omap.insert(mut table_index.ids, table_index.values, key, take value)
+    // A cut edits one candidate many times. The owned insert copies a node
+    // shared with the installed generation once and then edits it in place.
+    let held = replace(mut table_index.values, std.omap.new())
+    let (take values, _) = std.omap.insert_owned(mut table_index.ids, take held, key, take value)
     table_index.values = take values
     Ok(())
 }

@@ -389,15 +389,10 @@ impl<'a> Import<'a> {
         };
         let site = self.callsite(frames)?;
         self.db.execute(
-            "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,period,stack_root,unwind_status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            (Unsigned(time), thread, sample.cpu, site,
-             format!("{:#x}", sample.pc), Unsigned(sample.period), root, status),
-        )?;
-        let sample_id = self.db.last_insert_rowid();
-        self.db.execute(
-            "INSERT INTO sample_counter VALUES (?1,?2,?3)",
-            (sample_id, sample.event.name, Unsigned(sample.period)),
+            "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,event,period,stack_root,unwind_status)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            (Unsigned(time), thread, sample.cpu, site, format!("{:#x}", sample.pc),
+             sample.event.name, Unsigned(sample.period), root, status),
         )?;
         Ok(())
     }

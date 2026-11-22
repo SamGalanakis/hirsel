@@ -55,7 +55,8 @@ the mapping and relative PC when neither source is available.
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =
-0x48505246` and `user_version = 1`. Readers open the current version read-only.
+0x48505246` and `user_version = 2`. Readers open the current version
+read-only and refuse other versions.
 Source snippets and symbol names are recorded in the database so it can travel
 without the source tree, executable or debug files.
 
@@ -69,8 +70,7 @@ The database has the following tables and columns.
 | `function` | `id, def_path, instance_label, name, module_kind` |
 | `frame` | `id, mapping_id, rel_pc, function_id, file, line, col, inlined` |
 | `callsite` | `id, parent_id, frame_id, depth` |
-| `cpu_sample` | `id, ts_ns, thread_id, task_id, cpu, callsite_id, raw_pc_hex, period, stack_root, unwind_status` |
-| `sample_counter` | `sample_id, event, value` |
+| `cpu_sample` | `id, ts_ns, thread_id, task_id, host_stack_interval_id, cpu, callsite_id, raw_pc_hex, event, period, stack_root, unwind_status` |
 | `source_snippet` | `file, start_line, end_line, text` |
 | `fn_cpu_summary` | `function_id, event, self_total, inclusive_total, sample_count` |
 | `line_cpu_summary` | `file, line, function_id, event, self_total, sample_count` |
@@ -106,8 +106,11 @@ the default user stack snapshot is 32 KiB.
 
 The default event is `cycles`. The profiler uses `cpu-clock` if the PMU lacks
 hardware cycles and records the reason in `fallback_reason`. Each `--pmu`
-event contributes its own samples with that event's period in
-`sample_counter`. Instruction profiles use the `instructions` event directly.
+event contributes its own samples. Each `cpu_sample` row stores one
+event and one exact unsigned period. The period is a nonnegative SQLite
+integer up to 9 223 372 036 854 775 807, with larger u64 values stored as
+canonical decimal text. CPU rollups and pprof weights use that row's
+event and period. Instruction profiles use the `instructions` event directly.
 
 The unwinder reads ELF CFI with gimli and uses the captured stack and
 registers. It leaves the sampled instruction pointer intact and subtracts

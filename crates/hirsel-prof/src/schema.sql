@@ -1,5 +1,5 @@
 PRAGMA application_id = 0x48505246;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE run_meta (
     key TEXT PRIMARY KEY,
@@ -62,19 +62,20 @@ CREATE TABLE cpu_sample (
     cpu INTEGER NOT NULL,
     callsite_id INTEGER NOT NULL REFERENCES callsite,
     raw_pc_hex TEXT NOT NULL,
-    period ANY NOT NULL,
+    event TEXT NOT NULL CHECK (event <> ''),
+    period ANY NOT NULL CHECK (
+        (typeof(period) = 'integer' AND period >= 0)
+        OR (typeof(period) = 'text'
+            AND instr(period, char(0)) = 0 AND period NOT GLOB '*[^0-9]*'
+            AND ((length(period) = 19 AND period >= '9223372036854775808')
+                OR (length(period) = 20
+                    AND period BETWEEN '10000000000000000000' AND '18446744073709551615')))
+    ),
     stack_root TEXT NOT NULL CHECK (stack_root IN ('fiber', 'host', 'truncated', 'failed', 'kernel')),
     unwind_status TEXT NOT NULL CHECK (unwind_status IN (
         'ok', 'fiber_root', 'truncated_stack', 'missing_cfi', 'unknown_mapping', 'eval_error', 'not_attempted'
     ))
 ) STRICT;
-
-CREATE TABLE sample_counter (
-    sample_id INTEGER NOT NULL REFERENCES cpu_sample,
-    event TEXT NOT NULL,
-    value ANY NOT NULL,
-    PRIMARY KEY (sample_id, event)
-) STRICT, WITHOUT ROWID;
 
 CREATE TABLE source_snippet (
     file TEXT NOT NULL,

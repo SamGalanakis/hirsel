@@ -1,9 +1,9 @@
 -- Group weights once per leaf, then reuse them across its distinct functions.
 WITH RECURSIVE
 leaf_weight(callsite_id, event, weight, samples) AS (
-    SELECT s.callsite_id, c.event, u64_sum(c.value), count(*)
-    FROM cpu_sample s JOIN sample_counter c ON c.sample_id = s.id
-    GROUP BY s.callsite_id, c.event
+    SELECT s.callsite_id, s.event, u64_sum(s.period), count(*)
+    FROM cpu_sample s
+    GROUP BY s.callsite_id, s.event
 ),
 ancestors(leaf_id, site_id) AS (
     SELECT DISTINCT callsite_id, callsite_id FROM leaf_weight
@@ -25,8 +25,8 @@ FROM membership m JOIN leaf_weight w ON w.callsite_id = m.leaf_id
 GROUP BY m.function_id, w.event;
 
 INSERT INTO line_cpu_summary (file, line, function_id, event, self_total, sample_count)
-SELECT f.file, f.line, f.function_id, c.event, u64_sum(c.value), count(*)
-FROM cpu_sample s JOIN sample_counter c ON c.sample_id = s.id
+SELECT f.file, f.line, f.function_id, s.event, u64_sum(s.period), count(*)
+FROM cpu_sample s
 JOIN callsite site ON site.id = s.callsite_id JOIN frame f ON f.id = site.frame_id
 WHERE f.file IS NOT NULL AND f.line IS NOT NULL AND f.function_id IS NOT NULL
-GROUP BY f.file, f.line, f.function_id, c.event;
+GROUP BY f.file, f.line, f.function_id, s.event;

@@ -82,22 +82,28 @@ def stage(directory, upstream, target):
     return commit, rows
 
 
-def run_screen(args):
+def screen_job(args, bundle):
     check_peer(args.awfy, "awfy")
+    commits = {}
+    row_sets = []
+    for arm, source in zip(ARMS, (args.base, args.candidate), strict=True):
+        commits[arm], rows = stage(source, args.awfy, bundle / arm)
+        row_sets.append(rows)
+    if (row_sets[0] != row_sets[1] or
+            (bundle / "base/run.js").read_bytes() != (bundle / "candidate/run.js").read_bytes()):
+        raise ValueError("base and candidate board workload contracts differ")
+    shutil.copyfile(__file__, bundle / "screen.py")
+    (bundle / "inputs.json").write_text(json.dumps({"commits": commits, "rows": row_sets[0]}))
+    return {"lane": "board-screen", "bundle": str(bundle), "command": "python3 screen.py sample",
+            "seconds": 30}
+
+
+def run_screen(args):
     args.out.mkdir()
     with tempfile.TemporaryDirectory(dir=args.out) as directory:
         bundle = Path(directory)
-        commits = {}
-        row_sets = []
-        for arm, source in zip(ARMS, (args.base, args.candidate), strict=True):
-            commits[arm], rows = stage(source, args.awfy, bundle / arm)
-            row_sets.append(rows)
-        if (row_sets[0] != row_sets[1] or
-                (bundle / "base/run.js").read_bytes() != (bundle / "candidate/run.js").read_bytes()):
-            raise ValueError("base and candidate board workload contracts differ")
-        shutil.copyfile(__file__, bundle / "screen.py")
-        (bundle / "inputs.json").write_text(json.dumps({"commits": commits, "rows": row_sets[0]}))
-        subprocess.run([args.boat_run, "board-screen", bundle, "python3 screen.py sample"],
+        job = screen_job(args, bundle)
+        subprocess.run([args.boat_run, job["lane"], job["bundle"], job["command"]],
                        check=True, cwd=args.out)
 
 
@@ -138,11 +144,13 @@ def main():
     local.add_argument("out", type=lambda value: Path(value).resolve())
     local.add_argument("--awfy", type=Path, required=True)
     local.add_argument("--langarena", type=Path, required=True)
-    boat = commands.add_parser("run", help="compare two already built directories in one Boat VM")
-    boat.add_argument("out", type=lambda value: Path(value).resolve())
-    boat.add_argument("--base", type=Path, required=True, help="directory from screen.py prepare")
-    boat.add_argument("--candidate", type=Path, required=True, help="directory from screen.py prepare")
-    boat.add_argument("--awfy", type=Path, required=True)
+    pair = argparse.ArgumentParser(add_help=False)
+    pair.add_argument("out", type=lambda value: Path(value).resolve())
+    pair.add_argument("--base", type=Path, required=True, help="directory from screen.py prepare")
+    pair.add_argument("--candidate", type=Path, required=True, help="directory from screen.py prepare")
+    pair.add_argument("--awfy", type=Path, required=True)
+    boat = commands.add_parser("run", parents=[pair], help="compare two built directories in one Boat VM")
+    commands.add_parser("manifest", parents=[pair], help="stage a board screen shard for Boat")
     launcher = BOAT_RUN if BOAT_RUN.is_file() else BOAT_RUN.with_name("boat-run.sh")
     boat.add_argument("--boat-run", type=lambda value: Path(value).resolve(), default=launcher)
     commands.add_parser("sample", help="measure a staged bundle inside its Boat VM")
@@ -152,6 +160,9 @@ def main():
             prepare(args)
         elif args.command == "run":
             run_screen(args)
+        elif args.command == "manifest":
+            args.out.mkdir()
+            print(json.dumps([screen_job(args, args.out)]))
         else:
             sample()
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:

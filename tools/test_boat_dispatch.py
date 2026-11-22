@@ -87,6 +87,53 @@ class BoatDispatchTest(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_containment_paths_join_the_manifest_batch(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            checkout = root / "checkout"
+            checkout.mkdir()
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+                     *args], cwd=checkout, text=True).strip()
+
+            def commit(path):
+                source = checkout / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("test input\n")
+                git("add", path)
+                git("commit", "-qm", path)
+
+            git("init", "-q")
+            commit("README.md")
+            record = root / "last-contain"
+            manifest = root / "jobs.json"
+            manifest.write_text(json.dumps([
+                {"lane": "board-screen", "bundle": "screen", "command": "true", "seconds": 30},
+            ]))
+            command = [SCRIPT, "--dry-run", "--manifest", manifest,
+                       "--contain-worktree", checkout, "--contain-record", record]
+
+            def plan():
+                return subprocess.check_output(command, text=True).splitlines()
+
+            checkpoint = git("rev-parse", "HEAD") + "\n"
+            record.write_text(checkpoint)
+            commit("crates/hirsel-contain-unrelated/src/lib.rs")
+            self.assertEqual(plan(), ["dry-run-1 (30s): board-screen:30s"])
+
+            for path in ("crates/hirsel-contain/src/lib.rs",
+                         "crates/hirsel-core-driver/src/launcher/mod.rs",
+                         "core/programs/store/launcher.hirsel"):
+                with self.subTest(path=path):
+                    checkpoint = git("rev-parse", "HEAD") + "\n"
+                    record.write_text(checkpoint)
+                    commit(path)
+                    git("revert", "--no-edit", "HEAD")
+                    self.assertEqual(plan(), ["dry-run-1 (45s): board-screen:30s, contain:15s"])
+                    self.assertEqual(record.read_text(), checkpoint)
+
     def test_three_lanes_share_minimum_starts_and_stop_at_200(self):
         with tempfile.TemporaryDirectory() as scratch, redirect_stdout(io.StringIO()) as output:
             root = Path(scratch)

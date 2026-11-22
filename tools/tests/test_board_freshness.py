@@ -65,6 +65,8 @@ class BoardFreshnessTest(unittest.TestCase):
                 '#!/bin/bash\nshift 2\n'
                 'case "$1" in\n'
                 '  git) exit 0 ;;\n'
+                '  python3) [[ "$2 $3" == "bench/awfy/screen.py prepare" ]] && mkdir -p "$4" ;;\n'
+                '  */tools/boat-dispatch) exit 0 ;;\n'
                 '  cargo) echo "fixture: cargo fetch failed" >&2; exit 2 ;;\n'
                 '  *) exit 90 ;;\n'
                 'esac\n',

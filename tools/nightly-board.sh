@@ -36,6 +36,33 @@ step="check out origin/main"
 cd "$base/main"
 commit=$(git rev-parse --verify origin/main)
 taskset -c 8-11 git switch -q --detach "$commit"
+checkout=$PWD
+boat_status=0
+step="Boat screen and containment"
+record
+screen=()
+candidate="$run/screen-candidate"
+if taskset -c 8-11 python3 bench/awfy/screen.py prepare "$candidate" \
+    --awfy "$base/peers/awfy" --langarena "$base/peers/langarena" >>"$run/run.log" 2>&1; then
+  if [[ -d "$base/last-screen-inputs" ]]; then
+    if taskset -c 8-11 python3 bench/awfy/screen.py manifest "$run/screen-bundle" \
+        --base "$base/last-screen-inputs" --candidate "$candidate" --awfy "$base/peers/awfy" \
+        >"$run/boat-jobs.json" 2>>"$run/run.log"; then
+      screen=(--manifest "$run/boat-jobs.json")
+    else
+      boat_status=$?
+    fi
+  fi
+  ln -s "$candidate" "$run/prepared-screen"
+  mv -Tf "$run/prepared-screen" "$base/last-screen-inputs"
+else
+  boat_status=$?
+fi
+(
+  cd "$run"
+  taskset -c 8-11 "$checkout/tools/boat-dispatch" "${screen[@]}" \
+    --contain-worktree "$checkout" --contain-record "$base/last-contain"
+) >>"$run/run.log" 2>&1 || boat_status=$?
 # Warm peer Rust caches before board.py invokes cargo --offline.
 for manifest in "$base/peers/langarena/rust/Cargo.toml" "$base/peers/awfy/rust/Cargo.toml"; do
   if [[ -f "$manifest" ]]; then
@@ -66,6 +93,10 @@ elif (( status == 0 )) && [[ ! -e "$base/baseline-refused" ]]; then
   mv -Tf "$run/complete.json" "$base/last-complete.json"
 elif (( status == 0 )); then
   echo "Promotion held by an earlier refusal. Run board.py rebaseline with a clean run." >>"$run/run.log"
+fi
+if (( status == 0 && boat_status != 0 )); then
+  step="Boat screen and containment"
+  status=$boat_status
 fi
 echo "$run"
 exit "$status"

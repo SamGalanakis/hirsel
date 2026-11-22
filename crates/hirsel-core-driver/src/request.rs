@@ -227,7 +227,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
-    let inspect_std = inspection.as_ref().is_some_and(|option| option.std);
+    let inspect_library = inspection.as_ref().and_then(|option| option.source_library);
     let inspect_foreign = inspection
         .as_ref()
         .and_then(crate::inspect::Inspection::foreign_module);
@@ -243,7 +243,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut image_path = None;
     let mut install_root = None;
     let mut core_product = None;
-    let mut source_core = inspect_std;
+    let mut source_core = inspect_library.is_some();
     let mut source_std = false;
     let mut product_name = None;
     let mut entry = None;
@@ -400,6 +400,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::Unused
             | Opt::InspectLibrary
             | Opt::InspectStd
+            | Opt::InspectCore
             | Opt::IncludeCredentials
             | Opt::Lib
             | Opt::FmtCheck
@@ -457,8 +458,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         package_mode.require_workspace("--inputs")?;
     } else if recipe_root.is_some() {
         package_mode.require_workspace("--recipe")?;
-    } else if inspect_std {
-        package_mode.require_workspace("--std")?;
+    } else if let Some(name) = inspect_library {
+        package_mode.require_workspace(if name == "core" { "--core" } else { "--std" })?;
     } else if matches!(
         command,
         "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
@@ -844,7 +845,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .map_or(LibraryInput::Sources, LibraryInput::Image),
             entry: None,
         }
-    } else if inspect_std {
+    } else if inspect_library.is_some() {
         CheckRequest::library_request(libraries, &store)?
     } else if command == "image" {
         CheckRequest::library_request(dir.as_deref().or(libraries), &store)?

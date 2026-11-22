@@ -8,7 +8,9 @@ logical size 8. They are `send`, move-only and never `shareable`.
 
 ### NET-1: Socket operation declarations
 
-Core declares these provider operations, each `waits`:
+Core declares `host.connect`, `host.listen`, `host.accept`, `host.recv_bounded` and
+`host.send_pair`. Each operation is `waits`. Run `hirsel inspect --core --interface`
+for their signatures.
 
 ```hirsel core
 pub fn connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError] waits
@@ -206,6 +208,10 @@ The NET-12 to NET-14 core declarations are checked. The laws describe the requir
 runtime behavior.
 
 ### NET-12: Unix rules
+
+Core's `Rule` type includes `Unix` for directory-relative endpoints. Use
+`hirsel inspect --core --interface` for the Unix declarations and
+`hirsel explain NET-1` for the TCP operations.
 
 ```hirsel core
 pub type UnixDirection = UnixConnect | UnixListen | UnixBind | UnixSend

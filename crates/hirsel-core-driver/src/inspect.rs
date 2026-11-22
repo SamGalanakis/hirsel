@@ -20,7 +20,7 @@ pub(crate) struct Inspection {
     query: Query,
     transitive: bool,
     library: bool,
-    pub(crate) std: bool,
+    pub(crate) source_library: Option<&'static str>,
 }
 
 impl Inspection {
@@ -29,7 +29,7 @@ impl Inspection {
         let mut queries = Vec::new();
         let mut transitive = false;
         let mut library = false;
-        let mut std = false;
+        let mut source_library = None;
         for (option, value) in invocation.options.extract_if(.., |(option, _)| {
             matches!(
                 option,
@@ -41,6 +41,7 @@ impl Inspection {
                     | Transitive
                     | InspectLibrary
                     | InspectStd
+                    | InspectCore
             )
         }) {
             match option {
@@ -56,7 +57,12 @@ impl Inspection {
                 Unused => queries.push(Query::Unused),
                 Transitive => transitive = true,
                 InspectLibrary => library = true,
-                InspectStd => std = true,
+                InspectStd | InspectCore => {
+                    let name = if option == InspectStd { "std" } else { "core" };
+                    if source_library.replace(name).is_some() {
+                        return Err("inspect takes one library selector: --core or --std".into());
+                    }
+                }
                 _ => unreachable!("only inspect options are extracted"),
             }
         }
@@ -73,22 +79,29 @@ impl Inspection {
         if library && !matches!(query, Query::Unused) {
             return Err("--library requires --unused".into());
         }
-        if std && invocation.positional.is_some() {
-            return Err("inspect --std selects its sources through --libraries".into());
+        if let Some(name) = source_library
+            && invocation.positional.is_some()
+        {
+            return Err(format!(
+                "inspect --{name} selects its sources through --libraries"
+            ));
         }
-        if std && matches!(query, Query::ForeignHeader(_)) {
+        if source_library.is_some() && matches!(query, Query::ForeignHeader(_)) {
             return Err(
                 "inspect --foreign-header requires a package with a foreign manifest".into(),
             );
         }
-        if !std && !matches!(query, Query::ForeignHeader(_)) && invocation.positional.is_none() {
-            return Err("inspect requires a package directory or --std".into());
+        if source_library.is_none()
+            && !matches!(query, Query::ForeignHeader(_))
+            && invocation.positional.is_none()
+        {
+            return Err("inspect requires a package directory, --core or --std".into());
         }
         Ok(Self {
             query,
             transitive,
             library,
-            std,
+            source_library,
         })
     }
 
@@ -110,8 +123,10 @@ impl Inspection {
         json: bool,
     ) -> io::Result<()> {
         hirsel_core_ids::published::catch_io(|| {
-            let package =
-                entry.map_or_else(|| crate::package("std"), |path| path.0.package.clone());
+            let package = entry.map_or_else(
+                || crate::package(self.source_library.unwrap_or("std")),
+                |path| path.0.package.clone(),
+            );
             if matches!(self.query, Query::Interface) {
                 return interface(product, package).write(json);
             }

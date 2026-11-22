@@ -31,6 +31,7 @@ pub enum OptionId {
     Unused,
     InspectLibrary,
     InspectStd,
+    InspectCore,
     TestTimeout,
     Rerun,
     Sim,
@@ -119,14 +120,14 @@ commands! {
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process.";
-    "inspect", "inspect [package-dir | --std] (--interface [--json] | --foreign-header MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
+    "inspect", "inspect [package-dir | --core | --std] (--interface [--json] | --foreign-header MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
     "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
-    "explain", "explain RULE|debug-lines|primer | explain --list [--json]", "Explain current specification rules, the debug-lines build option or the primer.";
+    "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
     "primer", "primer", "Print the Hirsel primer: the language in one page.";
     "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
@@ -229,6 +230,13 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["inspect"],
         "Inspect the source standard library from --libraries or the checkout."
+    ),
+    option!(
+        InspectCore,
+        ["--core"],
+        None,
+        ["inspect"],
+        "Inspect core declarations from --libraries or the bundled sources."
     ),
     option!(
         Recipe,

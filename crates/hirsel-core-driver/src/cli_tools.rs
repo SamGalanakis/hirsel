@@ -125,8 +125,9 @@ pub fn explain(
         }
     } else {
         let id = rule.ok_or("explain requires a rule or --list")?;
-        let rule = hirsel_core_diag::rule(id)
-            .ok_or_else(|| format!("unknown rule `{id}`; use explain --list"))?;
+        let Some(rule) = hirsel_core_diag::rule(id) else {
+            return explain_library(id, json);
+        };
         let example = hirsel_core_diag::example(rule.id);
         if json {
             #[derive(serde::Serialize)]
@@ -150,6 +151,61 @@ pub fn explain(
                 );
                 println!("\nAsserted refusals\n\n{}", example.assertions.join("\n"));
             }
+        }
+    }
+    Ok(())
+}
+
+fn explain_library(name: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::product::bundled::{SOURCES, STD_SOURCES};
+
+    if let Some(operation) = name.strip_prefix("net.")
+        && matches!(
+            operation,
+            "listen" | "connect" | "accept" | "recv_bounded" | "send_pair"
+        )
+    {
+        return Err(format!(
+            "unknown rule `{name}`; the socket operation is `host.{operation}`. See `hirsel inspect --core --interface` or `hirsel explain NET-1`"
+        ).into());
+    }
+
+    let module = match name {
+        "Args" => "args",
+        "Bytes" => "core",
+        _ => name.strip_prefix("std.").unwrap_or(name),
+    };
+    let core = SOURCES.iter().any(|(path, _)| *path == module);
+    let std = STD_SOURCES.iter().any(|(path, _)| *path == module);
+    if !core && !std {
+        return Err(format!(
+            "unknown rule `{name}`; use `hirsel explain --list` for rule IDs or `hirsel inspect --core --interface` and `hirsel inspect --std --interface` for declarations"
+        ).into());
+    }
+    let commands: Vec<_> = [
+        (core, "hirsel inspect --core --interface"),
+        (std, "hirsel inspect --std --interface"),
+    ]
+    .into_iter()
+    .filter_map(|(present, command)| present.then_some(command))
+    .collect();
+    let rule = match module {
+        "net" => Some("NET-1"),
+        "args" => Some("PROG-3"),
+        _ => None,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"module": module, "commands": commands, "rule": rule})
+        );
+    } else {
+        println!("Declarations for `{name}`");
+        for command in commands {
+            println!("  {command}");
+        }
+        if let Some(rule) = rule {
+            println!("  hirsel explain {rule}");
         }
     }
     Ok(())

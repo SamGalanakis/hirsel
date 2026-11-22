@@ -43,6 +43,9 @@ Hirsel has **no imports, no methods, no traits and no turbofish** (LANG-7).
   their functions by path, `list.push(mut xs, 1)`, never `xs.push(1)`. Another module of
   your package is `wal.append(..)` and a std module is `std.json.parse(..)`, all with no
   `use`. A std module that extends a core module merges into it, so `list.sort` is std's.
+  Run `hirsel inspect --core --interface` for core and `hirsel inspect --std --interface`
+  for std, including its extensions to core. `hirsel explain clock` points to both
+  listings. For sockets, see `hirsel explain NET-1` and look for `host.listen`.
 - A dotted name after a value reads a field. A method call is a field read, so it is
   refused:
 

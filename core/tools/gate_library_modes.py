@@ -349,6 +349,27 @@ def main():
             for arguments in [(), ('UNKNOWN-999',), ('--list', 'LANG-7')]:
                 self.assertEqual(explain(*arguments).returncode, 2)
 
+            net = explain('net')
+            self.assertEqual(net.returncode, 0, net.stderr)
+            self.assertIn('hirsel inspect --core --interface', net.stdout)
+            listen = explain('net.listen')
+            self.assertEqual(listen.returncode, 2)
+            self.assertIn('the socket operation is `host.listen`', listen.stderr)
+            self.assertIn('`host.listen`', explain('NET-1').stdout)
+            self.assertIn('hirsel inspect --core --interface', explain('NET-12').stdout)
+
+        def test_inspect_core_lists_provider_and_collection_declarations(self):
+            result = self.progress.run(
+                [str(compiler), 'inspect', '--core', '--interface'], cwd=ROOT,
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertIn(
+                'core@1/host/listen\tpub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError] waits',
+                lines)
+            self.assertIn('core@1/core/Bytes\tpub type Bytes = List[u8]', lines)
+            self.assertTrue(any(line.startswith('core@1/map/get\t') for line in lines))
+
         def test_cross_runner_replacement_and_invalid_sysroot_are_not_cached(self):
             arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()
             qemu = Path(os.environ['HIRSEL_TOOLCHAIN_QEMU']).resolve() / 'qemu-aarch64'

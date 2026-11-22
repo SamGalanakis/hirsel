@@ -404,6 +404,25 @@ fn f()->u64 {
 }
 
 #[test]
+fn generic_closure_environment_charges_and_refunds_the_closed_capture() {
+    let source = r#"fn keep[T: plain + inert](x: T) -> own fn() -> T {
+    fn() -> T { x }
+}
+fn f() -> u64 {
+    let cb = keep((7u64, 11u64))
+    let (a, b) = cb()
+    a + b
+}"#;
+    let (module, functions) = crate::SourceProgram::lower(source, None);
+
+    // Two u64 fields cost 16 bytes. The descriptor word is uncharged.
+    let run = eval::run(&module, functions["f"], &[], 32);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![18]));
+    assert_eq!(run.peak_reserved, 16);
+    assert_eq!(run.used, 0);
+}
+
+#[test]
 fn host_rename_and_sleep_rows_are_replayable_in_evaluator() {
     let source = r#"fn f(d:Dir,c:Clock)->u64 waits {
         let mut file = result.unwrap(host.open(d, "old", Write))

@@ -1004,6 +1004,14 @@ fn fill(
                     unreachable!("an inline row remaps to an inline row")
                 };
                 *ty = row;
+                // The template's literal charge used the symbolic capture widths.
+                // Admission and cleanup must both use the closed capture layout.
+                let captures = recipes[row.index()]
+                    .logical_size
+                    .ok_or("a closure environment requires a logical capture size")?;
+                let amount = hirsel_core_layout::charge::closure_env(captures)
+                    .ok_or("a closure environment charge exceeds u64")?;
+                allocation_constants.insert(*charge, amount);
             }
             _ => {}
         }

@@ -28,7 +28,20 @@
 #include <llvm/Transforms/IPO/ElimAvailExtern.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/Inliner.h>
+#include <llvm/Analysis/AssumptionCache.h>
+#include <llvm/Analysis/CaptureTracking.h>
+#include <llvm/IR/MDBuilder.h>
+#include <llvm/Analysis/OptimizationRemarkEmitter.h>
+#include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/ScalarEvolutionExpressions.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar/LICM.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/Transforms/Scalar/LoopUnrollPass.h>
+#include <llvm/Transforms/Utils/LoopSimplify.h>
+#include <llvm/Transforms/Utils/LoopUtils.h>
+#include <llvm/Transforms/Utils/UnrollLoop.h>
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
 #include <llvm/Transforms/Utils/Cloning.h>
@@ -283,6 +296,187 @@ public:
     }
 };
 
+// A loop that keeps C running values in a stack array and updates the one its
+// counter selects modulo C, C a power of two, runs C copies of its body per
+// iteration instead (langarena Hash::SHA256 updates `hashes[at % 8]` per byte:
+// 20.9G instructions, as Rust's; Goose strip-mines the loop by 8 in its own
+// front end and runs 5.1G). The loop vectorizer cannot widen the original
+// loop, since lanes 8 apart write the same cell, and the SLP vectorizer sees
+// one cell per iteration. In copy j the index is `(counter + j) & (C - 1)`
+// with the counter a multiple of C, so it folds to a constant; the cells then
+// stay in registers across iterations, and SLP packs the C independent
+// updates into vectors.
+//
+// The rule: an innermost loop whose only exit is its latch and which makes no
+// calls, where every load or store of a static alloca indexes it by `and (P +
+// k), C - 1`, C in [2, 16] and the same for each alloca, P a header phi
+// counting up by 1 from a constant that is a multiple of C. Its body has at
+// most 64 instructions and at most 320 once copied. LLVM's unroller makes the
+// copies with a remainder loop after them for the last trip count modulo C
+// iterations, which keeps the main loop's counter a multiple of C. Before
+// that, when the cells provably cannot alias the loop's other accesses,
+// `separateCells` records it in alias scopes so LICM can keep the cells in
+// registers. The function then takes one instcombine and LICM pass, and the
+// loop is not unrolled again. This adds no semantics: every check that remains stays in
+// each copy with its site and cause.
+class MaskedCellUnrollPass : public OptionalPassInfoMixin<MaskedCellUnrollPass> {
+    static constexpr unsigned MaxBody = 64, MaxCopied = 320;
+
+    // The C of a GEP whose last index is `and x, C - 1` on a static alloca.
+    static unsigned cellWidth(const Value *pointer, Value **counted = nullptr) {
+        auto *gep = dyn_cast<GetElementPtrInst>(pointer);
+        if (!gep || gep->getNumIndices() == 0) return 0;
+        auto *alloca = dyn_cast<AllocaInst>(gep->getPointerOperand()->stripPointerCasts());
+        if (!alloca || !alloca->isStaticAlloca()) return 0;
+        Value *index = *std::prev(gep->idx_end());
+        Value *x;
+        const APInt *mask;
+        if (!PatternMatch::match(index, PatternMatch::m_And(PatternMatch::m_Value(x),
+                                                            PatternMatch::m_APInt(mask))))
+            return 0;
+        if (!(*mask + 1).isPowerOf2() || mask->ugt(15) || mask->isZero()) return 0;
+        if (counted) *counted = x;
+        return unsigned(mask->getZExtValue()) + 1;
+    }
+
+    // The C to unroll `loop` by, or 0.
+    static unsigned width(Loop &loop, ScalarEvolution &scev) {
+        BasicBlock *latch = loop.getLoopLatch(), *header = loop.getHeader();
+        BasicBlock *preheader = loop.getLoopPreheader();
+        if (!latch || !preheader || loop.getExitingBlock() != latch) return 0;
+        unsigned body = 0, cells = 0;
+        SmallDenseMap<const Value *, unsigned, 4> widths;
+        for (BasicBlock *block : loop.blocks())
+            for (Instruction &i : *block) {
+                if (isa<PHINode>(i) || i.isDebugOrPseudoInst()) continue;
+                if (++body > MaxBody || isa<CallBase>(i)) return 0;
+                Value *pointer = getLoadStorePointerOperand(&i);
+                if (!pointer) {
+                    if (i.mayReadOrWriteMemory()) return 0;
+                    continue;
+                }
+                if (auto *load = dyn_cast<LoadInst>(&i); load && !load->isSimple()) return 0;
+                if (auto *store = dyn_cast<StoreInst>(&i); store && !store->isSimple()) return 0;
+                auto *alloca = dyn_cast<AllocaInst>(getUnderlyingObject(pointer));
+                if (!alloca || !alloca->isStaticAlloca()) continue;
+                Value *x = nullptr;
+                unsigned c = cellWidth(pointer, &x);
+                if (!c) return 0;
+                // x is P or P + k for a header phi P counting up by 1 from a
+                // constant multiple of C.
+                Value *counter = x;
+                PatternMatch::match(x, PatternMatch::m_Add(PatternMatch::m_Value(counter),
+                                                           PatternMatch::m_ConstantInt()));
+                auto *phi = dyn_cast<PHINode>(counter);
+                if (!phi || phi->getParent() != header) return 0;
+                auto *start = dyn_cast<ConstantInt>(phi->getIncomingValueForBlock(preheader));
+                if (!start || start->getValue().urem(c) != 0) return 0;
+                auto *rec = dyn_cast<SCEVAddRecExpr>(scev.getSCEV(phi));
+                if (!rec || rec->getLoop() != &loop || !rec->isAffine() || !rec->getStepRecurrence(scev)->isOne())
+                    return 0;
+                unsigned &seen = widths[alloca];
+                if (seen && seen != c) return 0;
+                seen = c;
+                cells = std::max(cells, c);
+            }
+        if (!cells || body * cells > MaxCopied) return 0;
+        // All of an alloca's accesses use one C; with two allocas of
+        // different C, unrolling by the larger keeps each index constant.
+        for (auto &[alloca, c] : widths)
+            if (cells % c) return 0;
+        return cells;
+    }
+
+    // Puts the loop's cell accesses in a fresh alias scope that its other
+    // accesses are noalias to, when that holds: no cell alloca is captured,
+    // so a pointer whose underlying objects, traced through every phi, select,
+    // GEP and cast, are all other than a cell alloca cannot reach a cell.
+    // Without this LICM cannot sink the cell stores past a load whose base is
+    // a phi of phis (SHA256 reads its bytes through `phi [null, phi [call,
+    // load]]`, which BasicAA gives up on), and the cells stay in memory. The
+    // tags state a fact about the pointers, so they stay true wherever later
+    // passes move the accesses. Returns whether it tagged anything.
+    static bool separateCells(Loop &loop) {
+        SmallVector<Instruction *, 32> cells, others;
+        SmallPtrSet<const Value *, 4> allocas;
+        for (BasicBlock *block : loop.blocks())
+            for (Instruction &i : *block)
+                if (const Value *pointer = getLoadStorePointerOperand(&i)) {
+                    if (cellWidth(pointer)) {
+                        cells.push_back(&i);
+                        allocas.insert(getUnderlyingObject(pointer));
+                    } else {
+                        others.push_back(&i);
+                    }
+                }
+        if (cells.empty() || others.empty()) return false;
+        for (const Value *alloca : allocas)
+            if (PointerMayBeCaptured(alloca, /*ReturnCaptures=*/true)) return false;
+        for (Instruction *i : others) {
+            SmallVector<const Value *, 4> objects;
+            getUnderlyingObjects(getLoadStorePointerOperand(i), objects, nullptr, /*MaxLookup=*/0);
+            for (const Value *object : objects)
+                if (allocas.contains(object) || getUnderlyingObject(object, 0) != object) return false;
+        }
+        LLVMContext &context = loop.getHeader()->getContext();
+        MDBuilder build(context);
+        MDNode *domain = build.createAnonymousAliasScopeDomain("hirsel.cells");
+        MDNode *scope = MDNode::get(context, build.createAnonymousAliasScope(domain, "cells"));
+        for (Instruction *i : cells)
+            i->setMetadata(LLVMContext::MD_alias_scope,
+                           MDNode::concatenate(i->getMetadata(LLVMContext::MD_alias_scope), scope));
+        for (Instruction *i : others)
+            i->setMetadata(LLVMContext::MD_noalias,
+                           MDNode::concatenate(i->getMetadata(LLVMContext::MD_noalias), scope));
+        return true;
+    }
+
+public:
+    PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
+        if (none_of(instructions(f), [](Instruction &i) {
+                const Value *pointer = getLoadStorePointerOperand(&i);
+                return pointer && cellWidth(pointer);
+            }))
+            return PreservedAnalyses::all();
+        LoopInfo &loops = analyses.getResult<LoopAnalysis>(f);
+        DominatorTree &tree = analyses.getResult<DominatorTreeAnalysis>(f);
+        ScalarEvolution &scev = analyses.getResult<ScalarEvolutionAnalysis>(f);
+        AssumptionCache &assumptions = analyses.getResult<AssumptionAnalysis>(f);
+        const TargetTransformInfo &target = analyses.getResult<TargetIRAnalysis>(f);
+        OptimizationRemarkEmitter &remarks = analyses.getResult<OptimizationRemarkEmitterAnalysis>(f);
+        SmallVector<std::pair<Loop *, unsigned>, 2> chosen;
+        for (Loop *loop : loops.getLoopsInPreorder())
+            if (loop->isInnermost())
+                if (unsigned c = width(*loop, scev)) chosen.push_back({loop, c});
+        bool changed = false;
+        for (auto [loop, c] : chosen) {
+            changed |= simplifyLoop(loop, &tree, &loops, &scev, &assumptions, nullptr, true);
+            changed |= formLCSSARecursively(*loop, tree, &loops, &scev);
+            changed |= separateCells(*loop);
+            UnrollLoopOptions options;
+            options.Count = c;
+            options.Force = false;
+            options.Runtime = true;
+            options.AllowExpensiveTripCount = false;
+            options.UnrollRemainder = false;
+            options.ForgetAllSCEV = false;
+            options.SCEVExpansionBudget = 4;
+            LoopUnrollResult result = UnrollLoop(loop, options, &loops, &scev, &tree, &assumptions,
+                                                 &target, &remarks, /*PreserveLCSSA=*/true);
+            if (result == LoopUnrollResult::Unmodified) continue;
+            if (result == LoopUnrollResult::PartiallyUnrolled) loop->setLoopAlreadyUnrolled();
+            changed = true;
+        }
+        if (!changed) return PreservedAnalyses::all();
+        analyses.invalidate(f, PreservedAnalyses::none());
+        FunctionPassManager cleanup;
+        cleanup.addPass(InstCombinePass());
+        cleanup.addPass(createFunctionToLoopPassAdaptor(LICMPass(LICMOptions()), /*UseMemorySSA=*/true));
+        cleanup.run(f, analyses);
+        return PreservedAnalyses::none();
+    }
+};
+
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
 using CounterRangeReport = void (*)(void *, const char *, size_t, unsigned);
 
@@ -299,6 +493,10 @@ void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, hirs
             }
             if (name == "counted-exit-split") {
                 passes.addPass(hirsel_llvm::CountedExitSplitPass());
+                return true;
+            }
+            if (name == "masked-cell-unroll") {
+                passes.addPass(MaskedCellUnrollPass());
                 return true;
             }
             if (name == "invariant-arm-sink") {
@@ -426,7 +624,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         "deadargelim,globalopt,globaldce,rpo-function-attrs,recompute-globalsaa,"
         "function<eager-inv>("
             "drop-unnecessary-assumes,float2int,lower-constant-intrinsics,"
-            "loop(loop-rotate<check-exit-count>,loop-deletion,loop-interchange),"
+            "loop(loop-rotate<check-exit-count>,loop-deletion,loop-interchange),masked-cell-unroll,"
             "inject-tli-mappings,loop-vectorize,drop-unnecessary-assumes<drop-deref>,"
             "infer-alignment,loop-load-elim,instcombine<no-verify-fixpoint>,"
             "simplifycfg<forward-switch-cond;switch-range-to-icmp;switch-to-arithmetic;"

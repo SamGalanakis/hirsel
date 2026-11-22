@@ -11,3 +11,5 @@ Allocation and growth use the underlying list rules. Copying is explicit through
 
 `string.find` returns the first matching byte offset at or after the given start.
 It allocates nothing and takes O(remaining bytes + pattern bytes) in the worst case.
+
+`string.push_upper`, `string.push_lower`, `string.to_upper` and `string.to_lower` apply full Unicode 18.0.0 case mappings to each scalar.

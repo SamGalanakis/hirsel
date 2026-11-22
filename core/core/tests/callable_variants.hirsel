@@ -52,3 +52,72 @@ fn failing_comparator() -> u64 {
     })
     calls
 }
+
+// A record's callable fields are code words at their own offsets; `second`
+// is not at offset zero. A private body may call one directly only where every
+// write of that word agrees.
+scoped type Pair {
+    first: scoped fn(u64) -> u64,
+    second: scoped fn(u64) -> u64,
+    flag: bool
+}
+
+fn call_second(p: Pair, x: u64) -> u64 {
+    p.second(x)
+}
+
+fn forward_pair(p: Pair, x: u64) -> u64 {
+    call_second(p, x)
+}
+
+fn swap_pair(mut p: Pair) {
+    p.second = p.first
+}
+
+fn with_pair(build: scoped fn(Pair) -> u64) -> u64 {
+    let a: u64 = 1
+    let b: u64 = 2
+    build(Pair(first: scoped fn(x: u64) -> u64 {
+        x + a
+    }, second: scoped fn(x: u64) -> u64 {
+        x * b
+    }, flag: true))
+}
+
+// known 20*2=40, lent 20+1=21, reassigned 30+1=31, through a callback 7*2=14,
+// another site's closure 5+100=105: ((((40*100+21)*100+31)*100+14)*1000+105.
+// expect: run record_carried_code() = 40213114105
+fn record_carried_code() -> u64 {
+    let a: u64 = 1
+    let b: u64 = 2
+    let known = forward_pair(Pair(first: scoped fn(x: u64) -> u64 {
+        x + a
+    }, second: scoped fn(x: u64) -> u64 {
+        x * b
+    }, flag: true), 20)
+    let mut lent = Pair(first: scoped fn(x: u64) -> u64 {
+        x + a
+    }, second: scoped fn(x: u64) -> u64 {
+        x * b
+    }, flag: true)
+    swap_pair(mut lent)
+    let swapped = forward_pair(lent, 20)
+    let mut moved = Pair(first: scoped fn(x: u64) -> u64 {
+        x + a
+    }, second: scoped fn(x: u64) -> u64 {
+        x * b
+    }, flag: true)
+    moved.second = fn(x: u64) -> u64 {
+        x + 1
+    }
+    let reassigned = forward_pair(moved, 30)
+    let through = with_pair(scoped fn(p: Pair) -> u64 {
+        forward_pair(p, 7)
+    })
+    let other = forward_pair(Pair(first: scoped fn(x: u64) -> u64 {
+        x + a
+    }, second: scoped fn(x: u64) -> u64 {
+        x + 100
+    }, flag: false), 5)
+    (((known * 100 + swapped) * 100 + reassigned) * 100 + through) * 1000 + other
+}

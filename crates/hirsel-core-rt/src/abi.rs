@@ -1277,9 +1277,9 @@ pub unsafe extern "C" fn hirsel_core_resource_stage(
 /// Full-new admission, replacement, carrier install, then original-payer
 /// refund, for every sequence growth an emitter does not complete inline.
 /// # Safety
-/// The consuming sequence carrier is exclusively owned and has nonzero
-/// capacity. Layout, stride, kind, charges and moved bytes are the exact FORM
-/// operands.
+/// The consuming sequence carrier's data and nonzero capacity words are
+/// exclusively owned. The length word is unused and may be uninitialized.
+/// Layout, stride, kind, charges and moved bytes are the exact FORM operands.
 #[allow(clippy::too_many_arguments)]
 #[cold]
 #[inline(never)]

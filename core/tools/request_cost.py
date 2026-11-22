@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import sys
 
+from measure import parse_json, read_json
+
 
 def manifests(root, out):
     sys.path.insert(0, str(root / 'core/tools'))
@@ -69,9 +71,10 @@ def toolchain(root, buck_inputs=None):
     if buck_inputs is None:
         while os.getloadavg()[0] > 32:
             time.sleep(10)
-        outputs = json.loads(subprocess.check_output([
+        command = [
             str(root / '.buck2/bin/buck2'), 'build', '--show-json-output',
-            '//tools/buck2/native-toolchain:llvm', '//tools/buck2/native-toolchain:kit'], cwd=root, text=True))
+            '//tools/buck2/native-toolchain:llvm', '//tools/buck2/native-toolchain:kit']
+        outputs = parse_json(subprocess.check_output(command, cwd=root), f'stdout from {command!r}')
         llvm = (root / outputs['root//tools/buck2/native-toolchain:llvm']).resolve()
         kit = (root / outputs['root//tools/buck2/native-toolchain:kit']).resolve()
     else:
@@ -93,7 +96,8 @@ def toolchain(root, buck_inputs=None):
 
 
 def stamp_metrics(path, tools):
-    row = json.loads(path.read_text())
+    row = read_json(path)
     row['linker_sha256'] = tools['linker_sha256']
     row['linker'] = tools['linker']
     path.write_text(json.dumps(row, indent=2) + '\n')
+    return row

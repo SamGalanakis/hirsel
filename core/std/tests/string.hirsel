@@ -1378,3 +1378,115 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+fn unicode_upper_scalar(c: char, expected: String) -> bool {
+    let mut out = string.new()
+    string.push_upper(mut out, c)
+    out == expected
+}
+
+fn unicode_lower_scalar(c: char, expected: String) -> bool {
+    let mut out = string.new()
+    string.push_lower(mut out, c)
+    out == expected
+}
+
+// UNI-7. Full mappings include expansions, identity overrides and changes in
+// the pinned data. Conditional case mappings are excluded.
+// expect: run unicode_scalar_cases() = true
+fn unicode_scalar_cases() -> bool {
+    unicode_upper_scalar('ß', "SS") && unicode_lower_scalar('ß', "ß") && unicode_lower_scalar('ẞ', "ß") && unicode_upper_scalar('ẞ', "ẞ") && unicode_lower_scalar('İ', "i\u{307}") && unicode_lower_scalar('I', "i") && unicode_upper_scalar('ΐ', "\u{399}\u{308}\u{301}") && unicode_upper_scalar('ﬃ', "FFI") && unicode_upper_scalar('և', "\u{535}\u{552}") && unicode_upper_scalar('ᾈ', "\u{1f08}\u{399}") && unicode_lower_scalar('ᾈ', "\u{1f80}") && unicode_upper_scalar('ǅ', "\u{1c4}") && unicode_lower_scalar('ǅ', "\u{1c6}") && unicode_lower_scalar('Σ', "σ") && unicode_lower_scalar('\u{212a}', "k") && unicode_upper_scalar('\u{212a}', "\u{212a}") && unicode_lower_scalar('Ⅷ', "\u{2177}") && unicode_upper_scalar('\u{345}', "\u{399}") && unicode_upper_scalar('ª', "ª") && unicode_lower_scalar('𐐀', "\u{10428}") && unicode_upper_scalar('ꟓ', "\u{a7d2}") && unicode_upper_scalar('ɷ', "\u{a7dd}") && unicode_lower_scalar('\u{a7dd}', "ɷ") && unicode_upper_scalar('\u{1df95}', "SS") && unicode_lower_scalar('\u{1df95}', "\u{1df95}")
+}
+
+// UNI-7. These include strings that grow, keep their byte length, and remain empty.
+// expect: run unicode_string_cases() = true
+fn unicode_string_cases() -> bool {
+    let empty = result.unwrap(bound bytes 0 {
+        string.to_upper("") == "" && string.to_lower("") == ""
+    })
+    string.to_upper("Straße") == "STRASSE" && string.to_lower("İ") == "i\u{307}" && string.to_upper("ΐ") == "\u{399}\u{308}\u{301}" && string.to_lower("ΣΑΣ") == "σασ" && string.to_lower("Ⅷ ǅ") == "ⅷ ǆ" && empty
+}
+
+fn lower_parts(a: String, b: String) -> String {
+    let mut out = string.to_lower(a)
+    string.push(mut out, string.to_lower(b))
+    take out
+}
+
+// UNI-4. Joining across a word boundary must not introduce final sigma.
+// expect: run unicode_lower_concatenates() = true
+fn unicode_lower_concatenates() -> bool {
+    string.to_lower("ΑΣ ") == lower_parts("ΑΣ", " ") && string.to_lower("ΣΑ") == lower_parts("Σ", "Α") && lower_parts("ΑΣ", " ") == "ασ " && lower_parts("Σ", "Α") == "σα"
+}
+
+// UNI-5. Compare both single-scalar appending and the whole-string ASCII path.
+// expect: run unicode_ascii_case_agreement() = true
+fn unicode_ascii_case_agreement() -> bool {
+    let mut input = string.with_capacity(128)
+    let mut upper = string.with_capacity(128)
+    let mut lower = string.with_capacity(128)
+    for code in 0u64 .. 128 {
+        let c = option.unwrap(char.from_u32(int.narrow(code)))
+        string.push_char(mut input, c)
+        string.push_upper(mut upper, c)
+        string.push_lower(mut lower, c)
+    }
+    let mut ascii_upper = string.from(input)
+    let mut ascii_lower = string.from(input)
+    string.make_ascii_upper(mut ascii_upper)
+    string.make_ascii_lower(mut ascii_lower)
+    upper == ascii_upper && lower == ascii_lower && string.to_upper(input) == ascii_upper && string.to_lower(input) == ascii_lower
+}
+
+// U+0390 maps to three two-byte scalars. A six-byte result is charged as eight.
+// expect: run unicode_case_exact_charge() = true
+fn unicode_case_exact_charge() -> bool {
+    let fits = result.unwrap(bound bytes 8 {
+        let s = string.to_upper("ΐ")
+        s == "\u{399}\u{308}\u{301}" && list.capacity(string.as_bytes(s)) == 6
+    })
+    let refused = isolate(fn() -> Result[String, Capacity] {
+        bound bytes 7 {
+            string.to_upper("ΐ")
+        }
+    })
+    fits && (match caught(take refused) {
+        Some(c) => c.requested == 8 && c.available == 7,
+        None => false,
+    })
+}
+
+resource type CaseAppendAudit {
+    out: String
+} drop(audit) {
+    if audit.out != "123456" {
+        fail("string.push_upper changed out before admission")
+    }
+}
+
+// The first mapped scalar fits the bound, but all three require 16 bytes.
+// The finalizer sees out during unwind and adds a cause if a prefix was appended.
+// expect: run unicode_push_refusal_is_atomic() = true
+fn unicode_push_refusal_is_atomic() -> bool {
+    let attempt = result.unwrap(isolate(fn() {
+        let mut audit = result.unwrap(CaseAppendAudit(out: "123456"))
+        let _ = bound bytes 8 {
+            string.push_upper(mut audit.out, 'ΐ')
+        }
+    }))
+    let Error(take causes) = take attempt else {
+        return false
+    }
+    let mut count: u64 = 0
+    for cause in causes {
+        match cause.kind {
+            Capacity(c) => if c.requested == 16 && c.available == 8 {
+                count += 1
+            } else {
+                return false
+            },
+            _ => return false,
+        }
+    }
+    count == 1
+}

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 /// What an instruction defines and uses, as names: value `v` is `v`, address `a` is
 /// `values + a`. An `address` instruction defines its address and uses its base and
 /// step operands.
-pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
+pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
     let n = b.values.len();
     let v = |v: ValueId| v.index();
     let a = |a: AddressId| n + a.index();
@@ -228,7 +228,7 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
 
 /// The names block `bi`'s terminator uses: its condition or scrutinee, its edges'
 /// arguments, its results, a `raise fail` cause's address.
-pub(crate) fn terminator_uses(b: &Body, bi: usize) -> Vec<usize> {
+pub fn terminator_uses(b: &Body, bi: usize) -> Vec<usize> {
     let vals = |r: PoolRange<ValueId>| -> Vec<usize> {
         r.get(&b.pools.values)
             .unwrap_or_default()

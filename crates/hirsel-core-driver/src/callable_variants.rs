@@ -1,11 +1,18 @@
 //! Native-only code variants. The checked instance and function-value identities
-//! remain type keyed; a private symbol binds only immutable callable code words.
+//! remain type keyed; a private symbol binds only immutable code words: an
+//! immutable callable parameter's, or a callable field's of a record the
+//! callee views. A call through a bound word is direct, to its code.
 use crate::instances::InstanceSet;
 use crate::{ContentHash, DefPath, InstanceStop, NativeStop};
-use hirsel_core_ir::{Callee, FuncId, Function, Identity, Inst, Module, SigId};
+use hirsel_core_ir::{
+    Callee, FuncId, Function, Identity, Inst, Loan, Module, Param, PlaceTy, SigId,
+};
+use hirsel_core_layout::{Recipe, TypeRef};
 use serde::Serialize;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 mod origins;
 
@@ -24,10 +31,46 @@ struct Known {
     /// body a unit carries has its own.
     code: ContentHash,
 }
+/// Known code by (entry parameter, byte offset of the code word in its place).
+type Bindings = BTreeMap<(u32, u64), Known>;
 #[derive(Serialize)]
 struct Variant<'a> {
     base: &'a Identity,
-    bindings: &'a BTreeMap<u32, Known>,
+    code: ContentHash,
+    bindings: Vec<(&'a (u32, u64), &'a Known)>,
+}
+/// A code word of a callee's parameter whose known code the callee can use: it
+/// calls through it, or passes, stores or copies the place holding it.
+#[derive(Clone, Copy)]
+struct Demand {
+    param: u32,
+    offset: u64,
+    /// An immutable callable parameter's own word, not a record field's.
+    callable: bool,
+    /// A record field's word, or a callable the body calls passing a record
+    /// whose code word is known, or forwards to a callee where it carries.
+    /// Only a generic callee's variants bind a callable that carries none.
+    carries: bool,
+}
+
+/// Whether function `f` of `m` takes known code a caller can bind: an immutable
+/// callable parameter, or a viewed record holding a code word.
+pub(crate) fn takes_code(m: &Module, f: FuncId) -> bool {
+    let function = &m.functions[f.index()];
+    function
+        .body
+        .as_ref()
+        .is_some_and(|b| !b.callable_parameters.is_empty())
+        || m.signatures[function.signature.index()]
+            .params
+            .iter()
+            .any(|p| match p {
+                Param::Address {
+                    place: PlaceTy::Declared(t),
+                    loan: Loan::View,
+                } => origins::holds_code(&m.types, TypeRef(t.0)),
+                _ => false,
+            })
 }
 pub(crate) fn prepare<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
@@ -134,11 +177,15 @@ fn collect<'m>(
         owners,
         eligible,
         variants: BTreeMap::new(),
+        optional: 0,
         bound: BTreeMap::new(),
+        recipes: RefCell::new(BTreeMap::new()),
+        demands: RefCell::new(BTreeMap::new()),
+        computing: RefCell::new(BTreeSet::new()),
         pending: roots
             .into_iter()
             .rev()
-            .map(|root| (root, BTreeMap::new()))
+            .map(|root| (root, Bindings::new()))
             .collect(),
         live: BTreeSet::new(),
         semantic_count,
@@ -185,12 +232,22 @@ struct Work<'a, 'm> {
     owners: Vec<ContentHash>,
     eligible: BTreeSet<Identity>,
     variants: BTreeMap<ContentHash, Target>,
+    /// How many of `variants` only save an indirect call: those spend a limit
+    /// of their own, never a generic callee's.
+    optional: usize,
     /// What each variant binds, by its code identity, for the inventory.
     bound: BTreeMap<ContentHash, Vec<Known>>,
-    pending: Vec<(Target, BTreeMap<u32, Known>)>,
+    pending: Vec<(Target, Bindings)>,
     live: BTreeSet<ContentHash>,
     semantic_count: usize,
     limit: usize,
+    /// Each unit's layout recipes, with the type count they were computed for:
+    /// an import appends rows.
+    recipes: RefCell<BTreeMap<usize, (usize, Rc<Vec<Recipe>>)>>,
+    /// What each body can use of known code, by its code identity.
+    demands: RefCell<BTreeMap<ContentHash, Rc<Vec<Demand>>>>,
+    /// The bodies whose demands are being computed, to end a recursive forward.
+    computing: RefCell<BTreeSet<ContentHash>>,
 }
 impl Work<'_, '_> {
     /// The binding-owner inventory (std-reuse S1): a JSON line per live body
@@ -277,28 +334,184 @@ impl Work<'_, '_> {
             code,
         })
     }
+    fn recipes(&self, unit: usize) -> Rc<Vec<Recipe>> {
+        let types = &self.modules[unit].types;
+        if let Some((n, r)) = self.recipes.borrow().get(&unit)
+            && *n == types.len()
+        {
+            return r.clone();
+        }
+        // A table the layout refuses binds nothing: every field offset and
+        // layout constant stays unknown.
+        let r = Rc::new(hirsel_core_layout::compute(types).unwrap_or_default());
+        self.recipes
+            .borrow_mut()
+            .insert(unit, (types.len(), r.clone()));
+        r
+    }
+    /// The code words body `t` can use of what a caller knows.
+    fn demands(&self, t: Target) -> Rc<Vec<Demand>> {
+        let m = &self.modules[t.unit];
+        let code = m.code_identity(t.function);
+        if let Some(d) = self.demands.borrow().get(&code) {
+            return d.clone();
+        }
+        let function = &m.functions[t.function.index()];
+        if self.computing.borrow().contains(&code) {
+            // A recursive forward carries nothing the outer body does not.
+            return Rc::new(Vec::new());
+        }
+        let mut keys = Vec::new();
+        if let Some(body) = function.body.as_ref() {
+            let signature = &m.signatures[function.signature.index()];
+            let recipes = self.recipes(t.unit);
+            let entry = body.blocks[0].params.get(&body.pools.values).unwrap();
+            for v in &body.callable_parameters {
+                keys.push(Demand {
+                    param: entry.iter().position(|x| x == v).unwrap() as u32,
+                    offset: 0,
+                    callable: true,
+                    carries: false,
+                });
+            }
+            for (v, param, place) in origins::frozen_parameters(signature, body) {
+                if body.callable_parameters.contains(&v) {
+                    continue;
+                }
+                for offset in place
+                    .map(|t| origins::code_words(&m.types, &recipes, TypeRef(t.0)))
+                    .unwrap_or_default()
+                {
+                    keys.push(Demand {
+                        param,
+                        offset,
+                        callable: false,
+                        carries: true,
+                    });
+                }
+            }
+            if !keys.is_empty() {
+                let mut o = origins::Origins::new(m, &recipes, signature, body);
+                let called: Vec<_> = body
+                    .calls
+                    .iter()
+                    .filter_map(|c| match c.callee {
+                        Callee::Indirect(v) => o.value(v),
+                        _ => None,
+                    })
+                    .collect();
+                keys.retain(|d| {
+                    o.uses(d.param)
+                        || called.contains(&origins::Origin::Parameter(d.param, d.offset))
+                });
+                if keys.iter().any(|d| d.callable) {
+                    self.computing.borrow_mut().insert(code);
+                    for d in keys.iter_mut().filter(|d| d.callable) {
+                        d.carries = self.carries(t, &recipes, &mut o, d.param);
+                    }
+                    self.computing.borrow_mut().remove(&code);
+                }
+            }
+        }
+        let keys = Rc::new(keys);
+        self.demands.borrow_mut().insert(code, keys.clone());
+        keys
+    }
+    /// Whether `t`'s callable parameter `p` carries record-held code: `t` calls
+    /// through it passing a viewed record with a code word it knows or is bound,
+    /// or passes it on to a callee whose parameter carries.
+    fn carries(&self, t: Target, recipes: &[Recipe], o: &mut origins::Origins, p: u32) -> bool {
+        let m = &self.modules[t.unit];
+        let body = m.functions[t.function.index()].body.as_ref().unwrap();
+        let this = origins::Origin::Parameter(p, 0);
+        body.calls.iter().any(|call| {
+            let args = call.args.get(&body.pools.args).unwrap();
+            match call.callee {
+                Callee::Indirect(v) if o.value(v) == Some(this) => {
+                    let signature = &m.signatures[call.signature.index()];
+                    let dest = usize::from(signature.dest.is_some());
+                    args.iter().enumerate().any(|(i, &arg)| {
+                        let place = i.checked_sub(dest).and_then(|i| signature.params.get(i));
+                        let Some(Param::Address {
+                            place: PlaceTy::Declared(ty),
+                            loan: Loan::View,
+                        }) = place
+                        else {
+                            return false;
+                        };
+                        origins::code_words(&m.types, recipes, TypeRef(ty.0))
+                            .into_iter()
+                            .any(|k| o.word(arg, k).is_some())
+                    })
+                }
+                Callee::Direct(f) => {
+                    let Some(&to) = self
+                        .originals
+                        .get(&m.identity(m.functions[f.index()].instance))
+                    else {
+                        return false;
+                    };
+                    let forwarded: Vec<u32> = (0..args.len() as u32)
+                        .filter(|&i| o.word(args[i as usize], 0) == Some(this))
+                        .collect();
+                    !forwarded.is_empty()
+                        && self
+                            .demands(to)
+                            .iter()
+                            .any(|d| d.callable && d.carries && forwarded.contains(&d.param))
+                }
+                _ => false,
+            }
+        })
+    }
+    fn resolve(
+        &self,
+        unit: usize,
+        bindings: &Bindings,
+        origin: Option<origins::Origin>,
+    ) -> Option<Known> {
+        match origin? {
+            origins::Origin::Function(f) => self.known(unit, f),
+            origins::Origin::Parameter(p, k) => bindings.get(&(p, k)).cloned(),
+        }
+    }
+    /// A private body of `base` binding `bindings`. A generic callee's callable
+    /// bindings spend the instance limit as its instances do (`strict`); any
+    /// other binding only saves an indirect call, so at its own limit the call
+    /// keeps the shared body.
     fn request(
         &mut self,
         base: Target,
-        bindings: BTreeMap<u32, Known>,
-    ) -> Result<Target, NativeStop> {
+        bindings: Bindings,
+        strict: bool,
+    ) -> Result<Option<Target>, NativeStop> {
         let instance = self.instance(base);
         let hash = crate::native::key(
-            "hirsel.callable-code.v1",
+            "hirsel.callable-code.v2",
             &Variant {
                 base: &instance,
-                bindings: &bindings,
+                code: self.modules[base.unit].code_identity(base.function),
+                bindings: bindings.iter().collect(),
             },
         )?;
         if let Some(t) = self.variants.get(&hash) {
-            return Ok(*t);
+            return Ok(Some(*t));
         }
-        if self.semantic_count + self.variants.len() >= self.limit {
+        let spent = if strict {
+            self.variants.len() - self.optional
+        } else {
+            self.optional
+        };
+        if self.semantic_count + spent >= self.limit {
+            if !strict {
+                return Ok(None);
+            }
             return Err(NativeStop::Instances(InstanceStop::Resource {
                 limit: self.limit,
                 next: instance,
             }));
         }
+        self.optional += usize::from(!strict);
         let mut module = self.modules[base.unit].clone().into_owned();
         let root = module.functions[base.function.index()].clone();
         for f in &mut module.functions {
@@ -319,7 +532,7 @@ impl Work<'_, '_> {
         self.bound
             .insert(hash, bindings.values().cloned().collect());
         self.pending.push((target, bindings));
-        Ok(target)
+        Ok(Some(target))
     }
     fn import(
         &mut self,
@@ -361,67 +574,75 @@ impl Work<'_, '_> {
         }
         Ok(function)
     }
-    fn visit(&mut self, target: Target, bindings: &BTreeMap<u32, Known>) -> Result<(), NativeStop> {
+    fn visit(&mut self, target: Target, bindings: &Bindings) -> Result<(), NativeStop> {
         let unit = target.unit;
-        let m = &self.modules[unit];
-        let body = m.functions[target.function.index()].body.as_ref().unwrap();
-        let needed = !bindings.is_empty()
-            || body.calls.iter().any(|call| match call.callee {
-                Callee::Direct(f) => self
-                    .eligible
-                    .contains(&m.identity(m.functions[f.index()].instance)),
-                _ => false,
-            });
         let mut edits = Vec::new();
-        if needed {
-            let mut origins = origins::Origins::new(m, body);
-            for (i, call) in body.calls.iter().enumerate() {
-                match call.callee {
-                    Callee::Indirect(v) => {
-                        let known = match origins.value(v) {
-                            Some(origins::Origin::Parameter(p)) => bindings.get(&p).cloned(),
-                            Some(origins::Origin::Function(f)) => self.known(unit, f),
-                            None => None,
-                        };
-                        if let Some(k) = known {
-                            edits.push((i, self.bodies[&k.code], None));
-                        }
-                    }
-                    Callee::Direct(f) => {
-                        let key = m.identity(m.functions[f.index()].instance);
-                        if !self.eligible.contains(&key) {
-                            continue;
-                        }
-                        let base = self.originals[&key];
-                        let b = self.modules[base.unit].functions[base.function.index()]
-                            .body
-                            .as_ref()
-                            .unwrap();
-                        let params = b.blocks[0].params.get(&b.pools.values).unwrap();
-                        let mut passed = BTreeMap::new();
-                        for v in &b.callable_parameters {
-                            let p = params.iter().position(|x| x == v).unwrap() as u32;
-                            let arg = call.args.get(&body.pools.args).unwrap()[p as usize];
-                            let known = match origins.argument(arg) {
-                                Some(origins::Origin::Function(f)) => self.known(unit, f),
-                                Some(origins::Origin::Parameter(p)) => bindings.get(&p).cloned(),
-                                None => None,
-                            };
-                            if let Some(k) = known {
-                                passed.insert(p, k);
+        {
+            let m = &self.modules[unit];
+            let function = &m.functions[target.function.index()];
+            let body = function.body.as_ref().unwrap();
+            let bases: Vec<Option<Target>> = body
+                .calls
+                .iter()
+                .map(|call| match call.callee {
+                    Callee::Direct(f) => self
+                        .originals
+                        .get(&m.identity(m.functions[f.index()].instance))
+                        .copied(),
+                    _ => None,
+                })
+                .collect();
+            let needed = !bindings.is_empty()
+                || bases.iter().flatten().any(|&b| !self.demands(b).is_empty());
+            if needed {
+                let recipes = self.recipes(unit);
+                let mut origins = origins::Origins::new(
+                    m,
+                    &recipes,
+                    &m.signatures[function.signature.index()],
+                    body,
+                );
+                for (i, call) in body.calls.iter().enumerate() {
+                    // A call through known code is direct to that code's body,
+                    // which may itself bind what this call passes it.
+                    let (to, devirtualized) = match call.callee {
+                        Callee::Indirect(v) => {
+                            match self.resolve(unit, bindings, origins.value(v)) {
+                                Some(k) => (self.bodies[&k.code], true),
+                                None => continue,
                             }
                         }
-                        if !passed.is_empty() {
-                            edits.push((i, base, Some(passed)));
+                        Callee::Direct(_) => match bases[i] {
+                            Some(b) => (b, false),
+                            None => continue,
+                        },
+                        Callee::Runtime(..) => continue,
+                    };
+                    let eligible = !devirtualized && self.eligible.contains(&self.instance(to));
+                    let args = call.args.get(&body.pools.args).unwrap();
+                    let mut passed = Bindings::new();
+                    let mut strict = false;
+                    for d in self.demands(to).iter() {
+                        if !eligible && !d.carries {
+                            continue;
+                        }
+                        let Some(&arg) = args.get(d.param as usize) else {
+                            continue;
+                        };
+                        if let Some(k) = self.resolve(unit, bindings, origins.word(arg, d.offset)) {
+                            strict |= eligible && d.callable;
+                            passed.insert((d.param, d.offset), k);
                         }
                     }
-                    _ => {}
+                    if devirtualized || !passed.is_empty() {
+                        edits.push((i, to, (!passed.is_empty()).then_some((passed, strict))));
+                    }
                 }
             }
         }
         for (i, base, passed) in edits {
             let to = match passed {
-                Some(p) => self.request(base, p)?,
+                Some((p, strict)) => self.request(base, p, strict)?.unwrap_or(base),
                 None => base,
             };
             let sig = self.modules[unit].functions[target.function.index()]
@@ -461,7 +682,7 @@ impl Work<'_, '_> {
         );
         for f in dependencies {
             if let Some(&t) = self.bodies.get(&m.code_identity(f)) {
-                self.pending.push((t, BTreeMap::new()));
+                self.pending.push((t, Bindings::new()));
                 continue;
             }
             if m.code_variants.contains_key(&f) {
@@ -474,7 +695,7 @@ impl Work<'_, '_> {
             else {
                 continue;
             };
-            self.pending.push((t, BTreeMap::new()));
+            self.pending.push((t, Bindings::new()));
         }
         Ok(())
     }
@@ -727,6 +948,129 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
                 expected
             );
             assert_eq!(keys.len(), reached.instances.as_ref().unwrap().len());
+        }
+    }
+
+    /// The callee of each non-runtime call in each live body of `name` that
+    /// `entry` reaches: the definition of a direct callee, None if indirect.
+    fn reached_calls(source: &str, entry: &str, name: &str) -> Vec<Vec<Option<String>>> {
+        let dir = tempfile::tempdir().unwrap();
+        let product = Driver::default()
+            .check(
+                crate::tests::request(source, dir.path()),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{:?} {:?}",
+            product.diagnostics,
+            product.incomplete
+        );
+        let entry = DefPath::from_full(&format!("app@1/main/{entry}")).unwrap();
+        let reached = product.reachable(&entry, 64).unwrap();
+        let keys = reached.require().unwrap();
+        let mut modules: Vec<_> = keys
+            .iter()
+            .map(|k| Cow::Borrowed(reached.materialized.get(k).ir().unwrap()))
+            .collect();
+        prepare(
+            &mut modules,
+            keys,
+            &reached.materialized,
+            Roots::Entry(&entry),
+            64,
+        )
+        .unwrap();
+        let name = format!("app@1/main/{name}");
+        let mut bodies = vec![];
+        for m in &modules {
+            for f in &m.functions {
+                let Some(body) = &f.body else { continue };
+                if m.identity(f.instance).definition.to_string() != name {
+                    continue;
+                }
+                bodies.push(
+                    body.calls
+                        .iter()
+                        .filter_map(|c| match c.callee {
+                            Callee::Direct(g) => Some(Some(
+                                m.identity(m.functions[g.index()].instance)
+                                    .definition
+                                    .to_string(),
+                            )),
+                            Callee::Indirect(_) => Some(None),
+                            Callee::Runtime(..) => None,
+                        })
+                        .collect(),
+                );
+            }
+        }
+        bodies
+    }
+    #[test]
+    fn record_carried_code_is_direct_only_where_every_write_agrees() {
+        // `second` is the record's second callable field, at a nonzero
+        // offset; `forward` passes the viewed record on. Closures are numbered
+        // in each body's lowering order: `first` is $closure0, `second` is
+        // $closure1.
+        let source = r#"
+scoped type Pair {
+    first: scoped fn(u64) -> u64,
+    second: scoped fn(u64) -> u64,
+    flag: bool
+}
+fn call_second(p: Pair, x: u64) -> u64 { p.second(x) }
+fn forward(p: Pair, x: u64) -> u64 { call_second(p, x) }
+fn known() -> u64 {
+    let a: u64 = 1
+    let b: u64 = 2
+    let p = Pair(first: scoped fn(x: u64) -> u64 { x + a }, second: scoped fn(x: u64) -> u64 { x * b }, flag: true)
+    forward(p, 20u64)
+}
+fn unknown(p: Pair) -> u64 { forward(p, 20u64) }
+fn swap(mut p: Pair) { p.second = p.first }
+fn lent() -> u64 {
+    let a: u64 = 1
+    let b: u64 = 2
+    let mut p = Pair(first: scoped fn(x: u64) -> u64 { x + a }, second: scoped fn(x: u64) -> u64 { x * b }, flag: true)
+    swap(mut p)
+    forward(p, 20u64)
+}
+fn reassigned() -> u64 {
+    let a: u64 = 1
+    let b: u64 = 2
+    let mut p = Pair(first: scoped fn(x: u64) -> u64 { x + a }, second: scoped fn(x: u64) -> u64 { x * b }, flag: true)
+    p.second = fn(x: u64) -> u64 { x + 1 }
+    forward(p, 20u64)
+}
+"#;
+        let direct = |to: &str| Some(format!("app@1/main/{to}"));
+        let known = reached_calls(source, "known", "call_second");
+        assert!(!known.is_empty());
+        assert!(
+            known
+                .iter()
+                .all(|calls| calls == &[direct("known$closure1")]),
+            "{known:?}"
+        );
+        assert_eq!(
+            reached_calls(source, "unknown", "call_second"),
+            [vec![None]],
+            "no caller knows the code"
+        );
+        // After the mutable loan or the field write, `second` holds other
+        // code; the constructor's `second` is the wrong target.
+        for entry in ["lent", "reassigned"] {
+            let calls = reached_calls(source, entry, "call_second");
+            assert!(!calls.is_empty());
+            assert!(
+                calls
+                    .iter()
+                    .flatten()
+                    .all(|c| c != &direct(&format!("{entry}$closure1"))),
+                "{entry}: {calls:?}"
+            );
         }
     }
 }

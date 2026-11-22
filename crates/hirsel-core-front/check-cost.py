@@ -22,7 +22,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
-from measure import source_lines, sample
+from measure import read_json, sample, source_lines
 
 # Frozen, absolute allowances owned by core-check-index-912. They never scale
 # with source growth and never apply to the fixed finished-process budget.
@@ -35,6 +35,16 @@ COMPLETE = dict(complete_bodies=1, bodies=1,
 def margin(value):
     return math.ceil(value * 1.02 / 100) * 100
 
+
+def semantic_tokens(metrics):
+    tokens = metrics['tokens']
+    if tokens <= 0:
+        raise ValueError('front has no semantic tokens')
+    return tokens
+
+
+def instruction_rate_ceiling(instructions, tokens):
+    return margin(instructions) / tokens
 
 
 def process_instructions(path):
@@ -95,17 +105,17 @@ def finished_forecast(process, lines, projection, budget):
     return forecast, failures
 
 
-def sample_sources(compiler, output, profile_front=False):
+def sample_sources(compiler, output, profile_front=False, *, names=('m1', 'std')):
     import m1
     manifest = m1.load_manifest(ROOT / 'core/programs/m1/manifest.json')
     manifest.pop('entries', None)
     for package in manifest['packages']:
         for source in package['sources']:
             source['file'] = str((ROOT / source['file']).resolve())
-    for name in ['m1', 'std']:
+    for name in names:
         inputs = copy.deepcopy(manifest)
-        if name == 'std':
-            inputs['packages'] = [p for p in inputs['packages'] if p['package']['name'] in ['core', 'std']]
+        if name != 'm1':
+            inputs['packages'] = [p for p in inputs['packages'] if p['package']['name'] in {'core', name}]
         directory = output / name
         directory.mkdir()
         (directory / 'inputs.json').write_text(json.dumps(inputs))
@@ -126,17 +136,25 @@ def sample_sources(compiler, output, profile_front=False):
         # A tool crash or missing counter never passes as a cheap check.
         if observed['status'] not in accepted_statuses:
             raise ValueError(f'{name}: driver exited {observed["status"]}')
-        product = json.loads((directory / 'result.json').read_text())
+        product = read_json(directory / 'result.json')
         if 'incomplete' not in product or 'diagnostics' not in product:
             raise ValueError(f'{name}: driver did not return a check result')
-        metrics = json.loads((directory / 'metrics.json').read_text())
+        metrics = read_json(directory / 'metrics.json')
         process = observed['instructions']
         yield name, lines, product, metrics, process
 
 
 def run(compiler, output, ceilings, request_compiler=None, report_only=False):
     failures, observations, proposed, floors = [], {}, {}, {}
-    for name, lines, product, metrics, process in sample_sources(compiler, output):
+    library_tokens = {}
+    names = ('m1', 'std', 'core') if request_compiler is not None else ('m1', 'std')
+    for name, lines, product, metrics, process in sample_sources(compiler, output, names=names):
+        if request_compiler is not None and name in ('std', 'core'):
+            library_tokens[name] = semantic_tokens(metrics)
+        if name == 'core':
+            if metrics.get('counter_refusal') or completion_errors(product, COMPLETE):
+                raise ValueError('core: could not measure tokens for the fixed core request')
+            continue
         ceiling = ceilings['corpora'].get(name, {})
         residual = ANCHOR_RESIDUAL.get(name, 0)
         lower, total, errors = check_ceiling(metrics, lines, ceiling, process, residual)
@@ -162,10 +180,13 @@ def run(compiler, output, ceilings, request_compiler=None, report_only=False):
             floors[name] = {key: max(0, value) + PROCESS_RESIDUAL / lines for key, value in values.items()}
             proposed[name] = {key: max(margin(max(0, value)), floors[name][key]) for key, value in values.items()}
     if request_compiler is not None:
-        errors, observed, limits = run_product(request_compiler, output / 'product', ceilings)
+        errors, observed, limits = run_product(request_compiler, output / 'product', ceilings, library_tokens)
         failures.extend(errors)
         observations['product'], proposed['product'] = observed, limits
-        floors['product'] = {'fixed_' + mode + '_instructions': value + PROCESS_RESIDUAL for mode, value in observed['fixed'].items()}
+        floors['product'] = dict(instructions_per_token={
+            name: (row['instructions'] + PROCESS_RESIDUAL) / row['tokens']
+            for name, row in observed['fixed'].items()
+        })
         floors['product']['entries'] = {row['entry']: dict(marginal_per_line=row['marginal'] + 2 * PROCESS_RESIDUAL / row['own_lines']) for row in observed['entries']}
     print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures, observations=observations, ceilings=proposed, floors=floors)), flush=True)
     if failures:
@@ -189,6 +210,21 @@ def product_ceiling(process, fixed, lines, ceiling, budget):
     return marginal, failures
 
 
+def fixed_product_costs(fixed, limits):
+    failures, proposed = [], {}
+    for name, row in fixed.items():
+        instructions, tokens = row['instructions'], row['tokens']
+        rate = instructions / tokens
+        maximum = limits['instructions_per_token'][name]
+        print(f'product: {name} {instructions} instructions; {tokens} semantic tokens; '
+              f'{rate:.6f} instructions/token; ceiling {maximum}')
+        if rate > maximum:
+            failures.append(f'product {name}: {rate:.6f} instructions/token exceeds {maximum}')
+        proposed[name] = max(instruction_rate_ceiling(instructions, tokens),
+                             (instructions + PROCESS_RESIDUAL) / tokens)
+    return failures, proposed
+
+
 def admit():
     while os.getloadavg()[0] > 32:
         time.sleep(5)
@@ -205,7 +241,7 @@ def product_sample(compiler, inputs, entry, mode, directory, cache):
                       str(directory / 'metrics.json')], directory, compiler_only=True)
     if observed['status'] != 'ok':
         raise ValueError(f'{directory.name}: {observed["status"]}')
-    result = json.loads((directory / 'stdout').read_text())
+    result = read_json(directory / 'stdout')
     expected = sum(len(p['sources']) for p in inputs['packages']
                    if p['package']['name'] not in ['core', 'std'])
     if not result['accepted'] or result['files'] != expected:
@@ -215,7 +251,7 @@ def product_sample(compiler, inputs, entry, mode, directory, cache):
     return observed['instructions']
 
 
-def run_product(compiler, directory, ceilings):
+def run_product(compiler, directory, ceilings, library_tokens):
     import m1
     os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
     os.environ['HIRSEL_JOBS'] = '1'
@@ -239,19 +275,17 @@ def run_product(compiler, directory, ceilings):
         'dependencies': [p['package'] for p in empty['packages']],
         'sources': [{'file': str(source), 'modules': ['main'], 'signatures': False}]})
     limits = ceilings['corpora'].get('product', {})
-    failures = []
     fixed = {}
     for mode in ['std', 'core']:
         request = copy.deepcopy(empty)
         if mode == 'core':
             request['packages'] = [p for p in request['packages'] if p['package']['name'] != 'std']
             request['packages'][-1]['dependencies'] = [request['core']]
-        fixed[mode] = product_sample(compiler, request, 'empty@1/main/main', mode,
-                                     directory / ('fixed-' + mode), cache)
-        maximum = limits.get('fixed_' + mode + '_instructions', float('inf'))
-        print(f'product: fixed {mode} {fixed[mode]} instructions; ceiling {maximum}')
-        if fixed[mode] > maximum:
-            failures.append(f'product fixed {mode}: {fixed[mode]} exceeds {maximum}')
+        instructions = product_sample(compiler, request, 'empty@1/main/main', mode,
+                                      directory / ('fixed-' + mode), cache)
+        fixed['fixed ' + mode] = dict(instructions=instructions, tokens=library_tokens[mode])
+    failures, fixed_proposals = fixed_product_costs(fixed, limits)
+    fixed_std = fixed['fixed std']['instructions']
     rows = []
     for entry in manifest['entries']:
         name = entry['workload'] + '-' + entry['variant']
@@ -261,14 +295,14 @@ def run_product(compiler, directory, ceilings):
         lines = sum(source_lines(p) for p in sorted(own))
         path = entry['package']['name'] + '@1/' + entry['module'] + '/' + entry['function']
         process = product_sample(compiler, request, path, 'std', directory / name, cache)
-        marginal, errors = product_ceiling(process, fixed['std'], lines,
+        marginal, errors = product_ceiling(process, fixed_std, lines,
             limits.get('entries', {}).get(name, {}).get('marginal_per_line', float('inf')), ceilings['finished_budget_per_line'])
         rows.append(dict(entry=name, own_lines=lines, process=process,
-                         fixed=fixed['std'], marginal=marginal))
-        print(f'product {name}: {lines} own lines; process {process}; fixed {fixed["std"]}; marginal {marginal:.2f}')
+                         fixed=fixed_std, marginal=marginal))
+        print(f'product {name}: {lines} own lines; process {process}; fixed {fixed_std}; marginal {marginal:.2f}')
         failures.extend(f'product {name}: {e}' for e in errors)
     (directory / 'results.json').write_text(json.dumps(dict(fixed=fixed, entries=rows), indent=2) + '\n')
-    proposals = {'fixed_' + mode + '_instructions': max(math.ceil(value * 1.02), value + PROCESS_RESIDUAL) for mode, value in fixed.items()}
+    proposals = {'instructions_per_token': fixed_proposals}
     proposals['entries'] = {row['entry']: dict(marginal_per_line=margin(row['marginal'])) for row in rows}
     return failures, dict(fixed=fixed, entries=rows), proposals
 
@@ -281,7 +315,7 @@ def main():
     parser.add_argument('--ceilings', type=Path, default=Path(__file__).with_name('cost-ceilings.json'))
     parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
     args = parser.parse_args()
-    ceilings = json.loads(args.ceilings.read_text())
+    ceilings = read_json(args.ceilings)
     ceilings['policy'] = ceilings.get('policy', 'Compare observations against the committed ceilings.')
     if args.out:
         args.out.mkdir(parents=True, exist_ok=False)

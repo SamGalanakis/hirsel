@@ -109,13 +109,11 @@ impl FunctionEmitter<'_> {
             // zero charges share one runtime call, which makes the same
             // admission and threshold decisions.
             self.block(cold);
-            // The runtime borrows only this call-lifetime carrier. Keep the
-            // source carrier's address out of the call so local homes promote.
+            // Cold growth reads only data and capacity. Keep the source
+            // carrier's address out of the call so local homes promote.
             let shadow = self.temp(Type::words(3));
             self.runtime_void("llvm.lifetime.start.p0", &[ptr(shadow.clone())]);
-            let length = self.load_native(at, 8, Type::I64);
             self.store_native(&shadow, 0, Type::Ptr, old);
-            self.store_native(&shadow, 8, Type::I64, &length);
             self.store_native(&shadow, 16, Type::I64, &cap);
             let grown = Type::structure([Type::Ptr, Type::I64]);
             let pair = self.call_declared(

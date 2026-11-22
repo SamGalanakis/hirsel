@@ -4,6 +4,7 @@ use crate::{
     fiber::Stack,
     task_heap::{Mapping, slabs::Slab},
 };
+use hirsel_core_ids::launch::Metadata;
 use std::{
     collections::VecDeque,
     ptr::NonNull,
@@ -166,6 +167,26 @@ pub(crate) struct Memory {
     release_room: Condvar,
 }
 
+/// The storage operations a running task can request from its unit pool.
+pub(crate) trait SharedMemory: Sync {
+    fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata;
+    fn signal_stack(&self) -> Stack;
+    fn start_sync(&self, start: fn() -> Result<(), i32>) -> Result<(), i32>;
+    fn take_task_stack(&self) -> Stack;
+    fn put_task_stack(&self, stack: Stack);
+    fn take_slab(&self) -> Option<Slab>;
+    fn put_slab(&self, slab: Slab);
+    fn dispose_slab(&self, slab: Slab);
+    fn aligned_page(
+        &self,
+        bytes: usize,
+        space: usize,
+        align: usize,
+        headroom: usize,
+    ) -> Option<Mapping>;
+    fn put_page(&self, page: Mapping);
+}
+
 impl Memory {
     pub(super) fn new() -> Self {
         Self {
@@ -212,27 +233,6 @@ impl Memory {
             }
             Err(mpsc::TryRecvError::Disconnected) => panic!("memory thread disconnected"),
         }
-    }
-
-    pub(crate) fn native_metadata(
-        &self,
-        target: &str,
-        n_place: u64,
-        describe: bool,
-    ) -> hirsel_core_ids::launch::Metadata {
-        // All units have the same target and leading launch options. Resolve
-        // the lazy digest here so its file mapping is also released here.
-        self.launch
-            .get_or_init(|| {
-                let target = target.to_owned();
-                self.map(move || {
-                    let launch =
-                        hirsel_core_ids::launch::Metadata::native(&target, n_place, describe);
-                    let _ = launch.digest();
-                    launch
-                })
-            })
-            .clone()
     }
 
     fn release(&self, bytes: usize, release: Reclaim) {
@@ -291,42 +291,8 @@ impl Memory {
         }
     }
 
-    pub(crate) fn take_task_stack(&self) -> Stack {
-        self.task_stacks
-            .take(|_| true)
-            .unwrap_or_else(|| self.map(Stack::new))
-    }
-
-    pub(crate) fn put_task_stack(&self, stack: Stack) {
-        let bytes = stack.committed_bytes();
-        if let Some(stack) = self.task_stacks.put(stack, bytes) {
-            self.release(bytes, Reclaim::TaskStack(stack));
-        }
-    }
-
-    pub(crate) fn take_slab(&self) -> Option<Slab> {
-        self.slabs.take(|_| true)
-    }
-
-    pub(crate) fn put_slab(&self, slab: Slab) {
-        if let Some(slab) = self.slabs.put(slab, crate::task_heap::SLAB) {
-            self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
-        }
-    }
-
-    pub(crate) fn dispose_slab(&self, slab: Slab) {
-        self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
-    }
-
     pub(crate) fn take_page(&self, fits: impl FnMut(&Mapping) -> bool) -> Option<Mapping> {
         self.pages.take(fits)
-    }
-
-    pub(crate) fn put_page(&self, page: Mapping) {
-        let bytes = page.committed_bytes();
-        if let Some(page) = self.pages.put(page, bytes) {
-            self.release(bytes, Reclaim::Page(page));
-        }
     }
 
     pub(super) fn report(&self) {
@@ -338,6 +304,75 @@ impl Memory {
         ];
         let pending = self.work.lock().unwrap().peak_pending_bytes;
         eprintln!("pool-memory {} pending_peak={pending}", cache.join(" "));
+    }
+}
+
+impl SharedMemory for Memory {
+    fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata {
+        // All units have the same target and leading launch options. Resolve
+        // the lazy digest here so its file mapping is also released here.
+        self.launch
+            .get_or_init(|| {
+                let target = target.to_owned();
+                self.map(move || {
+                    let launch = Metadata::native(&target, n_place, describe);
+                    let _ = launch.digest();
+                    launch
+                })
+            })
+            .clone()
+    }
+
+    fn signal_stack(&self) -> Stack {
+        self.map(Stack::new)
+    }
+
+    fn start_sync(&self, start: fn() -> Result<(), i32>) -> Result<(), i32> {
+        self.map(start)
+    }
+
+    fn take_task_stack(&self) -> Stack {
+        self.task_stacks
+            .take(|_| true)
+            .unwrap_or_else(|| self.map(Stack::new))
+    }
+
+    fn put_task_stack(&self, stack: Stack) {
+        let bytes = stack.committed_bytes();
+        if let Some(stack) = self.task_stacks.put(stack, bytes) {
+            self.release(bytes, Reclaim::TaskStack(stack));
+        }
+    }
+
+    fn take_slab(&self) -> Option<Slab> {
+        self.slabs.take(|_| true)
+    }
+
+    fn put_slab(&self, slab: Slab) {
+        if let Some(slab) = self.slabs.put(slab, crate::task_heap::SLAB) {
+            self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
+        }
+    }
+
+    fn dispose_slab(&self, slab: Slab) {
+        self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
+    }
+
+    fn aligned_page(
+        &self,
+        bytes: usize,
+        space: usize,
+        align: usize,
+        headroom: usize,
+    ) -> Option<Mapping> {
+        Mapping::pooled_page(self, bytes, space, align, headroom)
+    }
+
+    fn put_page(&self, page: Mapping) {
+        let bytes = page.committed_bytes();
+        if let Some(page) = self.pages.put(page, bytes) {
+            self.release(bytes, Reclaim::Page(page));
+        }
     }
 }
 

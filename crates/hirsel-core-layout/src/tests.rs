@@ -55,6 +55,58 @@ fn u(s: Scalar) -> FieldTy {
     FieldTy::Scalar(s)
 }
 
+/// PROG-11 assigns bit j to byte j, including tags next to a matching lane.
+/// Using an inexact zero-byte mask can include a neighboring nonmatch.
+#[test]
+fn map_group_masks_match_byte_loop() {
+    use map_index::{
+        DELETED, EMPTY, GROUP_WIDTH, match_mask, match_swar, vacant_mask, vacant_swar,
+    };
+
+    fn oracle(group: &[u8; GROUP_WIDTH], predicate: impl Fn(u8) -> bool) -> u16 {
+        let mut mask = 0;
+        for (lane, &byte) in group.iter().enumerate() {
+            if predicate(byte) {
+                mask |= 1 << lane;
+            }
+        }
+        mask
+    }
+
+    fn check(group: &[u8; GROUP_WIDTH], tag: u8) {
+        let matches = oracle(group, |byte| byte == tag);
+        assert_eq!(match_swar(group, tag), matches);
+        assert_eq!(match_mask(group, tag), matches);
+        let vacancies = oracle(group, |byte| byte & 0x80 != 0);
+        assert_eq!(vacant_swar(group), vacancies);
+        assert_eq!(vacant_mask(group), vacancies);
+    }
+
+    for tag in 0..=u8::MAX {
+        check(&[tag; GROUP_WIDTH], tag);
+        check(&[EMPTY; GROUP_WIDTH], tag);
+        check(&[DELETED; GROUP_WIDTH], tag);
+        let bytes = [
+            tag,
+            tag.wrapping_add(1),
+            tag.wrapping_sub(1),
+            DELETED,
+            EMPTY,
+        ];
+        let mut group = std::array::from_fn(|i| bytes[i % bytes.len()]);
+        check(&group, tag);
+        group.reverse();
+        check(&group, tag);
+        for lane in 0..GROUP_WIDTH {
+            for byte in 0..=u8::MAX {
+                group[lane] = byte;
+                check(&group, tag);
+            }
+            group[lane] = bytes[(GROUP_WIDTH - 1 - lane) % bytes.len()];
+        }
+    }
+}
+
 /// Bug: padding leaks into the logical charge, or a field is not aligned to its width.
 /// `{a: u8, b: u64, c: u16}`: b@0, c@8, a@10; size 16 (align 8); logical
 /// 1 + 8 + 2 = 11, a Box of it charges round8(11) = 16.

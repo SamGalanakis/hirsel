@@ -1,5 +1,5 @@
-//! The unit pool (CONC-15). `HIRSEL_UNTIED=W` runs a program's root
-//! unit, and every helper unit `task.spawn_unit` makes, on W worker threads;
+//! The unit pool (CONC-15). For a program that can reach `task.spawn_unit`,
+//! `HIRSEL_UNTIED=W` runs its root and helper units on W worker threads;
 //! without it a helper runs on its own OS thread (units_lang.rs). A unit is one
 //! order of events: its entry chain, scheduler, tasks, reactor and budget live
 //! on its own stack and heap records. Units meet only through connections
@@ -22,8 +22,8 @@
 //! root alone, and its helpers are not recorded.
 #[path = "unit_memory.rs"]
 mod memory;
-pub(crate) use memory::Memory;
 use memory::UnitStack;
+pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
@@ -165,8 +165,35 @@ static UNTIED_ON: AtomicBool = AtomicBool::new(false);
 pub(crate) fn untied() -> bool {
     UNTIED_ON.load(Ordering::Relaxed)
 }
+
+struct PoolHooks {
+    memory: fn(bool) -> Option<&'static dyn SharedMemory>,
+    park: fn(Option<u64>),
+    maybe_yield: fn(),
+    wake: fn(u32),
+    blocking: fn(bool) -> Blocking,
+}
+
+static POOL_HOOKS: OnceLock<PoolHooks> = OnceLock::new();
+
+fn enable_pool() {
+    let _ = POOL_HOOKS.set(PoolHooks {
+        memory: pool_memory,
+        park: park_unit,
+        maybe_yield: yield_unit_if_needed,
+        wake: wake_unit_by_id,
+        blocking: mark_pool_blocking,
+    });
+    UNTIED_ON.store(true, Ordering::SeqCst);
+}
+
+// A launcher installs these callbacks before any worker starts. A tied
+// scheduler does not name the pool's records or queues through its wait path.
+fn pool_hooks() -> &'static PoolHooks {
+    POOL_HOOKS.get().unwrap()
+}
 /// `HIRSEL_UNTIED=W`: run the root unit, and every helper unit it makes, on W
-/// worker threads.
+/// worker threads. Only executables that can spawn a helper unit read it.
 pub(crate) fn workers() -> Option<usize> {
     std::env::var("HIRSEL_UNTIED")
         .ok()
@@ -375,20 +402,18 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 fn pool() -> &'static Pool {
     POOL.get().unwrap()
 }
-pub(crate) fn memory() -> Option<&'static Memory> {
-    if !untied() {
-        return None;
-    }
-    let p = pool();
-    (!p.stop.load(Ordering::Acquire)).then_some(&p.memory)
+pub(crate) fn memory() -> Option<&'static dyn SharedMemory> {
+    untied().then(|| (pool_hooks().memory)(false)).flatten()
 }
 /// A spare must arm its signal stack even if the memory thread is blocked.
-pub(crate) fn signal_stack_memory() -> Option<&'static Memory> {
-    if !untied() {
-        return None;
-    }
+pub(crate) fn signal_stack_memory() -> Option<&'static dyn SharedMemory> {
+    untied().then(|| (pool_hooks().memory)(true)).flatten()
+}
+
+fn pool_memory(signal_stack: bool) -> Option<&'static dyn SharedMemory> {
     let p = pool();
-    (p.handoff_ticks == 0 && !p.stop.load(Ordering::Acquire)).then_some(&p.memory)
+    ((!signal_stack || p.handoff_ticks == 0) && !p.stop.load(Ordering::Acquire))
+        .then_some(&p.memory as &dyn SharedMemory)
 }
 
 struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));
@@ -416,8 +441,8 @@ fn admit() -> bool {
 
 /// Make unit `id`, admitted already, and queue it. The record is made here;
 /// its stack is taken and its program starts on its first run.
-fn create_unit(id: u32) -> &'static Unit {
-    create_unit_with(id, None)
+fn create_unit(id: u32) {
+    publish_unit(new_unit(id, false));
 }
 
 /// Helper units take ids from here up, recycled with their records.
@@ -462,15 +487,18 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
     if id >= ID_END {
         crate::process::stop(b"UnitIdSpace");
     }
-    create_unit_with(id, Some(job));
+    let unit = new_unit(id, true);
+    unit.job.set(Some(job));
+    publish_unit(unit);
     Ok(())
 }
 
-fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
+// A helper's job is set by its spawner before publication. Keeping the job
+// out of the shared constructor also keeps its vtable out of the root path.
+fn new_unit(id: u32, helper: bool) -> Box<Unit> {
     let t0 = now();
-    let p = pool();
     let config = BASE.get().unwrap().0;
-    let u: &'static Unit = Box::leak(Box::new(Unit {
+    Box::new(Unit {
         id,
         sp: UnsafeCell::new(std::ptr::null_mut()),
         host: UnsafeCell::new(std::ptr::null_mut()),
@@ -492,13 +520,17 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
         config,
-        helper: job.is_some(),
-        job: Cell::new(job),
-    }));
-    if !TABLE[id as usize]
+        helper,
+        job: Cell::new(None),
+    })
+}
+
+fn publish_unit(unit: Box<Unit>) {
+    let unit: &'static Unit = Box::leak(unit);
+    if !TABLE[unit.id as usize]
         .compare_exchange(
             std::ptr::null_mut(),
-            (u as *const Unit).cast_mut(),
+            (unit as *const Unit).cast_mut(),
             Ordering::AcqRel,
             Ordering::Acquire,
         )
@@ -507,9 +539,8 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         crate::process::stop(b"UnitIdTaken");
     }
     bump(S_CREATED);
-    add_stat(S_CREATE_NS, now() - t0);
-    enqueue(p, u);
-    u
+    add_stat(S_CREATE_NS, now() - unit.created_ns);
+    enqueue(pool(), unit);
 }
 
 /// Give a unit about to run for the first time its stack and initial frame.
@@ -575,6 +606,10 @@ fn leave(u: &Unit, after: After) {
 
 /// The running unit has nothing runnable: park until a wake or `deadline`.
 pub(crate) fn park(deadline: Option<u64>) {
+    (pool_hooks().park)(deadline);
+}
+
+fn park_unit(deadline: Option<u64>) {
     bump(S_PARKS);
     // SAFETY: called on the unit's own stack while it runs.
     let u = unsafe { &*cur() };
@@ -687,8 +722,11 @@ pub(crate) fn lost_slot() -> bool {
 }
 
 /// Requeue the running unit when another unit waits and its slice is over.
-#[inline(always)]
 pub(crate) fn maybe_yield() {
+    (pool_hooks().maybe_yield)();
+}
+
+fn yield_unit_if_needed() {
     let p = pool();
     let ix = worker_ix();
     let Some(private) = p.lifo.get(ix) else {
@@ -737,6 +775,10 @@ pub(crate) fn wake(u: &Unit) {
     }
 }
 pub(crate) fn wake_id(id: u32) {
+    (pool_hooks().wake)(id);
+}
+
+fn wake_unit_by_id(id: u32) {
     if let Some(u) = unit_ref(id) {
         wake(u);
     }
@@ -843,6 +885,14 @@ pub(crate) fn blocking_file() -> Blocking {
 
 #[inline(always)]
 fn mark_blocking(publish_private: bool) -> Blocking {
+    if untied() {
+        (pool_hooks().blocking)(publish_private)
+    } else {
+        Blocking { call: None }
+    }
+}
+
+fn mark_pool_blocking(publish_private: bool) -> Blocking {
     if let Some(word) = HOST_CALL.get() {
         // A sole unit is the only thread that could admit a peer.
         if LIVE.load(Ordering::Acquire) > 1 {
@@ -855,7 +905,7 @@ fn mark_blocking(publish_private: bool) -> Blocking {
                 call: Some((word, stamp)),
             };
         }
-    } else if publish_private && untied() {
+    } else if publish_private {
         publish_before_unmonitored_call();
     }
     Blocking { call: None }
@@ -1625,7 +1675,7 @@ pub(crate) fn launch(
     let _ = RUN.set(RunFn(run));
     let _ = BASE.set(Base(*input));
     LIVE.store(k, Ordering::SeqCst);
-    UNTIED_ON.store(true, Ordering::SeqCst);
+    enable_pool();
     let p = pool();
     let memory_thread = p.memory.start();
     for i in 0..k {

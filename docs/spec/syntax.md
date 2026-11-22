@@ -164,6 +164,13 @@ parses to the tree of its input. Where it breaks a line inside an expression out
 brackets, it breaks before a continuation token, which starts the next line one level
 deeper, and after a `-`, which ends its line.
 
+A trailing comma in a parenthesized or bracketed list puts each entry on its own
+line, indented one level from the surrounding block or list. The closing
+delimiter returns to the surrounding indentation. This applies to arguments,
+parameters, generic parameters, type arguments, array literals, tuples, and
+constructor payloads and patterns. Lists without a trailing comma stay inline
+where their contents allow it. The formatter keeps the commas as written.
+
 ```hirsel
 fn total(a: u64, b: u64) -> u64 {
   let sum = a +

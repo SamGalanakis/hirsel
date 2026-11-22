@@ -30,7 +30,8 @@ PRIOR-ART.md records choices and tradeoffs. There are no old semantic dependenci
 
 `format(&ParseOutput)` formats a successful complete parse, retaining every literal,
 comment and semicolon. Blocks, fields, match arms and statements use four-space structural
-layout; declarations have one blank line between them. Other lists stay inline.
+layout; declarations have one blank line between them. Parenthesized and bracketed
+lists with a trailing comma put one entry on each line.
 `format_verified` checks changed output by reparsing in the original mode and
 comparing the normalized AST, token spellings and comment ownership. Tests also
 check item-relative anchors, recovery and idempotence.

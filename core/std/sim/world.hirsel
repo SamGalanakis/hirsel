@@ -171,8 +171,6 @@ pub fn test_seed(e: Env) -> Option[u64] {
     }
 }
 
-pub type CampaignMode: key = Sweep | Mutate
-
 pub type CampaignConfig {
     seed: u64,
     cases: u64,
@@ -302,19 +300,15 @@ fn next_mutation(mut pending: List[Mutation]) -> Option[Script] {
     Some(take s)
 }
 
-/// Runs the law with at most one candidate per case. The same seed source and
-/// case identities apply to both modes. The callback records draws in provider
-/// order and supplies the law's own verdict.
-pub fn campaign(tasks: Tasks, mode: CampaignMode, cfg: CampaignConfig, make: scoped fn(u64) -> Script, law: fn(take ScriptRun) -> (bool, Feedback) waits) -> CampaignResult waits {
+/// Runs one candidate per case, mutating observed draws from successful cases.
+/// The callback records draws in provider order and supplies the law's verdict.
+pub fn campaign(tasks: Tasks, cfg: CampaignConfig, make: scoped fn(u64) -> Script, law: fn(take ScriptRun) -> (bool, Feedback) waits) -> CampaignResult waits {
     let mut coverage: set.Set[(u64, u64, u64)] = set.new()
     let mut locations: set.Set[DrawPoint] = set.new()
     let mut pending: List[Mutation] = list.new()
     let max_draws = cfg.providers * cfg.max_draws
     for index in 0u64 .. cfg.cases {
-        let choice: Option[Script] = match mode {
-            Sweep => None,
-            Mutate => next_mutation(mut pending),
-        }
+        let choice = next_mutation(mut pending)
         let s = match take choice {
             Some(take candidate) => take candidate,
             None => make(int.wrapping_add(cfg.seed, index)),
@@ -341,7 +335,7 @@ pub fn campaign(tasks: Tasks, mode: CampaignMode, cfg: CampaignConfig, make: sco
                 continue
             }
             set.insert(mut coverage, key)
-            if mode == Mutate && observation.point.provider < cfg.providers && observation.point.provider < list.len(trial.script.streams) && observation.point.slot < cfg.max_draws && !set.contains(locations, observation.point) {
+            if observation.point.provider < cfg.providers && observation.point.provider < list.len(trial.script.streams) && observation.point.slot < cfg.max_draws && !set.contains(locations, observation.point) {
                 set.insert(mut locations, observation.point)
                 list.push(mut pending, Mutation(script: witness(trial.script, trace, observation.point), point: observation.point, next: 0))
             }

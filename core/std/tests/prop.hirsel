@@ -728,9 +728,12 @@ fn pilot_fixed_rare(take trial: Case[sim.world.Script]) -> Result[(), String] {
 // expect: run sim_script_campaign_fixed_replay(tasks) = true
 fn sim_script_campaign_fixed_replay(tasks: Tasks) -> bool waits {
     let cfg = sim.world.CampaignConfig(seed: 0, cases: 128, providers: 2, max_draws: 2, max_features: 64, case_steps: 1000000, case_bytes: 1048576)
-    let run = sim.world.campaign(tasks, Mutate, cfg, pilot_seed_script, pilot_rare)
+    let run = sim.world.campaign(tasks, cfg, pilot_seed_script, pilot_rare)
     let sim.world.CampaignResult(failure: take failure, ..) = take run
     let Some(take hit) = take failure else {
+        return false
+    }
+    if hit.index != 48 || hit.world_seed != 610569113502039870 {
         return false
     }
     let input = sim.world.script_tape(hit.script, 2, 2)

@@ -299,6 +299,10 @@ site fault setup as the original law. One reported `prop.replay` token contains
 all the recorded choices for the script. The law can still use `case.world_seed`
 to start its virtual clock. See [scripted plans](sim/world.md#scripted-plans).
 
+`std.sim.world.campaign` searches by mutating the draws observed in successful
+cases. It makes a script from the next case's seed when no mutation is pending.
+See [script campaigns](sim/world.md#script-campaigns).
+
 `shrink_tasks_from(tasks, cfg, g, law, index, values)` starts from an
 explicit tape and case index. It checks that generation consumes exactly
 the supplied tape and that the generated case fails. Then it uses the same

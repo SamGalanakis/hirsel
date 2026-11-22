@@ -978,6 +978,28 @@ static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
 // A recursive helper unrolls at most 8 copies deep along one inlining chain
 // (GCC's max-inline-recursive-depth-auto): unbounded, Havlak's loop nesting
 // pass spent its whole budget on 41 copies of one helper.
+// A slow path of loop L: between L's header and BB, the dominator chain
+// enters a block only through a two-way edge whose weights make it rarer than
+// one in eight. Those are Hirsel's 2000:1 failure and growth weights and the
+// edges into blocks LLVM estimates cold or unreachable. Data tests and switch
+// arms keep a static estimate near one half however deeply they nest, and an
+// inner loop's exit is not a slow edge.
+static bool slowPath(BasicBlock &BB, Loop &L, DominatorTree &DT, LoopInfo &LI,
+                     BranchProbabilityInfo &BPI) {
+  for (DomTreeNode *N = DT.getNode(&BB); N && N->getBlock() != L.getHeader();
+       N = N->getIDom()) {
+    DomTreeNode *Up = N->getIDom();
+    if (!Up || !L.contains(Up->getBlock())) return false;
+    BasicBlock *From = Up->getBlock(), *To = N->getBlock();
+    auto *Branch = dyn_cast<BranchInst>(From->getTerminator());
+    if (!Branch || !Branch->isConditional() || To->getSinglePredecessor() != From) continue;
+    Loop *Inner = LI.getLoopFor(From);
+    if (Inner != &L && !Inner->contains(To)) continue;
+    if (BPI.getEdgeProbability(From, To) < BranchProbability(1, 8)) return true;
+  }
+  return false;
+}
+
 static void inlineLoopHelpers(Module &M) {
   for (Function &F : M) {
     // A lent body is a helper here, never a caller.
@@ -1000,15 +1022,17 @@ static void inlineLoopHelpers(Module &M) {
     };
     SmallVector<Candidate, 16> Pending;
     DenseMap<BasicBlock *, SmallVector<size_t, 4>> UnwindGroups;
-    // Only calls on a loop's hot path: a block that runs less than once per
-    // eight header visits (failure arms, growth slow paths) keeps its call,
-    // whose inlined body would carry every cold path of its own.
+    // Only calls on a loop's hot path: a call on a slow path (failure arms,
+    // growth slow paths) stays a call, since its inlined body would carry every
+    // cold path of its own. The test is the path's edges, not the block's
+    // estimated frequency: in a dispatch loop the static estimate of an
+    // ordinary arm falls below any fixed share of the header as tests nest, so
+    // a frequency cutoff kept a call or not depending on whether O3 had
+    // already inlined the function around it (Richards' queue_packet, +10.7%).
     PostDominatorTree PDT(F);
     BranchProbabilityInfo BPI(F, LI, nullptr, &DT, &PDT);
-    BlockFrequencyInfo BFI(F, BPI, LI);
     for (BasicBlock &BB : F) if (Loop *L = LI.getLoopFor(&BB)) {
-      if (BFI.getBlockFreq(&BB).getFrequency() <
-          BFI.getBlockFreq(L->getHeader()).getFrequency() / 8) continue;
+      if (slowPath(BB, *L, DT, LI, BPI)) continue;
       for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I)) {
         if (!C->getCalledFunction()) continue;
         size_t Group = 0;

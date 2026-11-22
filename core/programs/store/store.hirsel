@@ -246,10 +246,14 @@ fn cut_state(mut db: Db, take s: State) -> Result[Ticket, Error] waits {
         return disk_request_cut(mut db, take s)
     }
     let live = capacity(state_account(s))?
+    Ok(record_memory_cut(mut db, live))
+}
+
+fn record_memory_cut(mut db: Db, live: u64) -> Ticket {
     db.checkpointed += 1
     db.resident = live
     db.settled = db.changes
-    Ok(Ticket(store: db.store, open: 0, mark: Cut(db.checkpointed)))
+    Ticket(store: db.store, open: 0, mark: Cut(db.checkpointed))
 }
 
 fn branch_index(db: Db, b: Branch) -> Result[u64, Error] {
@@ -492,11 +496,6 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
     if let Some(_) = branch(db, name) {
         return Error(Exists(take owned))
     }
-    // Section 1.11: the new tree's accounted size is admitted before the fork.
-    let live = int.saturating_add(db.resident, journal_account(from.roots))
-    if live > db.ceiling {
-        return Error(Full(Capacity(requested: live, available: db.ceiling)))
-    }
     // A Snapshot carries no wall time; the branch it was taken on, if it is
     // still live, gives the at its CallInfo continues from (section 1.7).
     let mut at = db.heads[0].at
@@ -508,7 +507,16 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
     let head = Head(id: id, name: take owned, parent: from.branch, forked_at: from.head, roots: share_roots(from.roots), head: from.head, at: at, following: None)
     list.push(mut planned.heads, take head)
     planned.next_branch = id + 1
-    let commit_ticket = cut_install(mut db, take planned)?
+    // Section 1.11: count the prospective union before making a cut.
+    let state = capacity(prospect_state(planned))?
+    let live = capacity(state_account(state))?
+    over_ceiling(live, db.ceiling)?
+    let commit_ticket = if list.len(db.disk) == 0 {
+        record_memory_cut(mut db, live)
+    } else {
+        disk_request_cut(mut db, take state)?
+    }
+    install_prospect(mut db, take planned)
     Ok((Branch(store: db.store, id: id), commit_ticket))
 }
 
@@ -6268,6 +6276,82 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     let _ = result.unwrap(unpin(mut db, "p"))
     if db.resident != 228 || !typed_put(mut db, t, 1, 7) || db.resident != 228 { return false }
     result.unwrap(get(snapshot(db), shape(t), 1)) == Some(7u64)
+}
+
+// L27(c): §1.11 gives 134 for the catalog and 94 for the typed row, as in
+// L27(a). 228 fits under 300, but the additive check asks for 456.
+pub fn law_fork_shared_head(c: Clock) -> bool waits {
+    let mut db = test_db(c, 300)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 1) || db.resident != 228 { return false }
+    let from = snapshot(db)
+    match fork(mut db, "fork", from) {
+        Ok((b, _)) => db.resident == 228 &&
+            result.unwrap(get(result.unwrap(snapshot_of(db, b)), shape(t), 1)) == Some(1u64),
+        _ => false,
+    }
+}
+
+// L27(c): the reader keeps the old 94-byte leaf. Adding a head makes it
+// count again, along with the current 94-byte leaf and one 134-byte catalog.
+// The exact request is 322, one over 321. The additive check asks for 456.
+pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
+    let mut db = test_db(c, 321)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 1) { return false }
+    let held = snapshot(db)
+    if !typed_put(mut db, t, 1, 2) || db.resident != 228 { return false }
+    let cut = db.checkpointed
+    let next_id = db.next_branch
+    match fork(mut db, "fork", held) {
+        Error(Full(cap)) => if cap.requested != 322 || cap.available != 321 { return false },
+        _ => return false,
+    }
+    let head = snapshot(db)
+    if let Some(_) = branch(db, "fork") { return false }
+    db.checkpointed == cut && db.next_branch == next_id && db.resident == 228 &&
+        version(head) == 3 && result.unwrap(get(head, shape(t), 1)) == Some(2u64) &&
+        result.unwrap(get(held, shape(t), 1)) == Some(1u64)
+}
+
+// L27(c), AF1: the catalog-only pin keeps 134 bytes. Four writes charge
+// 4 * 94, for 510 total, but only the last leaf is reachable. Even the old
+// additive check fits after settling (228 + 228 = 456); with stale charges
+// it asks for 510 + 228 = 738. The union costs 228 after the fork.
+pub fn law_fork_settle(c: Clock) -> bool waits {
+    let mut db = test_db(c, 510)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let empty = snapshot(db)
+    result.unwrap(pin(mut db, "empty", empty))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    for v in 1u64 .. 5 {
+        if !typed_put(mut db, t, 1, v) { return false }
+    }
+    if db.resident != 510 { return false }
+    let from = snapshot(db)
+    match fork(mut db, "fork", from) {
+        Ok((b, _)) => db.resident == 228 &&
+            result.unwrap(get(result.unwrap(snapshot_of(db, b)), shape(t), 1)) == Some(4u64) &&
+            result.unwrap(get(option.unwrap(pinned(db, "empty")), shape(t), 1)) == None,
+        _ => false,
+    }
+}
+
+@test
+fn test_fork_shared_head(c: Clock) -> Result[(), ()] waits {
+    if law_fork_shared_head(c) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_fork_old_snapshot(c: Clock) -> Result[(), ()] waits {
+    if law_fork_old_snapshot(c) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_fork_settle(c: Clock) -> Result[(), ()] waits {
+    if law_fork_settle(c) { Ok(()) } else { Error(()) }
 }
 
 @test

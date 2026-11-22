@@ -119,9 +119,10 @@ pub(crate) fn live_site_words(bytes: &[u8]) -> Result<BTreeSet<u64>> {
 /// Each item's symbol is its first site word: its file's first site plus the
 /// item's offset in that file.
 pub(super) fn define(object: &mut object::write::Object<'_>, sources: &SourceMap) -> Result<()> {
-    let items: Vec<_> = sources.items.keys().cloned().collect();
-    for (path, site) in items.iter().zip(sources.item_sites(&items)?) {
-        absolute(object, hirsel_core_ir::source::site_symbol(path), site);
+    let starts = sources.site_starts()?;
+    for (path, binding) in &sources.items {
+        let site = starts[binding.file as usize] + u64::from(binding.file_offset);
+        absolute(object, site_symbol(path), site);
     }
     Ok(())
 }

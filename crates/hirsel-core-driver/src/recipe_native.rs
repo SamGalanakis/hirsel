@@ -1091,17 +1091,22 @@ pub(super) fn bind_annexes(
         }
     }
     let mut sources = SourceMap::default();
+    // Site items differ from each other only in file and name. Files come in
+    // order; ordering each file's items by name gives the map's own order,
+    // so it is built in one pass rather than by a search per site.
+    let mut items = Vec::new();
     for (path, points) in points {
         let file = u32::try_from(sources.files.len())
             .map_err(|_| NativeStop::Entry("source file table exceeds u32".into()))?;
         let points: Vec<_> = points.into_iter().collect();
+        let first = items.len();
         for (offset, &(line, column)) in points.iter().enumerate() {
             let item = site_item(&Site {
                 file: path.clone(),
                 line,
                 column,
             });
-            sources.items.insert(
+            items.push((
                 item,
                 ItemSource {
                     file,
@@ -1109,14 +1114,16 @@ pub(super) fn bind_annexes(
                         NativeStop::Entry("source position table exceeds u32".into())
                     })?,
                 },
-            );
+            ));
         }
+        items[first..].sort_unstable_by(|(a, _), (b, _)| a.0.name.cmp(&b.0.name));
         sources.files.push(SourceFile {
             path: path.clone(),
             text: String::new(),
         });
         sources.points.insert(path, points);
     }
+    sources.items = items.into_iter().collect();
     for (identity, unit) in units {
         // Cached objects reference a unit's local site numbers. The final link
         // binds those symbols to the current recipe's absolute positions.

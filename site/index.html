@@ -32,7 +32,7 @@
   the behaviour on screen is the property.
 -->
 <style>
-:root{--ink:#11110F;--cream:#FBF6EC;--red:#CB271F;--mute:#5E5A50;--rule:rgba(17,17,15,.14);
+:root{--ink:#11110F;--cream:#FBF6EC;--red:#CB271F;--mute:#5E5A50;--rule:rgba(17,17,15,.14);--ground:#ECE3CF;
   /* one motion language: a confident deceleration; feedback quick, state changes routine, arrivals slow */
   --ease:cubic-bezier(.16,1,.3,1);--t-press:110ms;--t-state:260ms;--t-arrive:640ms;
   /* the notch and the home bar: zero on a desktop, so nothing there moves */
@@ -93,11 +93,28 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 .det button svg{width:13px;height:13px;flex:none;transition:transform var(--t-state) var(--ease)}
 .det button:hover,.det button:focus-visible{color:var(--ink);border-bottom-color:var(--ink)}
 .det button:hover svg,.det button:focus-visible svg{transform:rotate(-60deg)}
+/* the deep dive: closed, one more quiet row like Replay; open, the property as Hirsel source on oat */
+.deep{padding-top:14px}
+.det:not([hidden])+.deep{padding-top:10px}
+.deep>button{display:inline-flex;align-items:center;gap:7px;font-size:14px;font-weight:500;color:var(--mute);border-bottom:1px solid var(--rule);padding-bottom:1px;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
+.deep>button:hover,.deep>button:focus-visible,.deep>button[aria-expanded="true"]{color:var(--ink);border-bottom-color:var(--ink)}
+.deep>button svg{width:9px;height:9px;flex:none;transition:transform var(--t-state) var(--ease)}
+.deep>button[aria-expanded="true"] svg{transform:rotate(90deg)}
+.code{margin-top:12px;padding:10px 12px 11px;background:var(--ground);border-radius:6px;overflow:hidden}
+.code pre{margin:0;font:400 11.5px/1.6 ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
+/* a line too long for the column wraps under itself, so every line still starts flush */
+.code pre span{display:block;padding-left:2ch;text-indent:-2ch}
+.code pre .no{color:var(--red)}
+.code pre ::selection{background:rgba(203,39,31,.18)}
+.panel.open{overflow:auto;overscroll-behavior:contain}
 .walk{display:flex;justify-content:space-between;gap:16px;margin-top:28px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
 .walk button{color:var(--mute);transition:color var(--t-state) var(--ease)} .walk button:hover,.walk button:focus-visible{color:var(--ink)}
 .walk .ar{display:inline-block;font-style:normal;transition:transform var(--t-state) var(--ease)}
 #prevBtn:hover .ar,#prevBtn:focus-visible .ar{transform:translateX(-4px)}
 #nextBtn:hover .ar,#nextBtn:focus-visible .ar{transform:translateX(4px)}
+/* the walk's last stop: the same quiet link, out to the source */
+.walk a{text-decoration:none;color:var(--mute);transition:color var(--t-state) var(--ease)} .walk a:hover,.walk a:focus-visible{color:var(--ink)}
+#endLink:hover .ar,#endLink:focus-visible .ar{transform:translateX(4px)}
 .walk .nx{margin-left:auto}
 :focus-visible{outline:2px solid var(--ink);outline-offset:3px}
 
@@ -134,6 +151,9 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
   .panel .body{margin-top:10px;font-size:15px;line-height:1.5;max-width:none}
   .panel .body .half{margin-top:8px}
   .det{margin-top:8px}
+  .deep{padding-top:8px}
+  .det:not([hidden])+.deep{padding-top:6px}
+  .code{margin-top:10px}
   .walk{display:none}
 }
 /* a phone walks the hill from the bottom, under the thumb: back, where you are (which opens the
@@ -143,7 +163,11 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 .bar .step{width:48px;height:48px;display:inline-flex;align-items:center;font-size:18px;color:var(--mute);transition:color var(--t-state) var(--ease)}
 .bar .step .ar{display:inline-block;font-style:normal;transition:transform var(--t-press) var(--ease)}
 #bPrev{justify-content:flex-start}
-#bNext{justify-content:flex-end}
+#bNext,#bEnd{justify-content:flex-end}
+/* the last stop's forward slot: out to the source, drawn as the header's mark */
+#bEnd{color:var(--mute)}
+#bEnd svg{width:18px;height:18px;display:block}
+#bEnd:active{color:var(--ink)}
 .bar .step:not(:disabled):active{color:var(--ink)}
 #bPrev:not(:disabled):active .ar{transform:translateX(-4px)}
 #bNext:not(:disabled):active .ar{transform:translateX(4px)}
@@ -191,21 +215,89 @@ header .menu:active{background:rgba(17,17,15,.06)}
   .panel{max-height:44vh}
 }
 @media (hover:hover){
-  .bar .step:not(:disabled):hover,.list ol button:hover,.list .x:hover{color:var(--ink)}
+  .bar a.step:hover,.bar .step:not(:disabled):hover,.list ol button:hover,.list .x:hover{color:var(--ink)}
   header .menu:hover{opacity:1;background:rgba(17,17,15,.06)}
 }
 @media (prefers-reduced-motion:reduce){
   /* no travel: state still changes colour and weight, nothing slides or turns */
   header .strip button::after{transition:opacity var(--t-state) var(--ease)}
   .land .in span,.walk .ar,header .gh svg,.det button svg,.bar .ar{transform:none!important}
+  .deep>button svg{transition:none}
   .list,.list:not([open]){transform:none;transition:opacity var(--t-state) var(--ease),overlay var(--t-state) allow-discrete,display var(--t-state) allow-discrete}
   .list:not([open]){opacity:0}
   @starting-style{.list[open]{opacity:0}}
 }
 </style>
+<!-- without scripts there is no hill to walk: the same words, as one quiet page -->
+<noscript><style>
+html,body{height:auto;overflow:auto}
+#c,header,.land,.panel,.bar,.list{display:none!important}
+.ns{max-width:38rem;margin:0 auto;padding:56px max(24px,var(--sar)) 72px max(24px,var(--sal))}
+.ns h1{margin:0;font-size:clamp(64px,14vw,112px);line-height:.85}
+.ns .head{margin:20px 0 0 3px;font-size:24px;line-height:1.25;font-weight:600;letter-spacing:-.02em}
+.ns .tag{margin:10px 0 0 4px;max-width:40ch;color:#3d3b35;text-wrap:pretty}
+.ns section{margin-top:44px;padding-top:20px;border-top:1px solid var(--rule)}
+.ns h2{margin:0;font:400 26px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em}
+.ns p{margin:10px 0 0;color:#2b2a26;max-width:62ch;text-wrap:pretty}
+.ns .lead{margin-top:8px;font-size:18px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+.ns b{font-weight:600;color:var(--ink)}
+.ns .out{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
+.ns .out a{color:var(--mute);text-decoration:none}
+.ns .out a:hover,.ns .out a:focus-visible{color:var(--ink)}
+</style></noscript>
 </head>
 <body>
 <canvas id="c" aria-hidden="true"></canvas>
+<noscript>
+  <main class="ns">
+    <h1 class="wmfont">hirsel</h1>
+    <p class="head">Good fences make fast systems.</p>
+    <p class="tag">A native systems language with explicit authority, logical byte budgets, and recorded replay. Unbounded generation, bounded execution.</p>
+    <section>
+      <h2>Safe</h2>
+      <p class="lead">Nothing is left lying on the hill.</p>
+      <p>An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. When a sheep leaves, its ground goes with it.</p>
+    </section>
+    <section>
+      <h2>Parallel</h2>
+      <p class="lead">Every task keeps to its own ground.</p>
+      <p>Tasks share nothing. A value passes from one task to another only by moving through a spawn, a channel or a join. The only memory two tasks can both read is the immutable payload of an Arc.</p>
+    </section>
+    <section>
+      <h2>Memory</h2>
+      <p class="lead">The type decides who frees.</p>
+      <p>An ordinary type has one owner, and its value is freed when the owner goes away. Data that dies together lives in one region and is freed at once. Sharing is opt-in and counted, and a move never copies the data a value owns.</p>
+    </section>
+    <section>
+      <h2>Bounded</h2>
+      <p class="lead">A full patch refuses the next mouthful.</p>
+      <p>Every allocation is made against a limit. Running out is the ordinary failure Capacity, which the program catches and handles, and then it carries on. Bound scopes nest one limit inside another.</p>
+    </section>
+    <section>
+      <h2>Deterministic</h2>
+      <p class="lead">One run, every time.</p>
+      <p>Given the same outside inputs and limits, a program behaves identically on every engine and build, down to the moment it runs out of memory. No flag, build mode, optimiser or engine changes what a program means. A run can be recorded from outside, without altering the program, and replayed.</p>
+    </section>
+    <section>
+      <h2>Explicit authority</h2>
+      <p class="lead">Only a sheep handed the key goes through the gate.</p>
+      <p>Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed.</p>
+    </section>
+    <section>
+      <h2>Local</h2>
+      <p class="lead">Each sheep needs only its own ground.</p>
+      <p>Correct code needs no global knowledge. Checking a definition reads only its own body and the declarations it names, and each refusal names one rule and one site.</p>
+    </section>
+    <section>
+      <h2>Fast</h2>
+      <p class="lead">A straight line across the hill.</p>
+      <p>Hirsel is a compiled systems language.</p>
+      <p><b>Build.</b> The compiler checks and lowers each definition once, reading only its own body and the declarations it names. It keeps checked definitions by their content, so a change rechecks only that definition and the ones that name a signature it changed.</p>
+      <p><b>Run.</b> Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.</p>
+    </section>
+    <p class="out"><a href="https://github.com/samgalanakis/hirsel">Source on GitHub &rarr;</a></p>
+  </main>
+</noscript>
 
 <header>
   <button class="wm wmfont" id="wm" aria-label="hirsel, back to the hill" hidden>hirsel</button>
@@ -243,9 +335,14 @@ header .menu:active{background:rgba(17,17,15,.06)}
     <!-- On the real site the run could be streamed over SSE from a seeded simulation on the server. -->
     <button id="replayBtn"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 8a5.25 5.25 0 1 0 1.6-3.78"/><path d="M2.6 1.9v2.9h2.9"/></svg>Replay the run</button>
   </div>
+  <div class="deep" id="deep">
+    <button id="codeBtn" aria-expanded="false" aria-controls="code">In code<svg viewBox="0 0 10 10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 2 6.5 5l-3 3"/></svg></button>
+    <div class="code" id="code" role="region" aria-labelledby="codeBtn" hidden><pre id="codeTxt"></pre></div>
+  </div>
   <div class="walk">
     <button id="prevBtn"><i class="ar" aria-hidden="true">&larr;</i> <span></span></button>
     <button class="nx" id="nextBtn"><span></span> <i class="ar" aria-hidden="true">&rarr;</i></button>
+    <a class="nx" id="endLink" href="https://github.com/samgalanakis/hirsel" hidden>Source on GitHub <i class="ar" aria-hidden="true">&rarr;</i></a>
   </div>
 </section>
 
@@ -256,6 +353,7 @@ header .menu:active{background:rgba(17,17,15,.06)}
     <span class="ticks" id="ticks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
   </button>
   <button class="step" id="bNext"><i class="ar" aria-hidden="true">&rarr;</i></button>
+  <a class="step" id="bEnd" href="https://github.com/samgalanakis/hirsel" aria-label="Source on GitHub" hidden><svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </nav>
 
 <dialog class="list" id="list" aria-label="All views">
@@ -302,6 +400,73 @@ const COPY = {
     ['Hirsel is a compiled systems language.',
       ['build', 'The compiler checks and lowers each definition once, reading only its own body and the declarations it names. It keeps checked definitions by their content, so a change rechecks only that definition and the ones that name a signature it changed.'],
       ['run', 'Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.']]],
+};
+/* In code: each property as real Hirsel, opened on request. Every program here is checked by
+   `hirsel check` as shown (refusals cite the rule the checker prints); the shell lines are
+   transcripts. no: the line numbers (from 0) of the one refusal or failure, set in red. */
+const CODE = {
+  safe: { no: [2], src: [
+    'fn keep(take name: String) -> String {',
+    '  let kept = name',
+    '  name       // refused: OWN-5, name moved',
+    '}'] },
+  parallel: { no: [6, 7], src: [
+    'fn count(ts: Tasks, take ws: List[String])',
+    '    -> Task[u64] {',
+    '  task.spawn(ts, bytes 4096, take ws,',
+    '    fn(take w: List[String]) -> u64 {',
+    '      list.len(w) })',
+    '}',
+    'type Job: send { seen: Rc[String] }',
+    '  // refused: CONC-2, Rc is not send'] },
+  memory: { no: [], src: [
+    'fn width(take s: String) -> u64 {',
+    '  let owned = s        // moved: one owner',
+    '  region r {',
+    '    let t = text.copy_in(r, owned)',
+    '    text.len(t)',
+    '  }                    // r freed at once',
+    '}'] },
+  bounded: { no: [6], src: [
+    'fn fill() -> Result[List[u64], Capacity] {',
+    '  bound bytes 64 { list.with_capacity(100) }',
+    '}',
+    'fn fits() -> bool {',
+    '  match isolate(fill) {',
+    '    Ok(Ok(Ok(_))) => true,',
+    '    _ => false,  // ran out: Capacity, caught',
+    '  }',
+    '}'] },
+  deterministic: { no: [], src: [
+    '$ hirsel run app --record run.tape \\',
+    '    --grant Stdout --grant Clock',
+    '14915150',
+    '$ hirsel replay app --tape run.tape',
+    '$ echo $?    # 0: Sealed, the same run',
+    '0'] },
+  authority: { no: [4], src: [
+    'fn stamp(c: Clock) -> u64 {',
+    '  host.mono_ns(c)',
+    '}',
+    'fn sneak() -> u64 {',
+    '  host.mono_ns()  // refused: CAP-1, no Clock',
+    '}'] },
+  local: { no: [5], src: [
+    'fn twice(n: u64) -> u64 { n + n }',
+    'fn quad(n: u32) -> u64 {',
+    '  twice(n)    // reads twice\'s signature only',
+    '}',
+    '$ hirsel check',
+    'main.hirsel:3:9-10: LANG-11 expected `u64`, found `u32`'] },
+  fast: { no: [], src: [
+    '$ hirsel check          # nothing changed',
+    'accepted: 99 files, 0 checked definitions',
+    '$ # edit the body of twice',
+    '$ hirsel check',
+    'accepted: 99 files, 1 checked definitions',
+    '$ # make twice private; quad calls it',
+    '$ hirsel check',
+    'accepted: 99 files, 2 checked definitions'] },
 };
 
 /* ---------- seeded randomness ---------- */
@@ -497,8 +662,11 @@ function geom(view, pe) {
   const hd = document.querySelector('header').getBoundingClientRect();
   g.hdB = hd.bottom; g.rTo = hd.bottom + (MOB ? 36 : 64);
   pe = pe || $('panel'); const by = g.rTo + RIDGE_B() + 12;
-  pe.style.top = STACK ? '' : Math.round(H / 2) + 'px';
+  pe.style.top = STACK ? '' : Math.round(H / 2) + 'px'; pe.style.maxHeight = '';
   const pn = pe.getBoundingClientRect(); g.pn = pn;
+  /* side by side, the scene balances the words alone: the In code row and its snippet hang below
+     them and move nothing. Stacked, the scene stands above the whole panel, open or closed. */
+  g.ph = STACK ? pn.height : pn.height - pe.querySelector('.deep').getBoundingClientRect().height;
   if (STACK) { const m = MOB ? 16 : 32; g.box = { x: m, y: by, w: W - 2 * m, h: pn.top - 14 - by }; }
   else { const x0 = pn.right + (W <= 1000 ? 44 : 64); g.box = { x: x0, y: by, w: W - 48 - x0, h: H - 52 - by }; }
   return g;
@@ -509,7 +677,7 @@ function geom(view, pe) {
    tighter one); side by side, the text shares the scene's middle. */
 const BAND = () => STACK ? { minSky: 36, minGap: MOB ? 10 : 22, maxGap: 84 } : { minSky: 64, minGap: 36, maxGap: 150 };
 function band(g, eh) {
-  const RB = RIDGE_B(), Hc = STACK ? eh : Math.max(eh, g.pn.height);
+  const RB = RIDGE_B(), Hc = STACK ? eh : Math.max(eh, g.ph);
   return { Hc, top: g.hdB + RB, bot: STACK ? g.pn.top - 12 : H - 20 };
 }
 /* a hidden stand-in for the panel, so any view's text can be measured without touching the live one */
@@ -520,6 +688,7 @@ function ghostOf(v) {
     ghost.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
     ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.style.visibility = 'hidden';
     ghost.querySelectorAll('*').forEach(el => { el.style.opacity = el.style.transform = ''; });
+    ghost.classList.remove('open'); ghost.style.maxHeight = '';
     document.body.append(ghost);
   }
   ghost.hidden = false; fillPanel(ghost, v);
@@ -542,6 +711,14 @@ function skyNow() {
   ghost.hidden = true;
   return SKY = Math.max(B.minSky, Math.round(sky));
 }
+/* side by side: the words' top edge stays where it was without the In code row, so the row and an
+   open snippet hang below them. Centred on the same middle as before while the whole panel fits,
+   which keeps the closed panel on the very pixels it had; pinned and scrolling once it does not. */
+function placePanel(pe) {
+  const mid = +pe.dataset.mid, ph = +pe.dataset.ph, full = ph + pe.querySelector('.deep').getBoundingClientRect().height, top = mid - ph / 2;
+  if (top + full <= H - 16) { pe.style.top = mid + 'px'; pe.style.transform = 'translateY(calc(-50% + ' + (full - ph) / 2 + 'px))'; pe.style.maxHeight = ''; }
+  else { pe.style.top = top + 'px'; pe.style.transform = 'none'; pe.style.maxHeight = (H - top - 16) + 'px'; }
+}
 /* place a view under that ridge: the text column and the scene share one middle, set halfway down
    the ground between the ridge flock and the foot of the band. A scene that cannot fit is drawn
    smaller about its own centre. Moves are translations of the scene box, so a scene's own
@@ -551,13 +728,15 @@ function fit(v, g, sc) {
   for (let it = 0; ; it++) {
     const [t0, t1] = sc.ext, eh = t1 - t0, bd = band(g, eh), room = bd.bot - (rTo + RIDGE_B()) - bd.Hc;
     const b = g.box;
-    if (it < 5 && room < 2 * B.minGap - .5 && (STACK || eh >= g.pn.height)) {
+    if (it < 5 && room < 2 * B.minGap - .5 && (STACK || eh >= g.ph)) {
       const k = Math.max(.5, (eh - (2 * B.minGap - room)) / eh);
       g = { ...g, box: { x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k } };
       sc = SC[v](g); sc.g = g; continue;
     }
     const M = rTo + RIDGE_B() + Math.max(0, room / 2) + bd.Hc / 2;
-    if (!STACK) pe.style.top = Math.round(M) + 'px';
+    /* the words keep the middle they had; the panel's top is pinned there, so an open snippet
+       grows down, and scrolls inside the panel once it reaches the foot of the window */
+    if (!STACK) { pe.dataset.mid = Math.round(M); pe.dataset.ph = g.ph; placePanel(pe); }
     g = { ...g, rTo, box: { ...b, y: b.y + M - (t0 + t1) / 2 } }; sc = SC[v](g); sc.g = g; return sc;
   }
 }
@@ -586,7 +765,7 @@ const SC = {};
 
 SC.hill = (g) => {
   const land = document.getElementById('land').getBoundingClientRect();
-  const ex = { l: land.left - 30, r: land.right + 40, t: land.top - (MOB ? 30 : 34) };
+  const ex = { l: land.left - 30, r: land.right + 96, t: land.top - (MOB ? 30 : 34) };
   /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it.
      A big screen sizes the patches so the whole flock grazes the near slope. A phone keeps them
      big enough to read, takes as many as fit whole above the name, and leaves the rest of the
@@ -1407,7 +1586,7 @@ function setView(v, first) {
   if (first) {
     const lk = document.querySelector('header .links'), wk = $('panel').querySelector('.walk');
     if (v === 'hill') textIn([...$('land').children, lk], [8, 36, 42, 54, 60]);
-    else textIn([$('wm'), $('idx'), lk, $('pTitle'), $('pBody'), $('det'), wk, $('bar')], [8, 12, 16, 30, 35, 40, 45, 45]);
+    else textIn([$('wm'), $('idx'), lk, $('pTitle'), $('pBody'), $('det'), $('deep'), wk, $('bar')], [8, 12, 16, 30, 35, 40, 42, 45, 45]);
   }
   if (instant) { pan = panB; rb = rbB; }
   if (!instant) plan();
@@ -1475,6 +1654,8 @@ document.addEventListener('visibilitychange', () => { last = null; acc = 0; });
 
 /* ---------- page ---------- */
 const $ = id => document.getElementById(id);
+/* In code: closed on every load, then the reader's choice holds from view to view */
+let codeOpen = false;
 const strip = $('strip'), idxBtns = [...strip.querySelectorAll('button')], list = $('list'), listBtns = [...list.querySelectorAll('ol button')], ticks = [...$('ticks').children];
 /* words arrive as the flock settles, on the flock's own tick clock: the old text goes at once and
    the new rises in behind the walk. Only opacity and transform are written, never read back. */
@@ -1508,7 +1689,13 @@ function fillPanel(root, v) {
   const pv = i > 0 ? VIEWS[i - 1] : null, nx = i < VIEWS.length - 1 ? VIEWS[i + 1] : null, wb = q('.walk').children;
   wb[0].hidden = !pv; wb[0].querySelector('span').textContent = pv ? COPY[pv][0] : '';
   wb[1].hidden = !nx; wb[1].querySelector('span').textContent = nx ? COPY[nx][0] : '';
+  wb[2].hidden = !!nx;
   q('.det').hidden = v !== 'deterministic' || reduced;
+  /* the snippet: one line per span, set as text; the stand-in always measures it closed */
+  const k = CODE[v], open = codeOpen && root === $('panel'), pre = q('pre');
+  pre.replaceChildren(...k.src.map((l, j) => { const sp = document.createElement('span'); sp.textContent = l; if (k.no.includes(j)) sp.className = 'no'; return sp; }));
+  q('.code').hidden = !open; q('.deep>button').setAttribute('aria-expanded', open ? 'true' : 'false');
+  root.classList.toggle('open', open);
 }
 function renderDom(v, quiet) {
   const hill = v === 'hill', i = VIEWS.indexOf(v), c = COPY[v], wasHill = $('panel').hidden;
@@ -1522,11 +1709,12 @@ function renderDom(v, quiet) {
     $('bNow').setAttribute('aria-label', c[0] + ', ' + i + ' of ' + (VIEWS.length - 1) + '. All views');
     $('bPrev').disabled = !pv; $('bPrev').setAttribute('aria-label', pv ? 'Back to ' + COPY[pv][0] : 'Back');
     $('bNext').disabled = !nx; $('bNext').setAttribute('aria-label', nx ? 'On to ' + COPY[nx][0] : 'On');
+    $('bNext').hidden = !nx; $('bEnd').hidden = !!nx;
   }
   $('det').hidden = v !== 'deterministic' || reduced;
   if (quiet) return;
   if (hill) textIn([...$('land').children], 26, 5);
-  else textIn([...(wasHill ? [$('wm'), $('idx')] : []), $('pTitle'), $('pBody'), $('det'), $('panel').querySelector('.walk'), ...(wasHill ? [$('bar')] : [])], view === null || arr >= 0 ? 20 : 30, 5);
+  else textIn([...(wasHill ? [$('wm'), $('idx')] : []), $('pTitle'), $('pBody'), $('det'), $('deep'), $('panel').querySelector('.walk'), ...(wasHill ? [$('bar')] : [])], view === null || arr >= 0 ? 20 : 30, 5);
 }
 function go(d) { setView(VIEWS[Math.max(0, Math.min(VIEWS.length - 1, VIEWS.indexOf(view) + d))]); }
 
@@ -1580,6 +1768,43 @@ $('replayBtn').addEventListener('click', () => {
   /* the mark turns back once, as the run does */
   const ic = $('replayBtn').querySelector('svg'); if (ic && ic.animate) ic.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(-360deg)' }], { duration: 700, easing: EASE });
 });
+/* In code: on a side-by-side layout the snippet unrolls below the words and nothing else moves;
+   stacked, the scene above walks to the room the panel leaves it */
+let codeAnim = null;
+$('codeBtn').addEventListener('click', () => {
+  codeOpen = !codeOpen;
+  const pe = $('panel'), box = $('code'), side = !STACK && !reduced && !!box.animate;
+  if (codeAnim) { codeAnim.cancel(); codeAnim = null; }
+  renderDom(view, true);
+  if (STACK) relayout();
+  /* while the box unrolls or folds, the words hold their top edge; once it rests, the panel is placed */
+  else if (side) { const top = +pe.dataset.mid - pe.dataset.ph / 2; pe.style.top = top + 'px'; pe.style.transform = 'none'; pe.style.maxHeight = (H - top - 16) + 'px'; }
+  else placePanel(pe);
+  /* a panel too short for the snippet scrolls to it, never past the row that opened it */
+  if (codeOpen && pe.scrollHeight > pe.clientHeight + 1) {
+    const btn = $('codeBtn'), to = Math.min(box.offsetTop + box.offsetHeight + 12 - pe.clientHeight, btn.offsetTop - 8);
+    if (to > pe.scrollTop) pe.scrollTo({ top: to, behavior: reduced ? 'auto' : 'smooth' });
+  }
+  if (reduced || !box.animate) return;
+  const fold = [{ height: 0, opacity: 0, marginTop: 0, paddingTop: 0, paddingBottom: 0 }];
+  if (codeOpen) {
+    codeAnim = box.animate(STACK ? [{ opacity: 0 }, { opacity: 1 }] : fold.concat({ height: box.offsetHeight + 'px', opacity: 1 }), { duration: 260, easing: EASE });
+  } else if (side) {
+    box.hidden = false;
+    codeAnim = box.animate([{ height: box.offsetHeight + 'px', opacity: 1 }].concat(fold), { duration: 200, easing: EASE });
+  }
+  if (codeAnim) codeAnim.onfinish = () => { codeAnim = null; if (!codeOpen) box.hidden = true; if (!STACK) placePanel(pe); };
+});
+/* re-place the current view for a panel that changed height: the flock walks to its new ground */
+function relayout() {
+  if (reduced) { rebuild(); return; }
+  if (tr < 1) { refit = true; return; }
+  const keepT = sT;
+  fading = [{ sc: scene, t: sT, g: 1, o: 1 }];
+  snap = rend.map(r => ({ ...r }));
+  scene = build(view); bindScene(scene, assign(scene, snap));
+  panA = pan; rbA = rb; panB = scene.g.pTo; rbB = scene.g.rTo; sT = keepT; tr = 0; plan();
+}
 addEventListener('hashchange', () => { const h = viewOf(location.hash.slice(1)); if (list.open) list.close(); if (VIEWS.includes(h)) setView(h); });
 addEventListener('keydown', e => {
   swiped = false;
@@ -1631,6 +1856,32 @@ addEventListener('pointerup', endTouch, true);
 addEventListener('pointercancel', endTouch, true);
 /* the tap a stroke ends on is not also a press */
 addEventListener('click', e => { if (swiped) { swiped = false; e.preventDefault(); e.stopPropagation(); } }, true);
+/* the wheel: one notch or one trackpad stroke walks one view, through the same go(). Deltas add up
+   until they pass a step; then the wheel is held until the walk has landed and the wheel has been
+   quiet a moment, so a stroke's long inertial tail never walks on past the next view. A wheel over
+   anything that can still scroll that way scrolls it instead; pinch zoom (ctrlKey) and sideways
+   strokes are the browser's. */
+const WH = { STEP: 60, QUIET: 350, LINE: 40, GAP: 200 };
+let whAcc = 0, whAt = -1e9, whHeld = false;
+function scrollsFurther(el, dy) {
+  for (let n = el; n && n.nodeType === 1 && n !== document.body; n = n.parentElement) {
+    if (n.scrollHeight <= n.clientHeight + 1 || !/auto|scroll/.test(getComputedStyle(n).overflowY)) continue;
+    if (dy > 0 ? n.scrollTop + n.clientHeight < n.scrollHeight - 1 : n.scrollTop > 0) return true;
+  }
+  return false;
+}
+addEventListener('wheel', e => {
+  if (e.ctrlKey || list.open) return;
+  const k = e.deltaMode === 1 ? WH.LINE : e.deltaMode === 2 ? innerHeight : 1, dx = e.deltaX * k, dy = e.deltaY * k;
+  if (!dy || Math.abs(dx) >= Math.abs(dy)) return;
+  const t = e.timeStamp, gap = t - whAt; whAt = t;
+  if (scrollsFurther(e.target, dy)) { whAcc = 0; return; }
+  if (whHeld) { if (tr < 1 || gap < WH.QUIET) return; whHeld = false; }
+  if (gap > WH.GAP || Math.sign(dy) !== Math.sign(whAcc)) whAcc = 0;
+  whAcc += dy;
+  if (Math.abs(whAcc) < WH.STEP) return;
+  const d = whAcc > 0 ? 1 : -1; whAcc = 0; whHeld = true; go(d);
+}, { passive: true });
 const nearRed = (x, y) => { const r = rend[REDI]; return Math.hypot(x - r.x, y - (r.y - r.s * .45)) < Math.max(18, r.s * .6); };
 cv.addEventListener('click', e => { if (view === 'hill' && nearRed(e.clientX, e.clientY)) go(1); });
 cv.addEventListener('mousemove', e => { cv.style.cursor = view === 'hill' && nearRed(e.clientX, e.clientY) ? 'pointer' : ''; });

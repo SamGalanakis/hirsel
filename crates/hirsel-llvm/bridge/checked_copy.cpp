@@ -19,9 +19,11 @@
 #include <optional>
 #include <memory>
 #include <llvm/ADT/MapVector.h>
+#include <llvm/ADT/SCCIterator.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/BlockFrequencyInfo.h>
+#include <llvm/Analysis/CallGraph.h>
 #include <llvm/Analysis/BranchProbabilityInfo.h>
 #include <llvm/Analysis/PostDominators.h>
 #include <llvm/Analysis/CycleAnalysis.h>
@@ -979,6 +981,12 @@ static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
 // A recursive helper unrolls at most 8 copies deep along one inlining chain
 // (GCC's max-inline-recursive-depth-auto): unbounded, Havlak's loop nesting
 // pass spent its whole budget on 41 copies of one helper.
+// A helper recursive with its caller (one call-graph SCC) grows that caller
+// at most 450 instructions (GCC's max-inline-insns-recursive-auto, as the
+// front end's exposure pass): 8 copies deep still let LangArena's sort and
+// parser cycles take in each other's whole recursion. A helper's own
+// recursion into a caller outside its cycle keeps the depth bound alone:
+// Queens' search specializes 8 levels into its driver loop.
 // A slow path of loop L: between L's header and BB, the dominator chain
 // enters a block only through a two-way edge whose weights make it rarer than
 // one in eight. Those are Hirsel's 2000:1 failure and growth weights and the
@@ -1002,6 +1010,18 @@ static bool slowPath(BasicBlock &BB, Loop &L, DominatorTree &DT, LoopInfo &LI,
 }
 
 static void inlineLoopHelpers(Module &M) {
+  DenseMap<const Function *, unsigned> Scc;
+  {
+    CallGraph CG(M);
+    unsigned N = 0;
+    for (auto I = scc_begin(&CG); !I.isAtEnd(); ++I, ++N)
+      for (CallGraphNode *Node : *I)
+        if (Function *G = Node->getFunction()) Scc[G] = N;
+  }
+  auto Mutual = [&](const Function *A, const Function *B) {
+    auto I = Scc.find(A), J = Scc.find(B);
+    return I != Scc.end() && J != Scc.end() && I->second == J->second;
+  };
   for (Function &F : M) {
     // A lent body is a helper here, never a caller.
     if (F.isDeclaration() || F.hasAvailableExternallyLinkage()) continue;
@@ -1016,6 +1036,7 @@ static void inlineLoopHelpers(Module &M) {
         Copies += History[Entry].first == Target;
       return Copies >= 8;
     };
+    DenseMap<Function *, unsigned> RecursiveGrowth;
     struct Candidate {
       CallBase *Call;
       int Entry;
@@ -1064,6 +1085,8 @@ static void inlineLoopHelpers(Module &M) {
           Call->hasFnAttr(Attribute::NoInline)) continue;
       unsigned Cost = expansionCost(*Target);
       if (Cost > Budget) continue;
+      bool Recursive = Mutual(Target, &F);
+      if (Recursive && RecursiveGrowth[Target] + Cost > 450) continue;
       // A looping helper amortizes its call. Repeating the same expansion
       // into a shared unwind join extends the cleanup state's live ranges.
       // Calls with different operands can specialize independently.
@@ -1074,6 +1097,7 @@ static void inlineLoopHelpers(Module &M) {
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) {
         Budget -= Cost;
+        if (Recursive) RecursiveGrowth[Target] += Cost;
         if (Group) ExpandedUnwinds.insert(Group);
         History.push_back({Target, Entry});
         for (CallBase *Site : Info.InlinedCallSites)

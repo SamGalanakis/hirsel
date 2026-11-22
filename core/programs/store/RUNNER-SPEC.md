@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.25.1: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.26: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,20 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.26 (cold places under the platform host: the wake row, the idle stop, the clean report and the deploy trigger scan; lane platform-host-spec-1741)
+
+Agent Platform 2027 (ratified 2026-11-22, Topics 2 and 3) runs places cold by default under a Hirsel platform host (docs/spec/launch.md "Platform host and launcher"). §13.5 said an unloaded place is not woken for a trigger. That rule is reopened for platform places in a new §14. Text only, **unbuilt**; every new law is **UNTESTED**.
+
+| # | Point | Decision | What v2.26 says | Basis |
+|---|---|---|---|---|
+| 1 | Waking a cold place | **RATIFIED (T3-Q1 = A)** | One generation-fenced row per place in the host catalog, `Dirty(gen) \| Clean(Option[next_due])`; the host wakes a `Clean(Some(t))` place at wall time t | §14.1, §14.3 |
+| 2 | Capacity | **RATIFIED** | Checked before `Dirty` is written; `dirty` ≤ `max_places` in every committed state; lowering below it is refused | §14.2 |
+| 3 | Only a clean stop writes `Clean` | **RATIFIED** | `Ended` becomes `Stopped(Option[u64]) \| Forced(u64)`; `runner.main --hirsel-wake` reports `next_due`; any other end leaves `Dirty` and a probe | §14.4, §14.5 |
+| 4 | Idle stop | **DECIDED here; reversible** | `PlaceConfig.idle`; idle needs no session, no worker, no active run and no trigger due within the idle time | §14.4 |
+| 5 | Deploy trigger scan | **RATIFIED** | Runs in the prepare child after the staged migration, with the head's own dispatch code; exact, or `Limit(triggers)` | §14.6, launch.md |
+| 6 | Image-digest retry guard | **RATIFIED: kept** | Started granted runs keep the launch image-digest stamp; the scan reports them `held` | §14.6 |
+| 7 | The §13 directory | **DECIDED here; reversible until P6 lands** | Superseded by the platform host; deleted once the host's harness covers PD1 to PD4 | §14.8 row 9 |
 
 ## CHANGES-v2.25.1 (an owner stages every Update already queued in one delivery job; lane checkbox-repair-1670)
 
@@ -1275,10 +1289,11 @@ pub type PlaceConfig[G: send, H: send, S: send]: send {
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
     triggers: Option[TriggerConfig[G, S]],
+    idle: Option[u64],   // v2.26: the idle stop (§14.4); None for runner.main and the fixture
     wire: Option[Wire[G]],   // v2.24: None refuses wire calls to Granted entries and gives every session a fresh anonymous Caller
 }
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
-pub type Ended: codec + send = Stopped | Forced(u64)
+pub type Ended: codec + send = Stopped(Option[u64]) | Forced(u64)   // v2.26: Stopped carries next_due (§14.4)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
@@ -1553,7 +1568,7 @@ One task, the directory, owns the state of every name and is the only task that 
 
 - **Release check (v2.19.x).** It holds within one instance, and no session crosses instances. An instance unloads only through its drain: every session ends before the head halts the publisher, so no frame of the old instance can be sent after it. The next instance has a new publisher whose base is the store's durable version at its open, and new sessions with new fences. Its clients reconnect and subscribe from scratch, so every row they get passes the new publisher's check.
 - **Committed writes.** A drain answers only what was admitted, and the head closes the `Db` after the last commit is durable (§12.1). The reopen opens the same store, so every acknowledged commit is there.
-- **Triggers.** The directory does not wake an unloaded place for a scheduled trigger (unlike a Durable Object alarm). A trigger that comes due while its place is unloaded runs once at the next open, in (due time, identity) order (ENDSTATE `storage-triggers`, ENDSTATE.md line 1117). The head already does this: it arms from the first pending trigger at open, and one that is past due runs at once. An owner that needs a trigger on time keeps a lease on its place.
+- **Triggers.** (v2.26: this rule is the directory's only. A place under the platform host is woken for its triggers, §14.) The directory does not wake an unloaded place for a scheduled trigger (unlike a Durable Object alarm). A trigger that comes due while its place is unloaded runs once at the next open, in (due time, identity) order (ENDSTATE `storage-triggers`, ENDSTATE.md line 1117). The head already does this: it arms from the first pending trigger at open, and one that is past due runs at once. An owner that needs a trigger on time keeps a lease on its place.
 
 ### 13.6 Laws
 
@@ -1568,6 +1583,114 @@ Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-back
 
 ### 13.7 Prior art (each source opened)
 
-- **Cloudflare Durable Objects** (workerd 7c4518fa, src/workerd/server/server/actor.rs). One container per id in one map (`actors`, :118). An idle object is evicted after `IDLE_SHUTDOWN_DELAY` = 10 s (:80, idle timer :1544–1563). Eviction is refused while a strong reference remains, because it "could leave two instances" (:1570–1590); a client handle's drop updates the access time (:2342–2357). A get during retirement waits for it and then starts fresh (:1357–1392). Alarms keep the object's name and wake it after eviction (src/workerd/server/server/factory/worker-factory-actor.c++:691). **Taken:** one instance per id, a lease as the strong reference, wait-then-fresh. **Not taken:** alarm wake-up; our triggers run at the next open (§13.5).
+- **Cloudflare Durable Objects** (workerd 7c4518fa, src/workerd/server/server/actor.rs). One container per id in one map (`actors`, :118). An idle object is evicted after `IDLE_SHUTDOWN_DELAY` = 10 s (:80, idle timer :1544–1563). Eviction is refused while a strong reference remains, because it "could leave two instances" (:1570–1590); a client handle's drop updates the access time (:2342–2357). A get during retirement waits for it and then starts fresh (:1357–1392). Alarms keep the object's name and wake it after eviction (src/workerd/server/server/factory/worker-factory-actor.c++:691). **Taken:** one instance per id, a lease as the strong reference, wait-then-fresh. **Not taken** by the directory: alarm wake-up; its triggers run at the next open (§13.5). **Taken** by the platform host in v2.26 (§14.9).
 - **Orleans** (af30f59f). Idle activations are collected after `CollectionAge` (15 min), scanned every `CollectionQuantum` (1 min) (src/Orleans.Runtime/Configuration/Options/GrainCollectionOptions.cs:14–24; Catalog/ActivationCollector.cs ScanStale :243–282). Requests that arrive while an activation deactivates are held and forwarded after it completes, not given the old activation (src/Orleans.Runtime/Catalog/ActivationData.cs:1295–1316, :2335–2360). Under memory pressure it collects regardless of keep-alive (Catalog/ActivationCollector.cs:447). **Taken:** hold opens during deactivation, sweep on a period. **Not taken:** memory-pressure eviction; we refuse when full.
 - **Akka cluster sharding** (49e479e8). Idle passivation with a 120 s default timeout, checked every half the timeout (akka-cluster-sharding/src/main/resources/reference.conf:55, :92; akka-cluster-sharding/src/main/scala/akka/cluster/sharding/internal/EntityPassivationStrategy.scala:147–167). Messages for a passivating entity are buffered and the entity restarts when passivation completes if any arrived (akka-cluster-sharding/src/main/scala/akka/cluster/sharding/Shard.scala:457–459, :820–823, :1044–1060); passivation is ignored while messages are buffered (:976–1000). **Taken:** sweep at half the idle time, buffer and restart. **Not taken:** limit-based passivation (evicting least-recently-used entities); see §13.4.
+
+## 14. Cold places under the platform host (new in v2.26; unbuilt)
+
+A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. Everything here is **unbuilt** and its laws are **UNTESTED**. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
+
+The rule in one line: a place that a commit has given a future trigger is woken for it, and the host can always tell, from one durable row per place, whether it knows the place's next due time or must start the place to find out.
+
+### 14.1 The wake row
+
+The host's catalog has one row per authority group (one place) in its `wake` table:
+
+```hirsel
+pub type Wake: codec + send = Dirty(u64) | Clean(Option[u64])
+pub type WakeRow: codec + send { wake: Wake, gen: u64 }
+```
+
+- `Dirty(gen)`: a process with generation `gen` may hold, or may have held, the place's store, and the host does not know the place's triggers. The place must run to find out.
+- `Clean(next_due)`: no process holds the store, and `next_due` is the due time of the place's first pending trigger, in `at` units (`store.CallInfo.at`, wall milliseconds), or `None` when it has none that can run.
+- `gen` counts the starts of the place. It only grows, and each start gets the next value.
+
+Every change of a wake row is a transaction of the host's own store. The host waits for that commit to be durable before it acts on it (it launches nothing on a `Dirty` that could still be lost). So every argument below is about the order of the host's commits and of the facts the launcher reports, never about the order of tasks in one run (CONC-10, SEM-8 and CAP-8 promise none that this needs).
+
+### 14.2 Capacity
+
+The host's `config` row holds `max_places`, and the `wake` table keeps a count `dirty` of its `Dirty` rows, updated in the same transaction as every row change.
+
+- **Check before `Dirty`.** A transaction that turns a `Clean` row into `Dirty` first reads `dirty`. If `dirty` ≥ `max_places`, it commits nothing and the start is refused `Full(Count(max_places))`. Otherwise it writes `Dirty(gen + 1)`, raises `gen` and `dirty`, and commits. A row that is already `Dirty` (the place is live, being started, or being probed) is re-marked `Dirty(gen + 1)` without a check, because `dirty` does not change.
+- **The invariant.** `dirty` ≤ `max_places` holds in every committed state, because the host's store runs one writer and every transaction that raises `dirty` checks it.
+- **Lowering the bound.** A `config` change that sets `max_places` below the current `dirty` is refused `Busy(dirty)`. The operator stops places first. So the invariant holds across changes, and no rule reads a historical bound.
+- **No eviction** (§13.4). A full host refuses or queues a start. It never stops a live place to make room.
+- Each tenant's live-group quota is checked in the same transaction, the same way.
+
+### 14.3 Waking
+
+A place is woken by any of these:
+
+- **Arrival.** The launcher reports `Arrived(group)` when a cold group's listener becomes readable. The connection waits in the backlog, and the new process accepts it from the inherited listener (launch.md "Routing").
+- **Due time.** The host keeps an index of `Clean(Some(t))` rows by `t`. It waits for the earliest `t` with an absolute wall-time wait on its `Clock`, and wakes that place when the wall clock reads `t` or later. A trigger is due when the next commit's `at` is at least its due time (ENDSTATE T1), and that `at` is at least the wall clock, so the trigger is due when the woken head reads it. A wake that comes early because the clock stepped back is harmless: the head arms its timer for the trigger as at any open, and the idle rule (§14.4) keeps the place up until it runs.
+- **Operator or deploy.** A deploy, an install, a genesis or an operator request to a cold place first wakes it. Every launch that opens the place's store goes through `Dirty`, so `next_due` is never stale after one of them.
+
+A wake runs the check of §14.2. On success the host launches the serving child with the selected activation, and the launcher tags the child with `gen`. On `Full`, the wake stays queued in the host's memory, in (time of the wake's cause, group name) order, and is retried when a place's row leaves `Dirty`. The trigger then runs late, which ENDSTATE T2 already allows: it runs once, and sees how late it is from its own `at`. The host reports each queued wake and its age in its status, so a lateness is never hidden.
+
+### 14.4 The idle stop and the clean report
+
+**Idle (extends §12.1).** `PlaceConfig` gains `idle: Option[u64]`, an idle time in milliseconds; `Some(0)` is refused `Missing("idle")`. With `Some(i)`, `operate` stops the place itself when it is idle for `i`. A place is **idle** when all of these hold:
+- S holds no session;
+- H holds no worker and no FIFO entry, and its trigger drive has no active run;
+- H has no pending trigger, other than a parked one, that is due before `at` + `i`, where `at` is `store.next_call_info(db).at`.
+
+H and S send `operate` a message each time their part becomes true or false. `operate` checks on a sweep every `i / 2` (at least 1 ms), as §13.2's directory does: a place idle at two sweeps `i` apart is stopped, by the same path as `StopRequested` (§12.1 "Draining"). An active granted run therefore keeps its place up. Without this rule, a drain would cut the run and the next start would run attempt n + 1, so a cold place would churn its attempts. The platform host sets `idle` for every place. `runner.main` and the fixture pass `None`.
+
+**The clean report (extends §12.1).** `Ended` becomes `Stopped(Option[u64]) | Forced(u64)`. On the drain's finish (§12.1 step 6), after the last commit is durable and before `store.close`, H reads `triggers.next_pending` on its last snapshot with no active run. It sends that row's due time, or `None`, to `operate` in its last message, and `operate` returns `Ok(Stopped(next_due))`. A parked trigger is skipped, as at dispatch: only a release, which is a transaction through an entry and so a wake, can make it runnable. A run that a drain cut is pending again, so its due time is in the past and the place is woken at once. A place without triggers returns `Stopped(None)`.
+
+`runner.main` launched with the private option `--hirsel-wake` writes `next_due` on the launcher's private report descriptor when it gets `Stopped(next_due)`, as one value-codec `Option[u64]`, and exits 0. It writes nothing for `Forced` or a `StartError`. The launcher forwards the report with the child's `gen` and its exit status.
+
+**Only a clean `Stopped` writes `Clean`.** The host writes `Clean(next_due)` in one transaction that requires the row to be `Dirty(gen)` with the report's `gen`, the exit status to be 0 and the report to be present, and it lowers `dirty`. Any other end leaves the row `Dirty(gen)`: a crash, a kill, `Forced`, a `StartError`, an exit 0 with no report, a report from an older generation, or a lost report. The generation fence matters at a cutover: NEW is started at `gen + 1` while OLD drains, so OLD's later report names the old `gen` and changes nothing.
+
+### 14.5 Crashes and probes
+
+After a host or launcher restart, the launcher reports every child it had as ended (under containment, only once the child's container is empty). Every `Dirty` row whose place has no live child is then a **probe**: the host starts it without a capacity check, since it is already counted. The probe recovers the store, arms its triggers at open (§13.5: one past due runs at once), runs until it is idle, and writes `Clean` by the clean report. By the invariant, a restart probes at most `max_places` places, and it never scans `Clean` rows.
+
+- A probe or start that ends with a `StartError`, or is refused `Held` because a process the host no longer knows still holds the store, leaves the row `Dirty(gen)`, and so keeps its capacity. The host retries it with doubling delays from 1 s up to 5 min, and its status lists the group as failing with the last error. The operator ends it with a deploy, a retry or a removal. An `uncontained` child that survived the host can hold `Held` until it dies (EXEC-6 gives only best-effort death); a `contained` one cannot, because its container is emptied first.
+- While the host runs, a child that ends without a clean report (a crash, a kill, `Forced`, a lost report) leaves its row `Dirty` and is started again at once, as a probe. After `Forced` its store is at a crash cut, and the next open recovers it (§12.1 "At D").
+- Removing a group requires its row to be `Clean`.
+
+### 14.6 Deploys and pending triggers
+
+A deploy runs on a live place, so its row is `Dirty` for the whole deploy, and NEW's serving start re-marks it at `gen + 1`.
+
+**The preview scan** is launch.md "Deploy preview of pending triggers". It runs in the prepare child against the staged catalog, after `migrate`. `PrepareConfig` gains `triggers: triggers.Entries`, the same list the place passes in `TriggerConfig`. The scan classifies each pending row with the head's own dispatch code, as the manifest preview uses `answer_want` (§12.2): `trigger_key` is the one function that says whether NEW has the row's entry, and `triggers.start`'s revision comparison says whether a started granted run is held. So the scan cannot disagree with what NEW's head does. Its classes are `gone`, `held`, `changed` and `unchanged`. OLD's revisions come from the export's `current` activation row. The report is exact, and one that does not fit the prepare child's bound fails the preview with `Limit(triggers)`, never a truncated list.
+
+**The image-digest guard stays.** A granted trigger's revision stamp is the launch image digest (`make_trigger_drive`), and a start of attempt ≥ 2 under another digest parks the run with a `Revision` hold. `Exported.revision` does not cover `handles` (a table name, a binding, a key codec, an index extractor), so a revision-keyed guard would let a started run resume against changed handles. The scan reports these runs as `held`, so the operator sees, before the cutover, which runs need a release.
+
+### 14.7 Laws
+
+Each law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited.
+
+| Law | Wrong implementation it catches | Oracle |
+|---|---|---|
+| L39 `wake_due_after_unload`: a place commits a trigger due at t + 2 s and goes idle; its process ends with `Stopped(Some(t + 2000))`; with no arrival, the trigger's outcome is committed after wall time t + 2 s | the host keeps §13.5's no-wake rule, or writes `Clean(None)`, so the trigger never runs | §14.3, §14.4 |
+| L40 `trigger_scan_classes`: one OLD store holds a pending transact trigger for an entry NEW removes, a started granted run, one for an entry whose body NEW changes, and one for an unchanged entry; the scan reports `gone`, `held`, `changed` and `unchanged`, one each; NEW's head then consumes the first with `Gone` and parks the second with a `Revision` hold | the scan reads OLD's registry or the pre-migration catalog, or compares revisions for granted runs | §14.6, launch.md |
+| L41 `wake_dirty_capacity`: with `max_places` 2, two places are live and a third's due time comes; it is not started, its row stays `Clean`, and it starts when one of the two writes `Clean` | the host writes `Dirty` before the check, so a restart probes 3 > `max_places` places | §14.2 |
+| L42 `wake_only_clean_stop`: a child killed after its drain began, a child that ends `Forced`, and a child that exits 0 without a report each leave the row `Dirty`; each is started again as a probe, and so is each one left `Dirty` across a host restart, and its due trigger runs | the host writes `Clean` on any exit 0 or on `Draining` | §14.4, §14.5 |
+| L43 `wake_generation_fence`: during a cutover, OLD's clean report arrives after NEW is Ready; the row stays `Dirty(gen + 1)`, and NEW's idle stop then writes `Clean` | a report is accepted without its `gen`, so the host believes the place stopped while NEW serves, and a second start is refused `Held` | §14.4 |
+| L44 `idle_keeps_runs`: a granted run that waits on its outside step for 3 × `idle` keeps its place up, and records one attempt | idle counts sessions only, so the place drains, the run is cut, and attempt 2 runs | §14.4 |
+| L45 `wake_probe_bound`: after `max_places` places are left `Dirty` by kills and the host restarts with 10,000 `Clean` rows, it starts exactly the `Dirty` ones, and lowering `max_places` below them is refused `Busy` | the host probes every row, or accepts a lower bound and breaks the invariant | §14.2, §14.5 |
+
+### 14.8 What this changes elsewhere, and the conflicts
+
+| # | Existing rule | Conflict | Resolution |
+|---|---|---|---|
+| 1 | §13.5 "the directory does not wake an unloaded place" | the platform must wake one | §13.5 now names §14 for platform places. The directory keeps its rule until it is retired (row 9). |
+| 2 | §13.7 Durable Objects "Not taken: alarm wake-up" | §14 takes it | §13.7 is amended to say so. |
+| 3 | §13.6 PD4 `dir_reopen_keeps` | none: it tests the directory, which still runs a due trigger at the next open | unchanged |
+| 4 | §12.1 `Ended = Stopped \| Forced(u64)` | the clean report needs `next_due` | `Stopped(Option[u64])`. Every match on `Stopped` (the directory, the fixture, `main`) gains the field. Pre-1.0, nothing migrates. |
+| 5 | §12.1 "operate publishes at each phase change"; the watch channel of capacity 6 | the idle stop adds inputs to `operate` | The idle stop adds messages on `operate`'s own inbox, not phases. No new phase, no new `Status` publish, and the watch channel stays at six sends. |
+| 6 | §12.2 "the preview opens no store" | the trigger scan needs the store's rows | The scan runs in the prepare child, which already opens the export and stages the migration. The manifest preview is unchanged. |
+| 7 | ENDSTATE `storage-triggers` "after a long outage every trigger … runs once at the next open" | none | A wake is an open. Lateness under `Full` is T2's lateness. |
+| 8 | ENDSTATE `storage-runs` "a drain … is the same cut: the next start is attempt n + 1" | idle stops would cut runs | §14.4's idle rule counts active runs, so an idle stop never cuts one. An operator stop still does, as before. |
+| 9 | §13 directory (several places in one process) vs the authority group (one store, one process) | a directory runs several groups in one process | The directory is not a tenant mechanism. **Decided:** it is superseded by the platform host and is deleted once the host's harness covers PD1 to PD4 (lane P6). Reversible until that lane lands. |
+| 10 | rule 11 "no guard against our own implementation" | containment and the generation fence | Neither guards our own code. Containment bounds tenant code that is source-compiled but untrusted (T2-Q1). The fence orders reports from processes that really overlap during a cutover. |
+| 11 | "no hidden cap changes an answer" (host rules) | the scan, the probe set and the queued wakes | The scan is exact or fails `Limit(triggers)`. Probes are all `Dirty` rows, which the invariant bounds, and nothing is truncated. A `Full` delay is reported in the host status and changes no trigger's result. |
+
+### 14.9 Prior art (each source opened)
+
+- **Cloudflare workerd** (e9a7b9c, src/workerd/server/alarm-scheduler.c++). One alarm row per actor, `_cf_ALARM(actor_id, scheduled_time)` (:55-60). At startup it loads every row into memory and arms a timer for each (:81-99). An alarm runs only once the clock reads at least its time, and it re-waits if woken early (:180-192). A failed alarm is retried with backoff, up to `RETRY_MAX_TRIES` (alarm-scheduler.h:54-66, .c++:247-263). **ADOPTED:** one durable due-time row per place, and the clock re-check. **ADAPTED:** a row is `Clean(next_due)` only after a clean stop, and the scan at startup reads only `Dirty` rows, bounded by `max_places`, where workerd holds every alarm in memory (its own TODO, :84-85). **NOT TAKEN:** engine retries. A Hirsel trigger's failure is recorded and consumed, and re-arming is the program's choice (ENDSTATE triggers).
+- **Rivet** (de28d20, rivetkit-rust/packages/rivetkit-core/src/actor/). The actor pushes its next alarm to the engine before it sleeps (schedule.rs:902-916, :956-961). A new generation pushes again, and a stale alarm from an earlier generation "wakes the actor once with nothing due; it never drops a pending alarm" (schedule.rs:918-926). An actor may sleep only with no run handler, no connection and no HTTP request (sleep.rs:218-251). **ADOPTED:** sleep only when no run or connection is active (§14.4), and a generation on each start. **REPLACED:** Rivet tolerates a stale alarm, while §14 fences reports by generation and writes `Clean` only from a clean stop, so a crash leaves `Dirty` and a probe, never a lost wake.
+- **Goose** (d5ae5bb). A single-process language with no durable scheduler, no places and no process host. **NOT TAKEN:** nothing to take.

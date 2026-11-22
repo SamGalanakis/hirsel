@@ -1349,6 +1349,7 @@ impl Publication {
         let store = Store::new(&options.store)?;
         let mut release_sites = Vec::new();
         let mut release_debug_sites = Vec::new();
+        let mut remarks = Vec::new();
         let (mut objects, closed_image, launch_digest_unused) = if let Some(std) = std {
             let emitted = release_objects(
                 &self.units,
@@ -1361,6 +1362,7 @@ impl Publication {
             )?;
             release_sites = emitted.release_sites;
             release_debug_sites = emitted.release_debug_sites;
+            remarks = emitted.remarks;
             (
                 emitted.objects,
                 emitted.closed_image,
@@ -1399,7 +1401,7 @@ impl Publication {
             launch_digest_unused,
             &options,
         )?
-        .with_release_sites(&release_sites, &release_debug_sites)
+        .with_release_sites(&release_sites, &release_debug_sites, &remarks)
         .with_foreign(&self.recipe.foreign_modules);
         let result = link_objects(
             &plan,

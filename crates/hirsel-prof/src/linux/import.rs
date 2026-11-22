@@ -92,6 +92,24 @@ impl<'a> Import<'a> {
         Ok(())
     }
 
+    pub(crate) fn source_remarks(&mut self) -> Result<()> {
+        let main = self.main.clone();
+        for (def_path, instance, file, line, col, kind, outcome, count) in &main.remarks {
+            let id = self.function(&Function {
+                def_path: Some(def_path.clone()),
+                instance: instance.clone(),
+                name: def_path.clone(),
+                kind: "hirsel",
+            })?;
+            self.snapshot(file, *line)?;
+            self.db.execute(
+                "INSERT INTO codegen_remark VALUES (?1,?2,?3,?4,?5,?6,'source_remark',?7)",
+                (id, file, line, col, kind, outcome, Unsigned(*count)),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn record(&mut self, record: Record) -> Result<()> {
         let Record {
             time,

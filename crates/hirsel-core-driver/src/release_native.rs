@@ -148,8 +148,9 @@ struct Parts {
     parts: Vec<ContentHash>,
     sites: Vec<hirsel_core_ir::source::ReleaseSite>,
     debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+    remarks: Vec<hirsel_core_ir::source::CodegenRemark>,
 }
-const PARTS_SCHEMA: u32 = 4;
+const PARTS_SCHEMA: u32 = 5;
 
 type Held = (
     crate::store::Bare,
@@ -324,11 +325,13 @@ pub(super) fn emit_release_image(
     let mut held = Vec::new();
     let mut sites = Vec::new();
     let mut debug_sites = Vec::new();
+    let mut remarks;
     let mut lowered = None;
     let mut optimized_key = None;
     if let Some((record, objects)) = load_parts(store, &shared, unit)? {
         sites = record.sites;
         debug_sites = record.debug_sites;
+        remarks = record.remarks;
         held = objects;
     } else if closed_executable
         && target == hirsel_core_layout::Target::X86_64Linux
@@ -357,11 +360,15 @@ pub(super) fn emit_release_image(
             record.sites.clone_from(&sites);
             record.debug_sites.clone_from(&debug_sites);
             store.put_keyed(unit, &encode(&record)?)?;
+            remarks = record.remarks;
             held = objects;
         } else {
+            remarks = Vec::new();
             optimized_key = Some(key);
             lowered = Some(release);
         }
+    } else {
+        remarks = Vec::new();
     }
     if held.is_empty() {
         let units = modules
@@ -391,6 +398,8 @@ pub(super) fn emit_release_image(
             ),
         }
         .map_err(emit)?;
+        remarks = program.remarks;
+        remarks.sort_unstable();
         if let Some(error) = failure {
             return Err(error.into());
         }
@@ -434,6 +443,7 @@ pub(super) fn emit_release_image(
             parts,
             sites: Vec::new(),
             debug_sites: Vec::new(),
+            remarks: remarks.clone(),
         };
         if let Some(key) = optimized_key {
             store.put_keyed(key, &encode(&record)?)?;
@@ -471,6 +481,7 @@ pub(super) fn emit_release_image(
         launch_digest_unused,
         release_sites: sites,
         release_debug_sites: debug_sites,
+        remarks,
     })
 }
 

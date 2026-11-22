@@ -32,6 +32,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest.join("bridge/source_remark.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest.join("bridge/guarded_check.h").display()
     );
     println!(

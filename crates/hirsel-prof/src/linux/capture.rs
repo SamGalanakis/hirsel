@@ -53,6 +53,7 @@ pub fn run(
         provenance.main.clone(),
         provenance.identity,
     );
+    import.source_remarks()?;
     let mut status = None;
     while status.is_none() {
         for record in group.collect(false)? {

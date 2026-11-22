@@ -46,6 +46,17 @@ type Reuse = unsafe extern "C" fn(
 ) -> i32;
 type Deliver = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize);
 type CounterRangeReport = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, libc::c_uint);
+type SourceRemark = unsafe extern "C" fn(
+    *mut libc::c_void,
+    libc::c_uint,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    libc::c_uint,
+);
 type FindTail = unsafe extern "C" fn(
     *mut libc::c_void,
     *const u8,
@@ -81,6 +92,7 @@ type Program = unsafe extern "C" fn(
     Reuse,
     Deliver,
     Option<CounterRangeReport>,
+    Option<SourceRemark>,
     *mut libc::c_void,
     *const u8,
     usize,
@@ -231,7 +243,7 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v9".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v10".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -470,6 +482,48 @@ unsafe extern "C" fn report_counter_range(
     }
 }
 
+unsafe extern "C" fn report_source_remark(
+    receiver: *mut libc::c_void,
+    kind: libc::c_uint,
+    definition: *const u8,
+    definition_len: usize,
+    linkage: *const u8,
+    linkage_len: usize,
+    owner: *const u8,
+    owner_len: usize,
+    start: libc::c_uint,
+) {
+    use hirsel_core_ids::DefPath;
+    use hirsel_core_ir::source::{CodegenRemark, RemarkKind};
+    // SAFETY: the engine lends these spans and the receiver in this callback.
+    unsafe {
+        let receiver = &mut *receiver.cast::<Receiver<'_>>();
+        let text = |bytes, len| std::str::from_utf8(std::slice::from_raw_parts(bytes, len)).ok();
+        let Some(definition) = text(definition, definition_len).and_then(DefPath::from_full) else {
+            return;
+        };
+        let Some(owner) = text(owner, owner_len).and_then(DefPath::from_full) else {
+            return;
+        };
+        let Some(linkage) = text(linkage, linkage_len) else {
+            return;
+        };
+        let kind = match kind {
+            0 => RemarkKind::BoundsCheck,
+            1 => RemarkKind::OverflowCheck,
+            2 => RemarkKind::StepSync,
+            _ => unreachable!("LLVM source remark kind"),
+        };
+        receiver.program.remarks.push(CodegenRemark {
+            definition,
+            linkage: linkage.to_owned(),
+            owner,
+            start,
+            kind,
+        });
+    }
+}
+
 fn emit(
     mut units: Vec<ProgramUnit<'_>>,
     exports: &[String],
@@ -547,6 +601,7 @@ fn emit(
             reuse_part,
             deliver_part,
             report,
+            Some(report_source_remark),
             &mut receiver as *mut Receiver<'_> as *mut libc::c_void,
             lent.as_ptr(),
             lent.len(),

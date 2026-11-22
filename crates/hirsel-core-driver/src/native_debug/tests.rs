@@ -190,7 +190,7 @@ fn native_symbol_tiers_follow_the_elf_identity() {
                 "symtab_only"
             );
         }
-        let debug = bind_detached([&debug], &map, &[], &bytes).unwrap();
+        let debug = bind_detached([&debug], &map, &[], &[], &bytes).unwrap();
         let binary = NativeImage { bytes, debug };
         binary.deliver(&image).unwrap();
         let SymbolSource::DetachedDwarf(rows) =

@@ -530,6 +530,7 @@ struct Emitted {
     launch_digest_unused: bool,
     release_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
     release_debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+    remarks: Vec<hirsel_core_ir::source::CodegenRemark>,
 }
 
 impl CheckProduct {
@@ -1822,6 +1823,7 @@ fn link_objects(
                 debug_rows(),
                 &sources,
                 entry_plan.release_debug_sites,
+                entry_plan.remarks,
                 &options.target,
             )
             .map_err(bind_error)?;
@@ -1871,6 +1873,7 @@ fn link_objects(
             debug_rows(),
             &sources,
             entry_plan.release_debug_sites,
+            entry_plan.remarks,
             &bytes,
         )
         .map_err(bind_error)?;

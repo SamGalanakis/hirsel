@@ -49,6 +49,7 @@ pub(crate) struct Plan<'a> {
     launch_digest_unused: bool,
     release_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     pub(crate) release_debug_sites: &'a [hirsel_core_ir::source::ReleaseSite],
+    pub(crate) remarks: &'a [hirsel_core_ir::source::CodegenRemark],
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::GrantRule],
@@ -197,6 +198,7 @@ impl<'a> Plan<'a> {
             launch_digest_unused: launch_digest_unused && cleanup.is_none(),
             release_sites: &[],
             release_debug_sites: &[],
+            remarks: &[],
             cleanup,
             root_limit: options.root_limit,
             grant_mask,
@@ -231,9 +233,11 @@ impl<'a> Plan<'a> {
         mut self,
         sites: &'a [hirsel_core_ir::source::ReleaseSite],
         debug_sites: &'a [hirsel_core_ir::source::ReleaseSite],
+        remarks: &'a [hirsel_core_ir::source::CodegenRemark],
     ) -> Self {
         self.release_sites = sites;
         self.release_debug_sites = debug_sites;
+        self.remarks = remarks;
         self
     }
 

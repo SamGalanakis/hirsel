@@ -20,6 +20,24 @@ pub struct NativeDebug {
     pub scopes: Vec<DebugScope>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub enum RemarkKind {
+    BoundsCheck,
+    OverflowCheck,
+    StepSync,
+}
+
+/// A pass decision in a native unit. Source owners use the same neutral byte
+/// offsets or release ordinals as the unit's DWARF rows.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct CodegenRemark {
+    pub definition: DefPath,
+    pub linkage: String,
+    pub owner: DefPath,
+    pub start: u32,
+    pub kind: RemarkKind,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CodeSection {
     /// Global hidden alias at the start of the producer's code section.

@@ -93,6 +93,7 @@ pub fn attach(
         provenance.main.clone(),
         provenance.identity,
     );
+    import.source_remarks()?;
     let mut snapshot = Some((threads, maps));
     let apply =
         |import: &mut Import<'_>, snapshot: &mut Option<_>, record: perf::Record| -> Result<()> {

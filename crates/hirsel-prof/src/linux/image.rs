@@ -51,10 +51,14 @@ pub(crate) struct Image {
     pub(crate) digest: String,
     pub(crate) unwind: UnwindInfo,
     pub(crate) main: bool,
+    pub(crate) remarks: Vec<SourceRemark>,
     dwarf: Option<addr2line::Context<Reader>>,
     symbols: Vec<Symbol>,
     segments: Vec<Segment>,
 }
+
+/// Definition, instance, source file, line, column, kind, outcome and count.
+pub(crate) type SourceRemark = (String, String, String, u32, u32, String, String, u64);
 
 struct Symbol {
     name: String,
@@ -114,6 +118,14 @@ impl Image {
             .as_ref()
             .and_then(|debug| debug.section_by_name(".debug_frame"))
             .and_then(|s| s.data().ok());
+        let remarks = debug_file
+            .as_ref()
+            .and_then(|file| file.section_by_name(crate::CODEGEN_REMARK_SECTION))
+            .map(|section| {
+                Ok::<_, Box<dyn std::error::Error>>(serde_json::from_slice(section.data()?)?)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let unwind = UnwindInfo::new(
             section(".eh_frame"),
             embedded_frame.or(detached_frame),
@@ -170,6 +182,7 @@ impl Image {
             })
             .collect();
         Ok(Self {
+            remarks,
             build_id: file.build_id()?.map(hex),
             digest: hex(&Sha256::digest(bytes)),
             unwind,

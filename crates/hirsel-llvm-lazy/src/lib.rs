@@ -97,6 +97,8 @@ pub struct Program {
     pub objects: Vec<Vec<u8>>,
     /// The bodies a library program lends ([`Lend::Lend`]), as bitcode.
     pub lent: Vec<u8>,
+    /// Source-neutral decisions reported by the passes that made them.
+    pub remarks: Vec<hirsel_core_ir::source::CodegenRemark>,
 }
 
 /// What a release program lends or borrows of a separately generated library.

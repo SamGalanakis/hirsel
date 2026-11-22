@@ -54,7 +54,37 @@ struct Sources<'a> {
     files: FxHashMap<u32, FileIndex>,
     release: FxHashMap<DefPath, Vec<Option<(ItemSource, u32)>>>,
 }
-impl Sources<'_> {
+impl<'a> Sources<'a> {
+    fn new(map: &'a SourceMap, release: &[ReleaseSite]) -> Self {
+        let mut sources = Self {
+            map,
+            files: FxHashMap::default(),
+            release: FxHashMap::default(),
+        };
+        for binding in release {
+            let item = sources.map.items.get(&binding.item).copied();
+            let rows = sources
+                .release
+                .entry(release_debug_owner(&binding.item))
+                .or_default();
+            debug_assert_eq!(rows.len(), binding.ordinal as usize);
+            rows.push(item.map(|item| (item, binding.start)));
+        }
+        sources
+    }
+
+    fn resolve(&self, owner: &DefPath, start: u32) -> Option<(ItemSource, u32)> {
+        if let Some(&item) = self.map.items.get(owner) {
+            Some((item, start))
+        } else {
+            self.release
+                .get(owner)?
+                .get(start as usize)
+                .copied()
+                .flatten()
+        }
+    }
+
     fn position(
         &mut self,
         items: &[DefPath],
@@ -63,15 +93,16 @@ impl Sources<'_> {
     ) -> Option<Position> {
         let location = location?;
         let owner = &items[location.item as usize];
-        let (item, start) = if let Some(&item) = self.map.items.get(owner) {
-            (item, location.start)
-        } else {
-            self.release
-                .get(owner)?
-                .get(location.start as usize)
-                .copied()
-                .flatten()?
-        };
+        let (item, start) = self.resolve(owner, location.start)?;
+        self.position_at(item, start, lines)
+    }
+
+    fn position_at(
+        &mut self,
+        item: ItemSource,
+        start: u32,
+        lines: &mut LineProgram,
+    ) -> Option<Position> {
         let index = self.files.entry(item.file).or_insert_with(|| {
             let source = &self.map.files[item.file as usize];
             let id = lines.add_file(
@@ -96,6 +127,70 @@ impl Sources<'_> {
         }
         Some(index.position(offset))
     }
+}
+
+fn write_remarks(
+    object: &mut object::write::Object<'_>,
+    lines: &mut LineProgram,
+    sources: &SourceMap,
+    release: &[ReleaseSite],
+    remarks: &[CodegenRemark],
+) -> Result<(), String> {
+    if remarks.is_empty() {
+        return Ok(());
+    }
+    let mut sources = Sources::new(sources, release);
+    let mut counts = std::collections::BTreeMap::new();
+    for remark in remarks {
+        let Some((item, start)) = sources.resolve(&remark.owner, remark.start) else {
+            continue;
+        };
+        let Some(pos) = sources.position_at(item, start, lines) else {
+            continue;
+        };
+        let file = &sources.map.files[item.file as usize].path;
+        let (kind, outcome) = match remark.kind {
+            RemarkKind::BoundsCheck => ("bounds_check", "elided"),
+            RemarkKind::OverflowCheck => ("overflow_check", "elided"),
+            RemarkKind::StepSync => ("step_sync", "coalesced"),
+        };
+        *counts
+            .entry((
+                &remark.definition,
+                &remark.linkage,
+                file,
+                pos.line,
+                pos.column,
+                kind,
+                outcome,
+            ))
+            .or_insert(0u64) += 1;
+    }
+    let records = counts
+        .into_iter()
+        .map(
+            |((definition, linkage, file, line, col, kind, outcome), count)| {
+                (
+                    definition.to_string(),
+                    linkage,
+                    file,
+                    line,
+                    col,
+                    kind,
+                    outcome,
+                    count,
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+    let data = serde_json::to_vec(&records).map_err(error)?;
+    let section = object.add_section(
+        vec![],
+        hirsel_prof::CODEGEN_REMARK_SECTION.as_bytes().to_vec(),
+        object::SectionKind::Debug,
+    );
+    object.append_section_data(section, &data, 1);
+    Ok(())
 }
 
 fn location(unit: &mut write::Unit, id: UnitEntryId, p: Option<Position>, call: bool) {
@@ -147,6 +242,7 @@ pub(crate) fn bind<'a>(
     products: impl IntoIterator<Item = &'a NativeDebug>,
     sources: &SourceMap,
     release: &[ReleaseSite],
+    remarks: &[CodegenRemark],
     target: &str,
 ) -> Result<Vec<u8>, String> {
     let architecture = match hirsel_core_layout::Target::from_triple(target) {
@@ -174,6 +270,13 @@ pub(crate) fn bind<'a>(
         })
     });
     let mut sections = write::Sections::new(elf::Section::default());
+    write_remarks(
+        &mut object,
+        &mut dwarf.unit.line_program,
+        sources,
+        release,
+        remarks,
+    )?;
     dwarf.write(&mut sections).map_err(error)?;
     elf::write_sections(&mut object, &sections, &symbols)?;
     object.write().map_err(error)
@@ -191,6 +294,7 @@ pub(crate) fn bind_linked<'a>(
     products: impl IntoIterator<Item = &'a NativeDebug>,
     sources: &SourceMap,
     release: &[ReleaseSite],
+    remarks: &[CodegenRemark],
     image: &[u8],
 ) -> Result<Vec<u8>, String> {
     use object::{Object as _, ObjectSymbol as _};
@@ -210,6 +314,13 @@ pub(crate) fn bind_linked<'a>(
             .map(Address::Constant)
     });
     let mut object = debug_object(file.architecture());
+    write_remarks(
+        &mut object,
+        &mut dwarf.unit.line_program,
+        sources,
+        release,
+        remarks,
+    )?;
     let mut sections = write::Sections::new(write::EndianVec::new(gimli::LittleEndian));
     dwarf.write(&mut sections).map_err(error)?;
     sections.for_each(|id, section| {
@@ -258,20 +369,7 @@ fn unit<'a>(
         LineString::String(b"Hirsel".to_vec()),
         None,
     );
-    let mut sources = Sources {
-        map: sources,
-        files: FxHashMap::default(),
-        release: FxHashMap::default(),
-    };
-    for binding in release {
-        let item = sources.map.items.get(&binding.item).copied();
-        let rows = sources
-            .release
-            .entry(release_debug_owner(&binding.item))
-            .or_default();
-        debug_assert_eq!(rows.len(), binding.ordinal as usize);
-        rows.push(item.map(|item| (item, binding.start)));
-    }
+    let mut sources = Sources::new(sources, release);
     let mut unit_ranges = Vec::new();
     let mut abstracts = FxHashMap::default();
     for product in products {

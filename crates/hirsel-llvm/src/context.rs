@@ -226,6 +226,7 @@ impl<'context> Module<'context> {
                     prune: LLVMBool,
                     prepay_steps: LLVMBool,
                     report: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, c_uint)>,
+                    source: *const c_void,
                     receiver: *mut c_void,
                     lent: *const u8,
                     lent_len: usize,
@@ -253,6 +254,7 @@ impl<'context> Module<'context> {
                 0,
                 0,
                 None,
+                ptr::null(),
                 ptr::null_mut(),
                 std::ptr::null(),
                 0,
@@ -298,6 +300,8 @@ impl<'context> Module<'context> {
                     fn hirsel_llvm_share_cold_step_sync(
                         module: LLVMModuleRef,
                         machine: LLVMTargetMachineRef,
+                        source: *const c_void,
+                        receiver: *mut c_void,
                     );
                     fn hirsel_llvm_cold_failure_edges(
                         module: LLVMModuleRef,
@@ -312,7 +316,12 @@ impl<'context> Module<'context> {
                 hirsel_llvm_if_convert_guarded_checks(self.raw);
                 hirsel_llvm_share_cold_sites(self.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
-                hirsel_llvm_share_cold_step_sync(self.raw, machine.raw);
+                hirsel_llvm_share_cold_step_sync(
+                    self.raw,
+                    machine.raw,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 error = hirsel_llvm_growth_arms_back(self.raw, machine.raw);
                 hirsel_llvm_align_release_functions(self.raw);
             }

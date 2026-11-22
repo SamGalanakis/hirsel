@@ -147,6 +147,15 @@ joining them to the CPU results. A line with multiple remarks still reports
 each sample period once. Lines carrying only remarks have an empty `cpu`
 array.
 
+LLVM release builds record source remarks when `CounterRangePass` folds a
+proven overflow flag or a branch to a known Bounds cause, or when the cold
+step-sync pass coalesces a flush, refill and reload. The rows use
+`evidence_level = 'source_remark'`. They describe those pass decisions.
+Counts can include multiple compiled instances at one source position.
+The linked image's debug product binds the remarks to the current source
+coordinates and carries them into the profile even when the line gets no
+CPU samples.
+
 `prof export` supports the pprof format. It preserves mapping addresses,
 inline frame order, and one value per event. Values that exceed the signed
 64-bit fields in pprof are refused.

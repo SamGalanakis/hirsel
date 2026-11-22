@@ -13,6 +13,7 @@
 #include "forward_reads.h"
 #include "loop_version.h"
 #include "step_tree.h"
+#include "source_remark.h"
 #include <array>
 #include <map>
 #include <optional>
@@ -1568,7 +1569,8 @@ struct StepSite {
   LoadInst *Load;
 };
 
-static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM) {
+static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM,
+                               hirsel_llvm::SourceRemark report, void *receiver) {
   auto *Step = M.getFunction("hirsel_core_step_out");
   if (!Step || !Step->isDeclaration()) return;
 
@@ -1628,6 +1630,7 @@ static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM) {
     Builder.CreateRet(Builder.CreateInsertValue(Pair, Outcome, 1));
 
     for (auto &[Store, Call, Load] : Sites) {
+      hirsel_llvm::remark(report, receiver, hirsel_llvm::StepSync, *Call);
       Builder.SetInsertPoint(Call);
       Builder.SetCurrentDebugLocation(Call->getDebugLoc());
       auto *New = Builder.CreateCall(Shared, {
@@ -1641,12 +1644,13 @@ static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM) {
   }
 }
 
-extern "C" void hirsel_llvm_share_cold_step_sync(void *Raw, void *Machine) {
+extern "C" void hirsel_llvm_share_cold_step_sync(
+    void *Raw, void *Machine, hirsel_llvm::SourceRemark report, void *receiver) {
   auto &M = *static_cast<Module *>(Raw);
   if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
   runLoopPass(static_cast<TargetMachine *>(Machine), M, "cold-step-sync",
               [&](PassBuilder &, FunctionAnalysisManager &FAM) {
-                shareColdStepSites(M, FAM);
+                shareColdStepSites(M, FAM, report, receiver);
               });
 }
 

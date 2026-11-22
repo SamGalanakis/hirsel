@@ -2,6 +2,7 @@
 // when a range fixed point proves they can never fire, including checks on
 // counters that a reset keeps in range.
 #pragma once
+#include "source_remark.h"
 #include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/MapVector.h>
@@ -80,10 +81,12 @@ using namespace llvm;
 class CounterRangePass : public OptionalPassInfoMixin<CounterRangePass> {
     using Report = void (*)(void *, const char *, size_t, unsigned);
     Report report;
+    SourceRemark source;
     void *receiver;
 
 public:
-    CounterRangePass(Report report, void *receiver) : report(report), receiver(receiver) {}
+    CounterRangePass(Report report, SourceRemark source, void *receiver)
+        : report(report), source(source), receiver(receiver) {}
 
     PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
         if (f.isDeclaration()) return PreservedAnalyses::all();
@@ -94,7 +97,7 @@ public:
         if (!state.collect(loops)) return PreservedAnalyses::all();
         state.solve();
         unsigned removed = 0;
-        if (!state.fold(removed)) return PreservedAnalyses::all();
+        if (!state.fold(removed, source, receiver)) return PreservedAnalyses::all();
         if (report && removed && f.hasName())
             report(receiver, f.getName().data(), f.getName().size(), removed);
         PreservedAnalyses kept;
@@ -112,6 +115,25 @@ private:
                     if (Function *callee = call->getCalledFunction();
                         callee && callee->getName().starts_with("hirsel_core_raise"))
                         return true;
+            auto *branch = dyn_cast<UncondBrInst>(block->getTerminator());
+            if (!branch) return false;
+            block = branch->getSuccessor();
+        }
+        return false;
+    }
+
+    // Only a known Bounds cause identifies a bounds check. The pass also
+    // proves comparisons that lead to other causes.
+    static bool reachesBounds(BasicBlock *block) {
+        for (int hop = 0; block && hop < 4; hop++) {
+            for (Instruction &i : *block) {
+                auto *call = dyn_cast<CallInst>(&i);
+                if (!call || !call->getCalledFunction()) continue;
+                if (call->getCalledFunction()->getName() == "hirsel_core_raise" && call->arg_size() == 2) {
+                    auto *cause = call->getArgOperand(1)->stripPointerCasts();
+                    return isa<GlobalVariable>(cause) && cause->getName().starts_with("hirsel_cause_1_");
+                }
+            }
             auto *branch = dyn_cast<UncondBrInst>(block->getTerminator());
             if (!branch) return false;
             block = branch->getSuccessor();
@@ -1160,7 +1182,7 @@ private:
             }
         }
 
-        bool fold(unsigned &removed) {
+        bool fold(unsigned &removed, SourceRemark source, void *receiver) {
             if (gaveUp) return false;
             bool changed = false;
             for (WithOverflowInst *op : overflows) {
@@ -1168,7 +1190,10 @@ private:
                 for (User *user : make_early_inc_range(op->users())) {
                     auto *flag = dyn_cast<ExtractValueInst>(user);
                     if (!flag || flag->getNumIndices() != 1 || flag->getIndices()[0] != 1) continue;
-                    if (!flag->use_empty()) ++removed;
+                    if (!flag->use_empty()) {
+                        ++removed;
+                        remark(source, receiver, OverflowCheck, *op);
+                    }
                     flag->replaceAllUsesWith(ConstantInt::getFalse(f.getContext()));
                     flag->eraseFromParent();
                     changed = true;
@@ -1183,6 +1208,8 @@ private:
                                                      : compare->getPredicate();
                 // The branch takes its non-failing edge for every operand value.
                 if (!l.icmp(predicate, r)) continue;
+                if (source && reachesBounds(guard->getSuccessor(fails ? 0 : 1)))
+                    remark(source, receiver, BoundsCheck, *guard);
                 guard->setCondition(ConstantInt::getBool(f.getContext(), !fails));
                 if (compare->use_empty()) compare->eraseFromParent();
                 ++removed;

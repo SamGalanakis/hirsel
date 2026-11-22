@@ -286,15 +286,15 @@ public:
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
 using CounterRangeReport = void (*)(void *, const char *, size_t, unsigned);
 
-void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, void *receiver) {
+void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, hirsel_llvm::SourceRemark source, void *receiver) {
     builder.registerPipelineParsingCallback(
-        [report, receiver](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+        [report, source, receiver](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
             if (name == "implied-check-hoist") {
                 passes.addPass(hirsel_llvm::ImpliedCheckHoistPass());
                 return true;
             }
             if (name == "counter-range") {
-                passes.addPass(hirsel_llvm::CounterRangePass(report, receiver));
+                passes.addPass(hirsel_llvm::CounterRangePass(report, source, receiver));
                 return true;
             }
             if (name == "counted-exit-split") {
@@ -367,12 +367,12 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
 
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
-    LLVMBool prepay_steps, CounterRangeReport report, void *receiver, const uint8_t *lent,
+    LLVMBool prepay_steps, CounterRangeReport report, hirsel_llvm::SourceRemark source, void *receiver, const uint8_t *lent,
     size_t lent_len) {
     limit_recursive_entry_inlining(*unwrap(raw_module));
     ReleasePipeline release(raw_module, raw_machine);
     PassBuilder &builder = release.builder;
-    registerReleasePasses(builder, report, receiver);
+    registerReleasePasses(builder, report, source, receiver);
     std::string lend_failure;
     if (lent_len) release.skip_lent();
 

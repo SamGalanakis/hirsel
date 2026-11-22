@@ -21,15 +21,18 @@ extern void hirsel_llvm_inline_recursive_leaves(void *module);
 extern void hirsel_llvm_inline_snapshot_calls(void *module);
 extern void hirsel_llvm_share_cold_sites(void *module);
 extern void hirsel_llvm_if_convert_guarded_checks(LLVMModuleRef module);
-extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers);
 extern LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
                                        char **message, LLVMMemoryBufferRef *buffer);
 extern void hirsel_llvm_align_release_functions(LLVMModuleRef module);
 typedef void (*HirselLlvmCounterRangeReport)(void *, const char *, size_t, unsigned);
+typedef void (*HirselLlvmSourceRemark)(void *, unsigned, const char *, size_t, const char *, size_t,
+                                       const char *, size_t, unsigned);
+extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine,
+    HirselLlvmSourceRemark source, void *receiver);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
-    LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, void *receiver,
+    LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
     const uint8_t *lent, size_t lent_len);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
     const uint8_t *lent, size_t lent_len);
@@ -455,7 +458,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
-                          HirselLlvmCounterRangeReport report, void *receiver,
+                          HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
                           const uint8_t *lent, size_t lent_len, size_t lend_limit, const char *own,
                           HirselLlvmDeliver lend, HirselLlvmOutput *out) {
     unsigned major, minor, patch;
@@ -541,7 +544,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         hirsel_llvm_inline_snapshot_calls(module);
         LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
         LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
-                                                      refill && LLVMGetFirstUse(refill), report, receiver,
+                                                      refill && LLVMGetFirstUse(refill), report, source, receiver,
                                                       lent, lent_len);
         if (!e) e = hirsel_llvm_specialize_release(module, machine, lent, lent_len);
         if (!e) {
@@ -563,7 +566,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_llvm_if_convert_guarded_checks(module);
             hirsel_llvm_share_cold_sites(module);
             hirsel_cold_failure_edges(module, context);
-            hirsel_llvm_share_cold_step_sync(module, machine);
+            hirsel_llvm_share_cold_step_sync(module, machine, source, receiver);
             e = hirsel_llvm_growth_arms_back(module, machine);
             hirsel_llvm_align_release_functions(module);
         }
@@ -612,24 +615,24 @@ done:
 // `lend`, this program is such a library, and `lend` gets its bodies of up to
 // `lend_limit` instructions, local names suffixed with `own`.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v9(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v10(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
                           const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
-                          HirselLlvmCounterRangeReport report, void *receiver,
+                          HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
                           const uint8_t *lent, size_t lent_len, size_t lend_limit, const char *own,
                           HirselLlvmDeliver lend, HirselLlvmOutput *out) {
     emit_program(units, count, exports, export_count, speed, triple, cpu, features, jobs, find, keep,
-                 reuse, deliver, report, receiver, lent, lent_len, lend_limit, own, lend, out);
+                 reuse, deliver, report, source, receiver, lent, lent_len, lend_limit, own, lend, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v2(const uint8_t *ir, size_t len, uint8_t speed, const char *triple,
                            const char *cpu, const char *features, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
     emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, NULL,
-                 NULL, 0, 0, NULL, NULL, out);
+                 NULL, NULL, 0, 0, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

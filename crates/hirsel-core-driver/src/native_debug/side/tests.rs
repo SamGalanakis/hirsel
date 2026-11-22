@@ -95,6 +95,18 @@ pub(crate) fn binding_case() {
         linkage: "hworker2".into(),
     };
     let neutral = crate::encode(&(&first, &second)).unwrap();
+    let remark = CodegenRemark {
+        definition: first.items[0].clone(),
+        linkage: "hprivate1".into(),
+        owner: release_debug_owner(&first.items[0]),
+        start: 0,
+        kind: RemarkKind::BoundsCheck,
+    };
+    let release = [ReleaseSite {
+        item: first.items[0].clone(),
+        start: 12,
+        ordinal: 0,
+    }];
     let mut sources = SourceMap {
         points: Default::default(),
         files: vec![SourceFile {
@@ -115,10 +127,33 @@ pub(crate) fn binding_case() {
                 sources.files[0].text.insert_str(0, "\n\n");
                 sources.items.values_mut().next().unwrap().file_offset += 2;
             }
-            let bytes = bind([&first, &second], &sources, &[], target).unwrap();
+            let bytes = bind(
+                [&first, &second],
+                &sources,
+                &release,
+                std::slice::from_ref(&remark),
+                target,
+            )
+            .unwrap();
             let file = object::File::parse(bytes.as_slice()).unwrap();
             assert!(file.section_by_name(".text").is_none());
             let line = if moved { 6 } else { 4 };
+            let remarks = file
+                .section_by_name(hirsel_prof::CODEGEN_REMARK_SECTION)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(remarks.data().unwrap()).unwrap(),
+                serde_json::json!([[
+                    "app@1/main/f",
+                    "hprivate1",
+                    "/a/source.hirsel",
+                    line,
+                    4,
+                    "bounds_check",
+                    "elided",
+                    1
+                ]])
+            );
             assert_eq!(
                 super::super::source_positions(&bytes).unwrap(),
                 [

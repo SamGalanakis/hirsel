@@ -92,7 +92,7 @@ def main():
             artifacts=identity, root_limit=1073741824,
             population='R4/R5 16 keys after 64 durable commits, 100k R6/R7/migrate, 1M R8; Account codec30 with schema2, tree key12',
             indexes='none or one J=id%4', sample='one per configuration',
-            cpu=16, protocol='READY/DONE; population, validation and final drops excluded'), indent=2) + '\n')
+            cpu=16, protocol='READY/DONE; R8-load counts creation, population and the first checkpoint; other modes exclude population; validation and final drops excluded'), indent=2) + '\n')
     if args.measure:
         rows = []
         with open('/tmp/core-llvm-905-measure.lock', 'a') as core_lock, open('/tmp/hirsel-langarena-measure.lock', 'a') as shared_lock:

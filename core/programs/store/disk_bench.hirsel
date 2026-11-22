@@ -133,6 +133,17 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let migrating = mode == "migrate"
     let million = mode == "R8-load" || mode == "R8-open"
     let n: u64 = if million { 1000000 } else { 100000 }
+    // R8-load's phase is creation, population and the first checkpoint, so its
+    // gate comes before the store exists; every other mode's comes after setup.
+    let loading = mode == "R8-load"
+    let mut gate = result.unwrap(host.open(d, "gate", Read))
+    let mut byte: Bytes = list.with_capacity(1)
+    let mut started = 0u64
+    if loading {
+        result.unwrap(stdout.write(out, "READY\n"))
+        if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+        started = host.mono_ns(c)
+    }
     let child = disk_test_directory(d)
     let mut options = defaults()
     // The journal worker allowance and resident limit keep their defaults.
@@ -176,12 +187,12 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     } else {
         list.push(mut holder, take db)
     }
-    let mut gate = result.unwrap(host.open(d, "gate", Read))
-    let mut byte: Bytes = list.with_capacity(1)
-    result.unwrap(stdout.write(out, "READY\n"))
-    if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    if !loading {
+        result.unwrap(stdout.write(out, "READY\n"))
+        if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+        started = host.mono_ns(c)
+    }
     let mut timing: Option[CutTiming] = None
-    let started = host.mono_ns(c)
     if mode == "R7" || mode == "R8-open" {
         options.create = false
         let opened = result.unwrap(open(tasks, child, c, r, options))

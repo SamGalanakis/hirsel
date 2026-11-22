@@ -4,7 +4,7 @@ pub type Room: codec + send { requested: u64, available: u64 }
 
 pub type Bad: codec + send { kind: u32, at: u64 }
 
-pub type Kind: codec + send = Compute | Transact | Query | Granted
+pub type Kind: codec + key + send = Compute | Transact | Query | Granted
 
 pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable
 
@@ -249,7 +249,7 @@ pub fn operate_bytes[G: send, H: send, S: send](p: PlaceConfig[G, H, S]) -> Resu
 }
 
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    if launch_word(9u64, 0u64) != 0u64 { return operate_prepare(p) }
+    if launch_word(9u64, 0u64) != 0u64 { return operate_prepare(take p) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
     if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: configured, n_publisher: n_publisher,
@@ -282,19 +282,16 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
         },
         _ => { let _ = channel.try_send(to, StopRequested); None },
     }
-    let triggering: Option[(TriggerConfig[G, S], Sender[HeadInput])] = match take trigger_config {
-        Some(take config) => {
-            if triggers.is_empty(config.entries) { None } else { Some((take config, channel.sender(head_to))) }
-        },
-        None => None,
+    let grant_bytes = match trigger_config {
+        Some(config) => if triggers.is_empty(config.entries) { 0u64 } else { config.grant_bytes },
+        None => 0u64,
     }
-    let grant_bytes = match triggering { Some((config, _)) => config.grant_bytes, None => 0u64 }
     let allowance = int.saturating_add(head_bytes(backing, n_place, n_publisher), grant_bytes)
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
     let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
-        head_to: channel.sender(head_to), cut: take activity, triggering: take triggering)
+        head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
     let mut heading: Option[Task[()]] = Some(task.spawn(tasks, bytes allowance, take head_job, head_run))
     let mut serving: Option[Task[()]] = None
@@ -491,15 +488,21 @@ fn prepare_bytes(field: u64, size: u64) -> Result[Bytes, StartError] {
     Ok(take value)
 }
 
-fn operate_prepare[G: send, H: send, S: send](p: PlaceConfig[G, H, S]) -> Result[Ended, StartError] waits {
-    let (scratch, options) = match p.backing { Disk(scratch, options) => (scratch, options), _ => return Error(Missing("scratch")) }
+fn operate_prepare[G: send, H: send, S: send](take p: PlaceConfig[G, H, S]) -> Result[Ended, StartError] waits {
+    let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, clock: clock, tasks: tasks, triggers: take config, ..) = take p
+    let (scratch, options) = match backing { Disk(scratch, options) => (scratch, options), _ => return Error(Missing("scratch")) }
+    let entries = match take config {
+        Some(TriggerConfig(entries: take listed, ..)) => take listed,
+        None => triggers.empty_entries(),
+    }
     let setup = PrepareConfig(scratch: scratch, options: options, attempt: prepare_bytes(10u64, 16u64)?, image_digest: prepare_bytes(11u64, 32u64)?,
-        clock: p.clock, tasks: p.tasks, n_place: launch_word(0u64, 0u64), place: p.place, migrate: p.migrate, handles: p.handles)
+        clock: clock, tasks: tasks, n_place: launch_word(0u64, 0u64), place: place, migrate: migrate, handles: handles, triggers: take entries)
     match prepare_deploy(setup) {
         Ok(()) => Ok(Stopped),
         Error(Open(take problem)) => Error(Open(take problem)),
         Error(Identity) => Error(Open(IdentityUnknown)),
         Error(Deploy(Store(take problem))) => Error(Open(Store(take problem))),
+        Error(Deploy(Scratch(Limit(Triggers)))) => Error(Open(Store(Limit(Triggers)))),
         Error(Deploy(_)) => Error(Missing("prepared")),
     }
 }
@@ -2508,7 +2511,7 @@ type ManagedHead[G: send, H: send, S: send]: send {
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
     head_to: Sender[HeadInput], cut: CutActivity,
-    triggering: Option[(TriggerConfig[G, S], Sender[HeadInput])],
+    triggering: Option[TriggerConfig[G, S]],
 }
 
 fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
@@ -2546,18 +2549,15 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         Ok(take values) => take values,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
     }
-    let trigger_drive = match take triggering {
-        Some((take config, take trigger_to)) => match make_trigger_drive(db, clock, tasks, take trigger_to, release, take config) {
-            Ok(take drive) => Some(take drive),
-            Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
-        },
-        None => None,
-    }
     // A place directory reopens a disk store at this version (RUNNER-SPEC §13.3).
     let (version, retain_from) = if persistent {
         match activation_window(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
     } else { (0u64, 0u64) }
-    if !head_advance(to, inbox, Activated(take release, version, store.identity_words(db), retain_from)) { return head_closed(take db) }
+    if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from)) { return head_closed(take db) }
+    let trigger_drive = match open_trigger_drive(db, clock, tasks, channel.sender(head_to), release, take triggering) {
+        Ok(take drive) => take drive,
+        Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
+    }
     let mail = match mailbox(PUBLISHER_INBOX) {
         Ok(take mail) => take mail,
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
@@ -2675,7 +2675,20 @@ pub type PrepareConfig[G: send, H: send] {
     n_place: u64,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
-    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]
+    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
+    triggers: triggers.Entries
+}
+
+pub type TriggerScanClass: codec + key + send = Cancelling | Held | Gone | Changed | Unchanged
+
+// TRIGGERS contains one value-codec List[TriggerScanRow].
+pub type TriggerScanRow: codec + send {
+    class: TriggerScanClass,
+    kind: Kind,
+    path: Bytes,
+    schema: Bytes,
+    count: u64,
+    earliest_due: u64
 }
 
 pub type PrepareArgs { attempt: Bytes, digest: Bytes }
@@ -2721,6 +2734,10 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
         Error(c) => return Error(Open(Store(Full(Allocation(c))))),
     }
     if list.len(digest) != 32 || digest != p.image_digest { return Error(Identity) }
+    prepare_export(p, source, digest)
+}
+
+fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Preparation, digest: Bytes) -> Result[(), PrepareError] waits {
     let registered = match placed(p.place, p.n_place) {
         Ok(take reg) => take reg,
         Error(take error) => return Error(Open(Place(take error))),
@@ -2740,7 +2757,90 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
     let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
         resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes,
         checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit)
+    let scan = prepare_trigger_scan(source, staged, registered, p.triggers, digest)?
+    write_trigger_scan(p.scratch, scan)?
     prepare_result(store.write_prepared(source, staged, p.scratch, take target))
+}
+
+fn trigger_scan_limit() -> PrepareError { Deploy(Scratch(Limit(Triggers))) }
+
+fn prepare_trigger_scan[G: send, H: send](source: store.Preparation, staged: store.StagedMigration, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] {
+    let scanned = isolate(scoped fn() -> Result[Bytes, PrepareError] {
+        let table = prepare_open_result(store.with_staged_schema(staged, code.describe(triggers.pending_table_if_present)))?
+        let snapshot = store.staged_snapshot(source, staged)
+        let rows = match prepare_open_result(triggers.scan_pending(snapshot, table))? {
+            Some(take cursor) => collect_trigger_scan(take cursor, source, reg, choices, digest)?,
+            None => list.new(),
+        }
+        let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
+        let mut raw: Bytes = list.new()
+        std.codec.encode(codec, rows, mut raw) ?=> |_| trigger_scan_limit()
+        Ok(take raw)
+    })
+    match take scanned {
+        Ok(Ok(Error(Open(Store(Full(Allocation(_))))))) => Error(trigger_scan_limit()),
+        Ok(Ok(take report)) => take report,
+        Error(_) => Error(trigger_scan_limit()),
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let Capacity(_) = cause.kind { return Error(trigger_scan_limit()) }
+                break
+            }
+            fail("runner: trigger scan failed")
+        },
+    }
+}
+
+fn collect_trigger_scan[G: send, H: send](take cursor: triggers.PendingRows, source: store.Preparation, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[List[TriggerScanRow], PrepareError] {
+    let mut remaining = take cursor
+    let raw = match store.export_system_get(source, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes(), 0u8) {
+        Ok(take row) => take row,
+        Error(Missing(_)) => None,
+        Error(take problem) => return Error(Open(Store(take problem))),
+    }
+    let old = if let Some(take prior_description) = take raw {
+        let codec: std.codec.Codec[Describe] = std.codec.of()
+        let Describe(exported: take prior_entries, ..) = std.codec.decode(codec, prior_description) ?=> |problem| Open(Store(Decode(problem)))
+        take prior_entries
+    } else { list.new() }
+    let mut grouped: Map[(TriggerScanClass, Kind, Bytes, Bytes), (u64, u64)] = map.new()
+    while let Some(take pending) = prepare_open_result(triggers.next_scanned(mut remaining))? {
+        let class = prepare_open_result(trigger_scan_class(reg, choices, old, pending, digest))?
+        let due = triggers.due_time(pending)
+        let path: Bytes = clone(triggers.entry_path(pending))
+        let schema: Bytes = clone(triggers.argument_schema(pending))
+        let kind: Kind = if triggers.is_granted(pending) { Granted } else { Transact }
+        let key = (class, kind, take path, take schema)
+        map.update_or_insert(mut grouped, take key, (0u64, due), scoped fn(mut totals: (u64, u64)) {
+            totals = (totals.0 + 1u64, std.order.min(totals.1, due))
+        })
+    }
+    let mut rows: List[TriggerScanRow] = list.with_capacity(map.len(grouped))
+    for take ((class, kind, take path, take schema), (count, earliest)) in take grouped {
+        list.push(mut rows, TriggerScanRow(class: class, kind: kind,
+            path: take path, schema: take schema, count: count, earliest_due: earliest))
+    }
+    Ok(take rows)
+}
+
+fn trigger_scan_class[G: send, H: send](reg: Registry[G, H], choices: triggers.Entries, old: List[Exported], pending: triggers.Pending, digest: Bytes) -> Result[TriggerScanClass, store.Error] {
+    if triggers.cancelling(pending) { return Ok(Cancelling) }
+    if triggers.held_on_start(pending, digest) { return Ok(Held) }
+    let Some((_, index)) = trigger_key(reg, pending, choices)? else { return Ok(Gone) }
+    for entry in old {
+        if trigger_matches(pending, entry.described) {
+            return Ok(if entry.revision != reg.exported[index].revision { Changed } else { Unchanged })
+        }
+    }
+    Ok(Unchanged)
+}
+
+fn write_trigger_scan(d: Dir, raw: Bytes) -> Result[(), PrepareError] waits {
+    let mut file = host.open(d, "TRIGGERS", Write) ?=> |e| Deploy(Scratch(Io(e)))
+    host.write(mut file, raw) ?=> |e| Deploy(Scratch(Io(e.error)))
+    host.sync(mut file) ?=> |e| Deploy(Scratch(Io(e)))
+    host.close(take file) ?=> |e| Deploy(Scratch(Io(e)))
+    Ok(())
 }
 
 fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.DeployError] {
@@ -3447,6 +3547,8 @@ fn attempt_grants[G: send](to: Sender[GrantRequest[G]], take ctx: TriggerContext
 
 type ArmedTimer { at: u64, task_handle: Task[()] }
 
+type TriggerGrants[G: send] { to: Sender[GrantRequest[G]], worker: Task[()] }
+
 type TriggerDrive[G: send] {
     tables: triggers.Tables,
     revision: Bytes,
@@ -3455,23 +3557,39 @@ type TriggerDrive[G: send] {
     to: Sender[HeadInput],
     entries: triggers.Entries,
     author: Caller,
-    grants: Sender[GrantRequest[G]],
-    granting: Task[()],
+    grants: Option[TriggerGrants[G]],
     active: Map[triggers.Id, Task[Outcome]],
     timer: Option[ArmedTimer]
 }
 
 fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let tables = store.with_schema(db, code.describe(triggers.tables))?
-    let image = match launch_digest() { Ok(take digest) => take digest, Error(cap) => return Error(Full(Allocation(cap))) }
-    let stamp = if list.len(image) == 0u64 { copy_bytes(revision)? } else { take image }
+    let stamp = trigger_stamp(revision)?
     let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
     let (grants, inbox): (Sender[GrantRequest[G]], Receiver[GrantRequest[G]]) = channel.new(1u64)
     let supply = GrantWorker(grants: take seed, grant: grant, inbox: take inbox)
     let granting = task.spawn(tasks, bytes allowance, take supply, supply_grants)
     let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks, to: take to,
-        entries: take entries, author: take author, grants: take grants, granting: take granting, active: map.new(), timer: None)
+        entries: take entries, author: take author, grants: Some(TriggerGrants(to: take grants, worker: take granting)), active: map.new(), timer: None)
     Ok(box.new(take drive))
+}
+
+fn trigger_stamp(revision: Bytes) -> Result[Bytes, store.Error] {
+    let image = launch_digest() ?=> |cap| Full(Allocation(cap))
+    if list.len(image) == 0u64 { copy_bytes(revision) } else { Ok(take image) }
+}
+
+fn open_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] {
+    if let Some(take configured) = take config {
+        if !triggers.is_empty(configured.entries) {
+            return Ok(Some(make_trigger_drive(db, clock, tasks, take to, revision, take configured)?))
+        }
+    }
+    let snapshot = store.snapshot(db)
+    let Some(take tables) = triggers.tables_for_settlement(store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
+    let drive: TriggerDrive[G] = TriggerDrive(tables: take tables, revision: trigger_stamp(revision)?, clock: clock, tasks: tasks, to: take to,
+        entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
+    Ok(Some(box.new(take drive)))
 }
 
 fn arm_trigger_timer[G: send](mut drive: Box[TriggerDrive[G]], at: u64) -> Result[(), store.Error] waits {
@@ -3552,29 +3670,34 @@ fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () wait
 }
 
 fn stop_triggers[G: send](take drive: Box[TriggerDrive[G]]) -> () waits {
-    let TriggerDrive(active: take active, timer: take timer, granting: take granting, ..) = box.unbox(take drive)
+    let TriggerDrive(active: take active, timer: take timer, grants: take grants, ..) = box.unbox(take drive)
     if let Some(ArmedTimer(at: _, task_handle: take armed)) = take timer {
         let _ = task.cancel_join(take armed)
     }
     for take (_, take watcher) in take active {
         let _ = task.cancel_join(take watcher)
     }
-    let _ = task.cancel_join(take granting)
+    if let Some(TriggerGrants(worker: take grant_task, ..)) = take grants { let _ = task.cancel_join(take grant_task) }
 }
 
-fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[Bytes], store.Error] {
+fn trigger_matches(p: triggers.Pending, entry: Described) -> bool {
+    let matches_kind = match entry.kind {
+        Granted => triggers.is_granted(p),
+        Transact => !triggers.is_granted(p),
+        _ => false,
+    }
+    matches_kind && triggers.matches(p, entry.identity, entry.args)
+}
+
+fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[(Bytes, u64)], store.Error] {
     if !triggers.is_allowed(p, choices) { return Ok(None) }
-    for entry in r.exported {
-        let matches_kind = match entry.described.kind {
-            Granted => triggers.is_granted(p),
-            Transact => !triggers.is_granted(p),
-            _ => false,
-        }
-        if matches_kind && triggers.matches(p, entry.described.identity, entry.described.args) {
+    for index in 0u64 .. list.len(r.exported) {
+        let entry = view r.exported[index]
+        if trigger_matches(p, entry.described) {
             let mut key = copy_bytes(entry.described.identity)?
             std.codec.put_u64(entry.args_fp, mut key)
             std.codec.put_u64(entry.result_fp, mut key)
-            return Ok(Some(take key))
+            return Ok(Some((take key, index)))
         }
     }
     Ok(None)
@@ -3705,9 +3828,13 @@ fn watch_granted[G: send, A, R](take watched: WatchedJob[G, A, R]) -> Outcome wa
 
 fn launch_trigger[G: send, H: send](r: Registry[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, a: triggers.Attempt, key: Bytes) -> Result[(), Refusal] {
     let Some(Granted(go)) = map.get(r.slots, key) else { return Error(NoEntry) }
+    let grant_to = match drive.grants {
+        Some(grants) => channel.sender(grants.to),
+        None => return Error(NoEntry),
+    }
     map.reserve(mut drive.active, 1u64)
     let context = TriggerContext(attempt: a, to: channel.sender(drive.to))
-    let source = FromPlace(channel.sender(drive.grants), take context)
+    let source = FromPlace(take grant_to, take context)
     let raw: Bytes = match copy_bytes(triggers.argument(p)) {
         Ok(take payload) => take payload,
         Error(Full(cap)) => return Error(Budget(room(store_capacity(cap)))),
@@ -3757,7 +3884,10 @@ fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerD
         publish_trigger(mut hd, committed.ticket)?
         return Ok(true)
     }
-    let key = trigger_key(hd.r, p, drive.entries)?
+    let key = match trigger_key(hd.r, p, drive.entries)? {
+        Some((take key, _)) => Some(take key),
+        None => None,
+    }
     if !triggers.is_granted(p) {
         return run_trigger_transaction(mut hd, mut drive, p, take key)
     }
@@ -4171,6 +4301,271 @@ pub fn journal_law_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
 @test
 fn journal_test_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_trigger_granted(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn trigger_scan_law_unchanged(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take value: u64) -> Result[u64, u64] { Ok(value) }
+
+fn trigger_scan_law_removed(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take value: u64) -> Result[u64, u64] { Ok(value) }
+
+fn trigger_scan_law_removed_run(ctx: TriggerContext, caller: Caller, take value: u64) -> Result[u64, Capacity] waits {
+    let _ = trigger_boundary(ctx)
+    Ok(value)
+}
+
+fn trigger_scan_law_new(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    trigger_law_places(mut reg)?
+    transact(mut reg, code.describe(trigger_scan_law_unchanged), 131072u64, DEFAULT_STEPS)
+}
+
+fn trigger_scan_law_old(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    trigger_scan_law_new(mut reg)?
+    transact(mut reg, code.describe(trigger_scan_law_removed), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(trigger_scan_law_removed_run), 131072u64, DEFAULT_STEPS)
+}
+
+fn trigger_scan_law_keep_schema(mut phase: store.Migration) -> Result[(), store.Error] { Ok(()) }
+
+fn trigger_scan_law_bytes(n: u64, byte: u8) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(n)
+    list.fill(mut raw, n, byte)
+    take raw
+}
+
+// L40. Use the real export and prepare writer against a recorded OLD revision.
+@test
+fn trigger_scan_classes(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut options = triggers.law_options()
+    options.pack_bytes = 1048576u64
+    trigger_scan_image(d, c, r, tasks, options, false)?
+    trigger_scan_image(d, c, r, tasks, options, true)?
+    trigger_scan_last_entry(d, c, r, tasks, options, false)?
+    trigger_scan_last_entry(d, c, r, tasks, options, true)
+}
+
+fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.Options, same_image: bool) -> Result[(), ()] waits {
+    let dir = triggers.law_directory(d)
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
+    let n_place = 1048576u64
+    let old_digest = trigger_scan_law_bytes(32u64, 1u8)
+    let new_digest = trigger_scan_law_bytes(32u64, if same_image { 1u8 } else { 2u8 })
+    let new_place = if same_image { code.describe(trigger_scan_law_old) } else { code.describe(trigger_scan_law_new) }
+    let new_n_place = if same_image { n_place * 2u64 } else { n_place }
+    let mut old_reg = result.unwrap(placed(code.describe(trigger_scan_law_old), n_place))
+    // Model an older body at the same path and schema, as recorded by OLD.
+    if !same_image { old_reg.exported[0u64].revision = trigger_scan_law_bytes(32u64, 3u8) }
+    let Registry(exported: take exported, ..) = take old_reg
+    let release = result.unwrap(release_digest(exported))
+    let old_desc = result.unwrap(encode_describe(Describe(digest: clone(old_digest),
+        target: "", n_place: n_place, exported: take exported)))
+    let mut staged = result.unwrap(store.stage_migration(db, tasks, code.describe(trigger_law_migrate)))
+    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    result.unwrap(store.stage_activation(mut staged, 1u64, None, old_desc, release_codec,
+        ReleaseRecord(release: take release, digest: clone(old_digest))))
+    result.unwrap(store.install_activation(mut db, take staged))
+    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+
+    let changed = result.unwrap(triggers.transact(code.describe(trigger_law_body)))
+    let unchanged = result.unwrap(triggers.transact(code.describe(trigger_scan_law_unchanged)))
+    let removed = result.unwrap(triggers.transact(code.describe(trigger_scan_law_removed)))
+    let kept_run = result.unwrap(triggers.granted(code.describe(trigger_law_granted_body)))
+    let removed_run = result.unwrap(triggers.granted(code.describe(trigger_scan_law_removed_run)))
+    let mut new_entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut new_entries, changed))
+    result.unwrap(triggers.allow(mut new_entries, unchanged))
+    result.unwrap(triggers.allow(mut new_entries, kept_run))
+    let mut old_entries: triggers.Entries = clone(new_entries)
+    result.unwrap(triggers.allow(mut old_entries, removed))
+    result.unwrap(triggers.allow(mut old_entries, removed_run))
+    let written = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(triggers.Id, triggers.Id, triggers.Id, triggers.Id, triggers.Id, Option[triggers.Id]), triggers.Error] {
+        let kept = triggers.write(mut tx, tables, old_entries, kept_run, 7u64, At(0u64))?
+        let lost = triggers.write(mut tx, tables, old_entries, removed_run, 0u64, At(1u64))?
+        let gone = triggers.write(mut tx, tables, old_entries, removed, 0u64, At(2u64))?
+        let cancel = triggers.write(mut tx, tables, old_entries, removed, 0u64, At(3u64))?
+        let park_cancel = triggers.write(mut tx, tables, old_entries, removed_run, 0u64, At(4u64))?
+        let _ = triggers.write(mut tx, tables, old_entries, changed, 1u64, At(5u64))?
+        let _ = triggers.write(mut tx, tables, old_entries, unchanged, 0u64, At(7u64))?
+        let _ = triggers.write(mut tx, tables, old_entries, unchanged, 0u64, At(6u64))?
+        let staying = if same_image { Some(triggers.write(mut tx, tables, old_entries, kept_run, 0u64, At(8u64))?) } else { None }
+        Ok((kept, lost, gone, cancel, park_cancel, staying))
+    })
+    let (kept, lost, gone, cancel, park_cancel, staying) = result.unwrap(trigger_commit(take written)).value
+    let base = store.snapshot(db)
+    let first = option.unwrap(result.unwrap(triggers.next_pending(base, tables, fn(id: triggers.Id) -> bool { false })))
+    let second = option.unwrap(result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { id == kept })))
+    let cancelling_row = option.unwrap(result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { id != park_cancel })))
+    let parked_row = result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { Some(id) != staying }))
+    let started = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
+        let _ = triggers.start(mut tx, tables, first, old_digest)?
+        let _ = triggers.start(mut tx, tables, second, old_digest)?
+        let Body(park) = triggers.start(mut tx, tables, cancelling_row, old_digest)? else { return Error(StaleAttempt) }
+        triggers.hold(mut tx, tables, park, 0u64, list.new(), list.new())?
+        if let Some(row_to_park) = parked_row {
+            let Body(hold) = triggers.start(mut tx, tables, row_to_park, old_digest)? else { return Error(StaleAttempt) }
+            triggers.hold(mut tx, tables, hold, 0u64, list.new(), list.new())?
+        }
+        triggers.request_cancel(mut tx, tables, cancel)?
+        triggers.request_cancel(mut tx, tables, park_cancel)
+    })
+    let _ = result.unwrap(trigger_commit(take started))
+
+    let attempt = trigger_scan_law_bytes(16u64, 4u8)
+    let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
+    let exported_store = result.unwrap(store.export_copy(take copying))
+    let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
+    let setup = PrepareConfig(scratch: exported_store.dir, options: options, attempt: clone(attempt), image_digest: clone(new_digest),
+        clock: c, tasks: tasks, n_place: new_n_place, place: new_place,
+        migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: clone(new_entries))
+    result.unwrap(prepare_export(setup, source, new_digest))
+    let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
+    let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
+    let rows = result.unwrap(std.codec.decode(codec, raw))
+    if list.len(rows) != (if same_image { 8u64 } else { 7u64 }) { fail("L40: wrong number of report rows") }
+    let schema = result.unwrap(std.codec.schema(std.codec.of_u64()))
+    let mut seen = 0u64
+    for row in rows {
+        let (path, granted_kind, count, expected_class): (String, bool, u64, TriggerScanClass) = match row.earliest_due {
+            0u64 => ("trigger_law_granted_body", true, 1u64, if same_image { Unchanged } else { Held }),
+            1u64 => ("trigger_scan_law_removed_run", true, 1u64, if same_image { Gone } else { Held }),
+            2u64 => ("trigger_scan_law_removed", false, 1u64, Gone),
+            3u64 => ("trigger_scan_law_removed", false, 1u64, Cancelling),
+            4u64 => ("trigger_scan_law_removed_run", true, 1u64, Cancelling),
+            5u64 => ("trigger_law_body", false, 1u64, if same_image { Unchanged } else { Changed }),
+            6u64 => ("trigger_scan_law_unchanged", false, 2u64, Unchanged),
+            8u64 => if same_image { ("trigger_law_granted_body", true, 1u64, Held) } else { fail("L40: unexpected parked run") },
+            _ => fail("L40: wrong earliest due time"),
+        }
+        let mut qualified: String = clone("store@1/runner/")
+        string.push(mut qualified, path)
+        let expected_kind: Kind = if granted_kind { Granted } else { Transact }
+        let bit = 1u64 << int.narrow(row.earliest_due)
+        if row.path != string.as_bytes(qualified) { fail("L40: wrong entry path") }
+        if row.schema != schema || row.kind != expected_kind { fail("L40: wrong argument schema or kind") }
+        if row.count != count || (seen & bit) != 0u64 { fail("L40: wrong count or duplicate row") }
+        if row.class != expected_class { fail("L40: wrong trigger class") }
+        seen |= bit
+    }
+    store.release_export(mut db, attempt)
+    let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let (take running, take published) = trigger_law_initial(take db, c, tasks, take to, take new_entries)
+    let mut head = take running
+    head.r = result.unwrap(placed(new_place, new_n_place))
+    let mut drive = option.unwrap(replace(mut head.trigger_drive, None))
+    drive.revision = clone(new_digest)
+    head.trigger_drive = Some(take drive)
+    for i in 0u64 .. 8u64 {
+        if !result.unwrap(advance_triggers(mut head)) { fail("L40: due trigger did not advance") }
+    }
+    let snapshot = store.snapshot(head.db)
+    if let Some(Gone) = trigger_law_outcome(head, gone) {} else { fail("L40: removed transact trigger did not end Gone") }
+    if let Some(Cancelled) = trigger_law_outcome(head, cancel) {} else { fail("L40: cancel did not settle") }
+    if let Some(Cancelled) = trigger_law_outcome(head, park_cancel) {} else { fail("L40: parked cancel did not settle") }
+    if let Some(parked_id) = staying {
+        if let Some(Gone) = trigger_law_outcome(head, lost) {} else { fail("L40: same-image retry of removed entry did not end Gone") }
+        if let Some(Request(1u64, 0u64, _, _)) = result.unwrap(triggers.hold_mark(snapshot, tables, parked_id)) {} else { fail("L40: same-image Request hold changed") }
+        for i in 0u64 .. 2u64 {
+            let TriggerMessage(take message) = result.unwrap(channel.receive(inbox)) else { fail("L40: retry did not reach its trigger call") }
+            result.unwrap(trigger_message(mut head, take message, false))
+        }
+        let TriggerDone(retried, take verdict) = result.unwrap(channel.receive(inbox)) else { fail("L40: retry did not finish") }
+        if triggers.run_id(retried) != kept || triggers.number(retried) != 2u64 { fail("L40: wrong retry attempt") }
+        result.unwrap(trigger_done(mut head, retried, take verdict, false))
+        if let Some(Returned(_)) = trigger_law_outcome(head, kept) {} else { fail("L40: retry did not return") }
+    } else {
+        for id in [kept, lost] {
+            match result.unwrap(triggers.hold_mark(snapshot, tables, id)) {
+                Some(Revision(before, after)) => if before != old_digest || after != new_digest { fail("L40: wrong image digests in hold") },
+                _ => fail("L40: changed image did not park the run"),
+            }
+        }
+    }
+    let Head(db: take done, trigger_drive: take active, ..) = take head
+    stop_triggers(option.unwrap(take active))
+    result.unwrap(store.close(take done))
+    Ok(())
+}
+
+fn trigger_scan_law_last(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    transact(mut reg, code.describe(trigger_scan_law_removed), 131072u64, DEFAULT_STEPS)
+}
+
+fn trigger_scan_law_empty(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] { Ok(()) }
+
+fn trigger_scan_law_install(mut db: store.Db, tasks: Tasks, n_place: u64,
+    place: StaticFn[fn(mut Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError]],
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]) -> u64 waits {
+    let reg = result.unwrap(placed(place, n_place))
+    let (take description, take record) = result.unwrap(prepare_activation(reg, n_place))
+    let mut pending_install = result.unwrap(store.stage_migration(db, tasks, migrate))
+    let version = store.version(store.snapshot(db)) + 1u64
+    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    result.unwrap(store.stage_activation(mut pending_install, version, result.unwrap(current_description(db)), description, release_codec, record))
+    result.unwrap(store.install_activation(mut db, take pending_install))
+    version
+}
+
+fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.Options, explicit_empty: bool) -> Result[(), ()] waits {
+    let dir = triggers.law_directory(d)
+    let n_place = 1048576u64
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
+    let _ = trigger_scan_law_install(mut db, tasks, n_place, code.describe(trigger_scan_law_last), code.describe(trigger_law_migrate))
+    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let target = result.unwrap(triggers.transact(code.describe(trigger_scan_law_removed)))
+    let mut listed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut listed, target))
+    let due = host.wall_ms(c) + 100u64
+    let written = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, tables, listed, target, 0u64, At(due))
+    })
+    let id = result.unwrap(trigger_commit(take written)).value
+    let attempt = trigger_scan_law_bytes(16u64, 9u8)
+    let digest = trigger_scan_law_bytes(32u64, 2u8)
+    let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
+    let exported_store = result.unwrap(store.export_copy(take copying))
+    let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
+    let setup = PrepareConfig(scratch: exported_store.dir, options: options, attempt: clone(attempt), image_digest: clone(digest),
+        clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty),
+        migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: triggers.empty_entries())
+    result.unwrap(prepare_export(setup, source, digest))
+    let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
+    let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
+    let rows = result.unwrap(std.codec.decode(codec, raw))
+    if list.len(rows) != 1u64 || rows[0u64].class != Gone || rows[0u64].count != 1u64 || rows[0u64].earliest_due != due {
+        fail("L40: final entry did not scan as Gone")
+    }
+    store.release_export(mut db, attempt)
+    let selection = Current(trigger_scan_law_install(mut db, tasks, n_place, code.describe(trigger_scan_law_empty), code.describe(trigger_scan_law_keep_schema)))
+    result.unwrap(store.close(take db))
+
+    let (to, events): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
+    let (head_to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(8u64)
+    let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let initial_window: Option[DrainWindow] = None
+    let drain = latest.new(arc.new(initial_window))
+    let triggering = if explicit_empty { Some(trigger_law_config(triggers.empty_entries())) } else { None }
+    let job = ManagedHead(backing: Disk(dir, options), selection: selection, tasks: tasks, clock: c, random: r,
+        place: code.describe(trigger_scan_law_empty), migrate: code.describe(trigger_scan_law_keep_schema),
+        handles: code.describe(trigger_law_handles), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
+        finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),
+        cut: result.unwrap(cut_activity()), triggering: take triggering)
+    let allowance = head_bytes(job.backing, job.n_place, job.n_publisher)
+    let server = task.spawn(tasks, bytes allowance, take job, head_ended)
+    if let Ok(Recovered) = channel.receive(events) {} else { fail("L40: serving head did not recover") }
+    result.unwrap(channel.send(head_to, HeadContinue))
+    if let Ok(Activated(_, _, _, _)) = channel.receive(events) {} else { fail("L40: serving head did not activate") }
+    result.unwrap(channel.send(head_to, HeadContinue))
+    if let Ok(Published(_)) = channel.receive(events) {} else { fail("L40: serving head did not publish") }
+    host.sleep_until_wall(c, due)
+    result.unwrap(channel.send(head_to, HeadContinue))
+    // The serving loop dispatches due rows before it receives HeadClose.
+    result.unwrap(channel.send(head_to, HeadClose))
+    if let Ok(Settled) = channel.receive(events) {} else { fail("L40: serving head did not settle") }
+    result.unwrap(channel.send(head_to, HeadFinish))
+    if let Ok(HeadEnded(Ok(()))) = channel.receive(events) {} else { fail("L40: serving head did not close") }
+    result.unwrap(task.join(take server))
+    let reopened = result.unwrap(store.open(tasks, dir, c, r, options))
+    let outcome = result.unwrap(triggers.outcome(store.snapshot(reopened), tables, id))
+    result.unwrap(store.close(take reopened))
+    if let Some(Gone) = outcome { Ok(()) } else { fail("L40: Gone did not survive reopen") }
 }
 
 // ENDSTATE steps law 7. A committed request reaches the waiting body at its

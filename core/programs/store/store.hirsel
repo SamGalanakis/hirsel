@@ -28,7 +28,7 @@ pub fn defaults() -> Options {
     Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, journal_limit: 268435456, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory())
 }
 
-pub type Limit = Key | Value | Transaction | Name | Ids | Manifest
+pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
 pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Malformed
 
@@ -3932,6 +3932,10 @@ fn application_name(name: String) -> Result[(), Error] {
 pub fn with_schema[H](db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
     healthy(db)?
     (code.callable(make))(Schema(store: db.store, catalog: share_page_tree(db.heads[0].roots.catalog)))
+}
+
+pub fn snapshot_schema(s: Snapshot) -> Schema {
+    Schema(store: s.store, catalog: share_page_tree(s.roots.catalog))
 }
 
 pub fn tx_schema(tx: Tx) -> Schema {
@@ -8863,6 +8867,15 @@ pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result
 
 pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     stage_migration(source.db, tasks, configure)
+}
+
+pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V], at: K) -> Result[Option[V], Error] {
+    let selected = system_table(source.db, name, take key, take value)?
+    get(snapshot(source.db), shape(selected), at)
+}
+
+pub fn staged_snapshot(source: Preparation, staged: StagedMigration) -> Snapshot {
+    snapshot_from(source.db, 0u64, source.stamp.head, staged.plan.roots)
 }
 
 pub type PreparedTarget: codec + send {

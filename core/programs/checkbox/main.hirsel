@@ -165,7 +165,8 @@ pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: T
             let store.runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
             let setup = store.runner.PrepareConfig(scratch: directory, options: store.defaults(),
                 attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
-                place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles))
+                place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles),
+                triggers: store.triggers.empty_entries())
             return match store.runner.prepare_deploy(setup) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
         }
         start(n, directory, web, c, random, tasks, a, take stop)

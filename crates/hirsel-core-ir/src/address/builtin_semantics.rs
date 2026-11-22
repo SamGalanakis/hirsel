@@ -241,6 +241,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("net", "narrow", 1),
     ("net", "split", 1),
     ("option", "unwrap", 1),
+    ("order", "compare", 1),
     ("p256", "verify", 1),
     ("p256", "verify_der", 1),
     ("rc", "new", 2),

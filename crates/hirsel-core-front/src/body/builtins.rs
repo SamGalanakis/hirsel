@@ -43,6 +43,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.list_put_word(vals[0]?, vals[1]?, types[0], name == "put_word_be", n)?;
             return Some(None);
         }
+        if module == ["order"] && name == "compare" {
+            return Some(self.order_compare(types[0], vals[0], vals[1], result, n));
+        }
         if module == ["list"] && name == "compare_bytes" {
             return Some(self.list_compare_bytes(vals[0]?, vals[1]?, result, n));
         }

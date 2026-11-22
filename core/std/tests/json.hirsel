@@ -337,33 +337,58 @@ fn print_escapes_round_trip() -> bool {
 
 // expect: run parse_admission_order() = true
 fn parse_admission_order() -> bool {
-    let out = isolate(fn() -> Result[bool, Capacity] {
+    let malformed = result.unwrap(bound bytes 0 {
+        region r {
+            let bad = match json.parse(r, "[1,]") {
+                Error(Syntax(3)) => true,
+                _ => false,
+            }
+            let bad_key = match json.parse_tree("{\"abcdef\\q\":0}", fn() -> Result[(), json.Error] {
+                Ok(())
+            }, fn(take node: json.TreeValue[()]) {
+                drop(take node)
+            }, fn(take e: json.Error) -> json.Error {
+                take e
+            }) {
+                Error(Syntax(9)) => true,
+                _ => false,
+            }
+            bad && bad_key
+        }
+    })
+    let out = isolate(fn() -> Result[(), Capacity] {
         bound bytes 0 {
             region r {
-                let bad = match json.parse(r, "[1,]") {
-                    Error(Syntax(3)) => true,
-                    _ => false
-                }
-                let bad_key = match json.parse_tree("{\"abcdef\\q\":0}", fn() -> Result[(), json.Error] {
-                    Ok(())
-                }, fn(take node: json.TreeValue[()]) {
-                    drop(take node)
-                }, fn(take e: json.Error) -> json.Error {
-                    take e
-                }) {
-                    Error(Syntax(9)) => true,
-                    _ => false
-                }
-                if bad && bad_key {
-                    let _ = json.parse(r, "null")
-                }
-                false
+                let _ = json.parse(r, "null")
             }
         }
     })
-    match caught(take out) {
+    malformed && match caught(take out) {
         Some(c) => c.requested == 8 && c.available == 0,
         None => false,
+    }
+}
+
+// expect: run parse_tree_boolean_values() = true
+fn parse_tree_boolean_values() -> bool {
+    match json.parse_tree(" [ true, false ] ", fn() -> Result[(), json.Error] {
+        Ok(())
+    }, fn(take node: json.TreeValue[u64]) -> u64 {
+        match node {
+            True => 1,
+            False => 2,
+            Arr(xs) => if list.len(xs) == 2 && xs[0] == 1 && xs[1] == 2 {
+                3
+            } else {
+                0
+            },
+            _ => 0,
+        }
+    }, fn(take e: json.Error) -> json.Error {
+        take e
+    }) {
+        Ok(3) => true,
+        _ => false,
     }
 }
 

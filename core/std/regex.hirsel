@@ -1500,9 +1500,7 @@ fn add_range(mut pool: List[u32], lo: u32, hi: u32) -> Result[(), Error] {
 }
 
 fn range_cut(mut pool: List[u32], end: u64) {
-    while list.len(pool) > 2 * end {
-        let _ = list.pop(mut pool)
-    }
+    list.truncate(mut pool, 2 * end)
 }
 
 fn range_move(mut pool: List[u32], to: u64, from: u64) {

@@ -60,18 +60,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Ok(self.konst(Ty::Scalar(Scalar::Bool), u64::from(eq), n));
         };
         let eq_only = matches!(op, CompareOp::Eq | CompareOp::Ne);
-        let ord = Ty::Scalar(Scalar::I8);
-        let join = self.new_block(&[ord]);
-        let a = self.address(AddressBase::Value(l), &[], place, n);
-        let b = self.address(AddressBase::Value(r), &[], place, n);
-        self.walk(a, b, t, join, eq_only, n);
-        let zero = self.konst(ord, 0, n);
-        if let Some(zero) = zero {
-            self.jump(join, &[zero], n);
-        }
-        self.start(join);
-        let ordering = self.block_params(join)[0];
-        let zero = self.konst(ord, 0, n);
+        let ordering = self.walk_places(t, place, l, r, eq_only, n);
+        let zero = self.konst(Ty::Scalar(Scalar::I8), 0, n);
         let result = self.value(Ty::Scalar(Scalar::Bool));
         if let Some(zero) = zero {
             self.inst(
@@ -85,6 +75,86 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
         }
         Ok(Some(result))
+    }
+
+    /// The ordering -1, 0 or 1 of two places of type `t`: one walk, leaving at the
+    /// first component that differs (`eq_only`: telling equal from not only).
+    fn walk_places(
+        &mut self,
+        t: TyId,
+        place: PlaceTy,
+        l: ValueId,
+        r: ValueId,
+        eq_only: bool,
+        n: NodeId,
+    ) -> ValueId {
+        let ord = Ty::Scalar(Scalar::I8);
+        let join = self.new_block(&[ord]);
+        let a = self.address(AddressBase::Value(l), &[], place, n);
+        let b = self.address(AddressBase::Value(r), &[], place, n);
+        self.walk(a, b, t, join, eq_only, n);
+        let zero = self.konst(ord, 0, n);
+        if let Some(zero) = zero {
+            self.jump(join, &[zero], n);
+        }
+        self.start(join);
+        self.block_params(join)[0]
+    }
+
+    /// `order.compare(l, r)` at `t`: the `Order` that `<` decides, from one ordering of
+    /// the two values (core.md, Order). Scalars and values carried as their word
+    /// compare as `<` and `>` do; every other type is walked once.
+    pub(super) fn order_compare(
+        &mut self,
+        t: TyId,
+        l: Option<ValueId>,
+        r: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Ok(_) => return None,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let t = match self.t.kind(t) {
+            TyKind::View(x) => *x,
+            _ => t,
+        };
+        let ord = Ty::Scalar(Scalar::I8);
+        let word = t == UNIT || value_ty(&self.t, t).ok().flatten().is_some() || self.word_like(t);
+        let derived = !word && (has_param(&self.t, t) || self.comparable(t, 0).is_err());
+        let (left, right) = if derived {
+            let ordering = self.key_operation(key_glue::KeyOp::Order, t, &[l, r], n)?;
+            (ordering, self.konst(ord, 0, n)?)
+        } else if t == UNIT {
+            let zero = self.konst(ord, 0, n)?;
+            (zero, zero)
+        } else if word {
+            (l?, r?)
+        } else {
+            let (l, r) = (l?, r?);
+            if !self.live() {
+                return None;
+            }
+            match self.place_of(t, n) {
+                Some(place) => (
+                    self.walk_places(t, place, l, r, false, n),
+                    self.konst(ord, 0, n)?,
+                ),
+                None => {
+                    let zero = self.konst(ord, 0, n)?;
+                    (zero, zero)
+                }
+            }
+        };
+        if !self.live() {
+            return None;
+        }
+        self.order_of(left, right, id, result, n)
     }
 
     /// Ok when every component of `t` is built: scalars, unit, tuples, records and

@@ -1,8 +1,8 @@
 //! Foreign declarations (FFI-2, FFI-4 to FFI-6), before body checking or archive admission.
 use crate::decls::is_core_prelude;
 use crate::{
-    DeclBody, DeclId, Def, ERROR, FnDecl, H_RAW_HANDLE, Mode, Program, Repr, Role, Rows, TyId,
-    TyKind, TyRead, TypeDecl, UNIT, refusal,
+    DeclBody, DeclId, Def, ERROR, FnDecl, H_RAW_HANDLE, Mode, ParamDecl, Program, Repr, Role, Rows,
+    TyId, TyKind, TyRead, TypeDecl, refusal,
 };
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::Scalar;
@@ -76,7 +76,36 @@ impl Marker {
 pub(crate) struct Names {
     interfaces: BTreeMap<DeclId, Site>,
     kinds: BTreeMap<DeclId, Site>,
-    releases: BTreeMap<TyId, usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct CheckedHeaders {
+    names: Names,
+    calls: BTreeMap<usize, CallShape>,
+}
+
+struct CallShape {
+    params: Vec<AbiType>,
+    result: AbiType,
+    release: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum AbiType {
+    Unit,
+    Scalar(Scalar),
+    Bytes { mutable: bool },
+    Dir,
+    Handle { kind: TyId, release: bool },
+    New(TyId),
+    Other,
+}
+
+impl AbiType {
+    fn scalar_or_unit(self) -> bool {
+        matches!(self, Self::Unit)
+            || matches!(self, Self::Scalar(s) if !matches!(s, Scalar::Bool | Scalar::Char))
+    }
 }
 
 impl Names {
@@ -111,12 +140,11 @@ struct KindUse {
 impl Program<'_> {
     /// A successful make gives the run a release obligation, including when
     /// retained source never calls that release explicitly.
-    pub(crate) fn foreign_release_for(&self, make: &FnDecl) -> Option<usize> {
-        if !self.index.modules[make.site.module.0 as usize].foreign {
+    pub(crate) fn foreign_release_for(&self, make: usize) -> Option<usize> {
+        if !self.index.modules[self.fns[make].site.module.0 as usize].foreign {
             return None;
         }
-        let kind = self.foreign_result_kind(make.result)?;
-        self.foreign_names().releases.get(&kind).copied()
+        self.checked_foreign_headers().calls.get(&make)?.release
     }
 
     pub fn foreign_function_header(&self, function: &FnDecl) -> Option<(DefPath, String)> {
@@ -145,73 +173,89 @@ impl Program<'_> {
             self.decls[d.index()].path.clone()
         };
         Some(
-            self.fns
+            self.checked_foreign_headers()
+                .calls
                 .iter()
-                .filter(|fd| fd.site.module == module)
-                .map(|fd| {
+                .filter_map(|(&function, shape)| {
+                    let fd = &self.fns[function];
+                    if fd.site.module != module {
+                        return None;
+                    }
                     let params = fd.params[1..]
                         .iter()
-                        .map(|p| {
-                            let abi = if self.foreign_bytes(p.ty) {
-                                AbiParameter::Bytes {
-                                    mutable: p.mode == Mode::Mut,
-                                }
-                            } else if self.foreign_dir(p.ty) {
-                                AbiParameter::Dir
-                            } else if let Some(kind) = Marker::Handle.argument(self, p.ty) {
-                                AbiParameter::Handle {
+                        .zip(&shape.params)
+                        .map(|(p, shape)| {
+                            let abi = match *shape {
+                                AbiType::Scalar(scalar) => AbiParameter::Scalar(scalar),
+                                AbiType::Bytes { mutable } => AbiParameter::Bytes { mutable },
+                                AbiType::Dir => AbiParameter::Dir,
+                                AbiType::Handle { kind, release } => AbiParameter::Handle {
                                     kind: kind_name(kind),
-                                    release: p.mode == Mode::Take,
-                                }
-                            } else if let TyKind::Scalar(scalar) = self.types.kind(p.ty) {
-                                AbiParameter::Scalar(*scalar)
-                            } else {
-                                unreachable!("a checked foreign parameter has an ABI form")
+                                    release,
+                                },
+                                _ => unreachable!("a checked foreign parameter has an ABI form"),
                             };
                             (self.index.symbols.text(p.name).to_owned(), abi)
                         })
                         .collect();
-                    let result = if let Some(kind) = self.foreign_result_kind(fd.result) {
-                        AbiResult::New(kind_name(kind))
-                    } else if let TyKind::Scalar(scalar) = self.types.kind(fd.result) {
-                        AbiResult::Scalar(*scalar)
-                    } else {
-                        AbiResult::Unit
+                    let result = match shape.result {
+                        AbiType::New(kind) => AbiResult::New(kind_name(kind)),
+                        AbiType::Scalar(scalar) => AbiResult::Scalar(scalar),
+                        _ => AbiResult::Unit,
                     };
-                    AbiSignature {
+                    Some(AbiSignature {
                         name: fd.path.0.name.clone(),
                         waits: fd.waits,
                         params,
                         result,
-                    }
+                    })
                 })
                 .collect(),
         )
     }
 
     pub(crate) fn check_foreign_signatures(&mut self) {
-        let (names, refusals) = self.foreign_headers();
-        self.foreign_names.get_or_init(|| names);
+        let (headers, refusals) = self.foreign_headers();
+        self.foreign_headers.get_or_init(|| headers);
         self.refusals.extend(refusals);
     }
 
     pub(crate) fn foreign_names(&self) -> &Names {
-        self.foreign_names.get_or_init(|| self.foreign_headers().0)
+        &self.checked_foreign_headers().names
     }
 
-    fn foreign_headers(&self) -> (Names, Vec<Refusal>) {
-        let mut names = Names::default();
+    fn checked_foreign_headers(&self) -> &CheckedHeaders {
+        // The declaration layer stores the source rows. Derive these facts
+        // on first use after restoring an accepted layer.
+        self.foreign_headers
+            .get_or_init(|| self.foreign_headers().0)
+    }
+
+    fn foreign_headers(&self) -> (CheckedHeaders, Vec<Refusal>) {
+        let mut headers = CheckedHeaders::default();
+        let names = &mut headers.names;
         let mut refusals = Vec::new();
         if !self.index.modules.iter().any(|module| module.foreign) {
-            return (names, refusals);
+            return (headers, refusals);
         }
         let mut interfaces = BTreeMap::new();
         let mut uses = BTreeMap::<(ModuleId, DeclId), KindUse>::new();
+        let mut releases = BTreeMap::new();
         for (function, fd) in self.fns.iter().enumerate() {
             let module = fd.site.module;
             if !self.index.modules[module.0 as usize].foreign {
                 continue;
             }
+            let shape = headers.calls.entry(function).or_insert_with(|| CallShape {
+                params: fd
+                    .params
+                    .iter()
+                    .skip(1)
+                    .map(|p| self.foreign_parameter(p))
+                    .collect(),
+                result: self.foreign_result(fd.result),
+                release: None,
+            });
             let Some(first) = fd.params.first() else {
                 refusals.push(refusal(
                     "FFI-2",
@@ -268,14 +312,18 @@ impl Program<'_> {
 
             let params = &fd.params[1..];
             let release = params.iter().any(|p| p.mode == Mode::Take);
+            // Check the callable result with its roots. Lowering and the C
+            // projection use the value result, which can differ on refused headers.
             let result = match self.types.kind(fd.callable) {
                 TyKind::Fn(_, result, ..) => *result,
                 _ => fd.result,
             };
-            let new_kind = self.foreign_result_kind(result);
-            let returns_scalar = self.foreign_scalar(result);
-            if release
-                && (params.len() != 1 || !(result == UNIT || returns_scalar || result == ERROR))
+            let result_shape = if result == fd.result {
+                shape.result
+            } else {
+                self.foreign_result(result)
+            };
+            if release && (params.len() != 1 || !(result_shape.scalar_or_unit() || result == ERROR))
             {
                 refusals.push(refusal(
                     "FFI-5",
@@ -284,59 +332,41 @@ impl Program<'_> {
                 ));
                 continue;
             }
-            for p in params {
-                if let Some(raw_kind) = Marker::Handle.argument(self, p.ty)
-                    && !p.bytes
-                    && matches!(p.mode, Mode::View | Mode::Take)
-                {
-                    if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
-                        let site = self.handle_site(fd, p.site);
-                        note_kind(
-                            &mut names,
-                            &mut uses,
-                            kind,
-                            site,
-                            false,
+            for (p, &abi) in params.iter().zip(&shape.params) {
+                match (abi, p.mode, p.bytes) {
+                    (
+                        AbiType::Handle {
+                            kind: raw_kind,
                             release,
-                            &mut refusals,
-                        );
-                        if release {
-                            names.releases.insert(raw_kind, function);
+                        },
+                        Mode::View | Mode::Take,
+                        false,
+                    ) => {
+                        if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
+                            let site = self.handle_site(fd, p.site);
+                            note_kind(names, &mut uses, kind, site, false, release, &mut refusals);
+                            if release {
+                                releases.insert(raw_kind, function);
+                            }
                         }
                     }
-                } else if p.ty != ERROR
-                    && (p.bytes
-                        || !match p.mode {
-                            Mode::View => {
-                                self.foreign_scalar(p.ty)
-                                    || self.foreign_bytes(p.ty)
-                                    || self.foreign_dir(p.ty)
-                            }
-                            Mode::Mut => self.foreign_bytes(p.ty),
-                            _ => false,
-                        })
-                {
-                    refusals.push(refusal(
+                    (AbiType::Bytes { .. }, Mode::View | Mode::Mut, false)
+                    | (AbiType::Dir, Mode::View, false) => {}
+                    (AbiType::Scalar(_), Mode::View, false) if abi.scalar_or_unit() => {}
+                    _ if p.ty == ERROR => {}
+                    _ => refusals.push(refusal(
                         "FFI-5",
                         p.site,
                         "parameter is not a foreign ABI type and mode",
-                    ));
+                    )),
                 }
             }
-            if let Some(kind) = new_kind {
-                if let Some(kind) = self.foreign_marker_decl(kind, module) {
+            if let AbiType::New(raw_kind) = result_shape {
+                if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
                     let site = self.handle_site(fd, fd.result_site);
-                    note_kind(
-                        &mut names,
-                        &mut uses,
-                        kind,
-                        site,
-                        true,
-                        false,
-                        &mut refusals,
-                    );
+                    note_kind(names, &mut uses, kind, site, true, false, &mut refusals);
                 }
-            } else if result != ERROR && result != UNIT && !returns_scalar {
+            } else if result != ERROR && !result_shape.scalar_or_unit() {
                 refusals.push(refusal(
                     "FFI-5",
                     fd.result_site,
@@ -353,7 +383,12 @@ impl Program<'_> {
                 ));
             }
         }
-        (names, refusals)
+        for shape in headers.calls.values_mut() {
+            if let AbiType::New(kind) = shape.result {
+                shape.release = releases.get(&kind).copied();
+            }
+        }
+        (headers, refusals)
     }
 
     fn foreign_marker_decl(&self, ty: TyId, foreign: ModuleId) -> Option<DeclId> {
@@ -372,27 +407,42 @@ impl Program<'_> {
         .then_some(*d)
     }
 
-    fn foreign_scalar(&self, ty: TyId) -> bool {
-        matches!(self.types.kind(ty), TyKind::Scalar(s) if !matches!(s, Scalar::Bool | Scalar::Char))
-    }
-
-    fn foreign_bytes(&self, ty: TyId) -> bool {
-        matches!(self.types.kind(ty), TyKind::Adt(d, args)
-            if self.decls[d.index()].role == Some(Role::List)
-            && matches!(args.as_slice(), [element] if *element == crate::scalar(Scalar::U8)))
-    }
-
-    fn foreign_dir(&self, ty: TyId) -> bool {
-        matches!(self.types.kind(ty), TyKind::Adt(d, args)
-            if args.is_empty() && is_core_prelude(&self.decls[d.index()].path, &["Dir"]))
-    }
-
-    fn foreign_result_kind(&self, ty: TyId) -> Option<TyId> {
-        match self.types.kind(ty) {
-            TyKind::Adt(d, args) if is_core_prelude(&self.decls[d.index()].path, &["Option"]) => {
-                Marker::Handle.argument(self, *args.first()?)
+    fn foreign_parameter(&self, param: &ParamDecl) -> AbiType {
+        match self.types.kind(param.ty) {
+            TyKind::Scalar(s) => AbiType::Scalar(*s),
+            TyKind::Adt(d, args) => {
+                let decl = &self.decls[d.index()];
+                match args.as_slice() {
+                    [element]
+                        if decl.role == Some(Role::List)
+                            && *element == crate::scalar(Scalar::U8) =>
+                    {
+                        AbiType::Bytes {
+                            mutable: param.mode == Mode::Mut,
+                        }
+                    }
+                    [kind] if decl.role == Some(Role::ForeignHandle) => AbiType::Handle {
+                        kind: *kind,
+                        release: param.mode == Mode::Take,
+                    },
+                    [] if is_core_prelude(&decl.path, &["Dir"]) => AbiType::Dir,
+                    _ => AbiType::Other,
+                }
             }
-            _ => None,
+            _ => AbiType::Other,
+        }
+    }
+
+    fn foreign_result(&self, ty: TyId) -> AbiType {
+        match self.types.kind(ty) {
+            TyKind::Unit => AbiType::Unit,
+            TyKind::Scalar(s) => AbiType::Scalar(*s),
+            TyKind::Adt(d, args) if is_core_prelude(&self.decls[d.index()].path, &["Option"]) => {
+                args.first()
+                    .and_then(|&arg| Marker::Handle.argument(self, arg))
+                    .map_or(AbiType::Other, AbiType::New)
+            }
+            _ => AbiType::Other,
         }
     }
 

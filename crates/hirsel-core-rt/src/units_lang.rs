@@ -411,7 +411,18 @@ struct SendWait {
     settled: Option<Took>,
 }
 
+struct SchedulerHooks {
+    pump: unsafe fn(&mut LangUnit),
+    drop_root: unsafe fn(*mut LangUnit),
+}
+
+static SCHEDULER_HOOKS: SchedulerHooks = SchedulerHooks {
+    pump,
+    drop_root: drop_root_unit,
+};
+
 pub(crate) struct LangUnit {
+    hooks: &'static SchedulerHooks,
     pub(crate) ctx: Box<UnitCtx>,
     pub(crate) socket_registry: *mut hirsel_core_net::Sockets,
     inboxes: Map<usize, *mut InboxH>,
@@ -462,14 +473,28 @@ impl LangUnit {
         self.helper.is_some() || !self.helpers.is_empty()
     }
 
-    fn new(
-        ctx: Box<UnitCtx>,
-        readies: &Arc<Readies>,
-        helper: Option<Arc<HelperShared>>,
-    ) -> Box<Self> {
-        ctx.port.set_waker(readies);
-        ctx.port.arm();
+    pub(crate) fn attach(&self, readies: &Arc<Readies>) {
+        self.ctx.port.set_waker(readies);
+        self.ctx.port.arm();
+    }
+
+    /// # Safety
+    /// The scheduler owns the unit for this commit.
+    pub(crate) unsafe fn pump_ready(&mut self) {
+        // SAFETY: forwarded to the installed unit hook.
+        unsafe { (self.hooks.pump)(self) }
+    }
+
+    /// # Safety
+    /// The scheduler owns the root allocated by `root_unit`; no task runs.
+    pub(crate) unsafe fn end_root(unit: *mut Self) {
+        // SAFETY: forwarded to the installed unit hook.
+        unsafe { ((*unit).hooks.drop_root)(unit) }
+    }
+
+    fn new(ctx: Box<UnitCtx>, helper: Option<Arc<HelperShared>>) -> Box<Self> {
         Box::new(LangUnit {
+            hooks: &SCHEDULER_HOOKS,
             ctx,
             socket_registry: ptr::null_mut(),
             inboxes: map(),
@@ -484,35 +509,16 @@ impl LangUnit {
     }
 }
 
-/// A helper about to start its run, and where the run's unit is handed back.
-type Pending = Option<(Box<UnitCtx>, Arc<HelperShared>, *mut *mut LangUnit)>;
-std::thread_local! {
-    /// The helper unit this thread is about to run, for its `run_root`. Set
-    /// and taken on one thread before the run's first switch, so a pool unit
-    /// that later resumes on another worker never reads it again.
-    static PENDING: std::cell::RefCell<Pending> = const { std::cell::RefCell::new(None) };
-}
-
-/// For `run_root`: the helper unit this thread is starting, bound to the
-/// run's scheduler, or null (borrowed: the helper's body owns it).
-pub(crate) fn adopt(readies: &Arc<Readies>) -> *mut LangUnit {
-    let Some((ctx, shared, out)) = PENDING.with(|p| p.borrow_mut().take()) else {
-        return ptr::null_mut();
-    };
-    let u = Box::into_raw(LangUnit::new(ctx, readies, Some(shared)));
-    // SAFETY: `out` is on the helper body's own stack, live across its run.
-    unsafe { *out = u };
-    u
-}
-
 /// A root unit, made at the first unit operation of a run that is not a helper.
 pub(crate) fn root_unit(readies: &Arc<Readies>) -> *mut LangUnit {
-    Box::into_raw(LangUnit::new(Box::new(UnitCtx::unfunded()), readies, None))
+    let unit = LangUnit::new(Box::new(UnitCtx::unfunded()), None);
+    unit.attach(readies);
+    Box::into_raw(unit)
 }
 
 /// # Safety
 /// The scheduler owns this root unit and no task runs.
-pub(crate) unsafe fn drop_root_unit(u: *mut LangUnit) {
+unsafe fn drop_root_unit(u: *mut LangUnit) {
     // SAFETY: made by `root_unit`.
     let mut u = unsafe { Box::from_raw(u) };
     u.ctx.end_root();
@@ -1365,15 +1371,14 @@ fn helper_main(
             &xo,
         );
         drop(data);
-        let mut adopted: *mut LangUnit = ptr::null_mut();
-        PENDING.with(|p| *p.borrow_mut() = Some((hctx, shared, &raw mut adopted)));
+        let mut lu = LangUnit::new(hctx, Some(shared));
         let mut result = vec![0u8; layout.result.bytes.max(rb as usize)];
         let provider = if run.is_null() {
             tasks::SchedulerProvider::default()
         } else {
             (*run).scheduler
         };
-        let failed = tasks::run_root(
+        let failed = tasks::run_root_with_unit(
             &mut context,
             body,
             input.as_mut_ptr(),
@@ -1381,12 +1386,8 @@ fn helper_main(
             layout.input.bytes,
             layout.result.bytes,
             provider,
+            Some(&mut lu),
         );
-        let lu = adopted;
-        if lu.is_null() {
-            crate::process::stop(b"UnitLedger");
-        }
-        let mut lu = Box::from_raw(lu);
         // Each connection still retained has its last client in another unit;
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.

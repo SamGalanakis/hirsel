@@ -41,7 +41,7 @@ fn encode(db: &Connection, out: &mut impl Write) -> Result<()> {
 
     let mut strings = Strings::default();
     let mut events = BTreeMap::from([(primary.clone(), 0)]);
-    let mut counters = db.prepare("SELECT DISTINCT event FROM sample_counter ORDER BY event")?;
+    let mut counters = db.prepare("SELECT DISTINCT event FROM cpu_sample ORDER BY event")?;
     for event in counters.query_map([], |row| row.get::<_, String>(0))? {
         let event = event?;
         let next = events.len();
@@ -126,15 +126,12 @@ fn encode(db: &Connection, out: &mut impl Write) -> Result<()> {
         "SELECT c.parent_id,fr.id,fr.mapping_id,fr.rel_pc,fr.function_id,fr.line,fr.col,fr.inlined
          FROM callsite c JOIN frame fr ON fr.id=c.frame_id WHERE c.id=?1",
     )?;
-    let mut counters =
-        db.prepare("SELECT event,value FROM sample_counter WHERE sample_id=?1 ORDER BY event")?;
     let mut statement =
-        db.prepare("SELECT id,callsite_id,raw_pc_hex FROM cpu_sample ORDER BY id")?;
+        db.prepare("SELECT callsite_id,raw_pc_hex,event,period FROM cpu_sample ORDER BY id")?;
     let mut samples = statement.query([])?;
     while let Some(row) = samples.next()? {
-        let id: i64 = row.get(0)?;
-        let highest: i64 = row.get(1)?;
-        let leaf_pc = address(&row.get::<_, String>(2)?)?;
+        let highest: i64 = row.get(0)?;
+        let leaf_pc = address(&row.get::<_, String>(1)?)?;
         let mut pc = Some(leaf_pc);
         let mut current = Some(highest);
         let mut refs = Vec::new();
@@ -164,11 +161,8 @@ fn encode(db: &Connection, out: &mut impl Write) -> Result<()> {
             }
         }
         let mut weights = vec![0; events.len()];
-        let mut values = counters.query([id])?;
-        while let Some(value) = values.next()? {
-            let name: String = value.get(0)?;
-            weights[events[&name]] = i64::try_from(value.get::<_, Unsigned>(1)?.0)? as u64;
-        }
+        let name = row.get_ref(2)?.as_str()?;
+        weights[events[name]] = i64::try_from(row.get::<_, Unsigned>(3)?.0)? as u64;
         let mut message = Vec::new();
         packed(&mut message, 1, &refs)?;
         packed(&mut message, 2, &weights)?;
@@ -324,8 +318,7 @@ mod tests {
              INSERT INTO frame VALUES (1,1,32,1,'fixture.hirsel',10,1,0),
                                       (2,1,32,2,'fixture.hirsel',13,3,1);
              INSERT INTO callsite VALUES (1,NULL,1,0), (2,1,2,1);
-             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x1020',23,'fiber','fiber_root');
-             INSERT INTO sample_counter VALUES (1,'instructions',23);",
+             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x1020','instructions',23,'fiber','fiber_root');",
             )
             .unwrap();
         writer

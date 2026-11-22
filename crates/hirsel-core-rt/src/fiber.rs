@@ -255,6 +255,30 @@ impl Stack {
             release(self.guard_end, top);
         }
     }
+
+    /// # Safety
+    /// The caller exclusively owns this off-CPU stack and every page below
+    /// the page containing `sp` has no live frame.
+    #[cfg(target_os = "linux")]
+    pub(crate) unsafe fn discard_below(&self, sp: usize) {
+        let top = self.top();
+        let page = self.len - RESERVE;
+        // SAFETY: the stack is pinned and the low-water word remains writable.
+        let low = unsafe { low_word(top).read() };
+        debug_assert!((low..top).contains(&sp));
+        let end = sp & !(page - 1);
+        if low < end {
+            // SAFETY: the caller owns these complete writable pages, none of
+            // which contains the cut point or the stack header.
+            unsafe {
+                libc::madvise(
+                    std::ptr::without_provenance_mut(low),
+                    end - low,
+                    libc::MADV_DONTNEED,
+                );
+            }
+        }
+    }
 }
 /// Drop the grown pages of the idle stack whose writable range starts at
 /// `guard_end` and whose reservation ends at `top`, with one fresh inaccessible
@@ -304,6 +328,8 @@ impl Drop for Stack {
 pub(crate) struct Stock {
     budget: &'static Budget,
     kept: Vec<(Stack, Retained<'static>)>,
+    // The prefix whose stack pages have already been returned during idle.
+    cooled: usize,
     surplus: Vec<Stack>,
     // Repeated calls from one live unit reuse its last stack without locking
     // the pool. The unit gives it back with the rest of its task storage.
@@ -347,6 +373,7 @@ impl Stock {
         Self {
             budget,
             kept: Vec::new(),
+            cooled: 0,
             surplus: Vec::new(),
             recent: None,
         }
@@ -379,7 +406,10 @@ impl Stock {
         }
         stack.trim();
         match self.budget.retain(stack.retained()) {
-            Some(held) => self.kept.push((stack, held)),
+            Some(held) => {
+                self.cooled = self.cooled.min(self.kept.len());
+                self.kept.push((stack, held));
+            }
             None => {
                 SURPLUS.fetch_add(1, Relaxed);
                 self.surplus.push(stack);
@@ -393,12 +423,32 @@ impl Stock {
         self.surplus.clear();
     }
 
+    pub(crate) fn has_warm_kept(&self) -> bool {
+        cfg!(target_os = "linux") && self.kept.len() > self.cooled
+    }
+
+    /// Keep each reservation and its low-water word. The ended task owns no
+    /// frames, so the rest of its writable pages can return to the host.
+    pub(crate) fn cool_kept(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            for (stack, _) in self.kept.iter().skip(self.cooled) {
+                let page = stack.len - RESERVE;
+                // SAFETY: the stock owns this idle stack. Recycling trimmed
+                // it to COMMIT, and the last native page holds its low word.
+                unsafe { stack.discard_below(stack.top() - page) };
+            }
+            self.cooled = self.kept.len();
+        }
+    }
+
     /// Move up to `count` idle stacks, surplus first, to `to`.
     fn hand(&mut self, to: &mut Self, count: usize) {
         let surplus = count.min(self.surplus.len());
         to.surplus
             .extend(self.surplus.drain(self.surplus.len() - surplus..));
         let kept = (count - surplus).min(self.kept.len());
+        to.cooled = to.cooled.min(to.kept.len());
         to.kept.extend(self.kept.drain(self.kept.len() - kept..));
     }
 
@@ -435,7 +485,7 @@ struct Alternate {
 impl Alternate {
     fn new() -> Self {
         let stack = crate::units::signal_stack_memory()
-            .map_or_else(Stack::new, |memory| memory.map(Stack::new));
+            .map_or_else(Stack::new, |memory| memory.signal_stack());
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();

@@ -22,3 +22,44 @@ fn maybe(c: bool) -> Option[u64] {
         None
     }
 }
+
+type Job = Done | Running
+
+fn local() -> Job {
+    let j = Done
+    j
+}
+
+fn reply() -> DirReply {
+    let r: DirReply = Done
+    r
+}
+
+fn ended(r: DirReply) -> bool {
+    match r {
+        Done => true,
+        _ => false
+    }
+}
+
+fn env_error() -> env.EnvError {
+    let e: env.EnvError = NotUtf8
+    e
+}
+
+fn is_not_utf8(e: env.EnvError) -> bool {
+    match e {
+        NotUtf8 => true,
+        _ => false
+    }
+}
+
+fn locked() -> DirReply {
+    let r = Locked(true)
+    r
+}
+
+fn prelude_stat() -> Stat {
+    let s = Stat(kind: Directory, size: 2, modified_ns: 0)
+    s
+}

@@ -12,6 +12,7 @@ use hirsel_core_ir::source::SourceMap;
 use hirsel_core_layout::{Fixed, Layout};
 use hirsel_cranelift::unwind::Unwind;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::os::unix::ffi::OsStrExt;
 
 mod adapter;
@@ -22,7 +23,7 @@ mod report;
 mod sites;
 mod start;
 use code::{Code, I8, I32, I64};
-pub(crate) use sites::{check_linked_sites, retain_referenced};
+pub(crate) use sites::{check_linked_sites, live_site_words, retain_referenced};
 type Result<T> = std::result::Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -254,11 +255,12 @@ impl<'a> Plan<'a> {
         source_identity: hirsel_core_ids::ContentHash,
         revision: &[u8; 32],
         revisions: &[(String, [u8; 32])],
+        (live_sites, spawns_units): (Option<&BTreeSet<u64>>, bool),
     ) -> Result<Vec<u8>> {
         let mut object = object(target)?;
         let mut unwind = Unwind::new(object.isa()).map_err(error)?;
         let waits = foreign::emit(&mut object, &mut unwind, &self.foreign)?;
-        let data = data::write(&mut object, self, sources)?;
+        let data = data::write(&mut object, self, sources, live_sites)?;
         data::bytes(
             &mut object,
             Some("hirsel_code_revision"),
@@ -273,7 +275,15 @@ impl<'a> Plan<'a> {
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
             .map_err(error)?;
         adapter::emit(&mut object, &mut unwind, self, entry, signature)?;
-        start::emit(&mut object, &mut unwind, self, &data, entry, waits)?;
+        start::emit(
+            &mut object,
+            &mut unwind,
+            self,
+            &data,
+            entry,
+            waits,
+            spawns_units,
+        )?;
         let mut product = object.finish();
         unwind.write(&mut product).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);

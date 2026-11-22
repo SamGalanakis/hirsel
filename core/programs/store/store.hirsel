@@ -1455,7 +1455,7 @@ fn prefixed(id: u32, rest: u64) -> Result[Bytes, Error] {
 }
 
 // One allocation: the key is appended into the prefix's spare capacity.
-fn physical(id: u32, key: Bytes) -> Result[Bytes, Error] {
+fn logical_key(id: u32, key: Bytes) -> Result[Bytes, Error] {
     let mut p = prefixed(id, list.len(key))?
     list.append(mut p, key)
     Ok(take p)
@@ -1497,7 +1497,7 @@ fn note_read(tx: Tx, take read: Read) -> Result[(), Error] {
 }
 
 fn fetch_bytes(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    let p = physical(id, key)?
+    let p = logical_key(id, key)?
     let found = std.omap.get(tx.roots.data, p)
     note_read(tx, Point(take p))?
     match found {
@@ -1507,10 +1507,10 @@ fn fetch_bytes(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
 }
 
 fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
-    put_physical(mut tx, physical(id, key)?, copied(val)?)
+    put_logical_key(mut tx, logical_key(id, key)?, copied(val)?)
 }
 
-fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
+fn put_logical_key(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
     let frame = put_frame(tx, p, val, tx.frame_bytes)?
     apply_put(mut tx, take p, take val)
     tx.frame_bytes = frame
@@ -1560,7 +1560,7 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes) {
 }
 
 fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
-    let p = physical(id, key)?
+    let p = logical_key(id, key)?
     let Some(refund) = delete_refund(tx, p) else {
         return Ok(false)
     }
@@ -1852,14 +1852,14 @@ fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error]
             id
         }),
         Included(k) => {
-            let mut p = physical(id, k)?
+            let mut p = logical_key(id, k)?
             if high {
                 list.push(mut p, 0u8)
             }
             Ok(take p)
         },
         Excluded(k) => {
-            let mut p = physical(id, k)?
+            let mut p = logical_key(id, k)?
             if !high {
                 list.push(mut p, 0u8)
             }
@@ -1883,7 +1883,7 @@ fn next_bytes(mut rows: ByteRows) -> Result[Option[(Bytes, Arc[Bytes])], Error] 
 }
 
 fn get_bytes(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    let p = physical(id, key)?
+    let p = logical_key(id, key)?
     match std.omap.get(s.roots.data, p) {
         Some(v) => Ok(Some(copied(v)?)),
         None => Ok(None)
@@ -2045,8 +2045,8 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
             if done.value != 46 || list.len(done.reads) != 4 {
                 return false
             }
-            let one = result.unwrap(physical(t.id, key_word(1)))
-            let two = result.unwrap(physical(t.id, key_word(2)))
+            let one = result.unwrap(logical_key(t.id, key_word(1)))
+            let two = result.unwrap(logical_key(t.id, key_word(2)))
             let lo = result.unwrap(lower_bytes(t.id, Excluded(key_word(1)), false))
             let middle = result.unwrap(lower_bytes(t.id, Excluded(key_word(2)), false))
             let hi = result.unwrap(lower_bytes(t.id, Included(key_word(3)), true))
@@ -2806,7 +2806,7 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
 
 type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
 
-fn index_physical(id: u32, index_part: Bytes, key: Bytes) -> Result[Bytes, Error] {
+fn index_logical_key(id: u32, index_part: Bytes, key: Bytes) -> Result[Bytes, Error] {
     let mut row = prefixed(id, list.len(index_part) + list.len(key))?
     list.append(mut row, index_part)
     list.append(mut row, key)
@@ -2835,7 +2835,7 @@ fn apply_edits(mut tx: Tx, take edits: List[DataEdit]) {
 // therefore check the original op table while carrying the cumulative frame size.
 // A returned Error leaves all roots, accounting and issued IDs untouched.
 fn put_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Result[(), Error] {
-    let p = physical(t.id, key)?
+    let p = logical_key(t.id, key)?
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
@@ -2855,9 +2855,9 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Result[(), Er
                 if old_part == new_part {
                     continue
                 }
-                append_index_remove(tx, mut edits, index_physical(ix.id, old_part, key)?, mut frame)?
+                append_index_remove(tx, mut edits, index_logical_key(ix.id, old_part, key)?, mut frame)?
             }
-            let index_row = index_physical(ix.id, new_part, key)?
+            let index_row = index_logical_key(ix.id, new_part, key)?
             let empty: Bytes = list.new()
             frame = put_frame(tx, index_row, empty, frame)?
             list.push(mut edits, StoreRow(take index_row, take empty))
@@ -2870,7 +2870,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Result[(), Er
 }
 
 fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Error] {
-    let p = physical(t.id, key)?
+    let p = logical_key(t.id, key)?
     let (take old, refund) = {
         let raw = match std.omap.get(tx.roots.data, p) {
             Some(v) => v,
@@ -2887,7 +2887,7 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
     let mut edits: List[DataEdit] = list.new()
     for ix in t.indexes {
         let old_part = capacity((ix.extract)(old))?
-        append_index_remove(tx, mut edits, index_physical(ix.id, old_part, key)?, mut frame)?
+        append_index_remove(tx, mut edits, index_logical_key(ix.id, old_part, key)?, mut frame)?
     }
     frame = edit_frame(tx, p, 5 + list.len(p), frame)?
     apply_edits(mut tx, take edits)
@@ -2926,7 +2926,7 @@ pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] 
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.id)?
-    let p = physical(t.id, encode_key(t.key, k)?)?
+    let p = logical_key(t.id, encode_key(t.key, k)?)?
     match std.omap.get(s.roots.data, p) {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
@@ -3068,7 +3068,7 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
             ix
         }),
         Included(x) => {
-            let p = physical(ix, encode_key(key, x)?)?;
+            let p = logical_key(ix, encode_key(key, x)?)?;
             if high {
                 prefix_after(p)
             } else {
@@ -3076,7 +3076,7 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
             }
         },
         Excluded(x) => {
-            let p = physical(ix, encode_key(key, x)?)?;
+            let p = logical_key(ix, encode_key(key, x)?)?;
             if high {
                 Ok(take p)
             } else {
@@ -3205,36 +3205,36 @@ fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: Rows[K
     Ok(Page(rows: take page, byte_count: byte_count, next: take resume))
 }
 
-fn advance_rows[K, V](r: Rows[K, V], physical_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+fn advance_rows[K, V](r: Rows[K, V], row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
     let mut at: u64 = 4
     if let Some(skip) = r.skip {
-        match (skip)(physical_key, mut at) {
+        match (skip)(row_key, mut at) {
             Ok(()) => {},
             Error(e) => return Error(Decode(e))
         }
     }
-    let key = list.slice(physical_key, at, list.len(physical_key))
+    let key = list.slice(row_key, at, list.len(row_key))
     let k = decoded(std.codec.decode_key(r.key, key))?
     if let Some(_) = r.skip {
-        let primary = physical(r.table, key)?
+        let primary = logical_key(r.table, key)?
         match std.omap.get(r.data, primary) {
             Some(value) => finish_row(r, take k, primary, value, remaining, seen),
             None => Error(Stale(r.table))
         }
     } else {
-        finish_row(r, take k, physical_key, raw, remaining, seen)
+        finish_row(r, take k, row_key, raw, remaining, seen)
     }
 }
 
-fn finish_row[K, V](r: Rows[K, V], take key: K, physical_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
-    let size = list.len(physical_key) + list.len(raw)
+fn finish_row[K, V](r: Rows[K, V], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+    let size = list.len(row_key) + list.len(raw)
     if let Some(left) = remaining {
         if size > left {
             return Ok(None)
         }
     }
     let value = row_value(r.readers, r.table, raw)?
-    seen(physical_key)?
+    seen(row_key)?
     Ok(Some(((take key, take value), size)))
 }
 
@@ -3498,7 +3498,7 @@ fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.K
 }
 
 fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
-    let p = physical(t.id, encode_key(t.key, k)?)?
+    let p = logical_key(t.id, encode_key(t.key, k)?)?
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
@@ -3736,14 +3736,14 @@ fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: Strin
         let mut encoded_index = encode_key(key, j)?
         let user_key = list.slice(primary, 4, list.len(primary))
         list.append(mut encoded_index, user_key)
-        let physical_key = physical(id, encoded_index)?
-        if list.len(physical_key) > 4096 {
+        let row_key = logical_key(id, encoded_index)?
+        if list.len(row_key) > 4096 {
             return Error(Limit(Key))
         }
         let empty: Bytes = list.new()
-        live = int.saturating_add(live, entry(physical_key, empty))
+        live = int.saturating_add(live, entry(row_key, empty))
         let shared_empty = arc.new(take empty)
-        let (take data, _) = std.omap.insert(mut plan.next_node, roots.data, take physical_key, take shared_empty)
+        let (take data, _) = std.omap.insert(mut plan.next_node, roots.data, take row_key, take shared_empty)
         roots.data = take data
     }
     roots = catalog_insert(mut plan.next_node, roots, k, raw)?
@@ -3896,7 +3896,7 @@ fn migrate_build[K, V, K2, V2](source: std.omap.OMap[Bytes, Arc[Bytes]], take ba
         let v = row_value(from.readers, from.id, encoded)?
         if let Some((k2, v2)) = capacity(f(k, v))? {
             let key2 = encode_key(to.key, k2)?
-            let p = physical(id, key2)?
+            let p = logical_key(id, key2)?
             if list.len(p) > 4096 {
                 return Error(Limit(Key))
             }
@@ -3915,7 +3915,7 @@ fn migrate_build[K, V, K2, V2](source: std.omap.OMap[Bytes, Arc[Bytes]], take ba
             for ix in to.indexes {
                 let mut ik = capacity((ix.extract)(v2))?
                 list.append(mut ik, key2)
-                let ip = physical(id + position, ik)?
+                let ip = logical_key(id + position, ik)?
                 if list.len(ip) > 4096 {
                     return Error(Limit(Key))
                 }
@@ -5380,26 +5380,26 @@ pub fn law_look(c: Clock) -> bool waits {
         return false
     }
     let p1 = match got.reads[0] {
-        Point(k) => k == result.unwrap(physical(t.id, key_word(1))),
+        Point(k) => k == result.unwrap(logical_key(t.id, key_word(1))),
         _ => false
     }
     let p2 = match got.reads[1] {
-        Point(k) => k == result.unwrap(physical(t.id, key_word(9))),
+        Point(k) => k == result.unwrap(logical_key(t.id, key_word(9))),
         _ => false
     }
     // [table1 || key1 || 00, table1 || key3 || 00) includes precisely 2 and 3.
-    let mut low = result.unwrap(physical(t.id, key_word(1)))
+    let mut low = result.unwrap(logical_key(t.id, key_word(1)))
     list.push(mut low, 0u8)
-    let mut high = result.unwrap(physical(t.id, key_word(3)))
+    let mut high = result.unwrap(logical_key(t.id, key_word(3)))
     list.push(mut high, 0u8)
-    let mut middle = result.unwrap(physical(t.id, key_word(2)))
+    let mut middle = result.unwrap(logical_key(t.id, key_word(2)))
     list.push(mut middle, 0u8)
     let span = match (got.reads[2], got.reads[3]) {
         (Span(l, m), Span(n, h)) => l == low && m == middle && n == middle && h == high,
         _ => false
     }
-    let ix_low = result.unwrap(physical(ix.id, key_word(2)))
-    let ix_high = result.unwrap(physical(ix.id, key_word(3)))
+    let ix_low = result.unwrap(logical_key(ix.id, key_word(2)))
+    let ix_high = result.unwrap(logical_key(ix.id, key_word(3)))
     let index_span = match got.reads[4] {
         Span(l, h) => l == ix_low && h == ix_high,
         _ => false
@@ -5496,7 +5496,7 @@ fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) ->
             if at == list.len(delta) {
                 return false
             }
-            if delta[at].tree_key != result.unwrap(physical(1, key_word(k))) {
+            if delta[at].tree_key != result.unwrap(logical_key(1, key_word(k))) {
                 return false
             }
             let good = match delta[at].value {
@@ -5767,7 +5767,7 @@ pub fn law_changes_rewritten_equal(c: Clock) -> bool {
     for k in 0u64 .. 96 {
         let x = option.unwrap(result.unwrap(next_bytes(mut left)))
         let y = option.unwrap(result.unwrap(next_bytes(mut right)))
-        if x.0 != result.unwrap(physical(1, key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
+        if x.0 != result.unwrap(logical_key(1, key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
             return false
         }
         sum += decode_word(x.1)
@@ -5796,7 +5796,7 @@ fn frame_boundary_points() -> bool {
     let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
     let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
     let mut ops: Map[Bytes, Option[Arc[Bytes]]] = map.new()
-    let key = result.unwrap(physical(1, key_word(7)))
+    let key = result.unwrap(logical_key(1, key_word(7)))
     let mut value: Bytes = list.new()
     list.push(mut value, 0u8)
     list.push(mut value, 0u8)
@@ -6478,7 +6478,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     }))
     match take replied { Committed(_) => {}, _ => return false }
     if db.heads[0].head != 2 || stream_now(db, s) != (0u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r0")) { return false }
-    match std.omap.get(db.heads[0].roots.data, result.unwrap(physical(1, key_word(1)))) { Some(v) => if decode_word(v) != 11 { return false }, None => return false }
+    match std.omap.get(db.heads[0].roots.data, result.unwrap(logical_key(1, key_word(1)))) { Some(v) => if decode_word(v) != 11 { return false }, None => return false }
     // The reply keeps d: e still mismatches, before Duplicate, and d's
     // Duplicate follows it.
     match result.unwrap(admit(mut db, s, 0, e)) { RequestMismatch => {}, _ => return false }
@@ -6498,7 +6498,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     if db.heads[0].head != 4 || stream_now(db, s) != (1u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r1")) { return false }
-    if let Some(_) = std.omap.get(db.heads[0].roots.data, result.unwrap(physical(1, key_word(2)))) { return false }
+    if let Some(_) = std.omap.get(db.heads[0].roots.data, result.unwrap(logical_key(1, key_word(2)))) { return false }
     match result.unwrap(admit(mut db, s, 2, d)) { Admitted(t) => if !mark_is(ticket(t), 5) { return false }, _ => return false }
     // Aborted without a reply, Failed and Refused keep nothing; each later
     // admit of 2 is Abandoned with the commit_ticket of 5 and commits nothing.
@@ -6806,11 +6806,11 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         return false
     }
     let span = match reads[0] {
-        Span(low, high) => low == result.unwrap(physical(2, key_word(1))) && high == result.unwrap(physical(2, key_word(2))),
+        Span(low, high) => low == result.unwrap(logical_key(2, key_word(1))) && high == result.unwrap(logical_key(2, key_word(2))),
         _ => false
     }
     let point = match reads[1] {
-        Point(key) => key == result.unwrap(physical(1, key_word(1))),
+        Point(key) => key == result.unwrap(logical_key(1, key_word(1))),
         _ => false
     }
     if !span || !point {
@@ -6972,7 +6972,7 @@ fn cover_write(mut tx: Tx, t: Table[u64, u64], key: u64, mode: u64, value: u64) 
 }
 
 // L26: re-execution is the oracle, exact vectors rather than a checksum. Two
-// tables have equal keys and equal J buckets, but distinct physical prefixes.
+// tables have equal keys and equal J buckets, but distinct logical-key prefixes.
 pub fn law_read_cover(c: Clock) -> bool waits {
     if !lookup_cover_points(c) {
         return false
@@ -8128,7 +8128,7 @@ pub fn disk_law_nodes(c: Clock) -> bool {
     let rebuilt_root = option.unwrap(map.get(nodes, std.omap.node_id(root)))
     let rebuilt_map = std.omap.from_root(Some(arc.share(rebuilt_root)))
     for k in 0u64 .. 96 {
-        let p = result.unwrap(physical(1, key_word(k)))
+        let p = result.unwrap(logical_key(1, key_word(k)))
         match std.omap.get(rebuilt_map, p) {
             Some(v) => if !disk_word(v, k + 1) {
                 return false
@@ -8930,7 +8930,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
         return false
     }
     for k in 0u64 .. 40 {
-        let key = result.unwrap(physical(1, key_word(k)))
+        let key = result.unwrap(logical_key(1, key_word(k)))
         match std.omap.get(loaded.roots.data, key) {
             Some(v) => if !disk_word(v, k + 1) {
                 return false
@@ -9046,7 +9046,7 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
     let loaded = result.unwrap(disk_load(d, 96 * 86))
     for k in 0u64 .. 96 {
-        let key = result.unwrap(physical(1, key_word(k)))
+        let key = result.unwrap(logical_key(1, key_word(k)))
         let expected = if k < 64 {
             k + 101
         } else {
@@ -10294,8 +10294,8 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
             wrote_expected_pack = true
         }
     }
-    let key = result.unwrap(physical(1, key_word(0)))
-    let changed = result.unwrap(physical(1, key_word(95)))
+    let key = result.unwrap(logical_key(1, key_word(0)))
+    let changed = result.unwrap(logical_key(1, key_word(95)))
     let changed_value = match std.omap.get(reopened.roots.data, changed) {
         Some(raw) => decode_word(raw) == 195,
         None => false
@@ -12397,7 +12397,7 @@ fn journal_apply(file: String, mut replay: JournalReplay, commit: JournalCommit)
 pub fn journal_law_apply() -> bool {
     let mut replay = journal_initial()
     for head in 1u64 .. 4 {
-        let key = result.unwrap(physical(1, key_word(7)))
+        let key = result.unwrap(logical_key(1, key_word(7)))
         let mut data: List[JournalOp] = list.new()
         list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10))))
         let mut streams: List[JournalOp] = list.new()
@@ -12413,7 +12413,7 @@ pub fn journal_law_apply() -> bool {
     match journal_apply("j-7", mut replay, duplicate) { Error(Corrupt(f)) => match f.why { Gap(3) => {}, _ => return false }, _ => return false }
     let foreign_branch = JournalCommit(branch: 1, version: 4, at: 104, data: list.new(), streams: list.new(), call: None)
     match journal_apply("j-7", mut replay, foreign_branch) { Error(Corrupt(f)) => match f.why { Gap(4) => {}, _ => return false }, _ => return false }
-    let key = result.unwrap(physical(1, key_word(7)))
+    let key = result.unwrap(logical_key(1, key_word(7)))
     let mut deletes: List[JournalOp] = list.new()
     list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None))
     let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), call: None)
@@ -12589,7 +12589,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let mut stored: Bytes = list.new()
     result.unwrap(le(mut stored, 0, 2))
     result.unwrap(le(mut stored, 70, 8))
-    let key = result.unwrap(physical(1, key_word(7)))
+    let key = result.unwrap(logical_key(1, key_word(7)))
     let mut written: Map[Bytes, Option[Arc[Bytes]]] = map.new()
     map.insert(mut written, take key, Some(arc.new(take stored)))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
@@ -13594,7 +13594,7 @@ pub fn journal_law_call_vector() -> bool {
     let mut value: Bytes = list.with_capacity(34)
     result.unwrap(le(mut value, 0, 2))
     list.fill(mut value, 32, 4u8)
-    let key = result.unwrap(physical(1, key_word(7)))
+    let key = result.unwrap(logical_key(1, key_word(7)))
     let mut ids = 0u64
     let mut data: Map[Bytes, Option[Arc[Bytes]]] = map.new()
     map.insert(mut data, take key, Some(arc.new(take value)))
@@ -13805,7 +13805,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }))
     let kept = match take aborted { Aborted(Undone(value: 5, ticket: Some(t))) => t, _ => return false }
     match result.unwrap(recorded(db, b, db.heads[0].head)) { Some(call) => if call.record.stream != s { return false }, None => return false }
-    if let Some(_) = std.omap.get(db.heads[0].roots.data, result.unwrap(physical(1, key_word(2)))) { return false }
+    if let Some(_) = std.omap.get(db.heads[0].roots.data, result.unwrap(logical_key(1, key_word(2)))) { return false }
     // I4 with a pin: main's data leaf holds keys 1 and 9, so the pinned leaf
     // and main's copy cost four rows exactly. Three overwrites of key 9
     // charge five, one row over. With nothing in flight, a ceiling one below
@@ -13834,7 +13834,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     result.unwrap(close(take db))
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
     if stream_now(after, s) != (2u64, 2u64) || !stream_reply_is(after, s, string.as_bytes("r2")) { return false }
-    match std.omap.get(after.heads[0].roots.data, result.unwrap(physical(1, key_word(9)))) { Some(v) => if decode_word(v) != 5 { return false }, None => return false }
+    match std.omap.get(after.heads[0].roots.data, result.unwrap(logical_key(1, key_word(9)))) { Some(v) => if decode_word(v) != 5 { return false }, None => return false }
     let main = main_branch(after)
     match result.unwrap(recorded(after, main, committed_at)) { Some(call) => if call.record.stream != s { return false }, None => return false }
     // After the reopen, replied 2 keeps ours: Duplicate for ours, a mismatch
@@ -14048,7 +14048,7 @@ fn journal_test_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     if journal_law_rotation(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
-// L23 across a checkpoint: expected physical keys and stored values are laid
+// L23 across a checkpoint: expected logical keys and stored values are laid
 // out by hand. Rewriting row2 to the same value emits no Change.
 pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
@@ -14334,7 +14334,7 @@ fn reserve_pinned_data(mut db: Db, t: Table[u64, u64], rows: u64) -> () {
     result.unwrap(le(mut raw, 1, 8))
     let value = arc.new(take raw)
     for i in 0u64 .. rows {
-        list.push(mut keys, result.unwrap(physical(t.id, key_word(i))))
+        list.push(mut keys, result.unwrap(logical_key(t.id, key_word(i))))
         list.push(mut values, arc.share(value))
     }
     db.heads[0].roots.data = std.omap.from_sorted(mut db.next_node, keys, values)

@@ -103,7 +103,17 @@ pub(crate) struct Content {
     pub(crate) foreign: BTreeMap<Vec<String>, ForeignModule>,
 }
 
+pub(crate) struct ContentInventory<'a>(&'a Content);
+
 impl Content {
+    pub(crate) fn inventory(&self) -> Result<ContentInventory<'_>, String> {
+        let mut count = source_count(self.files.len())?;
+        for module in self.foreign.values() {
+            count = add_files(count, module.archives.len())?;
+        }
+        Ok(ContentInventory(self))
+    }
+
     pub(crate) fn foreign_stamp(&self) -> ContentHash {
         ContentHash::of_parts_stream("hirsel.foreign-stamp.v1", |hash| {
             let mut part =
@@ -126,45 +136,6 @@ impl Content {
             Ok(())
         })
         .unwrap()
-    }
-
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
-        let mut out = Writer::new(CONTENT_LIMIT);
-        out.number(1);
-        out.text(&self.id.name);
-        out.number(self.id.major as usize);
-        out.text(CHARGE);
-        out.number(self.bindings.len());
-        for (binding, root) in &self.bindings {
-            out.text(&binding.name);
-            out.number(binding.major as usize);
-            match root {
-                None => out.number(0),
-                Some(root) => {
-                    out.number(1);
-                    out.raw(&root.0);
-                }
-            }
-        }
-        out.number(self.files.len());
-        for (path, file) in &self.files {
-            out.text(path);
-            out.module(&file.module);
-            out.frame(&file.bytes);
-        }
-        out.number(self.foreign.len());
-        for (module, foreign) in &self.foreign {
-            out.module(module);
-            out.text(&foreign.symbols);
-            out.number(foreign.archives.len());
-            for (target, row) in &foreign.archives {
-                out.text(target);
-                out.text(&row.path);
-                out.raw(&row.pin);
-                out.frame(&row.bytes);
-            }
-        }
-        out.finish()
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
@@ -207,13 +178,7 @@ impl Content {
         let mut files = BTreeMap::new();
         let mut paths = PathTree::default();
         let mut modules = BTreeMap::new();
-        let mut count = input.count()?;
-        if count == 0 {
-            return Err("no files".into());
-        }
-        if count > FILE_LIMIT {
-            return Err(file_limit());
-        }
+        let mut count = source_count(input.count()?)?;
         for _ in 0..count {
             let path = input.text()?.to_owned();
             ordered(
@@ -248,10 +213,7 @@ impl Content {
                 return Err(format!("bad symbol prefix {symbols:?} of {name}"));
             }
             let rows = input.count()?;
-            if rows > FILE_LIMIT - count {
-                return Err(file_limit());
-            }
-            count += rows;
+            count = add_files(count, rows)?;
             let mut archives = BTreeMap::new();
             for _ in 0..rows {
                 let target = input.text()?.to_owned();
@@ -289,6 +251,49 @@ impl Content {
     }
 }
 
+impl ContentInventory<'_> {
+    pub(crate) fn encode(self) -> Result<(Root, Vec<u8>), String> {
+        let content = self.0;
+        let mut out = Writer::new(CONTENT_LIMIT);
+        out.number(1);
+        out.text(&content.id.name);
+        out.number(content.id.major as usize);
+        out.text(CHARGE);
+        out.number(content.bindings.len());
+        for (binding, root) in &content.bindings {
+            out.text(&binding.name);
+            out.number(binding.major as usize);
+            match root {
+                None => out.number(0),
+                Some(root) => {
+                    out.number(1);
+                    out.raw(&root.0);
+                }
+            }
+        }
+        out.number(content.files.len());
+        for (path, file) in &content.files {
+            out.text(path);
+            out.module(&file.module);
+            out.frame(&file.bytes);
+        }
+        out.number(content.foreign.len());
+        for (module, foreign) in &content.foreign {
+            out.module(module);
+            out.text(&foreign.symbols);
+            out.number(foreign.archives.len());
+            for (target, row) in &foreign.archives {
+                out.text(target);
+                out.text(&row.path);
+                out.raw(&row.pin);
+                out.frame(&row.bytes);
+            }
+        }
+        let encoded = out.finish()?;
+        Ok((Root::of(&encoded), encoded))
+    }
+}
+
 fn ordered<T: Ord>(
     previous: Option<&T>,
     current: &T,
@@ -315,8 +320,18 @@ pub(crate) fn target_name(text: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
 }
 
-fn file_limit() -> String {
-    format!("over the limit of {FILE_LIMIT} files and archive rows")
+fn source_count(files: usize) -> Result<usize, String> {
+    if files == 0 {
+        return Err("no files".into());
+    }
+    add_files(0, files)
+}
+
+fn add_files(count: usize, added: usize) -> Result<usize, String> {
+    count
+        .checked_add(added)
+        .filter(|&total| total <= FILE_LIMIT)
+        .ok_or_else(|| format!("over the limit of {FILE_LIMIT} files and archive rows"))
 }
 
 #[derive(Default)]

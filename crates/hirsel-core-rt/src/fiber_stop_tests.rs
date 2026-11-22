@@ -170,3 +170,100 @@ fn recycled_stacks_come_back_trimmed_whether_kept_or_surplus() {
     drop(stock);
     assert_eq!(budget.used(), 0);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn network_idle_returns_cached_stack_pages_and_keeps_the_reservations() {
+    let page = super::page();
+    if page == super::COMMIT {
+        return;
+    }
+    let reservation = page + super::COMMIT;
+    let budget = Box::leak(Box::new(crate::retention::Budget::with_headroom(
+        2 * reservation,
+    )));
+    let mut stock = super::Stock::with_budget(budget);
+    let stack = stock.take();
+    let other = stock.take();
+    // SAFETY: the test owns the two idle stacks and these pages are writable.
+    let bottom = unsafe { stack.base.as_ptr().add(stack.len - super::COMMIT) };
+    let other_bottom = unsafe { other.base.as_ptr().add(other.len - super::COMMIT) };
+    unsafe {
+        bottom.write_volatile(7);
+        other_bottom.write_volatile(9);
+    }
+    stock.recycle(stack);
+    stock.recycle(other);
+    assert!(stock.has_warm_kept());
+    stock.cool_kept();
+    assert!(!stock.has_warm_kept());
+    assert_eq!(budget.used(), 2 * reservation);
+
+    let other = stock.take();
+    let stack = stock.take();
+    assert_eq!(stack.top() - super::COMMIT, bottom.addr());
+    assert_eq!(other.top() - super::COMMIT, other_bottom.addr());
+    // SAFETY: take retained the mappings. MADV_DONTNEED zeroes these private
+    // anonymous pages on their next access, leaving the header page intact.
+    unsafe {
+        assert_eq!(bottom.read_volatile(), 0);
+        assert_eq!(other_bottom.read_volatile(), 0);
+        assert_eq!(super::low_word(stack.top()).read(), bottom.addr());
+        bottom.write_volatile(11);
+    }
+    stock.recycle(stack);
+    assert!(stock.has_warm_kept());
+    stock.cool_kept();
+    let stack = stock.take();
+    assert_eq!(stack.top() - super::COMMIT, bottom.addr());
+    // SAFETY: the retained mapping still owns this writable page.
+    assert_eq!(unsafe { bottom.read_volatile() }, 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn discarding_below_a_parked_stack_keeps_its_live_frames() {
+    if super::page() == super::COMMIT {
+        return;
+    }
+    struct Parked {
+        saved: *mut u8,
+        caller: *mut u8,
+        bottom: *mut u8,
+        result: u64,
+    }
+    unsafe extern "C" fn body(first: *mut u8, _: *mut u8) -> ! {
+        let state = first.cast::<Parked>();
+        let live = 23_u64;
+        // SAFETY: the pinned state and both stacks outlive these switches.
+        // The bottom byte is scratch. The local remains live across the park.
+        unsafe {
+            (*state).bottom.write_volatile(9);
+            hirsel_stack::switch(&raw mut (*state).saved, (*state).caller);
+            (*state).result = (&raw const live).read_volatile();
+            hirsel_stack::switch(&raw mut (*state).saved, (*state).caller);
+        }
+        unreachable!()
+    }
+
+    let stack = super::Stack::new();
+    // SAFETY: this address lies in the initial writable stack extent.
+    let bottom = unsafe { stack.base.as_ptr().add(stack.len - super::COMMIT) };
+    let mut state = Parked {
+        saved: std::ptr::null_mut(),
+        caller: std::ptr::null_mut(),
+        bottom,
+        result: 0,
+    };
+    // SAFETY: state lives until both switches return. Only one stack runs at
+    // a time. The first return owns a suspended frame above its saved SP.
+    unsafe {
+        let first = stack.prepare(body, (&raw mut state).cast(), std::ptr::null_mut());
+        hirsel_stack::switch(&raw mut state.caller, first);
+        assert_eq!(bottom.read_volatile(), 9);
+        stack.discard_below(state.saved.addr());
+        assert_eq!(bottom.read_volatile(), 0);
+        hirsel_stack::switch(&raw mut state.caller, state.saved);
+    }
+    assert_eq!(state.result, 23);
+}

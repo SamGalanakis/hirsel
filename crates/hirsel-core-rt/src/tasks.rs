@@ -59,17 +59,9 @@ impl Storage {
                 NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
             }
         };
-        #[cfg(any(test, feature = "charge-observation"))]
+        #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
         if bytes != 0 {
-            crate::peak::allocated(pointer.as_ptr(), bytes);
-        }
-        #[cfg(feature = "prof")]
-        if bytes != 0 {
-            crate::mem_prof::alloc(
-                pointer.as_ptr(),
-                bytes,
-                crate::mem_prof::Backing::TaskStorage,
-            );
+            crate::backing_observation::observe!(allocate, pointer.as_ptr(), bytes, TaskStorage);
         }
         Self { pointer, layout }
     }
@@ -82,10 +74,11 @@ impl Drop for Storage {
         // SAFETY: sole owner of this host storage; payload is already moved/cleaned.
         unsafe {
             if self.layout.size() != 0 {
-                #[cfg(any(test, feature = "charge-observation"))]
-                crate::peak::deallocated(self.pointer.as_ptr());
-                #[cfg(feature = "prof")]
-                crate::mem_prof::free(self.pointer.as_ptr(), self.layout.size());
+                crate::backing_observation::observe!(
+                    free,
+                    self.pointer.as_ptr(),
+                    self.layout.size(),
+                );
                 dealloc(self.pointer.as_ptr(), self.layout);
             }
         }
@@ -1289,6 +1282,8 @@ struct Scheduler {
     timers: TimerHeap,
     all: *mut Task,
     next: u64,
+    /// Task IDs below this cursor have already been considered at network idle.
+    stack_cool_next: u64,
     provider: SchedulerProvider,
     #[cfg(any(test, feature = "testing"))]
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
@@ -1628,7 +1623,7 @@ impl Scheduler {
             self.readies.port_pending.store(false, Ordering::Relaxed);
             // SAFETY: the run pins its unit; no task runs.
             unsafe {
-                crate::units_lang::pump(&mut *self.lang);
+                (*self.lang).pump_ready();
                 let sockets = (*self.lang).socket_registry;
                 if self.net != sockets
                     && let Some(poller) = sockets.as_ref().and_then(|s| s.active_poller())
@@ -1910,6 +1905,43 @@ impl Scheduler {
         }
     }
 
+    fn net_idle_wait(&self, timeout: i32) -> (i32, bool) {
+        let new_stacks =
+            cfg!(target_os = "linux") && self.pool.is_none() && self.stack_cool_next != self.next;
+        crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept() || new_stacks)
+    }
+
+    fn release_net_idle(&mut self) {
+        release_idle(self);
+        self.stacks.cool_kept();
+        #[cfg(target_os = "linux")]
+        if self.pool.is_none() && self.stack_cool_next != self.next {
+            self.cool_new_waiters();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cool_new_waiters(&mut self) {
+        let mut task = self.all;
+        // SAFETY: the serial dispatcher has exclusive custody of these tasks.
+        // The list is newest-first. A waiting stack's saved SP begins the
+        // switch frame, below the caller's live frames and any caller red zone.
+        unsafe {
+            while let Some(waiter) = task.as_ref() {
+                if waiter.id < self.stack_cool_next {
+                    break;
+                }
+                if matches!(waiter.state, State::Waiting | State::Provider)
+                    && let Some(stack) = &waiter.stack
+                {
+                    stack.discard_below(waiter.sp.addr());
+                }
+                task = waiter.all;
+            }
+        }
+        self.stack_cool_next = self.next;
+    }
+
     fn idle(&mut self, flow_pending: bool) {
         if self.readies.has_pending() || !self.cancels.is_empty() {
             return;
@@ -1930,8 +1962,7 @@ impl Scheduler {
         let release = match deadline {
             Some(deadline) => {
                 if !self.net.is_null() {
-                    let (timeout, release) =
-                        crate::task_heap::idle_wait(poll_timeout(Some(deadline)));
+                    let (timeout, release) = self.net_idle_wait(poll_timeout(Some(deadline)));
                     self.poll_net(timeout);
                     release
                 } else {
@@ -1950,7 +1981,7 @@ impl Scheduler {
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
-                    let (timeout, release) = crate::task_heap::idle_wait(-1);
+                    let (timeout, release) = self.net_idle_wait(-1);
                     self.poll_net(timeout);
                     release
                 } else {
@@ -1961,7 +1992,7 @@ impl Scheduler {
             }
         };
         if release && !self.readies.has_pending() {
-            release_idle(self);
+            self.release_net_idle();
         }
     }
 
@@ -2684,7 +2715,9 @@ unsafe fn provider_operation_in<const RETURNABLE: bool>(
         } else {
             provider_outcome_opt!(
                 token,
-                operation::<PointerCalls, RETURNABLE>(context, task, provider, request, token, issued)
+                operation::<PointerCalls, RETURNABLE>(
+                    context, task, provider, request, token, issued
+                )
             )
         }
     }
@@ -2731,7 +2764,9 @@ unsafe fn operation<C: Calls, const RETURNABLE: bool>(
         CALLBACK_TASK.set(ptr::null_mut());
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
-            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(
+                context, task, provider, request, token, start, issued,
+            );
         }
         let step = provider_callback!(
             token,
@@ -2740,12 +2775,18 @@ unsafe fn operation<C: Calls, const RETURNABLE: bool>(
         );
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
-            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(
+                context, task, provider, request, token, start, issued,
+            );
         }
         if let Some(issued) = issued {
             *issued = Some(step.outcome);
         }
-        Some(provider_callback!(token, Deliver, C::deliver(provider, request, step.outcome)))
+        Some(provider_callback!(
+            token,
+            Deliver,
+            C::deliver(provider, request, step.outcome)
+        ))
     }
 }
 /// How `operation` calls a provider's `wait` and `deliver`. A form may contain
@@ -2908,9 +2949,14 @@ unsafe fn returnable(
                 park_returnable(task, op);
                 None
             }
-            Next::Done(produced) => {
-                Some(delivered(context, &(*op).provider, request, token, produced, None))
-            }
+            Next::Done(produced) => Some(delivered(
+                context,
+                &(*op).provider,
+                request,
+                token,
+                produced,
+                None,
+            )),
         }
     }
 }
@@ -2934,7 +2980,14 @@ pub(crate) unsafe fn resume_returnable(context: *mut Context) -> Option<crate::p
             Next::Done(produced) => {
                 (*task).operation = ptr::null_mut();
                 let request = (*op).request;
-                let outcome = delivered(context, &(*op).provider, request, (*op).token, produced, None);
+                let outcome = delivered(
+                    context,
+                    &(*op).provider,
+                    request,
+                    (*op).token,
+                    produced,
+                    None,
+                );
                 #[cfg(feature = "prof")]
                 prof_io_end((*op).token, &outcome);
                 Some(outcome)
@@ -4637,6 +4690,35 @@ pub unsafe fn run_root(
     result_bytes: usize,
     provider: SchedulerProvider,
 ) -> u8 {
+    // SAFETY: the caller pins all root operands for the run.
+    unsafe {
+        run_root_with_unit(
+            context,
+            body,
+            argument,
+            destination,
+            input_bytes,
+            result_bytes,
+            provider,
+            None,
+        )
+    }
+}
+
+/// # Safety
+/// As for `run_root`. A helper's caller keeps its unit for this run and owns it
+/// again after the root returns.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn run_root_with_unit(
+    context: *mut Context,
+    body: Body,
+    argument: *mut u8,
+    destination: *mut u8,
+    input_bytes: usize,
+    result_bytes: usize,
+    provider: SchedulerProvider,
+    unit: Option<&mut crate::units_lang::LangUnit>,
+) -> u8 {
     crate::os_sync::check_fork();
     let workers = worker_count();
     #[cfg(feature = "prof")]
@@ -4656,6 +4738,7 @@ pub unsafe fn run_root(
         timers: TimerHeap::default(),
         all: ptr::null_mut(),
         next: 1,
+        stack_cool_next: 0,
         provider,
         #[cfg(any(test, feature = "testing"))]
         script: crate::schedule_script::installed(),
@@ -4677,7 +4760,10 @@ pub unsafe fn run_root(
         lang: ptr::null_mut(),
         lang_owned: false,
     };
-    run.lang = crate::units_lang::adopt(&run.readies);
+    if let Some(unit) = unit {
+        unit.attach(&run.readies);
+        run.lang = unit;
+    }
     // A helper's entry can carry sockets already registered for this unit.
     // SAFETY: the caller pins the context and its registry through the run.
     if let Some(files) = unsafe { (*context).host_files.as_mut() }
@@ -4759,13 +4845,11 @@ pub unsafe fn run_root(
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
     });
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
-    #[cfg(feature = "prof")]
-    crate::mem_prof::alloc(
+    crate::backing_observation::observe!(
+        allocate,
         (&*root as *const Task).cast(),
         size_of::<Task>(),
-        crate::mem_prof::Backing::TaskStorage,
+        TaskStorage,
     );
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
@@ -4825,7 +4909,7 @@ pub unsafe fn run_root(
         }
         (*context).events = 0;
         if run.lang_owned {
-            crate::units_lang::drop_root_unit(run.lang);
+            crate::units_lang::LangUnit::end_root(run.lang);
         }
         drop(registered);
         root.failed
@@ -4973,7 +5057,7 @@ impl RunPtr {
                     let (timeout, release) = if wait_for_net && untied {
                         (poll_timeout(run.timers.deadline()), false)
                     } else if wait_for_net {
-                        crate::task_heap::idle_wait(poll_timeout(run.timers.deadline()))
+                        run.net_idle_wait(poll_timeout(run.timers.deadline()))
                     } else {
                         (0, false)
                     };
@@ -4992,7 +5076,7 @@ impl RunPtr {
                     let task = run.pop();
                     if task.is_null() {
                         if release {
-                            release_idle(run);
+                            run.release_net_idle();
                         }
                         if !wait_for_net {
                             if run.share_heap {
@@ -5254,7 +5338,7 @@ impl RunPtr {
             (deadline, poller)
         };
         let (timeout, release) = match poller {
-            Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline)),
+            Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline), false),
             None => {
                 release_idle(self.0);
                 (poll_timeout(deadline), false)
@@ -5383,13 +5467,11 @@ unsafe fn spawn_in(
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
         });
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
-        #[cfg(feature = "prof")]
-        crate::mem_prof::alloc(
+        crate::backing_observation::observe!(
+            allocate,
             (&*task as *const Task).cast(),
             size_of::<Task>(),
-            crate::mem_prof::Backing::TaskStorage,
+            TaskStorage,
         );
         let task = Box::into_raw(task);
         #[cfg(feature = "record")]
@@ -5780,10 +5862,7 @@ pub(crate) unsafe fn on_host_stack<T>(
 #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
 impl Drop for Task {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::deallocated((self as *const Self).cast());
-        #[cfg(feature = "prof")]
-        crate::mem_prof::free((self as *const Self).cast(), size_of::<Self>());
+        crate::backing_observation::observe!(free, (self as *const Self).cast(), size_of::<Self>());
     }
 }
 
@@ -5854,6 +5933,7 @@ mod ready_routing_laws {
                 timers: TimerHeap::default(),
                 all: ptr::null_mut(),
                 next: 1,
+                stack_cool_next: 0,
                 provider: SchedulerProvider::default(),
                 script: None,
                 #[cfg(feature = "record")]

@@ -1200,6 +1200,20 @@ pub unsafe extern "C" fn hirsel_core_release(
     // SAFETY: caller transfers the fixed block and its concrete descriptor.
     unsafe { counted::drain(context, node, descriptor, site) }
 }
+/// Free one dead box that compiled glue cleaned in place instead of handing it
+/// to the drain, exactly as the drain frees the blocks it cleans.
+/// # Safety
+/// The block is exclusively owned, its fields are cleaned, and `charge` is its
+/// exact box charge.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_free_box(
+    context: *const Context,
+    node: NonNull<u8>,
+    charge: u64,
+) {
+    // SAFETY: as this function's contract.
+    unsafe { crate::block::free_dead_in(&*context, node, charge) }
+}
 /// The one release of non-terminal `Seq` or `Map` storage outside a drain (a
 /// local's, or a field of a value ordinary glue cleans): `recipe` cleans its
 /// elements through the constant-stack drain, then the storage is freed and
@@ -1263,9 +1277,9 @@ pub unsafe extern "C" fn hirsel_core_resource_stage(
 /// Full-new admission, replacement, carrier install, then original-payer
 /// refund, for every sequence growth an emitter does not complete inline.
 /// # Safety
-/// The consuming sequence carrier is exclusively owned and has nonzero
-/// capacity. Layout, stride, kind, charges and moved bytes are the exact FORM
-/// operands.
+/// The consuming sequence carrier's data and nonzero capacity words are
+/// exclusively owned. The length word is unused and may be uninitialized.
+/// Layout, stride, kind, charges and moved bytes are the exact FORM operands.
 #[allow(clippy::too_many_arguments)]
 #[cold]
 #[inline(never)]

@@ -35,14 +35,14 @@ while ids identify table and index incarnations and are never reused.
 `Seen { value, version, reads }`, `Failed` or `Refused`. It publishes nothing and
 runs on a reader task without a Db. The checker refuses a write or `info(mut tx)`
 in that body with OWN-5. CallInfo belongs only to `run` and helpers taking mut Tx.
-`changes(a, b)` compares data-tree bytes in ascending physical-key order, skipping
+`changes(a, b)` compares data-tree bytes in ascending logical key order, skipping
 shared nodes by node id. Each change holds an Arc to its stored value. Deletions have value None. Different stores or opens
 are Foreign; branches of one open are allowed. Catalog and stream roots do not
 contribute changes. Node visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage
 for w keys whose values differ, with w <= k.
 
-Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over physical data-tree keys,
+Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over logical keys,
 including the table or index id prefix, with half-open span bounds.
 `range` and `range_reverse` return `RangeRows` scoped to the Tx. Each
 `next_range` records the gap it inspected, including the row it finds, before
@@ -68,7 +68,7 @@ A row counts its data-tree key plus its stored value, and a page holds at least
 one row when one remains. `Page{rows, byte_count, next}` has `next` = None exactly
 on the last page. `Resume` is `send`, not `codec`. It binds the Snapshot's
 identity, the table or index id, the upper bound and the last row's full
-physical key. `scan_next` and `find_next` resume strictly after that key, so
+logical key. `scan_next` and `find_next` resume strictly after that key, so
 index entries with equal keys are neither repeated nor skipped. A different
 Snapshot gives `Moved(version)`, and another incarnation gives `Stale(id)`. The
 law is L36.
@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.37 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.40 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
@@ -225,9 +225,8 @@ it to built. Everything above describes the store as built.
   page. `count` over a whole table is O(1) after the lookup. `drop_table` removes
   the table's and its indexes' map entries in one schema commit (AP7).
 - **Keys.** Read sets, `Change`, `Resume`, covers and COMMIT ops carry the
-  logical key (`id u32 BE ‖ encoded key`), the bytes this page calls the physical
-  data-tree key. Pages store only the suffix past the id and the page prefix
-  (AP5).
+  logical key (`id u32 BE ‖ encoded key`). Pages store only the suffix past the
+  id and the page prefix (AP5).
 - **Values.** A stored value up to the store's inline threshold is inline, and
   a longer one is a `BlobRef` to an immutable BLOB in a blob pack. A new store's
   threshold is 1024 bytes; an existing store keeps the threshold its MANIFEST
@@ -260,30 +259,44 @@ it to built. Everything above describes the store as built.
   acks instead of failing; the frame being built and the worker's group buffer
   have their own fixed bounds. No single figure bounds the store's process
   memory. A delete-only commit is never refused by admission, on disk or in
-  memory; like any operation it can still return `Full(c)` if the writer's own
-  allocator cannot grow its checkpoint state, before anything is published. A delayed cut
-  ack never erases newer charges.
-  `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
+  memory; like every write it is still refused at the journal cap (below).
+  `accounts(db)` returns `{logical, exact, frames, journal, resident}`, where
+  `journal` is the journal bytes no published checkpoint covers; resident page
   memory is reported, not admitted, and can exceed `logical` when roots diverge
   (AP15).
-- **Checkpoints.** The writer plans each cut, and the checkpoint task only
-  writes the plan, in a fixed workspace W = max(`pack_bytes`, 16,777,476) +
-  65,536 bytes: `checkpoint_task_bytes` defaults to 67,174,400 bytes (W at the
-  64 MiB default), and open refuses less than W of its own `pack_bytes`.
-  Planning draws on a checkpoint reserve in the writer's memory that grows with
-  the store's packs, unlocated frames and branches and pins; the operation that
-  creates each one (open, a commit, a fork or `pin`) pays its credit before it
-  publishes, and can return `Full(c)` then. So a covering checkpoint is never
-  refused, by the writer or by its task, and `delete_branch` spends credit it
-  already holds. Only compaction's relocation of old frames is funded when the
-  cut needs it, and is deferred to a later cut if the writer has no room. A
-  segment rotates at `checkpoint_bytes` even while a cut is in flight, so no
-  segment grows past `checkpoint_bytes` plus one frame (AP15, AP16).
+- **Checkpoints.** The writer makes each cut itself and serves no other call
+  until it ends. It writes only the pages and blobs no earlier cut wrote, plus
+  the moved frames of compaction and the changed pack-list pages, and then
+  syncs and renames the MANIFEST. A cut that cannot get memory is refused and
+  loses nothing: the old MANIFEST and the journal still recover every committed
+  write. `checkpoint`, schema commits, `migrate`, `pin`, `unpin`, a fork from an
+  older Snapshot, `adopt`, `delete_branch` and install return
+  `Full(Allocation(c))` when their cut cannot get memory (install:
+  `FullNew(cause)`), with nothing changed. The MANIFEST a cut writes encodes
+  the operation's prospective branch and pin records, and the writer adopts them
+  only after the rename is durable (AP16). A pause is
+  about 0.1–0.25 s for a 10 GB store with 1% changed (an estimate; AP16 gives
+  the bound). The checkpoint task and `checkpoint_task_bytes` are removed.
+- **Journal cap.** Until a cut succeeds the journal keeps growing, up to
+  `journal_limit` (default 268,435,456 bytes; at least `checkpoint_bytes` +
+  `FRAME_LIMIT`, or open is `Full(Journal(c))` before it takes the lock). The
+  journal counts accepted COMMIT and FORK bytes. A write whose frame would pass
+  the limit is refused at once, never waiting, through each operation's own
+  result: `run` and `run_on` return `Refused(Journal(c))`, a committing `admit`
+  and a live-head `fork` return `Full(Journal(c))`, `serve` returns
+  `Before(Full(Journal(c)), None)`, and `conclude` returns
+  `Before(Full(Journal(c)), Some(p))`, handing its Pending back so a retry after
+  a checkpoint writes the original context. Here c is
+  `Capacity{requested: journal + frame bytes (saturated), available: journal_limit}`.
+  A journal refusal is never `NoRoom`, so it never counts toward a claim's
+  resident refusals or settle 2. A `checkpoint` or any other cut-made
+  operation is the way out (AP15, AP16).
 - **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
   journal frame, waits for its sync, and returns the branch with an already
   durable journal ticket: no walk, settle or cut, the account is unchanged, and
-  it is never refused by admission. Everything that can fail (allocation) is
-  prepared before the frame is sent and returns with nothing sent; a failed send
+  it is never refused by admission. Everything that can fail (allocation, and
+  the journal cap) is checked before the frame is sent and returns with nothing
+  sent; its latency is O(1), one group sync. A failed send
   poisons the Db.
   A fork from an older Snapshot still makes a cut. The empty name is allowed.
   A fork past the id counter is `Limit(Ids)`. A fork or `pin` whose record
@@ -292,6 +305,17 @@ it to built. Everything above describes the store as built.
 - **Install.** A release install edits each collection by remove (a dropped id,
   with its empty drop record), replace (a created id; zero rows give an empty
   collection) or keep (no range). A schema-only change to a populated table keeps its rows,
-  index ranges and root stamps (§11.1).
-- **Constants.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
-- **Errors.** `Limit` gains `Ids` and `Manifest`; every other case is unchanged.
+  index ranges and root stamps (§11.1). The preparation metadata records NEW's
+  `resident_limit`, `pack_bytes`, `checkpoint_bytes` and `journal_limit`, and
+  install checks exactly those before activation; a refusal is
+  `FullNew(cause)` with OLD still selected (AP1b).
+- **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
+  `Options` gains `journal_limit: u64` and loses `checkpoint_task_bytes`.
+- **Errors.** `Limit` gains `Ids` and `Manifest`. Every capacity refusal carries
+  `StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)`,
+  naming the resource that refused: `Error.Full`, `Outcome.Refused`,
+  `Looked.Refused`, `Served.NoRoom` (resident or allocation only) and
+  `DeployError.FullNew`. `ServeError` becomes
+  `Before(Error, Option[Pending]) | After(Error)`. Core `Capacity` and the
+  body's `Stop.OutOfBytes(Capacity)` are unchanged, and every other case is
+  unchanged (§11.16).

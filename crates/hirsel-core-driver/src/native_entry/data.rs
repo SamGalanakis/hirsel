@@ -1,6 +1,7 @@
 //! Static views and source bindings use the same ELF writer as generated code.
 use super::*;
 use hirsel_core_layout::source_positions;
+use std::collections::BTreeSet;
 use std::mem::offset_of;
 
 pub(super) struct Tables {
@@ -36,7 +37,7 @@ pub(super) fn carrier(
 fn define(
     object: &mut ObjectModule,
     name: Option<&str>,
-    mut bytes: Vec<u8>,
+    bytes: Vec<u8>,
     align: u64,
     pointers: &[(u32, DataId)],
 ) -> Result<DataId> {
@@ -53,6 +54,17 @@ fn define(
     let id = object
         .declare_data(name, linkage, false, false)
         .map_err(error)?;
+    define_contents(object, id, bytes, align, pointers)?;
+    Ok(id)
+}
+
+fn define_contents(
+    object: &mut ObjectModule,
+    id: DataId,
+    mut bytes: Vec<u8>,
+    align: u64,
+    pointers: &[(u32, DataId)],
+) -> Result<()> {
     if bytes.is_empty() {
         bytes.resize(8, 0);
     }
@@ -63,8 +75,7 @@ fn define(
         let reference = object.declare_data_in_data(target, &mut data);
         data.write_data_addr(offset, reference, 0);
     }
-    object.define_data(id, &data).map_err(error)?;
-    Ok(id)
+    object.define_data(id, &data).map_err(error)
 }
 fn views<'a>(object: &mut ObjectModule, strings: impl Iterator<Item = &'a str>) -> Result<DataId> {
     let mut rows = Vec::new();
@@ -81,6 +92,7 @@ pub(super) fn write(
     object: &mut ObjectModule,
     plan: &Plan<'_>,
     sources: &hirsel_core_ir::source::SourceMap,
+    live_sites: Option<&BTreeSet<u64>>,
 ) -> Result<Tables> {
     let mut requirements = Vec::new();
     for p in &plan.parameters {
@@ -168,11 +180,15 @@ pub(super) fn write(
         exec_rows.extend_from_slice(digest);
     }
     let exec_bindings = define(object, None, exec_rows, 8, &exec_pointers)?;
-    let files = bytes(object, None, source_files(sources)?, 8)?;
+    let (files, file_count) = source_files(sources, live_sites)?;
+    let files_id = object
+        .declare_data("__hirsel_source_files", Linkage::Local, false, false)
+        .map_err(error)?;
+    define_contents(object, files_id, files, 8, &[])?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object
         .declare_data(
-            if sources.points.is_empty() {
+            if live_sites.is_none() && sources.points.is_empty() {
                 source_positions::TABLE_SYMBOL
             } else {
                 source_positions::POINTS_TABLE_SYMBOL
@@ -183,8 +199,8 @@ pub(super) fn write(
         )
         .map_err(error)?;
     let mut table = vec![0; 24];
-    table[8..16].copy_from_slice(&(sources.files.len() as u64).to_le_bytes());
-    let sources = define(object, None, table, 8, &[(0, files), (16, decoder)])?;
+    table[8..16].copy_from_slice(&(file_count as u64).to_le_bytes());
+    let sources = define(object, None, table, 8, &[(0, files_id), (16, decoder)])?;
     if plan.charge_report.is_some() {
         let mut label = DataDescription::new();
         label.define(
@@ -210,16 +226,54 @@ pub(super) fn write(
     })
 }
 
-/// One 40-byte row per file: path and source views, then the file's first site word.
-fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Result<Vec<u8>> {
-    let mut files = vec![0; 40 * sources.files.len()];
-    for ((row, file), start) in sources.files.iter().enumerate().zip(sources.site_starts()?) {
-        files[40 * row + 32..40 * row + 40].copy_from_slice(&start.to_le_bytes());
-        let positions = match sources.points.get(&file.path) {
-            Some(points) => source_positions::encode_points(points),
-            None => source_positions::encode(&file.text),
+/// One 40-byte row per retained file. File starts use the original site space.
+fn source_files(
+    sources: &SourceMap,
+    live_sites: Option<&BTreeSet<u64>>,
+) -> Result<(Vec<u8>, usize)> {
+    if live_sites.is_some_and(BTreeSet::is_empty) {
+        return Ok((Vec::new(), 0));
+    }
+    let starts = sources.site_starts()?;
+    let positions = live_sites.map(|_| sources.positions());
+    let mut rows = Vec::new();
+    for (index, (file, &start)) in sources.files.iter().zip(&starts).enumerate() {
+        let positions = match (live_sites, &positions, sources.points.get(&file.path)) {
+            (Some(live), Some(positions), _) => {
+                let end = starts
+                    .get(index + 1)
+                    .copied()
+                    .unwrap_or(source_positions::SITE_END);
+                let mut points = Vec::new();
+                for &site in live.range(start..end) {
+                    let ordinal = (site - start) as u32;
+                    let point = positions
+                        .file_position(index, ordinal as usize)
+                        .ok_or_else(|| format!("linked site {site} is outside {}", file.path))?;
+                    points.push((ordinal, point));
+                }
+                if points.is_empty() {
+                    continue;
+                }
+                source_positions::encode_points(&points)
+            }
+            (_, _, Some(points)) => source_positions::encode_points(
+                &points
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, point)| (i as u32, point))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => source_positions::encode(&file.text),
         };
-        for (view, content) in [file.path.as_bytes(), &positions].into_iter().enumerate() {
+        rows.push((&file.path, start, positions));
+    }
+    let count = rows.len();
+    let mut files = vec![0; 40 * count];
+    for (row, (path, start, positions)) in rows.into_iter().enumerate() {
+        files[40 * row + 32..40 * row + 40].copy_from_slice(&start.to_le_bytes());
+        for (view, content) in [path.as_bytes(), &positions].into_iter().enumerate() {
             let field = 40 * row + 16 * view;
             let offset = files.len() as u64;
             files[field..field + 8].copy_from_slice(&offset.to_le_bytes());
@@ -227,5 +281,5 @@ fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Result<Vec<u8>> 
             files.extend_from_slice(content);
         }
     }
-    Ok(files)
+    Ok((files, count))
 }

@@ -38,6 +38,12 @@ Manifest membership stays fixed. The tool counts actual source lines for each ru
 The tool reports observations, denominators and completion findings. The
 committed JSON contains ceilings and policy.
 
+The fixed product rows divide the whole-process instruction count by the
+semantic tokens of the corresponding library sources. `fixed std` uses core
+and std, and `fixed core` uses core. The driver excludes trivia and EOF from
+both counts. Product marginal rows still subtract the raw fixed std count
+and divide by the program's own code lines.
+
 The driver's `check_cost` example enables this crate's `cost-profile` feature only
 through a dev dependency. `check_cost <inputs.json> <new-store> <output.json>
 --profile` reports independent nested phase, construct, body and instance views.
@@ -48,8 +54,8 @@ The feature and all scopes are absent from production compiler units.
 
 Both cost checks compare measurements against the committed ceiling files.
 Proposed ceilings use a 2% margin. Source costs round up to 100 instructions
-per line, and front-stage costs round to 100 instructions before normalizing
-by tokens. Integer image counts use a minimum margin of one event. The fixed
-finished-process budget is 60,000 instructions per line. The absolute
+per line. Front-stage and fixed product costs round up to 100 instructions
+before normalizing by tokens. Integer image counts use a minimum margin of
+one event. The fixed finished-process budget is 60,000 instructions per line. The absolute
 core-check-index-912 residual allowances apply to source comparisons. The
 finished budget and product requests use their full process cost.

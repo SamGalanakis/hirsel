@@ -374,8 +374,7 @@ impl Resolution {
                     (id.clone(), root)
                 })
                 .collect();
-            let encoded = content.encode()?;
-            let root = Root::of(&encoded);
+            let (root, encoded) = content.inventory()?.encode()?;
             self.encoded.insert(
                 current.clone(),
                 (

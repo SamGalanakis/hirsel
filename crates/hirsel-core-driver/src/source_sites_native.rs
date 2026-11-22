@@ -218,7 +218,183 @@ fn failure_sites_relocated(backend: Backend) {
 fn failure_sites_relocated_cranelift() { failure_sites_relocated(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
-fn failure_sites_relocated_llvm() { failure_sites_relocated(Backend::Llvm); }
+fn failure_sites_relocated_llvm() {
+    failure_sites_relocated(Backend::Llvm);
+    failure_sites_discarded_by_linker();
+}
+
+fn failure_sites_discarded_by_linker() {
+    use hirsel_core_ir::source::{ItemSource, site_symbol};
+    use hirsel_core_layout::source_positions::{POINTS_TAG, point_position};
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let overflow = DefPath::from_full("app@1/main/overflow").unwrap();
+    let dead = DefPath::from_full("app@1/main/dead_coordinate").unwrap();
+    const PREFIX: &str = "fn overflow(x: u64) -> u64 {\n    ";
+    let source = format!(
+        "{PREFIX}x + 1\n}}\npub fn main() -> Result[(), Exit] {{\n    if overflow(18446744073709551615u64) == 0 {{ Ok(()) }} else {{ Error(Exit(status: 7)) }}\n}}\n"
+    );
+    let product = Driver::default()
+        .check(source_request(&source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let dev = native_options(Backend::Llvm, dir.path());
+    let reached = product.reachable_for(&entry, &dev).unwrap();
+    let inputs = reached.native.as_ref().unwrap();
+    let (mut objects, _) = product.emit_reached(&entry, &reached, &dev).unwrap();
+    let main = reached
+        .require()
+        .unwrap()
+        .iter()
+        .find(|id| id.definition == entry)
+        .unwrap();
+    let items: Vec<_> = reached
+        .require()
+        .unwrap()
+        .iter()
+        .flat_map(|id| reached.materialized.items(id).unwrap())
+        .collect();
+    let rows = product.source_rows(&items).unwrap();
+    let mut sources = product.source_map(&rows).unwrap();
+    let file = sources.items[&overflow].file;
+    sources.items.insert(
+        dead.clone(),
+        ItemSource {
+            file,
+            file_offset: 1,
+        },
+    );
+
+    // The only reference to line 1, column 2 (the n of fn) is in a separate
+    // allocated section. LLD can discard it, even though it shares the live file.
+    let mut input = object::write::Object::new(
+        object::BinaryFormat::Elf,
+        object::Architecture::X86_64,
+        object::Endianness::Little,
+    );
+    let section = input.add_section(
+        vec![],
+        b".rodata.dead_coordinate".to_vec(),
+        object::SectionKind::ReadOnlyData,
+    );
+    input.section_mut(section).set_data(vec![0; 8], 8);
+    input.add_symbol(object::write::Symbol {
+        name: b"dead_coordinate_section".to_vec(),
+        value: 0,
+        size: 8,
+        kind: object::SymbolKind::Data,
+        scope: object::SymbolScope::Compilation,
+        weak: false,
+        section: object::write::SymbolSection::Section(section),
+        flags: object::SymbolFlags::None,
+    });
+    let binding = input.add_symbol(object::write::Symbol {
+        name: site_symbol(&dead).into_bytes(),
+        value: 0,
+        size: 0,
+        kind: object::SymbolKind::Unknown,
+        scope: object::SymbolScope::Linkage,
+        weak: false,
+        section: object::write::SymbolSection::Undefined,
+        flags: object::SymbolFlags::None,
+    });
+    input
+        .add_relocation(
+            section,
+            object::write::Relocation {
+                offset: 0,
+                symbol: binding,
+                addend: 0,
+                flags: object::RelocationFlags::Elf {
+                    r_type: object::elf::R_X86_64_64,
+                },
+            },
+        )
+        .unwrap();
+    let bytes = input.write().unwrap();
+    let path = dir.path().join("dead.o");
+    std::fs::write(&path, &bytes).unwrap();
+    objects.push(ObjectProduct {
+        private_variants: 0,
+        instance: main.clone(),
+        identity: ContentHash::of_bytes(&bytes),
+        check: crate::store::checksum(&bytes),
+        held: Some(std::fs::File::open(&path).unwrap()),
+        path,
+        debug: None,
+        debug_record: None,
+        compiled: true,
+    });
+    let options = NativeOptions {
+        optimize: true,
+        ..dev
+    };
+    let (abi, cleanup) = product
+        .bind_entry_native(&entry, &options, inputs, &BTreeSet::new())
+        .unwrap();
+    let plan = crate::native_entry::Plan::new(
+        main.symbol(),
+        entry.to_string(),
+        &abi,
+        cleanup.as_ref().map(|object| object.instance.symbol()),
+        false,
+        &options,
+    )
+    .unwrap();
+    objects.extend(cleanup);
+    let linked = link_objects(
+        &plan,
+        &objects,
+        &crate::foreign_archive::LinkArchives::default(),
+        None,
+        &options,
+        ContentHash::default(),
+        || Ok(sources),
+        inputs.toolchain.image,
+        inputs.recipe.clone(),
+        false,
+        reached.counters,
+        |_| Ok(0),
+        reached.address(&entry).unwrap(),
+        || reached.revisions(),
+        None,
+    )
+    .unwrap();
+    let Linked::Built(built) = linked else {
+        panic!("objects failed verification")
+    };
+    let output = Command::new(&built.executable).output().unwrap();
+    assert_eq!(output.status.code(), Some(101));
+    assert_eq!(output.stderr, b"Overflow at app@1/main.hirsel:2:5\n");
+
+    let bytes = std::fs::read(&built.executable).unwrap();
+    let elf = object::File::parse(bytes.as_slice()).unwrap();
+    assert!(
+        !elf.symbols()
+            .any(|symbol| symbol.name() == Ok("dead_coordinate_section"))
+    );
+    let table = elf
+        .symbols()
+        .find(|symbol| symbol.name() == Ok("__hirsel_source_files"))
+        .unwrap();
+    let section = elf
+        .section_by_index(table.section_index().unwrap())
+        .unwrap();
+    let data = section
+        .data_range(table.address(), table.size())
+        .unwrap()
+        .unwrap();
+    let word = |offset| u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+    assert_eq!(word(0), 40, "the only source file is main.hirsel");
+    assert_eq!(word(32), 1);
+    let points = data[word(16)..word(16) + word(24)]
+        .strip_prefix(&[POINTS_TAG])
+        .unwrap();
+    assert_eq!(point_position(points, 1), None);
+    assert_eq!(point_position(points, PREFIX.len()), Some((2, 5)));
+}
 
 // A function value's adapter is generated code, so a core callee that fails through
 // it reports the nearest non-core caller's site (driver README): the call through the

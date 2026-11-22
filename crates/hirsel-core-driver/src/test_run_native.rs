@@ -960,6 +960,45 @@ fn package_known_roots() {
 }
 
 #[test]
+fn package_member_root_enforces_content_file_limit() {
+    use crate::package_content::{Root, Source};
+    use crate::package_resolve::Resolution;
+    use crate::package_store::PackageStore;
+    use crate::package_workspace::Workspace;
+
+    let law = PackageLaw::new();
+    law.library("demo", "demo", 1, "", "");
+    let mut workspace = Workspace::discover(&law.path("demo")).unwrap().unwrap();
+    let id = workspace.member.clone().unwrap();
+    let content = &mut workspace.members.get_mut(&id).unwrap().content;
+    content.files.clear();
+    let source = Source { module: vec!["m".into()], bytes: std::sync::Arc::from([]) };
+    // C v1, demo@1, charge-v1, no bindings, and a 65,537-file count.
+    let mut wire = b"\x01\x04demo\x01\x09charge-v1\x00\x81\x80\x04".to_vec();
+    for index in 0..65_537 {
+        let path = format!("{index:05}.hirsel");
+        wire.push(12);
+        wire.extend_from_slice(path.as_bytes());
+        wire.extend_from_slice(b"\x01\x01m\x00");
+        content.files.insert(path, source.clone());
+    }
+    wire.push(0); // No foreign modules.
+    assert_eq!(wire.len(), 1_114_151);
+    let mut resolution = Resolution::resolve(workspace, PackageStore::new(None), false).unwrap();
+    assert_eq!(
+        resolution.member_root(&id).unwrap_err(),
+        "over the limit of 65536 files and archive rows"
+    );
+
+    let content = &mut resolution.workspace.members.get_mut(&id).unwrap().content;
+    content.files.pop_last().unwrap();
+    wire[18] = 0x80; // First byte of the canonical 65,536 count.
+    wire.truncate(wire.len() - 18);
+    wire.push(0);
+    assert_eq!(resolution.member_root(&id).unwrap(), Root::of(&wire));
+}
+
+#[test]
 fn package_foreign_roots_and_decoder_domain() {
     let law = PackageLaw::new();
     law.manifest("demo", "demo", 1, r#"

@@ -1703,7 +1703,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);
-        if let Some(release) = self.p.foreign_release_for(g) {
+        if let Some(release) = self.p.foreign_release_for(f) {
             let (function, _) = match self.instance_row(release, &[]) {
                 Ok(row) => row,
                 Err(what) => {

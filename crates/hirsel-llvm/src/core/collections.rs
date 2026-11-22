@@ -77,10 +77,14 @@ impl FunctionEmitter<'_> {
     /// inline free; any other is released by the drain from its buffer recipe
     /// (LANG-19), whose status this returns. A static carrier (capacity 0)
     /// owns nothing.
-    pub(super) fn release_collection(&mut self, field: &FieldTy, carrier: &Value) -> Option<Value> {
+    pub(super) fn release_collection(
+        &mut self,
+        field: &FieldTy,
+        carrier: &Value,
+    ) -> Result<Option<Value>> {
         // SEM-4: a List of a zero-sized element has no storage to clean.
         if hirsel_core_layout::storage_free(&self.module.types, field) {
-            return None;
+            return Ok(None);
         }
         let entries = Entries::new(self.module, self.recipes, field);
         let buffer = self.load(&Type::Ptr, carrier, 1);
@@ -98,6 +102,51 @@ impl FunctionEmitter<'_> {
         self.cond(&allocated, present, done);
         self.block(present);
         let charge = self.collection_charge(&capacity, entries.logical);
+        // A List of direct elements: cleaned here from index 0 up (SEM-9), each
+        // element as its own ordinary release, then freed as the drain frees it.
+        let direct = !terminal
+            && entries.state.is_none()
+            && entries.fields.iter().all(|(_, f)| {
+                super::cleanup::direct_field(self.module, self.recipes, f, &self.items.direct)
+            });
+        if direct {
+            let i64 = Type::I64;
+            let length = self.carrier_word(carrier, 8);
+            let index = self.temp(Type::I64);
+            self.store(&i64, &int(0), &index, 0);
+            let head = Label::new("elements_head", n);
+            let body = Label::new("elements_body", n);
+            let end = Label::new("elements_done", n);
+            self.br(head);
+            self.block(head);
+            let i = self.load(&i64, &index, 0);
+            let more = self.cmp(Predicate::Ult, &i64, &i, &length);
+            self.cond(&more, body, end);
+            self.block(body);
+            // Only this edge has index < the allocated collection extent.
+            let entry = self.gep(
+                &Type::bytes(entries.stride),
+                &buffer,
+                &i,
+                self.facts && entries.stride != 0,
+            );
+            let scratch = self.temp(Type::I8);
+            for (offset, f) in &entries.fields {
+                let at = self.offset(&entry, *offset);
+                self.direct_field(f, &at, &scratch, &int(0))?;
+            }
+            let next = self.bin(Binary::Add, &i64, &i, &int(1));
+            self.store(&i64, &next, &index, 0);
+            self.br(head);
+            self.block(end);
+            self.runtime_void(
+                "hirsel_core_free_box",
+                &[ptr(CONTEXT), ptr(buffer), word(charge)],
+            );
+            self.br(done);
+            self.block(done);
+            return Ok(None);
+        }
         if let Some(status) = &status {
             let site = self.site_word();
             let failed = self.runtime(
@@ -119,7 +168,7 @@ impl FunctionEmitter<'_> {
         }
         self.br(done);
         self.block(done);
-        status.map(|status| self.load(&Type::I8, &status, 0))
+        Ok(status.map(|status| self.load(&Type::I8, &status, 0)))
     }
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &Value) {
         if hirsel_core_layout::storage_free(&self.module.types, field) {

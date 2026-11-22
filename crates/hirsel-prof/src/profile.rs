@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, ToSql};
 use tempfile::NamedTempFile;
 
 const APPLICATION_ID: i64 = 0x48505246;
-const HPROF_VERSION: i64 = 1;
+const HPROF_VERSION: i64 = 2;
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -174,17 +174,18 @@ impl Profile {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.execute_batch("PRAGMA trusted_schema = OFF; PRAGMA query_only = ON; BEGIN DEFERRED;")?;
-        for (pragma, expected) in [
-            ("application_id", APPLICATION_ID),
-            ("user_version", HPROF_VERSION),
-        ] {
-            let actual: i64 = db.pragma_query_value(None, pragma, |row| row.get(0))?;
-            if actual != expected {
-                return Err(format!(
-                    "unsupported .hprof {pragma}: {actual:#x}, expected {expected:#x}"
-                )
-                .into());
-            }
+        let application: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        if application != APPLICATION_ID {
+            return Err(format!(
+                "unsupported .hprof application_id: {application:#x}, expected {APPLICATION_ID:#x}"
+            )
+            .into());
+        }
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version != HPROF_VERSION {
+            return Err(
+                format!("unsupported .hprof version {version}, expected {HPROF_VERSION}").into(),
+            );
         }
         Ok(Self { db })
     }
@@ -220,9 +221,8 @@ mod tests {
              INSERT INTO frame VALUES (1,NULL,NULL,1,'workload.hirsel',1,1,0),
                                       (2,NULL,NULL,2,'workload.hirsel',2,1,0);
              INSERT INTO callsite VALUES (1,NULL,1,0), (2,1,1,1), (3,2,2,2);
-             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x10',3,'fiber','fiber_root'),
-                                           (2,2,1,NULL,NULL,0,3,'0x20',5,'fiber','fiber_root');
-             INSERT INTO sample_counter VALUES (1,'cycles',3), (2,'cycles',5);",
+             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x10','cycles',3,'fiber','fiber_root'),
+                                           (2,2,1,NULL,NULL,0,3,'0x20','cycles',5,'fiber','fiber_root');",
         )
         .unwrap();
         db.execute(
@@ -262,5 +262,107 @@ mod tests {
             .query_row("SELECT text FROM source_snippet", [], |r| r.get(0))
             .unwrap();
         assert_eq!(saved, snippet);
+    }
+
+    #[test]
+    fn sample_schema_requires_one_event_and_one_exact_unsigned_period() {
+        use rusqlite::types::Value;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("samples.hprof");
+        let writer = ProfileWriter::create(&path).unwrap();
+        let db = writer.connection();
+        db.execute_batch(
+            "INSERT INTO thread VALUES (1,1,1,'main',0,NULL);
+             INSERT INTO function VALUES (1,'app.main','main','main','hirsel');
+             INSERT INTO frame VALUES (1,NULL,NULL,1,'main.hirsel',1,1,0);
+             INSERT INTO callsite VALUES (1,NULL,1,0);",
+        )
+        .unwrap();
+        let missing = db.execute(
+            "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,period,stack_root,unwind_status)
+             VALUES (1,1,0,1,'0x10',7,'fiber','fiber_root')",
+            [],
+        );
+        assert_eq!(
+            missing.unwrap_err().sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+
+        let insert = "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,event,period,stack_root,unwind_status)
+                      VALUES (1,1,0,1,'0x10',?1,?2,'fiber','fiber_root')";
+        for invalid in [
+            Value::Integer(-1),
+            Value::Real(1.25),
+            Value::Text("9223372036854775807".into()),
+            Value::Text("18446744073709551616".into()),
+            Value::Text("9223372036854775808\0".into()),
+        ] {
+            let error = db.execute(insert, ("cycles", invalid)).unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        db.execute(insert, ("cycles", Unsigned(u64::MAX))).unwrap();
+        db.execute(insert, ("instructions", Unsigned(7))).unwrap();
+        db.execute(insert, ("instructions", Unsigned(9))).unwrap();
+        writer
+            .finish(&RunMeta {
+                capture_mode: "run",
+                target: "",
+                cmdline: "",
+                build_id: "",
+                image_digest: "",
+                symbol_tier: "",
+                clock: "CLOCK_MONOTONIC",
+                primary_event: "cycles",
+                primary_unit: "cycles",
+                freq_hz: 997,
+                fallback_reason: "",
+                start_ns: 0,
+                duration_ns: 2,
+                samples_lost: 0,
+            })
+            .unwrap();
+
+        let profile = Profile::open(&path).unwrap();
+        let db = profile.connection();
+        for table in ["fn_cpu_summary", "line_cpu_summary"] {
+            let mut rows = db
+                .prepare(&format!(
+                    "SELECT event,self_total,sample_count FROM {table} ORDER BY event"
+                ))
+                .unwrap();
+            let values = rows
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Unsigned>(1)?.0,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                values,
+                [
+                    ("cycles".into(), u64::MAX, 1),
+                    ("instructions".into(), 16, 2)
+                ]
+            );
+        }
+
+        let v1 = dir.path().join("v1.hprof");
+        Connection::open(&v1)
+            .unwrap()
+            .execute_batch("PRAGMA application_id = 0x48505246; PRAGMA user_version = 1;")
+            .unwrap();
+        let error = Profile::open(&v1).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "unsupported .hprof version 1, expected 2"
+        );
     }
 }

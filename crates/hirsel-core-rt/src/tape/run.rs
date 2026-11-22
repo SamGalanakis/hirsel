@@ -609,6 +609,35 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
 ) -> u8 {
+    // SAFETY: the caller pins every startup operand for the call.
+    unsafe { run_recording::<false>(input, names, sources, entry, identity, revision) }
+}
+
+/// Recording entry for a program whose ordinary run can spawn helper units.
+///
+/// # Safety
+/// As hirsel_core_os_run_recording.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
+    input: *const OsConfig,
+    names: *const View,
+    sources: *const SourceTable,
+    entry: Entry,
+    identity: *const libc::c_char,
+    revision: *const [u8; 32],
+) -> u8 {
+    // SAFETY: the caller pins every startup operand for the call.
+    unsafe { run_recording::<true>(input, names, sources, entry, identity, revision) }
+}
+
+unsafe fn run_recording<const UNITS: bool>(
+    input: *const OsConfig,
+    names: *const View,
+    sources: *const SourceTable,
+    entry: Entry,
+    identity: *const libc::c_char,
+    revision: *const [u8; 32],
+) -> u8 {
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
         if let Some((path, mode)) = pinned_replay(&*input) {
@@ -623,7 +652,11 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
         std::env::remove_var("HIRSEL_RECORD");
         std::env::remove_var("HIRSEL_RECORD_ID");
         let Some(path) = path else {
-            return entry::hirsel_core_os_run_with_sources(input, names, sources, entry);
+            return if UNITS {
+                entry::hirsel_core_os_run_with_units(input, names, sources, entry, false)
+            } else {
+                entry::hirsel_core_os_run_with_sources(input, names, sources, entry)
+            };
         };
         let record_id = match id {
             None => None,
@@ -833,7 +866,7 @@ unsafe fn run_taped(
             }
             let key = replay.stored.map_hash_key.0;
             run.replay = Some(replay);
-            process::run_with_map_hash_key(&config, invoke, key, None)
+            process::run_with_map_hash_key(&config, invoke, key, process::run_plain)
         };
         if let Some((at, err)) = run.record_truncated {
             report_truncation(run.stderr, at, err);

@@ -33,9 +33,10 @@ named cases, and `--backend evaluator` runs host-free cases on the test evaluato
 **Naming std from another package.** There are no imports (LANG-7). A module that extends core
 (list, string, char, int, float, map, result) merges into core's name, so `list.sort` and
 `string.find` are written bare everywhere. Core collections use bare names: `Deque[T]`, `deque.push_back`, `Heap[T]`,
-`heap.pop`, `list.swap` and `list.sort_stable`. The stable sort uses one scratch block
-of `len * size(T)` bytes; a comparator failure preserves every element in unspecified
-order, and Capacity leaves the list unchanged. The Deque ring uses uninhabited slots,
+`heap.pop`, `list.swap` and `list.sort_stable`. The stable sort's scratch is specified
+in [MEM-24](../../docs/spec/budgets.md#mem-24-logical-charges). A comparator failure
+preserves every element in unspecified order, and Capacity leaves the list unchanged.
+The Deque ring uses uninhabited slots,
 and the Heap uses hole sifts over one List. Their modules are in `core/core`, with no
 std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, omap, set, pool, tally, dir,
 file) are reached from another package through the package name: `std.order.compare`,

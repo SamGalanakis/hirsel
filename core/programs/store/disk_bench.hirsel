@@ -7,6 +7,11 @@ type DiskAccount: send + codec {
 
 fn disk_bench_bucket(a: DiskAccount) -> Result[u64, Capacity] { Ok(a.id % 4) }
 
+fn disk_bench_upgrade(key: u64, a: DiskAccount) -> Result[Option[(u64, DiskAccount)], Capacity] {
+    let changed = DiskAccount(id: a.id, balance: a.balance + 1, owner: clone(a.owner))
+    Ok(Some((key, take changed)))
+}
+
 fn disk_bench_put(mut db: Db, t: Table[u64, DiskAccount], key: u64, balance: u64) waits {
     let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         let a = DiskAccount(id: key, balance: int.narrow(balance), owner: string.from("owner000"))
@@ -129,6 +134,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         return disk_bench_journal(d, c, r, tasks, out, mode)
     }
     let indexed = option.unwrap(args.get(argv, 1)) == "1"
+    let migrating = mode == "migrate"
     let million = mode == "R8-load" || mode == "R8-open"
     let n: u64 = if million { 1000000 } else { 100000 }
     let child = disk_test_directory(d)
@@ -150,6 +156,17 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let per_row: u64 = if indexed { 196 } else { 110 }
     if db.resident != catalog_cost + n * per_row { fail("disk bench account") }
     let first_pack = disk_bench_next_pack(child)
+    let original_shape = shape(t)
+    let migration = if migrating {
+        let mut target = spec("migrated", std.codec.key_u64(), dictionary)
+        if indexed {
+            result.unwrap(with_index(mut target, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
+        }
+        Some(take target)
+    } else {
+        None
+    }
+    let original_head = db.heads[0].head
     if mode == "R6" {
         for i in 0u64 .. 64 {
             let k = splitmix64(i) % n
@@ -175,6 +192,9 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     } else if mode == "R6" {
         let cut = result.unwrap(checkpoint(mut holder[0]))
         result.unwrap(durable(mut holder[0], cut))
+    } else if let Some(take target) = take migration {
+        let cut = result.unwrap(migrate(mut holder[0], take t, take target, disk_bench_upgrade))
+        result.unwrap(durable(mut holder[0], cut))
     }
     let elapsed = host.mono_ns(c) - started
     let stored_rows = std.omap.len(holder[0].heads[0].roots.data)
@@ -190,12 +210,18 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     list.clear(mut byte)
     if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
     // Full values are verified after the phase counters and RSS have stopped.
-    let sh = shape(t)
+    let sh = if migrating {
+        let target = result.unwrap(table(mut holder[0], "migrated", std.codec.key_u64(), dictionary))
+        if holder[0].heads[0].head != original_head + 1 { fail("disk bench migrate version") }
+        shape(target)
+    } else {
+        take original_shape
+    }
     let s = snapshot(holder[0])
     let mut rows = result.unwrap(scan(s, sh, Unbounded, Unbounded))
     for k in 0u64 .. n {
         let row = option.unwrap(result.unwrap(next(mut rows)))
-        let mut balance = k
+        let mut balance = if migrating { k + 1 } else { k }
         if mode == "R6" {
             for i in 0u64 .. 64 {
                 if splitmix64(i) % n == k { balance = 100000 + i }

@@ -126,6 +126,15 @@ capped uses its process-limit fallback, the tree peak stays missing; do not fabr
 one. Logical charges, allocated bytes and retained slack are different metrics; future
 runtime lanes report their curves separately from these physical-memory baselines.
 
+For Store phase allocation counts, add `--allocation-counter` to
+`measurement_artifacts.py` and `--allocations` to both preparation and sampling
+in `store_disk_bench.py`. Use `--workload migrate` for the 100,000-row table
+migration. The separate archive counts successful task-heap block allocations,
+new region backing chunks, and standalone Rust allocator calls including
+reallocations across all runtime threads. Each sample subtracts the count at
+READY from the count at DONE. Use the shipping archive for instruction, time,
+and RSS measurements.
+
 ## Reproduction and reporting
 
 ```sh

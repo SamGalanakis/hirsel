@@ -116,6 +116,11 @@ def startup(command, marker, log):
     return int(result.stdout) if result.returncode == 0 else None
 
 
+def matches_output(result, marker):
+    return result["returncode"] == 0 and any(
+        re.fullmatch(marker, line) for line in result["stdout"].splitlines())
+
+
 def runtime(command, marker, directory, exact_output=False):
     result = core_measure.sample(command, directory)
     output = (directory / "stdout").read_bytes()

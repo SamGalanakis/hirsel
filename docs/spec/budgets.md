@@ -114,7 +114,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 |---|---|
 | `Box[T]` node | the payload's size, rounded up to 8 |
 | `List[T]`, `Deque[T]`, `Heap[T]`, `String` storage | capacity × element size (`String`: 1), rounded up to 8 |
-| `list.sort_stable` scratch | length × element size, rounded up to 8, refunded before it returns |
+| `list.sort_stable` scratch | zero for length ≤ 20; otherwise scratch capacity × element size, rounded up to 8, refunded before it returns. Scratch capacity is min(length, max(128, floor(length / 2))). |
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8, rounded up to 8 |
 | owning closure environment | the sum of its captures' sizes, rounded up to 8 |

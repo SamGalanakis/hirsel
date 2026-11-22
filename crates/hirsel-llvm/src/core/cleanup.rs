@@ -23,6 +23,156 @@ fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize
     }
 }
 
+/// Whether ordinary glue cleans `field` in place with nothing below it to
+/// drain: scalars, terminal storage and inline values with no drop.
+fn flat_field(module: &Module, recipes: &[hirsel_core_layout::Recipe], field: &FieldTy) -> bool {
+    match field {
+        FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Seq(_) | FieldTy::Map(..) => {
+            hirsel_core_layout::terminal(&module.types, recipes, field)
+        }
+        FieldTy::Inline(t) => recipes[t.index()].drop.is_none(),
+        FieldTy::Array(e, _) => flat_field(module, recipes, e),
+        FieldTy::Scalar(_)
+        | FieldTy::RegionRef(_)
+        | FieldTy::Fn
+        | FieldTy::Borrow
+        | FieldTy::View(_)
+        | FieldTy::Locator(_)
+        | FieldTy::FrozenBytes => true,
+        _ => false,
+    }
+}
+
+/// A box of a fixed (non-terminal, non-resource) type.
+fn fixed_box(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    field: &FieldTy,
+) -> Option<usize> {
+    match field {
+        FieldTy::Box(t)
+            if hirsel_core_layout::cleanup_class(&module.types, recipes, field)
+                == Some(hirsel_core_layout::Cleanup::Fixed) =>
+        {
+            Some(t.index())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `field` is cleaned directly given the direct types `set`: flat, an
+/// inline value or array of direct values, or a box of a direct type.
+pub(super) fn direct_field(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    field: &FieldTy,
+    set: &BTreeSet<usize>,
+) -> bool {
+    match field {
+        FieldTy::Inline(t) if recipes[t.index()].drop.is_some() => set.contains(&t.index()),
+        FieldTy::Array(e, _) => direct_field(module, recipes, e, set),
+        FieldTy::Box(_) if !flat_field(module, recipes, field) => {
+            fixed_box(module, recipes, field).is_some_and(|t| set.contains(&t))
+        }
+        _ => flat_field(module, recipes, field),
+    }
+}
+
+/// The types whose dead boxes and list elements ordinary glue cleans and frees
+/// itself (`core_direct_T`) instead of handing them to the descriptor drain: every
+/// type reachable from such a box has no finalizer, is no resource, and holds
+/// only flat fields, inline or array values of such types, and boxes of them.
+/// Nothing below one can fail or take a step (MEM-30), so cleaning it in the
+/// drain's postorder with the drain's frees is the drain's effect exactly;
+/// boxes deeper than DIRECT_DEPTH still go to the drain (LANG-19).
+fn direct_types(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    normal: &BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    fn reach(
+        module: &Module,
+        recipes: &[hirsel_core_layout::Recipe],
+        field: &FieldTy,
+        pending: &mut Vec<usize>,
+    ) {
+        match field {
+            FieldTy::Inline(t) if recipes[t.index()].drop.is_some() => pending.push(t.index()),
+            FieldTy::Array(e, _) => reach(module, recipes, e, pending),
+            _ => pending.extend(fixed_box(module, recipes, field)),
+        }
+    }
+    fn boxes(
+        module: &Module,
+        recipes: &[hirsel_core_layout::Recipe],
+        field: &FieldTy,
+        pending: &mut Vec<usize>,
+    ) {
+        match field {
+            FieldTy::Array(e, _) => boxes(module, recipes, e, pending),
+            FieldTy::Seq(e) => reach(module, recipes, e, pending),
+            _ => pending.extend(fixed_box(module, recipes, field)),
+        }
+    }
+    // The roots: the boxes and the elements of the lists ordinary glue releases.
+    let mut pending = Vec::new();
+    for &t in normal {
+        if let Some(drop) = &recipes[t].drop {
+            for field in drop.fields.iter().flatten() {
+                boxes(module, recipes, &field.ty, &mut pending);
+            }
+        }
+    }
+    let mut set = BTreeSet::new();
+    while let Some(t) = pending.pop() {
+        if !set.insert(t) {
+            continue;
+        }
+        if let Some(drop) = &recipes[t].drop {
+            for field in drop.fields.iter().flatten() {
+                reach(module, recipes, &field.ty, &mut pending);
+            }
+        }
+    }
+    // The greatest set closed under the field rule: drop every type that fails
+    // it until none does, so a recursive type qualifies through its own boxes.
+    loop {
+        let failing: Vec<usize> = set
+            .iter()
+            .copied()
+            .filter(|&t| {
+                let Some(drop) = &recipes[t].drop else {
+                    return true;
+                };
+                drop.finalizer.is_some()
+                    || module.types[t].finalizer.is_some()
+                    || module.types[t].repr == Repr::Resource
+                    || !drop
+                        .fields
+                        .iter()
+                        .flatten()
+                        .all(|f| direct_field(module, recipes, &f.ty, &set))
+            })
+            .collect();
+        if failing.is_empty() {
+            return set;
+        }
+        for t in failing {
+            set.remove(&t);
+        }
+    }
+}
+
+/// Boxes this deep below an ordinary release are handed to the drain, which
+/// bounds its own native depth: the direct cleanup's stack stays constant.
+const DIRECT_DEPTH: u64 = 32;
+
+/// `void core_direct_T(ptr context, ptr payload, i64 depth, i64 caller_site)`.
+fn direct_signature() -> FnSig {
+    FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr, Type::I64, Type::I64])
+}
+const DEPTH: Local = Local::Named("depth");
+
 /// An emitter for module-level glue: no CoreIR body, no debug locations.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn glue_emitter<'a>(
@@ -194,6 +344,60 @@ pub(super) fn drop_glue(
     }
     let empty = Body::default();
     let payload = Value::Local(Local::PAYLOAD);
+    items.direct = direct_types(module, recipes, &normal);
+    let direct = items.direct.clone();
+    for &t in &direct {
+        sink.begin_function(
+            &format!("core_direct_{t}"),
+            &direct_signature(),
+            &[Local::CONTEXT, Local::PAYLOAD, DEPTH, Local::CALLER_SITE],
+            &FnAttrs::private(),
+        );
+        let mut e = glue_emitter(
+            module,
+            recipes,
+            failures,
+            facts,
+            &empty,
+            abi::Return::internal_on_target(target, &[]),
+            true,
+            Value::Local(Local::CALLER_SITE),
+            &mut *sink,
+            &mut *items,
+        );
+        // Nothing direct cleanup reaches can fail; flat fields' glue still
+        // takes a status word.
+        let status = e.temp(Type::I8);
+        e.store(&Type::I8, &int(0), &status, 0);
+        let recipe = recipes[t].drop.as_ref().unwrap();
+        if let Some(tag) = e.fixed(TypeId(t as u32)).tag {
+            let which = e.case_value(&tag, &payload);
+            let arms: Vec<_> = (1..recipe.fields.len())
+                .map(|row| (row as i128, Label::new("case", row)))
+                .collect();
+            e.effect(Operation::Switch(
+                &Type::I32,
+                &which,
+                Label::new("case", 0),
+                &arms,
+            ));
+        } else {
+            e.br(Label::new("case", 0));
+        }
+        let settle = Label::plain("settle");
+        for (row, fields) in recipe.fields.iter().enumerate() {
+            e.block(Label::new("case", row));
+            for field in fields {
+                let p = e.offset(&payload, field.offset);
+                e.direct_field(&field.ty, &p, &status, &Value::Local(DEPTH))?;
+            }
+            e.br(settle);
+        }
+        e.block(settle);
+        e.effect(Operation::Return(None));
+        drop(e);
+        sink.end_function();
+    }
     for &t in &normal {
         let drop_name = format!("core_drop_{t}");
         sink.begin_function(
@@ -304,6 +508,11 @@ impl FunctionEmitter<'_> {
             )),
             // LANG-19: a block that owns more is released by the constant-stack
             // drain; a box of a resource from the descriptor of its pointer.
+            FieldTy::Box(t) if self.items.direct.contains(&t.index()) => {
+                let block = self.load(&Type::Ptr, p, 1);
+                self.direct_box(&block, *t, &int(0));
+                None
+            }
             FieldTy::Box(t)
                 if !hirsel_core_layout::terminal(&self.module.types, self.recipes, field) =>
             {
@@ -357,7 +566,7 @@ impl FunctionEmitter<'_> {
                 self.block(done);
                 None
             }
-            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p),
+            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p)?,
             FieldTy::FrozenBytes => {
                 self.runtime_void(
                     "hirsel_core_drop_frozen_bytes",
@@ -476,6 +685,106 @@ impl FunctionEmitter<'_> {
             self.store(&Type::I8, &both, status, 0);
         }
         Ok(())
+    }
+    /// Clean `field` of a direct type's payload at box depth `depth`.
+    pub(super) fn direct_field(
+        &mut self,
+        field: &FieldTy,
+        p: &Value,
+        status: &Value,
+        depth: &Value,
+    ) -> Result<()> {
+        match field {
+            FieldTy::Inline(t) if self.recipes[t.index()].drop.is_none() => {}
+            FieldTy::Inline(t) => {
+                let site = self.site_word();
+                self.call(
+                    &direct_signature(),
+                    &Value::global(format!("core_direct_{}", t.0)),
+                    &[CONTEXT, p.clone(), depth.clone(), site],
+                    &CallAttrs::default(),
+                );
+            }
+            FieldTy::Array(e, n) => {
+                let i64 = Type::I64;
+                let stride = field_size(&self.module.types, self.recipes, e).0;
+                let index = self.temp(Type::I64);
+                self.store(&i64, &int(0), &index, 0);
+                let label = self.counter();
+                let head = Label::new("array_head", label);
+                let body = Label::new("array_body", label);
+                let done = Label::new("array_done", label);
+                self.br(head);
+                self.block(head);
+                let i = self.load(&i64, &index, 0);
+                let more = self.cmp(Predicate::Ult, &i64, &i, &int(*n));
+                self.cond(&more, body, done);
+                self.block(body);
+                let off = self.bin(Binary::Mul, &i64, &i, &int(stride));
+                let element = self.offset_by(p, &off);
+                self.direct_field(e, &element, status, depth)?;
+                let next = self.bin(Binary::Add, &i64, &i, &int(1));
+                self.store(&i64, &next, &index, 0);
+                self.br(head);
+                self.block(done);
+            }
+            FieldTy::Box(t) if self.items.direct.contains(&t.index()) => {
+                let block = self.load(&Type::Ptr, p, 1);
+                self.direct_box(&block, *t, depth);
+            }
+            // A terminal box: freed as the drain's recipe frees it.
+            FieldTy::Box(t) => {
+                let block = self.load(&Type::Ptr, p, 1);
+                let logical = self.recipes[t.index()].logical_size.unwrap();
+                let charge = hirsel_core_layout::charge::boxed(logical).unwrap();
+                self.free_block(&block, &int(charge));
+            }
+            _ => self.clean_field(field, p, status)?,
+        }
+        Ok(())
+    }
+    /// Clean and free the dead box `block` of direct type `t`, `depth` boxes
+    /// below an ordinary release: below DIRECT_DEPTH in place, child before
+    /// parent as the drain does, with the drain's free (`free_dead_in`);
+    /// deeper through the drain itself (LANG-19).
+    pub(super) fn direct_box(&mut self, block: &Value, t: TypeRef, depth: &Value) {
+        let i64 = Type::I64;
+        let site = self.site_word();
+        let n = self.counter();
+        let deep = Label::new("direct_deep", n);
+        let here = Label::new("direct_here", n);
+        let done = Label::new("direct_done", n);
+        let far = self.cmp(Predicate::Uge, &i64, depth, &int(DIRECT_DEPTH));
+        self.cond(&far, deep, here);
+        self.block(deep);
+        self.runtime(
+            "hirsel_core_release",
+            Type::I8,
+            &[
+                ptr(CONTEXT),
+                ptr(block.clone()),
+                ptr(Value::global(format!("core_fixed_own_{}", t.0))),
+                word(site.clone()),
+            ],
+            &CallAttrs::default(),
+        );
+        self.br(done);
+        self.block(here);
+        let below = self.bin(Binary::Add, &i64, depth, &int(1));
+        self.call(
+            &direct_signature(),
+            &Value::global(format!("core_direct_{}", t.0)),
+            &[CONTEXT, block.clone(), below, site],
+            &CallAttrs::default(),
+        );
+        let logical = self.recipes[t.index()].logical_size.unwrap();
+        let charge = hirsel_core_layout::charge::boxed(logical).unwrap();
+        self.runtime_void(
+            "hirsel_core_free_box",
+            &[ptr(CONTEXT), ptr(block.clone()), word(int(charge))],
+        );
+        self.br(done);
+        self.block(done);
     }
     pub(super) fn release_node(&mut self, node: &Value, t: TypeRef, atomic: bool) -> Result<()> {
         let last = self.items.release_last(t.0, atomic);
@@ -916,25 +1225,7 @@ impl FunctionEmitter<'_> {
     }
     /// Whether cleaning `field` frees at most terminal storage and yields nothing.
     fn flat(&self, field: &FieldTy) -> bool {
-        match field {
-            FieldTy::Box(_)
-            | FieldTy::Rc(_)
-            | FieldTy::Arc(_)
-            | FieldTy::Seq(_)
-            | FieldTy::Map(..) => {
-                hirsel_core_layout::terminal(&self.module.types, self.recipes, field)
-            }
-            FieldTy::Inline(t) => self.recipes[t.index()].drop.is_none(),
-            FieldTy::Array(e, _) => self.flat(e),
-            FieldTy::Scalar(_)
-            | FieldTy::RegionRef(_)
-            | FieldTy::Fn
-            | FieldTy::Borrow
-            | FieldTy::View(_)
-            | FieldTy::Locator(_)
-            | FieldTy::FrozenBytes => true,
-            _ => false,
-        }
+        flat_field(self.module, self.recipes, field)
     }
     /// A boxed child in a case that owns only terminal storage is that case's
     /// whole recipe: its fields are freed and the block refunded here, with no

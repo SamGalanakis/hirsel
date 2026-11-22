@@ -883,6 +883,10 @@ pub enum Counted {
     Arc,
 }
 
+/// The smallest `list.fill` span, in bytes, that lowers to `rt.zero_bytes`
+/// (crate docs, "Zero fill"); shorter fills keep their store loop.
+pub const ZERO_FILL_MIN: u64 = 1 << 16;
+
 /// Engine operations a call can name. Rows are in the crate docs;
 /// a `take` argument is passed by address and is the callee's only after the
 /// operation's commit point (FAIL-3), so a refused operation leaves it in place.
@@ -1000,6 +1004,8 @@ pub enum RtOp {
     Flow(hirsel_core_layout::flow::Op),
     /// SHA-1 compression of a byte span and its RFC 3174 padding.
     Sha1Blocks,
+    /// Zero a byte span of a list's storage (crate docs, "Zero fill").
+    ZeroBytes,
     /// XXH3-64 over at most 240 bytes with seed zero and the default secret.
     Xxh3Short,
     /// Accumulate complete XXH3 stripes in eight words with the given secret.
@@ -1462,6 +1468,7 @@ impl RtOp {
     /// | `xxh3_short` | `data: ptr`, `len: u64` | `u64`: XXH3-64 (crate docs, "XXH3") |
     /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
+    /// | `zero_bytes` | `block: ptr`, `at: ptr`, `len: u64` | (crate docs, "Zero fill") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
     /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
@@ -1556,6 +1563,7 @@ impl RtOp {
             RtOp::Xxh3Short => (vec![V(p), V(u64_)], vec![u64_]),
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
                 vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
@@ -1724,6 +1732,8 @@ impl RtOp {
                     ),
                     HostOp::ScramFinalLen => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::ScramVerify => (vec![V(u64_), V(p)], outcome),
+                    // The source carrier stays with the caller. Success wipes its
+                    // owned bytes. Tags 1 (invalid) and 2 (capacity) leave it intact.
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
@@ -1881,6 +1891,7 @@ impl RtOp {
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
+            | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
             | RtOp::Ed25519Verify
             | RtOp::P256Verify

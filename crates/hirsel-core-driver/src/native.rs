@@ -1469,6 +1469,7 @@ fn direct_link(
     output: &Path,
     optimize: bool,
     debug_lines: bool,
+    emit_relocations: bool,
 ) -> Result<(), NativeStop> {
     // The editor runs under an empty environment, in an empty directory of
     // its own: a script's relative name finds nothing there
@@ -1485,6 +1486,9 @@ fn direct_link(
     }
     if !debug_lines {
         process.arg("--strip-debug");
+    }
+    if emit_relocations {
+        process.arg("--emit-relocs");
     }
     let mut inserted = false;
     for argument in &recipe.args {
@@ -1650,7 +1654,7 @@ fn link_objects(
     let revision = hirsel_core_ir::code_revision(address);
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
-        "release-link-gc-sections"
+        "release-link-gc-source-coordinates"
     } else {
         "development-link-O0"
     };
@@ -1660,9 +1664,9 @@ fn link_objects(
     // enters by its digest, and the runtime headers by the compiler identity,
     // which embeds them.
     let link_key = match assembly {
-        Some(assembly) => key("hirsel.recipe-final-link.v1", &assembly)?,
+        Some(assembly) => key("hirsel.recipe-final-link.v2", &assembly)?,
         None => key(
-            "hirsel.core-executable.v6",
+            "hirsel.core-executable.v7",
             &(
                 compiler_identity()?,
                 toolchain,
@@ -1806,18 +1810,23 @@ fn link_objects(
             ))
         }));
         let mut runtime_sources = sources.clone();
-        crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
+        let spawns_units =
+            crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
         let source_identity = assembly.map_or(sources_digest, |(root, _)| root);
-        let bytes = entry_plan
-            .emit(
-                &options.target,
-                &runtime_sources,
-                source_identity,
-                &revision.0,
-                &revisions,
-            )
-            .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
-        std::fs::write(&entry, bytes)?;
+        let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
+            let bytes = entry_plan
+                .emit(
+                    &options.target,
+                    &runtime_sources,
+                    source_identity,
+                    &revision.0,
+                    &revisions,
+                    (live_sites, spawns_units),
+                )
+                .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
+            std::fs::write(&entry, bytes)?;
+            Ok(())
+        };
         if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(
                 debug_rows(),
@@ -1832,17 +1841,31 @@ fn link_objects(
             inputs.push(debug_path);
         }
         let link = |recipe| {
-            let mut inputs = inputs.clone();
-            link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
-            inputs.push(options.runtime.clone());
-            direct_link(
-                recipe,
-                &inputs,
-                DIRECT_LINK_SUPPORT_LIBS,
-                &output,
-                options.optimize,
-                options.debug_lines,
-            )
+            let run = |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
+                write_entry(live_sites)?;
+                let mut inputs = inputs.clone();
+                link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
+                inputs.push(options.runtime.clone());
+                direct_link(
+                    recipe,
+                    &inputs,
+                    DIRECT_LINK_SUPPORT_LIBS,
+                    &output,
+                    options.optimize,
+                    options.debug_lines,
+                    emit_relocations,
+                )
+            };
+            if options.optimize && !runtime_sources.items.is_empty() {
+                // The probe defines the same symbols and references. Only the
+                // source payload changes between the two links.
+                run(Some(&BTreeSet::new()), true)?;
+                let live = crate::native_entry::live_site_words(&std::fs::read(&output)?)
+                    .map_err(NativeStop::Link)?;
+                run(Some(&live), false)
+            } else {
+                run(None, false)
+            }
         };
         if let Err(first) = link(&recipe) {
             if matches!(first, NativeStop::Archive(_)) {
@@ -2376,7 +2399,14 @@ fn f5 = n5 g5 extern
             .unwrap()
             .with_foreign([&leaf]);
             let startup = plan
-                .emit(TARGET, &sources, ContentHash::default(), &[0; 32], &[])
+                .emit(
+                    TARGET,
+                    &sources,
+                    ContentHash::default(),
+                    &[0; 32],
+                    &[],
+                    (None, false),
+                )
                 .unwrap();
             std::fs::write(path("unit.o"), object.bytes).unwrap();
             std::fs::write(path("startup.o"), startup).unwrap();
@@ -2391,6 +2421,7 @@ fn f5 = n5 g5 extern
                 &inputs,
                 DIRECT_LINK_SUPPORT_LIBS,
                 &output,
+                false,
                 false,
                 false,
             )

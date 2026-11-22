@@ -65,8 +65,8 @@ fn width() -> u64 { 8 }
 fn f() -> u64 { let width: u64 = 1; width }               // refused: LANG-7, width is a function
 ```
 
-- Generics take bounds from a fixed set: `plain`, `shareable`, `send`, `key`, `ordered`,
-  `codec`, `inert`, `packed` and `streamable` (OWN-4). No user-defined traits, and no operator overloading
+- Generics take bounds from a fixed set: `plain`, `shareable`, `send`, `cross`, `key`, `ordered`,
+  `codec`, `inert`, `packed` and `streamable` (OWN-4, CONC-15). No user-defined traits, and no operator overloading
   (LANG-21).
 - Numbers never convert implicitly. `int.widen`, `int.narrow` and `int.try_narrow` change
   widths, and `x + y` needs one type (LANG-11, LANG-21).
@@ -343,7 +343,9 @@ hirsel check                       # check program and test sources
 hirsel explain OWN-7               # the rule a refusal cites, with an example
 hirsel test                        # every @test, each in its own process
 hirsel run --grant Stdout -- a b   # build and run; grants are explicit
+hirsel replay . --tape run.tape    # replay a recording with no host grants
 hirsel build --release -o program  # a native executable
+hirsel prof run --release .        # sample CPU or replay memory into .hprof
 hirsel inspect --core --interface  # public core declarations
 hirsel inspect --std --interface   # public std declarations
 hirsel fmt .                       # canonical formatting
@@ -422,7 +424,7 @@ fn serve(take job: Server) waits {
     let mut builder: std.router.Builder[()] = std.router.builder()
     result.unwrap(std.router.add(mut builder, "GET", "/", std.router.raw(hello)))
     let routes = result.unwrap(std.router.build(take builder))
-    let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0,)
+    let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
     result.unwrap(std.http.serve(take listeners, c, tasks, take cfg, take routes, ()))
 }
 

@@ -1052,9 +1052,14 @@ impl FunctionEmitter<'_> {
                     }
                     return Ok(());
                 }
-                let n = self.numeric(bytes);
+                // The inline intrinsic has the same nonoverlap contract but
+                // requires LLVM to emit the small copy without a library call.
+                let (name, n) = match self.constants[bytes.index()] {
+                    Some(n @ 1..=16) => ("llvm.memcpy.inline.p0.p0.i64", int(n)),
+                    _ => ("llvm.memcpy.p0.p0.i64", self.numeric(bytes)),
+                };
                 self.runtime(
-                    "llvm.memcpy.p0.p0.i64",
+                    name,
                     Type::Void,
                     &[ptr(to), ptr(from), word(n), arg(Type::I1, FALSE)],
                     &CallAttrs {

@@ -59,7 +59,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Tasks](tasks.md) | CONC-1 to CONC-13 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
-| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9, PROG-10 |
+| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 to PROG-11 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Packages](packages.md) | |
 | [Foreign calls](foreign.md) | FFI-1 to FFI-9 |
@@ -94,6 +94,11 @@ The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, 
 workspaces, library roots and package archives. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.
+The [Unicode text specification](unicode.md) defines std's Unicode character classification,
+general category and case conversion in `char` and `string`, pinned to Unicode 18.0.0. It is
+unbuilt design.
+The standard library contracts define [scripted simulation plans](../../core/std/api/sim/world.md#scripted-plans)
+and [shrinking and replaying them with `std.prop`](../../core/std/api/prop.md#scripted-simulation).
 
 The [process creation specification](exec.md) defines the `Exec` capability over
 operator-approved launch profiles, spawning, waiting, signalling, killing a dropped child,

@@ -12,7 +12,13 @@
 //! none of the closure's rows and none of its argument-free instances or row-free
 //! signatures, the same build finds the same things, so it makes the same rows,
 //! functions and signatures in the same order, each numbered past the module's own.
-//! When the module holds any of them, the build runs as before.
+//! Its recipes are the closure's: each was resolved by row name from those rows alone.
+//!
+//! A closure that asked for no hook and no tuple codec is the layout's walk alone: rows
+//! only, each made from its type and named by it. When the module holds some of its
+//! rows, and those name only rows the module holds, the walk in the module stops at each
+//! held row and makes the rest in the fresh walk's order, so those are added in closure
+//! order, naming the module's rows. Otherwise the build runs as before.
 
 use super::Emitter;
 use crate::Program;
@@ -48,12 +54,15 @@ struct Closure {
     source_signatures: Vec<Option<SigId>>,
     interned: Vec<((Signature, super::scalar_abi::SignatureAbi), SigId)>,
     abis: Vec<(SigId, super::scalar_abi::SignatureAbi)>,
-    /// How many of `types` had recipes when the build ended.
-    recipes: usize,
+    /// The recipes of the first rows of `types`, as the build ended with them.
+    recipes: Vec<hirsel_core_layout::Recipe>,
     /// The argument-free instances and row-free signatures, which a module may hold
     /// already.
     open_instances: Vec<usize>,
     open_signatures: Vec<usize>,
+    /// When the build asked for no hook and no tuple codec, so it was the layout's
+    /// walk alone: the rows each row names, by position.
+    row_refs: Option<Vec<Vec<u32>>>,
 }
 
 impl Emitter {
@@ -102,10 +111,62 @@ impl Emitter {
         };
         match built.flatten() {
             Some(closure) if self.holds_none_of(&closure) && self.recipes_ready(p, &closure) => {
-                Some(self.copy_closure(p, &closure))
+                Some(self.copy_closure(&closure))
             }
-            _ => self.shaped(p, t, |s| s.shape(ty)),
+            Some(closure) => match self.held_rows(&closure) {
+                Some(held) => Some(self.copy_over(&closure, &held)),
+                None => self.shaped(p, t, |s| s.shape(ty)),
+            },
+            None => self.shaped(p, t, |s| s.shape(ty)),
         }
+    }
+
+    /// The module's row of each row of a walk-only closure, when the rows the module
+    /// holds are closed under the rows they name: then the walk in this module stops at
+    /// each held row, as the fresh walk stops at a row it made, and makes the others in
+    /// the fresh walk's order. None when the closure is not walk-only or the held rows
+    /// name one the module does not hold.
+    fn held_rows(&self, c: &Closure) -> Option<Vec<Option<TypeRef>>> {
+        let refs = c.row_refs.as_ref()?;
+        let held: Vec<_> = c
+            .types
+            .iter()
+            .map(|s| self.types.get(&s.name).copied())
+            .collect();
+        let closed = held
+            .iter()
+            .zip(refs)
+            .filter(|(h, _)| h.is_some())
+            .all(|(_, names)| names.iter().all(|&r| held[r as usize].is_some()));
+        closed.then_some(held)
+    }
+
+    /// Add the rows of walk-only `c` that the module does not hold, in the closure's
+    /// order, each naming the module's row of every row it names.
+    fn copy_over(&mut self, c: &Closure, held: &[Option<TypeRef>]) -> TypeRef {
+        let mut next = self.module.types.len() as u32;
+        let at: Vec<TypeRef> = held
+            .iter()
+            .map(|h| {
+                h.unwrap_or_else(|| {
+                    next += 1;
+                    TypeRef(next - 1)
+                })
+            })
+            .collect();
+        for (i, s) in c.types.iter().enumerate() {
+            if held[i].is_none() {
+                let mut s = s.clone();
+                s.map_refs(&mut |r| at[r.index()]);
+                self.types.insert(s.name.clone(), at[i]);
+                self.module.types.push(s);
+            }
+        }
+        for &(ty, r) in &c.program_type_rows {
+            self.program_type_rows
+                .insert(ty, TypeId(at[r.0 as usize].0));
+        }
+        at[c.row.index()]
     }
 
     /// The module holds nothing the closure's fresh build would have found in it.
@@ -125,13 +186,13 @@ impl Emitter {
     /// refused extension leaves the build to run as before.
     fn recipes_ready(&mut self, p: &Program, c: &Closure) -> bool {
         let rows = self.module.types.len();
-        if c.recipes == 0 || self.recipes.len() == rows {
+        if c.recipes.is_empty() || self.recipes.len() == rows {
             return true;
         }
         self.recipe(p, TypeId(rows as u32 - 1), rows).is_some()
     }
 
-    fn copy_closure(&mut self, p: &Program, c: &Closure) -> TypeRef {
+    fn copy_closure(&mut self, c: &Closure) -> TypeRef {
         let rows = self.module.types.len() as u32;
         let functions = self.module.functions.len() as u32;
         let instances = self.module.instances.len() as u32;
@@ -166,19 +227,19 @@ impl Emitter {
                 body: None,
                 versioned: f.versioned,
             }));
-        // The fresh build's recipes covered its first `c.recipes` rows, each made from
-        // those rows alone: extend over exactly them, then add the rest.
-        for i in 0..c.recipes {
-            let s = shape_at(i);
-            self.types.insert(s.name.clone(), TypeRef(rows + i as u32));
-            self.module.types.push(s);
+        // The fresh build's recipes covered its first rows, each made from those rows
+        // alone and resolved by row name, as an extension over them here resolves
+        // them: the module's recipes reach its last row (`recipes_ready`), so they are
+        // the closure's, numbered past the module's.
+        if !c.recipes.is_empty() {
+            debug_assert_eq!(self.recipes.len(), rows as usize);
+            self.recipes.extend(c.recipes.iter().map(|r| {
+                let mut r = r.clone();
+                r.map_refs(|x| TypeRef(x.0 + rows));
+                r
+            }));
         }
-        if c.recipes > 0 {
-            let last = self.module.types.len();
-            let extended = self.recipe(p, TypeId(last as u32 - 1), last).is_some();
-            debug_assert!(extended, "the fresh build extended these recipes");
-        }
-        for i in c.recipes..c.types.len() {
+        for i in 0..c.types.len() {
             let s = shape_at(i);
             self.types.insert(s.name.clone(), TypeRef(rows + i as u32));
             self.module.types.push(s);
@@ -247,9 +308,30 @@ impl Closure {
             .filter(|&i| names_no_row(&e.module.signatures[i]))
             .collect();
         let functions = e.module.functions.len();
+        // A walk alone made only rows, so the walk in a module holding some of them
+        // makes the others the same way (`Emitter::copy_over`).
+        let walk_only = !e.hooked
+            && e.recipes.is_empty()
+            && functions == 0
+            && e.module.signatures.is_empty()
+            && e.module.instances.is_empty();
+        let row_refs = walk_only.then(|| {
+            e.module
+                .types
+                .iter()
+                .map(|s| {
+                    let mut names = vec![];
+                    s.clone().map_refs(&mut |r| {
+                        names.push(r.0);
+                        r
+                    });
+                    names
+                })
+                .collect()
+        });
         Some(Closure {
             row,
-            recipes: e.recipes.len(),
+            recipes: e.recipes,
             source_signatures: (0..functions)
                 .map(|f| e.source_signatures.get(FuncId(f as u32)))
                 .collect(),
@@ -264,6 +346,7 @@ impl Closure {
             functions: e.module.functions,
             open_instances,
             open_signatures,
+            row_refs,
         })
     }
 }

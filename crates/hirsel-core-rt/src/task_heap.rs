@@ -48,8 +48,9 @@ static RETAINING_HEAPS: AtomicUsize = AtomicUsize::new(0);
 /// The poll timeout for a worker about to wait `timeout` ms (-1: no limit),
 /// and whether it should release retained pages and surplus stacks if that
 /// wait finds nothing.
-pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
-    let retaining = slabs::retaining()
+pub(crate) fn idle_wait(timeout: i32, warm_stacks: bool) -> (i32, bool) {
+    let retaining = warm_stacks
+        || slabs::retaining()
         || returns::orphaned_pending()
         || RETAINING_HEAPS.load(Ordering::Relaxed) != 0
         || crate::fiber::surplus();
@@ -232,6 +233,17 @@ fn dedicated_index(payload: NonNull<u8>) -> &'static Mutex<Option<DedicatedIndex
     static SHARDS: [Mutex<Option<DedicatedIndex>>; 64] = [const { Mutex::new(None) }; 64];
     let slice = payload.addr().get() / SLAB;
     &SHARDS[(slice ^ (slice >> 6) ^ (slice >> 12)) % SHARDS.len()]
+}
+
+/// Whether `payload` starts a dedicated mapping's block: a private anonymous
+/// mapping that this heap made with `mmap` and owns whole.
+pub(crate) fn is_dedicated(payload: NonNull<u8>) -> bool {
+    payload.addr().get() & (SLAB - 1) == 0
+        && dedicated_index(payload)
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|index| index.contains_key(&payload.addr().get()))
 }
 
 #[cold]
@@ -603,15 +615,10 @@ impl Local<'_> {
 
 #[inline(always)]
 fn finish_allocation(pointer: NonNull<u8>, class: Class) -> NonNull<u8> {
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::allocated(pointer.as_ptr(), class.stride);
-    #[cfg(feature = "prof")]
-    crate::mem_prof::alloc(
-        pointer.as_ptr(),
-        class.stride,
-        crate::mem_prof::Backing::TaskHeap,
-    );
-    #[cfg(not(any(test, feature = "charge-observation")))]
+    #[cfg(feature = "allocation-count")]
+    crate::allocation_count::allocated();
+    crate::backing_observation::observe!(allocate, pointer.as_ptr(), class.stride, TaskHeap);
+    #[cfg(not(any(test, feature = "charge-observation", feature = "prof")))]
     let _ = class;
     pointer
 }
@@ -1375,10 +1382,7 @@ pub(crate) unsafe fn try_grow_in_place(
             allocation_check::resized(payload, slots.checked_bytes, bytes, kind);
             slots.checked_bytes = bytes;
         }
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::resized(payload.as_ptr(), class.stride);
-        #[cfg(feature = "prof")]
-        crate::mem_prof::resize(payload.as_ptr(), old_bytes, class.stride);
+        crate::backing_observation::observe!(resize, payload.as_ptr(), old_bytes, class.stride);
         true
     }
 }
@@ -1402,10 +1406,11 @@ pub(crate) unsafe fn release_page(
 ) {
     // SAFETY: the outstanding slot pins the page through publication.
     let heap = unsafe { &page.as_ref().heap };
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::deallocated(payload.as_ptr());
-    #[cfg(feature = "prof")]
-    crate::mem_prof::free(payload.as_ptr(), unsafe { Page::class(page) }.stride);
+    crate::backing_observation::observe!(
+        free,
+        payload.as_ptr(),
+        unsafe { Page::class(page) }.stride,
+    );
     #[cfg(feature = "memcheck")]
     // SAFETY: the outstanding slot pins its immutable kind.
     unsafe {
@@ -1748,15 +1753,7 @@ impl Mapping {
         headroom: usize,
     ) -> Option<(Self, NonNull<u8>)> {
         let mapping = if let Some(memory) = crate::units::memory() {
-            let len = space.checked_add(headroom)?;
-            memory
-                .take_page(|mapping| {
-                    mapping.len == len
-                        && mapping.prefix == headroom
-                        && mapping.writable.get() >= bytes
-                        && (mapping.base.addr().get() + headroom) & (align - 1) == 0
-                })
-                .or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))?
+            memory.aligned_page(bytes, space, align, headroom)?
         } else {
             Self::map_aligned(bytes, space, align, headroom)?
         };
@@ -1765,6 +1762,24 @@ impl Mapping {
         mapping.born.set(0);
         mapping.grown.set(false);
         Some((mapping, payload))
+    }
+
+    pub(crate) fn pooled_page(
+        memory: &crate::units::Memory,
+        bytes: usize,
+        space: usize,
+        align: usize,
+        headroom: usize,
+    ) -> Option<Self> {
+        let len = space.checked_add(headroom)?;
+        memory
+            .take_page(|mapping| {
+                mapping.len == len
+                    && mapping.prefix == headroom
+                    && mapping.writable.get() >= bytes
+                    && (mapping.base.addr().get() + headroom) & (align - 1) == 0
+            })
+            .or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))
     }
 
     fn map_aligned(bytes: usize, space: usize, align: usize, headroom: usize) -> Option<Self> {
@@ -2537,7 +2552,7 @@ mod tests {
         assert_eq!(context.available(), 0);
         free(first);
         assert_eq!(count_resident(&pages), SLABS);
-        assert_eq!(idle_wait(-1), (RELEASE_DELAY_MS, true));
+        assert_eq!(idle_wait(-1, false), (RELEASE_DELAY_MS, true));
         let second = burst();
         assert_eq!(probes(&second), pages);
         assert_eq!(count_resident(&pages), SLABS);

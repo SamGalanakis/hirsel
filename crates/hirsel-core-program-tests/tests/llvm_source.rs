@@ -282,6 +282,84 @@ fn exercise(budget: u64, count: u64) -> u64 {
     }
 }
 
+// A zero fill of at least ZERO_FILL_MIN bytes goes to rt.zero_bytes, which may
+// leave never-backed pages alone. Storage that held other values must still
+// read back as zeros, and the bytes before `at` and past the fill are kept:
+// a skipped written page, a span measured from the block instead of `at`, or a
+// count taken as bytes leaves 0xAB words or a lost prefix here. The expected
+// value is the spec's: fill appends n copies after the existing elements, so
+// every element matches and the length is prefix + count.
+#[test]
+fn large_zero_fills_overwrite_written_storage() {
+    let source = r#"
+fn words(n: u64, prefix: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(n)
+    list.fill(mut xs, n, 0xABABABABABABABAB)
+    list.clear(mut xs)
+    list.fill(mut xs, prefix, 7)
+    list.fill(mut xs, n - prefix - 1, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(xs) {
+        let want: u64 = if i < prefix { 7 } else { 0 }
+        if xs[i] != want { bad += 1 }
+    }
+    bad * 1000000 + list.len(xs)
+}
+fn octets(n: u64, prefix: u64) -> u64 {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0xAB)
+    list.clear(mut b)
+    list.fill(mut b, prefix, 7)
+    list.fill(mut b, n - prefix - 2, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(b) {
+        let want: u8 = if i < prefix { 7 } else { 0 }
+        if b[i] != want { bad += 1 }
+    }
+    bad * 1000000 + list.len(b)
+}
+fn fresh(n: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(n)
+    list.fill(mut xs, n, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(xs) {
+        if xs[i] != 0 { bad += 1 }
+    }
+    bad * 1000000 + list.len(xs)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // 32768 words are 256 KiB, 200003 bytes end inside a page, and each
+    // prefix starts the fill inside the first page.
+    let inputs = [
+        ("words", vec![32768, 3], 32767),
+        ("octets", vec![200003, 5], 200001),
+        ("fresh", vec![32768], 32768),
+    ];
+    let cases = inputs.clone().map(|(name, args, _)| Case {
+        function: names[name],
+        args,
+        limit: 4 << 20,
+        injection: None,
+    });
+    let expected = inputs.map(|(_, _, value)| eval::Outcome::Returned(vec![value]));
+    for (case, outcome) in cases.iter().zip(&expected) {
+        assert_eq!(
+            eval::run(&program, case.function, &case.args, case.limit).outcome,
+            *outcome
+        );
+    }
+    let functions = cases.each_ref().map(|case| case.function);
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &functions);
+    for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", mode, Some(object));
+        for (report, outcome) in reports.into_iter().zip(&expected) {
+            assert_eq!(&report.outcome, outcome);
+        }
+    }
+}
+
 #[test]
 fn counted_list_fill_slices_use_memset_after_the_range_check() {
     let source = r#"
@@ -672,7 +750,11 @@ fn unknown(j: u64, n: u64) -> u64 {
 /// 8 at the shift, which still fails with the evaluator's text and site on
 /// both native engines. `guarded` counts under a data-dependent guard, which
 /// release LLVM if-converts (`guarded_check.h`): the count fails only when the
-/// guard holds at 255, never when it is skipped there.
+/// guard holds at 255, never when it is skipped there. A count that grows at
+/// most once per trip is bounded by its start plus the trip count, so
+/// `guarded` and `from_zero` run their loop without the check when the trips
+/// fit and keep it, failing at the same trip, when they do not; `twice` grows
+/// faster than its trips and keeps its checks.
 #[test]
 fn counter_resets_keep_reachable_failures() {
     let source = r#"
@@ -762,6 +844,27 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
     }
     int.widen(count)
 }
+
+fn from_zero(n: u64, every: u64) -> u64 {
+    let mut count: u8 = 0
+    for i in 0u64 .. n {
+        if i % every == 0u64 {
+            count += 1
+        }
+    }
+    int.widen(count)
+}
+
+fn twice(n: u64, start: u64) -> u64 {
+    let mut count: u8 = int.narrow(start)
+    for i in 0u64 .. n {
+        count += 1
+        if i % 2u64 == 0u64 {
+            count += 1
+        }
+    }
+    int.widen(count)
+}
 "#;
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     // Hand-derived. Bit i is set when i % 3 != 0, at bit 7 - pos. With a reset
@@ -773,7 +876,12 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
     // bit, and at i = 15 (pos 7, no bit) it carries pos past 8 to 9, so the
     // set bit at i = 16 fails. `guarded` adds one per i in 0..n divisible by
     // `every`: from 254 every 5th of 4 reaches 255 at i = 0 and skips at 255
-    // for i = 1..3; every 4th of 6 reaches 256 at i = 4.
+    // for i = 1..3; every 4th of 6 reaches 256 at i = 4. Every 1st adds one
+    // per i, so 5 from 250 ends at 255 and 6 reaches 256 at i = 5; the count
+    // is at most start + i below n, so n + start <= 255 runs unchecked.
+    // `twice` adds two at even i and one at odd i: 3 from 250 ends at 255, 4
+    // reaches 256 at i = 3 though n + start is 254. `from_zero` every 1st
+    // ends 255 trips at 255 and reaches 256 at i = 255 of 256.
     let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
     let returned = |x: u64| eval::Outcome::Returned(vec![x]);
     let laws = [
@@ -798,6 +906,12 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
         ("guarded", vec![6, 3, 253], returned(255)),
         ("guarded", vec![6, 4, 254], overflow()),
         ("guarded", vec![7, 3, 253], overflow()),
+        ("guarded", vec![5, 1, 250], returned(255)),
+        ("guarded", vec![6, 1, 250], overflow()),
+        ("from_zero", vec![255, 1], returned(255)),
+        ("from_zero", vec![256, 1], overflow()),
+        ("twice", vec![3, 250], returned(255)),
+        ("twice", vec![4, 250], overflow()),
     ];
     let cases: Vec<_> = laws
         .iter()
@@ -817,10 +931,26 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
             run
         })
         .collect();
-    let exports =
-        ["packed", "reset_at_nine", "one_path", "bumped", "guarded"].map(|name| names[name]);
+    let exports = [
+        "packed",
+        "reset_at_nine",
+        "one_path",
+        "bumped",
+        "guarded",
+        "from_zero",
+        "twice",
+    ]
+    .map(|name| names[name]);
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
-    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    let (llvm, folds) =
+        program.llvm_program_with_counter_range_folds(Target::X86_64Linux, &exports);
+    for name in ["guarded", "from_zero"] {
+        let symbol = symbol(&program, names[name]);
+        assert!(
+            folds.get(symbol.as_bytes()).is_some_and(|&n| n > 0),
+            "{name}'s count check must go where the trips fit the count"
+        );
+    }
     for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
         let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
         for ((case, evaluated), native) in cases.iter().zip(&evaluated).zip(reports) {
@@ -1749,6 +1879,94 @@ void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, ui
         assert_eq!(report.outcome, eval::Outcome::Returned(vec![length]));
         assert_eq!(report.used, 0);
         assert_eq!(report.trace, vec![length * 8]);
+    }
+}
+
+/// Dead chains of up to a million boxes, released from a local and from a
+/// list's elements, are cleaned in place near their roots and each handed to
+/// the drain once below (LANG-19: constant stack), and every block is refunded.
+/// Hand-derived: `Link` is 8 + 8 (`Option[Box]`) plus 8, so each box charges 24
+/// (MEM-24); four roots in a list of capacity 4 add 4 × 16. Nothing is retained;
+/// each chain deeper than a few boxes traces one hand-over, a single box none.
+/// A million deep chain overflows any native recursion over its boxes.
+#[test]
+fn deep_box_chains_drop_with_one_drain_hand_over_each() {
+    let source = r#"
+type Link {
+    next: Option[Box[Link]],
+    value: u64
+}
+
+fn build(n: u64) -> Option[Box[Link]] {
+    let mut head: Option[Box[Link]] = None
+    let mut i = 0u64
+    while i < n {
+        let next = take head
+        head = Some(box.new(Link(next, value: i)))
+        i = i + 1
+    }
+    head
+}
+
+fn chain(n: u64) -> u64 {
+    let head = build(n)
+    n
+}
+
+fn forest(n: u64) -> u64 {
+    let mut roots: List[Option[Box[Link]]] = list.with_capacity(4)
+    let mut r = 0u64
+    while r < 4 {
+        list.push(mut roots, build(n))
+        r = r + 1
+    }
+    list.len(roots) * n
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // (function, length, roots, list bytes)
+    let shapes: Vec<(&str, u64, u64, u64)> = [1, 1_000, 1_000_000]
+        .into_iter()
+        .flat_map(|n| [("chain", n, 1, 0), ("forest", n, 4, 4 * 16)])
+        .collect();
+    let peak = |&(_, n, roots, list): &(&str, u64, u64, u64)| roots * n * 24 + list;
+    let cases: Vec<Case> = shapes
+        .iter()
+        .map(|shape| Case {
+            function: names[shape.0],
+            args: vec![shape.1],
+            limit: peak(shape),
+            injection: None,
+        })
+        .collect();
+    let bindings = r#"
+bool __real_hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t);
+bool __wrap_hirsel_core_release(HirselCoreContext *ctx, void *node, const HirselCoreFixedDescriptor *d, uint64_t site) {
+    hirsel_core_test_drop_trace(1);
+    return __real_hirsel_core_release(ctx, node, d, site);
+}
+"#;
+    let reports = execute_optimized(&module, &cases, bindings, "", Optimization::Speed);
+    for ((shape, case), report) in shapes.iter().zip(&cases).zip(reports) {
+        let &(_, n, roots, _) = shape;
+        // The evaluator's cleanup recurses natively, so it checks the shallow chains.
+        if n <= 1_000 {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(expected.outcome, report.outcome, "{shape:?}");
+            assert_eq!(expected.used, 0, "{shape:?}");
+            assert_eq!(expected.peak_reserved, peak(shape), "{shape:?}");
+        }
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![roots * n]),
+            "{shape:?}"
+        );
+        assert_eq!(report.used, 0, "{shape:?}");
+        if let Some(reserved) = report.peak_reserved {
+            assert_eq!(reserved, peak(shape), "{shape:?}");
+        }
+        let hand_overs = if n == 1 { 0 } else { roots as usize };
+        assert_eq!(report.trace, vec![1; hand_overs], "{shape:?}");
     }
 }
 

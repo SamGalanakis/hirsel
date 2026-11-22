@@ -377,7 +377,7 @@ impl FunctionEmitter<'_> {
             RtOp::MapPlaceWord => vec![self.map_place_word(&args[0])],
             RtOp::MapPlaceBytes => vec![self.map_place_bytes(&args[0], &args[1])],
             RtOp::MapStrongWord => {
-                vec![self.map_hash_word(&args[0], memory_layout::CONTEXT_MAP_STRONG_KEY)]
+                self.map_hash("hirsel_core_map_strong_word", &[ptr(CONTEXT), u(&args[0])])
             }
             RtOp::MapStrongBytes => self.map_hash(
                 "hirsel_core_map_strong_bytes",

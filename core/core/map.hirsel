@@ -23,27 +23,28 @@ fn placement[K: key, V](m: Map[K, V], k: K) -> u64 {
     }
 }
 
-fn probe_limit[K: key, V](m: Map[K, V], mask: u64) -> u64 {
-    if mask < 8 || fast_class(m) == 0 || mode(m) {
-        int.wrapping_add(mask, 1)
-    } else {
-        8
-    }
+fn more_groups[K: key, V](m: Map[K, V], scanned: u64, mask: u64) -> bool {
+    scanned <= mask && (scanned != 8 || fast_class(m) == 0 || mode(m))
+}
+
+fn first_lane(bits: u64) -> u64 {
+    let lane: u64 = int.widen(int.trailing_zeros(bits))
+    lane & 15
 }
 
 // Look for a match before terminating at EMPTY or using a remembered vacancy.
 fn probe[K: key, V](m: Map[K, V], k: K, p: u64, inserting: bool) -> Probe {
     let mask = group_mask(m)
-    let limit = probe_limit(m, mask)
     let tag = p >> 57
-    let mut g = p & mask
+    let bucket_mask = mask << 4
+    let mut base = (p & mask) << 4
     let mut n: u64 = 0
     let mut first_free: u64 = 18446744073709551615
-    while n < limit {
-        let base = g << 4
-        let mut matches = group_match(m, g, tag)
+    loop {
+        let group = base >> 4
+        let mut matches = group_match(m, group, tag)
         while matches != 0 {
-            let lane: u64 = int.widen(int.trailing_zeros(matches))
+            let lane = first_lane(matches)
             let bucket = base | lane
             let entry = bucket_entry(m, bucket)
             if slot_key(m, entry) == k {
@@ -52,17 +53,20 @@ fn probe[K: key, V](m: Map[K, V], k: K, p: u64, inserting: bool) -> Probe {
             matches = matches & int.wrapping_sub(matches, 1)
         }
         if inserting && first_free == 18446744073709551615 {
-            let free = group_vacant(m, g)
+            let free = group_vacant(m, group)
             if free != 0 {
-                let lane: u64 = int.widen(int.trailing_zeros(free))
+                let lane = first_lane(free)
                 first_free = base | lane
             }
         }
-        if group_empty(m, g) != 0 {
+        if group_empty(m, group) != 0 {
             break
         }
         n = int.wrapping_add(n, 1)
-        g = int.wrapping_add(g, n) & mask
+        if !more_groups(m, n, mask) {
+            break
+        }
+        base = int.wrapping_add(base, n << 4) & bucket_mask
     }
     if first_free == 18446744073709551615 {
         Crowded
@@ -102,16 +106,18 @@ fn probe_staged[K: key, V](m: Map[K, V], k: K) -> (u64, u64, bool, bool) {
 
 fn vacancy[K: key, V](m: Map[K, V], p: u64) -> Option[u64] {
     let mask = group_mask(m)
-    let limit = probe_limit(m, mask)
     let mut g = p & mask
     let mut n: u64 = 0
-    while n < limit {
+    loop {
         let free = group_vacant(m, g)
         if free != 0 {
-            let lane: u64 = int.widen(int.trailing_zeros(free))
+            let lane = first_lane(free)
             return Some((g << 4) | lane)
         }
         n = int.wrapping_add(n, 1)
+        if !more_groups(m, n, mask) {
+            break
+        }
         g = int.wrapping_add(g, n) & mask
     }
     None
@@ -173,7 +179,7 @@ fn reprobe_crowded[K: key, V](mut m: Map[K, V], k: K) -> (u64, u64) {
     loop {
         let free = group_vacant(m, g)
         if free != 0 {
-            let lane: u64 = int.widen(int.trailing_zeros(free))
+            let lane = first_lane(free)
             return ((g << 4) | lane, p)
         }
         n = int.wrapping_add(n, 1)

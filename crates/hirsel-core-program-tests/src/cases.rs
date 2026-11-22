@@ -1574,6 +1574,129 @@ fn foreign_frontend_cases() {
     for name in ["headers", "types"] {
         foreign_case(name);
     }
+    foreign_declaration_restore();
+}
+
+fn foreign_declaration_restore() {
+    use hirsel_core_ir::normal;
+    use hirsel_core_resolve::{ResolutionScratch, SourceId};
+    use std::sync::Arc;
+
+    let files = tempfile::tempdir().unwrap();
+    let main = files.path().join("main.hirsel");
+    let native = files.path().join("native.hirsel");
+    let source = "pub opaque type Law {}
+pub opaque type Obj {}
+pub fn use_make(f: Foreign[Law]) { let _ = native.make(f) }
+";
+    std::fs::write(&main, source).unwrap();
+    std::fs::write(
+        &native,
+        "pub fn make(f: Foreign[main.Law]) -> Option[foreign.Ptr[main.Obj]]
+pub fn release(f: Foreign[main.Law], take p: foreign.Ptr[main.Obj]) -> i32 waits
+",
+    )
+    .unwrap();
+    let mut manifest = crate::source_manifest(source, main, &core_dir(), "main");
+    manifest
+        .packages
+        .last_mut()
+        .unwrap()
+        .sources
+        .push(ModuleSource {
+            foreign: true,
+            captured: None,
+            file: native,
+            modules: vec!["native".into()],
+            signatures: true,
+        });
+    let corpus = manifest.load().unwrap();
+    let parsed = corpus.parse();
+    let index = corpus.index(&parsed);
+    let modules: Vec<_> = corpus
+        .sources
+        .iter()
+        .zip(parsed.files)
+        .enumerate()
+        .map(|(i, (source, output))| ModuleInput {
+            source: SourceId(i as u32),
+            id: index.module(&source.module).unwrap(),
+            syntax: output.syntax,
+        })
+        .collect();
+    let mut resolver = ResolutionScratch::default();
+    let resolutions: Vec<Vec<_>> = modules
+        .iter()
+        .map(|m| {
+            m.syntax
+                .items()
+                .enumerate()
+                .map(|(i, item)| Arc::new(resolver.resolve(&index, m.id, m.source, i as u32, item)))
+                .collect()
+        })
+        .collect();
+    let declared = Program::declare_resolved(&index, &modules, resolutions.clone());
+    assert!(declared.refusals.is_empty(), "{:?}", declared.refusals);
+    let restored = Program::install(
+        &index,
+        &modules,
+        resolutions,
+        None,
+        declared.declared().unwrap(),
+    )
+    .expect("the declaration record binds");
+    let make = DefPath::from_full("app@1/native/make").unwrap();
+    let release = DefPath::from_full("app@1/native/release").unwrap();
+    let use_make = DefPath::from_full("app@1/main/use_make").unwrap();
+    let kind = DefPath::from_full("app@1/main/Obj").unwrap();
+    let body = |p: &Program<'_>| {
+        let make = p.function(&make).unwrap();
+        let (interface, header) = p.foreign_function_header(make).unwrap();
+        assert_eq!(interface.definition_identity(), "app@1/main/Law");
+        assert_eq!(
+            header.as_bytes(),
+            b"(core@1/core/Foreign[app@1/main/Law])->core@1/core/Option[core@1/foreign/Ptr[app@1/main/Obj]]"
+        );
+
+        let abi = p.foreign_abi(make.site.module).unwrap();
+        let [makes, frees] = abi.as_slice() else {
+            panic!("expected the make and release ABI signatures");
+        };
+        assert_eq!(
+            (makes.name.as_str(), makes.waits, makes.params.len()),
+            ("make", false, 0)
+        );
+        assert!(matches!(&makes.result, AbiResult::New(k) if *k == kind));
+        assert_eq!((frees.name.as_str(), frees.waits), ("release", true));
+        assert!(matches!(
+            frees.params.as_slice(),
+            [(name, AbiParameter::Handle { kind: k, release: true })] if name == "p" && *k == kind
+        ));
+        assert!(matches!(
+            frees.result,
+            AbiResult::Scalar(hirsel_core_layout::Scalar::I32)
+        ));
+
+        let mut emitter = Emitter::new();
+        let check = p.check_lower(p.function_id(&use_make).unwrap(), &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        emitter.seal();
+        let f = check.function.unwrap();
+        let ir = &emitter.module;
+        let body = normal::encode(ir, f);
+        let foreign: Vec<_> = body
+            .slots
+            .iter()
+            .map(|slot| slot.identity(ir).definition)
+            .filter(|path| path.0.modules == ["native"])
+            .collect();
+        assert_eq!(foreign, [make.path.clone(), release.clone()]);
+        body.bytes
+    };
+    assert_eq!(body(&declared), body(&restored));
 }
 
 fn foreign_case(name: &str) {

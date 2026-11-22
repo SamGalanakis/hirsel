@@ -148,7 +148,7 @@ pub struct Program<'a> {
     row_closures: body::RowClosures,
     flow_holds: std::sync::OnceLock<Vec<std::sync::OnceLock<(u8, u64)>>>,
     closed_type_facts: std::sync::OnceLock<Vec<body::ClosedTypeFacts>>,
-    foreign_names: std::sync::OnceLock<foreign::Names>,
+    foreign_headers: std::sync::OnceLock<foreign::CheckedHeaders>,
 }
 
 /// The core types lowering builds, matches or lays out without the program naming
@@ -622,7 +622,7 @@ impl<'a> Program<'a> {
             row_closures: Default::default(),
             flow_holds: std::sync::OnceLock::new(),
             closed_type_facts: std::sync::OnceLock::new(),
-            foreign_names: std::sync::OnceLock::new(),
+            foreign_headers: std::sync::OnceLock::new(),
         }
     }
 

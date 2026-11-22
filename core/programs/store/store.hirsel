@@ -4442,13 +4442,21 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     let Some(source_root) = std.page.collection_child(source.root, prefix(from.id)?) else { return Error(Stale(from.id)) }
     let mut original = std.page.cursor_open(source_root, None, true, false)
     let mut new_rows: List[std.page.Row] = list.new()
-    while let Some(item) = std.page.cursor_next(mut original) {
-        let k = decoded(std.codec.decode_key(from.key, item.key))?
-        let v = row_value(from.readers, from.id, item.value)?
+    loop {
+        // Decode each source row from the page in place, with no owned copy.
+        let read = std.page.cursor_read(mut original, scoped fn(key: Bytes, raw: Bytes) -> Result[(K, V, u64), Error] {
+            let decoded_key = decoded(std.codec.decode_key(from.key, key))?
+            Ok((take decoded_key, row_value(from.readers, from.id, raw)?, list.len(raw)))
+        })
+        let Some(take found) = take read else { break }
+        let (take k, take v, source_width) = found?
         if let Some((k2, v2)) = capacity(f(k, v))? {
             let encoded = encode_key(to.key, k2)?
             if list.len(encoded) > 4092 { return Error(Limit(Key)) }
-            let mut raw: Bytes = list.new()
+            // The source row's width sizes the buffer, so an upgrade that keeps
+            // the row's size encodes it with no regrowth.
+            let width = order.max(source_width, 2 + std.codec.least(to.value))
+            let mut raw: Bytes = list.with_capacity(order.min(width, VALUE_LIMIT))
             capacity(le(mut raw, int.widen(number), 2))?
             std.codec.encode(to.value, v2, mut raw) ?=> |_| Limit(Value)
             if list.len(raw) > VALUE_LIMIT { return Error(Limit(Value)) }

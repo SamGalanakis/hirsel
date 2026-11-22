@@ -677,10 +677,7 @@ fn cell_size(raw: Bytes, lvl: u8, at: u64) -> u64 {
 }
 
 fn write_entry(mut raw: Bytes, at: u64, p: u64, row: Entry, body_index: Option[u16]) -> u64 {
-    let suffix = list.len(row.key) - p
-    put16(mut raw, at, suffix)
-    list.copy_from_slice(mut raw, at + 2, list.slice(row.key, p, p + suffix))
-    let value = at + 2 + suffix
+    let value = write_key(mut raw, at, p, row.key)
     match row.cell {
         Child(branch) => {
             put_ptr(mut raw, value, branch.child)
@@ -688,22 +685,35 @@ fn write_entry(mut raw: Bytes, at: u64, p: u64, row: Entry, body_index: Option[u
             list.set_word_le(mut raw, value + PTR_BYTES + 8, branch.charge)
             value + BRANCH_BYTES
         },
-        InlineValue(data) => {
-            raw[value] = 0
-            put16(mut raw, value + 1, list.len(data))
-            list.copy_from_slice(mut raw, value + 3, data)
-            value + 3 + list.len(data)
-        },
+        InlineValue(data) => write_inline(mut raw, value, data),
         BlobValue(original) => {
             let mut blob = original
             if let Some(index) = body_index {
                 blob.body = index
             }
-            raw[value] = 1
-            put_ref(mut raw, value + 1, blob)
-            value + 1 + REF_BYTES
+            write_blob(mut raw, value, blob)
         },
     }
+}
+
+fn write_key(mut raw: Bytes, at: u64, p: u64, key: Bytes) -> u64 {
+    let suffix = list.len(key) - p
+    put16(mut raw, at, suffix)
+    list.copy_from_slice(mut raw, at + 2, list.slice(key, p, p + suffix))
+    at + 2 + suffix
+}
+
+fn write_inline(mut raw: Bytes, at: u64, data: Bytes) -> u64 {
+    raw[at] = 0
+    put16(mut raw, at + 1, list.len(data))
+    list.copy_from_slice(mut raw, at + 3, data)
+    at + 3 + list.len(data)
+}
+
+fn write_blob(mut raw: Bytes, at: u64, blob: BlobRef) -> u64 {
+    raw[at] = 1
+    put_ref(mut raw, at + 1, blob)
+    at + 1 + REF_BYTES
 }
 
 fn header(mut raw: Bytes, lvl: u8, id: u64, n: u64, p: u64, heap: u64) {
@@ -1331,20 +1341,58 @@ fn leaf_end(rows: List[Row], start: u64, inline: u64) -> u64 {
 }
 
 fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut next: u64) -> Result[Built, Error] {
-    let mut entries: List[Entry] = list.with_capacity(hi - lo)
+    // The rows are written straight into the image with pack_entries' cell
+    // writers, so no row key or inline value is copied into an Entry first.
+    let mut refs: List[BlobRef] = list.new()
     let mut blobs: List[Arc[Bytes]] = list.new()
     let mut charge = 0u64
+    let mut sum = 0u64
     for i in lo .. hi {
         let row = view rows[i]
-        let Some(sum) = int.checked_add(charge, row.charge) else {
+        let Some(total) = int.checked_add(charge, row.charge) else {
             return Error(PageLimit)
         }
-        charge = sum
-        let cell = leaf_cell(row, inline, mut next, mut blobs)
-        list.push(mut entries, Entry(key: clone(row.key), cell: take cell))
+        charge = total
+        let value = list.len(row.value)
+        sum += 4 + list.len(row.key) + (if value <= inline {
+            3 + value
+        } else {
+            1 + REF_BYTES
+        })
+        if value > inline {
+            if let BlobValue(blob) = leaf_cell(row, inline, mut next, mut blobs) {
+                list.push(mut refs, blob)
+            }
+        }
     }
     let id = draw(mut next)
-    let image = pack_entries(entries, 0, id, domain)?
+    let n = hi - lo
+    let p = common_prefix(rows[lo].key, rows[hi - 1].key)
+    let size = compressed(sum, n, p)
+    if !legal(0, n, size) {
+        return Error(PageLimit)
+    }
+    let slot_start = size - 2 * n
+    let mut raw: Bytes = list.with_capacity(size)
+    list.fill(mut raw, size, 0)
+    header(mut raw, 0, id, n, p, slot_start)
+    if p != 0 {
+        list.copy_from_slice(mut raw, HEADER, list.slice(rows[lo].key, 0, p))
+    }
+    let mut at = HEADER + p
+    let mut blob_slot = 0u64
+    for i in lo .. hi {
+        let row = view rows[i]
+        put16(mut raw, slot_start + 2 * (i - lo), at)
+        let cell = write_key(mut raw, at, p, row.key)
+        if list.len(row.value) <= inline {
+            at = write_inline(mut raw, cell, row.value)
+        } else {
+            at = write_blob(mut raw, cell, refs[blob_slot])
+            blob_slot += 1
+        }
+    }
+    let image = Image(raw: take raw, domain: domain)
     let root = arc.new(new_page(take image, list.new(), take blobs))
     Ok(Built(root: take root, first: clone(rows[lo].key), last: clone(rows[hi - 1].key), rows: hi - lo, charge: charge))
 }

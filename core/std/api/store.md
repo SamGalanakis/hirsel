@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.35 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.36 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
@@ -264,6 +264,12 @@ it to built. Everything above describes the store as built.
   `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
   memory is reported, not admitted, and can exceed `logical` when roots diverge
   (AP15).
+- **Checkpoints.** The writer plans each cut over checkpoint records it
+  allocates with the frames they describe, and the checkpoint task only
+  writes the plan, in a fixed workspace: `checkpoint_task_bytes` defaults to
+  67,174,400 bytes and open refuses less. A checkpoint is never refused by
+  its task; a planning allocation the writer cannot make returns `Full` with
+  nothing captured (AP16).
 - **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
   journal frame, waits for its sync, and returns the branch with an already
   durable journal ticket: no walk, settle or cut, the account is unchanged, and

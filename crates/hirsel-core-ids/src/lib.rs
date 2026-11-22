@@ -127,6 +127,14 @@ impl PartsHasher {
         self.hash.update(rest);
     }
 
+    /// Append parts already framed as [`Self::part_byte_slice`] frames them:
+    /// each a little-endian `u64` length, a first byte and the rest. A syntax
+    /// tree's canonical token stream is framed this way.
+    #[inline]
+    pub fn framed_parts(&mut self, bytes: &[u8]) {
+        self.hash.update(bytes);
+    }
+
     #[inline]
     pub fn part_with(
         &mut self,

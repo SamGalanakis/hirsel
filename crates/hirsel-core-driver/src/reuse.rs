@@ -133,47 +133,59 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
     if item.range.has_errors || !matches!(root.kind, NodeKind::Function | NodeKind::CloneHook) {
         return shape;
     }
-    let text =
-        |t: &hirsel_core_syntax::Token| &item.text[t.span.start as usize..t.span.end as usize];
-    let mut bindings: Vec<usize> = item
-        .tree
+    let tree = item.tree;
+    let mut bindings: Vec<usize> = tree
         .children(item.root)
         .iter()
-        .filter(|&&c| item.tree.node(c).kind == NodeKind::Parameters)
-        .flat_map(|&c| item.tree.children(c))
-        .filter_map(|&p| item.tree.node(p).token.map(|t| t.0 as usize))
+        .filter(|&&c| tree.node(c).kind == NodeKind::Parameters)
+        .flat_map(|&c| tree.children(c))
+        .filter_map(|&p| tree.node(p).token.map(|t| t.0 as usize))
         .collect();
     bindings.sort_unstable();
     if bindings.is_empty() {
         return shape;
     }
+    // The header is the item's tokens before the body block (token spans are
+    // file offsets and increase), as `header_identity` cuts it.
+    let start = item.range.tokens.start as usize;
     let end = header_file_end(item);
-    let header = (item.range.tokens.start as usize..item.range.tokens.end as usize).filter(|&i| {
-        let t = &item.tree.tokens[i];
-        !t.kind.is_trivia() && !matches!(t.kind, TokenKind::Eof) && (t.span.start as usize) < end
-    });
-    let mut names: Vec<&str> = bindings
-        .iter()
-        .map(|&i| text(&item.tree.tokens[i]))
-        .collect();
+    let stop = start
+        + tree.tokens[start..item.range.tokens.end as usize]
+            .iter()
+            .position(|t| t.span.start as usize >= end)
+            .unwrap_or(item.range.tokens.end as usize - start);
+    let text = |i: usize| {
+        let t = &tree.tokens[i];
+        &item.text[t.span.start as usize..t.span.end as usize]
+    };
+    let mut names: Vec<&str> = bindings.iter().map(|&i| text(i)).collect();
     names.sort_unstable();
     let distinct = names.windows(2).all(|w| w[0] != w[1]);
-    let spelled = header.clone().any(|i| {
-        bindings.binary_search(&i).is_err()
-            && names.binary_search(&text(&item.tree.tokens[i])).is_ok()
+    let spelled = (start..stop).any(|i| {
+        let t = &tree.tokens[i];
+        !t.kind.is_trivia()
+            && !matches!(t.kind, TokenKind::Eof)
+            && bindings.binary_search(&i).is_err()
+            && names.binary_search(&text(i)).is_ok()
     });
     if !distinct || spelled {
         return shape;
     }
+    // The parsed tree's canonical stream frames each significant token as
+    // `part_byte_slice(kind, spelling)` does (trivia adds no bytes), so the
+    // header hashes as its stream with each binding's spelling left out.
+    let canonical = |from: usize, to: usize| {
+        let offsets = &tree.canonical_offsets;
+        &tree.canonical[offsets[from] as usize..offsets[to] as usize]
+    };
     ContentHash::of_parts_stream("hirsel.signature-tokens.v1", |parts| {
-        for i in header {
-            let t = &item.tree.tokens[i];
-            let spelling = match bindings.binary_search(&i) {
-                Ok(_) => "",
-                Err(_) => text(t),
-            };
-            parts.part_byte_slice(t.kind as u8, spelling.as_bytes());
+        let mut from = start;
+        for &binding in &bindings {
+            parts.framed_parts(canonical(from, binding));
+            parts.part_byte_slice(tree.tokens[binding].kind as u8, b"");
+            from = binding + 1;
         }
+        parts.framed_parts(canonical(from, stop));
         Ok(())
     })
     .expect("signature token hash")

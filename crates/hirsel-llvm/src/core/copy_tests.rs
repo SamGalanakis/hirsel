@@ -1,6 +1,6 @@
 //! Release bridge rewrites must preserve every partial update, failure order and raised cause.
 use crate::context::{Context, Module, TargetMachine};
-use std::{path::PathBuf, process::Command};
+use std::{fmt::Write as _, path::PathBuf, process::Command};
 
 const COPY: &str = include_str!("../../tests/core_runtime/checked-copy.ll");
 
@@ -13,6 +13,50 @@ fn optimized(source: &str) -> (String, Vec<u8>) {
     module.run_core_passes(&machine).unwrap();
     module.verify().unwrap();
     (module.text(), module.emit_object(&machine).unwrap())
+}
+
+#[test]
+fn fixed_width_check_rewrites_all_admitted_widths() {
+    let mut source = String::new();
+    let widths = [0, 1, 2, 4, 8, 16, 32, 64, 65];
+    for width in widths {
+        writeln!(
+            source,
+            "define i1 @width_{width}(i64 %base, i64 %len) {{
+               %start = add nuw i64 %base, 11
+               %end = add i64 %base, {}
+               %within = icmp ule i64 %end, %len
+               %no_wrap = icmp uge i64 %end, %start
+               %valid = and i1 %within, %no_wrap
+               br i1 %valid, label %pass, label %fail
+             pass: ret i1 true
+             fail: ret i1 false
+             }}",
+            11 + width
+        )
+        .unwrap();
+    }
+    let context = Context::new();
+    let module = Module::parse(&context, "fixed-width", &source).unwrap();
+    module.verify().unwrap();
+    module.fixed_width_checks();
+    module.verify().unwrap();
+    let ir = module.text();
+    for width in widths {
+        let (_, tail) = ir.split_once(&format!("@width_{width}(")).unwrap();
+        let (body, _) = tail.split_once("\n}").unwrap();
+        if (1..=64).contains(&width) {
+            assert!(
+                body.contains(&format!("icmp uge i64 %len, {width}")),
+                "{body}"
+            );
+            assert!(body.contains(&format!("sub i64 %len, {width}")), "{body}");
+            assert!(body.contains("icmp ule i64 %start"), "{body}");
+            assert!(!body.contains("%end ="), "{body}");
+        } else {
+            assert!(body.contains("icmp uge i64 %end, %start"), "{body}");
+        }
+    }
 }
 
 #[test]

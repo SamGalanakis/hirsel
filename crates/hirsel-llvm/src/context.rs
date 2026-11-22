@@ -146,6 +146,22 @@ impl<'context> Module<'context> {
         Ok(Self { raw, context })
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixed_width_checks(&self) {
+        use llvm_sys::prelude::LLVMValueRef;
+        unsafe extern "C" {
+            fn hirsel_llvm_fixed_width_checks(function: LLVMValueRef);
+        }
+        // SAFETY: the module owns each function for the duration of the pass.
+        unsafe {
+            let mut function = LLVMGetFirstFunction(self.raw);
+            while !function.is_null() {
+                hirsel_llvm_fixed_width_checks(function);
+                function = LLVMGetNextFunction(function);
+            }
+        }
+    }
+
     /// Sets the module's triple and data layout to the machine's.
     pub(crate) fn set_target(&self, machine: &TargetMachine) {
         let triple = c_string(&machine.triple);

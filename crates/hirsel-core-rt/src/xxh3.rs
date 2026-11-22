@@ -10,6 +10,10 @@ fn select() -> Accumulate {
     if std::is_x86_feature_detected!("avx2") {
         return avx2::accumulate;
     }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("sse2") {
+        return sse2::accumulate;
+    }
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("neon") {
         return neon::accumulate;
@@ -111,6 +115,56 @@ mod avx2 {
             }
             _mm256_storeu_si256(acc, low);
             _mm256_storeu_si256(acc.add(1), high);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod sse2 {
+    use std::arch::x86_64::*;
+
+    #[target_feature(enable = "sse2")]
+    fn stripe(acc: __m128i, data: __m128i, secret: __m128i) -> __m128i {
+        let keyed = _mm_xor_si128(data, secret);
+        let product = _mm_mul_epu32(keyed, _mm_srli_epi64::<32>(keyed));
+        let swapped = _mm_shuffle_epi32::<0b01_00_11_10>(data);
+        _mm_add_epi64(_mm_add_epi64(acc, swapped), product)
+    }
+
+    #[target_feature(enable = "sse2")]
+    pub(super) unsafe fn accumulate(acc: &mut [u64; 8], stripes: &[[u8; 64]], secret: &[u8]) {
+        let acc = acc.as_mut_ptr().cast::<__m128i>();
+        // SAFETY: acc, each stripe, and each eight-byte-stepped secret
+        // window cover four unaligned 16-byte loads. Only acc is written.
+        unsafe {
+            let mut a0 = _mm_loadu_si128(acc);
+            let mut a1 = _mm_loadu_si128(acc.add(1));
+            let mut a2 = _mm_loadu_si128(acc.add(2));
+            let mut a3 = _mm_loadu_si128(acc.add(3));
+            for (i, block) in stripes.iter().enumerate() {
+                let data = block.as_ptr().cast::<__m128i>();
+                let key = secret.as_ptr().add(i * 8).cast::<__m128i>();
+                a0 = stripe(a0, _mm_loadu_si128(data), _mm_loadu_si128(key));
+                a1 = stripe(
+                    a1,
+                    _mm_loadu_si128(data.add(1)),
+                    _mm_loadu_si128(key.add(1)),
+                );
+                a2 = stripe(
+                    a2,
+                    _mm_loadu_si128(data.add(2)),
+                    _mm_loadu_si128(key.add(2)),
+                );
+                a3 = stripe(
+                    a3,
+                    _mm_loadu_si128(data.add(3)),
+                    _mm_loadu_si128(key.add(3)),
+                );
+            }
+            _mm_storeu_si128(acc, a0);
+            _mm_storeu_si128(acc.add(1), a1);
+            _mm_storeu_si128(acc.add(2), a2);
+            _mm_storeu_si128(acc.add(3), a3);
         }
     }
 }

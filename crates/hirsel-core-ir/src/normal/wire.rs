@@ -475,6 +475,7 @@ macro_rules! wire_field {
 
 pub(super) trait Tagged {
     fn tag(&self) -> u8;
+    fn defines_tag(tag: u8) -> bool;
 }
 
 macro_rules! tags {
@@ -485,6 +486,10 @@ macro_rules! tags {
                 match self {
                     $(Self::$name $(( $(tags!(@ignore $part)),+ ))? $({ $($field: _),+ })? => $tag),*
                 }
+            }
+
+            fn defines_tag(tag: u8) -> bool {
+                matches!(tag, $($tag)|*)
             }
         }
 

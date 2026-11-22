@@ -268,9 +268,9 @@ impl Function<'_, '_, '_> {
                 let code = self.b.ins().iconst(types::I8, i64::from(op.code()));
                 let null = self.b.ins().iconst(types::I64, 0);
                 let no_mode = self.b.ins().iconst(types::I8, 0);
-                let (operand, mode) = match op {
-                    HostOp::Open => (args[1], args[2]),
-                    HostOp::Read
+                let operand = match op {
+                    HostOp::Open
+                    | HostOp::Read
                     | HostOp::Write
                     | HostOp::OpenDir
                     | HostOp::Stat
@@ -281,81 +281,10 @@ impl Function<'_, '_, '_> {
                     | HostOp::RemoveTree
                     | HostOp::Stdout
                     | HostOp::Stderr
-                    | HostOp::Random => (args[1], no_mode),
-                    HostOp::Close
-                    | HostOp::Entries
-                    | HostOp::StatFile
-                    | HostOp::TryLock
-                    | HostOp::Unlock
-                    | HostOp::WallMs
-                    | HostOp::MonoNs
-                    | HostOp::Rename
-                    | HostOp::ReadAt
-                    | HostOp::WriteAt
-                    | HostOp::SleepUntil
-                    | HostOp::SleepUntilWall
-                    | HostOp::Sync
-                    | HostOp::SyncDir
-                    | HostOp::Connect
-                    | HostOp::Listen
-                    | HostOp::Accept
-                    | HostOp::RecvBounded
-                    | HostOp::SendPair
-                    | HostOp::NetNarrow
-                    | HostOp::ExecNarrow
-                    | HostOp::NetNarrowTls
-                    | HostOp::NetNarrowResolve
-                    | HostOp::UnixConnect
-                    | HostOp::UnixListen
-                    | HostOp::UnixAccept
-                    | HostOp::DatagramOpen
-                    | HostOp::DatagramBind
-                    | HostOp::DatagramConnect
-                    | HostOp::DatagramSend
-                    | HostOp::DatagramSendTo
-                    | HostOp::DatagramRecv
-                    | HostOp::NetNarrowUnix
-                    | HostOp::Resolve
-                    | HostOp::TlsConnect
-                    | HostOp::SendSecret
-                    | HostOp::ScramSha256
-                    | HostOp::ScramFinalLen
-                    | HostOp::ScramVerify
-                    | HostOp::SecretSeal
-                    | HostOp::SecretNarrow
-                    | HostOp::SecretHmac
-                    | HostOp::SecretVerifyHmac
-                    | HostOp::StdinRead
-                    | HostOp::StreamTerminal
-                    | HostOp::EnvGet
-                    | HostOp::EnvLen
-                    | HostOp::EnvName
-                    | HostOp::EnvNarrow
-                    | HostOp::ProvideClock
-                    | HostOp::ProvideRandom
-                    | HostOp::ProvideProcess
-                    | HostOp::ClockAdvance
-                    | HostOp::ClockSetWall
-                    | HostOp::ClockIdle
-                    | HostOp::ProcessTrigger
-                    | HostOp::ProvideStdout
-                    | HostOp::ProvideStderr
-                    | HostOp::PortNext
-                    | HostOp::CallWord
-                    | HostOp::CallSecret
-                    | HostOp::CallPayload
-                    | HostOp::PortReply
-                    | HostOp::ProvideDir
-                    | HostOp::ProvideNet
-                    | HostOp::ProvideExec
-                    | HostOp::PortFill
-                    | HostOp::NetJoin
-                    | HostOp::ExecSpawn
-                    | HostOp::ExecWait
-                    | HostOp::ExecSignal
-                    | HostOp::NetSplit
-                    | HostOp::Stopped => (null, no_mode),
+                    | HostOp::Random => args[1],
+                    _ => null,
                 };
+                let mode = if op == HostOp::Open { args[2] } else { no_mode };
                 // The C outcome is always 32 bytes: value at 0, error.tag at 8,
                 // error.code at 12, written at 16, status at 24.
                 let values = match op {
@@ -468,7 +397,27 @@ impl Function<'_, '_, '_> {
                         &[U, K, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::I64), K, K],
                         &[self.context, code, args[0], operand, mode, site],
                     )?,
-                    _ => self.c_call(
+                    HostOp::Open
+                    | HostOp::Read
+                    | HostOp::Write
+                    | HostOp::Close
+                    | HostOp::TryLock
+                    | HostOp::Unlock
+                    | HostOp::Mkdir
+                    | HostOp::Mkdtemp
+                    | HostOp::Remove
+                    | HostOp::RemoveTree
+                    | HostOp::WallMs
+                    | HostOp::MonoNs
+                    | HostOp::Stdout
+                    | HostOp::Stderr
+                    | HostOp::Sync
+                    | HostOp::SyncDir
+                    | HostOp::Random
+                    | HostOp::Stopped
+                    | HostOp::OpenDir
+                    | HostOp::Entries
+                    | HostOp::NextEntries => self.c_call(
                         op.io_symbol(),
                         &[P, K, U, P, K, U],
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
@@ -515,11 +464,9 @@ impl Function<'_, '_, '_> {
             }
             RtOp::Returnable(op) => {
                 // The host row with the record word after the context.
-                let symbol = match op {
-                    HostOp::RecvBounded => "hirsel_core_host_recv_bounded_rec",
-                    HostOp::SendPair => "hirsel_core_host_send_pair_rec",
-                    _ => unreachable!("only owned waits have a returnable form"),
-                };
+                let symbol = op
+                    .returnable_symbol()
+                    .expect("only owned waits have a returnable form");
                 let signature = op_signature(op);
                 let count = signature.len();
                 let mut params = vec![P, P];

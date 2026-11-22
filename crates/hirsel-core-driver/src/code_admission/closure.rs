@@ -492,7 +492,12 @@ fn check_engine_tags(
             if let Callee::Runtime(operation) = &call.callee {
                 check(EngineTag::Runtime(normal::runtime_tag(operation)))?;
                 match operation {
-                    RtOp::Host(host) => check(EngineTag::Host(normal::host_tag(host)))?,
+                    RtOp::Returnable(host) if host.returnable_symbol().is_none() => {
+                        return Err(AdmissionError::Unsupported("returnable host operation"));
+                    }
+                    RtOp::Host(host) | RtOp::Returnable(host) => {
+                        check(EngineTag::Host(normal::host_tag(host)))?;
+                    }
                     RtOp::Flow(flow) => check(EngineTag::Flow(normal::flow_tag(flow)))?,
                     _ => {}
                 }

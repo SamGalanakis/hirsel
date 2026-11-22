@@ -80,7 +80,7 @@ pub fn waits_owned(module: &Module, f: FuncId) -> bool {
 
 fn leaf(callee: Callee) -> Option<HostOp> {
     match callee {
-        Callee::Runtime(RtOp::Host(op @ (HostOp::RecvBounded | HostOp::SendPair))) => Some(op),
+        Callee::Runtime(RtOp::Host(op)) if op.returnable_symbol().is_some() => Some(op),
         _ => None,
     }
 }

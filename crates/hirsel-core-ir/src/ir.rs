@@ -1397,6 +1397,16 @@ impl HostOp {
             _ => unreachable!(),
         }
     }
+
+    /// The adapter for an owned wait that can return its native stack.
+    pub const fn returnable_symbol(self) -> Option<&'static str> {
+        match self {
+            Self::RecvBounded => Some("hirsel_core_host_recv_bounded_rec"),
+            Self::SendPair => Some("hirsel_core_host_send_pair_rec"),
+            _ => None,
+        }
+    }
+
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
         !matches!(

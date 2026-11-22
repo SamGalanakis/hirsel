@@ -164,10 +164,14 @@ impl<'a> Plan<'a> {
                 "Secret grants must name distinct Secret parameters".into(),
             ));
         }
-        if options.exec_grants.len() as u64 > ordinals[grant_kind("Exec").unwrap() as usize] {
-            return Err(NativeStop::Entry(
-                "Exec grant has no matching entry parameter".into(),
-            ));
+        if let Some(grant) = options
+            .exec_grants
+            .get(ordinals[grant_kind("Exec").unwrap() as usize] as usize)
+        {
+            return Err(NativeStop::Entry(format!(
+                "--grant Exec={} has no matching parameter of {identity}",
+                grant.request.text()
+            )));
         }
         if !options.exec_grants.is_empty() && options.replay.is_some() {
             return Err(NativeStop::Entry(

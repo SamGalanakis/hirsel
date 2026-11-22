@@ -168,7 +168,7 @@ impl CheckProduct {
             return Err(stop);
         }
         let decl = self.entry_decl(entry)?;
-        let foreign = self.release_foreign(reached, options, decl, store)?;
+        let foreign = self.release_foreign(entry, reached, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
         let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
         let (units, groups, addresses) = self.release_units(&entry, reached, store, Some(names))?;
@@ -299,6 +299,7 @@ fn archive_ref(row: &ForeignArchiveCapture) -> ObjectRef {
 impl CheckProduct {
     fn release_foreign(
         &self,
+        entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
         decl: &EntryDecl,
@@ -317,7 +318,7 @@ impl CheckProduct {
                 )));
             }
         }
-        let grants = bindings(decl, options, |interface| {
+        let grants = bindings(entry, decl, options, |interface| {
             let mut functions = self
                 .foreign_headers
                 .iter()
@@ -584,6 +585,7 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
 }
 
 fn bindings(
+    entry: &DefPath,
     decl: &EntryDecl,
     options: &NativeOptions,
     mut archive: impl FnMut(&str) -> Result<ObjectRef, NativeStop>,
@@ -676,24 +678,51 @@ fn bindings(
             policy,
         });
     }
-    if options.directories.len() > next[GrantKind::Dir as usize]
-        || options.exec_grants.len() > next[GrantKind::Exec as usize]
-        || options.foreign_grants.len() != named.len()
-        || (!options.net_rules.is_empty() && next[GrantKind::Net as usize] == 0)
-        || GRANT_NAMES
-            .iter()
-            .enumerate()
-            .any(|(tag, _)| options.grant_mask & (1 << tag) != 0 && next[tag] == 0)
-        || options.secret_grants.iter().any(|grant| {
-            !decl
-                .parameters
-                .iter()
-                .any(|p| p.name == grant.parameter && p.ty == "core@1/core/Secret")
+    let unmatched = GRANT_NAMES
+        .iter()
+        .enumerate()
+        .find(|&(tag, _)| options.grant_mask & (1 << tag) != 0 && next[tag] == 0)
+        .map(|(_, name)| format!("--grant {name}"));
+    let unmatched = unmatched
+        .or_else(|| {
+            options
+                .directories
+                .get(next[GrantKind::Dir as usize])
+                .map(|dir| format!("--dir {dir:?}"))
         })
-    {
-        return Err(NativeStop::Entry(
-            "grant has no matching entry parameter".into(),
-        ));
+        .or_else(|| {
+            options
+                .exec_grants
+                .get(next[GrantKind::Exec as usize])
+                .map(|grant| format!("--grant Exec={}", grant.request.text()))
+        })
+        .or_else(|| {
+            options
+                .foreign_grants
+                .iter()
+                .find(|interface| !named.contains(interface.as_str()))
+                .map(|interface| format!("--grant Foreign={interface}"))
+        })
+        .or_else(|| {
+            (!options.net_rules.is_empty() && next[GrantKind::Net as usize] == 0)
+                .then(|| "--grant Net".to_owned())
+        })
+        .or_else(|| {
+            options
+                .secret_grants
+                .iter()
+                .find(|grant| {
+                    !decl
+                        .parameters
+                        .iter()
+                        .any(|p| p.name == grant.parameter && p.ty == "core@1/core/Secret")
+                })
+                .map(|grant| format!("--grant Secret:{}", grant.parameter))
+        });
+    if let Some(grant) = unmatched {
+        return Err(NativeStop::Entry(format!(
+            "{grant} has no matching parameter of {entry}"
+        )));
     }
     Ok(bound)
 }

@@ -859,6 +859,17 @@ impl PackageLaw {
 }
 
 #[test]
+fn build_names_unmatched_grant_and_entry() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    PackageLaw::pass(law.run(&["lock", "app"]));
+    let (status, stdout, stderr) = law.run(&["build", "app", "--grant", "Stderr"]);
+    assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+    assert_eq!(stderr, "entry: --grant Stderr has no matching parameter of app@1/main/main\n");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+#[test]
 fn foreign_recipe_build_uses_only_selected_sealed_archive() {
     use crate::code_store::{CodeStore, ObjectKind};
     use hirsel_core_ir::{decode::DecodeBudget, release_recipe::Recipe};

@@ -1639,7 +1639,8 @@ fn finish(
         {
             eprintln!("{stop}");
         }
-        if command != "run" && command != "replay" {
+        if command != "run" && command != "replay" && (!output.accepted || output.stopped.is_none())
+        {
             println!(
                 "{}: {} files, {} checked definitions",
                 if output.accepted {

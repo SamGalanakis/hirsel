@@ -20,6 +20,8 @@ pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
 
 pub fn net(bytes n: u64) -> (Net, Served[NetOp])
 
+pub fn exec(bytes n: u64) -> (Exec, Served[ExecOp])
+
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
@@ -166,6 +168,40 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
         SendTo(datagram: a, root: b, path: d, len: e)
     } else {
         RecvDatagram(datagram: a, room: b)
+    }
+}
+
+fn stdio(w: u64) -> Stdio {
+    if w == 0 {
+        Discard
+    } else {
+        Piped
+    }
+}
+
+pub fn exec_op(c: Call[ExecOp]) -> ExecOp {
+    let t = word(c, 0)
+    let a = word(c, 1)
+    let b = word(c, 2)
+    if t == 0 {
+        Spawn(program: a, args: b, env: word(c, 3), dir: word(c, 4), path: word(c, 5), stdin: stdio(word(c, 6)), stdout: stdio(word(c, 7)), stderr: stdio(word(c, 8)))
+    } else if t == 1 {
+        Await(proc: a)
+    } else if t == 2 {
+        let s: Signal = if b == 0 {
+            SigInt
+        } else if b == 1 {
+            SigTerm
+        } else {
+            SigKill
+        }
+        Signal(proc: a, signal: s)
+    } else if t == 3 {
+        Recv(pipe: a, room: b, max: word(c, 3))
+    } else if t == 4 {
+        Send(pipe: a, prefix: b, tail: word(c, 3))
+    } else {
+        Released(id: a, part: part(b))
     }
 }
 
@@ -323,6 +359,37 @@ pub fn net_reply(r: NetReply) -> Reply[NetOp] {
         } else {
             0
         }, 0),
+    }
+}
+
+pub fn exec_reply(r: ExecReply) -> Reply[ExecOp] {
+    match r {
+        Done => words(0, 0, 0, 0),
+        Failed(e) => {
+            let (tag, code): (u64, u64) = match e {
+                Denied => (1, 0),
+                TimedOut => (2, 0),
+                Aborted => (3, 0),
+                Other(code) => (4, int.widen(code)),
+            }
+            words(1, tag, code, 0)
+        },
+        IoFailed(e) => {
+            let (tag, code) = net_words(e)
+            words(16, tag, code, 0)
+        },
+        Count(n) => words(3, n, 0, 0),
+        Started(proc: id, stdin: input, stdout: output, stderr: errors) => Reply(tag: 17, w0: id, w1: input, w2: output, w3: errors, w4: 0, w5: 0),
+        Ended(t) => {
+            let status: u64 = match t {
+                Exited(code) => int.widen(code),
+                Signalled(sig) => {
+                    let wide: u64 = int.widen(sig)
+                    256 + wide
+                },
+            }
+            words(18, status, 0, 0)
+        },
     }
 }
 

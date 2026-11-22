@@ -123,6 +123,7 @@ unsafe impl Sync for RunGrants {}
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
     pub(crate) datagrams: BTreeMap<u64, crate::unix_net::Datagram>,
+    pub(crate) exec_pipes: BTreeMap<u64, crate::exec_runtime::HandleCharge>,
     pub(crate) unix_served: BTreeMap<u64, Provider>,
     pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
     pub(crate) tls: crate::os_tls::Streams,
@@ -266,6 +267,7 @@ impl Files {
         Self {
             sockets: Default::default(),
             datagrams: BTreeMap::new(),
+            exec_pipes: BTreeMap::new(),
             unix_served: BTreeMap::new(),
             connected: Default::default(),
             tls: Default::default(),
@@ -286,6 +288,7 @@ impl Files {
         self.connected.clear();
         self.datagrams.clear();
         self.unix_served.clear();
+        self.exec_pipes.clear();
         if let Some(files) = &mut self.registry.owned.get_mut().unwrap().live {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };

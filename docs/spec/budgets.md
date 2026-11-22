@@ -147,7 +147,7 @@ on the provider: against a virtual provider ([core](core.md#provide)) the caller
 the admissions and steps it pays against the host for the same operations and results. Every
 byte the server keeps (handle records, staged reply bytes) comes out of its port's room `n`,
 which the server admitted at `provide.dir`, `provide.net`, `provide.stdout` or
-`provide.stderr`; bytes a server copies out with `provide.payload` land in capacity the server
+`provide.stderr` or `provide.exec`. Bytes a server copies out with `provide.payload` land in capacity the server
 already holds. A reply that needs more room than is left raises `Capacity` in the server and
 never charges the caller.
 
@@ -163,8 +163,9 @@ charge during cleanup. Its stages run no user cleanup ([CONC-14](tasks.md#conc-1
 `HostFile` closes the host file and ignores the outcome. `Proc`, `UnixListener`
 and `UnixDatagram` are mechanical too ([EXEC-3](exec.md#exec-3-spawn),
 [NET-13](net.md#net-13-unix-streams), [NET-14](net.md#net-14-unix-datagrams)). A child's pipe
-ends are the existing `ReadHalf` and `WriteHalf`. The supervisor's records and the host's
-descriptors are provider storage, outside every limit. A served reply that issues several ids
+ends are the existing `ReadHalf` and `WriteHalf`. Spawn admits eight bytes for the `Proc`
+and for each pipe half together. Each drop refunds its eight bytes. The supervisor's records
+and the host's descriptors are provider storage, outside every limit. A served reply that issues several ids
 reserves all their room from the server's port at once, or fails with `Capacity` having
 issued none. A narrowed `Exec` or `Unix` rule's storage is the logical size that
 [EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing) and

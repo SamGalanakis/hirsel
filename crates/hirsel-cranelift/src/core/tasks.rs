@@ -344,6 +344,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::PortReply
                     | HostOp::ProvideDir
                     | HostOp::ProvideNet
+                    | HostOp::ProvideExec
                     | HostOp::PortFill
                     | HostOp::NetJoin
                     | HostOp::ExecSpawn
@@ -406,6 +407,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::PortReply
                     | HostOp::ProvideDir
                     | HostOp::ProvideNet
+                    | HostOp::ProvideExec
                     | HostOp::PortFill
                     | HostOp::NetJoin
                     | HostOp::ExecSpawn

@@ -1080,6 +1080,7 @@ pub enum HostOp {
     PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
     ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
     ProvideNet = hirsel_core_ids::host_op::PROVIDE_NET as isize,
+    ProvideExec = hirsel_core_ids::host_op::PROVIDE_EXEC as isize,
     PortFill = hirsel_core_ids::host_op::PORT_FILL as isize,
     ScramSha256 = hirsel_core_ids::host_op::SCRAM as isize,
     ScramVerify = hirsel_core_ids::host_op::SCRAM_VERIFY as isize,
@@ -1194,6 +1195,7 @@ impl HostOp {
         HostOp::ScramFinalLen,
         HostOp::ScramVerify,
         HostOp::ProvideNet,
+        HostOp::ProvideExec,
         HostOp::ExecNarrow,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
@@ -1285,6 +1287,7 @@ impl HostOp {
             HostOp::PortReply => "port_reply",
             HostOp::ProvideDir => "provide_dir",
             HostOp::ProvideNet => "provide_net",
+            HostOp::ProvideExec => "provide_exec",
             HostOp::PortFill => "port_fill",
             HostOp::StreamTerminal => "stream_is_terminal",
         }
@@ -1347,6 +1350,7 @@ impl HostOp {
             Self::PortReply => "hirsel_core_port_reply",
             Self::ProvideDir => "hirsel_core_provide_dir",
             Self::ProvideNet => "hirsel_core_provide_net",
+            Self::ProvideExec => "hirsel_core_provide_exec",
             Self::PortFill => "hirsel_core_port_fill",
             Self::StreamTerminal => "hirsel_core_stream_is_terminal",
             _ => unreachable!(),
@@ -1389,6 +1393,7 @@ impl HostOp {
                 | HostOp::PortReply
                 | HostOp::ProvideDir
                 | HostOp::ProvideNet
+                | HostOp::ProvideExec
                 | HostOp::PortFill
                 | HostOp::StreamTerminal
         )
@@ -1718,9 +1723,10 @@ impl RtOp {
                     | HostOp::CallSecret
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
-                    HostOp::ProvideDir | HostOp::ProvideNet | HostOp::PortNext => {
-                        (vec![V(u64_)], outcome)
-                    }
+                    HostOp::ProvideDir
+                    | HostOp::ProvideNet
+                    | HostOp::ProvideExec
+                    | HostOp::PortNext => (vec![V(u64_)], outcome),
                     HostOp::ProvideStdout | HostOp::ProvideStderr => {
                         (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
                     }

@@ -84,6 +84,7 @@ pub fn needs_writable_dir(op: u8, mode: u8) -> bool {
 }
 
 pub const EXEC_NARROW: u8 = 75;
+pub const PROVIDE_EXEC: u8 = 76;
 // Unix endpoints and datagrams (NET-12 through NET-14).
 pub const UNIX_CONNECT: u8 = 106;
 pub const UNIX_LISTEN: u8 = 107;

@@ -1992,7 +1992,7 @@ fn exec_provider_law(image: &std::path::Path) {
     std::fs::write(image, b"replaced after seal").unwrap();
     std::fs::create_dir(root.join("here")).unwrap();
     std::os::unix::fs::symlink("here", root.join("link")).unwrap();
-    let grant = Grant {
+    let grant = Grant::Native {
         supervisor,
         profiles: Arc::new(profiles),
         rules,

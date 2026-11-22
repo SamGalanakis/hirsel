@@ -28,6 +28,8 @@ pub const LATEST_ROOT: u64 = 32;
 /// A `provide.clock`, `provide.random` or `provide.process` cell (MEM-24),
 /// held by the constructing payer until the run ends, as a narrowed grant.
 pub const PROVIDE_CELL: u64 = 32;
+/// Each mechanical Proc or pipe designation admitted by Exec.spawn (EXEC-3).
+pub const EXEC_HANDLE: u64 = 8;
 /// Logical size of a Map entry's bookkeeping beside its key and value.
 pub const MAP_ENTRY_EXTRA: u64 = 16;
 /// Growth that doubles capacity starts from this many elements.

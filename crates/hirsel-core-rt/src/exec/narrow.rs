@@ -66,7 +66,7 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
         };
         let Some(rule) = rule else { return DENIED };
         let parent = &*(hirsel_core_capability_handle(context, exec) as *const super::Grant);
-        let Some(rules) = parent.rules.narrow(&rule) else {
+        let Some(rules) = parent.rules().narrow(&rule) else {
             return DENIED;
         };
         let charge = rules.charge();
@@ -80,11 +80,7 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
                 kind: 0,
             };
         }
-        let grant = Box::new(super::Grant {
-            supervisor: parent.supervisor.clone(),
-            profiles: parent.profiles.clone(),
-            rules,
-        });
+        let grant = Box::new(parent.with_rules(rules));
         let handle = std::ptr::from_ref(&*grant) as u64;
         let registry = &(*(*context).host_files).registry;
         registry

@@ -443,6 +443,7 @@ tags!(HostOp {
     73 => ExecWait,
     74 => ExecSignal,
     75 => ExecNarrow,
+    76 => ProvideExec,
     106 => UnixConnect,
     107 => UnixListen,
     108 => UnixAccept,

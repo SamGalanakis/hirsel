@@ -9,6 +9,7 @@ import base64
 import contextlib
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import shlex
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -84,6 +86,37 @@ def unit_socket_case(case):
 
 def loopback_grants():
     return ['--grant', 'Net=' + ';'.join(LOOPBACK_RULES), '--grant', 'Clock', '--grant', 'Tasks']
+
+def exec_fixture(scratch, host):
+    """Pin a host executable with a known exit and derive its EXEC-1 approval."""
+    image = Path('/usr/bin/true').resolve()
+    contents = image.read_bytes()
+    pin = hashlib.sha256(contents)
+    policy = scratch / 'exec.toml'
+    policy.write_text(f'[parity]\nimage = {json.dumps(str(image))}\nsha256 = "{pin.hexdigest()}"\n'
+                      f'argv0 = "true"\nargs = [[]]\nenv = {{}}\n'
+                      f'dirs = {{ work = {json.dumps(str(host))} }}\n')
+
+    def field(data):
+        return struct.pack('<I', len(data)) + data
+
+    # One profile, one empty form, no environment keys, one directory.
+    canonical = (b'hirsel.exec-policy.v1' + struct.pack('<I', 1)
+                 + field(b'parity') + field(os.fsencode(image)) + pin.digest() + field(b'true')
+                 + struct.pack('<IIIII', 1, 0, 0, 0, 1) + field(b'work') + field(os.fsencode(host)))
+    digest = hashlib.sha256(canonical).hexdigest()
+    interpreter = b'none'
+    start = struct.unpack_from('<Q', contents, 32)[0]
+    stride, count = struct.unpack_from('<HH', contents, 54)
+    for at in range(start, start + stride * count, stride):
+        if struct.unpack_from('<I', contents, at)[0] == 3:  # ELF64 PT_INTERP
+            offset, _, _, length = struct.unpack_from('<QQQQ', contents, at + 8)
+            interpreter = contents[offset:offset + length].rstrip(b'\0')
+            break
+    approval = (f'exec: parity: image {image}, sha256 {pin.hexdigest()}, interpreter '.encode()
+                + interpreter + f', policy {digest}\n'.encode())
+    return f'Exec={policy} parity', approval
+
 
 LANES = {'895': 'core-check-895', '910': 'core-check-calls-910', '912': 'core-check-index-912',
          '913': 'core-check-callables-913', '914': 'core-ops-914'}
@@ -300,6 +333,8 @@ def host_parameter(case):
         return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
     if '(unix, dir, tasks)' in case.call:
         return 'native_net:Net,native_dir:Dir,native_tasks:Tasks', ''
+    if '(exec, tasks)' in case.call:
+        return 'native_tasks:Tasks,native_exec:Exec', ''
     if '(granted, tasks)' in case.call:  # An entry-grant Secret: native only.
         return 'native_tasks:Tasks,native_granted:Secret', ''
     if '(dir, tasks)' in case.call:  # A host Dir as the oracle beside served ports.
@@ -453,6 +488,7 @@ def wrapper(case, port=None):
     call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
     call = call.replace('(clock, tasks)', '(native_clock,native_tasks)')
     call = call.replace('(unix, dir, tasks)', '(native_net,native_dir,native_tasks)')
+    call = call.replace('(exec, tasks)', '(native_exec,native_tasks)')
     call = call.replace('(granted, tasks)', '(native_granted,native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
@@ -670,6 +706,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            cause=None, owner=None, native_only=False)
                 # The evaluator models tasks and the clock (virtual time); a law
                 # whose entry takes another host capability runs natively only.
+                if (engine == 'evaluator' or emulator) and '(exec, tasks)' in case.call:
+                    row.update(applicable=False, passed=None, native_only=True,
+                               cause='native-only: sealed Exec image oracle')
+                    save_row(rows, row, output)
+                    continue
                 if engine == 'evaluator' and '(unix, dir, tasks)' in case.call:
                     row.update(applicable=False, passed=None, native_only=True,
                                cause='native-only: Unix socket and directory oracle')
@@ -863,6 +904,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Clock'])
                 if any(args in case.call for args in ('(tasks)', '(dir, tasks)', '(clock, tasks)')):
                     command.extend(['--grant', 'Tasks'])
+                if '(exec, tasks)' in case.call:
+                    grant, approval = exec_fixture(scratch, host)
+                    command.extend(['--grant', 'Tasks', '--grant', grant])
+                    case = dataclasses.replace(case, stderr=approval + case.stderr)
                 if '(granted, tasks)' in case.call:
                     command.extend(['--grant', 'Tasks', '--grant', 'Secret:native_granted=env:HIRSEL_GRANTED_SECRET to alpha.test'])
                     environment = {**os.environb, b'HIRSEL_GRANTED_SECRET': b'granted-token'}

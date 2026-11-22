@@ -7,11 +7,12 @@ use crate::{
     os_exec::{Process, Signal, SpawnInput, Termination},
     provider::*,
 };
+use hirsel_core_layout::charge::EXEC_HANDLE;
+pub(crate) use hirsel_core_net::exec::LogicalLaunch;
 use std::{
     ffi::CString,
     io,
     os::fd::{AsFd, FromRawFd, OwnedFd},
-    ptr,
 };
 
 const PROC_BIT: u64 = 1 << 63;
@@ -20,7 +21,7 @@ const DENIED: Outcome = failure(1, 0);
 const TIMED_OUT: Outcome = failure(2, 0);
 const ABORTED: Outcome = failure(3, 0);
 
-const fn failure(tag: u8, code: u32) -> Outcome {
+pub(crate) const fn failure(tag: u8, code: u32) -> Outcome {
     Outcome {
         value: 0,
         error: IoError { tag, code },
@@ -34,50 +35,20 @@ fn other(error: io::Error) -> Outcome {
     failure(4, error.raw_os_error().unwrap_or(libc::EIO) as u32)
 }
 
-pub(crate) struct LogicalLaunch<'a> {
-    pub program: &'a str,
-    pub args: Vec<&'a [u8]>,
-    pub env: Vec<(&'a str, &'a [u8])>,
-    pub dir: &'a str,
-    pub path: &'a str,
-    pub piped: [bool; 3],
-}
-
-impl LogicalLaunch<'_> {
-    fn valid(&self) -> bool {
-        let fits = |len| u32::try_from(len).is_ok();
-        fits(self.program.len())
-            && fits(self.dir.len())
-            && fits(self.path.len())
-            && fits(self.args.len())
-            && fits(self.env.len())
-            && self
-                .args
-                .iter()
-                .all(|arg| fits(arg.len()) && !arg.contains(&0))
-            && self.env.iter().all(|(key, value)| {
-                fits(key.len())
-                    && fits(value.len())
-                    && hirsel_core_net::exec::valid_key(key)
-                    && !value.contains(&0)
-            })
-            && self.env.windows(2).all(|pair| pair[0].0 != pair[1].0)
-            && (self.path.is_empty() || hirsel_core_net::valid_relative_path(self.path.as_bytes()))
-    }
-
-    fn permitted(&self, grant: &Grant) -> bool {
-        let keys: Vec<_> = self.env.iter().map(|(key, _)| *key).collect();
-        grant
-            .rules
-            .permits(self.program, &self.args, &keys, self.dir)
-    }
-}
-
 struct ProcessHandle {
     provider: Provider,
     handle: u64,
     native: Option<Process>,
     cached: Option<u64>,
+    _charge: HandleCharge,
+}
+
+pub(crate) struct HandleCharge(crate::limit::Payer);
+
+impl Drop for HandleCharge {
+    fn drop(&mut self) {
+        self.0.refund(EXEC_HANDLE);
+    }
 }
 
 pub(crate) struct SpawnCall<'a> {
@@ -85,6 +56,7 @@ pub(crate) struct SpawnCall<'a> {
     files: *mut crate::host_file::Files,
     process: Option<Process>,
     pub pipes: [u64; 3],
+    pub served_payloads: [Vec<u8>; 2],
 }
 
 pub(crate) struct ProcCall<'a> {
@@ -144,7 +116,15 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
         let call = &mut (*r.path.cast_mut().cast::<Call<SpawnCall>>()).data;
         let grant = &*(r.handle as *const Grant);
         let launch = &call.launch;
-        let profile = &grant.profiles[launch.program];
+        let Grant::Native {
+            supervisor,
+            profiles,
+            ..
+        } = grant
+        else {
+            unreachable!("native spawn requires a native grant");
+        };
+        let profile = &profiles[launch.program];
         let Ok(cwd) = cwd(&profile.spec.dirs[launch.dir], launch.path) else {
             return DENIED;
         };
@@ -175,7 +155,7 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
         {
             return other(error);
         }
-        let result = grant.supervisor.spawn(SpawnInput {
+        let result = supervisor.spawn(SpawnInput {
             image: profile.image.file.clone(),
             interpreter: profile.image.interpreter.clone(),
             cwd,
@@ -345,9 +325,13 @@ pub unsafe extern "C" fn hirsel_core_exec_spawn(
                 files: (*context).host_files,
                 process: None,
                 pipes: [0; 3],
+                served_payloads: Default::default(),
             },
         };
         let mut r = request(EXEC_SPAWN, 0, handle, &raw mut call, site);
+        let payer = (*context).payer();
+        let mut charged = 0;
+        let mut refusal = None;
         let mut outcome = drive_with(context, &provider, &mut r, None, |provider, r| {
             let launch = &(*r.path.cast::<Call<SpawnCall>>()).data.launch;
             #[cfg(feature = "record")]
@@ -365,16 +349,52 @@ pub unsafe extern "C" fn hirsel_core_exec_spawn(
                 let _ = provider;
                 r.handle
             };
-            launch.valid() && launch.permitted(&*(handle as *const Grant))
+            if !launch.permitted((*(handle as *const Grant)).rules()) {
+                return false;
+            }
+            let amount =
+                EXEC_HANDLE * (1 + launch.piped.into_iter().filter(|&pipe| pipe).count() as u64);
+            match payer.admit(Some(amount)) {
+                Ok(()) => {
+                    charged = amount;
+                    true
+                }
+                Err(capacity) => {
+                    refusal = Some(capacity);
+                    false
+                }
+            }
         });
+        if let Some(capacity) = refusal {
+            // The lowering raises Capacity at the call site with these words.
+            outcome = Outcome {
+                value: capacity.requested,
+                written: capacity.available,
+                ..failure(5, 0)
+            };
+        }
         if outcome.error == IoError::OK && outcome.status == 0 {
+            {
+                let _commit = crate::sequencer::enter();
+                let files = (*context).host_files;
+                let served = crate::provide::owns(&provider);
+                for key in call.data.pipes.into_iter().filter(|&key| key != 0) {
+                    (*files).exec_pipes.insert(key, HandleCharge(payer));
+                    if served {
+                        (*files).unix_served.insert(key & !3, provider);
+                    }
+                }
+            }
             let proc = Box::new(ProcessHandle {
                 provider,
                 handle: outcome.value,
                 native: call.data.process,
                 cached: None,
+                _charge: HandleCharge(payer),
             });
             outcome.value = Box::into_raw(proc) as u64 | PROC_BIT;
+        } else if charged != 0 {
+            payer.refund(charged);
         }
         SpawnOutcome {
             outcome,

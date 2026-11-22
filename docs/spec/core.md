@@ -581,10 +581,10 @@ runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/
 `provide` makes capabilities of virtual construction
 ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)) and answers their operations in the
 program's own code ([CAP-5](capabilities.md#cap-5-provider-operations)). Callers see nothing
-new: a `Dir`, `Net`, `Stdout`, `Stderr`, `Clock`, `Random` or `Process` from `provide` has its
-ordinary type and every `host`, `net`, `tls`, `stdout` and `stderr` operation takes it.
+new: a `Dir`, `Net`, `Exec`, `Stdout`, `Stderr`, `Clock`, `Random` or `Process` from `provide` has its
+ordinary type and supports the same operations as a host grant.
 A `provide.net` port also answers the Unix operations ([NET-14](net.md#net-14-unix-datagrams)).
-Unbuilt: `provide.exec` makes an `Exec` answered on a `Served[ExecOp]` port
+`provide.exec` makes an `Exec` answered on a `Served[ExecOp]` port
 ([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
 
 ```hirsel core

@@ -600,13 +600,13 @@ gives that concrete rule, and it has no external spelling and no tape tag. `exec
 narrows it, and EXEC-2 gives the logical grant and the rule-storage charge of each result,
 its remainder and universal parts included.
 
-```hirsel unbuilt
+```hirsel core
 pub type ExecOp = Spawn(program: u64, args: u64, env: u64, dir: u64, path: u64, stdin: Stdio, stdout: Stdio, stderr: Stdio) | Await(proc: u64) | Signal(proc: u64, signal: Signal) | Recv(pipe: u64, room: u64, max: u64) | Send(pipe: u64, prefix: u64, tail: u64) | Released(id: u64, part: Part)
 pub type ExecReply = Done | Failed(ExecError) | IoFailed(NetError) | Count(u64) | Started(proc: u64, stdin: u64, stdout: u64, stderr: u64) | Ended(Termination)
 
 pub fn exec(bytes n: u64) -> (Exec, Served[ExecOp])
 pub fn exec_op(c: Call[ExecOp]) -> ExecOp
-pub fn exec_reply(r: ExecReply) -> Reply[ExecOp]
+pub fn exec_reply(r: ExecReply) -> provide.Reply[ExecOp]
 ```
 
 The served rules are Provide's: a port room, payload fields by declaration order, `fill`,

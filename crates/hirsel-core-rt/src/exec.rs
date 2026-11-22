@@ -16,13 +16,39 @@ pub(crate) use narrow::NarrowedGrant;
 const EXEC_HOST: &str =
     "Exec requires clone3 with CLONE_PIDFD and close_range (Linux 5.9 or later)";
 
-pub(crate) struct Grant {
-    pub(crate) supervisor: Arc<crate::os_exec::Supervisor>,
-    pub(crate) profiles: Arc<BTreeMap<String, PinnedProfile>>,
-    pub(crate) rules: ExecRules,
+pub(crate) enum Grant {
+    Native {
+        supervisor: Arc<crate::os_exec::Supervisor>,
+        profiles: Arc<BTreeMap<String, PinnedProfile>>,
+        rules: ExecRules,
+    },
+    Served {
+        rules: ExecRules,
+    },
 }
 
 impl Grant {
+    pub(crate) fn rules(&self) -> &ExecRules {
+        match self {
+            Self::Native { rules, .. } | Self::Served { rules } => rules,
+        }
+    }
+
+    fn with_rules(&self, rules: ExecRules) -> Self {
+        match self {
+            Self::Native {
+                supervisor,
+                profiles,
+                ..
+            } => Self::Native {
+                supervisor: supervisor.clone(),
+                profiles: profiles.clone(),
+                rules,
+            },
+            Self::Served { .. } => Self::Served { rules },
+        }
+    }
+
     fn verify(request: &Request, workdir: &Path, expected: [u8; 32]) -> Result<Policy, String> {
         let policy = request.load_from(workdir)?;
         if policy.digest != expected {
@@ -41,7 +67,7 @@ impl Grant {
         let rules = policy.rules();
         let (profiles, lines) = policy.pin_images()?;
         Ok((
-            Self {
+            Self::Native {
                 supervisor,
                 profiles: Arc::new(profiles),
                 rules,

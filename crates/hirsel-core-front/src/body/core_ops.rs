@@ -379,6 +379,7 @@ operations! {
     ("provide", "stderr", Lane::Runtime(Kernel::Provide(HostOp::ProvideStderr)), "B", "provide-r8a-1533", false),
     ("provide", "dir", Lane::Runtime(Kernel::Provide(HostOp::ProvideDir)), "B", "provide-r8a-1533", false),
     ("provide", "net", Lane::Runtime(Kernel::Provide(HostOp::ProvideNet)), "B", "provide-r8a-1533", false),
+    ("provide", "exec", Lane::Runtime(Kernel::Provide(HostOp::ProvideExec)), "B", "exec-unix-impl-c-1627", false),
     ("provide", "fill", Lane::Runtime(Kernel::Provide(HostOp::PortFill)), "B", "provide-r8a-1533", false),
     ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
     ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
@@ -2598,7 +2599,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if matches!(
             op,
-            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::ProvideDir | HostOp::ProvideNet
+            HostOp::ProvideStdout
+                | HostOp::ProvideStderr
+                | HostOp::ProvideDir
+                | HostOp::ProvideNet
+                | HostOp::ProvideExec
         ) {
             // A port's room, with its own record, saturating as the run time's.
             let cell = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
@@ -2623,7 +2628,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             | HostOp::ProvideStdout
             | HostOp::ProvideStderr
             | HostOp::ProvideDir
-            | HostOp::ProvideNet => {
+            | HostOp::ProvideNet
+            | HostOp::ProvideExec => {
                 let id = self.runtime_type(result, n)?;
                 let to = self.new_slot(PlaceTy::Declared(id), n);
                 self.runtime_store(to, &[Step::Field(0)], u, value, n);
@@ -3486,8 +3492,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => unreachable!(),
         }
         let args: Vec<_> = args.into_iter().map(Arg::Value).collect();
-        let [value, tag, code, _, stdin, stdout, stderr] =
+        let [value, tag, code, written, stdin, stdout, stderr] =
             self.runtime_outputs::<7>(RtOp::Host(op), &args, n)?;
+        if op == HostOp::ExecSpawn {
+            let max_error = self.konst(Ty::Scalar(Scalar::U8), 4, n)?;
+            let decided = self.test(CompareOp::Le, tag, max_error, n);
+            self.raise_unless(decided, value, written, n);
+        }
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 0, n)?;
         self.runtime_result(
             result,

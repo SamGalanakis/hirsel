@@ -127,6 +127,8 @@ struct World {
     /// A served Net's grants (in `network.grants`, so `net.narrow` works on
     /// them as on any Net) and their port.
     net_ports: BTreeMap<u64, usize>,
+    exec_grants: Vec<(usize, hirsel_core_net::exec::ExecRules)>,
+    exec_handles: BTreeMap<u64, Limit>,
     /// A served Net caller's socket and listener keys (direction bits clear):
     /// port, server id and the peer's port, which a handshake's rule checks
     /// (native `provide::Port::keys`, `Files::connected`).
@@ -138,6 +140,7 @@ struct World {
 const CELL_BASE: u64 = 0x80_0000;
 const SCRAM_BASE: u64 = 1 << 60;
 const PORT_HANDLE: u64 = 1 << 61;
+const EXEC_GRANT: u64 = 1 << 58;
 /// A port's `Served` end is `SERVED_BASE + i` for cell `i`; its call `id` is
 /// `CALL_BASE + (i << 32) + id`.
 const SERVED_BASE: u64 = 0x90_0000;
@@ -150,7 +153,7 @@ const PORT_KEYS: u64 = 1 << 33;
 /// answers them only while the call is unsettled, as natively.
 struct PortCall {
     caller: usize,
-    words: [u64; 8],
+    words: [u64; 9],
     /// The `Op`'s data fields by field number.
     fields: Vec<Vec<u8>>,
     /// The caller's carrier that receives the staged reply bytes.
@@ -179,6 +182,7 @@ struct PortHandle {
     state: PortState,
     write: Option<PortState>,
     read_only_file: bool,
+    termination: Option<u64>,
 }
 impl PortHandle {
     fn new(kind: u8) -> Self {
@@ -187,6 +191,7 @@ impl PortHandle {
             state: PortState::Live,
             write: None,
             read_only_file: false,
+            termination: None,
         }
     }
     fn done(&self) -> bool {
@@ -198,6 +203,7 @@ enum Vocab {
     Stream,
     Dir,
     Net,
+    Exec,
 }
 enum Queued {
     Call(u64),
@@ -219,6 +225,10 @@ const PORT_SOCKET: u8 = 3;
 const PORT_UNIX_SOCKET: u8 = 5;
 const PORT_UNIX_LISTENER: u8 = 6;
 const PORT_DATAGRAM: u8 = 7;
+const PORT_PROC: u8 = 8;
+const PORT_PIPE_READ: u8 = 9;
+const PORT_PIPE_WRITE: u8 = 10;
+use hirsel_core_net::exec::served as exec;
 
 #[derive(Clone, Copy)]
 struct DatagramState {
@@ -231,6 +241,7 @@ fn is_notice(vocab: Vocab, op: u64) -> bool {
         Vocab::Stream => false,
         Vocab::Dir => op == DIR_RELEASED,
         Vocab::Net => op == NET_RELEASED,
+        Vocab::Exec => op == exec::RELEASED,
     }
 }
 const HANDLE_ROOM: u64 = 32;
@@ -364,8 +375,13 @@ impl VirtualCell {
     }
 }
 /// A sealed port's answer: `Closed`, or a Net's `Reset`.
-fn port_closed(vocab: Vocab) -> [u64; 5] {
-    [0, if vocab == Vocab::Net { 5 } else { 4 }, 0, 0, 0]
+fn port_closed(vocab: Vocab, op: u64) -> [u64; 5] {
+    let error = match vocab {
+        Vocab::Net => 5,
+        Vocab::Exec if !exec::exec_error_op(op) => 5,
+        _ => 4,
+    };
+    [0, error, 0, 0, 0]
 }
 /// A port outcome shaped as the host model's row for the call's operation:
 /// a Stat's carries the kind, a Net Listen's or Accept's an address.
@@ -373,6 +389,7 @@ fn port_outcome(vocab: Vocab, op: u64, v: [u64; 5]) -> Vec<u64> {
     match (vocab, op) {
         (Vocab::Dir, 3 | 14) => v.to_vec(),
         (Vocab::Net, 2 | 3 | 6) => [&v[..4], &[0; 4]].concat(),
+        (Vocab::Exec, exec::SPAWN) => [&v[..4], &[0; 3]].concat(),
         _ => v[..4].to_vec(),
     }
 }
@@ -2215,7 +2232,7 @@ impl Machine<'_> {
         &mut self,
         t: &Task,
         c: usize,
-        words: [u64; 8],
+        words: [u64; 9],
         fields: Vec<Vec<u8>>,
         out: Option<u64>,
         live: bool,
@@ -2232,7 +2249,7 @@ impl Machine<'_> {
         &mut self,
         t: &Task,
         c: usize,
-        words: [u64; 8],
+        words: [u64; 9],
         fields: Vec<Vec<u8>>,
         out: Option<u64>,
         live: bool,
@@ -2244,16 +2261,22 @@ impl Machine<'_> {
         };
         let vocab = *vocab;
         if *sealed {
-            return Ok(port_outcome(vocab, words[0], port_closed(vocab)));
+            return Ok(port_outcome(vocab, words[0], port_closed(vocab, words[0])));
         }
         if !live {
             // Not this port's live object of the operation's kind: Denied
             // (IoError tag 2, NetError tag 1).
-            let denied = if vocab == Vocab::Net { 1 } else { DENIED };
+            let denied = if matches!(vocab, Vocab::Net | Vocab::Exec) {
+                1
+            } else {
+                DENIED
+            };
             return Ok(port_outcome(vocab, words[0], [0, denied, 0, 0, 0]));
         }
+        let exec_error = vocab == Vocab::Exec && exec::exec_error_op(words[0]);
+        let deadline_error = if exec_error { 2 } else { 6 };
         if deadline.is_some_and(|due| self.passed(due)) {
-            return Ok(port_outcome(vocab, words[0], [0, 6, 0, 0, 0]));
+            return Ok(port_outcome(vocab, words[0], [0, deadline_error, 0, 0, 0]));
         }
         let VirtualCell::Port {
             next,
@@ -2306,7 +2329,7 @@ impl Machine<'_> {
                 cell.free_staged(id);
                 cell.closed_call(id);
                 cell.prune(id);
-                return Ok(port_outcome(vocab, words[0], [0, 6, 0, 0, 0]));
+                return Ok(port_outcome(vocab, words[0], [0, deadline_error, 0, 0, 0]));
             }
             self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
             let host = match deadline {
@@ -2329,8 +2352,9 @@ impl Machine<'_> {
                     cell.free_staged(id);
                     cell.closed_call(id);
                     cell.prune(id);
-                    if vocab == Vocab::Net {
-                        return Ok(port_outcome(vocab, words[0], [0, 7, 0, 0, 0]));
+                    if matches!(vocab, Vocab::Net | Vocab::Exec) {
+                        let aborted = if exec_error { 3 } else { 7 };
+                        return Ok(port_outcome(vocab, words[0], [0, aborted, 0, 0, 0]));
                     }
                     self.check_cancel(t)?;
                 }
@@ -2461,7 +2485,7 @@ impl Machine<'_> {
         let live = handles.get(&h).is_some_and(|handle| {
             handle.kind == kind && handle.state == PortState::Live && handle.write.is_none()
         });
-        let mut w = [0; 8];
+        let mut w = [0; 9];
         w[..words.len()].copy_from_slice(&words);
         let mut answer = self.port_call(t, c, w, fields, out, live)?;
         if a[0] & DIR_READ_ONLY != 0 && answer[1] == 0 {
@@ -2534,10 +2558,10 @@ impl Machine<'_> {
                         // The notice's record leaves the room with the last
                         // part's notice, and becomes a Call that needs no reply.
                         let handle = handles.get_mut(&h).unwrap();
-                        let part = match (handle.write, write) {
-                            (None, _) => 0,
-                            (Some(_), false) => 1,
-                            (Some(_), true) => 2,
+                        let part = match (handle.kind, handle.write, write) {
+                            (PORT_PIPE_READ, _, _) | (_, Some(_), false) => 1,
+                            (PORT_PIPE_WRITE, _, _) | (_, Some(_), true) => 2,
+                            _ => 0,
                         };
                         if write {
                             handle.write = Some(PortState::Gone);
@@ -2550,11 +2574,11 @@ impl Machine<'_> {
                         }
                         let id = *next;
                         *next += 1;
-                        let mut words = [0; 8];
-                        if *vocab == Vocab::Net {
-                            words[..3].copy_from_slice(&[NET_RELEASED, h, part]);
-                        } else {
-                            words[..2].copy_from_slice(&[DIR_RELEASED, h]);
+                        let mut words = [0; 9];
+                        match *vocab {
+                            Vocab::Net => words[..3].copy_from_slice(&[NET_RELEASED, h, part]),
+                            Vocab::Exec => words[..3].copy_from_slice(&[exec::RELEASED, h, part]),
+                            _ => words[..2].copy_from_slice(&[DIR_RELEASED, h]),
                         }
                         calls.insert(
                             id,
@@ -2602,7 +2626,7 @@ impl Machine<'_> {
             }
             let op = cell.port().0.get(&id).map_or(0, |call| call.words[0]);
             let vocab = cell.port().4;
-            callers.extend(cell.settle(id, port_outcome(vocab, op, port_closed(vocab))));
+            callers.extend(cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op))));
             cell.prune(id);
         } else {
             let c = (h - SERVED_BASE) as usize;
@@ -2620,7 +2644,7 @@ impl Machine<'_> {
             let vocab = *vocab;
             let ids: Vec<(u64, u64)> = calls.iter().map(|(&id, c)| (id, c.words[0])).collect();
             for (id, op) in ids {
-                callers.extend(cell.settle(id, port_outcome(vocab, op, port_closed(vocab))));
+                callers.extend(cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op))));
             }
         }
         for k in callers {
@@ -2651,6 +2675,13 @@ impl Machine<'_> {
         let op = call.words[0];
         if *vocab == Vocab::Net {
             return Self::net_answer(call, handles, tag, w);
+        }
+        if *vocab == Vocab::Exec {
+            let [value, error, code, written] =
+                exec::answer(&call.words, call.staged.len() as u64, tag, w, |id| {
+                    handles.contains_key(&id)
+                })?;
+            return Some(([value, error, code, written, 0], None));
         }
         let dir = *vocab == Vocab::Dir;
         let answers = if !dir {
@@ -2832,7 +2863,7 @@ impl Machine<'_> {
         }
         let Some((answer, kind)) = self.port_answer(c, id, a[2], &a[3..9]) else {
             let cell = &mut self.world.cells[c];
-            let k = cell.settle(id, port_outcome(vocab, op, port_closed(vocab)));
+            let k = cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
             k.into_iter().for_each(|k| self.ready_provider(k));
             return Err(Stop::Cause("Fail"));
         };
@@ -2850,7 +2881,7 @@ impl Machine<'_> {
             let available = *room - *used;
             if available < HANDLE_ROOM {
                 let cell = &mut self.world.cells[c];
-                let k = cell.settle(id, port_outcome(vocab, op, port_closed(vocab)));
+                let k = cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
                 k.into_iter().for_each(|k| self.ready_provider(k));
                 return Ok(vec![HANDLE_ROOM, 1, 0, available]);
             }
@@ -2871,10 +2902,48 @@ impl Machine<'_> {
                 answer[0] = PORT_HANDLE + self.world.port_handles.len() as u64 - 1;
             }
         }
+        let mut pipes = [0; 3];
+        if (vocab, a[2]) == (Vocab::Exec, exec::STARTED) {
+            let needed = HANDLE_ROOM * a[3..7].iter().filter(|&&id| id != 0).count() as u64;
+            let VirtualCell::Port {
+                room,
+                used,
+                handles,
+                ..
+            } = &mut self.world.cells[c]
+            else {
+                unreachable!()
+            };
+            let available = *room - *used;
+            if available < needed {
+                let k =
+                    self.world.cells[c].settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
+                k.into_iter().for_each(|k| self.ready_provider(k));
+                return Ok(vec![needed, 1, 0, available]);
+            }
+            *used += needed;
+            for (i, &id) in a[3..7].iter().enumerate().filter(|&(_, id)| *id != 0) {
+                let (kind, part) = match i {
+                    0 => (PORT_PROC, 0),
+                    1 => (PORT_PIPE_WRITE, 2),
+                    _ => (PORT_PIPE_READ, 1),
+                };
+                handles.insert(id, PortHandle::new(kind));
+                let key = PORT_KEYS | (self.world.next_port_key << 2);
+                self.world.next_port_key += 1;
+                self.world.port_keys.insert(key, (c, id, 0));
+                if i == 0 {
+                    answer[0] = key;
+                } else {
+                    pipes[i - 1] = key | part;
+                }
+            }
+        }
         let (calls, ..) = self.world.cells[c].port();
         let call = &calls[&id];
         if let (Some(out), false) = (call.out, call.staged.is_empty())
-            && !(vocab == Vocab::Net && op == NET_DATAGRAM_RECV && answer[1] != 0)
+            && !((vocab == Vocab::Exec || (vocab, op) == (Vocab::Net, NET_DATAGRAM_RECV))
+                && answer[1] != 0)
         {
             // The commit copies the staged bytes into the caller's capacity.
             let (op, staged) = (call.words[0], call.staged.clone());
@@ -2896,6 +2965,9 @@ impl Machine<'_> {
             }
         }
         let mut row = port_outcome(vocab, op, answer);
+        if (vocab, op) == (Vocab::Exec, exec::SPAWN) {
+            row[4..7].copy_from_slice(&pipes);
+        }
         if vocab == Vocab::Net && matches!(op, 2 | 3) && row[1] == 0 {
             // A listener's bound address, an accepted socket's peer.
             row[4..8].copy_from_slice(&a[4..8]);
@@ -2927,7 +2999,11 @@ impl Machine<'_> {
         }
         if matches!(
             op,
-            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::ProvideDir | HostOp::ProvideNet
+            HostOp::ProvideStdout
+                | HostOp::ProvideStderr
+                | HostOp::ProvideDir
+                | HostOp::ProvideNet
+                | HostOp::ProvideExec
         ) {
             // A port's room with its own record, held until the run ends.
             let payer = t.limits.last().unwrap();
@@ -2985,10 +3061,12 @@ impl Machine<'_> {
             HostOp::ProvideStdout
             | HostOp::ProvideStderr
             | HostOp::ProvideDir
-            | HostOp::ProvideNet => {
+            | HostOp::ProvideNet
+            | HostOp::ProvideExec => {
                 let vocab = match op {
                     HostOp::ProvideDir => Vocab::Dir,
                     HostOp::ProvideNet => Vocab::Net,
+                    HostOp::ProvideExec => Vocab::Exec,
                     _ => Vocab::Stream,
                 };
                 let port = VirtualCell::Port {
@@ -3008,6 +3086,14 @@ impl Machine<'_> {
                 };
                 let h = new(&mut self.world, port);
                 let served = h - CELL_BASE + SERVED_BASE;
+                if vocab == Vocab::Exec {
+                    let key = EXEC_GRANT + self.world.exec_grants.len() as u64;
+                    self.world.exec_grants.push((
+                        (h - CELL_BASE) as usize,
+                        hirsel_core_net::exec::ExecRules::universal(),
+                    ));
+                    return Some(Ok(ok(key, served)));
+                }
                 if vocab != Vocab::Net {
                     return Some(Ok(ok(h, served)));
                 }
@@ -3063,7 +3149,7 @@ impl Machine<'_> {
             HostOp::CallWord => {
                 let (c, id) = Self::call_of(a[0]);
                 let (calls, ..) = self.world.cells[c].port();
-                ok(calls[&id].words[a[1].min(7) as usize], 0)
+                ok(calls[&id].words.get(a[1] as usize).copied().unwrap_or(0), 0)
             }
             HostOp::CallSecret => {
                 // A new designation charged as `secret.narrow`; any call but
@@ -3127,6 +3213,7 @@ impl Machine<'_> {
                         call.words[2]
                     }
                     (Vocab::Dir, 2 | 11) => call.words[3],
+                    (Vocab::Exec, exec::RECV) => call.words[2].min(call.words[3]),
                     _ => 0,
                 };
                 let take = offer
@@ -3203,7 +3290,7 @@ impl Machine<'_> {
                     return Some(Err(cancelled));
                 }
                 let (bytes, ..) = self.carrier(a[1]);
-                let mut words = [0; 8];
+                let mut words = [0; 9];
                 words[1] = bytes.len() as u64;
                 return Some(self.port_call(t, c, words, vec![bytes], None, true));
             }
@@ -3565,6 +3652,8 @@ impl Machine<'_> {
         let live = handles.get(&id).is_some_and(|h| {
             let state = match (key & 3, h.write) {
                 (0, None) | (1, Some(_)) => Some(h.state),
+                (1, None) if kind == PORT_PIPE_READ => Some(h.state),
+                (2, None) if kind == PORT_PIPE_WRITE => Some(h.state),
                 (2, write) => write,
                 _ => None,
             };
@@ -3585,6 +3674,13 @@ impl Machine<'_> {
         a: &[u64],
     ) -> X<Vec<u64>> {
         self.check_cancel(t)?;
+        let served_exec = matches!(
+            self.world.cells[c],
+            VirtualCell::Port {
+                vocab: Vocab::Exec,
+                ..
+            }
+        );
         let (words, fields, out): (Vec<u64>, Vec<Vec<u8>>, Option<u64>) = match op {
             HostOp::Connect => (vec![0, a[1], a[2], a[3], a[4]], vec![], None),
             HostOp::Listen => (vec![2, a[1], a[2], a[3], a[4], a[5]], vec![], None),
@@ -3601,21 +3697,31 @@ impl Machine<'_> {
             }
             HostOp::RecvBounded => {
                 let (_, _, len, cap) = self.carrier(a[1]);
-                let room = cap.saturating_sub(len).min(a[2]);
-                (vec![4, id, room, a[2]], vec![], Some(a[1]))
+                let room = cap.saturating_sub(len);
+                let (tag, room) = if served_exec {
+                    (exec::RECV, room)
+                } else {
+                    (4, room.min(a[2]))
+                };
+                (vec![tag, id, room, a[2]], vec![], Some(a[1]))
             }
             HostOp::SendPair => {
                 let prefix = self.carrier(a[1]).0;
                 let tail = self.carrier(a[2]).0;
                 (
-                    vec![5, id, prefix.len() as u64, tail.len() as u64],
+                    vec![
+                        if served_exec { exec::SEND } else { 5 },
+                        id,
+                        prefix.len() as u64,
+                        tail.len() as u64,
+                    ],
                     vec![vec![], prefix, tail],
                     None,
                 )
             }
             _ => unreachable!("a TCP operation"),
         };
-        let mut w = [0; 8];
+        let mut w = [0; 9];
         w[..words.len()].copy_from_slice(&words);
         // Each operation's `until` operand (Listen has none).
         let deadline = match op {
@@ -3673,7 +3779,7 @@ impl Machine<'_> {
             h.write = Some(PortState::Live);
             return true;
         }
-        let slot = if key & 3 == 2 {
+        let slot = if key & 3 == 2 && h.kind != PORT_PIPE_WRITE {
             h.write.as_mut()
         } else {
             Some(&mut h.state)
@@ -3697,6 +3803,150 @@ impl Machine<'_> {
             }
         }
         true
+    }
+
+    fn exec_call(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        use hirsel_core_net::exec::LogicalLaunch;
+        self.check_cancel(t)?;
+        if op == HostOp::ExecSpawn {
+            let Some((c, rules)) = a[0]
+                .checked_sub(EXEC_GRANT)
+                .and_then(|i| self.world.exec_grants.get(i as usize))
+            else {
+                std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
+            };
+            let string = |at| std::str::from_utf8(self.carrier_bytes(at)).unwrap();
+            let list = |at| (self.load(at, 8), self.load(at + 8, 8));
+            let (args, argc) = list(a[2]);
+            let (env, envc) = list(a[3]);
+            let mut env: Vec<_> = (0..envc)
+                .map(|i| {
+                    let at = env + i * 48;
+                    (string(at), self.carrier_bytes(at + 24))
+                })
+                .collect();
+            env.sort_unstable_by_key(|(key, _)| *key);
+            let launch = LogicalLaunch {
+                program: string(a[1]),
+                args: (0..argc)
+                    .map(|i| self.carrier_bytes(args + i * 24))
+                    .collect(),
+                env,
+                dir: string(a[4]),
+                path: string(a[5]),
+                piped: [a[6] != 0, a[7] != 0, a[8] != 0],
+            };
+            if !launch.permitted(rules) {
+                return Ok(vec![0, 1, 0, 0, 0, 0, 0]);
+            }
+            let [args, env] = launch.served_payloads();
+            let fields = vec![
+                launch.program.as_bytes().to_vec(),
+                args,
+                env,
+                launch.dir.as_bytes().to_vec(),
+                launch.path.as_bytes().to_vec(),
+            ];
+            let mut words = [0; 9];
+            for (word, field) in words[1..6].iter_mut().zip(&fields) {
+                *word = field.len() as u64;
+            }
+            words[6..].copy_from_slice(&a[6..9]);
+            let c = *c;
+            let payer = t.limits.last().unwrap();
+            let charge = charge::EXEC_HANDLE * (1 + words[6..].iter().sum::<u64>());
+            if let Err(available) = self.admit(payer, charge) {
+                return Ok(vec![charge, 5, 0, available, 0, 0, 0]);
+            }
+            let answer = self.port_call(t, c, words, fields, None, true)?;
+            if answer[1] == 0 {
+                for key in [answer[0], answer[4], answer[5], answer[6]]
+                    .into_iter()
+                    .filter(|&key| key != 0)
+                {
+                    self.world.exec_handles.insert(key, payer.clone());
+                }
+            } else {
+                self.refund(payer.clone(), charge);
+            }
+            return Ok(answer);
+        }
+
+        let Some((c, id, live)) = self.port_socket(a[0], PORT_PROC) else {
+            std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
+        };
+        let wait = op == HostOp::ExecWait;
+        let cached = self.world.cells[c].port().1[&id].termination;
+        if let Some(value) = cached {
+            return Ok(vec![if wait { value } else { 0 }, 0, 0, 0]);
+        }
+        let mut words = [0; 9];
+        words[..2].copy_from_slice(&[if wait { exec::AWAIT } else { exec::SIGNAL }, id]);
+        let deadline = if wait {
+            self.until(a, 1)
+        } else {
+            words[2] = a[1];
+            None
+        };
+        let answer =
+            self.port_call_with(t, c, words, Vec::new(), None, live, &mut None, deadline)?;
+        if wait && answer[1] == 0 {
+            self.world.cells[c]
+                .port()
+                .1
+                .get_mut(&id)
+                .unwrap()
+                .termination = Some(answer[0]);
+        }
+        Ok(answer)
+    }
+
+    fn exec_narrow(&mut self, t: &Task, a: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::exec::{ArgToken, ExecRule, Form, Names};
+        let Some((c, parent)) = a[0]
+            .checked_sub(EXEC_GRANT)
+            .and_then(|i| self.world.exec_grants.get(i as usize))
+        else {
+            std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
+        };
+        let c = *c;
+        let text = |at| std::str::from_utf8(self.carrier_bytes(at)).unwrap();
+        let name = text(a[2]);
+        let names = || Names::parse(text(a[3]));
+        let rule = match a[1] {
+            0 => Names::parse(name).map(ExecRule::Programs),
+            1 => {
+                let data = self.load(a[3], 8);
+                let len = self.load(a[3] + 8, 8);
+                let tokens = (0..len)
+                    .map(|i| {
+                        let at = data + i * 24;
+                        match self.load(at + 16, 8) {
+                            0x8000_0000_0000_0000 => ArgToken::Any,
+                            0x8000_0000_0000_0001 => ArgToken::Rest,
+                            _ => ArgToken::Lit(self.carrier_bytes(at).to_vec()),
+                        }
+                    })
+                    .collect();
+                Form::new(tokens).map(|form| ExecRule::Form(name.to_owned(), form))
+            }
+            2 => names().map(|keys| ExecRule::EnvKeys(name.to_owned(), keys)),
+            3 => names().map(|labels| ExecRule::Dirs(name.to_owned(), labels)),
+            _ => unreachable!(),
+        };
+        let Some(rules) = rule.and_then(|rule| parent.narrow(&rule)) else {
+            return vec![0, 1, 0, 0];
+        };
+        let size = rules.charge();
+        let charge = size.unwrap_or(u64::MAX);
+        let payer = t.limits.last().unwrap();
+        if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
+            return vec![charge, 2, 0, available];
+        }
+        let key = EXEC_GRANT + self.world.exec_grants.len() as u64;
+        self.world.exec_grants.push((c, rules));
+        self.world.grant_charges.push((payer.clone(), charge));
+        vec![key, 0, 0, 0]
     }
 
     fn network_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
@@ -3730,7 +3980,23 @@ impl Machine<'_> {
                 } else {
                     original
                 };
-                if let Some((c, id, live)) = socket {
+                if let Some((c, id, mut live)) = socket {
+                    if stream
+                        && matches!(
+                            self.world.cells[c],
+                            VirtualCell::Port {
+                                vocab: Vocab::Exec,
+                                ..
+                            }
+                        )
+                    {
+                        let kind = if op == HostOp::RecvBounded {
+                            PORT_PIPE_READ
+                        } else {
+                            PORT_PIPE_WRITE
+                        };
+                        (_, _, live) = self.port_socket(a[0], kind).unwrap();
+                    }
                     return self.net_call(t, op, c, id, live, a);
                 }
             }
@@ -3810,7 +4076,7 @@ impl Machine<'_> {
         } else {
             (0, 0)
         };
-        let mut w = [0; 8];
+        let mut w = [0; 9];
         let (out, deadline) = match op {
             HostOp::UnixConnect => {
                 w[..3].copy_from_slice(&[NET_UNIX_CONNECT, root, path]);
@@ -3971,7 +4237,7 @@ impl Machine<'_> {
             .flat_map(|p| std::iter::once(p.len() as u8).chain(p.iter().copied()))
             .collect();
         let (_, id, live) = self.port_socket(key, 3).unwrap();
-        let mut w = [0; 8];
+        let mut w = [0; 9];
         w[..5].copy_from_slice(&[
             6,
             id,
@@ -4132,7 +4398,7 @@ impl Machine<'_> {
             if key & 3 != 2 {
                 return Ok(vec![0, 1, 0, 0]);
             }
-            let mut w = [0; 8];
+            let mut w = [0; 9];
             w[..4].copy_from_slice(&[7, id, before.len() as u64, after.len() as u64]);
             let fields = vec![vec![], before, after];
             self.check_cancel(t)?;
@@ -4192,7 +4458,7 @@ impl Machine<'_> {
             let joined = Zeroizing::new([&before[..], &message, &after].concat());
             let mut at = 0;
             while at < joined.len() {
-                let mut w = [0; 8];
+                let mut w = [0; 9];
                 w[..4].copy_from_slice(&[5, id, (joined.len() - at) as u64, 0]);
                 let fields = vec![vec![], joined[at..].to_vec(), vec![]];
                 let deadline = self.until(args, 6);
@@ -4291,6 +4557,7 @@ impl Machine<'_> {
             op,
             HostOp::WallMs
                 | HostOp::MonoNs
+                | HostOp::ExecNarrow
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
@@ -4337,14 +4604,15 @@ impl Machine<'_> {
             | HostOp::PortReply
             | HostOp::ProvideDir
             | HostOp::ProvideNet
+            | HostOp::ProvideExec
             | HostOp::PortFill
             | HostOp::StreamTerminal => {
                 unreachable!()
             }
             HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal => {
-                std::panic::resume_unwind(Box::new(RunStop("NativeExec")))
+                return self.exec_call(t, op, a);
             }
-            HostOp::ExecNarrow => panic!("Exec evaluation uses the native reference"),
+            HostOp::ExecNarrow => self.exec_narrow(t, a),
             HostOp::Resolve => return self.network_resolve(t, a),
             HostOp::UnixConnect
             | HostOp::UnixListen
@@ -5208,6 +5476,9 @@ impl Machine<'_> {
         failed
     }
     fn socket_drop(&mut self, key: u64) {
+        if let Some(payer) = self.world.exec_handles.remove(&key) {
+            self.refund(payer, charge::EXEC_HANDLE);
+        }
         if key & 3 == 2 {
             self.world.tls_writes.remove(&(key & !3));
         }

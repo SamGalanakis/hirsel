@@ -452,7 +452,8 @@ pub(crate) unsafe fn owned_op(
         } else {
             *operand
         };
-        if op == RECV_BOUNDED {
+        let served = served_socket(context, key);
+        if op == RECV_BOUNDED && !served.as_ref().is_some_and(crate::provide::exec_port) {
             let max = usize::try_from(max_receive).unwrap_or(usize::MAX);
             buffer.capacity = buffer.capacity.min(buffer.len.saturating_add(max));
         }
@@ -465,7 +466,6 @@ pub(crate) unsafe fn owned_op(
             buffer,
             site,
         };
-        let served = served_socket(context, key);
         #[cfg(feature = "record")]
         let outcome = if let Some(tape) = tape.filter(|_| served.is_none()) {
             request.handle = tape.handle(key);
@@ -983,6 +983,11 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             crate::exec_runtime::drop_proc(context, key);
             return;
         }
+        let charge = {
+            let _commit = crate::sequencer::enter();
+            (*(*context).host_files).exec_pipes.remove(&key)
+        };
+        drop(charge);
         if let Some(provider) = served_socket(context, key) {
             // The port queues the Released; its server is readied outside
             // the run's commit section.

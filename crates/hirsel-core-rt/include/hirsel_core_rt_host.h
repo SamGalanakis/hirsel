@@ -289,6 +289,7 @@ HirselCoreHostOutcome hirsel_core_port_reply(HirselCoreContext *, uint64_t serve
 HirselCoreHostOutcome hirsel_core_port_fill(HirselCoreContext *, uint64_t served, uint64_t call, const HirselCoreBuffer *bytes, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_dir(HirselCoreContext *, uint64_t n, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_net(HirselCoreContext *, uint64_t n, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_exec(HirselCoreContext *, uint64_t n, uint64_t);
 /* SEND_PAIR (26): buffer borrows the first prefix. The first word at path
    is a const HirselCoreBuffer * borrowing the second prefix. Both remain
    pinned through deliver. Outcome.value counts their concatenated prefix. */

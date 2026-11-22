@@ -173,6 +173,7 @@ impl FunctionEmitter<'_> {
             | HostOp::PortReply
             | HostOp::ProvideDir
             | HostOp::ProvideNet
+            | HostOp::ProvideExec
             | HostOp::PortFill
             | HostOp::ExecSpawn
             | HostOp::ExecWait

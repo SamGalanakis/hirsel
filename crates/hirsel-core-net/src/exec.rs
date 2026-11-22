@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 mod image;
 mod policy;
+pub mod served;
 pub use image::{PinnedImage, PinnedProfile, hex, probe_seals};
 pub use policy::{GRANT_SYNTAX, Policy, Profile, Request};
 
@@ -339,5 +340,59 @@ impl ExecRules {
                 .map(|(name, profile)| 8 + name.len() as u128 + profile.charge())
                 .sum::<u128>();
         u64::try_from((bytes + 7) & !7).ok()
+    }
+}
+
+pub struct LogicalLaunch<'a> {
+    pub program: &'a str,
+    pub args: Vec<&'a [u8]>,
+    pub env: Vec<(&'a str, &'a [u8])>,
+    pub dir: &'a str,
+    pub path: &'a str,
+    pub piped: [bool; 3],
+}
+
+impl LogicalLaunch<'_> {
+    fn valid(&self) -> bool {
+        let fits = |len| u32::try_from(len).is_ok();
+        fits(self.program.len())
+            && fits(self.dir.len())
+            && fits(self.path.len())
+            && fits(self.args.len())
+            && fits(self.env.len())
+            && self
+                .args
+                .iter()
+                .all(|arg| fits(arg.len()) && !arg.contains(&0))
+            && self.env.iter().all(|(key, value)| {
+                fits(key.len()) && fits(value.len()) && valid_key(key) && !value.contains(&0)
+            })
+            && self.env.windows(2).all(|pair| pair[0].0 != pair[1].0)
+            && (self.path.is_empty() || crate::valid_relative_path(self.path.as_bytes()))
+    }
+
+    pub fn permitted(&self, rules: &ExecRules) -> bool {
+        if !self.valid() {
+            return false;
+        }
+        let keys: Vec<_> = self.env.iter().map(|(key, _)| *key).collect();
+        rules.permits(self.program, &self.args, &keys, self.dir)
+    }
+}
+
+impl LogicalLaunch<'_> {
+    pub fn served_payloads(&self) -> [Vec<u8>; 2] {
+        fn encode<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for part in parts {
+                bytes.extend_from_slice(&(part.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(part);
+            }
+            bytes
+        }
+        [
+            encode(self.args.iter().copied()),
+            encode(self.env.iter().flat_map(|&(k, v)| [k.as_bytes(), v])),
+        ]
     }
 }

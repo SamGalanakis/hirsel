@@ -825,3 +825,500 @@ fn unix_reply_validation(tasks: Tasks) -> bool waits {
     }
     valid
 }
+
+type ExecAttempt: send {
+    grant: Exec,
+    steps: u64
+}
+
+fn exec_launch(stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Launch {
+    Launch(program: "parity", args: list.new(), env: list.new(), dir: "work", path: "", stdin: stdin, stdout: stdout, stderr: stderr)
+}
+
+fn exec_client(take request: ExecAttempt) -> u64 waits {
+    let ExecAttempt(grant, steps) = take request
+    let run = bound steps steps {
+        match exec.spawn(grant, exec_launch(Piped, Piped, Piped)) {
+            Ok(take started) => {
+                let Spawned(take process, take input, take output, take errors) = take started
+                let _ = option.unwrap(take input)
+                let _ = option.unwrap(take output)
+                let _ = option.unwrap(take errors)
+                let mut child = take process
+                match exec.wait(mut child, Never) {
+                    Ok(Exited(0)) => 1u64,
+                    _ => 3u64
+                }
+            },
+            Error(Other(0)) => 4u64,
+            Error(_) => 5u64
+        }
+    }
+    match run {
+        Ok(v) => v,
+        Error(o) => 1000 + o.steps
+    }
+}
+
+fn exec_attempt(tasks: Tasks, grant: Exec, bytes n: u64, steps: u64) -> (u64, u64, u64) waits {
+    let child = task.spawn(tasks, bytes n, ExecAttempt(grant: grant, steps: steps), exec_client)
+    match task.join(take child) {
+        Ok(v) => (v, 0, 0),
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => (0, k.requested, k.available),
+                    _ => (6, 0, 0)
+                }
+            }
+            (7, 0, 0)
+        },
+        Error(_) => (8, 0, 0)
+    }
+}
+
+fn exec_answer(mut s: Served[ExecOp], take c: Call[ExecOp], reply: ExecReply) -> Result[(), Withdrawn] {
+    provide.reply(mut s, take c, provide.exec_reply(reply))
+}
+
+fn exec_parity_server(take s: Served[ExecOp]) -> u64 waits {
+    let mut port = take s
+    let mut next: u64 = 1
+    let mut releases: u64 = 0
+    loop {
+        match provide.next(mut port) {
+            None => return releases,
+            Some(take call) => {
+                let response: ExecReply = match provide.exec_op(call) {
+                    Spawn(stdin: Piped, stdout: Piped, stderr: Piped, program: _, args: _, env: _, dir: _, path: _) => {
+                        let first = next
+                        next += 4
+                        Started(proc: first, stdin: first + 1, stdout: first + 2, stderr: first + 3)
+                    },
+                    Await(proc: _) => Ended(Exited(0)),
+                    Released(id: _, part: _) => {
+                        releases += 1
+                        Done
+                    },
+                    _ => Failed(Denied)
+                }
+                let _ = exec_answer(mut port, take call, response)
+            }
+        }
+    }
+}
+
+// The host fixture exits 0. Each mechanical result block is eight bytes,
+// so the empty launch with three pipes crosses its admission at 32 bytes.
+// expect: run exec_parity(exec, tasks) = true
+fn exec_parity(host: Exec, tasks: Tasks) -> bool waits {
+    let (served, port) = provide.exec(bytes 128)
+    let server = task.spawn(tasks, bytes 4096, take port, exec_parity_server)
+    let mut ok = true
+    let mut n: u64 = 0
+    while n <= 33 {
+        let expected = if n < 32 {
+            (0u64, 32u64, n)
+        } else {
+            (1u64, 0u64, 0u64)
+        }
+        ok = ok && exec_attempt(tasks, host, bytes n, 64) == expected
+        ok = ok && exec_attempt(tasks, served, bytes n, 64) == expected
+        n += 1
+    }
+    let mut steps: u64 = 0
+    let mut short = false
+    while steps <= 16 {
+        let native = exec_attempt(tasks, host, bytes 32, steps)
+        ok = ok && native == exec_attempt(tasks, served, bytes 32, steps)
+        short = short || native == (1000 + steps, 0u64, 0u64)
+        steps += 1
+    }
+    let released = result.unwrap(task.join(take server))
+    ok && short && released >= 8
+}
+
+// Started reserves four 32-byte records in one admission.
+// expect: run exec_started_short(tasks) = true
+fn exec_started_short(tasks: Tasks) -> bool waits {
+    let (e, port) = provide.exec(bytes 127)
+    let server = task.spawn(tasks, bytes 4096, take port, exec_parity_server)
+    let caller = exec_attempt(tasks, e, bytes 32, 64)
+    let shortage = match task.join(take server) {
+        Error(Failed(causes)) => {
+            for c in causes {
+                match c.kind {
+                    Capacity(k) => return caller == (4u64, 0u64, 0u64) && k.requested == 128 && k.available == 127,
+                    _ => ()
+                }
+            }
+            false
+        },
+        _ => false
+    }
+    shortage
+}
+
+fn bad_exec_reply(tag: u64) -> ExecReply {
+    if tag == 0 {
+        Done
+    } else if tag == 1 {
+        Failed(Other(42))
+    } else if tag == 2 {
+        IoFailed(Other(42))
+    } else if tag == 3 {
+        Count(0)
+    } else if tag == 4 {
+        Started(proc: 11, stdin: 12, stdout: 13, stderr: 14)
+    } else {
+        Ended(Exited(0))
+    }
+}
+
+type ExecReplyTest: send {
+    port: Served[ExecOp],
+    op: u64,
+    reply: ExecReply
+}
+
+fn exec_bad_server(take test: ExecReplyTest) -> bool waits {
+    let ExecReplyTest(port: take p, op, reply) = take test
+    let mut port = take p
+    let first = option.unwrap(provide.next(mut port))
+    if op == 0 {
+        result.unwrap(exec_answer(mut port, take first, reply))
+        return false
+    }
+    result.unwrap(exec_answer(mut port, take first, Started(proc: 1, stdin: 2, stdout: 3, stderr: 4)))
+    let mut call = option.unwrap(provide.next(mut port))
+    if op == 3 {
+        let payload = string.as_bytes("a")
+        let _ = provide.fill(mut port, mut call, payload)
+    }
+    result.unwrap(exec_answer(mut port, take call, reply))
+    true
+}
+
+fn exec_bad_caller(e: Exec, op: u64, io_error: bool) -> bool waits {
+    let start = exec.spawn(e, exec_launch(Piped, Piped, Piped))
+    if op == 0 {
+        return match take start {
+            Error(Other(0)) => true,
+            _ => false
+        }
+    }
+    let Spawned(take process, take input, take output, take _errors) = result.unwrap(take start)
+    let mut proc = take process
+    if op == 1 {
+        return match exec.wait(mut proc, Never) {
+            Error(Other(0)) => true,
+            _ => false
+        }
+    }
+    if op == 2 {
+        return match exec.signal(mut proc, SigTerm) {
+            Error(Other(0)) => true,
+            _ => false
+        }
+    }
+    if op == 3 {
+        let mut pipe = option.unwrap(take output)
+        let mut b: Bytes = list.with_capacity(2)
+        list.push(mut b, 0x7au8)
+        let received = host.recv_bounded(mut pipe, mut b, 1, Never)
+        return list.len(b) == 1 && b[0] == 0x7a && match received {
+            Error(Reset) => !io_error,
+            Error(Other(42)) => io_error,
+            _ => false
+        }
+    }
+    let mut pipe = option.unwrap(take input)
+    match host.send_pair(mut pipe, string.as_bytes("a"), string.as_bytes("b"), Never) {
+        Error(Reset) => true,
+        _ => false
+    }
+}
+
+fn exec_reject_reply(tasks: Tasks, op: u64, reply: ExecReply, io_error: bool) -> bool waits {
+    let (e, port) = provide.exec(bytes 256)
+    let server = task.spawn(tasks, bytes 4096, ExecReplyTest(port: take port, op: op, reply: reply), exec_bad_server)
+    let unchanged = exec_bad_caller(e, op, io_error)
+    let rejected = match task.join(take server) {
+        Ok(ok) => io_error && ok,
+        Error(Failed(causes)) => {
+            for c in causes {
+                match c.kind {
+                    Fail(_) => return unchanged && !io_error,
+                    _ => ()
+                }
+            }
+            false
+        },
+        _ => false
+    }
+    unchanged && rejected
+}
+
+// All invalid reply pairs, malformed Started ids and counts, and a legal
+// error reply with staged data. The caller observes closure or the error,
+// with the existing byte unchanged in every read.
+// expect: run exec_reply_matrix(tasks) = true
+fn exec_reply_matrix(tasks: Tasks) -> bool waits {
+    let mut op: u64 = 0
+    while op < 5 {
+        let mut tag: u64 = 0
+        while tag < 6 {
+            let valid = if op == 0 {
+                tag == 1 || tag == 4
+            } else if op == 1 {
+                tag == 1 || tag == 5
+            } else if op == 2 {
+                tag == 0 || tag == 1
+            } else {
+                tag == 2 || tag == 3
+            }
+            if !valid && !exec_reject_reply(tasks, op, bad_exec_reply(tag), false) {
+                return false
+            }
+            tag += 1
+        }
+        op += 1
+    }
+    exec_reject_reply(tasks, 0, Started(proc: 1, stdin: 2, stdout: 2, stderr: 4), false) && exec_reject_reply(tasks, 0, Started(proc: 0, stdin: 2, stdout: 3, stderr: 4), false) && exec_reject_reply(tasks, 0, Started(proc: 1, stdin: 2, stdout: 3, stderr: 0), false) && exec_reject_reply(tasks, 3, Count(0), false) && exec_reject_reply(tasks, 4, Count(3), false) && exec_reject_reply(tasks, 3, IoFailed(Other(42)), true)
+}
+
+fn exec_start_client(take e: Exec) -> bool waits {
+    match exec.spawn(e, exec_launch(Piped, Piped, Piped)) {
+        Error(Aborted) => true,
+        _ => false
+    }
+}
+
+// A withdrawn Started publishes no ids. Reuse the same four ids immediately;
+// the next waiter succeeds and a cached wait and signal queue no calls.
+// expect: run exec_spawn_withdrawal(tasks) = true
+fn exec_spawn_withdrawal(tasks: Tasks) -> bool waits {
+    let (e, s) = provide.exec(bytes 128)
+    let mut port = take s
+    let mut first = task.spawn(tasks, bytes 32, e, exec_start_client)
+    let withdrawn_call = option.unwrap(provide.next(mut port))
+    task.cancel(mut first)
+    let withdrawal = match exec_answer(mut port, take withdrawn_call, Started(proc: 1, stdin: 2, stdout: 3, stderr: 4)) {
+        Error(Withdrawn()) => true,
+        _ => false
+    }
+    let aborted = result.unwrap(task.join(take first))
+    let second = task.spawn(tasks, bytes 32, e, exec_cached_client)
+    let spawn_call = option.unwrap(provide.next(mut port))
+    result.unwrap(exec_answer(mut port, take spawn_call, Started(proc: 1, stdin: 2, stdout: 3, stderr: 4)))
+    let wait_call = option.unwrap(provide.next(mut port))
+    result.unwrap(exec_answer(mut port, take wait_call, Ended(Signalled(15))))
+    let cached = result.unwrap(task.join(take second))
+    let mut parts: u64 = 0
+    let mut going = true
+    while going {
+        match provide.next(mut port) {
+            Some(take call) => {
+                parts += match provide.exec_op(call) {
+                    Released(id: 1, part: Whole) => 1,
+                    Released(id: 2, part: Write) => 2,
+                    Released(id: 3, part: Read) => 4,
+                    Released(id: 4, part: Read) => 8,
+                    _ => 16
+                }
+                let _ = take call
+            },
+            None => {
+                going = false
+            }
+        }
+    }
+    withdrawal && aborted && cached && parts == 15
+}
+
+fn exec_cached_client(take e: Exec) -> bool waits {
+    let Spawned(take process, take _input, take _output, take _errors) = result.unwrap(exec.spawn(e, exec_launch(Piped, Piped, Piped)))
+    let mut child = take process
+    let first = match exec.wait(mut child, Never) {
+        Ok(Signalled(15)) => true,
+        _ => false
+    }
+    let cached = match exec.wait(mut child, Never) {
+        Ok(Signalled(15)) => true,
+        _ => false
+    }
+    let signal = match exec.signal(mut child, SigKill) {
+        Ok(()) => true,
+        _ => false
+    }
+    first && cached && signal
+}
+
+fn exec_narrow_client(take input: (Exec, u64)) -> bool {
+    let (e, room) = take input
+    let mut form: List[ArgToken] = list.with_capacity(1)
+    list.push(mut form, Lit(exec_bytes("status")))
+    let rule = Form(program: "git", form: take form)
+    let attempted = bound bytes room {
+        match exec.narrow(e, rule) {
+            Ok(_) => true,
+            _ => false
+        }
+    }
+    result.unwrap(attempted)
+}
+
+// 32 base, 11 profile, 22 form, 16 for universal keys and labels, and
+// 8 remainder. Rounded to eight, the result costs exactly 96 bytes.
+// expect: run exec_narrow_charge(tasks) = true
+fn exec_narrow_charge(tasks: Tasks) -> bool waits {
+    let (e, port) = provide.exec(bytes 0)
+    let _ = take port
+    let short = task.spawn(tasks, bytes 512, (e, 95u64), exec_narrow_client)
+    match task.join(take short) {
+        Error(Failed(causes)) => {
+            for c in causes {
+                match c.kind {
+                    Capacity(k) => {
+                        if k.requested != 96 || k.available != 95 {
+                            return false
+                        }
+                        let exact = task.spawn(tasks, bytes 512, (e, 96u64), exec_narrow_client)
+                        return result.unwrap(task.join(take exact))
+                    },
+                    _ => ()
+                }
+            }
+            false
+        },
+        _ => false
+    }
+}
+
+type ExecDeadline: send {
+    grant: Exec,
+    time: Clock
+}
+
+fn exec_deadline_client(take input: ExecDeadline) -> bool waits {
+    let ExecDeadline(grant: e, time) = take input
+    let Spawned(take process, _, take read_half, _) = result.unwrap(exec.spawn(e, exec_launch(Discard, Piped, Discard)))
+    let mut proc = take process
+    let mut output = option.unwrap(take read_half)
+    let mut buf: Bytes = list.with_capacity(4)
+    list.push(mut buf, b'z')
+    let read_result = host.recv_bounded(mut output, mut buf, 1, At(time, 1))
+    let timed_wait = exec.wait(mut proc, At(time, 2))
+    list.len(buf) == 1 && buf[0] == b'z' && match read_result {
+        Error(TimedOut) => true,
+        _ => false
+    } && match timed_wait {
+        Error(TimedOut) => true,
+        _ => false
+    }
+}
+
+// The server takes and stages a live read. After advancing the virtual clock,
+// both the read and the later wait withdraw. Neither late reply can commit.
+// expect: run exec_deadline_withdrawal(tasks) = true
+fn exec_deadline_withdrawal(tasks: Tasks) -> bool waits {
+    let (e, s) = provide.exec(bytes 65)
+    let (time, clock_hand) = provide.clock(0, 0)
+    let mut hand = take clock_hand
+    let mut port = take s
+    let caller = task.spawn(tasks, bytes 64, ExecDeadline(grant: e, time: time), exec_deadline_client)
+    let call = option.unwrap(provide.next(mut port))
+    result.unwrap(exec_answer(mut port, take call, Started(proc: 1, stdin: 0, stdout: 2, stderr: 0)))
+    let mut read = option.unwrap(provide.next(mut port))
+    let offer = match provide.exec_op(read) {
+        Recv(pipe: 2, room: 3, max: 1) => true,
+        _ => false
+    }
+    let staged = provide.fill(mut port, mut read, string.as_bytes("xy"))
+    clock.advance_to(mut hand, 1)
+    let wait = option.unwrap(provide.next(mut port))
+    let awaits = match provide.exec_op(wait) {
+        Await(proc: 1) => true,
+        _ => false
+    }
+    clock.advance_to(mut hand, 2)
+    let caller_ok = result.unwrap(task.join(take caller))
+    let read_withdrew = match exec_answer(mut port, take read, Count(1)) {
+        Error(Withdrawn()) => true,
+        _ => false
+    }
+    let wait_withdrew = match exec_answer(mut port, take wait, Ended(Exited(0))) {
+        Error(Withdrawn()) => true,
+        _ => false
+    }
+    offer && staged == 1 && awaits && caller_ok && read_withdrew && wait_withdrew
+}
+
+fn exec_bytes(text: String) -> Bytes {
+    let src = string.as_bytes(text)
+    let mut data: Bytes = list.with_capacity(list.len(src))
+    list.append(mut data, src)
+    data
+}
+
+fn exec_payload_client(take e: Exec) -> bool waits {
+    let mut args: List[Bytes] = list.with_capacity(1)
+    list.push(mut args, exec_bytes("ab"))
+    let mut env: List[(String, Bytes)] = list.with_capacity(2)
+    list.push(mut env, ("Z", exec_bytes("last")))
+    list.push(mut env, ("A", exec_bytes("first")))
+    let launch = Launch(program: "parity", args: take args, env: take env, dir: "work", path: "sub", stdin: Discard, stdout: Discard, stderr: Piped)
+    match exec.spawn(e, launch) {
+        Error(Other(99)) => true,
+        _ => false
+    }
+}
+
+fn exec_wire_field(wire: Bytes, at: u64, expected: Bytes) -> bool {
+    let n = list.len(expected)
+    if wire[at] != int.truncate(n) || wire[at + 1] != 0 || wire[at + 2] != 0 || wire[at + 3] != 0 {
+        return false
+    }
+    let mut i: u64 = 0
+    while i < n {
+        if wire[at + 4 + i] != expected[i] {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+// The wire lengths include each four-byte prefix, and env arrives in bytewise
+// key order even though the caller supplied Z before A. Failed issues no ids.
+// expect: run exec_spawn_payloads(tasks) = true
+fn exec_spawn_payloads(tasks: Tasks) -> bool waits {
+    let (e, s) = provide.exec(bytes 0)
+    let mut port = take s
+    let caller = task.spawn(tasks, bytes 512, e, exec_payload_client)
+    let call = option.unwrap(provide.next(mut port))
+    let fields = match provide.exec_op(call) {
+        Spawn(program: 6, args: 6, env: 27, dir: 4, path: 3, stdin: Discard, stdout: Discard, stderr: Piped) => true,
+        _ => false
+    }
+    let mut program: Bytes = list.with_capacity(6)
+    let mut args: Bytes = list.with_capacity(6)
+    let mut env: Bytes = list.with_capacity(27)
+    let mut dir: Bytes = list.with_capacity(4)
+    let mut path: Bytes = list.with_capacity(3)
+    provide.payload(call, 0, mut program)
+    provide.payload(call, 1, mut args)
+    provide.payload(call, 2, mut env)
+    provide.payload(call, 3, mut dir)
+    provide.payload(call, 4, mut path)
+    result.unwrap(exec_answer(mut port, take call, Failed(Other(99))))
+    let failed = result.unwrap(task.join(take caller))
+    let empty = match provide.next(mut port) {
+        None => true,
+        Some(take next) => {
+            let _ = take next;
+            false
+        }
+    }
+    fields && failed && empty && program == string.as_bytes("parity") && dir == string.as_bytes("work") && path == string.as_bytes("sub") && list.len(args) == 6 && exec_wire_field(args, 0, string.as_bytes("ab")) && list.len(env) == 27 && exec_wire_field(env, 0, string.as_bytes("A")) && exec_wire_field(env, 5, string.as_bytes("first")) && exec_wire_field(env, 14, string.as_bytes("Z")) && exec_wire_field(env, 19, string.as_bytes("last"))
+}

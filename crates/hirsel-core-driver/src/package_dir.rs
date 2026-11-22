@@ -324,15 +324,16 @@ impl PackageDir {
 
         let selected_member = resolution.workspace.members.get(selected);
         let mut seen = BTreeSet::new();
-        let mut pending = vec![selected];
+        let mut pending = vec![selected.clone()];
         let mut dependencies = Vec::new();
         let mut main = None;
         while let Some(id) = pending.pop() {
-            if id.name == "std" || !seen.insert(id) {
+            if id.name == "std" || !seen.insert(id.clone()) {
                 continue;
             }
-            let root = resolution.published.get(id).copied();
-            let (content, bindings) = if let Some(member) = resolution.workspace.members.get(id) {
+            let root = resolution.published.get(&id).copied();
+            let toolchain_store;
+            let (content, bindings) = if let Some(member) = resolution.workspace.members.get(&id) {
                 let bindings = member
                     .edges
                     .iter()
@@ -346,7 +347,12 @@ impl PackageDir {
                     .collect::<Vec<_>>();
                 (&member.content, bindings)
             } else {
-                let content = &resolution.libraries[&root.unwrap()].content;
+                let content = if resolution.toolchain_store && id.name == "store" && id.major == 1 {
+                    toolchain_store = crate::installation::Installed::store_package(&id)?;
+                    &toolchain_store
+                } else {
+                    &resolution.libraries[&root.unwrap()].content
+                };
                 (
                     content,
                     content
@@ -356,14 +362,14 @@ impl PackageDir {
                         .collect(),
                 )
             };
-            pending.extend(bindings.iter().map(|(id, _)| *id));
-            let tests = if include_tests && id == selected {
+            pending.extend(bindings.iter().map(|(id, _)| (**id).clone()));
+            let tests = if include_tests && &id == selected {
                 selected_member.map(|member| &member.tests)
             } else {
                 None
             };
             let package = Self::manifest_from_content(content, selected, root, bindings, tests);
-            if id == selected {
+            if &id == selected {
                 main = Some(package);
             } else {
                 dependencies.push(package);
@@ -414,8 +420,14 @@ impl PackageDir {
         };
         let mut roots = BTreeMap::new();
         let mut dependencies = Vec::new();
+        let mut toolchain_store = None;
         for (root, library) in &archive.entries {
             let content = &library.content;
+            if toolchain_store.is_none() {
+                toolchain_store = content.bindings.iter().find_map(|(id, root)| {
+                    (id.name == "store" && id.major == 1 && root.is_none()).then_some(id)
+                });
+            }
             if let Some(previous) = roots.insert(&content.id, root) {
                 return Err(io::Error::other(format!(
                     "{} is bound to both {previous} and {root}",
@@ -425,6 +437,21 @@ impl PackageDir {
             if *root != archive.head {
                 dependencies.push(manifest(content, *root));
             }
+        }
+        if let Some(id) = toolchain_store {
+            if roots.contains_key(id) {
+                return Err(io::Error::other(
+                    "store@1 is bound both to the toolchain and to a published library",
+                ));
+            }
+            let store = crate::installation::Installed::store_package(id)?;
+            dependencies.push(Self::manifest_from_content(
+                &store,
+                &head.id,
+                None,
+                store.bindings.iter().map(|(id, pin)| (id, *pin)),
+                None,
+            ));
         }
         Ok(Self {
             package: manifest(head, archive.head),

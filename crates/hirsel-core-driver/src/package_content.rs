@@ -12,6 +12,13 @@ const PACKAGE_LIMIT: usize = 4096;
 const ARCHIVE_TAG: &str = "hirsel.package-archive.v1";
 const CHARGE: &str = "charge-v1";
 
+pub(crate) fn toolchain_major(name: &str) -> Option<u32> {
+    match name {
+        "std" | "store" => Some(1),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Id {
     pub(crate) name: String,
@@ -157,12 +164,12 @@ impl Content {
         for _ in 0..input.count()? {
             let binding = input.id()?;
             let tag = input.number(u64::MAX)?;
-            let root = match (binding.name.as_str(), binding.major, tag) {
-                ("std", 1, 0) => None,
-                ("std" | "core", _, _) | (_, _, 0 | 2..) => {
-                    return Err(format!("bad binding {binding}"));
+            let root = match tag {
+                0 if toolchain_major(&binding.name) == Some(binding.major) => None,
+                1 if !matches!(binding.name.as_str(), "core" | "std") => {
+                    Some(Root(input.digest()?))
                 }
-                (_, _, 1) => Some(Root(input.digest()?)),
+                _ => return Err(format!("bad binding {binding}")),
             };
             if !names.insert(binding.name.clone()) {
                 return Err(format!("two bindings of {}", binding.name));

@@ -6,6 +6,9 @@ code in Node and browsers, without a build step.
 The output directory has `package.json` with `"type": "module"`, so Node loads
 the same `.js` files even inside a CommonJS project.
 
+A server using `store.runner` declares `store = { major = 1 }` under
+`[dependencies]` in `hirsel.toml`.
+
 ## 4. Generated code
 
 `codec.js` follows `std.codec` value schemas and ordered key schemas. Integers

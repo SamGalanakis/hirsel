@@ -98,6 +98,22 @@ fn make_rows(resolution: &Resolution) -> Rows {
             },
         );
     }
+    if resolution.toolchain_store {
+        rows.insert(
+            Id {
+                name: "store".into(),
+                major: 1,
+            },
+            Row {
+                root: None,
+                source: "toolchain".into(),
+                edges: vec![Id {
+                    name: "std".into(),
+                    major: 1,
+                }],
+            },
+        );
+    }
     std_row(&mut rows);
     rows
 }

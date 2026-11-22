@@ -11,6 +11,7 @@ type Declarations = BTreeMap<Root, (Id, SourceLocation)>;
 pub(crate) struct Resolution {
     pub(crate) workspace: Workspace,
     pub(crate) libraries: Libraries,
+    pub(crate) toolchain_store: bool,
     pub(crate) published: BTreeMap<Id, Root>,
     pub(crate) store: PackageStore,
     declarations: Declarations,
@@ -296,6 +297,28 @@ impl Resolution {
         }
 
         let paths = best_paths(&workspace, &libraries);
+        let store_id = Id {
+            name: "store".into(),
+            major: 1,
+        };
+        let toolchain_store = workspace
+            .members
+            .values()
+            .any(|member| matches!(member.edges.get(&store_id), Some(Edge::Toolchain)))
+            || libraries
+                .values()
+                .any(|library| library.content.bindings.get(&store_id) == Some(&None));
+        if toolchain_store
+            && (workspace.members.contains_key(&store_id)
+                || incoming(&workspace, &libraries)
+                    .iter()
+                    .any(|(id, _)| id == &store_id))
+        {
+            return Err(
+                "store@1 is bound both to the toolchain and to a member or published library"
+                    .into(),
+            );
+        }
         let mut all = BTreeMap::<Id, BTreeSet<Root>>::new();
         for (id, root) in incoming(&workspace, &libraries) {
             all.entry(id).or_default().insert(root);
@@ -303,6 +326,7 @@ impl Resolution {
         let mut resolution = Self {
             workspace,
             libraries,
+            toolchain_store,
             store,
             declarations: declared,
             published: BTreeMap::new(),

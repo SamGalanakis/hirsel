@@ -5,6 +5,9 @@ of a place, as a library over v1 (reserved R13). R0 has `Registry[G, H]`, `compu
 `granted`, `describe`, `call`, `start` and `finish`. R1 adds `transact`, the head
 (`place_head`), its internal publisher, and sessions (`connect`, `ask`, `hang_up`).
 
+To use `store.runner`, add `store = { major = 1 }` under `[dependencies]` in
+`hirsel.toml`. The installed Hirsel toolchain supplies the package.
+
 ## No authentication, no authorization
 
 Hirsel and `runner` contain no authentication and no authorization (RUNNER-SPEC

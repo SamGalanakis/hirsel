@@ -53,9 +53,10 @@ another first. The framed bytes are never compared: `aa` comes before `b`, altho
 of `b` is the smaller byte string. A module's rows are in strictly ascending order of target
 bytewise. Bindings and files are likewise strictly ascending, so no two are equal.
 
-`core@1` is bound in every package and is never written as a binding. `std@1` is a toolchain
-package (section 2) and is written with tag `0`, so a library root says which std major it
-uses, and the toolchain that checks it supplies that std. A toolchain package has no root.
+`core@1` is bound in every package and is never written as a binding. `std@1` and `store@1`
+can be bound as toolchain packages (section 2) and are written with tag `0`. A library
+root records the major it uses, and the toolchain that checks it supplies that package.
+A toolchain binding has no root.
 Its content is the toolchain's and enters every key through the compiler and the toolchain
 identity, as it does today.
 
@@ -224,8 +225,10 @@ one, is refused: the directory walk below is only for a directory with no manife
 major of each name. Each value has exactly one of these forms. `major` is required in all but
 the last.
 
-- `{ major }` alone binds a **toolchain package**: only `std`, and only the major the
-  toolchain has (1). `core` is bound in every package and may not be declared.
+- `{ major }` alone binds a **toolchain package**. The installed toolchain supplies
+  `std@1` and `store@1`. A workspace using toolchain `store@1` cannot also bind
+  `store@1` as a member or published library. `core` is bound in every package and
+  may not be declared.
 - `{ major, path }` binds a member of the same workspace (section 4). The path is relative to
   this manifest's directory and must resolve to a member's directory, whose `[package]` has
   this name and major.
@@ -431,7 +434,7 @@ command does, then computes the member's root:
   recursively. So a member's root is defined whenever its bindings resolve, and it changes
   when any member it reaches changes.
 - A binding to a published library is encoded as its root.
-- A binding to `std` is encoded as a toolchain binding.
+- A binding supplied by the toolchain is encoded as a toolchain binding.
 
 The member's `C` holds its captured `[sources]` files and `[foreign]` archives, every target's,
 and nothing of `[tests]`, `[program]` or `[tool]`. Each archive's captured bytes must match its

@@ -83,6 +83,10 @@ jobs:
               hirsel test
               hirsel run
               hirsel build
+              sed -i "/^\[dependencies\]/a store = { major = 1 }" hirsel.toml
+              sed -i "/^pub fn main/a\    let _ = store.defaults()" main.hirsel
+              hirsel lock 2>&3
+              hirsel check --locked
               test ! -s /tmp/hirsel-smoke.stderr
             '
 

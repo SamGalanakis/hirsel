@@ -127,6 +127,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
+| connection ([CONC-17](tasks.md#conc-17-connections)) | 64 + capacity × item size + its room |
 | `Latest` root | 32 |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
@@ -154,7 +155,7 @@ Creating a resource admits its cause cell, and can therefore be refused; then
 nothing was admitted, so nothing is refunded, and the literal's fields come back in its
 error ([T1.2](ownership.md#own-26-the-transition-table)). This holds unless
 it is **mechanical**: its cleanup can never add a cause. These mechanical resources have no cause cell: `Sender`, `Receiver`, `Task`,
-`Latest`, `Flow`, `HostFile` and the four socket resources described in
+`Latest`, `Client`, `Inbox`, `Flow`, `HostFile` and the four socket resources described in
 [Net](net.md). The channel and task handles close a channel or end a child. A `Latest`
 handle releases its root. If cleaning a queued item or result raises a cause, the
 value's finalizer owns that cause. A `Flow` discards its entries and refunds every

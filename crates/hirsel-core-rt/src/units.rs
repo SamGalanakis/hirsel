@@ -1,4 +1,4 @@
-//! The unit pool (CONC-15, CONC-16). `HIRSEL_UNTIED=W` runs a program's root
+//! The unit pool (CONC-15). `HIRSEL_UNTIED=W` runs a program's root
 //! unit, and every helper unit `task.spawn_unit` makes, on W worker threads;
 //! without it a helper runs on its own OS thread (units_lang.rs). A unit is one
 //! order of events: its entry chain, scheduler, tasks, reactor and budget live
@@ -8,7 +8,7 @@
 //!
 //! A unit recording (not built). A unit's events are a function of its inputs,
 //! and the only inputs that come from another unit are arrivals, which it takes
-//! at take positions (CONC-16). A recording of unit u would therefore hold u's
+//! at take positions (not yet specified). A recording of unit u would therefore hold u's
 //! own host tape, as a root's run tape does, plus: a helper's entry value at its
 //! content; and at each take position, in order, how many arrivals it took and
 //! each one (the connection, the item's bytes with its owners' content, a

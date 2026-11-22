@@ -32,7 +32,8 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `deque` | [deque](../../core/core/deque.hirsel) | Deques and heaps, MEM-24 |
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
-| `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
+| `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11, CONC-15 |
+| `conn` | [conn](../../core/core/conn.hirsel) | CONC-17 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
@@ -53,6 +54,7 @@ and the bodiless declarations of the core files. A bound column never lists `pla
 `List[T]` and `Box[T]` are own and never `plain`, whatever `T` is. "When T" means the type
 has each of the listed bounds exactly when every type argument has that bound; `packed`
 and `streamable` are never listed either, since MEM-12 says which types have them, nor
+`cross`, which [CONC-2](tasks.md#conc-2-the-send-bound) gives, nor
 `integer` and `float`, which hold exactly for the integer and the float types; a holds
 entry "T's" is the union of its type arguments' holds sets. Tuples, `Option` and `Result`
 take their kind and copyability from OWN-3 and their other bounds componentwise; `Inline`
@@ -96,6 +98,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Task[R]` | resource, mechanical | none | 8 | resource, and R's |
 | `Sender[T]`, `Receiver[T]` | resource, mechanical | `send` | 24 | resource |
 | `Latest[T]` | resource, mechanical | `send` | 8 | resource |
+| `Client[T]`, `Inbox[T]` | resource, mechanical | `send` | 8 | resource |
 | `Flow` | resource, mechanical | none | 8 | resource |
 | `Sink[T]`, `Into[T]`, `Port[T]` | plain | `shareable`, `send` | 8 | nothing |
 | `HostFile` | resource, mechanical | `send` | 8 | resource |

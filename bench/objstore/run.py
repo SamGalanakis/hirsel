@@ -60,22 +60,22 @@ def counters(client, event, path):
         )
 
 
-def sample(client, event, work, instrument):
+def sample(cpu, client, event, work, instrument):
     perf_path = work / "perf.tsv"
     alloc_path = work / "allocations"
     alloc_path.unlink(missing_ok=True)
-    env = os.environ.copy()
+    preload = []
     if instrument:
-        env["LD_PRELOAD"] = str(instrument)
-        env["HTTP_BENCH_C_ALLOC"] = str(alloc_path)
+        # taskset must exec before the allocation counter's constructor runs.
+        preload = ["env", f"LD_PRELOAD={instrument}", f"HTTP_BENCH_C_ALLOC={alloc_path}"]
 
     def c_allocations():
         return struct.unpack("=Q", alloc_path.read_bytes())[0]
 
-    with counters(client, event, perf_path) as (argv, fds, toggle):
+    with counters([*cpu, *preload, *client], event, perf_path) as (argv, fds, toggle):
         with (work / "client.stderr").open("w+") as error, subprocess.Popen(
             argv, pass_fds=tuple(fd.fileno() for fd in fds), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=error, text=True, env=env,
+            stderr=error, text=True,
         ) as process:
             for fd in fds:
                 fd.close()
@@ -104,7 +104,7 @@ def sample(client, event, work, instrument):
             error.seek(0)
             stderr = error.read()
     if code or elapsed is None:
-        raise RuntimeError(f"{' '.join(client[:7])}: {code=}, {ready=}, {done=}, {stderr}")
+        raise RuntimeError(f"{' '.join(client[:4])}: {code=}, {ready=}, {done=}, {stderr}")
     ring = re.fullmatch(r"SEND_ZC ([0-9]+) ([0-9]+)\n", details)
     if event:
         values = [line.split("\t") for line in perf_path.read_text().splitlines()]
@@ -166,14 +166,14 @@ def run(args, work, results):
                 tls = MODES[mode]
                 instrument = None
                 if mode in LANG:
-                    client = [*cpu, *command(args.hirsel, method, ports[tls], args.requests, measure)]
+                    client = command(args.hirsel, method, ports[tls], args.requests, measure)
                     if tls:
                         client.append(pem)
                 else:
-                    client = [*cpu, *command(args.rust, "client", mode, method, ports[tls], args.cert, args.requests, measure)]
+                    client = command(args.rust, "client", mode, method, ports[tls], args.cert, args.requests, measure)
                     if args.stage == "allocations":
                         instrument = args.preload
-                ns, count, alloc, (zc, copied) = sample(client, event, work, instrument)
+                ns, count, alloc, (zc, copied) = sample(cpu, client, event, work, instrument)
                 if args.stage == "allocations" and alloc is None:
                     raise RuntimeError(f"{mode} did not publish allocation counts")
                 result = dict(mode=mode, method=method, run=repetition, requests=args.requests,

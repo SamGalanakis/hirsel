@@ -171,7 +171,9 @@ def fresh_witness(prefix):
         raise ValueError('fresh root std interface omitted the public sim.fs.serve declaration')
     registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
     runtimes = [f'{name} {target} {Path(archive).parent.name}'
-                for field, name in [('runtimes', 'runtime'), ('recording_runtimes', 'recording runtime')]
+                for field, name in [('runtimes', 'runtime'), ('recording_runtimes', 'recording runtime'),
+                                    ('prof_runtimes', 'profiling runtime'),
+                                    ('prof_recording_runtimes', 'profiling recording runtime')]
                 for target, archive in registration[field].items()]
     if (not re.fullmatch(r'hirsel \d+\.\d+\.\d+\S*', lines[0])
             or not re.fullmatch(r'compiler [0-9a-f]{64}', lines[1])

@@ -178,6 +178,19 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
         .canonicalize()
         .unwrap();
     let recording = env_record_runtime();
+    let profiling = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_ARCHIVE").unwrap());
+    let observe = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE").unwrap());
+    for (archive, prof, record) in [
+        (&plain, false, false),
+        (&recording, false, true),
+        (&profiling, true, false),
+        (&observe, true, true),
+    ] {
+        let bytes = std::fs::read(archive).unwrap();
+        let defines = |name| crate::installation::archive_defines_symbol(&bytes, name);
+        assert_eq!(defines(b"hirsel_core_prof_runtime"), prof, "{archive:?}");
+        assert_eq!(defines(b"hirsel_core_os_run_recording"), record, "{archive:?}");
+    }
     let store = dir.path().join("store");
     let code_store = dir.path().join("code");
     let libraries = root.join("core");
@@ -302,34 +315,37 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
                     if recording_on {
                         assert_eq!(run(true), off, "RL1 recording on: {tag}");
                         assert!(tape.is_file(), "RL1 recording on must write a tape: {tag}");
-                        let mut replay = vec!["replay"];
-                        replay.extend(inputs);
-                        replay.extend(link);
-                        let other = if engine == "llvm" {
-                            "cranelift"
-                        } else {
-                            "llvm"
-                        };
-                        let replay_output = dir.path().join("replay");
-                        replay.extend([
-                            "--backend",
-                            other,
-                            "--runtime",
-                            recording.to_str().unwrap(),
-                            "--tape",
-                            tape.to_str().unwrap(),
-                            "-o",
-                            replay_output.to_str().unwrap(),
-                        ]);
-                        if !release {
-                            replay.push("--release");
+                        for archive in [&recording, &observe] {
+                            let mut replay = vec!["replay"];
+                            replay.extend(inputs);
+                            replay.extend(link);
+                            let other = if engine == "llvm" {
+                                "cranelift"
+                            } else {
+                                "llvm"
+                            };
+                            let replay_output = dir.path().join("replay");
+                            replay.extend([
+                                "--backend",
+                                other,
+                                "--runtime",
+                                archive.to_str().unwrap(),
+                                "--tape",
+                                tape.to_str().unwrap(),
+                                "-o",
+                                replay_output.to_str().unwrap(),
+                            ]);
+                            if !release {
+                                replay.push("--release");
+                            }
+                            let (status, stdout, stderr) = invoke(&replay);
+                            assert_eq!(status, Some(0), "{tag} replay on {archive:?}: {stderr}");
+                            assert_eq!(code_revision_of(&replay_output), code_revision_of(&program));
+                            assert!(
+                                stdout.is_empty(),
+                                "RL1 replay must not repeat live writes: {tag}"
+                            );
                         }
-                        let (status, stdout, stderr) = invoke(&replay);
-                        assert_eq!(status, Some(0), "{tag} replay: {stderr}");
-                        assert!(
-                            stdout.is_empty(),
-                            "RL1 replay must not repeat live writes: {tag}"
-                        );
                     }
                 }
             };

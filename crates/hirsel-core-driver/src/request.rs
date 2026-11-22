@@ -300,7 +300,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
     let mut run_args = invocation.arguments;
     let mut recording_build = false;
-    let mut recording_runtime = None;
+    let mut additional_runtimes = crate::installation::RuntimeVariants::<PathBuf>::default();
     let mut record_path = None;
     let mut replay_tape = None;
     let mut test_replay = false;
@@ -325,7 +325,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 }
             }
             Opt::Recording => recording_build = true,
-            Opt::RecordingRuntime => recording_runtime = Some(PathBuf::from(value)),
+            Opt::RecordingRuntime => additional_runtimes.recording = Some(PathBuf::from(value)),
+            Opt::ProfRuntime => additional_runtimes.prof = Some(PathBuf::from(value)),
+            Opt::ProfRecordingRuntime => {
+                additional_runtimes.prof_recording = Some(PathBuf::from(value))
+            }
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
@@ -646,6 +650,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     |p| p.display().to_string()
                 )
             );
+            for (label, archive) in [
+                ("profiling runtime", report.prof_runtime),
+                ("profiling recording runtime", report.prof_recording_runtime),
+            ] {
+                println!(
+                    "{label}: {}",
+                    archive.map_or_else(|| "none".to_owned(), |p| p.display().to_string())
+                );
+            }
         }
         std::process::exit(0);
     }
@@ -654,10 +667,12 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     if install_root.is_none()
         && ((command == "core-product" && (explicit_runtime || explicit_target))
-            || (matches!(command, "core-product" | "std-product") && recording_runtime.is_some()))
+            || additional_runtimes.recording.is_some()
+            || additional_runtimes.prof.is_some()
+            || additional_runtimes.prof_recording.is_some())
     {
         return Err(
-            "core-product --runtime/--target and --recording-runtime require --install".into(),
+            "core-product --runtime/--target and runtime variant options require --install".into(),
         );
     }
     if profile_front && !hirsel_core_ids::published::FRONT_OBSERVER_AVAILABLE {
@@ -791,9 +806,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     root,
                     command == "std-product",
                     runtime.as_deref().map(|runtime| (runtime, target.as_str())),
-                    recording_runtime
-                        .as_deref()
-                        .map(|runtime| (runtime, target.as_str())),
+                    crate::installation::RuntimeVariants {
+                        recording: additional_runtimes
+                            .recording
+                            .as_deref()
+                            .map(|path| (path, target.as_str())),
+                        prof: additional_runtimes
+                            .prof
+                            .as_deref()
+                            .map(|path| (path, target.as_str())),
+                        prof_recording: additional_runtimes
+                            .prof_recording
+                            .as_deref()
+                            .map(|path| (path, target.as_str())),
+                    },
                     cc.clone().or_else(pinned).as_deref(),
                     &mut meter,
                 )?
@@ -802,19 +828,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 if let Some(runtime) = &runtime {
                     let bytes = std::fs::read(runtime)?;
                     crate::installation::check_runtime(runtime, &bytes, false)?;
-                    let recording = recording_runtime
-                        .as_deref()
-                        .map(|path| {
-                            let bytes = std::fs::read(path)?;
-                            crate::installation::check_runtime(path, &bytes, true)?;
-                            std::io::Result::Ok(bytes)
-                        })
-                        .transpose()?;
                     crate::installation::prebuild_release(
                         &package.image,
                         &target,
-                        &bytes,
-                        recording.as_deref(),
+                        [bytes.as_slice()],
                         &mut meter,
                     )?;
                 }

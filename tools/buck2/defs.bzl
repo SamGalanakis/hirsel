@@ -523,13 +523,15 @@ def _toolchain_bundle_impl(ctx):
     scratch = ctx.actions.declare_output("scratch", dir = True)
     runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
     recording_runtimes = ctx.attrs.recording_runtimes[DefaultInfo].sub_targets
+    prof_runtimes = ctx.attrs.prof_runtimes[DefaultInfo].sub_targets
+    prof_recording_runtimes = ctx.attrs.prof_recording_runtimes[DefaultInfo].sub_targets
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
         'clang="$(cd "$8" && pwd)/bin/hirsel-clang"',
         '"$1" core-product --install "$root" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --target x86_64-unknown-linux-gnu --cc "$clang" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --target aarch64-unknown-linux-gnu > /dev/null',
+        '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --target x86_64-unknown-linux-gnu --cc "$clang" > /dev/null',
+        '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --target aarch64-unknown-linux-gnu > /dev/null',
     ])
     ctx.actions.run(
         cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
@@ -539,6 +541,10 @@ def _toolchain_bundle_impl(ctx):
                  recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  ctx.attrs._llvm[DefaultInfo].default_outputs[0],
+                 prof_runtimes["x86_64"][DefaultInfo].default_outputs[0],
+                 prof_runtimes["aarch64"][DefaultInfo].default_outputs[0],
+                 prof_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
+                 prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -554,6 +560,8 @@ hirsel_toolchain_bundle = rule(
         "hirsel": attrs.dep(),
         "runtimes": attrs.dep(),
         "recording_runtimes": attrs.dep(),
+        "prof_runtimes": attrs.dep(),
+        "prof_recording_runtimes": attrs.dep(),
         "_llvm": attrs.dep(default = "root//tools/buck2/native-toolchain:llvm"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
     },
@@ -740,6 +748,8 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
         # A runtime that writes the logical charge report.
         "HIRSEL_CORE_RT_OBSERVED_ARCHIVE": "//:core-driver-observed-runtime-pic",
+        "HIRSEL_CORE_RT_PROF_ARCHIVE": "//:hirsel-core-rt-prof-archives[x86_64]",
+        "HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE": "//:hirsel-core-rt-prof-record-archives[x86_64]",
     }
     if case_filter == "native::tests::":
         files_env["HIRSEL_CORE_RT_SCRIPTED_ARCHIVE"] = "//:core-scripted-runtime-pic"

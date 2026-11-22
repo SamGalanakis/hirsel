@@ -9,6 +9,7 @@
     "hirsel-core-ir/wf": "test-only",
     "hirsel-core-rt/mimalloc": "runtime-option",
     "hirsel-core-rt/charge-observation": "runtime-option",
+    "hirsel-core-rt/prof": "runtime-option",
     "hirsel-core-rt/record": "runtime-option",
     "hirsel-core-rt/standalone": "runtime-option",
     "hirsel-intern/id-salt": "test-only",

@@ -301,7 +301,13 @@ pub(super) fn emit_release_image(
         crate::native_facts::get(store, facts_key, &refs, &[])?;
     let target =
         hirsel_core_layout::Target::from_triple(&options.target).expect("supported native target");
-    let generator = (compiler, llvm, &options.target);
+    let generator = (
+        compiler,
+        llvm,
+        &options.target,
+        runtime,
+        options.logical_charge_report.is_some(),
+    );
     let unit = unit_key(
         &(
             &generator,

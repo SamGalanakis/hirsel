@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const FILE: &str = "hirsel-core-toolchain.json";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// The installed compiler's name in its prefix.
 const EXECUTABLE: &str = "hirsel";
 /// The host this compiler runs on: the one target an installation links
@@ -41,8 +41,9 @@ struct Registration {
     version: u32,
     products: BTreeMap<String, PathBuf>,
     runtimes: BTreeMap<String, PathBuf>,
-    #[serde(default)]
     recording_runtimes: BTreeMap<String, PathBuf>,
+    prof_runtimes: BTreeMap<String, PathBuf>,
+    prof_recording_runtimes: BTreeMap<String, PathBuf>,
     /// Each linked target's recipe, relative to the root.
     links: BTreeMap<String, PathBuf>,
 }
@@ -98,6 +99,14 @@ impl Installed {
             .get(target)
             .map(|path| self.root.join(path))
     }
+    pub fn prof_runtime(&self, target: &str, recording: bool) -> Option<PathBuf> {
+        let runtimes = if recording {
+            &self.registration.prof_recording_runtimes
+        } else {
+            &self.registration.prof_runtimes
+        };
+        runtimes.get(target).map(|path| self.root.join(path))
+    }
     /// The link recipe this installation captured for `target`. A target
     /// without one links only through an explicit `--cc`.
     pub fn link(&self, target: &str) -> Option<PathBuf> {
@@ -141,7 +150,7 @@ pub fn register(
     name: &str,
     image: &CoreImage,
     runtime: Option<(&[u8], &str)>,
-    recording_runtime: Option<(&[u8], &str)>,
+    additional: RuntimeVariants<(&[u8], &str)>,
     link: Option<(&str, &Path)>,
 ) -> io::Result<()> {
     let root = crate::product::normalized(root);
@@ -175,11 +184,17 @@ pub fn register(
         let relative = install_runtime(bytes, target)?;
         registration.runtimes.insert(target.to_owned(), relative);
     }
-    if let Some((bytes, target)) = recording_runtime {
-        let relative = install_runtime(bytes, target)?;
-        registration
-            .recording_runtimes
-            .insert(target.to_owned(), relative);
+    for (archive, runtimes) in [
+        (additional.recording, &mut registration.recording_runtimes),
+        (additional.prof, &mut registration.prof_runtimes),
+        (
+            additional.prof_recording,
+            &mut registration.prof_recording_runtimes,
+        ),
+    ] {
+        if let Some((bytes, target)) = archive {
+            runtimes.insert(target.to_owned(), install_runtime(bytes, target)?);
+        }
     }
     if let Some((target, recipe)) = link {
         registration
@@ -209,6 +224,11 @@ pub(crate) fn print_version() -> io::Result<()> {
                 "recording runtime",
                 &installed.registration.recording_runtimes,
             ),
+            ("profiling runtime", &installed.registration.prof_runtimes),
+            (
+                "profiling recording runtime",
+                &installed.registration.prof_recording_runtimes,
+            ),
         ] {
             for (target, archive) in runtimes {
                 let identity = archive
@@ -237,6 +257,8 @@ pub struct Environment {
     pub target: String,
     pub runtime: Option<PathBuf>,
     pub recording_runtime: Option<PathBuf>,
+    pub prof_runtime: Option<PathBuf>,
+    pub prof_recording_runtime: Option<PathBuf>,
 }
 pub fn environment(
     executable: &Path,
@@ -281,6 +303,9 @@ pub fn environment(
         target: target.to_owned(),
         runtime: runtime.map(Path::to_owned),
         recording_runtime: recording_runtime.map(Path::to_owned),
+        prof_runtime: installed.and_then(|installed| installed.prof_runtime(target, false)),
+        prof_recording_runtime: installed
+            .and_then(|installed| installed.prof_runtime(target, true)),
     })
 }
 /// Keep user-supplied archives in the runtime slot they implement.
@@ -301,7 +326,7 @@ pub(crate) fn check_runtime(path: &Path, bytes: &[u8], recording: bool) -> io::R
 }
 
 /// Check whether a Unix static archive (`.a`) defines `symbol` in its symbol table.
-fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
+pub(crate) fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
     if !bytes.starts_with(b"!<arch>\n") {
         return false;
     }
@@ -341,6 +366,32 @@ fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
     false
 }
 
+pub struct RuntimeVariants<T> {
+    pub recording: Option<T>,
+    pub prof: Option<T>,
+    pub prof_recording: Option<T>,
+}
+
+impl<T> Default for RuntimeVariants<T> {
+    fn default() -> Self {
+        Self {
+            recording: None,
+            prof: None,
+            prof_recording: None,
+        }
+    }
+}
+
+impl<T> RuntimeVariants<T> {
+    fn as_ref(&self) -> RuntimeVariants<&T> {
+        RuntimeVariants {
+            recording: self.recording.as_ref(),
+            prof: self.prof.as_ref(),
+            prof_recording: self.prof_recording.as_ref(),
+        }
+    }
+}
+
 /// The same producer used by the CLI and the distribution assembler. Every
 /// outside input is read and checked before anything is written; the
 /// selection is written last, so a failed install keeps the previous one.
@@ -352,7 +403,7 @@ pub fn publish(
     root: &Path,
     std: bool,
     runtime: Option<(&Path, &str)>,
-    recording_runtime: Option<(&Path, &str)>,
+    additional: RuntimeVariants<(&Path, &str)>,
     cc: Option<&Path>,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
@@ -360,6 +411,7 @@ pub fn publish(
     fn read_runtime<'a>(
         input: Option<(&Path, &'a str)>,
         recording: bool,
+        prof: bool,
     ) -> io::Result<Option<(Vec<u8>, &'a str)>> {
         input
             .map(|(path, target)| {
@@ -368,12 +420,27 @@ pub fn publish(
                 }
                 let bytes = std::fs::read(path)?;
                 check_runtime(path, &bytes, recording)?;
+                if archive_defines_symbol(&bytes, b"hirsel_core_prof_runtime") != prof {
+                    let required = if prof {
+                        "with profiling"
+                    } else {
+                        "without profiling"
+                    };
+                    return Err(io::Error::other(format!(
+                        "this slot requires a runtime archive {required}: {}",
+                        path.display()
+                    )));
+                }
                 Ok((bytes, target))
             })
             .transpose()
     }
-    let runtime = read_runtime(runtime, false)?;
-    let recording_runtime = read_runtime(recording_runtime, true)?;
+    let runtime = read_runtime(runtime, false, false)?;
+    let additional = RuntimeVariants {
+        recording: read_runtime(additional.recording, true, false)?,
+        prof: read_runtime(additional.prof, false, true)?,
+        prof_recording: read_runtime(additional.prof_recording, true, true)?,
+    };
     let linked = runtime
         .as_ref()
         .map(|(_, target)| *target)
@@ -410,6 +477,10 @@ pub fn publish(
         }
         _ => None,
     };
+    fn archive_ref<'a>(archive: &'a (Vec<u8>, &str)) -> (&'a [u8], &'a str) {
+        (archive.0.as_slice(), archive.1)
+    }
+    let refs = additional.as_ref();
     register(
         &root,
         if std { "std" } else { "core" },
@@ -417,9 +488,11 @@ pub fn publish(
         runtime
             .as_ref()
             .map(|(bytes, target)| (bytes.as_slice(), *target)),
-        recording_runtime
-            .as_ref()
-            .map(|(bytes, target)| (bytes.as_slice(), *target)),
+        RuntimeVariants {
+            recording: refs.recording.map(archive_ref),
+            prof: refs.prof.map(archive_ref),
+            prof_recording: refs.prof_recording.map(archive_ref),
+        },
         link.as_ref()
             .map(|(target, recipe)| (*target, recipe.as_path())),
     )?;
@@ -442,25 +515,29 @@ pub fn publish(
         }
     }
     if std && let Some((bytes, target)) = &runtime {
-        let recording = recording_runtime
-            .as_ref()
-            .filter(|(_, recording)| recording == target)
+        // Preserve the prebuilt sides for the installed shipping and recording
+        // paths. Profiling lowers its separately keyed side on first use.
+        let recording = refs
+            .recording
+            .filter(|(_, archive_target)| archive_target == target)
             .map(|(bytes, _)| bytes.as_slice());
-        prebuild_release(&product.image, target, bytes, recording, meter)?;
+        prebuild_release(
+            &product.image,
+            target,
+            std::iter::once(bytes.as_slice()).chain(recording),
+            meter,
+        )?;
     }
     Ok(product)
 }
 
 /// Lower the release std of a std product's image for a default release
-/// build on `target` linking the runtime archive `runtime`, with and without
-/// debug lines, and for a recording build linking `recording`, into the
-/// image's store, where every build over the image finds it before lowering
-/// std itself. Every checked plain root is lowered; a refused one is skipped.
-pub(crate) fn prebuild_release(
+/// build on `target` for each installed archive. The image's store holds
+/// the prebuilt definitions. Every checked plain root is lowered.
+pub(crate) fn prebuild_release<'a>(
     image: &Arc<CoreImage>,
     target: &str,
-    runtime: &[u8],
-    recording: Option<&[u8]>,
+    archives: impl IntoIterator<Item = &'a [u8]>,
     meter: &mut Meter,
 ) -> io::Result<()> {
     let scratch = tempfile::tempdir()?;
@@ -477,8 +554,11 @@ pub(crate) fn prebuild_release(
     let product = crate::Driver::default().check(request, meter)?;
     let identity =
         |bytes: &[u8]| crate::tool_inputs::runtime_identity(ContentHash::of_bytes(bytes));
-    let mut runtimes = vec![identity(runtime)];
-    runtimes.extend(recording.map(identity));
+    // Installation prebuilds the shipping codegen mode for each archive.
+    let runtimes: Vec<_> = archives
+        .into_iter()
+        .map(|bytes| (identity(bytes), false))
+        .collect();
     product
         .prebuild_release_std(target, &runtimes)
         .map_err(|stop| io::Error::other(format!("prebuilding the release std: {stop}")))?;

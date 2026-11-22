@@ -27,6 +27,11 @@ hirsel prof sql <FILE.hprof> "<SQL>" [--limit 500] [--timeout-ms 5000] [--json]
 hirsel prof export <FILE.hprof> --format pprof --out <PATH>
 ```
 
+For each target, `core-product --install` and `std-product --install` accept
+`--prof-runtime ARCHIVE` and `--prof-recording-runtime ARCHIVE` to register
+the profiling and combined profiling/recording archives. `hirsel env` lists
+both archive paths. `hirsel --version` reports their content identities.
+
 `prof run` takes the native build options of `run`. It passes arguments after
 `--` to the executable, leaves its standard streams connected, and returns
 its exit status. `--out` names the profile and defaults to `profile.hprof`.

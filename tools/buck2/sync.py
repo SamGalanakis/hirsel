@@ -461,6 +461,18 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-record-archives',
                               library=f'//:{name}-standalone-record',
                               archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-standalone-prof',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'prof']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-prof-archives',
+                              library=f'//:{name}-standalone-prof',
+                              archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-standalone-prof-record',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'prof', 'record']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-prof-record-archives',
+                              library=f'//:{name}-standalone-prof-record',
+                              archive_name=f"lib{attrs['crate']}.a")
                 + '\n' + call('hirsel_library', name=f'{name}-test-pool',
                               deps=declared_deps(package, packages),
                               **{**attrs, 'features': ['standalone', 'testing']})
@@ -553,6 +565,8 @@ def first_party(meta: dict) -> str:
                           else {
                               "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                               "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+                              "HIRSEL_CORE_RT_PROF_ARCHIVE": "//:hirsel-core-rt-prof-archives[x86_64]",
+                              "HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE": "//:hirsel-core-rt-prof-record-archives[x86_64]",
                               "HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE": "//:core-scripted-record-runtime-pic",
                           } if binary == "hirsel-core-driver-unittest"
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" or program_llvm else None)
@@ -765,6 +779,8 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes="//:hirsel-core-rt-archives",
                             recording_runtimes="//:hirsel-core-rt-record-archives",
+                            prof_runtimes="//:hirsel-core-rt-prof-archives",
+                            prof_recording_runtimes="//:hirsel-core-rt-prof-record-archives",
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present()],

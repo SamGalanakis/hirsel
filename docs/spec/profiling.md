@@ -159,3 +159,15 @@ CPU samples.
 `prof export` supports the pprof format. It preserves mapping addresses,
 inline frame order, and one value per event. Values that exceed the signed
 64-bit fields in pprof are refused.
+
+## Runtime archives
+
+The default runtime archive compiles out runtime profiling. Installations
+register separate profiling and profiling-with-recording archives for each
+target. The recording entry reads and clears recording environment variables
+even when there is no recording destination. Live profiling can use the
+profiling archive without paying for that startup path.
+
+The chosen archive's content identity participates in native object, release
+part, release std and executable assembly cache keys. Runtime archive
+selection preserves semantic code addresses and `hirsel_code_revision`.

@@ -17,6 +17,7 @@ required-features = ["record"]
 # Only a standalone program owns the process allocator. Rust embeddings keep theirs.
 standalone = []
 record = ["dep:hirsel-tape-format"]
+prof = []
 testing = []
 memcheck = []
 charge-observation = []

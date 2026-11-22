@@ -261,7 +261,7 @@ impl CheckProduct {
     pub(crate) fn prebuild_release_std(
         &self,
         target: &str,
-        runtimes: &[ContentHash],
+        runtimes: &[(ContentHash, bool)],
     ) -> Result<(), NativeStop> {
         let image = self
             .image
@@ -269,10 +269,10 @@ impl CheckProduct {
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
         let store = Store::new(&image.store_root().join(PREBUILT))?;
         let side = self.image_side()?;
-        for &runtime in runtimes {
+        for &(runtime, observe_charge) in runtimes {
             let generator = Generator {
                 target,
-                observe_charge: false,
+                observe_charge,
                 runtime,
             };
             lower(&generator, generator.kin()?, side.clone_units(), &store)?;

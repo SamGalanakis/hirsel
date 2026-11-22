@@ -9,6 +9,8 @@ pub enum OptionId {
     ReleaseManifest,
     Recording,
     RecordingRuntime,
+    ProfRuntime,
+    ProfRecordingRuntime,
     Record,
     Tape,
     Replay,
@@ -439,6 +441,20 @@ static OPTIONS: &[OptionSpec] = &[
         Some("ARCHIVE"),
         ["core-product", "std-product"],
         "Install this recording runtime archive alongside --runtime."
+    ),
+    option!(
+        ProfRuntime,
+        ["--prof-runtime"],
+        Some("ARCHIVE"),
+        ["core-product", "std-product"],
+        "Install the profiling runtime archive alongside --runtime."
+    ),
+    option!(
+        ProfRecordingRuntime,
+        ["--prof-recording-runtime"],
+        Some("ARCHIVE"),
+        ["core-product", "std-product"],
+        "Install the combined profiling and recording runtime archive."
     ),
     option!(
         Record,

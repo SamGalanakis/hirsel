@@ -96,8 +96,8 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 `String` with the Rust `regex` crate's syntax and meaning.
 
 The [process creation specification](exec.md) defines the `Exec` capability over
-operator-approved launch profiles, spawning, waiting, signalling and supervised cleanup of
-children, and served Exec. It is unbuilt design, as are the Net chapter's Unix-domain socket
+operator-approved launch profiles, spawning, waiting, signalling, killing a dropped child,
+and served Exec. It is unbuilt design, as are the Net chapter's Unix-domain socket
 rules, NET-12 to NET-14.
 
 The [foreign calls specification](foreign.md) defines foreign modules over pinned native

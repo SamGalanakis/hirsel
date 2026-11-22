@@ -84,11 +84,11 @@ def traced_calls(root, work):
 type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes], link: Transport }
 
 fn observed(d: Drive, take link: Transport) -> Conn waits {
-    let entries: Result[Log[observe.Obs], Capacity] = log.new()
+    let entries: Log[observe.Obs] = log.new()
     let id = host.mono_ns(d.clock)
     emit(d.out, Opened(id))
     Conn(id: id, clock: d.clock, out: d.out, err: d.err,
-        log: result.unwrap(take entries), digests: map.new(), link: take link)
+        log: take entries, digests: map.new(), link: take link)
 }
 
 fn replies(cn: Conn, d: runner.Down) -> () waits {
@@ -119,8 +119,7 @@ fn finish(take cn: Conn, code: u64) -> bool waits {
 }
 
 pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
-    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
-    let (head, inbox) = result.unwrap(take made)
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
     let db = store.memory(c, r, store.defaults())
     let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
@@ -153,13 +152,13 @@ fn record(cn: Conn, take e: observe.Obs) -> () waits {
 // Memoize the pure hash by its complete byte inputs, not the slot or deadline.
 fn send_digest(mut cn: Conn, key: Bytes, arg: Bytes) -> Bytes {
     let mut cache_key: Bytes = list.new()
-    result.unwrap(std.codec.put_u64(list.len(key), mut cache_key))
+    std.codec.put_u64(list.len(key), mut cache_key)
     list.append(mut cache_key, key)
-    result.unwrap(std.codec.put_u64(list.len(arg), mut cache_key))
+    std.codec.put_u64(list.len(arg), mut cache_key)
     list.append(mut cache_key, arg)
-    if let Some(d) = map.get(cn.digests, cache_key) { return result.unwrap(clone(d)) }
+    if let Some(d) = map.get(cn.digests, cache_key) { return clone(d) }
     let d = observe_fixture.digest(key, arg)
-    map.insert(mut cn.digests, take cache_key, result.unwrap(clone(d)))
+    map.insert(mut cn.digests, take cache_key, clone(d))
     d
 }
 '''

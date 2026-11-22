@@ -1146,7 +1146,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.require_copy_range(at, count, len, n);
         let dst = self.carrier_word(dst, carrier, SeqWord::Data, n);
         let src = self.carrier_word(src, carrier, SeqWord::Data, n);
-        self.copy_plain_range(item, dst, at, src, count, n)
+        self.copy_plain_range(item, dst, at, src, None, count, n)
+    }
+
+    /// `list.copy_within`: Bounds unless both `src + count` and `dst + count`
+    /// fit `len` without overflow, checked before any write; then one memmove,
+    /// so overlapping ranges copy as if through a temporary.
+    pub(super) fn list_copy_within(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        src: ValueId,
+        dst: ValueId,
+        count: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        self.require_copy_range(src, count, len, n);
+        self.require_copy_range(dst, count, len, n);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        self.copy_plain_range(item, data, dst, data, Some(src), count, n)
     }
 
     /// `list.fill_slice`: Bounds unless `at + count <= len`, checked before any
@@ -1218,7 +1238,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // proves that count fits the source prefix.
         self.require_copy_range(at, count, bound, n);
         if len != 0 && self.list_storage_static(item) != Some(false) {
-            self.copy_plain_range(item, dst?, at, src?, count, n)?;
+            self.copy_plain_range(item, dst?, at, src?, None, count, n)?;
+        }
+        Some(())
+    }
+
+    /// `inline.copy_within`: the same bounds as `list.copy_within` against the
+    /// static length, then one memmove inside the array.
+    pub(super) fn inline_copy_within(
+        &mut self,
+        array: TyId,
+        data: Option<ValueId>,
+        src: ValueId,
+        dst: ValueId,
+        count: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let TyKind::Array(item, len) = *self.t.kind(array) else {
+            return None;
+        };
+        let bound = self.konst(Ty::Scalar(Scalar::U64), len, n)?;
+        self.require_copy_range(src, count, bound, n);
+        self.require_copy_range(dst, count, bound, n);
+        if len != 0 && self.list_storage_static(item) != Some(false) {
+            let data = data?;
+            self.copy_plain_range(item, data, dst, data, Some(src), count, n)?;
         }
         Some(())
     }
@@ -1438,12 +1482,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_require_element(valid, n);
     }
 
+    /// Copies `count` plain elements from `src` (at element `within`, or its
+    /// start) to `dst` at element `at`. A `within` offset means both ranges lie
+    /// in one carrier and may overlap, so the bytes move as one memmove.
+    #[allow(clippy::too_many_arguments)]
     fn copy_plain_range(
         &mut self,
         item: TyId,
         dst: ValueId,
         at: ValueId,
         src: ValueId,
+        within: Option<ValueId>,
         count: ValueId,
         n: NodeId,
     ) -> Option<()> {
@@ -1458,8 +1507,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, at, stride, n);
         let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
         let to = self.address(AddressBase::Value(dst), &[Step::Byte(offset)], byte, n);
-        let from = self.address(AddressBase::Value(src), &[], byte, n);
-        self.inst(Inst::Copy { to, from, bytes }, n);
+        match within {
+            None => {
+                let from = self.address(AddressBase::Value(src), &[], byte, n);
+                self.inst(Inst::Copy { to, from, bytes }, n);
+            }
+            Some(within) => {
+                let (offset, _) =
+                    self.list_arith(ArithOp::Mul, ArithMode::Wrapping, within, stride, n);
+                let from = self.address(AddressBase::Value(src), &[Step::Byte(offset)], byte, n);
+                self.inst(Inst::Move { to, from, bytes }, n);
+            }
+        }
         self.jump(done, &[], n);
         self.start(done);
         Some(())
@@ -1686,6 +1745,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.drain_owner(data, next, len, item);
             self.end_owners(mark, None, false, n);
         }
+    }
+
+    /// `list.truncate`: when `keep < len`, the length drops to `keep` first and a
+    /// drain then cleans the cut elements in ascending index order, as
+    /// `list.clear` does; the capacity stays. Plain elements cost no loop.
+    pub(super) fn list_truncate(&mut self, item: TyId, header: ValueId, keep: ValueId, n: NodeId) {
+        let Some(carrier) = self.list_carrier(item, n) else {
+            return;
+        };
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let shorter = self.list_compare(CompareOp::Lt, keep, len, n);
+        let cut = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(shorter, cut, done, n);
+        self.start(cut);
+        self.set_carrier_word(header, carrier, SeqWord::Len, keep, n);
+        if self.drop_id(item).is_some() {
+            let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+            let next = self.new_slot(PlaceTy::Value(Ty::Scalar(Scalar::U64)), n);
+            self.inst(
+                Inst::Store {
+                    address: next,
+                    value: keep,
+                },
+                n,
+            );
+            let mark = self.owner_mark();
+            self.drain_owner(data, next, len, item);
+            self.end_owners(mark, None, false, n);
+        }
+        self.jump(done, &[], n);
+        self.start(done);
     }
 
     /// The old occupant keeps custody through argument evaluation. Save its

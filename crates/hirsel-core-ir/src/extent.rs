@@ -173,7 +173,9 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         Inst::Free { block, charge } => uses.extend([v(block), v(charge)]),
         Inst::FrameRefund { charge } => uses.push(v(charge)),
         Inst::PromoteFrame { carrier } => uses.push(a(carrier)),
-        Inst::Copy { to, from, bytes } => uses.extend([a(to), a(from), v(bytes)]),
+        Inst::Copy { to, from, bytes } | Inst::Move { to, from, bytes } => {
+            uses.extend([a(to), a(from), v(bytes)])
+        }
         Inst::Grow {
             result,
             available,

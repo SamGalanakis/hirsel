@@ -284,6 +284,7 @@ tags!(Inst {
     41 => Simd { result, op, first, second, fail },
     42 => PutLanes { to, vector, count },
     43 => BuiltinUse { definition },
+    44 => Move { to, from, bytes },
 });
 
 tags!(LayoutQuery {

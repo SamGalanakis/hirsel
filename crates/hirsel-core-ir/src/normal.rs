@@ -599,6 +599,7 @@ fn results<'a>(inst: &'a Inst, body: &'a Body) -> impl Iterator<Item = ValueId> 
         | Inst::Free { .. }
         | Inst::FrameRefund { .. }
         | Inst::Copy { .. }
+        | Inst::Move { .. }
         | Inst::SetCase { .. }
         | Inst::RegionClose { .. }
         | Inst::Trim { .. }

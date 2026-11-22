@@ -2,6 +2,10 @@
 // A range outside either Inline array fails with Bounds before any write.
 pub fn copy_from_slice[A: plain](mut dst: A, at: u64, src: A, count: u64)
 
+// Copy count elements of a starting at src over those starting at dst, as if
+// through a temporary. A range outside a fails with Bounds before any write.
+pub fn copy_within[A: plain](mut a: A, src: u64, dst: u64, count: u64)
+
 // Read a u16, u32 or u64 (as fixed by the expected type) from an Inline byte
 // array. Invalid ranges fail with Bounds. Alloc: nothing.
 pub fn word_le[A: plain, T: integer](b: A, at: u64) -> T

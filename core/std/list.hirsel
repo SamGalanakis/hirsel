@@ -358,14 +358,6 @@ pub fn swap_remove[T](mut xs: List[T], i: u64) -> T {
     }
 }
 
-/// Cleans elements n.. from the highest index down; no change when n >= len.
-/// Alloc: nothing. Cost: O(len - n). Ex: `list.truncate(mut xs, 64)`
-pub fn truncate[T](mut xs: List[T], n: u64) {
-    while list.len(xs) > n {
-        let _ = list.pop(mut xs)
-    }
-}
-
 /// Reverses the elements in place. Alloc: nothing. Cost: O(len). Ex: `list.reverse(mut path)`
 pub fn reverse[T](mut xs: List[T]) {
     let mut i: u64 = 0
@@ -629,7 +621,7 @@ pub fn dedup[T: key](mut xs: List[T]) {
         }
         read += 1
     }
-    truncate(mut xs, write)
+    list.truncate(mut xs, write)
 }
 
 /// Calls f on each element in order and collects the results. Reserves exactly
@@ -668,7 +660,7 @@ pub fn retain[T](mut xs: List[T], keep: scoped fn(T) -> bool) {
             write += 1
         }
     }
-    truncate(mut xs, write)
+    list.truncate(mut xs, write)
 }
 
 /// A view of the first element that satisfies pred, or None.
@@ -763,6 +755,6 @@ pub fn drop_prefix[T: plain](mut xs: List[T], n: u64) {
         for i in n .. len {
             xs[i - n] = xs[i]
         }
-        truncate(mut xs, len - n)
+        list.truncate(mut xs, len - n)
     }
 }

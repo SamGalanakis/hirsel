@@ -7583,6 +7583,19 @@ impl Machine<'_> {
                 let src = self.get(f, n).to_vec();
                 self.put(places[to.index()].0, &src);
             }
+            Inst::Move { to, from, bytes } => {
+                let n = vals[bytes.index()] as usize;
+                if n == 0 {
+                    return Ok(());
+                }
+                self.touch(from, places[from.index()].0, n);
+                self.touch(to, places[to.index()].0, n);
+                let f = places[from.index()].0;
+                self.read_marked(f, n);
+                // Read the whole source first, so an overlapping target sees the old bytes.
+                let src = self.get(f, n).to_vec();
+                self.put(places[to.index()].0, &src);
+            }
             Inst::Grow {
                 result,
                 available,

@@ -223,6 +223,23 @@ operations it names; nothing else about them may be inferred from an implementat
   its length and capacity; the call admits no bytes and takes one Step whatever
   `count` is. A fill writes the same bytes on every engine
   ([SEM-8](semantics.md#sem-8-determinism)).
+  `list.copy_within(mut xs, src, dst, count)` copies the `count` elements of `xs`
+  from `src` over those from `dst`, and `inline.copy_within(mut a, src, dst, count)`
+  does the same inside an Inline array. The ranges may overlap: every destination
+  element ends up holding the source element it had before the call, as if the
+  source range were first copied to a temporary. Each raises `Bounds` before any
+  write unless `src ≤ len`, `dst ≤ len` and `count ≤ len − max(src, dst)`, so an
+  overflowing end is refused, and it checks both ranges even when `count` is 0 or
+  the element type has no storage. Elements must be plain. The carrier keeps its
+  length and capacity; the call admits no bytes and takes one Step whatever `count`
+  is.
+- **Shortening.** `list.truncate(mut xs, n)` keeps the first `n` elements and does
+  nothing when `n ≥ len`. Otherwise the length becomes `n` first, and the elements
+  from `n` up to the old length are then cleaned in ascending index order, the order
+  in which `list.clear` cleans all of them. The capacity stays, so the call refunds
+  only what the cleaned elements own, admits nothing, and takes one Step
+  ([MEM-30](budgets.md#mem-30-step-bounds)); for plain elements it does no work per
+  element.
 - **Words.** `list.word_le(b, at)` and `list.word_be(b, at)` read a little- or big-endian
   word from `b` at a byte offset. The expected `u16`, `u32` or `u64` type fixes the width.
   Without an expected type the result is `u64`. An invalid range, including an overflowing

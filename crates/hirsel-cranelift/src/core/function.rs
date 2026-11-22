@@ -156,7 +156,7 @@ pub(super) fn emit(
                 | Inst::Grow {
                     carrier: address, ..
                 } => used(address),
-                Inst::Copy { to, from, .. } => {
+                Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
                     used(to);
                     used(from);
                 }

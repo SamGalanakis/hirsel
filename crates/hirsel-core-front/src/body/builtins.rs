@@ -67,6 +67,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             ));
         }
+        if module == ["inline"] && name == "copy_within" {
+            self.inline_copy_within(types[0], vals[0], vals[1]?, vals[2]?, vals[3]?, n)?;
+            return Some(None);
+        }
         if module == ["inline"] && name == "copy_from_slice" {
             self.inline_copy_from_slice(types[0], vals[0], vals[1]?, vals[2], vals[3]?, n)?;
             return Some(None);
@@ -131,6 +135,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_clear(item, vals[0]?, n);
                 return Some(None);
             }
+            "truncate" => {
+                self.list_truncate(item, vals[0]?, vals[1]?, n);
+                return Some(None);
+            }
             "push" => return Some(self.list_push(item, vals[0]?, vals[1], n, None)),
             "fill" => {
                 self.list_fill(item, vals[0]?, vals[1]?, vals[2], n)?;
@@ -142,6 +150,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "copy_from_slice" => {
                 self.list_copy_from_slice(item, vals[0]?, vals[1]?, vals[2]?, n)?;
+                return Some(None);
+            }
+            "copy_within" => {
+                self.list_copy_within(item, vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)?;
                 return Some(None);
             }
             "fill_slice" => {

@@ -153,7 +153,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             f(charge)
         }
         Inst::FrameRefund { charge } => f(charge),
-        Inst::Copy { bytes, .. } => f(bytes),
+        Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } => f(bytes),
         Inst::Grow {
             result,
             available,
@@ -244,7 +244,7 @@ pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {
         | Inst::Grow {
             carrier: address, ..
         } => f(address),
-        Inst::Copy { to, from, .. } => {
+        Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
             f(to);
             f(from)
         }

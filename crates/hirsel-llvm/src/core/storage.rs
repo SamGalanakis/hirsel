@@ -1063,6 +1063,17 @@ impl FunctionEmitter<'_> {
                     },
                 );
             }
+            // No alias scopes: the two places may be the same storage.
+            Inst::Move { to, from, bytes } => {
+                let (to, from) = (self.address(to), self.address(from));
+                let n = self.numeric(bytes);
+                self.runtime(
+                    "llvm.memmove.p0.p0.i64",
+                    Type::Void,
+                    &[ptr(to), ptr(from), word(n), arg(Type::I1, FALSE)],
+                    &CallAttrs::default(),
+                );
+            }
             Inst::LimitEnter {
                 admitted,
                 available,

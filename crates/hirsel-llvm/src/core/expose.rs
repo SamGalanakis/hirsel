@@ -43,6 +43,7 @@ fn supported(i: &Inst) -> bool {
             | Inst::Call { .. }
             | Inst::Pointer { .. }
             | Inst::Copy { .. }
+            | Inst::Move { .. }
             | Inst::Case { .. }
             | Inst::SetCase { .. }
             | Inst::Step { .. }
@@ -197,7 +198,7 @@ impl Rename {
                 v(mask);
             }
             Inst::Call { call } => call.0 += self.call,
-            Inst::Copy { to, from, bytes } => {
+            Inst::Copy { to, from, bytes } | Inst::Move { to, from, bytes } => {
                 *to = self.a(*to);
                 *from = self.a(*from);
                 v(bytes);

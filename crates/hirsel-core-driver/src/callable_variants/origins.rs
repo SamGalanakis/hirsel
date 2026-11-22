@@ -109,6 +109,12 @@ impl<'a> Origins<'a> {
                         s.escaped.insert(loc.root);
                     }
                 }
+                // An overlapping move is not followed; its target is no longer known.
+                Inst::Move { to, .. } => {
+                    if let Some(loc) = s.addresses[to.index()] {
+                        s.escaped.insert(loc.root);
+                    }
+                }
                 Inst::Copy { to, from, bytes } => {
                     if let Some(loc) = s.addresses[to.index()] {
                         match (loc.offset, s.constant(bytes)) {

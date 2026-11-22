@@ -188,7 +188,7 @@ pub(super) fn rewrite(
     let needs_places = body.slots.iter().any(|&p| scalar_place(p))
         || body.insts.iter().any(|inst| match inst {
             Inst::Drop { ty, .. } => recipes[ty.index()].drop.is_none(),
-            Inst::Copy { to, from, .. } => {
+            Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
                 scalar_place(body.addresses[to.index()].ty)
                     || scalar_place(body.addresses[from.index()].ty)
             }

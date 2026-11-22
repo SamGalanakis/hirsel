@@ -248,7 +248,7 @@ pub(super) fn promote(module: &Module, recipes: &[Recipe], body: &mut Body, dest
             {
                 escaped[slot.index()] = true;
             }
-            Inst::Copy { to, from, .. } => {
+            Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
                 for a in [to, from] {
                     if let Some(s) = cells[a.index()] {
                         escaped[s.index()] = true

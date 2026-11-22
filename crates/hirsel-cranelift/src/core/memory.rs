@@ -469,6 +469,12 @@ impl Function<'_, '_, '_> {
                     self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
                 }
             }
+            Inst::Move { to, from, bytes } => {
+                let to = self.addr(to);
+                let from = self.addr(from);
+                let bytes = self.get(bytes);
+                self.c_call("memmove", &[p, p, u], &[p], &[to, from, bytes])?;
+            }
             // Full-new admission and install-before-refund are unchanged.
             // Growth may reuse ordinary local backing under the shared policy;
             // every other buffer takes the original allocate/copy/free path.

@@ -69,6 +69,10 @@ pub fn swap[T](mut xs: List[T], i: u64, j: u64)
 
 pub fn clear[T](mut xs: List[T])
 
+// Keep the first n elements and clean the rest in ascending index order, as
+// clear does; no change when n >= len. The capacity stays.
+pub fn truncate[T](mut xs: List[T], n: u64)
+
 pub fn fill[T: plain](mut xs: List[T], n: u64, x: T)
 
 // Overwrite count existing elements starting at at with copies of x. A range
@@ -80,6 +84,11 @@ pub fn append[T: plain](mut xs: List[T], ys: List[T])
 // Overwrite src's length of existing elements starting at at. A range outside
 // dst (including an overflowing end) fails with Bounds before any write.
 pub fn copy_from_slice[T: plain](mut dst: List[T], at: u64, src: List[T])
+
+// Copy count elements of xs starting at src over those starting at dst, as if
+// through a temporary, so the ranges may overlap. A range outside xs (including
+// an overflowing end) fails with Bounds before any write.
+pub fn copy_within[T: plain](mut xs: List[T], src: u64, dst: u64, count: u64)
 
 pub fn sum[T: integer](xs: List[T]) -> T {
     let mut t: T = int.narrow(0u8)

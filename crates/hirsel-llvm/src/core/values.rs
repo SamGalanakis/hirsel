@@ -183,7 +183,9 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                         read(v);
                     }
                 }
-                Inst::Copy { bytes, .. } | Inst::LimitEnter { bytes, .. } => read(bytes),
+                Inst::Copy { bytes, .. }
+                | Inst::Move { bytes, .. }
+                | Inst::LimitEnter { bytes, .. } => read(bytes),
                 Inst::Trim {
                     block,
                     region,
@@ -353,7 +355,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::Drop { address, .. }
                 | Inst::Mark { address, .. }
                 | Inst::Unmark { address, .. } => read(address),
-                Inst::Copy { to, from, .. } => {
+                Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
                     read(to);
                     read(from);
                 }

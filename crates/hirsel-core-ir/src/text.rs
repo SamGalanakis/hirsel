@@ -109,6 +109,7 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::FrameRefund { .. }
                                 | Inst::PromoteFrame { .. }
                                 | Inst::Copy { .. }
+                                | Inst::Move { .. }
                                 | Inst::RegionOpen { .. }
                                 | Inst::RegionClose { .. }
                                 | Inst::Trim { .. }
@@ -749,6 +750,9 @@ impl Printer {
                     Inst::PromoteFrame { carrier } => format!("promote_frame a{}", carrier.0),
                     Inst::Copy { to, from, bytes } => {
                         format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
+                    }
+                    Inst::Move { to, from, bytes } => {
+                        format!("move a{}, a{}, {}", to.0, from.0, v(bytes))
                     }
                     Inst::Case { result, address } => {
                         format!("{} = case a{}", def(*result), address.0)
@@ -1425,16 +1429,18 @@ impl BodyParser {
                 l.next()?;
                 return Ok(Inst::FrameRefund { charge: l.value()? });
             }
-            Some("copy") => {
+            Some(op @ ("copy" | "move")) => {
+                let overlap = op == "move";
                 l.next()?;
                 let to = AddressId(l.id('a')?);
                 l.expect(",")?;
                 let from = AddressId(l.id('a')?);
                 l.expect(",")?;
-                return Ok(Inst::Copy {
-                    to,
-                    from,
-                    bytes: l.value()?,
+                let bytes = l.value()?;
+                return Ok(if overlap {
+                    Inst::Move { to, from, bytes }
+                } else {
+                    Inst::Copy { to, from, bytes }
                 });
             }
             Some("set_case") => {

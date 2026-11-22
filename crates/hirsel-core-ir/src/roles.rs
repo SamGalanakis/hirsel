@@ -809,7 +809,7 @@ impl<'a> Seal<'a> {
                     self.used(v, Use::Other);
                 }
             }
-            Inst::Copy { to, from, bytes } => {
+            Inst::Copy { to, from, bytes } | Inst::Move { to, from, bytes } => {
                 self.whole(to);
                 self.whole(from);
                 self.used(bytes, Use::Other);

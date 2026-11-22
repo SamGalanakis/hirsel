@@ -1286,7 +1286,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.writes(carrier)?;
             c.place(carrier).map(|_| ())
         }
-        Inst::Copy { to, from, bytes } => {
+        Inst::Copy { to, from, bytes } | Inst::Move { to, from, bytes } => {
             c.writes(to)?;
             c.place(to)?;
             c.place(from)?;
@@ -1569,7 +1569,7 @@ fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
             let p = read(&mut t, address);
             t.writes.extend(p);
         }
-        Inst::Copy { to, from, .. } => {
+        Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
             let p = read(&mut t, from);
             t.reads.extend(bytes(from, p));
             let p = read(&mut t, to);

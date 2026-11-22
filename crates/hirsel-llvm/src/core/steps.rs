@@ -126,7 +126,7 @@ fn root_slot(body: &Body, mut address: AddressId) -> Option<SlotId> {
 fn writes(body: &Body, inst: &Inst, root: Option<SlotId>) -> bool {
     let address = match *inst {
         Inst::Store { address, .. } | Inst::SetCase { address, .. } => address,
-        Inst::Copy { to, .. } => to,
+        Inst::Copy { to, .. } | Inst::Move { to, .. } => to,
         Inst::Grow { carrier, .. } => carrier,
         _ => return false,
     };

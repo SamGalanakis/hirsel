@@ -765,6 +765,14 @@ pub enum Inst {
     BuiltinUse {
         definition: Box<DefPath>,
     },
+    /// Copy `bytes` bytes from the place `from` to the place `to` as if through a
+    /// temporary buffer, so the two ranges may overlap (memmove). Plain bytes only;
+    /// it moves no ownership. Last, so no stored variant index moves (FORM #112).
+    Move {
+        to: AddressId,
+        from: AddressId,
+        bytes: ValueId,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

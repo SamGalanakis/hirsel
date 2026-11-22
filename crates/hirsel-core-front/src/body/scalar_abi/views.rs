@@ -232,7 +232,7 @@ pub(super) fn scalar_views(module: &Module, body: &mut Body, aliases: &mut Vec<V
                     escape(v)
                 }
             }
-            Inst::Copy { to, from, .. } => {
+            Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
                 for a in [to, from] {
                     if let Some(v) = of_address[a.index()] {
                         escape(v)

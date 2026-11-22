@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "linux")]
 mod memory;
+#[cfg(target_os = "linux")]
 mod observation;
 mod pprof;
 mod profile;

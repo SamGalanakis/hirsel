@@ -250,6 +250,11 @@ new record and the profile reports the per-worker total as
 `runtime_events_lost`. An incomplete stream reports that its final loss count
 may be missing. Observations take no scheduler turn and add no tape event.
 
+The runtime stream starts with the magic `HIRSOBS1`. Its assigned record
+kinds are 1–12 for task, I/O and mapping observations, 16–21 for memory
+observations, 65 534 for END, and 65 535 for LOSS. Import refuses every
+unassigned kind. A new required record kind needs a new stream version.
+
 For a host-stack sample, import pairs the thread ID and monotonic timestamp
 with the calling task and source site in `host_stack_interval`. The launch
 records executable mappings from `/proc/self/maps` before program operations.

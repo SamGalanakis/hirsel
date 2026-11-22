@@ -31,7 +31,8 @@ struct Allocation {
     end: Option<u64>,
 }
 
-struct Snapshot {
+#[derive(Clone, Copy)]
+pub(crate) struct Snapshot {
     metric: &'static str,
     scope: Option<i64>,
     ts: u64,
@@ -39,7 +40,8 @@ struct Snapshot {
     epoch: u64,
 }
 
-struct Budget {
+#[derive(Clone, Copy)]
+pub(crate) struct Budget {
     id: i64,
     task: i64,
     parent: Option<i64>,
@@ -50,6 +52,105 @@ struct Budget {
     exit: Option<u64>,
     stack: u64,
     refused: bool,
+}
+
+pub(crate) enum MemoryEvent {
+    Allocate {
+        id: u64,
+        bytes: u64,
+        kind: &'static str,
+        probability: f64,
+        epoch: u64,
+    },
+    Free {
+        id: u64,
+        epoch: u64,
+    },
+    Resize {
+        id: u64,
+        bytes: u64,
+        epoch: u64,
+    },
+    Peak(Snapshot),
+    ScopeStack {
+        id: u64,
+    },
+    Budget(Box<Budget>),
+    Meta {
+        metric_version: u64,
+        state_loss: u64,
+    },
+    Slack {
+        epoch: u64,
+        id: u64,
+        bytes: u64,
+    },
+}
+
+impl MemoryEvent {
+    pub(crate) fn decode(kind: u16, words: &[u64]) -> Result<Self> {
+        let event = match (kind, words) {
+            (ALLOC, &[0, id, bytes, backing, probability, epoch]) => {
+                let probability = f64::from_bits(probability);
+                if probability <= 0.0 || probability > 1.0 || !probability.is_finite() {
+                    return Err("invalid memory sample inclusion probability".into());
+                }
+                Self::Allocate {
+                    id,
+                    bytes,
+                    kind: named(BACKING, backing)?,
+                    probability,
+                    epoch,
+                }
+            }
+            (ALLOC, &[1, id, _, _, _, epoch]) => Self::Free { id, epoch },
+            (ALLOC, &[2, id, bytes, _, _, epoch]) => Self::Resize { id, bytes, epoch },
+            (PEAK, &[metric, scope, ts, bytes, epoch]) => Self::Peak(Snapshot {
+                metric: named(METRICS, metric)?,
+                scope: (scope != 0).then(|| i64::try_from(scope)).transpose()?,
+                ts,
+                bytes,
+                epoch,
+            }),
+            (SCOPE_STACK, &[id]) => Self::ScopeStack { id },
+            (
+                BUDGET,
+                &[
+                    id,
+                    task,
+                    parent,
+                    kind,
+                    limit,
+                    peak,
+                    enter,
+                    exit,
+                    stack,
+                    refused,
+                ],
+            ) => {
+                let kind = named(SCOPES, kind)?;
+                Self::Budget(Box::new(Budget {
+                    id: i64::try_from(id)?,
+                    task: i64::try_from(task)?,
+                    parent: (parent != 0).then(|| i64::try_from(parent)).transpose()?,
+                    kind,
+                    limit: (kind != "capacity_unattributed").then_some(limit),
+                    peak: (kind != "capacity_unattributed").then_some(peak),
+                    enter,
+                    exit: (exit != 0).then_some(exit),
+                    stack,
+                    refused: refused != 0,
+                }))
+            }
+            (META, &[metric_version, state_loss]) => Self::Meta {
+                metric_version,
+                state_loss,
+            },
+            (SLACK, &[epoch, id, bytes]) => Self::Slack { epoch, id, bytes },
+            _ => return Err(format!("invalid memory profile record {kind}").into()),
+        };
+        Ok(event)
+    }
 }
 
 #[derive(Default)]
@@ -77,10 +178,6 @@ fn named(names: &[&'static str], code: u64) -> Result<&'static str> {
 }
 
 impl MemoryImport {
-    pub(crate) fn accepts(kind: u16) -> bool {
-        matches!(kind, ALLOC | PEAK | BUDGET | SCOPE_STACK | META | SLACK)
-    }
-
     pub(crate) fn stack(&mut self, status: &str) {
         self.stacks += 1;
         match status {
@@ -90,101 +187,64 @@ impl MemoryImport {
         }
     }
 
-    pub(crate) fn record(
-        &mut self,
-        ts: u64,
-        kind: u16,
-        words: &[u64],
-        site: Option<i64>,
-    ) -> Result<()> {
+    pub(crate) fn record(&mut self, ts: u64, event: &MemoryEvent, site: Option<i64>) -> Result<()> {
         self.records += 1;
-        match (kind, words) {
-            (ALLOC, [0, id, bytes, kind, probability, epoch]) => {
-                let probability = f64::from_bits(*probability);
-                if probability <= 0.0 || probability > 1.0 || !probability.is_finite() {
-                    return Err("invalid memory sample inclusion probability".into());
-                }
-                let site = site.ok_or("missing allocation callsite")?;
+        match *event {
+            MemoryEvent::Allocate {
+                id,
+                bytes,
+                kind,
+                probability,
+                epoch,
+            } => {
                 let allocation = Allocation {
-                    site,
-                    kind: named(BACKING, *kind)?,
-                    bytes: *bytes,
+                    site: site.ok_or("missing allocation callsite")?,
+                    kind,
+                    bytes,
                     probability,
                     start: ts,
                     end: None,
                 };
-                if self.allocations.insert(*id, allocation).is_some() {
+                if self.allocations.insert(id, allocation).is_some() {
                     return Err("duplicate memory allocation identity".into());
                 }
-                self.changes.push((*epoch, *id, Some(*bytes)));
+                self.changes.push((epoch, id, Some(bytes)));
             }
-            (ALLOC, [1, id, _, _, _, epoch]) => {
-                if let Some(a) = self.allocations.get_mut(id) {
+            MemoryEvent::Free { id, epoch } => {
+                if let Some(a) = self.allocations.get_mut(&id) {
                     a.end = Some(ts);
-                    self.changes.push((*epoch, *id, None));
+                    self.changes.push((epoch, id, None));
                 } else {
                     self.unmatched += 1;
                 }
             }
-            (ALLOC, [2, id, bytes, _, _, epoch]) => {
-                if self.allocations.contains_key(id) {
-                    self.changes.push((*epoch, *id, Some(*bytes)));
+            MemoryEvent::Resize { id, bytes, epoch } => {
+                if self.allocations.contains_key(&id) {
+                    self.changes.push((epoch, id, Some(bytes)));
                 } else {
                     self.unmatched += 1;
                 }
             }
-            (PEAK, [metric, scope, ts, bytes, epoch]) => {
-                self.snapshots.push(Snapshot {
-                    metric: named(METRICS, *metric)?,
-                    scope: (*scope != 0).then(|| i64::try_from(*scope)).transpose()?,
-                    ts: *ts,
-                    bytes: *bytes,
-                    epoch: *epoch,
-                });
-            }
-            (SCOPE_STACK, [id]) => {
+            MemoryEvent::Peak(snapshot) => self.snapshots.push(snapshot),
+            MemoryEvent::ScopeStack { id } => {
                 self.scope_stacks
-                    .insert(*id, site.ok_or("missing scope callsite")?);
+                    .insert(id, site.ok_or("missing scope callsite")?);
             }
-            (
-                BUDGET,
-                [
-                    id,
-                    task,
-                    parent,
-                    kind,
-                    limit,
-                    peak,
-                    enter,
-                    exit,
-                    stack,
-                    refused,
-                ],
-            ) => {
-                let kind = named(SCOPES, *kind)?;
+            MemoryEvent::Budget(ref budget) => {
                 if let Some(site) = site {
-                    self.scope_stacks.insert(*stack, site);
+                    self.scope_stacks.insert(budget.stack, site);
                 }
-                self.budgets.push(Budget {
-                    id: i64::try_from(*id)?,
-                    task: i64::try_from(*task)?,
-                    parent: (*parent != 0).then(|| i64::try_from(*parent)).transpose()?,
-                    kind,
-                    limit: (kind != "capacity_unattributed").then_some(*limit),
-                    peak: (kind != "capacity_unattributed").then_some(*peak),
-                    enter: *enter,
-                    exit: (*exit != 0).then_some(*exit),
-                    stack: *stack,
-                    refused: *refused != 0,
-                });
+                self.budgets.push(**budget);
             }
-            (META, [metric_version, state_loss]) => {
-                self.meta = Some((*metric_version, *state_loss))
+            MemoryEvent::Meta {
+                metric_version,
+                state_loss,
+            } => {
+                self.meta = Some((metric_version, state_loss));
             }
-            (SLACK, [epoch, id, bytes]) => {
-                self.slack.insert((*epoch, *id), *bytes);
+            MemoryEvent::Slack { epoch, id, bytes } => {
+                self.slack.insert((epoch, id), bytes);
             }
-            _ => return Err(format!("invalid memory profile record {kind}").into()),
         }
         Ok(())
     }
@@ -373,8 +433,10 @@ mod tests {
 
         let mut memory = MemoryImport::default();
         let p = 1.0f64.to_bits();
-        let mut record =
-            |ts, kind, words: &[u64], site| memory.record(ts, kind, words, site).unwrap();
+        let mut record = |ts, kind, words: &[u64], site| {
+            let event = MemoryEvent::decode(kind, words).unwrap();
+            memory.record(ts, &event, site).unwrap();
+        };
         record(1, ALLOC, &[0, 1, 100, 2, p, 1], Some(2));
         record(2, SLACK, &[1, 1, 92], None);
         record(3, ALLOC, &[0, 2, 24, 1, p, 2], Some(1));

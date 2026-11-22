@@ -11,7 +11,7 @@ use super::procfs::{self, Identity, KernelSymbols};
 use super::unwind::{Registers, Stack, Step};
 use crate::MemMode;
 use crate::memory::MemoryImport;
-use crate::observation::{MAPPING, Observation};
+use crate::observation::{Observation, RecordKind};
 use crate::profile::{Result, Unsigned};
 
 struct ActiveMapping {
@@ -121,26 +121,29 @@ impl<'a> Import<'a> {
         let mut records = observations.records.iter().peekable();
         let mut maps = Vec::new();
         while let Some(record) = records.next() {
-            if record.kind == MAPPING {
-                maps.extend_from_slice(&record.bytes);
-                maps.push(b'\n');
-                if !records
-                    .peek()
-                    .is_some_and(|next| next.kind == MAPPING && next.ts == record.ts)
-                {
-                    self.close_mappings(record.ts)?;
-                    self.initialize(Vec::new(), procfs::parse_mappings(&maps)?, record.ts)?;
-                    maps.clear();
+            match &record.kind {
+                RecordKind::Mapping(line) => {
+                    maps.extend_from_slice(line);
+                    maps.push(b'\n');
+                    if !records.peek().is_some_and(|next| {
+                        matches!(next.kind, RecordKind::Mapping(_)) && next.ts == record.ts
+                    }) {
+                        self.close_mappings(record.ts)?;
+                        self.initialize(Vec::new(), procfs::parse_mappings(&maps)?, record.ts)?;
+                        maps.clear();
+                    }
                 }
-            } else if MemoryImport::accepts(record.kind) {
-                let site = if record.bytes.is_empty() {
-                    None
-                } else {
-                    let (site, status) = self.memory_callsite(&record.bytes)?;
-                    memory.stack(status);
-                    Some(site)
-                };
-                memory.record(record.ts, record.kind, &record.words, site)?;
+                RecordKind::Memory { event, stack } => {
+                    let site = if stack.is_empty() {
+                        None
+                    } else {
+                        let (site, status) = self.memory_callsite(stack)?;
+                        memory.stack(status);
+                        Some(site)
+                    };
+                    memory.record(record.ts, event, site)?;
+                }
+                _ => {}
             }
         }
         memory.finish(
@@ -616,6 +619,28 @@ mod tests {
     use super::*;
     use crate::{By, Group, ProfileWriter, Query, RunMeta, query};
     use serde_json::json;
+
+    #[test]
+    fn runtime_observation_refuses_unassigned_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.observations");
+        let mut wire = b"HIRSOBS1".to_vec();
+        // Both frames have no words or bytes. Kind 22 is unassigned; 65,534 is END.
+        for kind in [22u16, 65_534] {
+            let mut header = [0; 20];
+            header[12..14].copy_from_slice(&kind.to_le_bytes());
+            wire.extend_from_slice(&header);
+        }
+        std::fs::write(&path, wire).unwrap();
+        let profile = ProfileWriter::create(&dir.path().join("run.hprof")).unwrap();
+        let error = Observation::read(&path)
+            .and_then(|observations| observations.store(profile.connection()))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unassigned runtime observation kind 22 in HIRSOBS1"
+        );
+    }
 
     #[test]
     fn kernel_samples_keep_periods_without_user_unwind_failures() {

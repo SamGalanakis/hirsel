@@ -773,59 +773,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.halt();
                     (ERROR, None)
                 }
-                // LANG-7: with no expected type a record the current module declares
-                // is built by its name, so a case added to core or a dependency never
-                // takes it over; otherwise a variant names the one visible type that
-                // declares it; its type arguments come from its payloads alone
-                // (LANG-12, Q33).
                 _ => {
                     let from = p.modules[self.at.module as usize].id;
-                    let text = p.index.symbols.text(name);
-                    let own = p.index.constructor_candidates(from, name).find_map(|id| {
-                        let Some(Def::Type(d)) = p.by_definition[id.0 as usize] else {
-                            return None;
-                        };
-                        let decl = &p.decls[d.index()];
-                        match &decl.body {
-                            DeclBody::Record(fs) if decl.site.module == from => Some((d, fs)),
-                            _ => None,
-                        }
-                    });
-                    if let Some((d, fields)) = own {
-                        let want = want.filter(|w| w.payload != 0);
-                        return self.construct(n, d, None, fields, true, args, want);
-                    }
-                    let mut found = None;
-                    for id in p.index.constructor_candidates(from, name) {
-                        let Some(Def::Type(d)) = p.by_definition[id.0 as usize] else {
-                            continue;
-                        };
-                        let DeclBody::Variant(cs) = &p.decls[d.index()].body else {
-                            continue;
-                        };
-                        let Some(i) = cs.iter().position(|c| c.name == text) else {
-                            continue;
-                        };
-                        if found.is_some_and(|(e, _, _)| e != d) {
-                            self.refuse(
-                                "LANG-7",
-                                n,
-                                format!("two visible types declare the variant `{text}`"),
-                            );
+                    let (d, case) = match p.bare_constructor(from, name) {
+                        Ok(found) => found,
+                        Err(message) => {
+                            self.refuse("LANG-7", n, message);
                             return (ERROR, None);
                         }
-                        found = Some((d, i, &cs[i]));
-                    }
-                    let Some((d, i, c)) = found else {
-                        self.refuse("LANG-7", n, format!("no visible type declares `{text}`"));
-                        return (ERROR, None);
+                    };
+                    let (fields, labelled) = match (&p.decls[d.index()].body, case) {
+                        (DeclBody::Record(fs), None) => (fs, true),
+                        (DeclBody::Variant(cs), Some(i)) => {
+                            let c = &cs[i as usize];
+                            (&c.fields, c.labelled)
+                        }
+                        _ => unreachable!(),
                     };
                     self.construct(
                         n,
                         d,
-                        Some(i as u32),
-                        &c.fields,
-                        c.labelled,
+                        case,
+                        fields,
+                        labelled,
                         args,
                         want.filter(|w| w.payload != 0),
                     )

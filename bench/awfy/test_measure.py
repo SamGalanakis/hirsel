@@ -176,6 +176,103 @@ class BoardCompletion(unittest.TestCase):
                 fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+class ComparisonReceipts(unittest.TestCase):
+    commit = "f" * 40
+
+    def arm(self, mode, rss):
+        return {"commit": self.commit, "mode": mode, "status": "ok", "verified": True,
+                "max_rss_kib": rss, "instructions": 1, "cycles": 1, "seconds": 1,
+                "pmu_times_ns": {"instructions:u": [[10, 10]], "cycles:u": [[10, 10]]}}
+
+    def runtime_evidence(self):
+        from comparison import RUNTIME_SUITES, VERSION
+
+        evidence = {"version": VERSION, "commit": self.commit, "families": ["runtime-memory"],
+                    "failures": {}, "samples": {}, "runtime": {}}
+        for suite in RUNTIME_SUITES:
+            for name in measure.EXPECTED[suite]:
+                evidence["runtime"][f"{suite}/{name}"] = {
+                    side: self.arm("runtime", 128) for side in measure.SIDES}
+        cases = evidence["runtime"]
+        cases["AWFY original/Bounce"]["hirsel"]["max_rss_kib"] = 256
+        cases["AWFY original/List"]["hirsel"]["max_rss_kib"] = 64
+        return evidence
+
+    def test_opposite_ratios_cancel_and_full_coverage_is_required(self):
+        from comparison import summary
+
+        report = summary(self.runtime_evidence(), [])
+        self.assertTrue(report["selection_complete"])
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["rows"][0]["coverage"]["rust"], (14, 14))
+        aggregate = report["rows"][-1]
+        self.assertEqual(aggregate["coverage"], {"rust": (72, 72), "goose": (72, 72)})
+        self.assertEqual(aggregate["ratios"], {"rust": {"geomean_peak_rss": 1},
+                                                "goose": {"geomean_peak_rss": 1}})
+
+    def test_invalid_rss_arm_refuses_only_aggregates_depending_on_it(self):
+        from comparison import summary
+
+        for change, reason in (
+            (None, "missing arm"),
+            ({"commit": "e" * 40}, "stale revision"),
+            ({"mode": "startup"}, "mismatched mode"),
+            ({"max_rss_kib": 0}, "missing or invalid metric"),
+            ({"status": "memory-censored"}, "memory-censored"),
+        ):
+            with self.subTest(reason=reason):
+                evidence = self.runtime_evidence()
+                samples = evidence["runtime"]["AWFY original/Bounce"]
+                if change is None:
+                    del samples["rust"]
+                else:
+                    samples["rust"].update(change)
+                report = summary(evidence, [])
+                original, pools, arena, aggregate = report["rows"]
+                self.assertEqual(original["issues"]["AWFY original/Bounce/rust"], reason)
+                self.assertEqual(pools["status"], "ok")
+                self.assertEqual(arena["status"], "ok")
+                self.assertEqual(aggregate["coverage"], {"rust": (71, 72), "goose": (72, 72)})
+                self.assertEqual(aggregate["ratios"], {"rust": {}, "goose": {"geomean_peak_rss": 1}})
+                self.assertFalse(report["selection_complete"])
+
+    def test_old_checksum_cannot_qualify_edit(self):
+        from comparison import SPECTRALNORM, compare_row, compile_oracle, COMPILE_FIELDS
+
+        mode = "arena-release/edit"
+        samples = {side: self.arm(mode, 128) | {"rebuilt": True} for side in measure.SIDES}
+        for side, sample in samples.items():
+            marker = ("CLBG::Spectralnorm checksum=1051192944 expected=1051192944 status=OK"
+                      if side == "hirsel" else "CLBG::Spectralnorm: OK in 0.01s")
+            sample["verification"] = {
+                SPECTRALNORM: {"returncode": 0, "stdout": marker + "\n", "expected_checksum": 1051192945}}
+        def compare():
+            return compare_row("Release compile", "LangArena one-body edit", samples, self.commit, mode,
+                               COMPILE_FIELDS, oracle=lambda side, sample:
+                               compile_oracle(sample, side, "arena-release", "edit"))
+        row = compare()
+        self.assertEqual(row["status"], "incomplete")
+        self.assertEqual(row["issues"], {"hirsel": "workload or rebuild oracle failed"})
+        self.assertEqual(row["ratios"], {"rust": {}, "goose": {}})
+        samples["hirsel"]["verification"][SPECTRALNORM]["stdout"] = (
+            "CLBG::Spectralnorm checksum=1051192945 expected=1051192945 status=OK\n")
+        self.assertEqual(compare()["status"], "ok")
+
+    def test_export_with_missing_units_labels_is_refused(self):
+        from comparison_units import CASES, expected, import_rows
+
+        labels = [{"goal": goal, "row": name, "status": "ok"}
+                  for goal, name in expected(tmpfs_matched=False)]
+        export = {"version": 1, "commit": self.commit, "complete": True, "failures": {},
+                  "config": {"mode": "full", "repeats": 1, "regimes": CASES, "families": ["a1", "regimes"]},
+                  "expected_rows": labels, "rows": labels[:-1]}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fair.json"
+            path.write_text(json.dumps(export))
+            with self.assertRaisesRegex(ValueError, "incomplete units label set"):
+                import_rows(path, self.commit)
+
+
 class SiblingActivity(unittest.TestCase):
     def test_cold_phases_reuses_the_lane_cpu_set(self):
         original = os.sched_getaffinity(0)

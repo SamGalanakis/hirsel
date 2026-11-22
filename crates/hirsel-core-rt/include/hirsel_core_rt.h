@@ -82,6 +82,9 @@ void hirsel_core_map_hash_add_bytes(void *, const uint8_t *, uint64_t);
 uint64_t hirsel_core_map_hash_finish(const void *);
 /* rt.sha1_blocks: RFC 3174 compression of the byte span and its padding. */
 void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len);
+/* rt.zero_bytes: zero len bytes at at, inside the storage block that starts at
+   block; pages the kernel never backed are already zero and stay untouched. */
+void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
 
 /* rt.sha256_blocks: FIPS 180-4 compression of blocks 64-byte blocks into the
    eight state words, with the CPU's SHA-256 instructions when it has them; no
@@ -141,6 +144,8 @@ typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_
 typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreFixedDescriptor;
 typedef struct { uint64_t back, cursor, a, b, index; } HirselCoreFixedPoint;
 bool hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t site);
+/* A dead box compiled glue cleaned in place, freed as the drain frees it. */
+void hirsel_core_free_box(HirselCoreContext *, void *node, uint64_t charge);
 /* Inline Arc completion hooks. Call with ctx[CONTEXT_EVENTS] != 0.
    The event word and sink are pinned for the run. The hook folds owner
    credits and records the operation. Release precedes last-release glue. */

@@ -360,9 +360,11 @@ impl FunctionEmitter<'_> {
             ),
             RtOp::Host(op) => self.host_call(op, &args, None),
             RtOp::Returnable(op) => self.host_call(op, &args[1..], Some(args[0].clone())),
-            RtOp::FrameRecord => {
-                self.native_call("hirsel_core_frame_record", &[P], &[ptr(CONTEXT), u(&args[0])])
-            }
+            RtOp::FrameRecord => self.native_call(
+                "hirsel_core_frame_record",
+                &[P],
+                &[ptr(CONTEXT), u(&args[0])],
+            ),
             RtOp::CauseNext => self.native_call("hirsel_core_cause_next", &[P], &[p(&args[0])]),
             RtOp::CauseValue => self.native_call("hirsel_core_cause_value", &[P], &[p(&args[0])]),
             RtOp::MapHashBytes => self.map_hash(
@@ -396,6 +398,11 @@ impl FunctionEmitter<'_> {
             ),
             RtOp::Sha1Blocks => self.native_call(
                 "hirsel_core_sha1_blocks",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
+            RtOp::ZeroBytes => self.native_call(
+                "hirsel_core_zero_bytes",
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),

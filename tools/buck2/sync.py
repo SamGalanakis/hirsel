@@ -455,6 +455,12 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
                               library=f'//:{name}-standalone',
                               archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-standalone-allocation-count',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'allocation-count']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-allocation-count-archives',
+                              library=f'//:{name}-standalone-allocation-count',
+                              archive_name=f"lib{attrs['crate']}.a")
                 + '\n' + call('hirsel_library', name=f'{name}-standalone-record',
                               deps=declared_deps(package, packages),
                               **{**attrs, 'features': ['standalone', 'record']})

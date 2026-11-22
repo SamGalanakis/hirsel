@@ -64,11 +64,11 @@ fn stable_owned_strings() -> bool {
     xs[0] == "a" && xs[1] == "bb" && xs[2] == "cc"
 }
 
-// One 5-u64 scratch block fits exactly. This bound refused the old second allocation.
-// expect: run stable_one_allocation() = 12345
-fn stable_one_allocation() -> u64 {
+// Short insertion sorts admit no scratch even with owned list storage.
+// expect: run stable_short_without_allocation() = 12345
+fn stable_short_without_allocation() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 40 {
+    let r = bound bytes 0 {
         list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
             compare(a, b)
         })
@@ -173,10 +173,10 @@ fn zero_size_sort() -> bool {
 }
 
 // Stable insertion sort using ordinary swaps, independent of run detection and merging.
-fn reference(mut xs: List[u64]) {
+fn reference(mut xs: List[u64], stride: u64) {
     for i in 1u64 .. list.len(xs) {
         let mut j = i
-        while j > 0 && xs[j - 1] / 128 > xs[j] / 128 {
+        while j > 0 && xs[j - 1] / stride > xs[j] / stride {
             list.swap(mut xs, j - 1, j)
             j -= 1
         }
@@ -207,7 +207,7 @@ fn stable_generated_runs() -> bool {
                 list.push(mut expected, entry)
             }
             if n > 1 {
-                reference(mut expected)
+                reference(mut expected, 128)
             }
             let sorted = bound bytes (n * 8) {
                 list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
@@ -218,6 +218,42 @@ fn stable_generated_runs() -> bool {
             if xs != expected {
                 return false
             }
+        }
+    }
+    true
+}
+
+// A full partition exceeds the bound. Sorting and merging smaller runs must
+// preserve input order among equal keys across the run boundary.
+// expect: run stable_bounded_scratch() = true
+fn stable_bounded_scratch() -> bool {
+    let n: u64 = 257
+    let mut rng: u64 = 966490
+    for shape in 0u64 .. 3 {
+        let mut xs: List[u64] = list.with_capacity(n)
+        let mut expected: List[u64] = list.with_capacity(n)
+        for i in 0u64 .. n {
+            rng = int.wrapping_add(int.wrapping_mul(rng, 1664525), 1013904223)
+            let key = if shape == 0 {
+                (rng >> 16) % 13
+            } else if shape == 1 {
+                (i % 129) / 2
+            } else {
+                (256 - i) % 129 / 2
+            }
+            let entry = key * 512 + i
+            list.push(mut xs, entry)
+            list.push(mut expected, entry)
+        }
+        reference(mut expected, 512)
+        let sorted = bound bytes 1024 {
+            list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+                compare(a / 512, b / 512)
+            })
+        }
+        result.unwrap(sorted)
+        if xs != expected || list.capacity(xs) != n {
+            return false
         }
     }
     true

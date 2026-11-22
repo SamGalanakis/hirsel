@@ -1,4 +1,4 @@
-//! WIRE-SPEC §3 and core/std/api/codec.md. Values are LE; physical keys are BE.
+//! WIRE-SPEC §3 and core/std/api/codec.md. Values are LE; logical keys are BE.
 use crate::{MAX_FRAME, Result};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

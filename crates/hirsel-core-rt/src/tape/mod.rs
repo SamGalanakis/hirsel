@@ -31,6 +31,7 @@ mod tests;
 use crate::{
     provider::*,
     retention::{RETENTION, Retained},
+    unix_net::{UnixOperation, UnixReply},
 };
 use format::*;
 use std::{collections::BTreeMap, ptr, sync::Mutex};
@@ -816,7 +817,7 @@ fn creates_object(op: u8) -> bool {
             | TLS_CONNECT
             | SCRAM
             | EXEC_SPAWN
-    ) || unix::kind(op).is_some()
+    )
 }
 
 fn waiting_io(op: u8) -> bool {
@@ -959,8 +960,8 @@ unsafe fn canonical(r: &Request) -> Args {
         if r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
             return Args::of(&[r.mode & 3]);
         }
-        if unix_operation(r.operation) {
-            return unix::canonical(r);
+        if let Some(op) = UnixOperation::describe(r.operation) {
+            return unix::canonical(r, op);
         }
         if socket_op(r.operation) {
             return socket_args(r);
@@ -1840,7 +1841,9 @@ unsafe fn record_out(
     };
     let mut answer = o;
     let mut created = None;
-    if ok && creates_object(r.operation) {
+    let unix_reply = UnixOperation::describe(r.operation).map(|op| op.reply);
+    let unix_kind = unix_reply.and_then(unix::kind);
+    if ok && (creates_object(r.operation) || unix_kind.is_some()) {
         live.objects.push(Object {
             inner: Some(Inner {
                 provider: inner.provider,
@@ -1851,6 +1854,10 @@ unsafe fn record_out(
         out.value = live.objects.len() as u64;
         answer.value = handle(generation, live.objects.len());
         created = Some(answer.value);
+        if let Some(kind) = unix_kind {
+            live.typed_resources
+                .insert(live.objects.len(), Resource::new(kind, 0));
+        }
     }
     if ok && r.operation == EXEC_SPAWN {
         live.typed_resources
@@ -1882,10 +1889,6 @@ unsafe fn record_out(
             *pipe = (live.objects.len() as u64) << 2 | u64::from(part);
         }
     }
-    if ok && let Some(kind) = unix::kind(r.operation) {
-        live.typed_resources
-            .insert(live.objects.len(), Resource::new(kind, 0));
-    }
     if ok && r.operation == CLOSE && r.mode == crate::exec_runtime::PROC_CLOSE {
         live.typed_resources.remove(&ordinal);
     }
@@ -1914,7 +1917,7 @@ unsafe fn record_out(
     } else if ok && matches!(r.operation, STAT | STAT_FILE) {
         out.payload.push(o.kind);
         out.payload.extend_from_slice(&o.written.to_le_bytes());
-    } else if ok && r.operation == DATAGRAM_RECV {
+    } else if ok && unix_reply == Some(UnixReply::Packet) {
         out.payload.push(o.kind);
         if r.buffer.len > before {
             // SAFETY: receive initialized exactly its appended bytes.
@@ -2053,8 +2056,9 @@ unsafe fn replay_out(
     r: &mut Request,
     out: Out,
 ) -> Result<Outcome, Fault> {
-    if unix_operation(op) {
-        unix::delivery(r, &out, live.objects.len() as u64)?;
+    let unix_reply = UnixOperation::describe(op).map(|op| op.reply);
+    if let Some(reply) = unix_reply {
+        unix::delivery(r, reply, &out, live.objects.len() as u64)?;
     }
     if op == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
         let ordinal = object as usize;
@@ -2131,7 +2135,8 @@ unsafe fn replay_out(
         o.value = prev.wrapping_add(unzz(out.value) as u64);
         live.clocks.insert((op, object), o.value);
     }
-    if ok && creates_object(op) {
+    let unix_kind = unix_reply.and_then(unix::kind);
+    if ok && (creates_object(op) || unix_kind.is_some()) {
         if out.value != live.objects.len() as u64 + 1 {
             return Err(Fault::Corrupt);
         }
@@ -2140,10 +2145,10 @@ unsafe fn replay_out(
             open_resource: false,
         });
         o.value = handle(generation, live.objects.len());
-    }
-    if ok && let Some(kind) = unix::kind(op) {
-        live.typed_resources
-            .insert(ordinal_of(o.value), Resource::new(kind, 0));
+        if let Some(kind) = unix_kind {
+            live.typed_resources
+                .insert(ordinal_of(o.value), Resource::new(kind, 0));
+        }
     }
     if ok && op == EXEC_SPAWN {
         live.typed_resources
@@ -2173,7 +2178,7 @@ unsafe fn replay_out(
     if matches!(op, EXEC_SPAWN | EXEC_WAIT | EXEC_SIGNAL) {
         return Ok(o);
     }
-    if op == DATAGRAM_RECV {
+    if unix_reply == Some(UnixReply::Packet) {
         if ok {
             let (flag, bytes) = out.payload.split_first().unwrap();
             if !bytes.is_empty() {

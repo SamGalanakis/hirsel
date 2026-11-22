@@ -23,7 +23,8 @@ enum Pos {
 
 /// The tables declaration writes, own rows only (a library's rows are the
 /// request's image, named by the shape). Sites' spans index `positions`, nodes
-/// index `nodes`, and symbols index `symbols`.
+/// index `nodes`, and symbols index `symbols`. `by_path` is sorted by path, so
+/// one shape's tables are one record's bytes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Declared {
     types: Vec<TyKind>,
@@ -310,7 +311,13 @@ impl<'a> Program<'a> {
             constant_parts: self.constant_parts.own_iter().cloned().collect(),
             constant_strings: self.constant_strings.own_iter().cloned().collect(),
             constant_ids: self.constant_ids.own_iter().cloned().collect(),
-            by_path: self.by_path.iter().map(|(p, d)| (p.clone(), *d)).collect(),
+            by_path: {
+                // The program's map has no order; the record's rows are sorted
+                // by path, as a published image map's are.
+                let mut rows: Vec<_> = self.by_path.iter().map(|(p, d)| (p.clone(), *d)).collect();
+                rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                rows
+            },
             by_definition: self.by_definition.own_iter().cloned().collect(),
             core_operations: self.core_operations.own_iter().cloned().collect(),
             alias_state: self.alias_state.clone(),

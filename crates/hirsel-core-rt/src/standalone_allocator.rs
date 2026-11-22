@@ -13,6 +13,8 @@ fn required(pointer: *mut u8) -> *mut u8 {
     if pointer.is_null() {
         crate::process::stop(b"HostMemory");
     }
+    #[cfg(feature = "allocation-count")]
+    crate::allocation_count::allocated();
     pointer
 }
 

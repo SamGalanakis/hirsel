@@ -357,12 +357,13 @@ slots are its bodiless functions in number order.
 
 Every enumeration is written with a tag from a fixed, append-only table, and every count and
 index as unsigned LEB128. The body starts with the seven ASCII bytes `HIRBODY`, a zero byte
-and its normal-form version as a 16-bit little-endian number. The current version is 2, which
-uses the run-keyed Map hash operations of [SEM-5](semantics.md#sem-5-maps).
+and its normal-form version as a 16-bit little-endian number. The current version is 3, which
+places Map keys in the grouped index of [PROG-11](#prog-11-map-index); a reader accepts version 3
+only.
 Each value has exactly one encoding: a reader refuses a LEB128 number with a redundant byte,
 an unknown tag, a list out of its required order or with a repeat, or bytes left over at the
 end. Decoding and re-encoding a body gives the same bytes. Its
-**body hash** is `H("hirsel.code-body.v2", body)`. Positions and hints go to the body's
+**body hash** is `H("hirsel.code-body.v3", body)`. Positions and hints go to the body's
 **annex** instead, in the body's order: each entry names a position of that body, and an annex
 whose entries do not match its body's instructions, terminators and calls in number and kind is
 malformed. The annex is hashed under `hirsel.code-annex.v1` and never enters an address.
@@ -415,10 +416,11 @@ outcomes. A cache of one function's results keys each function argument by its t
 and its captured values, since two function values with equal identity bytes can run different
 code.
 
-The domains `hirsel.code-body.v2`, `hirsel.code-annex.v1`, `hirsel.code-group.v1`,
-`hirsel.code-address.v1`, `hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by
-the 2026-11-21 version of this section. A change to the normal form or to a group's encoding
-takes a new version and a new domain. It never reuses an old one.
+The domains `hirsel.code-annex.v1`, `hirsel.code-group.v1`, `hirsel.code-address.v1`,
+`hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by the 2026-11-21 version of
+this section, and `hirsel.code-body.v3` by the 2026-11-22 version, which retires
+`hirsel.code-body.v2`. A change to the normal form or to a group's encoding takes a new version
+and a new domain. It never reuses an old one.
 
 Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
 failure target; slots are the functions retained code can run, and type hooks are metadata;
@@ -428,6 +430,151 @@ by closure hash; the identity order, the identity encoding and the closure encod
 generated functions are named by ordinal; and a program has one address per identity. Earlier
 text took slots from every bodiless row, wrote lowered builtins as instructions only, and stored
 an address at materialisation. No address had been published, so nothing migrates.
+
+Version note (2026-11-22, Map index): normal form 3 replaces the linear-probe index of words
+with the grouped index of PROG-11, adds the fast placement operations, and changes the meaning of
+every private Map builtin that reads or writes a Map's block. Bodies of version 2 are refused,
+not converted.
+
+### PROG-11: Map index
+
+This section fixes how a Map stores and finds its entries, so that `core.map`, code the compiler
+emits for a Map and every engine agree on one layout under one normal-form version (PROG-10).
+None of it is observable. No value, admission, refund, step, cleanup order or iteration order
+depends on it, on the run's Map key, or on which placement mode a Map is in
+([SEM-5](semantics.md#sem-5-maps)).
+
+**Entries are authoritative.** A Map's block holds `cap` entries in insertion order, then a
+32-byte index header, then its index. Each entry is a meta word (`u64`), then the key, then the
+value, at the entry's stride. A dead entry's meta is 0 and a live entry's is never 0. Order,
+membership, iteration, cleanup, compaction, growth, cloning and consuming iteration read only
+the entries. The index is derived from them, and a rebuild reconstructs it from them alone. The
+carrier stays `{data, used entry slots, cap}`.
+
+**Index.** The index has B = max(16, next_pow2(2 × cap)) buckets in G = B / 16 groups.
+Group g is 16 control bytes followed by 16 entry indices. Entry indices are `u32` while
+cap ≤ 2^32 and `u64` above, so a group is 80 or 144 bytes, and group g begins 32 + g × 80
+(or g × 144) bytes after the entries. A control byte is one of:
+
+| byte | meaning |
+|---|---|
+| `0xFF` | EMPTY: never used since the last rebuild, or erased in a group that holds an EMPTY byte |
+| `0x80` | DELETED: erased in a group that held no EMPTY byte |
+| `0x00`–`0x7F` | FULL: a tag; the bucket's entry index names a live entry |
+
+Every live entry has exactly one FULL byte, and every FULL byte names a distinct live entry.
+Non-EMPTY bytes number at most the used entry slots, which are at most cap, which is at most
+B / 2, so at least half of every index is EMPTY.
+
+The header holds four words: the live count, the group mask G − 1, the mode, and zero. Mode
+bit 0 is set in **strong** mode and clear in **fast** mode; bit 1 is set when entry indices are
+`u64`. A Map's first index is strong when its key type is in neither class below, and fast
+otherwise.
+
+**Placement word.** Each key has a 64-bit placement word p. Its tag is p >> 57, and its home
+group is p & (G − 1). A Map block on any supported target is below 2^57 bytes, so G < 2^51,
+and bits 51–56 of p never select a group. A live entry's meta is p | 2^56, which is never 0,
+and a rebuild takes each entry's tag and group from its meta.
+
+In fast mode p is the key's **fast placement word**. Write fold(a, b) for the low 64 bits of
+the 128-bit unsigned product a × b, XORed with its high 64 bits. Write C for
+`0x9e3779b97f4a7c15`, and s0 and s1 for the run's salts.
+
+- **Word class.** These are the scalar key types. With x the 64-bit word that `map.hash` reads
+  for the key, p = fold(x ^ s0, C).
+- **Byte class.** These are the key types whose value is one byte sequence and nothing else
+  (`String`, `Bytes`, `List[u8]`). Take bytes b[0..n). Start with z = s0 and i = 0. While
+  n − i > 16, set z = fold(z ^ le(i, 8), s1 ^ le(i + 8, 8)) and add 16 to i. Here le(j, w)
+  is the min(w, n − j) bytes from b[j], read as a little-endian number with the bytes above
+  zero (0 when j ≥ n). With r = n − i, let w0 = le(i, 8), and w1 = le(i + 8, r − 8) when
+  r > 8, else 0. Then t = fold(z ^ w0, (s1 ^ w1) + n mod 2^64) and p = fold(t, C). An engine
+  reads no byte outside b[0..n).
+
+In strong mode, p = `map.hash(k)`, the run-keyed SipHash-1-3 of SEM-5.
+
+**Salts.** s0 is SipHash-1-3 under the run's Map key of the 17 ASCII bytes
+`hirsel.map.fast.0`, and s1 is the same over `hirsel.map.fast.1`. They are derived where the
+key is acquired or restored ([CAP-8](capabilities.md#cap-8-the-replay-point)). They belong to
+the run, every task uses them, and a recording holds only the key. Every `map.hash` stream is
+a whole number of 8-byte words, so no stream equals either message. With the key
+`00 01 … 0f`, s0 = `c93577b642b675d3` and s1 = `216bdc5358d9c4d5`. The fast word of
+0 is `175d5dfbd09e75c7`, of 1 is `b08ad43c5024c9bd`, of the empty byte sequence is
+`c601c2084ab71e17`, of `abcdefghi` is `dd8ba4778c150f32` and of `abcdefghijklmnopq`
+is `8d14bb88cfa906fe`.
+
+**Probing.** From the home group g0, a probe visits the groups g(i+1) = (g(i) + i + 1) &
+(G − 1), which reach every group once in G visits. In fast mode a probe visits at most
+min(8, G) groups, which is 128 buckets. In strong mode it has no cap. Within a group, buckets
+are taken in ascending order.
+
+- A **lookup** compares the key of every bucket whose byte equals p's tag, in probe order,
+  and finds the first that is equal ([SEM-7](semantics.md#sem-7-equality-and-order)). It ends absent
+  after a group that holds an EMPTY byte, or at the cap.
+- An **insertion probe** is a lookup that also notes the first EMPTY or DELETED bucket it
+  passes. Its result is **Found**(entry, bucket), **Vacant**(bucket) or, in fast mode only,
+  **Crowded**, when no such bucket lies within the cap.
+- A **placement** takes the first EMPTY or DELETED bucket in probe order. In fast mode it is
+  Crowded when none lies within the cap. In strong mode the half-empty index always has one.
+
+**One writer.** `core.map` has one function that publishes a Vacant result: it writes p's tag
+to the bucket's control byte and the entry index at the header's width. Every path that
+places a key goes through it: insertion, `update_or_insert`, the compiler's in-place insertion,
+growth, compaction, `reserve`, clone and promotion. The compiler's in-place insertion runs
+`core.map`'s insertion probe and branches on its result:
+
+- Found replaces the value in place.
+- Vacant with a spare entry slot builds the key and value in that slot and publishes.
+- Vacant without a spare slot, and Crowded, call the ordinary insertion, which owns growth and
+  promotion.
+
+So the index width, the mode and promotion each have one definition, and emitted code
+computes no part of the layout itself. Admission and in-place ownership are unchanged.
+
+**Erasure.** `map.remove` erases its entry's bucket before the entry dies. The byte becomes
+EMPTY when its group holds an EMPTY byte, and DELETED otherwise. A consuming loop moves
+entries out without touching the index. The Map has been taken, so it is never probed again,
+and its cleanup reads only the entries.
+
+**Rebuild.** Growth, compaction, `reserve`, clone and promotion rebuild the index. A rebuild
+sets every control byte to EMPTY, then places every live entry in entry order under the Map's
+mode. A fast rebuild hashes nothing.
+
+**Promotion.** A Map in fast mode promotes when an insertion probe or a placement is Crowded.
+Promotion sets the strong bit. Then it recomputes p = `map.hash` of each live entry's key, in
+entry order, stores p | 2^56 as that entry's meta, and rebuilds. The interrupted operation then
+goes on in strong mode: an insertion probes its key again under `map.hash`.
+
+Promotion allocates nothing, admits nothing, moves no entry and takes no step
+([MEM-30](budgets.md#mem-30-step-bounds)). It happens at most once in a Map's life. Growth,
+compaction, `reserve`, removal and clone keep the strong bit (a clone of a strong Map is
+strong), and nothing clears it.
+
+Before promotion, a probe visits at most 8 groups whatever the keys. Promotion costs one pass
+over the entries, once. After it, every probe has the expected cost of a half-full table under
+a keyed hash, for keys chosen without the run key.
+
+**Private operations.** `core.map` reaches a block only through bodiless private functions.
+The compiler lowers each inline from one layout definition, on every engine:
+
+| function | meaning |
+|---|---|
+| `place(k)` | the fast placement word, from tags `MapPlaceWord` (60) and `MapPlaceBytes` (61); a pure inline operation that reads the salts from the task context and calls nothing |
+| `hash(k)` | the strong placement word, as in version 2 |
+| `mode(m)`, `group_mask(m)` | the header's mode and group mask |
+| `group_match(m, g, t)` | a 16-bit mask whose bit j is set when group g's byte j equals t |
+| `group_empty(m, g)`, `group_vacant(m, g)` | the same mask for EMPTY bytes, and for EMPTY or DELETED bytes |
+| `bucket_entry(m, b)` | bucket b's entry index |
+| `publish(mut m, b, p, i)` | write p's tag and entry index i to bucket b; called only by the one writer |
+| `erase(mut m, b)` | erase bucket b; called only by `map.remove` |
+| `clear_index(mut m)`, `set_strong(mut m)` | set every control byte to EMPTY; set the strong bit |
+| `slot_meta(m, i)` | entry i's meta |
+
+`slot_hash`, `slot_live`, `index_len`, `index_get` and `index_set` are gone. Each mask is
+exact on every target: SSE2, NEON and the portable word-at-a-time form give equal masks, with
+no false positives. The insertion probe's result is a core-private enum with the cases
+`Found(entry, bucket)`, `Vacant(bucket)` and `Crowded`. `hash` keeps semantics number 2. Every
+other Map builtin that reads or writes a block takes its next number, and a new builtin starts
+at 1.
 
 ### PROG-6: One meaning
 

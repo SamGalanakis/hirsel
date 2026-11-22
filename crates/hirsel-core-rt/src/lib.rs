@@ -8,7 +8,10 @@ pub mod abi;
 pub mod abi_host;
 pub mod abi_layout;
 pub mod abi_tasks;
+#[cfg(feature = "allocation-count")]
+mod allocation_count;
 mod allocator;
+mod backing_observation;
 pub mod block;
 pub mod causes;
 pub mod channel;
@@ -74,6 +77,7 @@ pub mod tls;
 mod units;
 pub mod units_lang;
 mod unix_net;
+mod zero;
 /// The unit connection path's round-trip measurement (`examples/units_conn.rs`).
 #[cfg(not(test))]
 #[doc(hidden)]

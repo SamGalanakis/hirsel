@@ -106,7 +106,10 @@ by a per-run seed that enters at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); no operation reveals a hash and iteration
 is in insertion order, so no value depends on the seed
 ([CAP-6](capabilities.md#cap-6-no-ambient-input)). The key also has no effect on cleanup
-order, admission, refunds or step charges. A Map literal builds its index at run time.
+order, admission, refunds or step charges. Lookups and insertions stay expected constant time
+for keys chosen without the seed, even keys chosen to collide: a Map whose cheap placement
+crowds rebuilds its index once under the keyed hash
+([PROG-11](programs.md#prog-11-map-index)), and that rebuild is not observable either. A Map literal builds its index at run time.
 Views from `map.get` are anchored to the map and freeze it as list views do.
 `map.update` changes a present value in place through a scoped callback
 ([core](core.md)).

@@ -194,7 +194,7 @@ reuses it. `hang_up()` closes the session.
 Reset. `Want`, `Entry`, `Done` and `Row` are its codec payload types. Welcome carries
 the Caller, q, budget, executable digest, target and n_place. Batch carries the
 version, completing subscription ids, rows and outcomes, in that order. A Row key
-is the physical data-tree key, with big-endian table and integer key components;
+is the logical key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
 schema prefix. The session still uses `Told`; wire serving is a later slice.
 Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.

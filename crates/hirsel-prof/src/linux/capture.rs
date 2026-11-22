@@ -10,7 +10,7 @@ use super::import::Import;
 use super::launch::SuspendedLaunchedProcess;
 use super::perf::{self, Event, PerfGroup, PerfSettings};
 use super::procfs::Identity;
-use crate::observation::{MAPPING, Observation};
+use crate::observation::{Observation, RecordKind};
 use crate::profile::{ProfileWriter, Result, RunMeta};
 
 /// The settings common to launching or attaching to a native process.
@@ -254,13 +254,16 @@ fn seed_mappings(import: &mut Import<'_>, observations: &Observation) -> Result<
     let mut maps = observations
         .records
         .iter()
-        .filter(|record| record.kind == MAPPING)
+        .filter_map(|record| match &record.kind {
+            RecordKind::Mapping(line) => Some((record.ts, line)),
+            _ => None,
+        })
         .peekable();
-    let Some(time) = maps.peek().map(|record| record.ts) else {
+    let Some(&(time, _)) = maps.peek() else {
         return Ok(());
     };
     let bytes = maps
-        .flat_map(|record| record.bytes.iter().copied().chain([b'\n']))
+        .flat_map(|(_, line)| line.iter().copied().chain([b'\n']))
         .collect::<Vec<_>>();
     import.initialize(Vec::new(), super::procfs::parse_mappings(&bytes)?, time)
 }

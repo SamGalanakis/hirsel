@@ -282,6 +282,84 @@ fn exercise(budget: u64, count: u64) -> u64 {
     }
 }
 
+// A zero fill of at least ZERO_FILL_MIN bytes goes to rt.zero_bytes, which may
+// leave never-backed pages alone. Storage that held other values must still
+// read back as zeros, and the bytes before `at` and past the fill are kept:
+// a skipped written page, a span measured from the block instead of `at`, or a
+// count taken as bytes leaves 0xAB words or a lost prefix here. The expected
+// value is the spec's: fill appends n copies after the existing elements, so
+// every element matches and the length is prefix + count.
+#[test]
+fn large_zero_fills_overwrite_written_storage() {
+    let source = r#"
+fn words(n: u64, prefix: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(n)
+    list.fill(mut xs, n, 0xABABABABABABABAB)
+    list.clear(mut xs)
+    list.fill(mut xs, prefix, 7)
+    list.fill(mut xs, n - prefix - 1, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(xs) {
+        let want: u64 = if i < prefix { 7 } else { 0 }
+        if xs[i] != want { bad += 1 }
+    }
+    bad * 1000000 + list.len(xs)
+}
+fn octets(n: u64, prefix: u64) -> u64 {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0xAB)
+    list.clear(mut b)
+    list.fill(mut b, prefix, 7)
+    list.fill(mut b, n - prefix - 2, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(b) {
+        let want: u8 = if i < prefix { 7 } else { 0 }
+        if b[i] != want { bad += 1 }
+    }
+    bad * 1000000 + list.len(b)
+}
+fn fresh(n: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(n)
+    list.fill(mut xs, n, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(xs) {
+        if xs[i] != 0 { bad += 1 }
+    }
+    bad * 1000000 + list.len(xs)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // 32768 words are 256 KiB, 200003 bytes end inside a page, and each
+    // prefix starts the fill inside the first page.
+    let inputs = [
+        ("words", vec![32768, 3], 32767),
+        ("octets", vec![200003, 5], 200001),
+        ("fresh", vec![32768], 32768),
+    ];
+    let cases = inputs.clone().map(|(name, args, _)| Case {
+        function: names[name],
+        args,
+        limit: 4 << 20,
+        injection: None,
+    });
+    let expected = inputs.map(|(_, _, value)| eval::Outcome::Returned(vec![value]));
+    for (case, outcome) in cases.iter().zip(&expected) {
+        assert_eq!(
+            eval::run(&program, case.function, &case.args, case.limit).outcome,
+            *outcome
+        );
+    }
+    let functions = cases.each_ref().map(|case| case.function);
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &functions);
+    for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", mode, Some(object));
+        for (report, outcome) in reports.into_iter().zip(&expected) {
+            assert_eq!(&report.outcome, outcome);
+        }
+    }
+}
+
 #[test]
 fn counted_list_fill_slices_use_memset_after_the_range_check() {
     let source = r#"
@@ -1749,6 +1827,94 @@ void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, ui
         assert_eq!(report.outcome, eval::Outcome::Returned(vec![length]));
         assert_eq!(report.used, 0);
         assert_eq!(report.trace, vec![length * 8]);
+    }
+}
+
+/// Dead chains of up to a million boxes, released from a local and from a
+/// list's elements, are cleaned in place near their roots and each handed to
+/// the drain once below (LANG-19: constant stack), and every block is refunded.
+/// Hand-derived: `Link` is 8 + 8 (`Option[Box]`) plus 8, so each box charges 24
+/// (MEM-24); four roots in a list of capacity 4 add 4 × 16. Nothing is retained;
+/// each chain deeper than a few boxes traces one hand-over, a single box none.
+/// A million deep chain overflows any native recursion over its boxes.
+#[test]
+fn deep_box_chains_drop_with_one_drain_hand_over_each() {
+    let source = r#"
+type Link {
+    next: Option[Box[Link]],
+    value: u64
+}
+
+fn build(n: u64) -> Option[Box[Link]] {
+    let mut head: Option[Box[Link]] = None
+    let mut i = 0u64
+    while i < n {
+        let next = take head
+        head = Some(box.new(Link(next, value: i)))
+        i = i + 1
+    }
+    head
+}
+
+fn chain(n: u64) -> u64 {
+    let head = build(n)
+    n
+}
+
+fn forest(n: u64) -> u64 {
+    let mut roots: List[Option[Box[Link]]] = list.with_capacity(4)
+    let mut r = 0u64
+    while r < 4 {
+        list.push(mut roots, build(n))
+        r = r + 1
+    }
+    list.len(roots) * n
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // (function, length, roots, list bytes)
+    let shapes: Vec<(&str, u64, u64, u64)> = [1, 1_000, 1_000_000]
+        .into_iter()
+        .flat_map(|n| [("chain", n, 1, 0), ("forest", n, 4, 4 * 16)])
+        .collect();
+    let peak = |&(_, n, roots, list): &(&str, u64, u64, u64)| roots * n * 24 + list;
+    let cases: Vec<Case> = shapes
+        .iter()
+        .map(|shape| Case {
+            function: names[shape.0],
+            args: vec![shape.1],
+            limit: peak(shape),
+            injection: None,
+        })
+        .collect();
+    let bindings = r#"
+bool __real_hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t);
+bool __wrap_hirsel_core_release(HirselCoreContext *ctx, void *node, const HirselCoreFixedDescriptor *d, uint64_t site) {
+    hirsel_core_test_drop_trace(1);
+    return __real_hirsel_core_release(ctx, node, d, site);
+}
+"#;
+    let reports = execute_optimized(&module, &cases, bindings, "", Optimization::Speed);
+    for ((shape, case), report) in shapes.iter().zip(&cases).zip(reports) {
+        let &(_, n, roots, _) = shape;
+        // The evaluator's cleanup recurses natively, so it checks the shallow chains.
+        if n <= 1_000 {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(expected.outcome, report.outcome, "{shape:?}");
+            assert_eq!(expected.used, 0, "{shape:?}");
+            assert_eq!(expected.peak_reserved, peak(shape), "{shape:?}");
+        }
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![roots * n]),
+            "{shape:?}"
+        );
+        assert_eq!(report.used, 0, "{shape:?}");
+        if let Some(reserved) = report.peak_reserved {
+            assert_eq!(reserved, peak(shape), "{shape:?}");
+        }
+        let hand_overs = if n == 1 { 0 } else { roots as usize };
+        assert_eq!(report.trace, vec![1; hand_overs], "{shape:?}");
     }
 }
 

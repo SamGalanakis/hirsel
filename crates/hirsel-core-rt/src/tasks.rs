@@ -59,17 +59,9 @@ impl Storage {
                 NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
             }
         };
-        #[cfg(any(test, feature = "charge-observation"))]
+        #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
         if bytes != 0 {
-            crate::peak::allocated(pointer.as_ptr(), bytes);
-        }
-        #[cfg(feature = "prof")]
-        if bytes != 0 {
-            crate::mem_prof::alloc(
-                pointer.as_ptr(),
-                bytes,
-                crate::mem_prof::Backing::TaskStorage,
-            );
+            crate::backing_observation::observe!(allocate, pointer.as_ptr(), bytes, TaskStorage);
         }
         Self { pointer, layout }
     }
@@ -82,10 +74,11 @@ impl Drop for Storage {
         // SAFETY: sole owner of this host storage; payload is already moved/cleaned.
         unsafe {
             if self.layout.size() != 0 {
-                #[cfg(any(test, feature = "charge-observation"))]
-                crate::peak::deallocated(self.pointer.as_ptr());
-                #[cfg(feature = "prof")]
-                crate::mem_prof::free(self.pointer.as_ptr(), self.layout.size());
+                crate::backing_observation::observe!(
+                    free,
+                    self.pointer.as_ptr(),
+                    self.layout.size(),
+                );
                 dealloc(self.pointer.as_ptr(), self.layout);
             }
         }
@@ -2695,7 +2688,9 @@ unsafe fn provider_operation_in<const RETURNABLE: bool>(
         } else {
             provider_outcome_opt!(
                 token,
-                operation::<PointerCalls, RETURNABLE>(context, task, provider, request, token, issued)
+                operation::<PointerCalls, RETURNABLE>(
+                    context, task, provider, request, token, issued
+                )
             )
         }
     }
@@ -2742,7 +2737,9 @@ unsafe fn operation<C: Calls, const RETURNABLE: bool>(
         CALLBACK_TASK.set(ptr::null_mut());
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
-            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(
+                context, task, provider, request, token, start, issued,
+            );
         }
         let step = provider_callback!(
             token,
@@ -2751,12 +2748,18 @@ unsafe fn operation<C: Calls, const RETURNABLE: bool>(
         );
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
-            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(
+                context, task, provider, request, token, start, issued,
+            );
         }
         if let Some(issued) = issued {
             *issued = Some(step.outcome);
         }
-        Some(provider_callback!(token, Deliver, C::deliver(provider, request, step.outcome)))
+        Some(provider_callback!(
+            token,
+            Deliver,
+            C::deliver(provider, request, step.outcome)
+        ))
     }
 }
 /// How `operation` calls a provider's `wait` and `deliver`. A form may contain
@@ -2919,9 +2922,14 @@ unsafe fn returnable(
                 park_returnable(task, op);
                 None
             }
-            Next::Done(produced) => {
-                Some(delivered(context, &(*op).provider, request, token, produced, None))
-            }
+            Next::Done(produced) => Some(delivered(
+                context,
+                &(*op).provider,
+                request,
+                token,
+                produced,
+                None,
+            )),
         }
     }
 }
@@ -2945,7 +2953,14 @@ pub(crate) unsafe fn resume_returnable(context: *mut Context) -> Option<crate::p
             Next::Done(produced) => {
                 (*task).operation = ptr::null_mut();
                 let request = (*op).request;
-                let outcome = delivered(context, &(*op).provider, request, (*op).token, produced, None);
+                let outcome = delivered(
+                    context,
+                    &(*op).provider,
+                    request,
+                    (*op).token,
+                    produced,
+                    None,
+                );
                 #[cfg(feature = "prof")]
                 prof_io_end((*op).token, &outcome);
                 Some(outcome)
@@ -4770,13 +4785,11 @@ pub unsafe fn run_root(
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
     });
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
-    #[cfg(feature = "prof")]
-    crate::mem_prof::alloc(
+    crate::backing_observation::observe!(
+        allocate,
         (&*root as *const Task).cast(),
         size_of::<Task>(),
-        crate::mem_prof::Backing::TaskStorage,
+        TaskStorage,
     );
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
@@ -5394,13 +5407,11 @@ unsafe fn spawn_in(
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
         });
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
-        #[cfg(feature = "prof")]
-        crate::mem_prof::alloc(
+        crate::backing_observation::observe!(
+            allocate,
             (&*task as *const Task).cast(),
             size_of::<Task>(),
-            crate::mem_prof::Backing::TaskStorage,
+            TaskStorage,
         );
         let task = Box::into_raw(task);
         #[cfg(feature = "record")]
@@ -5791,10 +5802,7 @@ pub(crate) unsafe fn on_host_stack<T>(
 #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
 impl Drop for Task {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::deallocated((self as *const Self).cast());
-        #[cfg(feature = "prof")]
-        crate::mem_prof::free((self as *const Self).cast(), size_of::<Self>());
+        crate::backing_observation::observe!(free, (self as *const Self).cast(), size_of::<Self>());
     }
 }
 

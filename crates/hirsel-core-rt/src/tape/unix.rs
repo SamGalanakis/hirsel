@@ -1,13 +1,14 @@
 //! Path and packet rows for Unix sockets. Endpoints are logical root/path pairs.
 use super::{Args, Fault, Out, Request, ResourceKind, ordinal_of, put_varint};
+use crate::unix_net::{UnixField, UnixHandle, UnixOperation, UnixReply, UnixRequest};
 use hirsel_core_ids::host_op::*;
 
-pub(super) fn kind(operation: u8) -> Option<ResourceKind> {
-    match operation {
-        UNIX_CONNECT | UNIX_ACCEPT => Some(ResourceKind::UnixStream),
-        UNIX_LISTEN => Some(ResourceKind::UnixListener),
-        DATAGRAM_OPEN | DATAGRAM_BIND => Some(ResourceKind::Datagram),
-        _ => None,
+pub(super) fn kind(reply: UnixReply) -> Option<ResourceKind> {
+    match reply {
+        UnixReply::Created(UnixHandle::Stream) => Some(ResourceKind::UnixStream),
+        UnixReply::Created(UnixHandle::Listener) => Some(ResourceKind::UnixListener),
+        UnixReply::Created(UnixHandle::Datagram) => Some(ResourceKind::Datagram),
+        UnixReply::Done | UnixReply::Packet => None,
     }
 }
 
@@ -18,22 +19,25 @@ pub(super) fn can_park(operation: u8) -> bool {
     )
 }
 
-pub(super) unsafe fn canonical(r: &Request) -> Args {
+pub(super) unsafe fn canonical(r: &Request, op: UnixOperation) -> Args {
     // SAFETY: each Unix operation pins this extension and its buffer.
     unsafe {
-        let req = &*r.path.cast::<crate::unix_net::UnixRequest>();
+        let req = &*r.path.cast::<UnixRequest>();
         let mut args = Vec::new();
-        if matches!(
-            r.operation,
-            UNIX_CONNECT | UNIX_LISTEN | DATAGRAM_BIND | DATAGRAM_CONNECT | DATAGRAM_SEND_TO
-        ) {
-            for part in [req.root.as_bytes(), req.path.as_bytes()] {
+        for field in op.fields {
+            let part = match field {
+                UnixField::Root(_) => Some(req.root.as_bytes()),
+                UnixField::Path => Some(req.path.as_bytes()),
+                UnixField::Backlog => {
+                    args.extend_from_slice(&req.backlog.to_le_bytes());
+                    None
+                }
+                _ => None,
+            };
+            if let Some(part) = part {
                 put_varint(&mut args, part.len() as u64);
                 args.extend_from_slice(part);
             }
-        }
-        if r.operation == UNIX_LISTEN {
-            args.extend_from_slice(&req.backlog.to_le_bytes());
         }
         if can_park(r.operation) {
             if let Some((_, clock, at)) = req.until {
@@ -43,28 +47,34 @@ pub(super) unsafe fn canonical(r: &Request) -> Args {
                 args.push(0);
             }
         }
-        if r.operation == DATAGRAM_RECV {
-            args.extend_from_slice(
+        match op.fields.last() {
+            Some(UnixField::Room) => args.extend_from_slice(
                 &(r.buffer.capacity.saturating_sub(r.buffer.len) as u64).to_le_bytes(),
-            );
-        }
-        if matches!(r.operation, DATAGRAM_SEND | DATAGRAM_SEND_TO) {
-            let bytes = super::buffer_bytes(&r.buffer);
-            put_varint(&mut args, bytes.len() as u64);
-            return Args::of_parts(&[&args, bytes]);
+            ),
+            Some(UnixField::Bytes) => {
+                let bytes = super::buffer_bytes(&r.buffer);
+                put_varint(&mut args, bytes.len() as u64);
+                return Args::of_parts(&[&args, bytes]);
+            }
+            _ => {}
         }
         Args::of(&args)
     }
 }
 
-pub(super) fn delivery(r: &Request, out: &Out, objects: u64) -> Result<(), Fault> {
+pub(super) fn delivery(
+    r: &Request,
+    reply: UnixReply,
+    out: &Out,
+    objects: u64,
+) -> Result<(), Fault> {
     use super::{ABORTED, ERROR, OK, TIMED_OUT};
     let op = r.operation;
     if out.status == OK {
         if out.error != (0, 0) {
             return Err(Fault::Corrupt);
         }
-        if op == DATAGRAM_RECV {
+        if reply == UnixReply::Packet {
             let space = r.buffer.capacity.saturating_sub(r.buffer.len) as u64;
             let count = space.min(out.value);
             let Some((&flag, payload)) = out.payload.split_first() else {
@@ -78,7 +88,11 @@ pub(super) fn delivery(r: &Request, out: &Out, objects: u64) -> Result<(), Fault
                 return Err(Fault::Corrupt);
             }
         } else {
-            let expected = kind(op).map_or(0, |_| objects + 1);
+            let expected = if matches!(reply, UnixReply::Created(_)) {
+                objects + 1
+            } else {
+                0
+            };
             if out.value != expected || out.written != 0 || !out.payload.is_empty() {
                 return Err(Fault::Corrupt);
             }

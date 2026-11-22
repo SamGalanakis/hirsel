@@ -362,7 +362,7 @@ fn writable(roots: &Roots, t: &Table) -> Result<(), Error> {
         _ => Err(Error::Stale(t.id)),
     }
 }
-fn physical(id: u32, key: &[u8]) -> Bytes {
+fn logical_key(id: u32, key: &[u8]) -> Bytes {
     let mut b = Vec::with_capacity(4 + key.len());
     b.extend_from_slice(&id.to_be_bytes());
     b.extend_from_slice(key);
@@ -370,7 +370,7 @@ fn physical(id: u32, key: &[u8]) -> Bytes {
 }
 /// One data-tree write: the limits, the COMMIT size, the path copy, the op list and I4. Returns the
 /// replaced row.
-fn put_physical(tx: &mut Tx, key: Bytes, value: Bytes) -> Result<Option<Row>, Error> {
+fn put_logical_key(tx: &mut Tx, key: Bytes, value: Bytes) -> Result<Option<Row>, Error> {
     if key.len() > 4096 {
         return Err(Error::Limit("Key"));
     }
@@ -408,7 +408,7 @@ fn index_key(ix: &Index, a: &Account, key: &[u8; 8]) -> [u8; 20] {
 pub fn put(tx: &mut Tx, t: &Table, k: u64, a: &Account) -> Result<(), Error> {
     writable(&tx.work, t)?;
     let key = k.to_be_bytes();
-    let old = put_physical(tx, physical(t.id, &key), encode(a).into_boxed_slice())?;
+    let old = put_logical_key(tx, logical_key(t.id, &key), encode(a).into_boxed_slice())?;
     if t.indexes.is_empty() {
         return Ok(());
     }
@@ -422,13 +422,13 @@ pub fn put(tx: &mut Tx, t: &Table, k: u64, a: &Account) -> Result<(), Error> {
             );
             continue;
         }
-        put_physical(tx, Box::from(&new[..]), Box::from(&[][..]))?;
+        put_logical_key(tx, Box::from(&new[..]), Box::from(&[][..]))?;
     }
     Ok(())
 }
 pub fn fetch(tx: &mut Tx, t: &Table, k: u64) -> Result<Option<Account>, Error> {
     readable(&tx.work, &t.catalog_key, t.id)?;
-    let key = physical(t.id, &k.to_be_bytes());
+    let key = logical_key(t.id, &k.to_be_bytes());
     let found = get(&tx.work.data, &key).map(|e| decode(&e.value));
     tx.reads.push(ReadRec::Point(key));
     Ok(found)

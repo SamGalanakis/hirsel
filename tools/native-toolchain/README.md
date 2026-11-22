@@ -80,6 +80,13 @@ library in its `engine/`. The compiler's RPATH selects the engine while clang
 and the LLVM tools select the stock library. The installation ships the
 engine, the static linker, and the dynamic inputs of the pinned link kit.
 
+## Publishing LLVM build inputs
+
+Create each `toolchain-llvm-*` release from its existing tag with
+`gh release create "$tag" --verify-tag --prerelease --latest=false`. Upload the
+pinned assets to that release. The tag keeps its direct download URLs, while
+GitHub excludes the release from its latest-release endpoint.
+
 ## Pool execution inputs
 
 `BUCK` downloads the locked LLVM bootstrap archive and static linker,

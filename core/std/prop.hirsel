@@ -6,7 +6,8 @@ type Choice {
 type Span {
     label: u64,
     start: u64,
-    end: u64
+    end: u64,
+    parent: Option[u64]
 }
 
 pub opaque type Source {
@@ -14,6 +15,7 @@ pub opaque type Source {
     prefix: Option[List[u64]],
     tape: List[Choice],
     spans: List[Span],
+    parent: Option[u64],
     max_choices: u64,
     overrun: bool,
     invalid: bool,
@@ -43,7 +45,7 @@ pub fn draw[T](mut s: Source, g: Gen[T]) -> T {
 
 fn source(seed: u64, index: u64, max_choices: u64, prefix: Option[List[u64]]) -> Source {
     let replay_prefix: Option[List[u64]] = clone(prefix)
-    Source(pcg: rand.new(seed, index), prefix: take replay_prefix, tape: list.new(), spans: list.new(), max_choices, overrun: false, invalid: false, rendering: false, rendered: None)
+    Source(pcg: rand.new(seed, index), prefix: take replay_prefix, tape: list.new(), spans: list.new(), parent: None, max_choices, overrun: false, invalid: false, rendering: false, rendered: None)
 }
 
 // After a discard, return zero without advancing either input stream.
@@ -131,8 +133,11 @@ pub fn span[T](mut s: Source, label: u64, body: scoped fn(mut Source) -> T) -> T
     }
     let i = list.len(s.spans)
     let start = list.len(s.tape)
-    list.push(mut s.spans, Span(label, start, end: start))
+    let parent = s.parent
+    list.push(mut s.spans, Span(label, start, end: start, parent))
+    s.parent = Some(i)
     let value = body(mut s)
+    s.parent = parent
     s.spans[i].end = list.len(s.tape)
     take value
 }
@@ -666,20 +671,25 @@ fn generation_failed(index: u64) -> Never {
     fail(take text)
 }
 
-fn primary_message(causes: Causes) -> String {
+fn failure_info(kind: FailureClass, text: String) -> FailureInfo {
+    FailureInfo(class: kind, message: excerpt(text))
+}
+
+fn cause_failure(causes: Causes) -> FailureInfo {
     for cause in causes {
+        let site = cause.site
         return match cause.kind {
-            Fail(text) => excerpt(text),
-            Overflow => string.from("Overflow"),
-            Bounds => string.from("Bounds"),
-            Division => string.from("Division"),
-            Unwrap => string.from("Unwrap"),
-            Cancelled => string.from("Cancelled"),
-            Capacity(_) => string.from("Capacity"),
-            OutOfTime => string.from("OutOfTime"),
+            Fail(text) => failure_info(AtSite(0, site), text),
+            Overflow => failure_info(AtSite(1, site), "Overflow"),
+            Bounds => failure_info(AtSite(2, site), "Bounds"),
+            Division => failure_info(AtSite(3, site), "Division"),
+            Unwrap => failure_info(AtSite(4, site), "Unwrap"),
+            Cancelled => failure_info(AtSite(5, site), "Cancelled"),
+            Capacity(_) => failure_info(ByteCapacity, "Capacity"),
+            OutOfTime => failure_info(TimedOut, "OutOfTime"),
         }
     }
-    string.from("failed")
+    fail("prop: empty failure causes")
 }
 
 fn generate[T](cfg: Config, g: Gen[T], index: u64, prefix: Option[List[u64]]) -> Option[(T, Source)] {
@@ -696,7 +706,7 @@ fn generate[T](cfg: Config, g: Gen[T], index: u64, prefix: Option[List[u64]]) ->
     }
 }
 
-fn case_failure[T](cfg: Config, v: T, law: own fn(T) -> Result[(), String]) -> Option[String] {
+fn case_failure[T](cfg: Config, v: T, law: own fn(T) -> Result[(), String]) -> Option[FailureInfo] {
     let run = bound bytes cfg.case_bytes {
         isolate(fn() -> Result[Result[(), String], OutOfTime] {
             bound steps cfg.case_steps {
@@ -706,10 +716,10 @@ fn case_failure[T](cfg: Config, v: T, law: own fn(T) -> Result[(), String]) -> O
     }
     match take run {
         Error(_) => config_bytes(cfg.case_bytes),
-        Ok(Error(_)) => Some(string.from("Capacity")),
-        Ok(Ok(Error(causes))) => Some(primary_message(causes)),
-        Ok(Ok(Ok(Error(_)))) => Some(string.from("OutOfTime")),
-        Ok(Ok(Ok(Ok(Error(text))))) => Some(excerpt(text)),
+        Ok(Error(_)) => Some(failure_info(ByteCapacity, "Capacity")),
+        Ok(Ok(Error(causes))) => Some(cause_failure(causes)),
+        Ok(Ok(Ok(Error(_)))) => Some(failure_info(TimedOut, "OutOfTime")),
+        Ok(Ok(Ok(Ok(Error(text))))) => Some(failure_info(Returned, text)),
         Ok(Ok(Ok(Ok(Ok(()))))) => None,
     }
 }
@@ -735,10 +745,494 @@ fn render_at[T](cfg: Config, g: Gen[T], index: u64, tape: List[Choice]) -> Strin
     }
 }
 
-fn found[T](cfg: Config, g: Gen[T], take s: Source, index: u64, cases: u64, take message: String) -> Found {
-    let Source(tape: take tape, ..) = take s
+type FailureClass: key = Returned | AtSite(u8, Site) | TimedOut | ByteCapacity
+
+type FailureInfo {
+    class: FailureClass,
+    message: String
+}
+
+type Counterexample {
+    tape: List[Choice],
+    spans: List[Span],
+    failure: FailureInfo
+}
+
+type Edit = Cut(u64, u64) | Zero(u64, u64) | Descendant(Span, Span) | Lower(u64, u64) | LowerEqual(u64, u64) | Transfer(u64, u64, u64) | SortSiblings(u64)
+
+type Cursor {
+    pass: u64,
+    left: u64,
+    right: u64,
+    span_width: u64,
+    block: u64,
+    phase: u64,
+    bit: u64,
+    base: u64,
+    good: u64,
+    bad: u64,
+    units: u64,
+    amount: u64
+}
+
+type Shrink {
+    best: Counterexample,
+    cursor: Cursor,
+    trials: u64,
+    changed: bool
+}
+
+fn cursor(pass: u64) -> Cursor {
+    Cursor(pass, left: 0, right: 1, span_width: 18446744073709551615, block: 5, phase: 0, bit: 64, base: 0, good: 0, bad: 0, units: 0, amount: 0)
+}
+
+fn smaller(a: List[Choice], b: List[Choice]) -> bool {
+    let len_a = list.len(a)
+    let len_b = list.len(b)
+    if len_a != len_b {
+        return len_a < len_b
+    }
+    for i in 0u64 .. len_a {
+        if a[i].value != b[i].value {
+            return a[i].value < b[i].value
+        }
+    }
+    false
+}
+
+fn cut_span(mut scan: Cursor, spans: List[Span]) -> Option[Edit] {
+    let mut best: Option[u64] = None
+    let mut width: u64 = 0
+    for i in 0u64 .. list.len(spans) {
+        let size = spans[i].end - spans[i].start
+        if size > width && (size < scan.span_width || (size == scan.span_width && i >= scan.left)) {
+            best = Some(i)
+            width = size
+        }
+    }
+    if let Some(i) = best {
+        scan.span_width = width
+        scan.left = i + 1
+        return Some(Cut(spans[i].start, spans[i].end))
+    }
+    None
+}
+
+fn cut_block(mut scan: Cursor, len: u64) -> Option[Edit] {
+    while scan.block > 0 {
+        if scan.block <= len && scan.left <= len - scan.block {
+            let left = scan.left
+            scan.left += 1
+            return Some(Cut(left, left + scan.block))
+        }
+        scan.block -= 1
+        scan.left = 0
+    }
+    None
+}
+
+fn zero_span(mut scan: Cursor, best: Counterexample) -> Option[Edit] {
+    while scan.left < list.len(best.spans) {
+        let item = best.spans[scan.left]
+        scan.left += 1
+        for i in item.start .. item.end {
+            if best.tape[i].value != 0 {
+                return Some(Zero(item.start, item.end))
+            }
+        }
+    }
+    None
+}
+
+fn enclosed(spans: List[Span], outer: u64, inner: u64) -> bool {
+    let mut at = spans[inner].parent
+    while let Some(i) = at {
+        if i <= outer {
+            return i == outer
+        }
+        at = spans[i].parent
+    }
+    false
+}
+
+fn next_pair(mut scan: Cursor) {
+    scan.left += 1
+    scan.right = scan.left + 1
+    scan.amount = 0
+}
+
+fn pass_descendant(mut scan: Cursor, spans: List[Span]) -> Option[Edit] {
+    let n = list.len(spans)
+    while scan.left < n {
+        let outer = spans[scan.left]
+        while scan.right < n && enclosed(spans, scan.left, scan.right) {
+            let inner = spans[scan.right]
+            scan.right += 1
+            if inner.label == outer.label && inner.end - inner.start < outer.end - outer.start {
+                return Some(Descendant(outer, inner))
+            }
+        }
+        next_pair(mut scan)
+    }
+    None
+}
+
+fn stride(scan: Cursor) -> u64 {
+    if scan.phase == 4 {
+        2
+    } else {
+        1
+    }
+}
+
+fn next_subtraction(mut scan: Cursor, improved: bool) {
+    if improved {
+        scan.good = scan.units
+    } else {
+        scan.bad = scan.units
+    }
+    if scan.bad == 0 && scan.good < scan.base / stride(scan) {
+        scan.units = order.min(scan.base / stride(scan), int.saturating_mul(scan.units, 2))
+    } else if scan.bad > scan.good && scan.bad - scan.good > 1 {
+        scan.units = scan.good + (scan.bad - scan.good) / 2
+    } else {
+        scan.phase += 1
+        scan.units = 0
+    }
+}
+
+fn next_number(mut scan: Cursor, value: u64) -> Option[u64] {
+    while scan.phase < 6 && value != 0 {
+        match scan.phase {
+            0 => {
+                scan.phase = 1
+                return Some(0)
+            },
+            1 => {
+                scan.phase = 2
+                if value > 1 {
+                    return Some(1)
+                }
+            },
+            2 => {
+                while scan.bit > 1 {
+                    scan.bit -= 1
+                    let masked = value & ((1u64 << scan.bit) - 1)
+                    if masked < value && masked > 1 {
+                        return Some(masked)
+                    }
+                }
+                scan.bit = 0
+                scan.phase = 3
+            },
+            3 => {
+                while scan.bit < 63 {
+                    scan.bit += 1
+                    let shifted = value >> scan.bit
+                    if shifted > 1 {
+                        return Some(shifted)
+                    }
+                }
+                scan.phase = 4
+            },
+            _ => {
+                if scan.units == 0 {
+                    scan.base = value
+                    scan.good = 0
+                    scan.bad = 0
+                    scan.units = 1
+                }
+                if scan.units > scan.base / stride(scan) {
+                    scan.phase += 1
+                    scan.units = 0
+                } else {
+                    let lowered = scan.base - stride(scan) * scan.units
+                    if lowered < value && lowered > 1 {
+                        return Some(lowered)
+                    }
+                    next_subtraction(mut scan, lowered >= value)
+                }
+            },
+        }
+    }
+    None
+}
+
+fn group_start(tape: List[Choice], i: u64) -> bool {
+    let value = tape[i].value
+    for j in 0u64 .. i {
+        if tape[j].value == value {
+            return false
+        }
+    }
+    for j in i + 1 .. list.len(tape) {
+        if tape[j].value == value {
+            return true
+        }
+    }
+    false
+}
+
+fn minimize(mut scan: Cursor, tape: List[Choice]) -> Option[Edit] {
+    while scan.left < list.len(tape) {
+        let value = tape[scan.left].value
+        if scan.pass == 5 || (value != 0 && group_start(tape, scan.left)) {
+            if let Some(lowered) = next_number(mut scan, value) {
+                return Some(if scan.pass == 5 {
+                    Lower(scan.left, lowered)
+                } else {
+                    LowerEqual(value, lowered)
+                })
+            }
+        }
+        scan.left += 1
+        scan.phase = 0
+        scan.bit = 64
+        scan.units = 0
+    }
+    None
+}
+
+fn transfer_pair(mut scan: Cursor, tape: List[Choice]) -> Option[Edit] {
+    let n = list.len(tape)
+    while scan.left < n {
+        let value = tape[scan.left].value
+        while value != 0 && scan.right < n {
+            let target = tape[scan.right]
+            let highest = int.wrapping_sub(target.limit, 1)
+            if scan.amount == 0 {
+                scan.amount = order.min(value, highest - target.value)
+            }
+            if scan.amount != 0 {
+                return Some(Transfer(scan.left, scan.right, scan.amount))
+            }
+            scan.right += 1
+        }
+        next_pair(mut scan)
+    }
+    None
+}
+
+fn span_order(a: Span, b: Span, tape: List[Choice]) -> Order {
+    let na = a.end - a.start
+    let nb = b.end - b.start
+    for i in 0u64 .. order.min(na, nb) {
+        let va = tape[a.start + i].value
+        let vb = tape[b.start + i].value
+        if va != vb {
+            return order.compare(va, vb)
+        }
+    }
+    order.compare(na, nb)
+}
+
+fn same_siblings(a: Span, b: Span) -> bool {
+    a.parent == b.parent && a.label == b.label && a.start < a.end && b.start < b.end
+}
+
+fn first_sibling(spans: List[Span], at: u64) -> bool {
+    let selected = spans[at]
+    for i in 0u64 .. at {
+        if same_siblings(spans[i], selected) {
+            return false
+        }
+    }
+    true
+}
+
+fn unordered_siblings(best: Counterexample, at: u64) -> bool {
+    let mut previous = best.spans[at]
+    for i in at + 1 .. list.len(best.spans) {
+        let current = best.spans[i]
+        if same_siblings(previous, current) {
+            if span_order(previous, current, best.tape) == Greater {
+                return true
+            }
+            previous = current
+        }
+    }
+    false
+}
+
+fn sort_siblings(mut scan: Cursor, best: Counterexample) -> Option[Edit] {
+    while scan.left < list.len(best.spans) {
+        let at = scan.left
+        scan.left += 1
+        if first_sibling(best.spans, at) && unordered_siblings(best, at) {
+            return Some(SortSiblings(at))
+        }
+    }
+    None
+}
+
+fn next_edit(mut scan: Cursor, best: Counterexample) -> Option[Edit] {
+    match scan.pass {
+        1 => cut_span(mut scan, best.spans),
+        2 => cut_block(mut scan, list.len(best.tape)),
+        3 => zero_span(mut scan, best),
+        4 => pass_descendant(mut scan, best.spans),
+        5 ..= 6 => minimize(mut scan, best.tape),
+        7 => transfer_pair(mut scan, best.tape),
+        8 => sort_siblings(mut scan, best),
+        _ => None,
+    }
+}
+
+fn push_values(mut out: List[u64], tape: List[Choice], start: u64, end: u64) {
+    for i in start .. end {
+        list.push(mut out, tape[i].value)
+    }
+}
+
+fn edit_value(edit: Edit, tape: List[Choice], i: u64) -> u64 {
+    let value = tape[i].value
+    match edit {
+        Zero(first, last) if first <= i && i < last => 0,
+        Lower(at, target) if at == i => target,
+        LowerEqual(from, target) if from == value => target,
+        Transfer(from, _, delta) if from == i => value - delta,
+        Transfer(_, to, delta) if to == i => value + delta,
+        _ => value,
+    }
+}
+
+fn push_sorted_siblings(mut out: List[u64], best: Counterexample, first: u64) {
+    let mut siblings: List[u64] = list.new()
+    let group = best.spans[first]
+    for i in first .. list.len(best.spans) {
+        if same_siblings(group, best.spans[i]) {
+            list.push(mut siblings, i)
+        }
+    }
+    let mut sorted: List[u64] = clone(siblings)
+    list.sort_stable(mut sorted, fn(a: u64, b: u64) -> Order {
+        span_order(best.spans[a], best.spans[b], best.tape)
+    })
+    let mut from: u64 = 0
+    for i in 0u64 .. list.len(siblings) {
+        let old = best.spans[siblings[i]]
+        let item = best.spans[sorted[i]]
+        push_values(mut out, best.tape, from, old.start)
+        push_values(mut out, best.tape, item.start, item.end)
+        from = old.end
+    }
+    push_values(mut out, best.tape, from, list.len(best.tape))
+}
+
+fn apply_edit(best: Counterexample, edit: Edit) -> List[u64] {
+    let tape = view best.tape
+    let n = list.len(tape)
+    let mut out: List[u64] = list.with_capacity(n)
+    match edit {
+        Cut(first, last) => {
+            push_values(mut out, tape, 0, first)
+            push_values(mut out, tape, last, n)
+        },
+        Descendant(a, b) => {
+            push_values(mut out, tape, 0, a.start)
+            push_values(mut out, tape, b.start, b.end)
+            push_values(mut out, tape, a.end, n)
+        },
+        SortSiblings(at) => push_sorted_siblings(mut out, best, at),
+        _ => {
+            for i in 0u64 .. n {
+                list.push(mut out, edit_value(edit, tape, i))
+            }
+        },
+    }
+    take out
+}
+
+fn next_trial(mut shrink: Shrink, cap: u64) -> Option[List[u64]] {
+    while shrink.trials < cap {
+        if let Some(edit) = next_edit(mut shrink.cursor, shrink.best) {
+            shrink.trials += 1
+            return Some(apply_edit(shrink.best, edit))
+        }
+        if shrink.cursor.pass < 8 {
+            shrink.cursor = cursor(shrink.cursor.pass + 1)
+        } else if shrink.changed {
+            shrink.cursor = cursor(1)
+            shrink.changed = false
+        } else {
+            return None
+        }
+    }
+    None
+}
+
+fn review_trial(mut shrink: Shrink, take trial: Option[Counterexample]) {
+    let mut improved = false
+    if let Some(take candidate) = take trial {
+        if candidate.failure.class == shrink.best.failure.class && smaller(candidate.tape, shrink.best.tape) {
+            shrink.best = take candidate
+            shrink.changed = true
+            improved = true
+        }
+    }
+    match shrink.cursor.pass {
+        1 if improved => {
+            shrink.cursor = cursor(1)
+        },
+        2 if improved => {
+            shrink.cursor.left -= 1
+        },
+        5 ..= 6 if shrink.cursor.phase >= 4 => next_subtraction(mut shrink.cursor, improved),
+        7 => {
+            if improved {
+                shrink.cursor.amount = 0
+            } else {
+                shrink.cursor.amount /= 2
+                if shrink.cursor.amount == 0 {
+                    shrink.cursor.right += 1
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+fn counterexample(take s: Source, take failure: FailureInfo) -> Counterexample {
+    let Source(tape: take tape, spans: take spans, ..) = take s
+    Counterexample(tape: take tape, spans: take spans, failure: take failure)
+}
+
+fn pure_candidate[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], index: u64, prefix: Option[List[u64]]) -> Option[Counterexample] {
+    let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
+        return None
+    }
+    if s.invalid || s.overrun {
+        return None
+    }
+    let Some(take info) = case_failure(cfg, value, law) else {
+        return None
+    }
+    Some(counterexample(take s, take info))
+}
+
+fn shrink_case[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], index: u64, take original: Counterexample) -> (Counterexample, u64) {
+    let mut state = Shrink(best: take original, cursor: cursor(1), trials: 0, changed: false)
+    while let Some(take values) = next_trial(mut state, cfg.max_shrinks) {
+        let trial = pure_candidate(cfg, g, law, index, Some(take values))
+        review_trial(mut state, take trial)
+    }
+    let Shrink(best: take best, trials, ..) = take state
+    (take best, trials)
+}
+
+fn found[T](cfg: Config, g: Gen[T], index: u64, cases: u64, shrinks: u64, take example: Counterexample) -> Found {
+    let Counterexample(tape: take tape, failure: FailureInfo(message: take message, ..), ..) = take example
     let rendered = render_at(cfg, g, index, tape)
-    Found(index, tape: take tape, cases, shrinks: 0, sim_seed: cfg.sim_seed, rendered: take rendered, message: take message)
+    Found(index, tape: take tape, cases, shrinks, sim_seed: cfg.sim_seed, rendered: take rendered, message: take message)
+}
+
+fn shrink_from[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], take values: List[u64]) -> Found {
+    let initial = match pure_candidate(cfg, g, law, 0, Some(take values)) {
+        Some(take example) => take example,
+        None => fail("prop: starting tape does not fail"),
+    }
+    let (take smallest, n) = shrink_case(cfg, g, law, 0, take initial)
+    found(cfg, g, 0, 1, n, take smallest)
 }
 
 fn replay_one[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], text: String) -> Outcome {
@@ -748,8 +1242,8 @@ fn replay_one[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], t
         generation_failed(index)
     }
     if !s.overrun && !s.invalid {
-        if let Some(take message) = case_failure(cfg, value, law) {
-            return Falsified(found(cfg, g, take s, index, 1, take message))
+        if let Some(take info) = case_failure(cfg, value, law) {
+            return Falsified(found(cfg, g, index, 1, 0, counterexample(take s, take info)))
         }
     }
     fail("prop: replay token no longer fails")
@@ -774,8 +1268,9 @@ pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> 
             }
         } else {
             cases += 1
-            if let Some(take message) = case_failure(c, value, law) {
-                return Falsified(found(c, g, take s, index, cases, take message))
+            if let Some(take info) = case_failure(c, value, law) {
+                let (take smallest, n) = shrink_case(c, g, law, index, counterexample(take s, take info))
+                return Falsified(found(c, g, index, cases, n, take smallest))
             }
         }
         index += 1

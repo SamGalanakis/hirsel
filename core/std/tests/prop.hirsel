@@ -236,3 +236,201 @@ fn prop_map_preimage() -> bool {
     }
     false
 }
+
+fn smaller_than_thousand(value: u64) -> Result[(), String] {
+    if value < 1000 {
+        Ok(())
+    } else {
+        Error(string.from("value >= 1000"))
+    }
+}
+
+fn sum_below_ten(values: List[u64]) -> Result[(), String] {
+    if list.sum(values) < 10 {
+        Ok(())
+    } else {
+        Error(string.from("sum >= 10"))
+    }
+}
+
+fn length_below_three(values: List[u64]) -> Result[(), String] {
+    if list.len(values) < 3 {
+        Ok(())
+    } else {
+        Error(string.from("length >= 3"))
+    }
+}
+
+fn signed_above_minus_five(value: i64) -> Result[(), String] {
+    if value > -5 {
+        Ok(())
+    } else {
+        Error(string.from("value <= -5"))
+    }
+}
+
+fn pair_sum_below_ten(values: (u64, u64)) -> Result[(), String] {
+    if values.0 + values.1 < 10 {
+        Ok(())
+    } else {
+        Error(string.from("sum >= 10"))
+    }
+}
+
+fn distinct_case_failures(value: u64) -> Result[(), String] {
+    if value >= 50 {
+        let _ = 1u64 / (value - value)
+    }
+    if value >= 3 {
+        let _ = string.as_bytes("")[value]
+    }
+    Ok(())
+}
+
+fn duplicate_failure(values: (u64, u64)) -> Result[(), String] {
+    if values.0 == values.1 && values.0 >= 3 {
+        Error(string.from("both choices are equal and large"))
+    } else {
+        Ok(())
+    }
+}
+
+fn conditional_generator(mut s: Source) -> u64 {
+    let value = below(mut s, 100)
+    if value < 50 {
+        fail("generator exhausted")
+    }
+    value
+}
+
+fn failing_generator(mut s: Source) -> u64 {
+    let _ = word(mut s)
+    fail("generator failed")
+}
+
+// Catches failing to find the boundary between passing and failing integers.
+// expect: run prop_shrink_integer() = true
+fn prop_shrink_integer() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 123456)
+    let result = shrink_from(config(), u64_in(0, 1000000), smaller_than_thousand, take tape)
+    result.rendered == "1000" && list.len(result.tape) == 1 && result.tape[0].value == 1000
+}
+
+// Catches failures to transfer the sum before removing the zero span or to replay the minimal tape.
+// expect: run prop_shrink_sum() = true
+fn prop_shrink_sum() -> bool {
+    let g = list_of(u64_in(0, 100), 0, 50)
+    let Replay(values: take starting, ..) = parse_token("AQAFAQYBBwA=", 32)
+    let result = shrink_from(config(), g, sum_below_ten, take starting)
+    let mut printed = string.new()
+    token(result, mut printed)
+    if result.rendered != "[10]" || printed != "AQADAQoA" {
+        return false
+    }
+    if let Falsified(reproduced) = search(replay(config(), printed), g, sum_below_ten) {
+        return reproduced.rendered == "[10]" && reproduced.shrinks == 0 && reproduced.message == "sum >= 10"
+    }
+    false
+}
+
+// Catches preserving a fourth span or leaving values irrelevant to the length failure.
+// expect: run prop_shrink_length() = true
+fn prop_shrink_length() -> bool {
+    let mut tape: List[u64] = list.new()
+    let words: Inline[u64, 9] =[1, 5, 1, 6, 1, 7, 1, 8, 0]
+    for value in words {
+        list.push(mut tape, value)
+    }
+    let result = shrink_from(config(), list_of(u64_in(0, 100), 0, 50), length_below_three, take tape)
+    result.rendered == "[0, 0, 0]"
+}
+
+// Catches minimizing the value by unsigned or absolute magnitude rather than its choice index.
+// expect: run prop_shrink_signed() = true
+fn prop_shrink_signed() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 100)
+    let result = shrink_from(config(), i64_in(-100, 100), signed_above_minus_five, take tape)
+    result.rendered == "-5" && result.tape[0].value == 10
+}
+
+// Catches shrinking entries independently and getting stuck at (5, 5).
+// expect: run prop_shrink_pair() = true
+fn prop_shrink_pair() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 7)
+    list.push(mut tape, 5)
+    let result = shrink_from(config(), pair(u64_in(0, 100), u64_in(0, 100)), pair_sum_below_ten, take tape)
+    result.rendered == "(0, 10)"
+}
+
+// Catches crossing from the original Division cause to the smaller Bounds failure.
+// expect: run prop_shrink_class() = true
+fn prop_shrink_class() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 60)
+    let result = shrink_from(config(), u64_in(0, 100), distinct_case_failures, take tape)
+    result.rendered == "50" && result.message == "Division"
+}
+
+// Catches executing a candidate after spending the entire shrink allowance.
+// expect: run prop_shrink_limit() = true
+fn prop_shrink_limit() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 123456)
+    let mut c = config()
+    c.max_shrinks = 0
+    let result = shrink_from(c, u64_in(0, 1000000), smaller_than_thousand, take tape)
+    result.tape[0].value == 123456 && result.shrinks == 0
+}
+
+// Catches failing to lower jointly constrained equal choices.
+// expect: run prop_shrink_duplicates() = true
+fn prop_shrink_duplicates() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 9)
+    list.push(mut tape, 9)
+    let result = shrink_from(config(), pair(u64_in(0, 100), u64_in(0, 100)), duplicate_failure, take tape)
+    result.rendered == "(3, 3)"
+}
+
+// Catches treating a generation failure during shrinking as a smaller counterexample.
+// expect: run prop_shrink_generator_error() = true
+fn prop_shrink_generator_error() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 60)
+    let g = make(conditional_generator, show_u64)
+    let result = shrink_from(config(), g, law_returns_error, take tape)
+    result.rendered == "50" && result.message == "always false"
+}
+
+// Catches routing a failing search generator into the shrinker or discarding the case index.
+// expect: run prop_shrink_generator_failure() = true
+fn prop_shrink_generator_failure() -> bool {
+    let g = make(failing_generator, show_u64)
+    let result = isolate(fn() -> Outcome {
+        search(config(), g, law_passes)
+    })
+    prop_failure_text(take result, "prop: generator failed at case 0")
+}
+
+fn unsorted_or_sorted_failure(values: (u64, u64, u64)) -> Result[(), String] {
+    if values == (3u64, 1u64, 2u64) || values == (1u64, 2u64, 3u64) {
+        Error(string.from("one of two orders"))
+    } else {
+        Ok(())
+    }
+}
+
+// Catches sorting only by swaps that each have to preserve the failure.
+// expect: run prop_shrink_sibling_order() = true
+fn prop_shrink_sibling_order() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 3)
+    list.push(mut tape, 1)
+    list.push(mut tape, 2)
+    let g = triple(u64_in(0, 9), u64_in(0, 9), u64_in(0, 9))
+    let result = shrink_from(config(), g, unsorted_or_sorted_failure, take tape)
+    result.rendered == "(1, 2, 3)"
+}

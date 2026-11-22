@@ -40,6 +40,19 @@ impl PreparedKey {
         let [v0, v1, v2, v3] = self.0;
         State([v0, v1, v2, v3, 0])
     }
+
+    /// Hash raw bytes without the structural stream's length word or padding.
+    pub(crate) fn raw(self, bytes: &[u8]) -> u64 {
+        let mut state = self.state();
+        let (words, tail) = bytes.as_chunks::<8>();
+        for &word in words {
+            state.compress(u64::from_le_bytes(word));
+        }
+        let mut final_word = [0; 8];
+        final_word[..tail.len()].copy_from_slice(tail);
+        final_word[7] = bytes.len() as u8;
+        state.finalize(u64::from_le_bytes(final_word))
+    }
 }
 
 /// Four SipHash lanes and the length of the structural byte stream.
@@ -99,8 +112,13 @@ impl State {
     }
 
     #[inline]
-    pub fn finish(mut self) -> u64 {
-        self.compress(self.0[4] << 56);
+    pub fn finish(self) -> u64 {
+        self.finalize(self.0[4] << 56)
+    }
+
+    #[inline]
+    fn finalize(mut self, final_word: u64) -> u64 {
+        self.compress(final_word);
         self.0[2] ^= 0xff;
         self.round();
         self.round();

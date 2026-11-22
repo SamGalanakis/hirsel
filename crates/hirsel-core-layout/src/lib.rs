@@ -23,6 +23,7 @@ pub mod flow;
 mod foreign;
 pub mod isa;
 pub mod map_hash;
+pub mod map_index;
 mod recipe;
 mod shape;
 pub mod show;

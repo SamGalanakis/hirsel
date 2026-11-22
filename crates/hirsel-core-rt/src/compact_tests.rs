@@ -357,3 +357,51 @@ fn map_hash_uses_the_siphash_13_vectors() {
         assert_eq!(hirsel_core_map_hash_finish(state), 0xdb92b956a12fc30b);
     }
 }
+
+/// PROG-11's independent vectors cover the two sides of an 8-byte tail
+/// and a 16-byte chunk, the signed-word width and all four derivation labels.
+#[test]
+fn map_placement_matches_prog_11_vectors() {
+    use hirsel_core_layout::{map_hash, map_index};
+
+    let key = std::array::from_fn(|i| i as u8);
+    let (s0, s1, strong) = map_index::derive(&key);
+    assert_eq!(s0, 0xc93577b642b675d3);
+    assert_eq!(s1, 0x216bdc5358d9c4d5);
+    assert_eq!(
+        strong,
+        [
+            0x1e, 0x7e, 0xe6, 0x05, 0xb3, 0x3f, 0x70, 0x78, 0xd1, 0x71, 0xd0, 0xad, 0xe9, 0x94,
+            0x21, 0x0e,
+        ]
+    );
+    for (word, fast, keyed) in [
+        (0, 0x175d5dfbd09e75c7, 0xe8b70260e432308d),
+        (1, 0xb08ad43c5024c9bd, 0x5cd87fd53c86d83a),
+        (u64::MAX, 0xd71c61fbd21d7517, 0x78ee0e4e0cad36d2),
+        (
+            u64::from(-1i8 as u8),
+            0x488dc5e5cae947bd,
+            0xfbe4122ec2e54220,
+        ),
+    ] {
+        assert_eq!(map_index::fast_word(word, s0), fast);
+        assert_eq!(map_hash::word(&strong, word), keyed);
+    }
+    for (bytes, expected) in [
+        (&b""[..], 0xc601c2084ab71e17),
+        (&b"abcdefgh"[..], 0x3251c98ae37d4dbf),
+        (&b"abcdefghi"[..], 0xdd8ba4778c150f32),
+        (&b"abcdefghijklmnop"[..], 0x441cb7420c58fe33),
+        (&b"abcdefghijklmnopq"[..], 0x8d14bb88cfa906fe),
+    ] {
+        assert_eq!(map_index::fast_bytes(bytes, s0, s1), expected);
+    }
+    for (bytes, expected) in [
+        (&b"a"[..], 0x9b4f3fea3a32bb74),
+        (&b"abcdefghi"[..], 0x687d6af59de6e421),
+        (&b"abcdefghijklmnopq"[..], 0x4427af8d97cca0dd),
+    ] {
+        assert_eq!(map_hash::bytes(&strong, bytes), expected);
+    }
+}

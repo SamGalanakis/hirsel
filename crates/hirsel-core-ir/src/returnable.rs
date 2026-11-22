@@ -455,8 +455,9 @@ struct Shape {
     reevaluated: BTreeMap<usize, Vec<AddressId>>,
     /// Addresses only the site's call takes, built afresh at each resume.
     cloned: BTreeMap<usize, Vec<AddressId>>,
-    /// Record offset of each slot.
-    slot_at: Vec<u64>,
+    /// Record offset of each slot a resume may read; the others stay in the
+    /// frame.
+    slot_at: Vec<Option<u64>>,
     value_at: HashMap<ValueId, u64>,
     /// The result place's parameter, type, record offset and size. A backend may
     /// keep a result it returns in registers in a place of the frame, which a
@@ -465,6 +466,50 @@ struct Shape {
     dest: Option<(ValueId, TypeId, u64, u64)>,
     /// The function's whole area, its own word first.
     area: u64,
+    sizes: Sizes,
+}
+
+/// The parts of a function's record area, in bytes, for the report.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sizes {
+    /// The largest callee area at a site.
+    pub child: u64,
+    /// Slots kept in the record, and all the body's slots.
+    pub slots: u64,
+    pub all_slots: u64,
+    pub dest: u64,
+    pub demoted: u64,
+    pub area: u64,
+}
+
+/// Slots whose bytes a resume may read: every slot an engine keeps for the
+/// whole body, and each scoped slot that may be in use at a site. A scoped
+/// slot not in use at a site is begun again, unwritten, before any use after
+/// it (`extent::scoped_slots`), so it stays in the frame.
+fn homed_slots(b: &Body, signatures: &[Signature], sites: &BTreeSet<usize>) -> Vec<bool> {
+    let scoped = crate::extent::scoped_slots(b, signatures);
+    let mut homed: Vec<bool> = scoped.slots.iter().map(|s| !s).collect();
+    for (bi, blk) in b.blocks.iter().enumerate() {
+        let first = blk.insts.start as usize;
+        let insts = blk.insts.get(&b.insts).unwrap_or_default();
+        if !(first..first + insts.len()).any(|k| sites.contains(&k)) {
+            continue;
+        }
+        let mut may = scoped.may_live_at(bi);
+        for (j, inst) in insts.iter().enumerate() {
+            if sites.contains(&(first + j)) {
+                for (slot, h) in homed.iter_mut().enumerate() {
+                    *h |= has(&may, slot);
+                }
+            }
+            match *inst {
+                Inst::StorageLive { slot } => put(&mut may, slot.index()),
+                Inst::StorageDead { slot } => cut(&mut may, slot.index()),
+                _ => {}
+            }
+        }
+    }
+    homed
 }
 
 fn place_layout(module: &Module, recipes: &[hirsel_core_layout::Recipe], t: PlaceTy) -> Option<(u64, u64)> {
@@ -634,15 +679,27 @@ fn shape(
         .max()
         .unwrap_or(8);
     let mut at = round(CHILD + child, ALIGN);
+    let mut sizes = Sizes {
+        child,
+        ..Sizes::default()
+    };
+    let homed = homed_slots(body, &module.signatures, &wanted);
     let mut slot_at = Vec::with_capacity(body.slots.len());
-    for &t in &body.slots {
+    for (&t, &home) in body.slots.iter().zip(&homed) {
+        if !home {
+            slot_at.push(None);
+            sizes.all_slots += place_layout(module, recipes, t).map_or(0, |l| l.0);
+            continue;
+        }
         let (size, align) = place_layout(module, recipes, t).ok_or(Refusal::SlotLayout)?;
         if align > ALIGN {
             return Err(Refusal::SlotLayout);
         }
         at = round(at, align);
-        slot_at.push(at);
+        slot_at.push(Some(at));
         at += size;
+        sizes.slots += size;
+        sizes.all_slots += size;
     }
     let dest = match dest {
         Some((d, t)) => {
@@ -654,6 +711,7 @@ fn shape(
             at = round(at, align);
             let off = at;
             at += size;
+            sizes.dest = size;
             Some((d, t, off, size))
         }
         None => None,
@@ -668,6 +726,8 @@ fn shape(
         value_at.insert(v, at);
         at += 8;
     }
+    sizes.demoted = 8 * demoted.len() as u64;
+    sizes.area = round(at, ALIGN);
     Ok(Shape {
         sites,
         demoted,
@@ -677,6 +737,7 @@ fn shape(
         value_at,
         dest,
         area: round(at, ALIGN),
+        sizes,
     })
 }
 
@@ -879,12 +940,22 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
     let child = b.at(rec, CHILD);
     let child_word = word(&mut b, child);
     let zero = b.konst(u64_, 0);
-    let slot_ptr: Vec<ValueId> = s.slot_at.iter().map(|&off| b.at(rec, off)).collect();
+    // A homed slot is a place in the record; the others stay slots of the frame.
+    let mut slot_base = Vec::with_capacity(s.slot_at.len());
+    for (k, off) in s.slot_at.iter().enumerate() {
+        slot_base.push(match *off {
+            Some(off) => AddressBase::Value(b.at(rec, off)),
+            None => {
+                b.n.slots.push(old.slots[k]);
+                AddressBase::Slot(SlotId(b.n.slots.len() as u32 - 1))
+            }
+        });
+    }
     let dest = s.dest.map(|(d, t, off, size)| (d, t, b.at(rec, off), size));
     // Slots and the result place live in the record.
     for info in &mut b.n.addresses {
         match info.base {
-            AddressBase::Slot(slot) => info.base = AddressBase::Value(slot_ptr[slot.index()]),
+            AddressBase::Slot(slot) => info.base = slot_base[slot.index()],
             AddressBase::Value(v) => {
                 if let Some((d, _, home, _)) = dest
                     && d == v
@@ -1029,10 +1100,20 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         for (j, inst) in range.get(&old.insts).unwrap_or_default().iter().enumerate() {
             let k = first + j;
             let anchor = old.inst_anchors.get(k).copied().flatten();
-            if hoisted(inst).is_some()
-                || skip.contains(&k)
-                || matches!(inst, Inst::StorageLive { .. } | Inst::StorageDead { .. })
-            {
+            if hoisted(inst).is_some() || skip.contains(&k) {
+                continue;
+            }
+            // A frame slot keeps its extent; a homed slot is in use throughout.
+            if let Inst::StorageLive { slot } | Inst::StorageDead { slot } = *inst {
+                if let AddressBase::Slot(slot) = slot_base[slot.index()] {
+                    b.cur.push((
+                        match *inst {
+                            Inst::StorageLive { .. } => Inst::StorageLive { slot },
+                            _ => Inst::StorageDead { slot },
+                        },
+                        anchor,
+                    ));
+                }
                 continue;
             }
             if let Some(&site) = s.sites.get(&k) {
@@ -1081,7 +1162,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                 for &a in &s.cloned[&k] {
                     let mut info = old.addresses[a.index()].clone();
                     info.base = match info.base {
-                        AddressBase::Slot(slot) => AddressBase::Value(slot_ptr[slot.index()]),
+                        AddressBase::Slot(slot) => slot_base[slot.index()],
                         AddressBase::Value(v) => AddressBase::Value(b.get(v)),
                         AddressBase::Address(x) => AddressBase::Address(*fresh.get(&x).unwrap_or(&x)),
                     };
@@ -1165,7 +1246,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                 if values.iter().any(|v| b.home.contains_key(v)) {
                     let mut info = old.addresses[address.index()].clone();
                     if let AddressBase::Slot(slot) = info.base {
-                        info.base = AddressBase::Value(slot_ptr[slot.index()]);
+                        info.base = slot_base[slot.index()];
                     }
                     if let AddressBase::Value(v) = info.base {
                         info.base = AddressBase::Value(b.get(v));
@@ -1325,6 +1406,8 @@ pub struct Applied {
     pub roots: usize,
     /// Spawns of entries that reach an owned wait but stay stackful.
     pub stackful_roots: usize,
+    /// The record area of each variant, roots by their entry adapter.
+    pub sizes: Vec<(FuncId, Sizes)>,
 }
 
 /// A spawn of the task entry adapter `entry` whose stored callee is `callee`,
@@ -1622,6 +1705,7 @@ pub fn apply(module: &mut Module) -> Applied {
         );
         variant.insert(f, (id, sig));
         applied.represented.push(FuncId(f as u32));
+        applied.sizes.push((FuncId(f as u32), shapes[&f].sizes));
     }
     let lookup = |g: FuncId| variant[&g.index()];
     let ret = |op: HostOp| returnable[&op.code()];
@@ -1640,6 +1724,7 @@ pub fn apply(module: &mut Module) -> Applied {
     let mut root_bodies = vec![];
     let mut rewrites = vec![];
     for (spawn, body, s) in &roots {
+        applied.sizes.push((spawn.entry, s.sizes));
         let key = (spawn.entry, spawn.callee);
         let id = match entries.get(&key) {
             Some(&id) => id,
@@ -1724,6 +1809,12 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     }
     for &(f, r) in &applied.refused {
         s.push_str(&format!("  refused f{} {} {r:?}\n", f.0, name(f)));
+    }
+    for (f, z) in &applied.sizes {
+        s.push_str(&format!(
+            "  area f{} {}: {} = word 16 + child {} + slots {} of {} + dest {} + demoted {}\n",
+            f.0, name(*f), z.area, z.child, z.slots, z.all_slots, z.dest, z.demoted
+        ));
     }
     s
 }

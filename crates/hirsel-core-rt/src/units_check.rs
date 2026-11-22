@@ -1663,6 +1663,28 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
+    // 17. The same client and law across the blocking-call hand-off: the
+    // unit moves to the other OS thread while the client is parked, and the
+    // client resumes there (`units_returnable_check.rs`).
+    Case {
+        name: "handoff_returnable",
+        workers: 1,
+        units: 2,
+        body: |id| {
+            if id == 1 {
+                wait_flag(0);
+                return 0;
+            }
+            // A second unit gives the monitor a reason to hand the slot off.
+            let status = returnable::handoff_body(id);
+            wake_id(1);
+            status
+        },
+        producers: &[("provider", returnable::producer)],
+        goals: 0b1,
+        params: |r| PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed),
+        pct: None,
+    },
     Case {
         name: "conn_flat_slot_reuse",
         workers: 3,
@@ -2147,6 +2169,10 @@ mod tests {
     #[test]
     fn returnable_stack_reuse() {
         check("returnable_stack_reuse");
+    }
+    #[test]
+    fn handoff_returnable() {
+        check("handoff_returnable");
     }
 
     #[test]

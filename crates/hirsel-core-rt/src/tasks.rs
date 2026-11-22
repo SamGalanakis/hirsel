@@ -4419,34 +4419,58 @@ unsafe fn unmount(task: *mut Task) -> Stack {
     }
 }
 /// A task's frame record for the returnable form (DESIGN "Eager records"):
-/// one zeroed allocation made at the root's first call, at a stable address
-/// until the task ends. Its header holds the owned operation state; the area
-/// after it holds the represented frames the compiler lays out.
+/// one block of the task's unit heap, funded by the task's payer at zero
+/// logical charge like the stack it stands in for, made at the root's first
+/// call and at a stable address until the task ends. Its header holds the
+/// owned operation state; the area after it holds the represented frames the
+/// compiler lays out.
 pub(crate) struct FrameRecord {
     base: NonNull<u8>,
+    #[cfg(debug_assertions)]
     size: usize,
 }
 /// The record's header: one operation and the owned helper state it borrows.
-#[repr(C, align(64))]
+#[repr(C)]
 pub(crate) struct FrameHeader {
     operation: std::mem::MaybeUninit<Operation>,
     pub(crate) net: std::mem::MaybeUninit<crate::net::OwnedNet>,
 }
 const FRAME_HEADER: usize = size_of::<FrameHeader>();
-/// Live frame-record bytes, for the memory figures.
-pub(crate) static FRAME_BYTES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+const _: () = assert!(FRAME_HEADER % 8 == 0 && align_of::<FrameHeader>() <= 8);
 impl FrameRecord {
-    fn layout(size: usize) -> Layout {
-        Layout::from_size_align(FRAME_HEADER + size, align_of::<FrameHeader>())
-            .unwrap_or_else(|_| crate::process::stop(b"FrameRecord"))
+    /// A record of `size` area bytes. Only the root's own resume word, the
+    /// area's first, starts zeroed: every other word is written before it is
+    /// read (a caller zeroes its callee's word before each fresh call), so
+    /// testing builds fill the rest to catch a word read before it is set.
+    fn new(context: &Context, size: usize) -> Self {
+        let bytes = FRAME_HEADER
+            .checked_add(size.max(8))
+            .unwrap_or_else(|| crate::process::stop(b"FrameRecord"));
+        // A zero charge admits nothing, so an injected refusal of real
+        // charges never reaches it; the block pins its payer until freed.
+        let payer = context.payer();
+        payer.pin_zero();
+        let base = crate::block::allocate_admitted(context, payer, bytes, 8, crate::block::PLAIN);
+        // SAFETY: the block holds `bytes` writable bytes, the word in bounds.
+        unsafe {
+            #[cfg(any(test, debug_assertions, feature = "testing"))]
+            std::ptr::write_bytes(base.as_ptr(), 0xA5, bytes);
+            base.as_ptr().add(FRAME_HEADER).cast::<u64>().write(0);
+        }
+        Self {
+            base,
+            #[cfg(debug_assertions)]
+            size,
+        }
     }
-    fn new(size: usize) -> Self {
-        // SAFETY: the layout has a nonzero size (the header).
-        let base = unsafe { std::alloc::alloc_zeroed(Self::layout(size)) };
-        let base = NonNull::new(base).unwrap_or_else(|| crate::process::stop(b"HostMemory"));
-        FRAME_BYTES.fetch_add(FRAME_HEADER + size, Ordering::Relaxed);
-        Self { base, size }
+    /// Give the block back through the task's live context.
+    /// # Safety
+    /// `context` is the running task's; nothing borrows the record now.
+    unsafe fn release(self, context: &Context) {
+        let base = self.base;
+        std::mem::forget(self);
+        // SAFETY: a zero-charge block of this context's heap.
+        unsafe { crate::block::free_with(base, 0, Some(context)) }
     }
     pub(crate) fn header(&self) -> *mut FrameHeader {
         self.base.as_ptr().cast()
@@ -4461,19 +4485,20 @@ impl FrameRecord {
     }
 }
 impl Drop for FrameRecord {
+    /// A task torn down without ending its body gives the block back with no
+    /// context: the heap takes it as any other foreign return.
     fn drop(&mut self) {
-        FRAME_BYTES.fetch_sub(FRAME_HEADER + self.size, Ordering::Relaxed);
-        // SAFETY: allocated in `new` with this layout; nothing borrows it now.
-        unsafe { dealloc(self.base.as_ptr(), Self::layout(self.size)) }
+        // SAFETY: a zero-charge block; nothing borrows it now.
+        unsafe { crate::block::free(self.base, 0) }
     }
 }
-/// The current task's frame record of `size` area bytes: made zeroed at the
-/// root's first call, and the same one at each resume, so a represented
-/// frame reads back what it stored before its task returned the stack.
+/// The current task's frame record of `size` area bytes: made at the root's
+/// first call, and the same one at each resume, so a represented frame reads
+/// back what it stored before its task returned the stack.
 /// # Safety
 /// Called by a returnable root, in a task, with the same size each time.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_frame_record(_: *mut Context, size: u64) -> *mut u8 {
+pub unsafe extern "C" fn hirsel_core_frame_record(context: *mut Context, size: u64) -> *mut u8 {
     let task = CURRENT.get();
     if task.is_null() {
         crate::process::stop(b"FrameRecord");
@@ -4481,7 +4506,10 @@ pub unsafe extern "C" fn hirsel_core_frame_record(_: *mut Context, size: u64) ->
     let size = usize::try_from(size).unwrap_or_else(|_| crate::process::stop(b"FrameRecord"));
     // SAFETY: CURRENT pins the task, and only its own fiber touches the record.
     unsafe {
-        let record = (*task).frame.get_or_insert_with(|| FrameRecord::new(size));
+        let record = (*task)
+            .frame
+            .get_or_insert_with(|| FrameRecord::new(&*context, size));
+        #[cfg(debug_assertions)]
         debug_assert_eq!(record.size, size);
         record.area()
     }
@@ -4510,7 +4538,9 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             switch_to_idle(task);
             std::hint::unreachable_unchecked();
         }
-        (*task).frame = None;
+        if let Some(record) = (*task).frame.take() {
+            record.release(&*(*task).context);
+        }
         // The hand-over and END share one hold of the token.
         let _handover = (*task).record.is_some().then(|| {
             let commit = crate::sequencer::enter();

@@ -849,7 +849,10 @@ struct Shape {
     /// and what its call takes, less the call's own results. A park copies them
     /// into the record and the resume copies them back; between waits they
     /// live in frame slots, so a wait that does not park touches no record.
+    /// Only one site's values are in the record at a time, so every site's
+    /// list starts at `kept_at`, 8 bytes a value.
     kept: BTreeMap<usize, Vec<ValueId>>,
+    kept_at: u64,
     /// Addresses evaluated again at each resume, bases first.
     reevaluated: BTreeMap<usize, Vec<AddressId>>,
     /// Addresses only the site's call takes, built afresh at each resume.
@@ -857,7 +860,6 @@ struct Shape {
     /// Record offset of each slot a resume may read; the others stay in the
     /// frame.
     slot_at: Vec<Option<u64>>,
-    value_at: HashMap<ValueId, u64>,
     /// The result place's parameter, type, record offset and size. A backend may
     /// keep a result it returns in registers in a place of the frame, which a
     /// resume would find empty, so the variant builds it in the record and
@@ -1197,16 +1199,14 @@ fn shape(
         None => None,
     };
     at = round(at, 8);
-    let mut value_at = HashMap::new();
     let demoted: Vec<ValueId> = (0..nv)
         .filter(|&v| demote[v])
         .map(|v| ValueId(v as u32))
         .collect();
-    for &v in &demoted {
-        value_at.insert(v, at);
-        at += 8;
-    }
-    sizes.demoted = 8 * demoted.len() as u64;
+    let kept_at = at;
+    let most = kept.values().map(Vec::len).max().unwrap_or(0) as u64;
+    at += 8 * most;
+    sizes.demoted = 8 * most;
     sizes.area = round(at, ALIGN);
     Ok(Shape {
         sites,
@@ -1215,7 +1215,7 @@ fn shape(
         reevaluated: addresses,
         cloned,
         slot_at,
-        value_at,
+        kept_at,
         dest,
         area: round(at, ALIGN),
         sizes,
@@ -1472,28 +1472,36 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
     let skip: BTreeSet<usize> = pointers.into_iter().collect();
     // A demoted value lives in a frame slot of its own, which the engine can
     // keep in a register; its place in the record is written only by a park.
-    let mut kept_at: HashMap<ValueId, (AddressId, AddressId)> = HashMap::new();
     for &v in &s.demoted {
         let ty = PlaceTy::Value(old.values[v.index()]);
-        let p = b.at(rec, s.value_at[&v]);
-        let in_record = b.address(AddressBase::Value(p), &[], ty);
         b.n.slots.push(ty);
         let slot = SlotId(b.n.slots.len() as u32 - 1);
         let home = b.address(AddressBase::Slot(slot), &[], ty);
-        for address in [in_record, home] {
+        b.emit(Inst::Address {
+            address: home,
+            fail: None,
+        });
+        b.home.insert(v, home);
+    }
+    // Each site's kept values in the record, in its list's order.
+    let mut kept_at: HashMap<(usize, ValueId), AddressId> = HashMap::new();
+    for (&k, values) in &s.kept {
+        for (i, &v) in values.iter().enumerate() {
+            let p = b.at(rec, s.kept_at + 8 * i as u64);
+            let ty = PlaceTy::Value(old.values[v.index()]);
+            let in_record = b.address(AddressBase::Value(p), &[], ty);
             b.emit(Inst::Address {
-                address,
+                address: in_record,
                 fail: None,
             });
+            kept_at.insert((k, v), in_record);
         }
-        b.home.insert(v, home);
-        kept_at.insert(v, (home, in_record));
     }
     // Copy the values a resume at site `k` reads between their frame slots and
     // the record.
     let copy_kept = |b: &mut Build, k: usize, to_record: bool| {
-        for v in &s.kept[&k] {
-            let (home, in_record) = kept_at[v];
+        for &v in &s.kept[&k] {
+            let (home, in_record) = (b.home[&v], kept_at[&(k, v)]);
             let (from, to) = if to_record {
                 (home, in_record)
             } else {

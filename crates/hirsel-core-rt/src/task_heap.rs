@@ -1212,8 +1212,9 @@ impl Heap {
         if let Some(state) = local.pages() {
             state.listed.clear();
             state.partial = HashMap::default();
-            for head in state.heads.iter_mut().flatten() {
-                if let Some(page) = head.take() {
+            for head in state.heads.as_flattened_mut() {
+                if let Some(page) = *head {
+                    *head = None;
                     // SAFETY: a live head pins itself and any empty head is detached.
                     unsafe {
                         if (*page.as_ref().slots.get()).live == 0 {

@@ -3,9 +3,10 @@
 //! tasks; nothing runs on the main thread (it only waits). The partition
 //! write runs on the committer's worker; fdatasync runs on one of `syncs`
 //! dedicated threads, as HIRSEL_SYNC_HELPERS does for hirsel.
-//! Usage: twin PORT SESSIONS PARTITIONS PAR TOOL_PORT WORKERS SYNCS DIR [READY_ACK]
+//! Usage: twin PORT SESSIONS PARTITIONS PAR TOOL_PORT WORKERS SYNCS DIR [READY_ACK [TIMED_COMMIT]]
 //!        twin synccost DIR N SIZE   (cost of write+fdatasync alone)
 use std::io::Write;
+use std::time::Duration;
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, mpsc as smpsc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,7 +33,11 @@ fn sync_pool(n: usize) -> smpsc::Sender<SyncJob> {
     tx
 }
 
-async fn committer(mut file: std::fs::File, mut rx: mpsc::Receiver<Commit>, sync: smpsc::Sender<SyncJob>) -> u64 {
+const COMMIT_CAP: usize = 4096;
+const COMMIT_WAIT: Duration = Duration::from_micros(400);
+
+async fn committer(mut file: std::fs::File, mut rx: mpsc::Receiver<Commit>, sync: smpsc::Sender<SyncJob>, timed: bool) -> u64 {
+    let timer = timed.then(|| DeadlineTimer::new().unwrap());
     let mut groups = 0u64;
     let mut batch = Vec::with_capacity(65536);
     let mut acks = Vec::new();
@@ -40,7 +45,11 @@ async fn committer(mut file: std::fs::File, mut rx: mpsc::Receiver<Commit>, sync
         batch.clear();
         batch.extend_from_slice(&rec);
         acks.push(ack);
-        while let Ok((rec, ack)) = rx.try_recv() {
+        if let Some(timer) = &timer {
+            timer.sleep(COMMIT_WAIT).await.unwrap();
+        }
+        while !timed || acks.len() < COMMIT_CAP {
+            let Ok((rec, ack)) = rx.try_recv() else { break };
             batch.extend_from_slice(&rec);
             acks.push(ack);
         }
@@ -167,6 +176,7 @@ fn main() {
     let syncs: usize = a[7].parse().unwrap();
     let dir = std::path::PathBuf::from(&a[8]);
     let ready_ack = a.get(9).is_some_and(|arg| arg == "1");
+    let timed_commit = a.get(10).is_some_and(|arg| arg == "1");
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).enable_all().build().unwrap();
     let main = rt.spawn(async move {
         let sync = sync_pool(syncs);
@@ -174,13 +184,16 @@ fn main() {
         let mut committers = Vec::new();
         for p in 0..partitions {
             let file = std::fs::File::create(dir.join(format!("p{p}.log"))).unwrap();
-            let (tx, rx) = mpsc::channel(4096);
+            let (tx, rx) = mpsc::channel(COMMIT_CAP);
             commits.push(tx);
-            committers.push(tokio::spawn(committer(file, rx, sync.clone())));
+            committers.push(tokio::spawn(committer(file, rx, sync.clone(), timed_commit)));
         }
         let (svc_tx, svc_rx) = mpsc::channel(1024);
         let svc = tokio::spawn(service(svc_rx));
-        let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_reuseaddr(true).unwrap();
+        socket.bind(([127, 0, 0, 1], port).into()).unwrap();
+        let l = socket.listen(4096).unwrap();
         let mut jobs = Vec::new();
         // A connection whose hello does not arrive whole within a second or
         // names no session is dropped and does not count as a session, as in

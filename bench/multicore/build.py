@@ -210,8 +210,7 @@ def hirsel_inputs(src):
     ]}
 
 
-def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False, *,
-                 recording_runtime=None):
+def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
@@ -220,9 +219,6 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
         str(llvm / "lib"), os.environ.get("LD_LIBRARY_PATH")
     ]))
     succeeded = True
-    replay = out / "regimes-replay.json"
-    if regimes:
-        replay.unlink(missing_ok=True)
     for src in sorted((BENCH / "hirsel").glob("*.hirsel")):
         case = src.stem
         if (case == "regimes") != regimes:
@@ -264,21 +260,6 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
             succeeded = False
             (path / case).unlink(missing_ok=True)
             print(f"Hirsel {case}: exit {result.returncode}; see {log}", flush=True)
-        if regimes and recording_runtime and result.returncode == 0:
-            recorded = path / "regimes-recording"
-            archive = ["--runtime", recording_runtime]
-            with (out / "hirsel-regimes-recording.log").open("wb") as file:
-                result = subprocess.run(
-                    list(map(str, [ROOT / "tools/capped", compiler, "build", *common, *grants,
-                                   *archive, "--recording", "--json", "-o", recorded])),
-                    env=env, stdout=file, stderr=subprocess.STDOUT,
-                )
-            if result.returncode:
-                succeeded = False
-                recorded.unlink(missing_ok=True)
-                print(f"Hirsel recording build: exit {result.returncode}; see its log", flush=True)
-            else:
-                replay.write_text(json.dumps(list(map(str, [compiler, "replay", *common, *archive]))))
     return succeeded
 
 
@@ -303,7 +284,7 @@ def build_checkbox(out, compiler, runtime):
         binary = checkbox.build(
             compiler, work, web, listen, prefix=(ROOT / "tools/capped",),
             flags=("--backend", "llvm", "--release", "--runtime", runtime, "--cc", clang, "--json"),
-            stdout=log, env=env,
+            stdout=log, env=env, entry="shipping_benchmark",
         )
     run([ROOT / "tools/capped", compiler, "sdk", "ts", binary, "--out", web,
          "--n-place", checkbox.N_PLACE, "--runtime", runtime, "--cc", clang], env=env)
@@ -335,9 +316,7 @@ def main():
     parser.add_argument("--go", default="go")
     parser.add_argument("--goose", type=Path, help="Goose compiler built from d5ae5bbd")
     parser.add_argument("--hirsel", type=Path, help="release Hirsel driver")
-    parser.add_argument("--runtime", type=Path, help="native runtime archive (testing for --regimes)")
-    parser.add_argument("--recording-runtime", type=Path,
-                        help="testing runtime with recording enabled for recorded --regimes runs")
+    parser.add_argument("--runtime", type=Path, help="native runtime archive (shipping archive for --regimes)")
     parser.add_argument("--engine", choices=["llvm", "cranelift"], default="llvm")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
@@ -346,8 +325,6 @@ def main():
     selection.add_argument("--s0", action="store_true", help="build only the S0 Hirsel, Tokio and Rust fixtures")
     selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
-    if options.recording_runtime and not options.regimes:
-        parser.error("--recording-runtime requires --regimes")
     if options.regimes:
         languages = ["rust", "go", "hirsel"]
     elif options.s8u:
@@ -376,7 +353,6 @@ def main():
             succeeded = build_hirsel(
                 out, options.hirsel.resolve(), options.runtime.resolve(), options.engine,
                 options.s0, options.s8u, options.regimes,
-                recording_runtime=options.recording_runtime.resolve() if options.recording_runtime else None,
             )
         elif language == "goose":
             build_goose(out, options.goose.resolve())

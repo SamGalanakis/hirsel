@@ -14,16 +14,21 @@ case "$(taskset -pc $$ | awk '{print $NF}')" in
     4,5|4-5) ;;
     *) echo "pin the builder with taskset -c 4-5" >&2; exit 1 ;;
 esac
-mkdir -p "$scratch"/{bin,build,store,"$side"}
+mkdir -p "$scratch"/{bin,build,store,software,"$side"}
 
 tools/capped rustup run 1.99.0 cargo build -j2 --manifest-path bench/units/rust/Cargo.toml \
     --target-dir "$scratch/build/cargo" --locked --release --bin loadgen --bin toolsrv --bin twin
 cp "$scratch/build/cargo/release/"{loadgen,toolsrv,twin} "$scratch/bin/"
-cp "$scratch/bin/loadgen" "$scratch/bin/loadgen_drain"
+for variant in drain detail churn; do
+    ln -sf loadgen "$scratch/bin/loadgen_$variant"
+done
+tools/capped rustup run 1.99.0 cargo build -j2 --manifest-path bench/units/rust/Cargo.toml \
+    --target-dir "$scratch/build/cargo" --locked --release --features software-sha --bin twin
+cp "$scratch/build/cargo/release/twin" "$scratch/software/"
 
 # The partitions' log directory is the program's directory grant.
 UNITS_DIR="$scratch/store" UNITS_LIMIT=1073741824 \
     python3 bench/units/build.py bench/units/session_u.hirsel "$scratch/build/live" "$driver" "$runtime"
 cp "$scratch/build/live/session_u" "$scratch/bin/"
 cp "$scratch/build/live/session_u" "$scratch/$side/"
-sha256sum "$driver" "$runtime" "$scratch/bin/"*
+sha256sum "$driver" "$runtime" "$scratch/bin/"* "$scratch/software/twin"

@@ -9,7 +9,10 @@ publish = false
 [dependencies]
 libc = "=0.2.191"
 tokio = { version = "=1.52.0", features = ["rt-multi-thread", "rt", "sync", "macros", "time", "net", "io-util", "fs"] }
-sha2 = { version = "=0.10.9", default-features = false, features = ["force-soft"] }
+sha2 = { version = "=0.10.9", default-features = false }
+
+[features]
+software-sha = ["sha2/force-soft"]
 
 [profile.release]
 lto = "thin"

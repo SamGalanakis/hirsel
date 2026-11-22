@@ -193,7 +193,7 @@ def applicable(case, s0=False):
     return ("Hirsel", "Tokio", "Go", "Goose")
 
 
-def sample_env(width, language, test_pool):
+def sample_env(width, language, test_pool, *, shipping_units=False):
     env = os.environ | {
         "LC_ALL": "C",
         "HIRSEL_MEMORY_LIMIT": "2G",
@@ -201,6 +201,9 @@ def sample_env(width, language, test_pool):
         "GOMAXPROCS": str(width),
         "RAYON_NUM_THREADS": str(width),
     }
+    if shipping_units and language == "Hirsel":
+        env = {key: value for key, value in env.items() if not key.startswith("HIRSEL_S8_")}
+        env.update(HIRSEL_UNTIED=str(width), HIRSEL_XSTATS="1")
     if test_pool and language == "Hirsel":
         env["HIRSEL_S8_STATS"] = "1"
         env["HIRSEL_S8_WORKERS"] = str(width)
@@ -221,7 +224,7 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
 
 
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
-            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False, tape=None):
+            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False, shipping_units=False):
     width = len(cpus)
     siblings = sibling_cpus(cpus, allow_smt=allow_smt)
     command = command or sample_command(bins, case, language, width, size, s0)
@@ -230,9 +233,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
     directory = out / f"{case}-{language.lower()}-{width}"
     directory.mkdir()
     launch = measured_command(directory, cpus, command, profile, cycles)
-    env = sample_env(width, language, test_pool)
-    if tape is not None:
-        env["HIRSEL_RECORD"] = str(tape)
+    env = sample_env(width, language, test_pool, shipping_units=shipping_units)
     stdin = sample_stdin(bins, case, language)
     if lock_path:
         wait_load()
@@ -391,22 +392,11 @@ def stderr_metrics(directory):
             re.findall(r"^([a-z][a-z0-9-]*)=(\d+)$", (directory / "stderr").read_text(), re.M)}
 
 
-def pool_counters(directory, case, size):
-    counters = Counter()
-    parks = []
+def unit_pool(directory):
     for line in (directory / "stderr").read_text().splitlines():
-        if line.startswith(("sequencer worker=", "pool workers=")):
-            for key, value in re.findall(r"\b([a-z_][a-z_0-9]*)=(\d+)", line):
-                if key not in {"worker", "workers"}:
-                    counters[key] += int(value)
-        if line.startswith("sequencer worker="):
-            parks = [max(a, b) for a, b in zip(
-                parks or [0] * 5, map(int, re.search(r"parks=\[([0-9, ]+)\]", line)[1].split(",")))]
-    if counters:
-        counters["parks"] = parks
-        if operations := regimes.ordered_operations(case, size):
-            counters["commits_per_workload_operation"] = counters["commits"] / operations
-    return dict(counters)
+        if line.startswith("untied-stats "):
+            return {name: int(value) for name, value in (part.split("=") for part in line.split()[1:])}
+    return {}
 
 
 def stop_server(pidfile, binary, sig):
@@ -445,7 +435,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
     work = regimes.WORKLOADS[case]
     directory.mkdir()
     pidfile = directory / "server.pid"
-    server_env = sample_env(width, language, True)
+    server_env = sample_env(width, language, False, shipping_units=True)
     if checkbox:
         board = bins / "checkbox"
         port = int((board / "port").read_text())
@@ -482,7 +472,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
             if not checkbox:
                 load = regimes.command(bins, "socket_load", "Tokio", len(load_cpus), size,
                                        rounds, port, work.connections)
-            command = ["taskset", "-c", data["load_cpus"], ROOT / "tools/capped", *load]
+            command = measured_load(data["load_cpus"], load)
             (directory / "load-command").write_text(shlex.join(map(str, command)) + "\n")
             with ((directory / "load.stdout").open("wb") as reply,
                   (directory / "load.stderr").open("wb") as load_err):
@@ -527,18 +517,8 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
     return counters | data | {"metrics": metrics, "service_seconds": service_seconds}
 
 
-def replay_sample(command, path, row, tape, cpu):
-    if row["status"] != "ok":
-        return
-    with ((path / "replay.stdout").open("wb") as output,
-          (path / "replay.stderr").open("wb") as err):
-        result = subprocess.run(
-            ["taskset", "-c", str(cpu), ROOT / "tools/capped",
-             *command, "--tape", tape, "-o", path / "replay"],
-            cwd=ROOT, stdout=output, stderr=err, env=sample_env(1, "Hirsel", True))
-    if result.returncode or (path / "replay.stdout").read_bytes():
-        row["status"] = f"replay-failed:{result.returncode}"
-    (path / "replay").unlink(missing_ok=True)
+def measured_load(cpus, command):
+    return ["taskset", "-c", cpus, ROOT / "tools/capped", *command]
 
 
 @contextmanager
@@ -597,20 +577,8 @@ def run_regimes(args, parser, bins, out, workers):
                 parser.error("socket and checkbox cases require disjoint --load-cpus")
             if set(args.load_cpus).intersection(sibling_cpus(args.measure_cpus)):
                 parser.error("load CPUs must also be on separate physical cores")
-    replay_command = None
-    if args.mode == "recorded":
-        replay_config = bins / "regimes-replay.json"
-        if not replay_config.is_file():
-            parser.error("recorded runs require building the regimes with --recording-runtime")
-        replay_command = json.loads(replay_config.read_text())
-        if args.case and any(not regimes.WORKLOADS[case].recorded for case in cases):
-            parser.error("a selected case has no recording and replay path")
-        if args.profile:
-            parser.error("profiles use the untaped fixtures")
-        cases = [case for case in cases if regimes.WORKLOADS[case].recorded]
-        if not cases:
-            parser.error("no selected case supports recording and replay")
     rows = []
+    pair_index = 0
     for case in cases:
         work = regimes.WORKLOADS[case]
         size = args.size or work.size
@@ -624,44 +592,36 @@ def run_regimes(args, parser, bins, out, workers):
                     point = out / f"{case}-{grain}ns-{rounds}r-w{width}-r{repeat}"
                     point.mkdir()
                     with nullcontext() if args.block_process_check else measurement_lock(args.lock):
-                        group = []
-                        for lang in ("Hirsel", "Tokio", "Go"):
-                            if (args.languages and lang not in args.languages
-                                    or lang == "Go" and (not work.go or args.mode == "recorded")):
-                                continue
+                        peers = [lang for lang in ("Hirsel", "Tokio", "Go")
+                                 if (not args.languages or lang in args.languages)
+                                 and (lang != "Go" or work.go)]
+                        if pair_index % 2:
+                            peers.reverse()
+                        pair_index += 1
+                        for lang in peers:
                             cpus = args.measure_cpus[:width]
                             path = point / f"{case}-{lang.lower()}-{width}"
-                            recorded = args.mode == "recorded" and lang == "Hirsel"
-                            tape = path / "run.tape" if recorded else None
                             if work.connections or case == "checkbox":
                                 row = observe_service(bins, path, case, lang, cpus, args.load_cpus,
                                                       size, rounds, wanted, profile=args.profile,
                                                       allow_smt=args.allow_smt, cycles=args.cycles)
                             else:
                                 command = regimes.command(bins, case, lang, width, size, rounds)
-                                if recorded:
-                                    command[0] = bins / "hirsel/regimes-recording"
                                 row = observe(bins, point, case, lang, cpus, size, wanted, False,
-                                              None, test_pool=True, command=command, profile=args.profile,
-                                              allow_smt=args.allow_smt, cycles=args.cycles, tape=tape)
+                                              None, command=command, profile=args.profile,
+                                              allow_smt=args.allow_smt, cycles=args.cycles, shipping_units=True)
                                 if path.exists():
-                                    launch = ["env", f"HIRSEL_RECORD={tape}", *command] if tape else command
-                                    (path / "command").write_text(shlex.join(map(str, launch)) + "\n")
+                                    (path / "command").write_text(shlex.join(map(str, command)) + "\n")
                                     row["metrics"] = stderr_metrics(path)
                             row |= {"case": case, "language": lang, "width": width, "size": size,
                                     "rounds": rounds, "grain_ns": grain, "repeat": repeat,
-                                    "mode": args.mode, "path": str(path.relative_to(out))}
+                                    "mode": "untaped", "path": str(path.relative_to(out))}
                             if args.allow_smt and args.load_cpus and set(cpus).intersection(args.load_cpus):
                                 row["placement"] = "SMT-bound, load shares the server CPUs"
                             if lang == "Hirsel" and path.exists():
-                                row["pool"] = pool_counters(path, case, size)
-                            if recorded:
-                                row["recorded_with"] = "recording build with testing runtime"
-                            group.append((path, row, tape))
-                        for path, row, tape in group:
-                            if tape:
-                                replay_sample(replay_command, path, row, tape, args.measure_cpus[0])
-                            lang = row["language"]
+                                row["pool"] = unit_pool(path)
+                                if row["status"] == "ok" and row["pool"].get("workers") != width:
+                                    row["status"] = "missing-unit-pool-receipt"
                             rows.append(row)
                             print(f"{case} {grain}ns {lang} {width} repeat {repeat}: {row['status']}",
                                   file=sys.stderr, flush=True)
@@ -685,7 +645,6 @@ def main():
     parser.add_argument("--grain-ns", nargs="+", type=int, default=regimes.GRAINS)
     parser.add_argument("--rounds", nargs="+", type=int, help="kernel iteration counts in grain order")
     parser.add_argument("--size", type=int, help="override the scheduler workload size")
-    parser.add_argument("--mode", choices=("untaped", "recorded"), default="untaped")
     parser.add_argument("--load-cpus", type=cpu_list)
     parser.add_argument("--allow-smt", action="store_true",
                         help="allow benchmark and load CPU assignments to share cores or CPUs")
@@ -717,7 +676,7 @@ def main():
             parser.error("--out must be a new directory outside the repository")
         workers = args.workers or ([1] if args.s0 else (1, 2, 4, 8, 16) if args.regimes else WIDTHS)
         if args.regimes:
-            if args.s0 or args.standard_rust or set(workers) - {1, 2, 4, 8, 16}:
+            if args.s0 or args.standard_rust or args.test_pool or set(workers) - {1, 2, 4, 8, 16}:
                 parser.error("use the grain sweep by itself at widths 1, 2, 4, 8 or 16")
             if args.languages and set(args.languages) - {"Hirsel", "Tokio", "Go"}:
                 parser.error("the grain sweep supports Hirsel, Tokio and Go")

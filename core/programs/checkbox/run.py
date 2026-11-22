@@ -57,7 +57,7 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
 
 
 def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sources=None, *,
-          prefix=(), flags=(), env=None, stdout=None):
+          prefix=(), flags=(), env=None, stdout=None, entry="main"):
     work.mkdir(parents=True, exist_ok=True)
     data = work / "data"
     data.mkdir(exist_ok=True)
@@ -65,7 +65,7 @@ def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sou
     port = int(listen.rsplit(":", 1)[1])
     subprocess.run([
         *prefix, compiler, "build", *flags, "--source-core", "--inputs", inputs(work, source, store_sources),
-        "--store", work / "compiler-store", "--entry", ENTRY + "/main",
+        "--store", work / "compiler-store", "--entry", ENTRY + "/" + entry,
         "--dir", data, "--dir", web, "--grant", "Tasks", "--grant", "Clock", "--grant", "Process",
         "--grant", "Random", "--grant", f"Net=Listen {listen.rsplit(':', 1)[0]}/32 {port}-{port}",
         "--limit", str(3 << 30), "-o", executable,

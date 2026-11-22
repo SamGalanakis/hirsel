@@ -124,7 +124,7 @@ def smoke(runner, out, side, cell, rate):
     saved = (scale.SERVER, scale.LOAD, scale.TOOL)
     scale.SERVER = scale.LOAD = scale.TOOL = "6-7"
     try:
-        with runner.tool() as tool:
+        with runner.tool(precise=cell.get("fair", False)) as tool:
             r = runner.trial(f"smoke-{os.getpid()}-{side}", side, cell, rate, 12345, tool, None)
     finally:
         scale.SERVER, scale.LOAD, scale.TOOL = saved

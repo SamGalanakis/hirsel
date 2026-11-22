@@ -4386,30 +4386,6 @@ pub(crate) fn returnable_waits() -> bool {
     }
 }
 
-/// Park the running task in `queue` as `park_for` does, in the same order,
-/// but leave the switch to `start`, after the represented frames have
-/// returned. The commit stays held until the dispatcher's, as across the
-/// stackful form's switch; a wake makes the task runnable, and it resumes on
-/// a fresh stack by entering its body again (`park_returnable`).
-/// # Safety
-/// As for `park`; the running task has `returnable_waits`.
-pub(crate) unsafe fn park_returnable_in(
-    queue: *mut Waiters,
-    #[cfg(feature = "prof")] wait: (Reason, u64),
-) {
-    let task = CURRENT.get();
-    let commit = crate::sequencer::enter();
-    // SAFETY: the condition was checked in this commit and the queue is pinned.
-    unsafe {
-        #[cfg(feature = "prof")]
-        prof_state(task, State::Waiting, wait.0, wait.1);
-        (*task).state = State::Waiting;
-        Waiters::push(queue, task);
-        (*task).stackless = true;
-    }
-    std::mem::forget(commit);
-}
-
 /// # Safety
 /// The active commit holds the condition's owner alive through the event.
 pub(crate) unsafe fn event_wake_waiters(kind: u8, object: u64, value: u64, queue: *mut Waiters) {

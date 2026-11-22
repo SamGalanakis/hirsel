@@ -442,7 +442,8 @@ unsafe fn receive<const REC: bool>(
                 };
             }
             if returnable {
-                tasks::park_returnable_in(
+                tasks::park_returning(
+                    tasks::current_task(),
                     &raw mut (*channel).receive_waiters,
                     #[cfg(feature = "prof")]
                     (crate::prof::Reason::ChannelRecv, (*channel).id),

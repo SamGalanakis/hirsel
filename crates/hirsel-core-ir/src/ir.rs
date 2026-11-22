@@ -1133,6 +1133,8 @@ pub enum HostOp {
     DatagramSendTo = hirsel_core_ids::host_op::DATAGRAM_SEND_TO as isize,
     DatagramRecv = hirsel_core_ids::host_op::DATAGRAM_RECV as isize,
     NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
+    /// Wait until the clock's wall time reaches an absolute millisecond reading.
+    SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
 }
 
 impl HostOp {
@@ -1163,6 +1165,7 @@ impl HostOp {
         HostOp::Stderr,
         HostOp::Rename,
         HostOp::SleepUntil,
+        HostOp::SleepUntilWall,
         HostOp::Sync,
         HostOp::SyncDir,
         HostOp::Random,
@@ -1263,6 +1266,7 @@ impl HostOp {
             HostOp::Stderr => "stderr_write",
             HostOp::Rename => "host_rename",
             HostOp::SleepUntil => "host_sleep_until",
+            HostOp::SleepUntilWall => "host_sleep_until_wall",
             HostOp::Sync => "host_sync",
             HostOp::SyncDir => "host_sync_dir",
             HostOp::Random => "host_random",
@@ -1820,7 +1824,9 @@ impl RtOp {
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::SleepUntil | HostOp::SleepUntilWall => {
+                        (vec![V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::Stat | HostOp::StatFile => {
                         let mut metadata = outcome;
                         metadata[3] = Ty::Scalar(Scalar::I64);

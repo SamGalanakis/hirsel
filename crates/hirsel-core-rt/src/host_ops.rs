@@ -266,10 +266,34 @@ pub unsafe extern "C" fn hirsel_core_host_sleep_until(
     deadline: u64,
     site: u64,
 ) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { clock_wait(context, SLEEP_UNTIL, handle, deadline, site) }
+}
+
+/// Cancellable wait until the clock's wall time reaches `wall_ms`, carried as
+/// SLEEP_UNTIL's deadline is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_sleep_until_wall(
+    context: *mut Context,
+    handle: u64,
+    wall_ms: u64,
+    site: u64,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { clock_wait(context, SLEEP_UNTIL_WALL, handle, wall_ms, site) }
+}
+
+unsafe fn clock_wait(
+    context: *mut Context,
+    operation: u8,
+    handle: u64,
+    at: u64,
+    site: u64,
+) -> Outcome {
     unsafe {
-        let mut bytes = deadline.to_ne_bytes();
+        let mut bytes = at.to_ne_bytes();
         let mut request = Request {
-            operation: SLEEP_UNTIL,
+            operation,
             mode: 0,
             handle,
             path: std::ptr::null(),

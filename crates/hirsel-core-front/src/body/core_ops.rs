@@ -117,6 +117,7 @@ operations! {
     ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
     ("host", "stopped", Lane::Runtime(Kernel::Host(HostOp::Stopped)), "B", "host-stopped-1426", false),
     ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
+    ("host", "sleep_until_wall", Lane::Runtime(Kernel::Host(HostOp::SleepUntilWall)), "B", "clock-fixture-1738", false),
     ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
     ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
     ("host", "random", Lane::Runtime(Kernel::Host(HostOp::Random)), "B", "core-ops-914", false),
@@ -2895,7 +2896,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 args[2] = Arg::Value(vals[2]?);
                 3
             }
-            HostOp::SleepUntil => {
+            HostOp::SleepUntil | HostOp::SleepUntilWall => {
                 args[1] = Arg::Value(vals[1]?);
                 2
             }

@@ -3233,7 +3233,10 @@ unsafe fn mark_parked(task: *mut Task) {
             } else {
                 0
             };
-            let reason = if (*(*op).request).operation == crate::provider::SLEEP_UNTIL {
+            let reason = if matches!(
+                (*(*op).request).operation,
+                crate::provider::SLEEP_UNTIL | crate::provider::SLEEP_UNTIL_WALL
+            ) {
                 Reason::Timer
             } else {
                 Reason::ProviderIo

@@ -3475,21 +3475,68 @@ fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks
 }
 
 fn arm_trigger_timer[G: send](mut drive: Box[TriggerDrive[G]], at: u64) -> Result[(), store.Error] waits {
-    if let Some(armed) = drive.timer {
-        if armed.at == at { return Ok(()) }
-    }
-    if let Some(ArmedTimer(at: _, task_handle: take prior)) = replace(mut drive.timer, None) {
-        let _ = task.cancel_join(take prior)
-    }
-    // The clock's wait runs on monotonic time. Sample wall time again after
-    // waking so a wall-clock correction cannot start a trigger early.
-    let remaining = int.saturating_sub(at, host.wall_ms(drive.clock))
-    // Recheck long waits so a wall-clock step forward is visible on an idle head.
-    let delay = if remaining < 1000u64 { remaining } else { 1000u64 }
-    let deadline = int.saturating_add(host.mono_ns(drive.clock), delay * 1000000u64)
-    let waiting = std.clock.alarm(drive.tasks, drive.clock, deadline, drive.to, TriggerWake(at))
-    drive.timer = Some(ArmedTimer(at: at, task_handle: take waiting))
+    let prior = replace(mut drive.timer, None)
+    drive.timer = Some(arm_wall_timer(take prior, drive.tasks, drive.clock, drive.to, at))
     Ok(())
+}
+
+// One absolute wall-time wait: no wakeup before `at`. The head still samples
+// wall time when TriggerWake arrives, before it starts a trigger.
+fn arm_wall_timer(take prior: Option[ArmedTimer], tasks: Tasks, c: Clock, to: Sender[HeadInput], at: u64) -> ArmedTimer waits {
+    if let Some(take armed) = take prior {
+        if armed.at == at { return take armed }
+        let ArmedTimer(at: _, task_handle: take running) = take armed
+        let _ = task.cancel_join(take running)
+    }
+    let waiting = std.clock.wall_alarm(tasks, c, at, to, TriggerWake(at))
+    ArmedTimer(at: at, task_handle: take waiting)
+}
+
+fn trigger_woken(from: Receiver[HeadInput]) -> List[u64] {
+    let mut woken: List[u64] = list.new()
+    while let Ok(take input) = channel.try_receive(from) {
+        if let TriggerWake(at) = take input { list.push(mut woken, at) }
+    }
+    take woken
+}
+
+// The head's trigger timer for an At(T) trigger armed one hour ahead. Monotonic and
+// wall time walk forward together, stopping at every deadline the clock reports, and
+// the head's re-arm after each early wake is replayed. The arm time plus the hour is
+// the oracle: the timer wakes the head never before T and once at T (0 wakeups in the
+// hour; the 1000 ms polling cap gave 3,600). A wall clock set back after arming must
+// not wake it early either.
+pub fn law_trigger_timer_wall_wait(tasks: Tasks) -> bool waits {
+    let armed_ms = 1700000000000u64
+    let hour_ms = 3600000u64
+    let at = armed_ms + hour_ms
+    let (c, h) = provide.clock(0u64, armed_ms)
+    let mut ticks = take h
+    let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let mut timer = arm_wall_timer(None, tasks, c, to, at)
+    let mut early = 0u64
+    while let Some(deadline) = clock.idle(mut ticks) {
+        if deadline >= hour_ms * 1000000u64 { break }
+        clock.advance_to(mut ticks, deadline)
+        clock.set_wall(mut ticks, armed_ms + deadline / 1000000u64)
+        let _ = clock.idle(mut ticks)
+        for _ in trigger_woken(from) {
+            early += 1u64
+            timer = arm_wall_timer(None, tasks, c, to, at)
+        }
+    }
+    clock.advance_to(mut ticks, hour_ms * 1000000u64 - 1000000u64)
+    clock.set_wall(mut ticks, at - 1u64)
+    let _ = clock.idle(mut ticks)
+    let before = list.len(trigger_woken(from))
+    clock.set_wall(mut ticks, armed_ms)
+    let _ = clock.idle(mut ticks)
+    let set_back = list.len(trigger_woken(from))
+    clock.set_wall(mut ticks, at)
+    let _ = clock.idle(mut ticks)
+    let woken = trigger_woken(from)
+    let once = list.len(woken) == 1u64 && woken[0u64] == at
+    early == 0u64 && before == 0u64 && set_back == 0u64 && once
 }
 
 fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () waits {

@@ -38,7 +38,7 @@ pub use crate::entry::{
 /// Stat uses value for size and written for signed modification nanoseconds.
 pub use crate::host_ops::{
     hirsel_core_host_at, hirsel_core_host_op, hirsel_core_host_rename,
-    hirsel_core_host_sleep_until, hirsel_core_host_stat,
+    hirsel_core_host_sleep_until, hirsel_core_host_sleep_until_wall, hirsel_core_host_stat,
 };
 pub use crate::process::{
     hirsel_core_args_get, hirsel_core_args_len, hirsel_core_main_error, hirsel_core_run,

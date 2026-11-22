@@ -34,6 +34,27 @@ fn fire_alarm[M: send](take job: Alarm[M]) waits {
     let _ = channel.send(to, take m)
 }
 
+type WallAlarm[M: send]: send {
+    c: Clock,
+    at_ms: u64,
+    to: Sender[M],
+    m: M
+}
+
+fn fire_wall_alarm[M: send](take job: WallAlarm[M]) waits {
+    let WallAlarm(c, at_ms, to: take to, m: take m) = take job
+    host.sleep_until_wall(c, at_ms)
+    let _ = channel.send(to, take m)
+}
+
+/// Sends m once `host.wall_ms(c)` has reached at_ms, with no wakeup before then.
+/// Waits for room in the channel and ends cleanly if the receiver is closed.
+/// Dropping the task before then cancels the alarm without sending.
+/// Alloc: a task with a 4096-byte child limit and a copy of the sender handle.
+pub fn wall_alarm[M: send](tasks: Tasks, c: Clock, at_ms: u64, to: Sender[M], take m: M) -> Task[()] {
+    task.spawn(tasks, bytes 4096, WallAlarm(c, at_ms, to: channel.sender(to), m: take m), fire_wall_alarm)
+}
+
 /// Sends m once at or after the absolute monotonic deadline at. Waits for room
 /// in the channel and ends cleanly if the receiver is closed. Dropping the task
 /// before at cancels the alarm without sending.

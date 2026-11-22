@@ -18,3 +18,8 @@ child sleeps until the absolute monotonic deadline on the supplied `Clock`,
 then sends the owned message once. It waits if the queue is full and drops the
 message if the receiver has closed. Dropping the task before the deadline
 cancels the alarm without delivering the message.
+
+`wall_alarm` is `alarm` on wall time: the child waits through
+`host.sleep_until_wall` until `host.wall_ms` on the supplied `Clock` reaches the
+absolute millisecond reading, with no wakeup before then, and sends the owned
+message once.

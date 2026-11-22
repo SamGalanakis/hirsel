@@ -210,6 +210,7 @@ core@1/host/rename
 # DECISIONS.md 2026-11-16 (CAP-5 / CAP-8, S5c)
 core@1/host/random
 core@1/host/sleep_until
+core@1/host/sleep_until_wall
 core@1/host/stat
 core@1/host/stat_file
 # DECISIONS.md 2026-11-18 (service-ops host stop source): the store runner

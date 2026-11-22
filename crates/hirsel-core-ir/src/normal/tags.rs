@@ -464,6 +464,7 @@ tags!(HostOp {
     113 => DatagramSendTo,
     114 => DatagramRecv,
     115 => NetNarrowUnix,
+    116 => SleepUntilWall,
 });
 
 tags!(RaiseCause {

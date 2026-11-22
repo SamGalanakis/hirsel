@@ -39,6 +39,8 @@ struct ClockCell {
     /// Waits on this clock's deadlines in registration order: a token stays
     /// until its deadline is reached; a stale one is pruned at quiescence.
     timers: Vec<(u64, u64)>,
+    /// Waits on this clock's wall time, as `timers`; `set_wall` readies them.
+    wall_timers: Vec<(u64, u64)>,
     /// `clock.idle` waits: the token and whether quiescence has woken it.
     idle: Vec<(u64, bool)>,
 }
@@ -754,6 +756,17 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
             }
             park()
         }
+        (Cell::Clock(clock), SLEEP_UNTIL_WALL) => {
+            let at = deadline(request);
+            let mut clock = lock(clock);
+            if at <= clock.wall {
+                return Wait::default();
+            }
+            if !clock.wall_timers.iter().any(|&(_, t)| t == token) {
+                clock.wall_timers.push((at, token));
+            }
+            park()
+        }
         (Cell::Clock(c), CLOCK_IDLE) => {
             let mut clock = lock(c);
             if let Some(i) = clock.idle.iter().position(|&(t, _)| t == token) {
@@ -1343,7 +1356,9 @@ pub unsafe extern "C" fn hirsel_core_clock_advance_to(
     Outcome::default()
 }
 
-/// `clock.set_wall(mut h, wall_ms)`: the wall clock may move either way.
+/// `clock.set_wall(mut h, wall_ms)`: the wall clock may move either way. Every
+/// wall wait now reached is readied, earliest reading first, ties in
+/// registration order.
 /// # Safety
 /// Context is running and `hand` is a live ClockHand.
 #[unsafe(no_mangle)]
@@ -1357,7 +1372,22 @@ pub unsafe extern "C" fn hirsel_core_clock_set_wall(
     let Cell::Clock(clock) = (unsafe { held(context, hand) }) else {
         unreachable!("a ClockHand designates a clock cell")
     };
-    lock(clock).wall = wall;
+    let mut due = Vec::new();
+    {
+        let mut clock = lock(clock);
+        clock.wall = wall;
+        clock.wall_timers.retain(|&(at, token)| {
+            let reached = at <= wall;
+            if reached {
+                due.push((at, token));
+            }
+            !reached
+        });
+    }
+    due.sort_by_key(|&(at, _)| at);
+    for (_, token) in due {
+        crate::tasks::hirsel_core_ready(token);
+    }
     Outcome::default()
 }
 
@@ -2215,6 +2245,7 @@ fn wake_quiescent(live: &dyn Fn(u64) -> bool) -> bool {
         if let Cell::Clock(clock) = unsafe { cell(state as *mut u8) } {
             let mut clock = lock(clock);
             clock.timers.retain(|&(_, t)| live(t));
+            clock.wall_timers.retain(|&(_, t)| live(t));
             if let Some(entry) = clock.idle.iter_mut().find(|(t, _)| *t == token) {
                 entry.1 = true;
             }

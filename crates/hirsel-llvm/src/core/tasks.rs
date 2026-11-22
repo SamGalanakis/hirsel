@@ -240,6 +240,16 @@ impl FunctionEmitter<'_> {
                     word(at),
                 ],
             ),
+            HostOp::SleepUntilWall => self.native_call(
+                "hirsel_core_host_sleep_until_wall",
+                &results,
+                &[
+                    ptr(CONTEXT),
+                    word(args[0].clone()),
+                    word(args[1].clone()),
+                    word(at),
+                ],
+            ),
             _ => self.native_call(
                 op.io_symbol(),
                 &results,

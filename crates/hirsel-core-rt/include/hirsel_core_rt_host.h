@@ -6,7 +6,7 @@
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
-   Stat 46, StatFile 47, CloseEntries 48. Positioned requests carry an eight-byte little-endian
+   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77. Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
@@ -68,6 +68,7 @@ HirselCoreHostOutcome hirsel_core_host_stat(HirselCoreContext *, uint8_t op, uin
 HirselCoreHostOutcome hirsel_core_host_at(HirselCoreContext *, uint8_t op, uint64_t handle, uint64_t at, HirselCoreBuffer *operand, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_sleep_until_wall(HirselCoreContext *, uint64_t handle, uint64_t wall_ms, uint64_t site);
 /* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.
    No public fields or inline offsets. OPEN returns it in
    Outcome.value; file operations use its retained issuing provider. CLOSE

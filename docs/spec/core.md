@@ -465,7 +465,13 @@ operations it names; nothing else about them may be inferred from an implementat
   cancellation point at its entry and while it waits
   ([CONC-7](tasks.md#conc-7-cancellation-points)), and its completion passes the replay
   point ([CAP-8](capabilities.md#cap-8-the-replay-point)). A relative sleep is
-  library code over it. No host operation admits; every byte it returns
+  library code over it. `host.sleep_until_wall(c, at_ms)` is the absolute wall-time wait:
+  it returns once `host.wall_ms(c) >= at_ms`, at once for a reading already reached, and
+  the run is not woken for it before then. The host provider measures what remains on its
+  monotonic clock from a fresh pair of readings, and reads both clocks again when that
+  measure runs out, so a wall clock set back while it waits lengthens the wait. A wall
+  clock set forward does not shorten a measure already running. It is a cancellation
+  point and passes the replay point as `host.sleep_until` does. No host operation admits; every byte it returns
   lands in capacity the caller already holds. `HostFile` is a mechanical resource
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
   outcome. `host.random(r: Random, mut b: Bytes)` appends to `b` exactly its spare capacity of bytes from the host's cryptographic source, never
@@ -727,7 +733,8 @@ pub fn trigger(take t: StopTrigger)
   `provide.clock` starts at the given times. `clock.advance_to(mut h, t)` raises monotonic
   time to `t` (a smaller `t` changes nothing) and completes every sleep and expires every
   deadline at or before it, in deadline order and then issue order. `clock.set_wall` sets
-  wall time alone. `clock.idle(mut h)` waits until every other task waits, then returns the
+  wall time alone and completes every `host.sleep_until_wall` it reaches, in reading order
+  and then issue order. A pending wall wait is no deadline of `clock.idle`'s. `clock.idle(mut h)` waits until every other task waits, then returns the
   earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
   answers each draw with the next bytes of a SplitMix64 stream from `seed`, eight
   little-endian bytes per step, so the same seed gives the same bytes on every engine.

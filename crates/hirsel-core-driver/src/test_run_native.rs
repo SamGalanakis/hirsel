@@ -870,6 +870,22 @@ fn build_names_unmatched_grant_and_entry() {
 }
 
 #[test]
+fn package_archive_outside_root_explains_workspace() {
+    let law = PackageLaw::new();
+    law.app("app", &format!(
+        "[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"../vendor/jx.hpkg\" }}\n"
+    ));
+    PackageLaw::refuse(
+        law.run(&["lock", "app"]),
+        concat!(
+            "app/hirsel.toml: dependencies.json: archive \"../vendor/jx.hpkg\" is not inside the workspace root. ",
+            "To share an archive across packages, add a parent hirsel.toml with [workspace] and members ",
+            "listing the package directories, then use a relative path within that workspace",
+        ),
+    );
+}
+
+#[test]
 fn foreign_recipe_build_uses_only_selected_sealed_archive() {
     use crate::code_store::{CodeStore, ObjectKind};
     use hirsel_core_ir::{decode::DecodeBudget, release_recipe::Recipe};

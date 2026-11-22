@@ -673,7 +673,7 @@ Roots are always written in full.
 | member cycle | `hirsel: the members' path bindings form a cycle: a@1 -> b@1 -> a@1`, starting at the smallest identity on the cycle |
 | inherit missing | `hirsel: <manifest>: dependencies.<name>: the workspace declares no <name>` |
 | no source | `hirsel: <id> sha256:<P> is not in the package store and its binding names no source` |
-| archive outside | `hirsel: <manifest>: dependencies.<name>: archive "<path>" is not inside the workspace root` |
+| archive outside | `hirsel: <manifest>: dependencies.<name>: archive "<path>" is not inside the workspace root. To share an archive across packages, add a parent hirsel.toml with [workspace] and members listing the package directories, then use a relative path within that workspace` |
 | archive incomplete | `hirsel: <id>: <source> lacks sha256:<P>, which <binder> binds as <name>@<major>`, the least such edge |
 | archive extra | `hirsel: <id>: <source> holds sha256:<Q>, which nothing in it binds`, the least such root |
 | fetch mismatch | `hirsel: <id>: <source> holds sha256:<Q>, but the binding pins sha256:<P>` |

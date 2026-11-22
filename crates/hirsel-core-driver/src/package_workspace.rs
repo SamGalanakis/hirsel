@@ -421,7 +421,10 @@ impl Workspace {
                     Dependency::Published(id, root, source) => {
                         let source = match source {
                             Some(SourceLocation::Archive(path)) => {
-                                let path = archive_path(from, path).ok_or_else(|| format!("{}: dependencies.{name}: archive {path:?} is not inside the workspace root", manifest.display()))?;
+                                let path = archive_path(from, path).ok_or_else(|| format!(
+                                    "{}: dependencies.{name}: archive {path:?} is not inside the workspace root. To share an archive across packages, add a parent hirsel.toml with [workspace] and members listing the package directories, then use a relative path within that workspace",
+                                    manifest.display()
+                                ))?;
                                 Some(SourceLocation::Archive(path))
                             }
                             other => other.clone(),

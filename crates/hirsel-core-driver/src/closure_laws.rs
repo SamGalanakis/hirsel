@@ -389,11 +389,14 @@ const CODEC_BODIES: [&str; 7] = [
 
 /// A row closure is built once per program and copied into later bodies
 /// (body/row_closures.rs). Law: every body's module, structural codec hooks
-/// included, is the module the body lowers to in a program holding it alone, where
-/// nothing is copied. Oracle: that program's fresh build. Bodies name `List[Rec]`
-/// after other rows, so a copy lands at an offset, and `seven` names hook-free `Out`
-/// after the `In` it holds, so only `Out` is copied, naming the body's `In`; red on a
-/// copy numbered or hooked apart from the build it stands for.
+/// included, is the module the body lowers to where nothing is copied. Oracle: the
+/// fresh build, first of a program holding the body alone, then of the whole program
+/// with every row built in each body that names it. Bodies name `List[Rec]` after
+/// other rows, so a copy lands at an offset, and `seven` names hook-free `Out` after
+/// the `In` it holds, so only `Out` is copied, naming the body's `In`. std's bodies
+/// name codec-hooked closures over rows they already hold, whose makers, instances and
+/// signatures the copy finds in the body's module; red on a copy numbered or hooked
+/// apart from the build it stands for.
 #[test]
 fn a_copied_row_closure_is_the_fresh_build() {
     let all = format!("{CODEC_TYPES}{}", CODEC_BODIES.concat());
@@ -414,4 +417,21 @@ fn a_copied_row_closure_is_the_fresh_build() {
         assert_eq!(together.definitions[&path].ir().unwrap(), fresh, "{name}");
     }
     assert!(hooked, "no body names a codec hook");
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let mut fresh_driver = Driver {
+        fresh_rows: true,
+        ..Driver::default()
+    };
+    let fresh = check(&all, fresh_dir.path(), &mut fresh_driver);
+    assert_eq!(
+        together.definitions.keys().collect::<Vec<_>>(),
+        fresh.definitions.keys().collect::<Vec<_>>()
+    );
+    for (path, definition) in &together.definitions {
+        assert_eq!(
+            definition.ir().ok(),
+            fresh.definitions[path].ir().ok(),
+            "{path}"
+        );
+    }
 }

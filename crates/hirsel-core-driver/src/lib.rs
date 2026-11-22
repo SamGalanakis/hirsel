@@ -537,6 +537,9 @@ impl CheckProduct {
 pub struct Driver {
     #[cfg(test)]
     pub(crate) layers: layers::Probe,
+    /// Each body builds every row it names, as `closure_laws` compares copies with.
+    #[cfg(test)]
+    pub(crate) fresh_rows: bool,
 }
 
 /// An item in one source file: the file's occurrence and the item's ordinal
@@ -1004,6 +1007,10 @@ impl Driver {
                 )
             });
             p.entry = request.entry.clone();
+            #[cfg(test)]
+            if self.fresh_rows {
+                p.build_rows_fresh();
+            }
             if !result.foreign_inputs.is_empty() {
                 result.foreign_headers = p
                     .fns

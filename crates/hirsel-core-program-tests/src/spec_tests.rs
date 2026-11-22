@@ -17,6 +17,7 @@ struct Fence {
     line: usize,
     source: String,
     signatures: bool,
+    uses_std: bool,
     entry: bool,
     rules: BTreeSet<String>,
     run: Option<Run>,
@@ -88,7 +89,12 @@ fn expected_run(lines: &mut Lines<'_>, location: &str) -> Run {
     Run { stdout, outcome }
 }
 
-fn read_fences(path: &Path, failures: &mut Vec<String>, unbuilt: &mut usize) -> Vec<Fence> {
+fn read_fences(
+    path: &Path,
+    std_by_default: bool,
+    failures: &mut Vec<String>,
+    unbuilt: &mut usize,
+) -> Vec<Fence> {
     let markdown = fs::read_to_string(path).unwrap();
     let mut lines = markdown.split_inclusive('\n').enumerate();
     let mut fences = Vec::new();
@@ -171,6 +177,7 @@ fn read_fences(path: &Path, failures: &mut Vec<String>, unbuilt: &mut usize) -> 
         fences.push(Fence {
             path: path.to_owned(),
             line: at + 2,
+            uses_std: std_by_default || source.contains("std."),
             source,
             signatures,
             entry,
@@ -215,7 +222,7 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
         } else {
             let name = package(&sample);
             let mut dependencies = vec![core.clone()];
-            if fence.source.contains("std.") {
+            if fence.uses_std {
                 dependencies.push(package("std"));
             }
             packages.push(PackageManifest {
@@ -402,11 +409,13 @@ fn every_live_spec_fence_checks_its_claim() {
         .filter(|path| path.extension().is_some_and(|e| e == "md"))
         .collect::<Vec<_>>();
     paths.sort();
-    paths.push(repo().join("docs/PRIMER.md"));
+    let primer = repo().join("docs/PRIMER.md");
+    paths.push(primer.clone());
     let (mut failures, mut unbuilt) = (Vec::new(), 0);
     let fences = paths
         .iter()
-        .flat_map(|path| read_fences(path, &mut failures, &mut unbuilt))
+        // `hirsel new` declares std, whose extensions are also visible through core module names.
+        .flat_map(|path| read_fences(path, path == &primer, &mut failures, &mut unbuilt))
         .collect::<Vec<_>>();
     let refused = fences
         .iter()

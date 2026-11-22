@@ -508,6 +508,7 @@ impl Hit {
                         .iter()
                         .map(|fix| Fix {
                             applicability: fix.applicability,
+                            signature: None,
                             edits: fix
                                 .edits
                                 .iter()
@@ -519,6 +520,7 @@ impl Hit {
                                 .collect(),
                         })
                         .collect(),
+                    available_members: Vec::new(),
                     missing_patterns: &r.missing_patterns,
                 })
                 .collect(),

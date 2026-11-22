@@ -517,18 +517,65 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     failures.push(format!("missing {role} at {from} for {rule} at {at}"));
                 }
             }
-            ["fix", rule, "at", at, applicability, "|", replacement @ ..] => {
+            ["available", rule, "at", at, "|", ..] => {
                 let rows = product.machine_diagnostics().unwrap();
                 let row = rows
                     .iter()
                     .find(|row| row.rule == *rule && matches_site(&row.primary, at));
-                let Some([fix]) = row.map(|row| row.fixes.as_slice()) else {
+                let signatures = row.filter(|row| row.fixes.is_empty()).map(|row| {
+                    row.available_members
+                        .iter()
+                        .map(|member| member.signature.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                });
+                let want = e.split_once(" | ").unwrap().1;
+                if signatures.as_deref() != Some(want) {
                     failures.push(format!(
-                        "expected one fix for {rule} at {at}: {:?}",
+                        "wrong available members for {rule} at {at}: {signatures:?}"
+                    ));
+                }
+            }
+            [
+                kind @ ("fix" | "first-fix"),
+                rule,
+                "at",
+                at,
+                applicability,
+                "|",
+                replacement @ ..,
+            ] => {
+                let rows = product.machine_diagnostics().unwrap();
+                let row = rows
+                    .iter()
+                    .find(|row| row.rule == *rule && matches_site(&row.primary, at));
+                let fix = row.and_then(|row| match row.fixes.as_slice() {
+                    [fix] => Some(fix),
+                    [first, ..] if *kind == "first-fix" => Some(first),
+                    _ => None,
+                });
+                let Some(fix) = fix else {
+                    failures.push(format!(
+                        "expected {kind} for {rule} at {at}: {:?}",
                         row.map(|r| &r.fixes)
                     ));
                     continue;
                 };
+                let (replacement, signature) = replacement
+                    .iter()
+                    .position(|&word| word == "|")
+                    .map_or((replacement, None), |separator| {
+                        (
+                            &replacement[..separator],
+                            Some(replacement[separator + 1..].join(" ")),
+                        )
+                    });
+                if fix.signature != signature {
+                    failures.push(format!(
+                        "wrong signature for {rule} at {at}: {:?}",
+                        fix.signature
+                    ));
+                }
                 let row = row.unwrap();
                 let line = source.lines().nth(row.primary.line.unwrap() - 1).unwrap();
                 if row.primary.line_text.as_deref() != Some(line) {
@@ -1516,6 +1563,20 @@ pub fn worker() -> u64 { 0 }
 #[test]
 fn diagnostic_delimiter_openers() {
     let failures = run_case(&root().join("cases/body/diag-unclosed-delimiters.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn diagnostic_name_candidates() {
+    let failures: Vec<_> = ["transpose", "case", "other-module", "available"]
+        .iter()
+        .flat_map(|case| {
+            let path = root().join(format!("cases/body/diag-name-{case}.hirsel"));
+            run_case(&path)
+                .into_iter()
+                .map(move |failure| format!("{case}: {failure}"))
+        })
+        .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

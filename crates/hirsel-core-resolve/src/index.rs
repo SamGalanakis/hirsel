@@ -525,6 +525,34 @@ impl NameIndex {
     pub fn module_head(&self, from: ModuleId, name: Symbol) -> Option<ModuleId> {
         self.module_head_from(self.module_package(from), name)
     }
+    /// Resolve the module qualifier of a dotted name as written by the caller.
+    pub fn qualified_module<'a>(
+        &self,
+        from: ModuleId,
+        segments: impl IntoIterator<Item = &'a str>,
+    ) -> Option<ModuleId> {
+        let mut segments = segments.into_iter();
+        let head = self.symbols.find(segments.next()?)?;
+        let mut module = self.module_head(from, head)?;
+        if let Some(package) = self.path_package(module)
+            && let Some(root) = self.root_module(package)
+        {
+            module = root;
+            if let Some(second) = segments.next() {
+                let name = self.symbols.find(second)?;
+                if name == package.name {
+                    return None;
+                }
+                module = self
+                    .child(package.root, name)
+                    .or_else(|| self.child(root, name))?;
+            }
+        }
+        for segment in segments {
+            module = self.child(module, self.symbols.find(segment)?)?;
+        }
+        Some(module)
+    }
     pub(crate) fn module_head_from(&self, package: PackageKey, name: Symbol) -> Option<ModuleId> {
         let p = &self.packages[package.0 as usize];
         self.child(p.root, name)

@@ -57,9 +57,17 @@ such as a library image's source, keeps its module path and byte span (`module s
 The primary site leads the line, followed by the rule ID and message; each causal site
 follows on its own line with the role and location.
 
-For an unresolved qualified name, a LANG-7 edit can insert the `std.` prefix
-when the requested public declaration exists there. The library selection lists
-extensions with `extends_core: true` in `hirsel inspect --std --interface --json`.
+For an unresolved qualified name, the compiler can return up to three ranked
+`maybe` fixes. It checks case-insensitive matches, nearby spellings including
+adjacent transpositions, module-head corrections, and exact member names in
+other visible modules. A qualifier edit can insert a package prefix such as
+`std.`. Each name fix has a `signature` string with the written interface of
+the suggested declaration. Without a close candidate, a module with up to five
+visible public members in the relevant namespace can return `available_members`.
+Each entry has a `name` and `signature`. The terminal output prints the signatures
+next to edits and lists available members on their own lines. The library
+selection lists extensions with `extends_core: true` in
+`hirsel inspect --std --interface --json`.
 
 ### PROG-8: No global order
 

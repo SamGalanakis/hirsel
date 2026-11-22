@@ -1615,8 +1615,9 @@ fn finish(
             for cause in &d.causal {
                 eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
             }
-            for edit in d.fixes.iter().flat_map(|fix| &fix.edits) {
-                eprintln!("  {}", edit.description());
+            for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members)
+            {
+                eprintln!("  {suggestion}");
             }
         }
         for g in &output.incomplete {

@@ -1,9 +1,9 @@
 //! Tool encoding of PROG-7 sites. Cached item-local anchors bind to current file bytes.
 use super::*;
-use hirsel_core_resolve::{
-    CausalRole, DefinitionKind, ModulePath, NameScope, Namespace, RefusalDetail,
-};
-use hirsel_core_syntax::{Span, Symbol};
+use hirsel_core_resolve::{CausalRole, ModulePath, Namespace, RefusalDetail};
+use hirsel_core_syntax::Span;
+
+mod name_candidates;
 
 #[derive(Debug, Serialize)]
 pub struct SourceSite {
@@ -64,6 +64,8 @@ pub struct Diagnostic<'a> {
     pub required: Option<&'a str>,
     pub message: &'a str,
     pub fixes: Vec<Fix>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub available_members: Vec<AvailableMember>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     pub missing_patterns: &'a [String],
 }
@@ -77,9 +79,37 @@ pub enum Applicability {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AvailableMember {
+    pub name: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Fix {
     pub applicability: Applicability,
     pub edits: Vec<Edit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+pub(crate) fn render_suggestions(
+    fixes: &[Fix],
+    members: &[AvailableMember],
+) -> impl Iterator<Item = String> {
+    let edits = fixes.iter().flat_map(|fix| {
+        fix.edits.iter().map(|edit| {
+            let description = edit.description();
+            match &fix.signature {
+                Some(signature) => format!("{description} ({signature})"),
+                None => description,
+            }
+        })
+    });
+    edits.chain(
+        members
+            .iter()
+            .map(|member| format!("available: {}", member.signature)),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -189,8 +219,9 @@ impl CheckProduct {
             )
             .unwrap();
         }
-        for edit in self.fixes(refusal)?.iter().flat_map(|fix| &fix.edits) {
-            write!(text, "\n  {}", edit.description()).unwrap();
+        let (fixes, members) = self.suggestions(refusal)?;
+        for suggestion in render_suggestions(&fixes, &members) {
+            write!(text, "\n  {suggestion}").unwrap();
         }
         Ok(text)
     }
@@ -214,6 +245,7 @@ impl CheckProduct {
     ) -> io::Result<Vec<Diagnostic<'a>>> {
         rows.into_iter()
             .map(|r| {
+                let (fixes, available_members) = self.suggestions(r)?;
                 Ok(Diagnostic {
                     rule: &r.rule,
                     primary: self.source_site(&r.primary)?,
@@ -230,7 +262,8 @@ impl CheckProduct {
                     declared: r.declared.as_deref(),
                     required: r.required.as_deref(),
                     message: &r.message,
-                    fixes: self.fixes(r)?,
+                    fixes,
+                    available_members,
                     missing_patterns: match r.detail.as_deref() {
                         Some(RefusalDetail::MissingPattern { pattern, .. }) => {
                             std::slice::from_ref(pattern)
@@ -286,6 +319,13 @@ impl CheckProduct {
 }
 
 impl CheckProduct {
+    fn suggestions(&self, refusal: &Refusal) -> io::Result<(Vec<Fix>, Vec<AvailableMember>)> {
+        if let Some(lookup) = refusal.unresolved.as_deref() {
+            return hirsel_core_ids::published::catch_io(|| self.name_candidates(refusal, lookup));
+        }
+        Ok((self.fixes(refusal)?, Vec::new()))
+    }
+
     fn fixes(&self, r: &Refusal) -> io::Result<Vec<Fix>> {
         let Some(file) = self.files.iter().find(|f| Some(f.file) == r.primary.source) else {
             return Ok(vec![]);
@@ -368,17 +408,7 @@ impl CheckProduct {
                 ))
             })
         } else {
-            hirsel_core_ids::published::catch_io(|| {
-                Ok(
-                    name_edit(&self.index, r).and_then(|(span, expected, text)| {
-                        (expected.is_none() || span_text(span) == expected).then_some((
-                            Applicability::Maybe,
-                            span,
-                            text,
-                        ))
-                    }),
-                )
-            })?
+            None
         };
         let Some((applicability, span, text)) = edit else {
             return Ok(vec![]);
@@ -386,6 +416,7 @@ impl CheckProduct {
         let module = source_name(file.name.as_deref(), &self.index.module_path(file.module));
         Ok(vec![Fix {
             applicability,
+            signature: None,
             edits: vec![Edit {
                 module,
                 span: Span {
@@ -509,189 +540,6 @@ pub(crate) fn resolve_method_edits(program: &hirsel_core_front::Program<'_>, row
             }));
         }
     }
-}
-
-fn name_edit<'a>(
-    index: &NameIndex,
-    refusal: &'a Refusal,
-) -> Option<(Span, Option<&'a str>, String)> {
-    let lookup = refusal.unresolved.as_deref()?;
-    let from = refusal.primary.module;
-    let module_at = |path: &ModulePath| index.module_at(&path.package, &path.modules);
-    let best = match &lookup.scope {
-        NameScope::ModuleMember {
-            module,
-            namespace,
-            constructor,
-        } => {
-            if module.package.name_is("core")
-                && module.modules == ["net"]
-                && matches!(
-                    lookup.written.as_str(),
-                    "listen" | "connect" | "accept" | "recv_bounded" | "recv_ready" | "send_pair"
-                )
-                && let Some(host) = index.module_at(&module.package, &["host".into()])
-                && let Some(head) = index.symbols.find("host")
-                && index.module_head(from, head) == Some(host)
-                && let Some(symbol) = index.symbols.find(&lookup.written)
-                && visible_member(index, from, host, symbol, *namespace, *constructor).is_some()
-            {
-                return Some((
-                    Span {
-                        start: refusal.primary.span.start,
-                        end: lookup.span.end,
-                    },
-                    None,
-                    format!("host.{}", lookup.written),
-                ));
-            }
-            let module = module_at(module)?;
-            let names = index.member_names_in(module).filter(|&name| {
-                visible_member(index, from, module, name, *namespace, *constructor).is_some()
-            });
-            closest_name(index, &lookup.written, names)
-        }
-        NameScope::ModulePrefix {
-            module,
-            children_of,
-            namespace,
-        } => {
-            let module = module_at(module)?;
-            let parent = module_at(children_of)?;
-            let children = index.child_names(parent).chain(index.child_names(module));
-            let constants = index.member_names_in(module).filter(|&name| {
-                *namespace == Namespace::Value
-                    && visible_member(index, from, module, name, Namespace::Value, false)
-                        == Some(DefinitionKind::Constant)
-            });
-            let names = children
-                .chain(constants)
-                .filter(|&name| parent == module || index.child(parent, name) != Some(module));
-            closest_name(index, &lookup.written, names)
-        }
-        NameScope::UnqualifiedPath {
-            modules,
-            namespace,
-            constructor,
-        } => {
-            let std = crate::package("std");
-            let root = index.module_at(&std, &[])?;
-            if index.module_head(from, index.symbols.find("std")?) != Some(root) {
-                return None;
-            }
-            let module = index.module_at(&std, modules)?;
-            let member = index.symbols.find(&lookup.written)?;
-            visible_member(index, from, module, member, *namespace, *constructor)?;
-            let start = refusal.primary.span.start;
-            return Some((Span { start, end: start }, None, "std.".into()));
-        }
-        NameScope::Field(path) | NameScope::Variant(path) => {
-            let path = &path.0;
-            let module = index.module_at(&path.package, &path.modules)?;
-            let name = index.symbols.find(&path.name)?;
-            let definition = index.member(module, name, Namespace::Type, false)?;
-            let row = index.get(definition);
-            if module != from
-                && (row.opaque
-                    || !row.public
-                    || !index.reachable(from, index.module_package(module)))
-            {
-                return None;
-            }
-            if matches!(lookup.scope, NameScope::Field(_)) {
-                closest_name(
-                    index,
-                    &lookup.written,
-                    index.field_names(definition).iter().copied(),
-                )
-            } else {
-                let names = index
-                    .variant_names(definition)
-                    .iter()
-                    .copied()
-                    .filter(|&name| {
-                        index.member(from, name, Namespace::Value, false).is_none()
-                            && index.prelude(name, Namespace::Value, false).is_none()
-                    });
-                closest_name(index, &lookup.written, names)
-            }
-        }
-    }?;
-    Some((
-        lookup.span,
-        Some(&lookup.written),
-        index.symbols.text(best).into(),
-    ))
-}
-
-fn visible_member(
-    index: &NameIndex,
-    from: ModuleId,
-    module: ModuleId,
-    name: Symbol,
-    ns: Namespace,
-    constructor: bool,
-) -> Option<DefinitionKind> {
-    let mut members = index.members_named(from, module, name, ns, false);
-    let (id, ambiguous) = if let Some(id) = members.next() {
-        (id, members.next().is_some())
-    } else if constructor {
-        let mut types = index.members_named(from, module, name, Namespace::Type, true);
-        (types.next()?, types.next().is_some())
-    } else {
-        return None;
-    };
-    let row = index.get(id);
-    (!ambiguous
-        && (row.site.module == from || row.public && !(constructor && row.opaque))
-        && (!constructor || row.kind != DefinitionKind::Type || index.variant_names(id).is_empty()))
-    .then_some(row.kind)
-}
-
-fn closest_name(
-    index: &NameIndex,
-    written: &str,
-    candidates: impl Iterator<Item = Symbol>,
-) -> Option<Symbol> {
-    let written: Vec<char> = written.chars().collect();
-    let mut best_distance = (written.len() / 3).max(1);
-    let mut best = None;
-    let mut tied = false;
-    let mut row = vec![0; written.len() + 1];
-    for name in candidates {
-        let candidate = index.symbols.text(name);
-        if written.len().abs_diff(candidate.chars().count()) > best_distance {
-            continue;
-        }
-        let distance = edit_distance(&written, candidate, &mut row);
-        if distance == 0 || distance > best_distance {
-            continue;
-        }
-        if best.is_none() || distance < best_distance {
-            best_distance = distance;
-            best = Some(name);
-            tied = false;
-        } else if best != Some(name) {
-            tied = true;
-        }
-    }
-    best.filter(|_| !tied)
-}
-
-fn edit_distance(written: &[char], candidate: &str, row: &mut [usize]) -> usize {
-    for (i, cell) in row.iter_mut().enumerate() {
-        *cell = i;
-    }
-    for (i, ch) in candidate.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, &other) in written.iter().enumerate() {
-            let above = row[j + 1];
-            row[j + 1] = (diagonal + usize::from(ch != other)).min(1 + above.min(row[j]));
-            diagonal = above;
-        }
-    }
-    row[written.len()]
 }
 
 /// The terminal form of PROG-7 sites: `path:line:column`, from the request's

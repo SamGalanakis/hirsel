@@ -283,6 +283,19 @@ impl CoreImage {
             ))
         })
     }
+    pub(crate) fn declaration_file(&self, source: SourceId) -> io::Result<Arc<FileProduct>> {
+        let index = self
+            .directory()?
+            .files
+            .iter()
+            .position(|file| {
+                file.names
+                    .iter()
+                    .any(|name| name.site.source == Some(source))
+            })
+            .ok_or_else(|| io::Error::other("candidate source file is not in its package image"))?;
+        self.file(index)
+    }
     fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         if let Some(file) = self.files.lock().unwrap().get(&index) {

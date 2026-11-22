@@ -1,0 +1,6 @@
+fn length(a: Args) -> u64 {
+    args.unrecognizable(a)
+}
+
+// expect: refuse LANG-7 at 2:5
+// expect: available LANG-7 at 2:5 | pub fn get(a: Args, i: u64) -> Option[View[String]] in a | pub fn len(a: Args) -> u64

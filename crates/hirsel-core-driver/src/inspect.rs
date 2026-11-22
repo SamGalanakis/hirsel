@@ -237,7 +237,7 @@ fn interface(product: &CheckProduct, package: PackageId) -> Interface<'_> {
     }
 }
 
-fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
+pub(crate) fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
     let root = item.tree.node(item.root);
     let mut children = item
         .tree
@@ -248,7 +248,7 @@ fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
     let (start, end) = if opaque {
         // The name, generics and public bounds describe the nominal type.
         // Fields, variants, aliases and owner codec functions are private.
-        let public = children.find(|n| n.kind == NodeKind::Public).unwrap();
+        let public = children.find(|n| n.kind == NodeKind::Public);
         let end = children
             .filter(|n| matches!(n.kind, NodeKind::Generics | NodeKind::Bounds))
             .last()
@@ -256,7 +256,7 @@ fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
                 || item.token_span(root.token.unwrap()).end,
                 |n| n.origin.span.end,
             );
-        (public.origin.span.start, end)
+        (public.map_or(span.start, |n| n.origin.span.start), end)
     } else {
         let end = match kind {
             DefinitionKind::Constant => {

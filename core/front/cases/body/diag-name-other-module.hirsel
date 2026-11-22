@@ -1,0 +1,6 @@
+fn length(s: String) -> u64 {
+    list.byte_len(s)
+}
+
+// expect: refuse LANG-7 at 2:5
+// expect: first-fix LANG-7 at 2:5 maybe | string | pub fn byte_len(s: String) -> u64

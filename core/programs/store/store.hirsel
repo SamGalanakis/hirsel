@@ -16903,11 +16903,12 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     }
     if refuse {
         for _ in 0u64 .. 2 {
-            let cut = bound bytes 2097152 {
-                checkpoint(mut db)
-            }
-            match take cut {
-                Ok(Error(Full(Allocation(_)))) => (),
+            let segment = db.file_seq
+            match disk_cut_state(mut db, NoHolderChange,
+                scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+                    capacity(bound bytes 0 { seal_page_manifest_file(mut raw, context, fence) })?
+                }) {
+                Error(Full(Allocation(_))) if db.file_seq == segment + 1 => (),
                 _ => return false
             }
         }
@@ -17684,7 +17685,8 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if db.uncovered != 4096 || db.since_cut != 4096 || db.file_seq != initial_segment {
         return Error(Foreign)
     }
-    let final_frame = append_transaction(mut db, 0, None, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let keep_reply: Option[fn(Error) -> bool] = None
+    let final_frame = append_transaction(mut db, 0, None, keep_reply, fn(mut tx: Tx) -> Result[(), Error] {
         journal_full_frame(mut tx, rows)
     })?
     let Committed(last) = final_frame else {
@@ -17807,8 +17809,9 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     if accounts(db).journal != 4096 {
         return Error(())
     }
+    let keep_reply: Option[fn(Error) -> bool] = None
     let crossing = bound bytes 134217728 {
-        append_transaction(mut db, 0, None, None, fn(mut tx: Tx) -> Result[(), Error] {
+        append_transaction(mut db, 0, None, keep_reply, fn(mut tx: Tx) -> Result[(), Error] {
             journal_full_frame(mut tx, rows)
         })
     }

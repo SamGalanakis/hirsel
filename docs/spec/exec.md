@@ -57,7 +57,8 @@ bind the run's own code and not its children:
 - it may signal other processes of the same user, including the run. A run granted
   `Process` sees a first SIGTERM or SIGINT through `host.stopped`
   ([CAP-5](capabilities.md#cap-5-provider-operations)), and a second one ends
-  it at once. A run without `Process`, and any run sent SIGKILL, ends as environmental
+  it at once. A run without `Process` takes the host's disposition for these signals, which
+  by default ends it. A run that a signal ends, SIGKILL included, ends as environmental
   termination ([FAIL-15](failure.md#fail-15-run-stops)). A run that ends this way leaves its
   recording ending at its last complete frame ([recording](../recording.md#recording-failures-and-truncated-recordings)).
 
@@ -218,9 +219,11 @@ has no fixed key. So `Form("git", f)` on a universal grant gives a named profile
 with forms `[f]` and universal keys and labels, plus the universal remainder, and
 `Programs` leaves no remainder. In the size above, a present remainder adds 8, and each
 universal forms, keys or labels part counts 8 in place of its list. A host grant never has
-a remainder or a universal part. The size is a function of the logical grant alone, so two
-grants with the same logical grant charge the same on the host, on a served Exec and in a
-replay.
+a remainder or a universal part. For example, `Form("git", [Lit("status")])` on a universal
+grant has size 32 + (8 + 3) + (8 + 8 + 6) + 8 + 8 + 8 = 89, rounded up to 96: the profile
+`git`, its one form, its universal keys, its universal labels and the remainder. The size is
+a function of the logical grant alone, so equal logical grants charge the same on the host,
+on a served Exec and in a replay.
 
 Laws:
 
@@ -636,9 +639,9 @@ not inputs of CAP-8.
 
 Laws:
 
-- a fixed client charges the same against `provide.exec` and against the host, over a sweep
-  of limits and step bounds (MEM-24), wherever its narrowings yield equal logical grants
-  (EXEC-2). The sweep includes the exact admission boundary of a
+- a fixed client that does not narrow its grant charges the same against `provide.exec`
+  and against the host, over a sweep of limits and step bounds (MEM-24). A narrowing of a
+  served grant charges EXEC-2's size of the logical grant it yields. The sweep includes the exact admission boundary of a
   spawn with three pipes, and a server one byte short of room for a `Started` reply;
 - a served spawn withdrawn by cancellation, or a served wait or pipe read withdrawn by its
   deadline or answered with an error reply, issues no ids and makes no staged bytes visible;

@@ -2428,10 +2428,10 @@ pub type ExportCommand: send {
 pub type ReserveImport: send { checked: store.ValidatedImport, answer: Sender[Result[store.ImportWork, store.DeployError]] }
 pub type KeepImport: send { built: store.Imported, answer: Sender[Result[Inline[u8, 32], store.DeployError]] }
 
-type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
+pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
     | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes)
-type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64 }
-type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
+pub type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64 }
+pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
     | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64)
 
 type HostControl {

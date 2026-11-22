@@ -1,0 +1,384 @@
+// Module launcher (package store): the control session between the platform host and the
+// launcher (docs/spec/launch.md "The launcher", RUNNER-SPEC v2.27 §14.5).
+//
+// One session runs at a time on the launcher's control socket. Each frame is a u32
+// little-endian length, then one value-codec `Request` (host to launcher) or `Event`
+// (launcher to host). Declared variant order fixes the u32 wire tags; the Rust launcher
+// (crates/hirsel-core-driver/src/launcher/session.rs) mirrors these types, and
+// launcher_wire.hirsel holds the byte vectors both sides check.
+//
+// `Fake` is the launcher's session rules without processes, for the platform host's
+// harness: it answers requests and lets a test end children and make listeners readable.
+// A deploy attempt: 16 bytes, `hi` then `lo`, each little-endian.
+pub type Attempt: codec + send {
+    hi: u64,
+    lo: u64
+}
+
+// A group by catalog name and incarnation (§14.1). No identity of an earlier incarnation
+// matches a later one.
+pub type Group: codec + send {
+    name: String,
+    incarnation: u64
+}
+
+// A child's role. The store-holding roles take the group's next `gen`; the others are
+// keyed by their deploy attempt (§14.1).
+pub type Role: codec + send = Install(u64) | Serving(u64) | Describe(Attempt) | Preview(Attempt) | Prepare(Attempt)
+
+// A child's identity, (group, incarnation, gen or attempt, role).
+pub type Child: codec + send {
+    group: Group,
+    role: Role
+}
+
+pub type InstallKind: codec + send = Genesis | Standalone
+
+// A serving launch is a wake launch: `idle` is its nonzero idle time in milliseconds
+// (§14.4). `candidate` names OLD's `gen` when this child is a cutover's candidate (§14.3).
+pub type Serve: codec + send {
+    activation: u64,
+    idle: u64,
+    candidate: Option[u64]
+}
+
+// What the child runs, by mode (launch.md "Child modes"). Preview carries OLD's entry
+// list; prepare carries the export name OLD answered.
+pub type Mode: codec + send = InstallMode(u64, InstallKind) | ServingMode(u64, Serve) | DescribeMode(Attempt) | PreviewMode(Attempt, Bytes) | PrepareMode(Attempt, String)
+
+// `assembly` is the 32-byte name of the assembly record the child runs. `workdir` is the
+// group's working directory; `args` are the program's arguments after the runtime prefix.
+pub type Launch: codec + send {
+    group: Group,
+    assembly: Bytes,
+    workdir: String,
+    args: List[String],
+    mode: Mode
+}
+
+pub type Request: codec + send = Hello
+// Hold the group's listener at this address, or bind it again after a launcher loss.
+    | Bind(Group, String)
+// Close a removed group's listener.
+    | Close(Group) | Start(Launch)
+// Stop a child by identity: a drain for a serving child, an end for the others.
+    | Stop(Child) | Kill(Child)
+// The host has applied this child's end; the launcher forgets it.
+    | Acknowledge(Child)
+// A command for a serving child's private endpoint (runner's host protocol).
+    | Command(Child, runner.HostCommand) | Retire(Group)
+// The attempt's pending row is durable or abandoned: end its reservation.
+    | Release(Attempt) | CollectBegin
+// The full root set: assembly record names.
+    | Collect(List[Bytes])
+
+pub type Status: codec + send = Code(i32) | Signal(i32)
+
+// A child's end. `report` is the wake report the child wrote on descriptor 5, if any: a
+// `Stopped(next_due)` sends Some(next_due). `readable` is the listener sample the
+// launcher took after the child ended and before it sent this end (§14.3).
+pub type End: codec + send {
+    status: Status,
+    report: Option[Option[u64]],
+    readable: bool
+}
+
+pub type Phase: codec + send = Started | Exited(End)
+
+pub type ChildState: codec + send {
+    child: Child,
+    phase: Phase
+}
+
+pub type Refusal: codec + send = Held | Retiring | UnknownGroup | Mismatch | Image(String) | Spawn(String) | Unbuilt(String)
+
+pub type Event: codec + send =
+// The answer to Hello: every child the launcher has and every readable cold listener.
+Inventory(List[ChildState], List[Group])
+// The answer to Start, and to a repeated Start with the same identity.
+    | Launched(Child, Phase) | Refused(Child, Refusal) | Ended(Child, End) | Arrived(Group) | Bound(Group) | BindFailed(Group, String) | Closed(Group) | Retired(Group)
+// A serving child's answer or notice on its private endpoint.
+    | Placed(Child, runner.HostReply) | Fenced | Collected(u64)
+
+pub fn role_of(m: Mode) -> Role {
+    match m {
+        InstallMode(g, _) => Install(g),
+        ServingMode(g, _) => Serving(g),
+        DescribeMode(a) => Describe(a),
+        PreviewMode(a, _) => Preview(a),
+        PrepareMode(a, _) => Prepare(a),
+    }
+}
+
+pub fn same_group(a: Group, b: Group) -> bool {
+    a.incarnation == b.incarnation && a.name == b.name
+}
+
+fn same_attempt(a: Attempt, b: Attempt) -> bool {
+    a.hi == b.hi && a.lo == b.lo
+}
+
+pub fn same_child(a: Child, b: Child) -> bool {
+    if !same_group(a.group, b.group) {
+        return false
+    }
+    match (a.role, b.role) {
+        (Install(x), Install(y)) => x == y,
+        (Serving(x), Serving(y)) => x == y,
+        (Describe(x), Describe(y)) => same_attempt(x, y),
+        (Preview(x), Preview(y)) => same_attempt(x, y),
+        (Prepare(x), Prepare(y)) => same_attempt(x, y),
+        _ => false,
+    }
+}
+
+fn holds_store(r: Role) -> bool {
+    match r {
+        Install(_) => true,
+        Serving(_) => true,
+        _ => false,
+    }
+}
+
+// The fake launcher. Children never run: a test ends them with `end`, and makes a listener
+// readable with `connect` (a client waits in the backlog) or not with `accept`.
+type Kept {
+    state: ChildState
+}
+
+type Listener {
+    group: Group,
+    readable: bool,
+    reported: bool,
+    retiring: bool
+}
+
+pub opaque type Fake {
+    children: List[Kept],
+    listeners: List[Listener],
+    fenced: bool
+}
+
+pub fn fake() -> Fake {
+    Fake(children: list.new(), listeners: list.new(), fenced: false)
+}
+
+fn find_listener(f: Fake, g: Group) -> Option[u64] {
+    for i in 0u64 .. list.len(f.listeners) {
+        if same_group(f.listeners[i].group, g) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_child(f: Fake, c: Child) -> Option[u64] {
+    for i in 0u64 .. list.len(f.children) {
+        if same_child(f.children[i].state.child, c) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn live(p: Phase) -> bool {
+    match p {
+        Started => true,
+        Exited(_) => false,
+    }
+}
+
+// Whether the group has a live serving launch, so its listener is not watched.
+fn serving_live(f: Fake, g: Group) -> bool {
+    for i in 0u64 .. list.len(f.children) {
+        let kept = f.children[i].state
+        if same_group(kept.child.group, g) && live(kept.phase) {
+            if let Serving(_) = kept.child.role {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn group_live(f: Fake, g: Group) -> bool {
+    for i in 0u64 .. list.len(f.children) {
+        let kept = f.children[i].state
+        if same_group(kept.child.group, g) && live(kept.phase) {
+            return true
+        }
+    }
+    false
+}
+
+// The one-launch rule of §14.3: a store-holding launch is refused while another lives,
+// unless it is the one candidate that names the live serving child's gen.
+fn one_launch(f: Fake, launch: Launch) -> bool {
+    let role = role_of(launch.mode)
+    if !holds_store(role) {
+        return true
+    }
+    let candidate = match launch.mode {
+        ServingMode(_, serve) => serve.candidate,
+        _ => None,
+    }
+    let mut holders = 0u64
+    let mut named = false
+    for i in 0u64 .. list.len(f.children) {
+        let kept = f.children[i].state
+        if same_group(kept.child.group, launch.group) && live(kept.phase) && holds_store(kept.child.role) {
+            holders += 1u64
+            if let (Serving(g), Some(old)) = (kept.child.role, candidate) {
+                if g == old {
+                    named = true
+                }
+            }
+        }
+    }
+    holders == 0u64 || (holders == 1u64 && named)
+}
+
+fn push_event(mut out: List[Event], take e: Event) {
+    list.push(mut out, take e)
+}
+
+// Answer one request. The returned events follow in stream order.
+pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
+    let mut out: List[Event] = list.new()
+    match take r {
+        Hello => {
+            f.fenced = false
+            let mut states: List[ChildState] = list.new()
+            for i in 0u64 .. list.len(f.children) {
+                list.push(mut states, clone(f.children[i].state))
+            }
+            let mut readable: List[Group] = list.new()
+            for i in 0u64 .. list.len(f.listeners) {
+                let report = f.listeners[i].readable && !serving_live(f, f.listeners[i].group)
+                if report {
+                    list.push(mut readable, clone(f.listeners[i].group))
+                    f.listeners[i].reported = true
+                }
+            }
+            push_event(mut out, Inventory(take states, take readable))
+        },
+        Bind(take g, _) => {
+            if let None = find_listener(f, g) {
+                list.push(mut f.listeners, Listener(group: clone(g), readable: false, reported: false, retiring: false))
+            }
+            push_event(mut out, Bound(take g))
+        },
+        Close(take g) => {
+            if let Some(i) = find_listener(f, g) {
+                let last = list.len(f.listeners) - 1u64
+                list.swap(mut f.listeners, i, last)
+                let _ = list.pop(mut f.listeners)
+            }
+            push_event(mut out, Closed(take g))
+        },
+        Start(take launch) => {
+            let child = Child(group: clone(launch.group), role: role_of(launch.mode))
+            if let Some(i) = find_child(f, child) {
+                push_event(mut out, Launched(take child, clone(f.children[i].state.phase)))
+                return take out
+            }
+            let refusal = match find_listener(f, launch.group) {
+                None => Some(UnknownGroup),
+                Some(i) if f.listeners[i].retiring => Some(Retiring),
+                Some(_) if list.len(launch.assembly) != 32u64 => Some(Mismatch),
+                Some(_) if !one_launch(f, launch) => Some(Held),
+                Some(_) => None,
+            }
+            match take refusal {
+                Some(take why) => push_event(mut out, Refused(take child, take why)),
+                None => {
+                    list.push(mut f.children, Kept(state: ChildState(child: clone(child), phase: Started)))
+                    push_event(mut out, Launched(take child, Started))
+                },
+            }
+        },
+        Stop(_) => (),
+        Kill(_) => (),
+        Acknowledge(take c) => {
+            if let Some(i) = find_child(f, c) {
+                if !live(f.children[i].state.phase) {
+                    let last = list.len(f.children) - 1u64
+                    list.swap(mut f.children, i, last)
+                    let _ = list.pop(mut f.children)
+                }
+            }
+        },
+        Command(_, _) => (),
+        Retire(take g) => {
+            if let Some(i) = find_listener(f, g) {
+                f.listeners[i].retiring = true
+            }
+            if !group_live(f, g) {
+                push_event(mut out, Retired(take g))
+            }
+        },
+        Release(_) => (),
+        CollectBegin => {
+            f.fenced = true
+            push_event(mut out, Fenced)
+        },
+        Collect(_) => {
+            f.fenced = false
+            push_event(mut out, Collected(0u64))
+        },
+    }
+    take out
+}
+
+// A live child ends. The fake samples the listener first and sends the end with it, and
+// only then watches the listener again (§14.3), so an `Arrived` can only follow the end.
+pub fn end(mut f: Fake, c: Child, status: Status, report: Option[Option[u64]]) -> List[Event] {
+    let mut out: List[Event] = list.new()
+    let Some(i) = find_child(f, c) else {
+        return take out
+    }
+    if !live(f.children[i].state.phase) {
+        return take out
+    }
+    let mut readable = false
+    let mut retiring = false
+    if let Some(l) = find_listener(f, c.group) {
+        readable = f.listeners[l].readable
+        retiring = f.listeners[l].retiring
+        f.listeners[l].reported = readable
+    }
+    let ended = End(status: status, report: report, readable: readable)
+    f.children[i].state.phase = Exited(clone(ended))
+    push_event(mut out, Ended(clone(c), take ended))
+    if retiring && !group_live(f, c.group) {
+        push_event(mut out, Retired(clone(c.group)))
+    }
+    take out
+}
+
+// A client connects to the group's listener and waits in its backlog.
+pub fn connect(mut f: Fake, g: Group) -> List[Event] {
+    let mut out: List[Event] = list.new()
+    let Some(l) = find_listener(f, g) else {
+        return take out
+    }
+    f.listeners[l].readable = true
+    if !f.listeners[l].reported && !serving_live(f, g) {
+        f.listeners[l].reported = true
+        push_event(mut out, Arrived(clone(g)))
+    }
+    take out
+}
+
+// The group's serving child accepted every waiting connection.
+pub fn accept(mut f: Fake, g: Group) {
+    if let Some(l) = find_listener(f, g) {
+        f.listeners[l].readable = false
+        f.listeners[l].reported = false
+    }
+}
+
+// Whether a collection fence is held.
+pub fn fenced(f: Fake) -> bool {
+    f.fenced
+}

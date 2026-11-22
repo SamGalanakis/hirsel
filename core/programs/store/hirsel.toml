@@ -23,6 +23,7 @@ std = { major = 1 }
 "runner_calls.hirsel" = "runner_calls"
 "wire_client.hirsel" = "wire_client"
 "fixture.hirsel" = "fixture"
+"launcher.hirsel" = "launcher"
 
 [program]
 module = "main"
@@ -39,6 +40,7 @@ dirs = ["."]
 "session-laws.hirsel" = "runner"
 "admission-laws.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"
+"launcher_wire.hirsel" = "launcher"
 
 [tests.runs."store@1/store/frame_size_boundary"]
 limit = 134217728

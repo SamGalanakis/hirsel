@@ -594,7 +594,7 @@ limit = {test_limit}
 
     let (status, stdout, stderr) = request(&args(&["--limit", "4096"]));
     assert_ne!(status, Some(0), "{stdout}");
-    assert!(stderr.contains("test takes no --limit"), "{stderr}");
+    assert!(stderr.contains("this package declares [tests] in hirsel.toml"), "{stderr}");
     configure(288, "missing", 296);
     let (status, stdout, stderr) = request(&args(&[]));
     assert_ne!(status, Some(0), "{stdout}");

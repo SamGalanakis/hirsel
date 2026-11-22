@@ -58,6 +58,10 @@ pub enum OptionId {
     PackOut,
     Metrics,
     ProfileFront,
+    ProfOut,
+    ProfFrequency,
+    ProfPmu,
+    ProfStackBytes,
     Image,
     Lib,
     Help,
@@ -117,6 +121,8 @@ commands! {
     "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
     "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
+    "prof", "prof <command>", "Capture or inspect a CPU profile.";
+    "prof run", "prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
@@ -492,6 +498,34 @@ static OPTIONS: &[OptionSpec] = &[
     ),
     option!(Help, ["--help", "-h"], None, [], "Show this help."),
     option!(
+        ProfOut,
+        ["--out"],
+        Some("FILE.hprof"),
+        ["prof run"],
+        "Write the profile to this file (default profile.hprof)."
+    ),
+    option!(
+        ProfFrequency,
+        ["--freq"],
+        Some("HZ"),
+        ["prof run"],
+        "Sample at this frequency per event (default 997)."
+    ),
+    option!(
+        ProfPmu,
+        ["--pmu"],
+        Some("LIST"),
+        ["prof run"],
+        "Sample a comma-separated list of events (default cycles)."
+    ),
+    option!(
+        ProfStackBytes,
+        ["--stack-bytes"],
+        Some("BYTES"),
+        ["prof run"],
+        "Capture this many bytes of user stack (default 32768)."
+    ),
+    option!(
         Json,
         ["--json"],
         None,
@@ -813,11 +847,18 @@ pub enum Action {
     Version,
     Invoke(Invocation),
 }
-fn named(name: &str) -> Result<&'static CommandSpec, String> {
+pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
     COMMANDS
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("unknown command `{name}`; use help"))
+}
+fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
+    option.commands.is_empty()
+        || option.commands.contains(&command.name)
+        || (command.name == "prof run"
+            && option.id != OptionId::Output
+            && option.commands.contains(&"run"))
 }
 pub fn help(command: Option<&CommandSpec>) -> String {
     if let Some(command) = command {
@@ -825,10 +866,16 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        for option in OPTIONS
-            .iter()
-            .filter(|o| o.commands.is_empty() || o.commands.contains(&command.name))
-        {
+        if command.name == "prof" {
+            for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with("prof ")) {
+                result.push_str(&format!(
+                    "  {}\n    {}\n",
+                    subcommand.usage, subcommand.description
+                ));
+            }
+            return result;
+        }
+        for option in OPTIONS.iter().filter(|o| applies(o, command)) {
             let label = format!(
                 "{}{}",
                 option.names.join(", "),
@@ -840,7 +887,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
     } else {
         let mut result =
             "Usage: hirsel <command> [options]\n       hirsel --version\n\nCommands:\n".to_owned();
-        for command in COMMANDS {
+        for command in COMMANDS.iter().filter(|c| !c.name.starts_with("prof ")) {
             result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
         }
         result.push_str("\nUse help <command>, <command> --help, or <command> -h for options.\n");
@@ -854,7 +901,7 @@ fn is_help(name: &str) -> bool {
 }
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut arguments = arguments.into_iter();
-    let Some(name) = arguments.next() else {
+    let Some(mut name) = arguments.next() else {
         return Ok(Action::Help(help(None)));
     };
     if is_help(&name) {
@@ -867,6 +914,15 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Err("--version takes no arguments".into())
         };
     }
+    if name == "prof" {
+        match arguments.next() {
+            None => return Ok(Action::Help(help(Some(named("prof")?)))),
+            Some(subcommand) if is_help(&subcommand) => {
+                return Ok(Action::Help(help(Some(named("prof")?))));
+            }
+            Some(subcommand) => name.push_str(&format!(" {subcommand}")),
+        }
+    }
     let command = named(&name)?;
     if name == "sdk" {
         match arguments.next().as_deref() {
@@ -878,10 +934,15 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
     if name == "help" {
         let target = arguments
             .next()
-            .map(|name| {
+            .map(|mut name| {
                 if is_help(&name) {
                     Ok(command)
                 } else {
+                    if name == "prof"
+                        && let Some(subcommand) = arguments.next()
+                    {
+                        name.push_str(&format!(" {subcommand}"));
+                    }
                     named(&name)
                 }
             })
@@ -905,17 +966,14 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         arguments: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
-        if argument == "--" && matches!(name.as_str(), "run" | "call" | "host") {
+        if argument == "--" && matches!(name.as_str(), "run" | "prof run" | "call" | "host") {
             invocation.arguments.extend(arguments);
             break;
         }
         if argument.starts_with('-') {
             let option = OPTIONS
                 .iter()
-                .find(|o| {
-                    o.names.contains(&argument.as_str())
-                        && (o.commands.is_empty() || o.commands.contains(&command.name))
-                })
+                .find(|o| o.names.contains(&argument.as_str()) && applies(o, command))
                 .ok_or_else(|| {
                     format!("unknown option `{argument}` for {name}; use help {name}")
                 })?;

@@ -11,6 +11,7 @@ name = "hirsel"
 path = "src/main.rs"
 
 [dependencies]
+hirsel-prof = { path = "../hirsel-prof" }
 hirsel-tape-format = { path = "../hirsel-tape-format" }
 hirsel-core-net = { path = "../hirsel-core-net" }
 cranelift-codegen = { version = "=0.136.3", default-features = false, features = ["std", "x86", "arm64", "unwind"] }

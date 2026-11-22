@@ -83,3 +83,35 @@ event periods attributed to the leaf frame. An inclusive total counts each
 sample's event period once per function on that chain, even when recursion
 or inlining repeats the function. The function sample count uses that same
 membership rule. Line summaries attribute self totals only.
+
+## Linux sampling
+
+`hirsel prof run` builds a native executable and opens the perf events before
+releasing the child to exec. Linux enables the events at exec. Sampling uses
+`CLOCK_MONOTONIC`, per-CPU mmap rings, and a timestamp merge across CPUs. The
+capture records kernel-reported losses. The default frequency is 997 Hz and
+the default user stack snapshot is 32 KiB.
+
+The default event is `cycles`. The profiler uses `cpu-clock` if the PMU lacks
+hardware cycles and records the reason in `fallback_reason`. Each `--pmu`
+event contributes its own samples with that event's period in
+`sample_counter`. Instruction profiles use the `instructions` event directly.
+
+The unwinder reads ELF CFI with gimli and uses the captured stack and
+registers. It leaves the sampled instruction pointer intact and subtracts
+one byte once from caller return addresses. x86-64 captures IP, SP and BP.
+AArch64 captures PC, LR, SP and X29.
+
+`stack_root` is `fiber`, `host`, `truncated` or `failed`. A host stack
+can contain a Foreign or OS operation whose calling fiber is unreachable.
+`unwind_status` is `ok`, `fiber_root`, `truncated_stack`, `missing_cfi`,
+`unknown_mapping` or `eval_error`. An undefined return address ends the
+walk. Missing CFI may permit frame-pointer recovery, but the sample retains
+`missing_cfi` and a `failed` root. Expression rules and CFA rules that
+require uncaptured registers, such as a stack-probe scratch register,
+produce `eval_error` with a `failed` root.
+
+`symbol_tier` is `full_dwarf` for matched detached or embedded DWARF,
+`symtab_only` for ELF symbols, or `offsets_only` if only mapping-relative
+addresses are available. A function's `module_kind` is `hirsel`, `runtime`,
+`foreign`, `kernel` or `unknown`.

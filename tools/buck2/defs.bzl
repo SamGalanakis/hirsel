@@ -13,7 +13,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES")
+load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//rust:cargo_package.bzl", "get_reindeer_platforms")
@@ -46,7 +46,7 @@ def _request(binary):
 
 def _test_platform(binary):
     """The invoking host, or the measured pool request for `binary`."""
-    return [budget_constraint("host" if TESTS_ON_HOST else test_budget_name(binary))]
+    return [budget_constraint("host" if TESTS_ON_HOST or binary in HOST_TEST_BINARIES else test_budget_name(binary))]
 
 def _from_package(manifest_dir, path):
     """`path`, relative to the repository root, as seen from `manifest_dir`."""
@@ -292,9 +292,9 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     selection_env = {"HIRSEL_TEST_HOST_CASES": " ".join(host_cases)} if host_cases else {}
     _rust_test(
         name = name + "-shard-1" if host_cases else name,
-        labels = [],
+        labels = ["local-execution"] if name in HOST_TEST_BINARIES else [],
         exec_compatible_with = _test_platform(name),
-        pool = not TESTS_ON_HOST,
+        pool = not (TESTS_ON_HOST or name in HOST_TEST_BINARIES),
         extra_env = selection_env,
         **common
     )

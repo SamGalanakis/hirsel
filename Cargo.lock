@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "addr2line"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59317f77929f0e679d39364702289274de2f0f0b22cbf50b2b8cff2169a0b27a"
+dependencies = [
+ "gimli",
+ "rustc-demangle",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -455,6 +465,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm-lazy",
+ "hirsel-prof",
  "hirsel-tape-format",
  "libc",
  "mimalloc",
@@ -691,8 +702,14 @@ dependencies = [
 name = "hirsel-prof"
 version = "0.1.0"
 dependencies = [
+ "addr2line",
+ "gimli",
  "hirsel-guard",
+ "libc",
+ "object",
  "rusqlite",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -938,6 +955,12 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
 ]
+
+[[package]]
+name = "rustc-demangle"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustc-hash"

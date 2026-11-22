@@ -65,6 +65,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
         crate::cli::Action::Invoke(invocation) => invocation,
     };
+    let profile = (invocation.command.name == "prof run")
+        .then(|| crate::prof_command::Run::read(&mut invocation))
+        .transpose()?;
     let command = invocation.command.name;
     if matches!(command, "host" | "deploy") {
         std::process::exit(crate::host::run(invocation)?);
@@ -428,7 +431,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::HostMemory
             | Opt::StartRetries
             | Opt::TapeRetention
-            | Opt::CallTimeout => {
+            | Opt::CallTimeout
+            | Opt::ProfOut
+            | Opt::ProfFrequency
+            | Opt::ProfPmu
+            | Opt::ProfStackBytes => {
                 unreachable!("CLI early command option")
             }
         }
@@ -548,6 +555,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         None
     };
     let dir = app_directory;
+    if profile.is_some() && (emulator.is_some() || sysroot.is_some()) {
+        return Err("prof run samples a native executable and cannot use an emulator".into());
+    }
     let runner = match (emulator, sysroot) {
         (None, None) => crate::Runner::Native,
         (Some(emulator), Some(sysroot)) => crate::Runner::qemu(&emulator, &sysroot, &target)?,
@@ -1074,6 +1084,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 &runner,
                 run_args,
                 record_path.as_deref(),
+                profile.as_ref(),
                 &mut meter,
                 metrics,
             );
@@ -1404,6 +1415,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         &runner,
         run_args,
         record_path.as_deref(),
+        profile.as_ref(),
         &mut meter,
         metrics,
     )
@@ -1430,6 +1442,7 @@ fn answer_hit(
     runner: &crate::Runner,
     run_args: Vec<String>,
     record_path: Option<&str>,
+    profile: Option<&crate::prof_command::Run>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1486,6 +1499,7 @@ fn answer_hit(
         runner,
         run_args,
         record_path,
+        profile,
         meter,
         metrics,
     )
@@ -1501,6 +1515,7 @@ fn finish(
     runner: &crate::Runner,
     run_args: Vec<String>,
     record_path: Option<&str>,
+    profile: Option<&crate::prof_command::Run>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1548,16 +1563,19 @@ fn finish(
     let run_exit = if command == "run" || command == "replay" {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
-            let mut cmd = runner.command(&path);
-            cmd.args(run_args);
-            if command == "run"
-                && let Some(record) = record_path
-            {
-                cmd.env("HIRSEL_RECORD", record);
-            }
-            let status = cmd
-                .status()
-                .map_err(|e| format!("run execution {runner:?}: {e}"))?;
+            let status = if let Some(profile) = profile {
+                profile.capture(&path, &run_args, record_path)?
+            } else {
+                let mut cmd = runner.command(&path);
+                cmd.args(run_args);
+                if command == "run"
+                    && let Some(record) = record_path
+                {
+                    cmd.env("HIRSEL_RECORD", record);
+                }
+                cmd.status()
+                    .map_err(|e| format!("run execution {runner:?}: {e}"))?
+            };
             if !status.success() {
                 eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
             }

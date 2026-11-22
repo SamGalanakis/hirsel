@@ -44,6 +44,7 @@ mod package_resolve;
 mod package_store;
 mod package_workspace;
 mod prebuild;
+mod prof_command;
 mod release_manifest;
 pub use prebuild::Prebuilt;
 mod core_inventory;

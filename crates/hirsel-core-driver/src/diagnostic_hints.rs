@@ -98,3 +98,43 @@ fn rendered_hints_follow_the_current_index_on_warm_and_cold_checks() {
         }
     }
 }
+
+#[test]
+fn unresolved_library_path_hints_name_existing_public_declarations() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn one() -> String { order.compare(\"a\", \"b\") }\n\
+                  fn absent() { order.unknown() }\n\
+                  fn listener(n: Net, a: Addr) waits { let _ = net.listen(n, a, 8u16); }\n";
+    let mut app = request(source, dir.path()).inputs.packages.remove(0);
+    app.dependencies.extend([package("core"), package("std")]);
+    let mut request = CheckRequest::library_request(None, &dir.path().join("store")).unwrap();
+    request.inputs.packages.push(app);
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let diagnostics = product.machine_diagnostics().unwrap();
+    let hint = |line: &str| {
+        let start = source.find(line).unwrap() as u32;
+        diagnostics
+            .iter()
+            .find(|row| row.primary.module == "app@1/main" && row.primary.span.start == start)
+            .unwrap()
+            .hint
+            .as_ref()
+    };
+    let Some(DiagnosticHint::StdPath {
+        replacement,
+        merged_modules,
+    }) = hint("order.compare")
+    else {
+        panic!("expected an exact std path for order.compare");
+    };
+    assert_eq!(replacement, "std.order.compare");
+    assert!(merged_modules.iter().any(|name| name == "clock"));
+    assert!(merged_modules.iter().any(|name| name == "list"));
+    assert!(hint("order.unknown").is_none());
+    assert_eq!(
+        hint("net.listen").map(ToString::to_string).as_deref(),
+        Some("did you mean `host.listen`?")
+    );
+}

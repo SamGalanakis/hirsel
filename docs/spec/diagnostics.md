@@ -38,3 +38,9 @@ An implementation reports at least one refusal for every refused program and may
 several, in any order. No first diagnostic is fixed across independent refusals, and a
 refusal is never suppressed or reworded by another one, except that checks depending on a
 construct that failed to parse, resolve or type are not made.
+
+
+For an unresolved qualified name, a LANG-7 hint can suggest the `std.` prefix
+when the requested public declaration exists there. It lists the std modules
+that extend core in the current library selection. Each extension also has
+`extends_core: true` in `hirsel inspect --std --interface --json`.

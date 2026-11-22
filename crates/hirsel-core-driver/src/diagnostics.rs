@@ -24,12 +24,32 @@ pub struct Diagnostic<'a> {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiagnosticHint {
-    DidYouMean { replacement: String },
+    DidYouMean {
+        replacement: String,
+    },
+    StdPath {
+        replacement: String,
+        merged_modules: Vec<String>,
+    },
 }
 impl std::fmt::Display for DiagnosticHint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DidYouMean { replacement } => write!(f, "did you mean `{replacement}`?"),
+            Self::StdPath {
+                replacement,
+                merged_modules,
+            } => {
+                write!(f, "did you mean `{replacement}`?")?;
+                if !merged_modules.is_empty() {
+                    write!(
+                        f,
+                        " Std extensions use bare names in these core modules: {}.",
+                        merged_modules.join(", ")
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -95,6 +115,11 @@ impl CheckProduct {
         );
         for site in &refusal.causal {
             write!(text, "\n  caused by {}", self.render_site(site)?).unwrap();
+        }
+        if let Some(hint) =
+            hirsel_core_ids::published::catch_io(|| Ok(name_hint(&self.index, refusal)))?
+        {
+            write!(text, "\n  {hint}").unwrap();
         }
         Ok(text)
     }
@@ -183,6 +208,20 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
             namespace,
             constructor,
         } => {
+            if module.package.name_is("core")
+                && module.modules == ["net"]
+                && matches!(
+                    lookup.written.as_str(),
+                    "listen" | "connect" | "accept" | "recv_bounded" | "send_pair"
+                )
+                && let Some(host) = index.module_at(&module.package, &["host".into()])
+                && let Some(symbol) = index.symbols.find(&lookup.written)
+                && visible_member(index, from, host, symbol, *namespace, *constructor).is_some()
+            {
+                return Some(DiagnosticHint::DidYouMean {
+                    replacement: format!("host.{}", lookup.written),
+                });
+            }
             let module = module_at(module)?;
             let names = index.member_names_in(module).filter(|&name| {
                 visible_member(index, from, module, name, *namespace, *constructor).is_some()
@@ -206,6 +245,31 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
                 .chain(constants)
                 .filter(|&name| parent == module || index.child(parent, name) != Some(module));
             closest_name(index, &lookup.written, names)
+        }
+        NameScope::UnqualifiedPath {
+            modules,
+            namespace,
+            constructor,
+        } => {
+            let std = crate::package("std");
+            let core = crate::package("core");
+            let root = index.module_at(&std, &[])?;
+            if index.module_head(from, index.symbols.find("std")?) != Some(root) {
+                return None;
+            }
+            let module = index.module_at(&std, modules)?;
+            let member = index.symbols.find(&lookup.written)?;
+            visible_member(index, from, module, member, *namespace, *constructor)?;
+            let mut merged_modules: Vec<_> = index
+                .child_names(root)
+                .map(|name| index.symbols.text(name).to_owned())
+                .filter(|name| index.module_at(&core, std::slice::from_ref(name)).is_some())
+                .collect();
+            merged_modules.sort_unstable();
+            return Some(DiagnosticHint::StdPath {
+                replacement: format!("std.{}.{}", modules.join("."), lookup.written),
+                merged_modules,
+            });
         }
         NameScope::Field(path) | NameScope::Variant(path) => {
             let path = &path.0;

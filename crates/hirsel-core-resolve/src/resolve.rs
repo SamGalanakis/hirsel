@@ -982,6 +982,20 @@ impl<'a> Resolver<'a, '_> {
                             )
                         };
                         let mut diagnostic = Refusal::new("LANG-7", self.site(n), message);
+                        if self.index.packages[self.package.0 as usize].name != name {
+                            let modules = std::iter::once(head_token)
+                                .chain(parts.take_while(|&token| token != last))
+                                .map(|token| self.index.symbols.text(self.name(token)).to_owned())
+                                .collect();
+                            diagnostic = diagnostic.with_unresolved(
+                                self.index.symbols.text(self.name(last)),
+                                NameScope::UnqualifiedPath {
+                                    modules,
+                                    namespace: ns,
+                                    constructor: construct,
+                                },
+                            );
+                        }
                         diagnostic.primary.span = self.item.token_span(head_token);
                         self.out.diagnostics.push(diagnostic);
                         Target::Missing

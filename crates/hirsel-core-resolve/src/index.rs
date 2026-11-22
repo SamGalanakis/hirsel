@@ -70,6 +70,11 @@ pub enum NameScope {
     },
     Field(DefPath),
     Variant(DefPath),
+    UnqualifiedPath {
+        modules: Vec<String>,
+        namespace: Namespace,
+        constructor: bool,
+    },
 }
 
 impl Refusal {

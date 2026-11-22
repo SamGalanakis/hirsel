@@ -44,11 +44,13 @@ def counters(client, event, path):
             stack.enter_context(os.fdopen(ack_write, "wb")),
         )
         control = stack.enter_context(os.fdopen(control_write, "wb", buffering=0))
-        ack = stack.enter_context(os.fdopen(ack_read, "rb"))
+        stack.callback(os.close, ack_read)
 
         def toggle(action):
             control.write((action + "\n").encode())
-            if not ack.readline().startswith(b"ack"):
+            # perf writes a NUL after the newline. Consume the whole
+            # acknowledgement so it cannot prefix the next one.
+            if os.read(ack_read, 4096).rstrip(b"\0\n") != b"ack":
                 raise RuntimeError(f"perf did not acknowledge {action}")
 
         yield (

@@ -170,7 +170,10 @@ impl FunctionEmitter<'_> {
                     };
                     operands.push(match *t {
                         Ty::Ptr => ptr(value.clone()),
-                        Ty::Scalar(Scalar::Bool) => zeroext(Type::I1, value.clone()),
+                        Ty::Scalar(Scalar::Bool) => {
+                            let flag = self.cast(Cast::Trunc, &Type::I8, value, &Type::I1);
+                            zeroext(Type::I1, flag)
+                        }
                         Ty::Scalar(Scalar::U8) => zeroext(Type::I8, value.clone()),
                         Ty::Scalar(Scalar::U16) => zeroext(Type::Int(16), value.clone()),
                         _ => word(value.clone()),

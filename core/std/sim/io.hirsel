@@ -1,0 +1,51 @@
+/// The collector for a simulated output stream.
+pub opaque type Captured: send {
+    port: Served[StreamOp]
+}
+
+/// Creates a Stdout stream and its collector.
+pub fn capture(bytes n: u64, terminal: bool) -> (Stdout, Captured) {
+    let (out, port) = provide.stdout(bytes n, terminal)
+    (out, Captured(port: take port))
+}
+
+/// Creates a Stderr stream and its collector.
+pub fn capture_stderr(bytes n: u64, terminal: bool) -> (Stderr, Captured) {
+    let (err, port) = provide.stderr(bytes n, terminal)
+    (err, Captured(port: take port))
+}
+
+/// Serves the stream until quiescence and returns its committed bytes.
+pub fn collect(take captured: Captured) -> Bytes waits {
+    let Captured(port: take port) = take captured
+    let mut s = take port
+    let mut log: Bytes = list.new()
+    while let Some(take call) = provide.next(mut s) {
+        let Write(len: n) = provide.stream_op(call)
+        let mut data: Bytes = list.with_capacity(n)
+        provide.payload(call, 0, mut data)
+        list.reserve(mut log, n)
+        if let Ok(()) = provide.reply(mut s, take call, provide.stream_reply(Done)) {
+            list.append(mut log, data)
+        }
+    }
+    take log
+}
+
+type Stop: send {
+    clock: Clock,
+    at: u64,
+    target: StopTrigger
+}
+
+fn signal(take stop: Stop) waits {
+    let Stop(clock: c, at: at, target: take target) = take stop
+    host.sleep_until(c, at)
+    process.trigger(take target)
+}
+
+/// Schedules the process's first stop signal at a monotonic deadline. A world
+/// driver can advance this clock to that time at quiescence.
+pub fn stop_at(tasks: Tasks, c: Clock, at: u64, take target: StopTrigger) -> Task[()] {
+    task.spawn(tasks, bytes 0, Stop(clock: c, at: at, target: take target), signal)
+}

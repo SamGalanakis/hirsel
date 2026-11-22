@@ -24,6 +24,7 @@ hirsel prof callers <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]
 hirsel prof callees <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]
 hirsel prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]
 hirsel prof sql <FILE.hprof> "<SQL>" [--limit 500] [--timeout-ms 5000] [--json]
+hirsel prof export <FILE.hprof> --format pprof --out <PATH>
 ```
 
 `prof run` takes the native build options of `run`. It passes arguments after
@@ -54,3 +55,6 @@ authorizer denies writes, ATTACH, and connection-changing statements.
 The result includes the ordered column names, rows, row limit, returned row
 count, and a truncation flag. The profiler interrupts a query that exceeds
 `--timeout-ms`.
+
+`prof export --format pprof` writes a standard uncompressed pprof protobuf to
+the requested path.

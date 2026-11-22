@@ -70,6 +70,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             crate::prof_command::attach(invocation)?;
             std::process::exit(0);
         }
+        "prof export" => {
+            crate::prof_command::export(invocation)?;
+            std::process::exit(0);
+        }
         name if name.starts_with("prof ") && name != "prof run" => {
             crate::prof_command::query(invocation)?;
             std::process::exit(0);
@@ -456,7 +460,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::ProfRows
             | Opt::ProfDepth
             | Opt::ProfMinDeltaPct
-            | Opt::ProfTimeout => {
+            | Opt::ProfTimeout
+            | Opt::ProfFormat => {
                 unreachable!("CLI early command option")
             }
         }

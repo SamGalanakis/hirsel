@@ -139,3 +139,7 @@ captured. Query results encode unsigned integers above 2^53 as decimal
 strings. `summary` groups hotspots by event and shows at most five rows
 per event. Function grouping deduplicates the definition across all
 instances in a stack.
+
+`prof export` supports the pprof format. It preserves mapping addresses,
+inline frame order, and one value per event. Values that exceed the signed
+64-bit fields in pprof are refused.

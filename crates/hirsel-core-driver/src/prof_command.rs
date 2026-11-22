@@ -239,3 +239,24 @@ pub(crate) fn query(invocation: Invocation) -> Result<()> {
     }
     Ok(())
 }
+
+pub(crate) fn export(invocation: Invocation) -> Result<()> {
+    let input = invocation
+        .positional
+        .as_deref()
+        .ok_or("prof export requires a .hprof file")?;
+    let mut format = None;
+    let mut out = None;
+    for (id, value) in invocation.options {
+        match id {
+            OptionId::ProfFormat => format = value,
+            OptionId::ProfOut => out = value,
+            _ => unreachable!("profile export option"),
+        }
+    }
+    if format.as_deref() != Some("pprof") {
+        return Err("prof export requires --format pprof".into());
+    }
+    let out = out.as_deref().ok_or("prof export requires --out PATH")?;
+    hirsel_prof::export_pprof(Path::new(input), Path::new(out))
+}

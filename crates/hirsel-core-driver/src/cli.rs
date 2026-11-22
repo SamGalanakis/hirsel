@@ -72,6 +72,7 @@ pub enum OptionId {
     ProfDepth,
     ProfMinDeltaPct,
     ProfTimeout,
+    ProfFormat,
     Image,
     Lib,
     Help,
@@ -142,6 +143,7 @@ commands! {
     "prof callees", "prof callees <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]", "Show sampled callees of a function.";
     "prof diff", "prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]", "Compare compatible captures and report changed and unmatched functions.";
     "prof sql", "prof sql <FILE.hprof> \"<SQL>\" [--limit 500] [--timeout-ms 5000] [--json]", "Query the profile with one read-only SQL statement.";
+    "prof export", "prof export <FILE.hprof> --format pprof --out <PATH>", "Export a pprof profile.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
@@ -519,9 +521,9 @@ static OPTIONS: &[OptionSpec] = &[
     option!(
         ProfOut,
         ["--out"],
-        Some("FILE.hprof"),
-        ["prof run", "prof attach"],
-        "Write the profile to this file (default profile.hprof)."
+        Some("PATH"),
+        ["prof run", "prof attach", "prof export"],
+        "Write the profile to this path."
     ),
     option!(
         ProfFrequency,
@@ -622,6 +624,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("MS"),
         ["prof sql"],
         "Interrupt the statement after this many milliseconds (default 5000)."
+    ),
+    option!(
+        ProfFormat,
+        ["--format"],
+        Some("pprof"),
+        ["prof export"],
+        "Write standard pprof protobuf."
     ),
     option!(
         Json,

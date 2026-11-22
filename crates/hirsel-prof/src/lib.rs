@@ -1,8 +1,10 @@
 //! Portable CPU profiles for Hirsel.
 
+mod pprof;
 mod profile;
 mod query;
 
+pub use pprof::export_pprof;
 pub use profile::{Profile, ProfileWriter, RunMeta};
 pub use query::{By, Group, Query, QueryResult, query};
 

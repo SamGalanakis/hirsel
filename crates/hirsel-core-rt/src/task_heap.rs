@@ -234,6 +234,17 @@ fn dedicated_index(payload: NonNull<u8>) -> &'static Mutex<Option<DedicatedIndex
     &SHARDS[(slice ^ (slice >> 6) ^ (slice >> 12)) % SHARDS.len()]
 }
 
+/// Whether `payload` starts a dedicated mapping's block: a private anonymous
+/// mapping that this heap made with `mmap` and owns whole.
+pub(crate) fn is_dedicated(payload: NonNull<u8>) -> bool {
+    payload.addr().get() & (SLAB - 1) == 0
+        && dedicated_index(payload)
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|index| index.contains_key(&payload.addr().get()))
+}
+
 #[cold]
 fn dedicated_page(payload: NonNull<u8>) -> PagePointer {
     dedicated_index(payload)

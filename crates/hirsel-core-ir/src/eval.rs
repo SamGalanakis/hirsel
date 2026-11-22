@@ -6418,6 +6418,12 @@ impl Machine<'_> {
                 self.put(a[0], &encoded);
                 vec![]
             }
+            RtOp::ZeroBytes => {
+                if a[2] != 0 {
+                    self.put(a[1], &vec![0; a[2] as usize]);
+                }
+                vec![]
+            }
             RtOp::Sha256Blocks => {
                 let mut h = [0u32; 8];
                 for (word, bytes) in h.iter_mut().zip(self.get(a[0], 32).as_chunks::<4>().0) {

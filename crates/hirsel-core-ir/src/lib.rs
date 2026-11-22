@@ -477,6 +477,19 @@
 //! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
 //! with no context or status.
 //!
+//! # Zero fill
+//!
+//! `rt.zero_bytes(block, at, len)` writes `len` zero bytes at `at`, which lies
+//! inside the owned storage block whose payload starts at `block`. `list.fill`
+//! of an integer list with the value 0 lowers to it when the span is at least
+//! `ZERO_FILL_MIN` bytes, and to its store loop otherwise. The result is the
+//! same bytes either way. The row takes no step, admits nothing and never
+//! fails, as the store loop it replaces (MEM-28, MEM-30). The run time may
+//! leave a whole page untouched when the kernel shows it was never backed in
+//! one of its private anonymous mappings, since such a page already reads as
+//! zero. Engines map it to `void hirsel_core_zero_bytes(uint8_t *, uint8_t *,
+//! uint64_t)`, with no context or status.
+//!
 //! # Identities
 //!
 //! `rt.dest_id` is the run's one counter of fresh `u64` identities: a

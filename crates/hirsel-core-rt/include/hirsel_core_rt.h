@@ -82,6 +82,9 @@ void hirsel_core_map_hash_add_bytes(void *, const uint8_t *, uint64_t);
 uint64_t hirsel_core_map_hash_finish(const void *);
 /* rt.sha1_blocks: RFC 3174 compression of the byte span and its padding. */
 void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len);
+/* rt.zero_bytes: zero len bytes at at, inside the storage block that starts at
+   block; pages the kernel never backed are already zero and stay untouched. */
+void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
 
 /* rt.sha256_blocks: FIPS 180-4 compression of blocks 64-byte blocks into the
    eight state words, with the CPU's SHA-256 instructions when it has them; no

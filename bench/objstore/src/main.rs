@@ -5,7 +5,7 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use socket::{CHUNK, Epoll, Ring};
 use std::fs;
-use std::io::{self, IoSlice, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::path::Path;
@@ -71,15 +71,6 @@ fn head(wire: &mut impl Read, header: &mut [u8]) -> io::Result<Option<(usize, us
             return Ok(Some((search + end + 4, filled)));
         }
     }
-}
-
-fn send_head<T: Write>(wire: &mut T, bytes: &[u8]) -> io::Result<()> {
-    // Exercise the plain sendmsg path used for a two-part write. TLS and the
-    // ring may take the Write default and consume only the first slice.
-    let split = bytes.len() / 2;
-    let parts = [IoSlice::new(&bytes[..split]), IoSlice::new(&bytes[split..])];
-    let sent = wire.write_vectored(&parts)?;
-    wire.write_all(&bytes[sent..])
 }
 
 fn check_bytes(bytes: &[u8], verify: bool) -> io::Result<()> {
@@ -172,10 +163,10 @@ fn request(
     verify: bool,
 ) -> io::Result<()> {
     if put {
-        send_head(wire, PUT)?;
+        wire.write_all(PUT)?;
         write_body(wire, &buf.tx)?;
     } else {
-        send_head(wire, GET)?;
+        wire.write_all(GET)?;
     }
     let mut header = [0; 4096];
     let (end, filled) = head(wire, &mut header)?.ok_or(io::ErrorKind::UnexpectedEof)?;

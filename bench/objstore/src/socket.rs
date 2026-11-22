@@ -68,10 +68,7 @@ impl Read for Epoll {
 
 impl Write for Epoll {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // SAFETY: buf is readable for its stated length during send.
-        self.retry(|fd| unsafe {
-            libc::send(fd, buf.as_ptr().cast(), buf.len(), libc::MSG_NOSIGNAL)
-        })
+        self.write_vectored(&[IoSlice::new(buf)])
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -207,7 +204,8 @@ impl Write for Ring {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = buf.len().min(CHUNK);
         let fd = types::Fd(self.stream.as_raw_fd());
-        if !self.send_zc {
+        // Control writes should not wait for TCP to retire a zerocopy buffer.
+        if !self.send_zc || len < 4096 {
             let entry = opcode::Send::new(fd, buf.as_ptr(), len as u32)
                 .flags(libc::MSG_NOSIGNAL)
                 .build();

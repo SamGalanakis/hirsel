@@ -39,8 +39,10 @@ runtime. The Hirsel DONE marker adds a small fixed cost per batch.
 
 The default matrix includes `ktls-send` (kernel TLS using ordinary
 `IORING_OP_SEND` and fixed-buffer receives). Select `--mode ktls` to
-require `IORING_OP_SEND_ZC` on the kTLS socket. Linux software kTLS may
-refuse it with `EOPNOTSUPP`. SEND_ZC usage counts include the warmup
+use `IORING_OP_SEND_ZC` for sends of at least 4 KiB on the kTLS socket.
+Linux software kTLS may refuse PUT data with `EOPNOTSUPP`. GET has only
+a small outbound HTTP head. The ring uses ordinary sends below 4 KiB in
+every mode. SEND_ZC usage counts include the warmup
 and exclude the TLS handshake. The io_uring client waits for each send's
 notification before reusing transmit storage. Buffered rustls uses
 registered staging buffers for its ciphertext.

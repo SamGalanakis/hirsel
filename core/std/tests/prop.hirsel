@@ -219,6 +219,151 @@ fn prop_filter_rejects() -> bool {
     }
 }
 
+fn all_pair() -> Gen[(bool, u8)] {
+    pair(bool_(), map_shown(u64_in(0, 2), fn(value: u64) -> u8 {
+        int.narrow(value)
+    }, fn(value: u8, mut text: String) {
+        string.push_u64(mut text, int.widen(value))
+    }))
+}
+
+fn all_pair_passes(value: (bool, u8)) -> Result[(), String] {
+    Ok(())
+}
+
+// Catches skipped, duplicated or out-of-order choices, including at the exact case budget.
+// expect: run prop_all_order() = true
+fn prop_all_order() -> bool {
+    let mut c = config()
+    c.cases = 6
+    let expected: Inline[(bool, u8), 6] =[(false, 0), (false, 1), (false, 2), (true, 0), (true, 1), (true, 2)]
+    for i in 0u64 .. 6 {
+        let target = expected[i]
+        let Falsified(result) = all(c, all_pair(), fn(value: (bool, u8)) -> Result[(), String] {
+            if value == target {
+                Error(string.from("target"))
+            } else {
+                Ok(())
+            }
+        }) else {
+            return false
+        }
+        if result.index != i || result.cases != i + 1 {
+            return false
+        }
+    }
+    match all(c, all_pair(), all_pair_passes) {
+        Held(run, discarded) => run == 6 && discarded == 0,
+        _ => false,
+    }
+}
+
+fn all_corner_law(value: (bool, u8)) -> Result[(), String] {
+    if value == (true, 2u8) {
+        Error(string.from("corner"))
+    } else {
+        Ok(())
+    }
+}
+
+// Catches losing the first failing tape or reporting a counterexample that cannot replay.
+// expect: run prop_all_corner() = true
+fn prop_all_corner() -> bool {
+    let Falsified(result) = all(config(), all_pair(), all_corner_law) else {
+        return false
+    }
+    let mut text = string.new()
+    token(result, mut text)
+    if text != "AQUCAQI=" || result.rendered != "(true, 2)" || result.shrinks != 0 {
+        return false
+    }
+    if let Falsified(replayed) = search(replay(config(), text), all_pair(), all_corner_law) {
+        return replayed.index == 5 && replayed.rendered == "(true, 2)" && replayed.message == "corner"
+    }
+    false
+}
+
+// Catches skipping a live word, recording the wrong position or continuing with a dummy value.
+// expect: run prop_all_unbounded_position() = true
+fn prop_all_unbounded_position() -> bool {
+    let g = make(fn(mut s: Source) -> u64 {
+        if below(mut s, 2) == 0 {
+            return 0
+        }
+        let _ = below(mut s, 1)
+        1u64 / word(mut s)
+    }, show_u64)
+    match all(config(), g, law_passes) {
+        Unbounded(at) => at == 2,
+        _ => false,
+    }
+}
+
+fn keep_nonzero(value: u64) -> bool {
+    value != 0
+}
+
+fn require_nonzero(value: u64) -> Result[(), String] {
+    if value == 0 {
+        Error(string.from("zero reached the law"))
+    } else {
+        Ok(())
+    }
+}
+
+fn all_counts(outcome: AllOutcome, held: bool, run: u64, discarded: u64) -> bool {
+    match outcome {
+        Held(r, d) => held && r == run && d == discarded,
+        Truncated(r, d) => !held && r == run && d == discarded,
+        _ => false,
+    }
+}
+
+// Catches treating an unfinished tree as closed, counting overrun as rejection, or retrying a filter.
+// expect: run prop_all_limits_and_rejects() = true
+fn prop_all_limits_and_rejects() -> bool {
+    let mut c = config()
+    c.cases = 2
+    let g = filter(u64_in(0, 2), keep_nonzero)
+    if !all_counts(all(c, g, require_nonzero), false, 1, 1) {
+        return false
+    }
+    c.cases = 3
+    if !all_counts(all(c, g, require_nonzero), true, 2, 1) {
+        return false
+    }
+    c.max_choices = 0
+    if !all_counts(all(c, g, law_returns_error), false, 0, 0) {
+        return false
+    }
+    c.max_choices = 1
+    c.gen_steps = 0
+    all_counts(all(c, g, law_returns_error), false, 0, 0)
+}
+
+// Catches sampling weighted choices at the probability endpoints on a variable-length path.
+// expect: run prop_all_weighted() = true
+fn prop_all_weighted() -> bool {
+    let g = make(fn(mut s: Source) -> u64 {
+        if weighted(mut s, 0, 100) {
+            2
+        } else if weighted(mut s, 100, 100) {
+            1
+        } else {
+            0
+        }
+    }, show_u64)
+    let mut c = config()
+    c.cases = 3
+    let Falsified(first) = all(c, g, require_nonzero) else {
+        return false
+    }
+    if first.index != 0 || first.rendered != "0" {
+        return false
+    }
+    all_counts(all(c, g, law_passes), true, 3, 0)
+}
+
 fn same_mapped_value(value: u64) -> u64 {
     0
 }

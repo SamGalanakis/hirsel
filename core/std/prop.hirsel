@@ -19,6 +19,7 @@ pub opaque type Source {
     max_choices: u64,
     overrun: bool,
     invalid: bool,
+    enumerating: bool,
     rendering: bool,
     rendered: Option[String]
 }
@@ -45,7 +46,11 @@ pub fn draw[T](mut s: Source, g: Gen[T]) -> T {
 
 fn source(seed: u64, index: u64, max_choices: u64, prefix: Option[List[u64]]) -> Source {
     let replay_prefix: Option[List[u64]] = clone(prefix)
-    Source(pcg: rand.new(seed, index), prefix: take replay_prefix, tape: list.new(), spans: list.new(), parent: None, max_choices, overrun: false, invalid: false, rendering: false, rendered: None)
+    Source(pcg: rand.new(seed, index), prefix: take replay_prefix, tape: list.new(), spans: list.new(), parent: None, max_choices, overrun: false, invalid: false, enumerating: false, rendering: false, rendered: None)
+}
+
+fn stop_enumeration(take reason: String) -> Never {
+    fail(take reason)
 }
 
 // After a discard, return zero without advancing either input stream.
@@ -54,6 +59,12 @@ fn ready(mut s: Source) -> bool {
         return false
     }
     let i = list.len(s.tape)
+    if s.enumerating {
+        if i >= s.max_choices {
+            stop_enumeration("")
+        }
+        return true
+    }
     let past_prefix = match s.prefix {
         Some(values) => i >= list.len(values),
         None => false,
@@ -64,7 +75,11 @@ fn ready(mut s: Source) -> bool {
 
 fn replay_choice(s: Source, limit: u64) -> Option[u64] {
     if let Some(values) = s.prefix {
-        let value = values[list.len(s.tape)]
+        let i = list.len(s.tape)
+        if s.enumerating && i >= list.len(values) {
+            return Some(0)
+        }
+        let value = values[i]
         return Some(if limit == 0 || value < limit {
             value
         } else {
@@ -101,6 +116,11 @@ pub fn below(mut s: Source, n: u64) -> u64 {
 pub fn word(mut s: Source) -> u64 {
     if !ready(mut s) {
         return 0
+    }
+    if s.enumerating {
+        let mut at = string.new()
+        string.push_u64(mut at, list.len(s.tape))
+        stop_enumeration(take at)
     }
     let value = match replay_choice(s, 0) {
         Some(value) => value,
@@ -490,7 +510,7 @@ pub fn filter[T](take g: Gen[T], take pred: own fn(T) -> bool) -> Gen[T] {
                 break take value
             }
             attempts += 1
-            if attempts == 3 {
+            if attempts == 3 || s.enumerating {
                 reject(mut s)
                 break take value
             }
@@ -522,6 +542,10 @@ pub fn replay(take c: Config, text: String) -> Config {
 }
 
 pub type Outcome = Passed(u64) | GaveUp(u64, u64) | Falsified(Found)
+
+pub type AllOutcome = Held(u64, u64) | Truncated(u64, u64) | Unbounded(u64) | Falsified(Found)
+
+type AllTrial[T] = Trial(T, Source) | TrialTruncated | WordAt(u64)
 
 pub opaque type Found {
     index: u64,
@@ -1276,6 +1300,96 @@ pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> 
         index += 1
     }
     Passed(cases)
+}
+
+fn enumeration_stop_site() -> Site {
+    // Identify the private failure site so a generator's own Fail text cannot stop the walk.
+    if let Ok(Error(causes)) = isolate(fn() {
+        stop_enumeration("")
+    }) {
+        for cause in causes {
+            return cause.site
+        }
+    }
+    fail("prop: could not read enumeration stop site")
+}
+
+fn enumerate_trial[T](c: Config, g: Gen[T], index: u64, prefix: Option[List[u64]]) -> AllTrial[T] {
+    let run = isolate(fn() -> Result[(T, Source), OutOfTime] {
+        bound steps c.gen_steps {
+            let mut s = source(0, 0, c.max_choices, prefix)
+            s.enumerating = true
+            let value = draw(mut s, g)
+            (take value, take s)
+        }
+    })
+    match take run {
+        Ok(Ok(Ok((take value, take s)))) => Trial(take value, take s),
+        Ok(Ok(Error(_))) => TrialTruncated,
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let OutOfTime = cause.kind {
+                    return TrialTruncated
+                }
+                if let Fail(reason) = cause.kind {
+                    if cause.site == enumeration_stop_site() {
+                        return match int.parse_uint(reason, 10) {
+                            Ok(at) => WordAt(at),
+                            Error(_) => TrialTruncated,
+                        }
+                    }
+                }
+                break
+            }
+            generation_failed(index)
+        },
+        Error(_) => generation_failed(index),
+    }
+}
+
+fn next_prefix(tape: List[Choice]) -> Option[List[u64]] {
+    let mut end = list.len(tape)
+    while end > 0 {
+        end -= 1
+        let choice = tape[end]
+        if choice.value + 1 < choice.limit {
+            let mut prefix: List[u64] = list.with_capacity(end + 1)
+            push_values(mut prefix, tape, 0, end)
+            list.push(mut prefix, choice.value + 1)
+            return Some(take prefix)
+        }
+    }
+    None
+}
+
+pub fn all[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> AllOutcome {
+    if let Some(_) = c.replay {
+        fail("prop: config: all does not take a replay token")
+    }
+    let mut prefix: Option[List[u64]] = Some(list.new())
+    let mut run: u64 = 0
+    let mut discarded: u64 = 0
+    for index in 0u64 .. c.cases {
+        match enumerate_trial(c, g, index, prefix) {
+            WordAt(at) => return Unbounded(at),
+            TrialTruncated => return Truncated(run, discarded),
+            Trial(take value, take s) => {
+                if s.invalid {
+                    discarded += 1
+                } else {
+                    run += 1
+                    if let Some(take info) = case_failure(c, value, law) {
+                        return Falsified(found(c, g, index, run, 0, counterexample(take s, take info)))
+                    }
+                }
+                let Some(take next) = next_prefix(s.tape) else {
+                    return Held(run, discarded)
+                }
+                prefix = Some(take next)
+            },
+        }
+    }
+    Truncated(run, discarded)
 }
 
 pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()] {

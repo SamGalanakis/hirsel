@@ -32,7 +32,7 @@ ada grace 2
 Outcome: success.
 
 Every outside effect comes in as a parameter: `main` writes only because it receives
-`Stdout`. It is `waits` because it calls a waiting operation. `main` returns
+`Stdout`. `main` is always `waits`, since it may wait (LANG-8). It returns
 `Result[(), E]`, and `Ok(())` exits 0 (PROG-3, CAP-1, CAP-4).
 
 ## 2. What is not there
@@ -62,10 +62,10 @@ fn f() -> u64 { let width: u64 = 1; width }               // refused: LANG-7, wi
 ```
 
 - Generics take bounds from a fixed set: `plain`, `shareable`, `send`, `key`, `ordered`,
-  `codec` and `inert` (OWN-4). No user-defined traits, and no operator overloading
+  `codec`, `inert`, `packed` and `streamable` (OWN-4). No user-defined traits, and no operator overloading
   (LANG-21).
-- Nothing converts implicitly. `int.widen`, `int.narrow` and `int.try_narrow` change
-  widths, and `x + y` needs one type (LANG-21).
+- Numbers never convert implicitly. `int.widen`, `int.narrow` and `int.try_narrow` change
+  widths, and `x + y` needs one type (LANG-11, LANG-21).
 - Variants are written bare (`Some(x)`, `Ok(())`), and the expected type picks them.
 
 ## 3. Types and local typing
@@ -155,7 +155,8 @@ fn f(take xs: List[u64]) { eat(xs) }                      // refused: OWN-7, nee
 
 `take` is written where a place of a moving type is moved, and a fresh value is passed
 bare. A view is read-only and lasts for a lexical extent: to the end of its block when
-bound by `let`, otherwise to the end of the statement (OWN-8). While it lives, nothing may
+bound by `let`, of its arm or loop body when bound by a pattern, and of its statement as a
+temporary (OWN-8). While it lives, nothing may
 write the place it views (OWN-10):
 
 ```hirsel
@@ -246,12 +247,13 @@ pub fn main(out: Stdout) -> Result[(), WriteError] waits {
 
 Outcome: success.
 
-The list grows to 4, 8, 16 and more elements, and each growth holds the old and the new
-storage at once. Under 4096 bytes all 100 pushes fit. Under 64 bytes, growing from 4 to 8
+The list grows to 4 elements, then doubles, and each growth holds the old and the new
+storage at once (MEM-24, MEM-26). Under 4096 bytes all 100 pushes fit. Under 64 bytes, growing from 4 to 8
 elements needs 32 + 64 bytes, so that push fails with `requested` 64.
 
 `@compact(W) type` declares region data: one contiguous blob with offsets `W` wide,
-built in place by `build_in` and its `Dest` or `Writer`, and immutable once published. Its
+built in place through `build_in`'s `Dest` or `build_stream_in`'s `Writer`, and immutable
+once published. Its
 fields are scalars, `Text`, spans, links and other compact types, never own values (MEM-9,
 MEM-2, MEM-4):
 
@@ -280,8 +282,8 @@ fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
 fn stamp() -> u64 { host.mono_ns() }                      // refused: CAP-1, no Clock argument
 ```
 
-A function is `waits` exactly when it calls something that is `waits`, and a
-needless `waits` is refused too (LANG-8). A waiting call may observe cancellation
+Any function but `main` is `waits` exactly when it calls something that is `waits`, and
+a needless `waits` is refused too (LANG-8). A waiting call may observe cancellation
 (CONC-7). Tasks share nothing: `task.spawn(tasks, bytes n, take payload, f)` moves a
 `send` payload into a new task, and channels carry values between tasks (CONC-2, CONC-3,
 CONC-4).
@@ -325,7 +327,8 @@ limit = 67108864
 ```
 
 Each `[sources]` entry maps a file to a module, and `[tests]` gives every test its root
-limit and grants. Test sources see the package's modules, as in `main.twice(21)`
+limit and grants. A definition is private to its module unless marked `pub`, and test
+sources call the package's `pub` definitions by module path, as in `main.twice(21)`
 (PROG-1, PROG-2).
 
 ## 10. The loop

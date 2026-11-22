@@ -36,10 +36,16 @@ output directory must be new and outside the checkout.
   pair. Holds avoid 02:45–04:00 local time and are separated by at least
   15 seconds. The runner records host load and `pgrep -x cc1plus` at both
   boundaries. Neither reading is an admission or discard rule.
-- A scheduler trace checks which tasks ran on the server CPUs during the
-  timed pair. Activity by a task outside the two arms discards the hold.
-  Missing scheduler ownership evidence also leaves the hold unqualified.
-  Raw receipts list foreign tasks, lost events and the opening idle sample.
+- Each arm spans at least one second. For short regimes the runner repeats
+  the same checksum-checked invocation within the arm and reports the rate
+  from the mean invocation time. Raw receipts retain every invocation.
+- A scheduler trace charges on-CPU intervals to each arm's measured window.
+  For each CPU set, foreign share is on-CPU time outside the arm's process
+  tree divided by the arm's wall time and the number of CPUs. An arm needs
+  a complete trace and foreign share below 1.5% on both the server and load
+  sets. The runner retains the timings and trace regardless of qualification.
+  Raw `arm_cpu` rows include the window, root PIDs, foreign nanoseconds per
+  CPU and the shares by role. No task names are excluded.
 - Use `--server-cpus`, `--load-cpus`, `--helper-cpus` and
   `--controller-cpus` to select masks. The defaults are server 0–3 and
   16–19 on CCD0, load generator 24–25, and helper and controller 26–27.
@@ -62,7 +68,7 @@ The receipt has these top-level fields.
 
 | Field | Meaning |
 |---|---|
-| `version`, `commit`, `config` | Schema version, source commit, workload selection, CPU masks, build budget, sync policy and hold policy |
+| `version`, `commit`, `config` | Schema version, source commit, workload selection, CPU masks, build budget, sync policy, foreign-share limit and minimum arm length |
 | `host`, `started`, `updated`, `host_load_start`, `host_load_last` | Host name, local timestamps with offset, and load averages |
 | `binary_sha256`, `toolchain` | SHA-256 by binary path relative to the commit's cache, plus compiler and runtime provenance |
 | `expected_rows`, `rows`, `failures`, `complete` | Expected and observed goal-board rows, recorded failures and completeness |
@@ -76,7 +82,7 @@ use server CPU µs per turn, where a smaller ratio means less Hirsel CPU.
 Full also publishes the intended-arrival p99 ratio for its matched rows. Regime rows use work/s and speedup over
 that port's width-1 work/s. A1 samples also include the actual offer,
 intended-arrival p99 and server-added p99 in nanoseconds, goodput, sync
-groups per turn, SHA backend and raw trial identifier. A missing result or
+groups per turn, SHA backend, foreign share by CPU role and raw trial identifier. A missing result or
 unsupported metric is JSON null or absent and cannot qualify its row.
 
 Full retention compares passing ceilings and is the result to compare with

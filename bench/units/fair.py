@@ -5,12 +5,12 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import partial
 import hashlib
-from itertools import count
+from itertools import count, cycle
 import json
 import os
 from pathlib import Path
 import signal
-from statistics import median
+from statistics import mean, median
 import subprocess
 import sys
 import time
@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "core/tools"))
 sys.path.insert(0, str(ROOT / "bench/awfy"))
 from receipt import measurement_slot, read, release_tools, write
 from bench_cpus import cpu_list
-from measurement import hold as measurement_hold
+from measurement import FOREIGN_SHARE_LIMIT, MIN_ARM_NS, hold as measurement_hold
 
 from bench.multicore import build, regimes, run
 
@@ -182,12 +182,17 @@ def scope(cpus, command, *, limit=55):
             "--", *map(str, command)]
 
 
+def command_with_pid(path, command):
+    return ["sh", "-c", 'printf "%s\n" "$$" > "$1"; shift; exec "$@"',
+            "measured", path, *command]
+
+
 def measure_regime(directory, cpus, command, profile=False, cycles=False, *, controller):
     events = "instructions:u,duration_time,cycles:u"
-    launcher = ["sh", "-c", 'printf "%s\n" "$$" > "$1"; shift; exec "$@"',
-                "measured", directory / "timed.pid",
-                "taskset", "-c", mask(cpus), "/usr/bin/time", "-f", "%U %S\n%M",
-                "-o", directory / "rss.txt", *command]
+    launcher = command_with_pid(directory / "timed.pid", [
+        "taskset", "-c", mask(cpus), "/usr/bin/time", "-f", "%U %S\n%M",
+        "-o", directory / "rss.txt", *command,
+    ])
     if profile:
         return scope(mask(controller), ["perf", "record", "-N", "--clockid", "mono", "--sample-cpu",
                              "-e", "cycles:u,cycles:k,cpu-clock", "-F", "499",
@@ -196,40 +201,74 @@ def measure_regime(directory, cpus, command, profile=False, cycles=False, *, con
                           "-o", directory / "perf.csv", "--", *launcher])
 
 
-def regime_pair(out, bins, case, grain, width, index, reverse, cpu_sets, profile=False):
+def load_regime(cpus, command, *, pid_path):
+    return scope(cpus, command_with_pid(pid_path, command))
+
+
+def regime_arm(out, bins, point, case, arm, cpus, rounds, wanted, cpu_sets, profile):
+    language = arm.capitalize()
+    runs, pids = [], []
+    start = time.monotonic_ns()
+    while not runs or time.monotonic_ns() - start < MIN_ARM_NS:
+        run_point = point
+        if runs:
+            run_point = point / f"{arm}-repeat-{len(runs)}"
+            run_point.mkdir()
+        loader_pid = run_point / f"{case}-{arm}-{len(cpus)}" / "load.pid"
+        path, row = run.observe_regime(
+            bins, run_point, case, language, cpus, cpu_sets["load"], regimes.WORKLOADS[case].size,
+            rounds, wanted, profile=profile, allow_smt=True,
+            launch_loader=partial(load_regime, pid_path=loader_pid),
+            launch_measurement=partial(measure_regime, controller=cpu_sets["controller"]))
+        cpu = None
+        if (path / "rss.txt").is_file():
+            lines = (path / "rss.txt").read_text().splitlines()
+            if len(lines) >= 2 and row.get("iterations"):
+                cpu = sum(map(float, lines[-2].split())) * 1e6 / row["iterations"]
+        runs.append(row | {"cpu_us_per_turn": cpu, "path": str(path.relative_to(out))})
+        for pid_path in (path / "timed.pid", loader_pid):
+            if pid_path.is_file():
+                pids.append(int(pid_path.read_text()))
+        if row["status"] != "ok":
+            break
+    window = {"side": arm, "start_ns": start, "end_ns": time.monotonic_ns(), "pids": pids}
+    sample = runs[0] | {"invocations": runs, "status": runs[-1]["status"]}
+    if sample["status"] == "ok" and not profile:
+        for field in ("seconds", "service_seconds", "cpu_us_per_turn"):
+            values = [run[field] for run in runs if run.get(field) is not None]
+            if values:
+                sample[field] = mean(values)
+        sample["work_per_s"] = regimes.rate(sample)
+    return sample, window
+
+
+def regime_pair(out, bins, case, grain, width, index, orders, cpu_sets, profile=False):
     work = regimes.WORKLOADS[case]
     rounds = ROUNDS[grain]
     wanted = ("%d %d\n" % regimes.receipt(case, work.size, rounds)).encode()
     cpus = cpu_sets["server"][:width]
     parent = out / ("regime-profiles" if profile else "regime-samples")
     parent.mkdir(exist_ok=True)
-    order = ARMS[::-1] if (index + reverse) % 2 else ARMS
     for attempt in count(1):
         point = parent / f"{case}-{grain}ns-w{width}-p{index}-h{attempt}"
         point.mkdir()
+        order = next(orders)
         hold = {"case": case, "grain_ns": grain, "width": width, "order": order}
         samples = {}
-        with guard(cpu_sets, point)(hold):
-            for arm in order:
-                path, row = run.observe_regime(
-                    bins, point, case, arm.capitalize(), cpus, cpu_sets["load"], work.size, rounds,
-                    wanted, profile=profile, allow_smt=True, launch_loader=scope,
-                    launch_measurement=partial(measure_regime, controller=cpu_sets["controller"]))
-                cpu = None
-                if (path / "rss.txt").is_file():
-                    lines = (path / "rss.txt").read_text().splitlines()
-                    if len(lines) >= 2 and row.get("iterations"):
-                        cpu = sum(map(float, lines[-2].split())) * 1e6 / row["iterations"]
-                sample = row | {"cpu_us_per_turn": cpu, "path": str(path.relative_to(out))}
-                if row["status"] == "ok" and not profile:
-                    sample["work_per_s"] = regimes.rate(row)
-                samples[arm] = sample
-                if (path / "timed.pid").exists():
-                    hold["arm_pids"].append(int((path / "timed.pid").read_text()))
-        hold["clean"] = hold["clean"] and len(samples) == 2
-        write(point / "pair.json", {"hold": hold, "samples": samples})
+        try:
+            with guard(cpu_sets, point)(hold):
+                for arm in order:
+                    samples[arm], window = regime_arm(out, bins, point, case, arm, cpus, rounds,
+                                                      wanted, cpu_sets, profile)
+                    hold["arm_windows"].append(window)
+                    hold["arm_pids"].extend(window["pids"])
+        finally:
+            hold["clean"] = hold.get("clean", False) and len(samples) == 2
+            for arm, sample in samples.items():
+                sample["foreign_share"] = hold.get("arm_cpu", {}).get(arm, {}).get("foreign_share")
+            write(point / "pair.json", {"hold": hold, "samples": samples})
         time.sleep(scale.HOLDS_GAP_S)
-        if hold["clean"]:
+        if hold["clean"] or any(sample["status"] != "ok" for sample in samples.values()):
             return samples
 
 
@@ -277,6 +316,7 @@ def a1_row(source, side, summary=None):
         "goodput_turns_per_s": (load["completed_after_warm_in_run"] * 1e9 /
                                 (load["end_ns"] - load["warm_ns"])) if load else None,
         "trial": source["trial"], "hold": source["hold"],
+        "foreign_share": source.get("arm_cpu", {}).get(source["side"], {}).get("foreign_share"),
         "profile": source.get("profile"),
     }
 
@@ -459,13 +499,14 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
 def run_regimes(report, cache, cases, full, repeats, reverse, cpu_sets):
     bins = cache / "regimes"
     index = 0
+    orders = cycle((ARMS[::-1], ARMS) if reverse else (ARMS, ARMS[::-1]))
     for case in cases:
         for grain in regime_grains(case, full):
             baseline = {}
             for width in regime_widths(full):
                 samples = {arm: [] for arm in ARMS}
                 for _ in range(repeats):
-                    pair = regime_pair(report.out, bins, case, grain, width, index, reverse, cpu_sets)
+                    pair = regime_pair(report.out, bins, case, grain, width, index, orders, cpu_sets)
                     index += 1
                     for arm, value in pair.items():
                         samples[arm].append(value)
@@ -484,7 +525,7 @@ def run_regimes(report, cache, cases, full, repeats, reverse, cpu_sets):
                            case=case, grain_ns=grain, width=width, kind="work_rate")
         if full:
             profile = regime_pair(report.out, bins, case, 0 if case == "checkbox" else 10_000,
-                                  8, index, reverse, cpu_sets, profile=True)
+                                  8, index, orders, cpu_sets, profile=True)
             index += 1
             report.data.setdefault("regime_profiles", {})[case] = profile
             report.save()
@@ -542,7 +583,8 @@ def main():
               "reverse": args.reverse, "build_cpus": BUILD_CPUS, "build_jobs": 4,
               "build_memory_limit_bytes": 4 << 30, "regime_scope_memory_limit_bytes": 3 << 30,
               "sync_policy": {"wait_us": 400, "max_writes": 4096, "durable_syncs_per_group": 1},
-              "hold_policy": "server-cpu-isolation",
+              "hold_policy": "foreign-cpu-share", "foreign_share_limit": FOREIGN_SHARE_LIMIT,
+              "minimum_arm_ns": MIN_ARM_NS,
               **{f"{role}_cpus": cpus for role, cpus in cpu_sets.items()}}
     expected = expected_rows(suites, cases, args.full)
     report = Report(out, commit, config, expected)

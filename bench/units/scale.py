@@ -190,6 +190,7 @@ class Runner:
         self.hold_guard = hold_guard or timing_hold
         self.cpu_sets = cpu_sets or {}
         self.hold = 0
+        self.last_order = None
 
     @contextmanager
     def tool(self, precise=False):
@@ -321,6 +322,7 @@ class Runner:
             profile = {"mode": profile_mode, "path": self.data / f"{trial_id}.perf.data"}
         r = dict(side=side, cell=cell, trial=trial_id, rate=round(rate), search_rate=rate, seed=seed, nofile=NOFILE)
         started = time.monotonic()
+        arm_start_ns = time.monotonic_ns()
         tool0 = proc_sample(tool_pid)
         with (self.scratch / "server.err").open("w+") as err:
             server = launch(server_argv, server_pidfile, env=env, stderr=err)
@@ -338,11 +340,18 @@ class Runner:
             err.seek(0)
             server_err = err.read().splitlines()
         elapsed = time.monotonic() - started
+        arm_end_ns = time.monotonic_ns()
         tool1 = proc_sample(tool_pid)
         try:
             result = json.loads(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
             result = None
+
+        if self.active_hold is not None and "arm_windows" in self.active_hold:
+            phase = result or {"warm_ns": arm_start_ns, "end_ns": arm_end_ns}
+            self.active_hold["arm_windows"].append(
+                dict(side=side, start_ns=phase["warm_ns"], end_ns=phase["end_ns"],
+                     pids=[server.pid, load.pid, tool_pid]))
 
         ustats = None
         memory = None
@@ -404,6 +413,8 @@ class Runner:
         """Run one trial per side under the locks, rerunning a discarded hold."""
         while True:
             self.hold += 1
+            if len(items) == 2 and tuple(side for side, _, _ in items) == self.last_order:
+                items = items[::-1]
             receipt = dict(hold=self.hold, phase=phase, cell_name=cell_name, group=group,
                            order=[side for side, _, _ in items], runner_pid=os.getpid())
             records = []
@@ -412,6 +423,7 @@ class Runner:
                 with self.hold_guard(receipt) as usable:
                     if usable:
                         with self.tool(precise=cell.get("fair", False)) as tool:
+                            self.last_order = tuple(receipt["order"])
                             for side, rate, seed in items:
                                 tag = f"{phase}-{cell_name}-{os.getpid()}-{self.hold}-{side.replace(' ', '_')}"
                                 records.append(self.trial(tag, side, cell, rate, seed, tool, profile))
@@ -422,14 +434,15 @@ class Runner:
                 clean = (receipt.get("clean", receipt.get("board_window_open", False))
                          and "port_conflict" not in receipt and receipt.get("hold_s", 240) < 240
                          and len(records) == len(items))
-                for r in records:
-                    out.write(json.dumps(r | receipt | {"discarded": not clean}) + "\n")
+                rows = [r | receipt | {"discarded": not clean} for r in records]
+                for row in rows:
+                    out.write(json.dumps(row) + "\n")
                 out.write(json.dumps(receipt | {"hold_summary": True, "discarded": not clean}) + "\n")
                 out.flush()
             log(f"hold {self.hold} {cell_name} {receipt.get('hold_s')} s clean={clean}")
             time.sleep(HOLDS_GAP_S)
             if clean:
-                return records
+                return rows
 
     def search(self, out, cell_name, cell, sides, groups, best):
         for group in groups:

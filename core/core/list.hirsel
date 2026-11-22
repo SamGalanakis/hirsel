@@ -40,6 +40,13 @@ pub fn put_word_le[T: integer](mut b: Bytes, x: T)
 // Like put_word_le, in big-endian byte order.
 pub fn put_word_be[T: integer](mut b: Bytes, x: T)
 
+// Overwrite the u16, u32 or u64 x at byte offset at, little-endian. A range past
+// len (including an overflowing end) fails with Bounds before any write.
+pub fn set_word_le[T: integer](mut b: Bytes, at: u64, x: T)
+
+// Like set_word_le, in big-endian byte order.
+pub fn set_word_be[T: integer](mut b: Bytes, at: u64, x: T)
+
 // The front expands push in place: a full test, a cold call to grow in its true
 // arm (MEM-24 from needed = len + 1), then a store within capacity.
 pub fn push[T](mut xs: List[T], take x: T)

@@ -43,6 +43,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.list_put_word(vals[0]?, vals[1]?, types[0], name == "put_word_be", n)?;
             return Some(None);
         }
+        if module == ["list"] && matches!(name, "set_word_le" | "set_word_be") {
+            let big_endian = name == "set_word_be";
+            self.list_set_word(vals[0]?, vals[1]?, vals[2]?, types[0], big_endian, n)?;
+            return Some(None);
+        }
+        if module == ["inline"] && matches!(name, "set_word_le" | "set_word_be") {
+            let big_endian = name == "set_word_be";
+            let (array, word) = (types[0], types[1]);
+            self.inline_set_word(array, vals[0], vals[1]?, vals[2]?, word, big_endian, n)?;
+            return Some(None);
+        }
         if module == ["inline"] && matches!(name, "word_le" | "word_be") {
             return Some(self.inline_word(
                 types[0],

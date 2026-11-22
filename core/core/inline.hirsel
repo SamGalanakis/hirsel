@@ -8,3 +8,10 @@ pub fn word_le[A: plain, T: integer](b: A, at: u64) -> T
 
 // Like word_le, in big-endian byte order.
 pub fn word_be[A: plain, T: integer](b: A, at: u64) -> T
+
+// Overwrite the u16, u32 or u64 x at byte offset at of an Inline byte array,
+// little-endian. Invalid ranges fail with Bounds before any write.
+pub fn set_word_le[A: plain, T: integer](mut a: A, at: u64, x: T)
+
+// Like set_word_le, in big-endian byte order.
+pub fn set_word_be[A: plain, T: integer](mut a: A, at: u64, x: T)

@@ -238,27 +238,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.read_word(data, at, word, big_endian, n))
     }
 
-    pub(super) fn inline_word(
+    /// SEM-4: the word width of an Inline byte array access, after its range
+    /// check; an array shorter than the word raises Bounds statically.
+    fn inline_word_range(
         &mut self,
         array: TyId,
-        data: Option<ValueId>,
         at: ValueId,
-        result: TyId,
-        big_endian: bool,
+        word: TyId,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<Scalar> {
         let len = match *self.t.kind(array) {
             TyKind::Array(item, len) if item == scalar(Scalar::U8) => len,
             _ => {
                 self.refuse(
                     "SEM-4",
                     n,
-                    "an Inline word read takes an Inline array of u8",
+                    "an Inline word access takes an Inline array of u8",
                 );
                 return None;
             }
         };
-        let scalar = self.word_scalar(result, n)?;
+        let scalar = self.word_scalar(word, n)?;
         if len < scalar.size() {
             let cleanup = self.fail_to(n);
             self.end(
@@ -272,7 +272,78 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let bound = self.konst(Ty::Scalar(Scalar::U64), len, n)?;
         self.require_word_range(at, bound, scalar, n)?;
+        Some(scalar)
+    }
+
+    pub(super) fn inline_word(
+        &mut self,
+        array: TyId,
+        data: Option<ValueId>,
+        at: ValueId,
+        result: TyId,
+        big_endian: bool,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let scalar = self.inline_word_range(array, at, result, n)?;
         Some(self.read_word(data?, at, scalar, big_endian, n))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn inline_set_word(
+        &mut self,
+        array: TyId,
+        data: Option<ValueId>,
+        at: ValueId,
+        word: ValueId,
+        input: TyId,
+        big_endian: bool,
+        n: NodeId,
+    ) -> Option<()> {
+        let scalar = self.inline_word_range(array, at, input, n)?;
+        self.write_word(data?, at, word, scalar, big_endian, n);
+        Some(())
+    }
+
+    fn write_word(
+        &mut self,
+        data: ValueId,
+        at: ValueId,
+        word: ValueId,
+        scalar: Scalar,
+        big_endian: bool,
+        n: NodeId,
+    ) {
+        let ty = Ty::Scalar(scalar);
+        let address = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(at)],
+            PlaceTy::Value(ty),
+            n,
+        );
+        let value = self.word_order(word, ty, big_endian, n);
+        self.inst(Inst::Store { address, value }, n);
+    }
+
+    /// `list.set_word_le`/`_be`: Bounds unless `at + width <= len`, before the store.
+    pub(super) fn list_set_word(
+        &mut self,
+        header: ValueId,
+        at: ValueId,
+        word: ValueId,
+        input: TyId,
+        big_endian: bool,
+        n: NodeId,
+    ) -> Option<()> {
+        if !self.live() {
+            return None;
+        }
+        let width = self.word_scalar(input, n)?;
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        self.require_word_range(at, len, width, n)?;
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        self.write_word(data, at, word, width, big_endian, n);
+        Some(())
     }
 
     /// Reserve first so refusal preserves the carrier and all its bytes.

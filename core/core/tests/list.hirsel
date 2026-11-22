@@ -298,3 +298,56 @@ fn fill_slice_overflow() -> bool {
     list.fill_slice(mut b, 1, 18446744073709551615, 1)
     b[1] == 1
 }
+
+// set_word (core.md, Words) at an unaligned offset, read back with the matching reads.
+// By hand: u32 0x01020304 big-endian at 1 of seven zeros gives [0, 1, 2, 3, 4, 0, 0];
+// u16 0xbbaa little-endian at 5, ending at len, gives b[5] = 0xaa and b[6] = 0xbb.
+// expect: run set_word_round_trip() = true
+fn set_word_round_trip() -> bool {
+    let mut b: Bytes = list.new()
+    list.fill(mut b, 7, 0)
+    let capacity = list.capacity(b)
+    list.set_word_be(mut b, 1, 0x01020304u32)
+    list.set_word_le(mut b, 5, 0xbbaau16)
+    let big: u32 = list.word_be(b, 1)
+    let little: u32 = list.word_le(b, 1)
+    list.len(b) == 7 && list.capacity(b) == capacity && b[0] == 0 && b[1] == 1 && b[4] == 4 && b[5] == 0xaa && b[6] == 0xbb && big == 0x01020304 && little == 0x04030201
+}
+
+// Eight bytes from offset 0 of a seven-byte list end one byte past len.
+// expect: run set_word_past_end() = fail Bounds
+fn set_word_past_end() -> bool {
+    let mut b: Bytes = list.new()
+    list.fill(mut b, 7, 0)
+    list.set_word_le(mut b, 0, 1u64)
+    b[0] == 1
+}
+
+// (2^64 - 2) + 4 wraps to 2, which a wrapping end check would accept.
+// expect: run set_word_overflow() = fail Bounds
+fn set_word_overflow() -> bool {
+    let mut b: Bytes = list.new()
+    list.fill(mut b, 7, 0)
+    list.set_word_be(mut b, 18446744073709551614, 1u32)
+    b[0] == 0
+}
+
+// Inline set_word at the last full offset: u32 0x0a0b0c0d big-endian at 4 of eight bytes,
+// then u16 0x0201 little-endian at 0. By hand: [1, 2, 0, 0, 0x0a, 0x0b, 0x0c, 0x0d].
+// expect: run inline_set_word_round_trip() = true
+fn inline_set_word_round_trip() -> bool {
+    let mut raw: Inline[u8, 8] =[0; 8]
+    inline.set_word_be(mut raw, 4, 0x0a0b0c0du32)
+    inline.set_word_le(mut raw, 0, 0x0201u16)
+    let big: u32 = inline.word_be(raw, 4)
+    let low: u64 = inline.word_le(raw, 0)
+    big == 0x0a0b0c0d && low == 0x0d0c0b0a00000201
+}
+
+// Offset 5 of eight bytes leaves three, one short of a u32.
+// expect: run inline_set_word_past_end() = fail Bounds
+fn inline_set_word_past_end() -> u8 {
+    let mut raw: Inline[u8, 8] =[0; 8]
+    inline.set_word_le(mut raw, 5, 1u32)
+    raw[5]
+}

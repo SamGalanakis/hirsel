@@ -229,8 +229,16 @@ operations it names; nothing else about them may be inferred from an implementat
   end, fails with `Bounds`. `list.put_word_le(mut b, x)` and `list.put_word_be(mut b, x)`
   append the two, four or eight bytes of `x` in the specified order. Growth follows
   [MEM-24](budgets.md#mem-24-logical-charges). A refused growth leaves the list unchanged.
+  `list.set_word_le(mut b, at, x)` and `list.set_word_be(mut b, at, x)` overwrite the two,
+  four or eight bytes of `b` from the byte offset `at` with `x` in that order, at any
+  alignment; the type of `x`, which must be `u16`, `u32` or `u64`, fixes the width. Unless `at` plus the width is at most `len`,
+  with no overflow, they fail with `Bounds` before any write. The list keeps its length and
+  capacity; the call admits no bytes and takes one Step
+  ([MEM-30](budgets.md#mem-30-step-bounds)).
   `inline.word_le` and `inline.word_be` read the same widths from an Inline byte
-  array. Its expected integer type fixes the width and an invalid range fails with `Bounds`.
+  array, and `inline.set_word_le(mut a, at, x)` and `inline.set_word_be(mut a, at, x)`
+  overwrite them in one under the same rules. The expected type of a read, or the type of
+  `x`, fixes the width, and an invalid range fails with `Bounds`.
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
   multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
   integer operations.

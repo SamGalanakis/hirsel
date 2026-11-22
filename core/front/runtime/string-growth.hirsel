@@ -1,4 +1,6 @@
-// Two peak eight-byte allocations fit in 16 bytes beyond main startup.
+// Two peak eight-byte allocations fit in 16 bytes beyond main startup, and
+// the isolate below admits its 32-byte cause cell and an 8-byte copy of s
+// from the same room (MEM-24).
 pub fn main()->Result[(),Exit] {
     let mut s=string.new()
     string.reserve(mut s,3)
@@ -12,8 +14,26 @@ pub fn main()->Result[(),Exit] {
     }
     // MEM-26: growth charges the active bound, which has zero bytes left.
     // The limit funding the existing storage still has eight bytes available.
-    let refused=bound bytes 0 { string.reserve(mut s,100) }
-    match refused { Ok(Error(c)) => if c.available!=0u64 || c.requested!=112u64 { return Error(Exit(status:3)) }, _ => return Error(Exit(status:4)) }
-    if s!="abcé" { return Error(Exit(status:5)) }
+    // An isolate body may not capture a mutable place, so it grows its own copy
+    // of s: reserving 100 more on 5 bytes asks for round8(5 + 100) = 112.
+    if refused(isolate(fn() -> Result[(), Capacity] {
+        let mut t=string.new()
+        string.reserve(mut t,3)
+        string.push(mut t,"abcé")
+        bound bytes 0 { string.reserve(mut t,100) }
+    })) != 112u64 { return Error(Exit(status:3)) }
     Ok(())
+}
+
+// The bytes requested by a caught refusal that found no room, else 0.
+fn refused(r: Result[Result[Result[(), Capacity], Causes], Capacity]) -> u64 {
+    if let Ok(Error(causes)) = r {
+        for c in causes {
+            if let Capacity(k) = c.kind {
+                if k.available == 0u64 { return k.requested }
+            }
+            return 0u64
+        }
+    }
+    0u64
 }

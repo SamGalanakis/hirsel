@@ -1182,7 +1182,7 @@ fn returned_argument_views_llvm() {
 
 fn string_growth_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (name, room) in [("string-growth", 16), ("string-growth-refusal", 0)] {
+    for (name, room) in [("string-growth", 16 + 32 + 8), ("string-growth-refusal", 32)] {
         let dir = tempfile::tempdir().unwrap();
         let source =
             std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel")))

@@ -1,5 +1,6 @@
 // Growing static capacity-0 storage admits a fresh 8-byte block; with no room left the
 // admission raises Capacity for exactly that block, whichever growth operation asks.
+// The run's 32 bytes of room hold each isolate's cause cell (MEM-24) and no more.
 pub fn main()->Result[(),Exit] {
     if refused(isolate(fn() -> Result[u64, Capacity] { let mut s = "keep"; string.reserve(mut s, 1); Ok(string.byte_len(s)) })) != 8u64 { return Error(Exit(status:1)) }
     if refused(isolate(fn() -> Result[u64, Capacity] { let mut s = "keep"; string.push(mut s, "x"); Ok(string.byte_len(s)) })) != 8u64 { return Error(Exit(status:3)) }

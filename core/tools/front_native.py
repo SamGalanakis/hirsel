@@ -50,8 +50,8 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                 {'package': core, 'dependencies': [], 'sources': sources},
                 {'package': {'name': 'app', 'version': '1'}, 'dependencies': [core],
                  'sources': [{'file': str(paths[name]), 'modules': ['main'], 'signatures': False}]}]}))
-            limit = {'args-returned-views': 288, 'string-growth': 304,
-                     'string-growth-refusal': 288, 'string-shorten': 296}.get(name, 1_048_576)
+            limit = {'args-returned-views': 288, 'string-growth': 344,
+                     'string-growth-refusal': 320, 'string-shorten': 296}.get(name, 1_048_576)
             sleeping = ('sleep-peer', 'sleep-cancel', 'parent-failure')
             grants = {
                 'Stdout': ('streams', 'args-print', 'args-returned-views', 'stdout-closed', 'stdout-cancel', *sleeping),

@@ -33,6 +33,7 @@ impl Images for Scripts {
             .clone();
         Ok(Image {
             path,
+            executable: super::ImageFile::Script,
             digest: [assembly[0]; 32],
             n_place: 1 << 16,
             prefix: Vec::new(),
@@ -69,9 +70,9 @@ fn images(dir: &Path, scripts: &[&str]) -> Scripts {
     Scripts { scripts, objects }
 }
 
-struct Rig {
+struct Rig<I = Scripts> {
     dir: tempfile::TempDir,
-    launcher: Launcher<Scripts>,
+    launcher: Launcher<I>,
 }
 
 /// A rig whose image `i` is the shell script body `scripts[i]`.
@@ -141,7 +142,7 @@ fn ended(events: &[Event], child: &Child) -> bool {
         .any(|e| matches!(e, Event::Ended(c, _) if c == child))
 }
 
-impl Rig {
+impl<I: Images> Rig<I> {
     fn work(&self) -> PathBuf {
         self.dir.path().to_owned()
     }
@@ -192,6 +193,184 @@ impl Rig {
             other => panic!("Hello answered {other:?}"),
         }
     }
+}
+
+#[test]
+fn launch_identity_is_the_verified_image() {
+    use super::stores::Stores;
+    use crate::code_store::{CodeStore, ObjectKind};
+    use crate::host::records::Records;
+    use hirsel_core_ids::{ContentHash, DefPath};
+    use hirsel_core_ir::{Identity, release_recipe};
+    use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
+    use std::io::Read;
+    use std::process::Command;
+
+    // The replacement happens after the real store has checked the image and
+    // before the launcher execs it. The next resolve sees the replacement.
+    struct SwapImage {
+        stores: Stores,
+        replacement: PathBuf,
+    }
+    impl Images for SwapImage {
+        fn resolve(&self, assembly: [u8; 32]) -> Result<Image, String> {
+            let image = self.stores.resolve(assembly)?;
+            fs::rename(&self.replacement, &image.path).unwrap();
+            Ok(image)
+        }
+
+        fn collect(&self, keep: &BTreeSet<[u8; 32]>) -> std::io::Result<u64> {
+            self.stores.collect(keep)
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path();
+    let options = crate::native::tests::native_options(crate::Backend::Cranelift, work);
+    let source = work.join("launch-identity.c");
+    fs::write(
+        &source,
+        r#"
+#include "hirsel_core_rt_host.h"
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
+                     HirselCoreMainResult *result) {
+    uint8_t digest[32];
+    if (hirsel_core_launch_word(ctx, 1, 0) != sizeof(digest)) return 1;
+    for (size_t i = 0; i < sizeof(digest); ++i)
+        digest[i] = hirsel_core_launch_word(ctx, 2, i);
+    int client = hirsel_core_launch_word(ctx, 12, 0) ? accept(3, NULL, NULL) : 1;
+    if (client < 0 || write(client, digest, sizeof(digest)) != sizeof(digest)) return 1;
+    result->kind = 0;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    HirselCoreView args[argc];
+    for (int i = 1; i < argc; ++i)
+        args[i - 1] = (HirselCoreView){(const uint8_t *)argv[i], strlen(argv[i])};
+    const HirselCoreOsConfig config = {
+        .root_limit = 1048576, .args = args, .args_len = argc - 1,
+        .stdout_fd = 1, .stderr_fd = 2,
+    };
+    return hirsel_core_os_run(&config, NULL, entry);
+}
+"#,
+    )
+    .unwrap();
+    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include");
+    crate::native::command(
+        Command::new(options.link.driver())
+            .arg("-I")
+            .arg(include)
+            .arg(source)
+            .arg(&options.runtime)
+            .args([
+                "-lgcc_s",
+                "-lpthread",
+                "-ldl",
+                "-lm",
+                "-lrt",
+                "-lutil",
+                "-o",
+            ])
+            .arg(&options.output),
+    )
+    .unwrap();
+    let bytes = fs::read(&options.output).unwrap();
+    let rustls::SupportedCipherSuite::Tls13(suite) = TLS13_AES_128_GCM_SHA256 else {
+        unreachable!();
+    };
+    let expected = suite.common.hash_provider.hash(&bytes);
+    let digest = ContentHash(expected.as_ref().try_into().unwrap());
+    let standalone = Command::new(&options.output).output().unwrap();
+    assert!(standalone.status.success(), "{standalone:?}");
+    assert_eq!(standalone.stdout, digest.0);
+
+    let state = work.join("state");
+    let objects = state.join("objects");
+    fs::create_dir_all(&objects).unwrap();
+    let records = Records::open(&objects).unwrap();
+    let recipe = release_recipe::Recipe {
+        entry: Identity::plain(DefPath::from_full("app@1/main/main").unwrap()),
+        address: ContentHash([0; 32]),
+        groups: vec![],
+        bodies: vec![],
+        foreign_modules: vec![],
+        foreign_archives: vec![],
+        launch: release_recipe::Launch {
+            backend: release_recipe::Backend::Cranelift,
+            target: options.target,
+            root_limit: 1 << 20,
+            n_place: 1 << 16,
+            exit_status: true,
+            grants: vec![],
+        },
+    };
+    let recipe = CodeStore::new(state.join("code"))
+        .put(ObjectKind::Recipe, &recipe.encode())
+        .unwrap()
+        .hash;
+    let toolchain = ContentHash([0; 32]);
+    let frame = [recipe.0, toolchain.0, digest.0].concat();
+    let identity = ContentHash::of_parts("hirsel.assembly-record.v1", [frame.as_slice()]);
+    records
+        .put_assembly(
+            &crate::AssemblyRecord {
+                identity,
+                recipe,
+                toolchain,
+                digest,
+            },
+            &bytes,
+        )
+        .unwrap();
+    drop(records);
+    let replacement = work.join("replacement");
+    fs::write(&replacement, b"#!/bin/sh\ntouch incorrectly-executed\n").unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o500)).unwrap();
+    let launcher = Launcher::new(&state, None, || {
+        Ok(SwapImage {
+            stores: Stores::open(&state, crate::host::limits().recipe_bytes)?,
+            replacement,
+        })
+    })
+    .unwrap();
+    let mut rig = Rig { dir, launcher };
+    let address = rig.bind();
+    let start = |generation| {
+        Request::Start(Launch {
+            group: group(),
+            assembly: identity.0.to_vec(),
+            workdir: rig.work().to_str().unwrap().into(),
+            args: vec![],
+            mode: Mode::Serving(generation, serve(0, None)),
+        })
+    };
+    let (first, second) = (start(1), start(2));
+    let mut peer = TcpStream::connect(address).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let child = serving(1);
+    assert_eq!(
+        rig.ask(first),
+        [Event::Launched(child.clone(), Phase::Started)]
+    );
+    let mut observed = [0; 32];
+    peer.read_exact(&mut observed).unwrap();
+    assert_eq!(observed, digest.0);
+    rig.until(|events| ended(events, &child));
+    assert_eq!(
+        rig.ask(second),
+        [Event::Refused(
+            serving(2),
+            Refusal::Image("image: image digest".into())
+        )],
+    );
+    assert!(!rig.work().join("incorrectly-executed").exists());
 }
 
 /// `group_one_head`, launcher half (RUNNER-SPEC §14.3): one store-holding launch per group,

@@ -1,7 +1,7 @@
 //! The launcher's content-addressed objects on disk: the code store's recipes and the
 //! assembly records with their images. Each is named by the hash of its own content, so
 //! keeping them is caching, not state (launch.md "The launcher").
-use super::{Image, Images};
+use super::{Image, ImageFile, Images};
 use crate::code_store::CodeStore;
 use crate::host::records::Records;
 use hirsel_core_ids::ContentHash;
@@ -37,12 +37,13 @@ impl Images for Stores {
             .map_err(|e| format!("assembly record: {e}"))?;
         let recipe = crate::host::read_recipe(&self.code, record.recipe, self.recipe_bytes)
             .map_err(|e| format!("recipe: {e}"))?;
-        let path = self
+        let verified = self
             .records
-            .verify_image(record.digest)
+            .open_image(record.digest)
             .map_err(|e| format!("image: {e}"))?;
         Ok(Image {
-            path,
+            path: self.records.image_path(record.digest),
+            executable: ImageFile::Verified(verified),
             digest: record.digest.0,
             n_place: recipe.launch.n_place,
             prefix: crate::exec_launch::arguments(&recipe).collect(),

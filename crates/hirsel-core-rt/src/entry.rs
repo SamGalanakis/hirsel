@@ -336,6 +336,40 @@ pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
     }
     Ok(out)
 }
+
+/// The platform launcher pins the image across exec, including the serving shell's
+/// exec. Consume its descriptor before any grants or process metadata are opened.
+fn receive_launch_image() -> io::Result<Option<[u8; 32]>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(value) = std::env::var_os(hirsel_core_ids::launch::LAUNCH_IMAGE_ENV) else {
+        return Ok(None);
+    };
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    let Some((parent, image)) = value.to_str().and_then(|text| text.split_once(':')) else {
+        return Ok(None);
+    };
+    // SAFETY: getppid takes no arguments.
+    if parent.parse::<libc::pid_t>().ok() != Some(unsafe { libc::getppid() }) {
+        return Ok(None);
+    }
+    let (fd, digest) = image.split_once(':').ok_or_else(invalid)?;
+    let fd = fd
+        .parse::<i32>()
+        .ok()
+        .filter(|fd| *fd >= 6)
+        .ok_or_else(invalid)?;
+    let digest = prepare_hex(digest.as_bytes())?;
+    let image = std::fs::metadata(format!("/proc/self/fd/{fd}"))?;
+    let running = std::fs::metadata("/proc/self/exe")?;
+    if (image.dev(), image.ino()) != (running.dev(), running.ino()) {
+        return Err(invalid());
+    }
+    // SAFETY: the launch transferred this descriptor for the running image.
+    drop(unsafe { OwnedFd::from_raw_fd(fd) });
+    Ok(Some(digest))
+}
+
 pub(crate) enum StartupError {
     Io(io::Error),
     /// A directory grant that could not be opened: its path as configured,
@@ -477,6 +511,7 @@ impl OsProcess {
             if (wake && (describe_mode || prepare_path.is_some())) || (!wake && idle_ms.is_some()) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
+            let digest = receive_launch_image()?;
             // Fd 3 is the inherited listener and fd 4 is the control socket.
             // Take the launcher's dedicated report descriptor before opening grants.
             let wake_report = if wake {
@@ -496,7 +531,10 @@ impl OsProcess {
             };
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
-            let mut launch = launch_metadata(target, n_place, describe_mode);
+            let mut launch = match digest {
+                Some(digest) => Metadata::embedded(Some(digest), target, n_place, describe_mode),
+                None => launch_metadata(target, n_place, describe_mode),
+            };
             if wake {
                 launch = launch.with_wake(idle_ms.unwrap_or_default());
             }

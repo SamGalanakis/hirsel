@@ -11,6 +11,8 @@ use std::{
 use std::sync::{Arc, LazyLock};
 
 pub const DEFAULT_N_PLACE: u64 = 16 * 1024 * 1024;
+/// Private platform transport for the launcher PID, image descriptor and SHA-256.
+pub const LAUNCH_IMAGE_ENV: &str = "HIRSEL_LAUNCH_IMAGE";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Executable {

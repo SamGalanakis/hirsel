@@ -39,6 +39,10 @@ require or extract a constant argument.
 - An embedded runtime receives the digest, target and `n_place` explicitly from
   its embedder before entry. It copies or pins the supplied value for the whole
   launch; later mutation of the embedder's input cannot change it.
+- For an uncontained platform launch, the launcher supplies the digest through
+  the embedded identity path. It checks the SHA-256 of the opened, read-only
+  content-addressed image and executes that same file by descriptor. Replacing
+  the store pathname cannot change the executed image or its digest.
 - An image that cannot be read at launch produces `Unavailable(reason)`.
   Missing source-only or embedded identity has the same representation. It
   does not fail launch. Its digest is empty; the known target and `n_place`

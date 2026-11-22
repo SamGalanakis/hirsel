@@ -12,6 +12,7 @@ mod laws;
 pub(crate) mod session;
 mod stores;
 
+use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
 use session::{
     Attempt, Bindings, Child, ChildState, End, Event, Group, HostCommand, HostReply, Label, Launch,
     Limits, Mode, Phase, Refusal, Request, Role, Status, Wire,
@@ -60,10 +61,17 @@ pub(crate) fn run(
 /// What the launcher runs for an assembly record: its image and the recipe's launch words.
 pub(crate) struct Image {
     pub(crate) path: PathBuf,
+    executable: ImageFile,
     pub(crate) digest: [u8; 32],
     pub(crate) n_place: u64,
     /// The recipe's runtime prefix words (`--hirsel-exec=` approvals).
     pub(crate) prefix: Vec<String>,
+}
+
+enum ImageFile {
+    Verified(File),
+    #[cfg(test)]
+    Script,
 }
 
 /// The launcher's content-addressed objects: assembly records and their images.
@@ -656,6 +664,16 @@ impl<I: Images> Launcher<I> {
     fn spawn(&self, launch: &Launch, image: &Image, listener: &Listening) -> io::Result<Process> {
         let workdir = Path::new(&launch.workdir);
         let n_place = format!("--hirsel-n-place={}", image.n_place);
+        let executable = match (&image.executable, listener.label) {
+            (ImageFile::Verified(file), Label::Uncontained) => {
+                Some(above_launch_slots(file.as_raw_fd())?)
+            }
+            _ => None,
+        };
+        let fd_path = executable
+            .as_ref()
+            .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())));
+        let program = fd_path.as_deref().unwrap_or(&image.path);
         let mut command;
         let mut slots: Vec<(OwnedFd, RawFd)> = Vec::new();
         let mut endpoint = None;
@@ -674,7 +692,7 @@ impl<I: Images> Launcher<I> {
                         "LISTEN_PID=$$ LISTEN_FDS=1 exec \"$@\"",
                         "hirsel-place",
                     ])
-                    .arg(&image.path)
+                    .arg(program)
                     .arg("--hirsel-wake");
                 if serve.idle != 0 {
                     command.arg(format!("--hirsel-idle={}", serve.idle));
@@ -703,7 +721,7 @@ impl<I: Images> Launcher<I> {
                 report = Some(read);
             }
             Mode::Describe(_) | Mode::Preview(_, _) => {
-                command = Command::new(&image.path);
+                command = Command::new(program);
                 let flag = if let Mode::Preview(..) = launch.mode {
                     "--hirsel-preview"
                 } else {
@@ -728,7 +746,7 @@ impl<I: Images> Launcher<I> {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, "export name"));
                 }
                 let path = scratch.join(export);
-                command = Command::new(&image.path);
+                command = Command::new(program);
                 command
                     .args(&image.prefix)
                     .arg(&n_place)
@@ -785,7 +803,16 @@ impl<I: Images> Launcher<I> {
             .env_remove("HIRSEL_RECORD")
             .env_remove("HIRSEL_RECORD_ID");
         let parent = std::process::id() as libc::pid_t;
+        if let Some(fd) = executable.as_ref() {
+            command.env(
+                LAUNCH_IMAGE_ENV,
+                format!("{parent}:{}:{}", fd.as_raw_fd(), hex(&image.digest)),
+            );
+        } else {
+            command.env_remove(LAUNCH_IMAGE_ENV);
+        }
         let raw: Vec<(RawFd, RawFd)> = slots.iter().map(|(f, to)| (f.as_raw_fd(), *to)).collect();
+        let image_fd = executable.as_ref().map(AsRawFd::as_raw_fd);
         // SAFETY: the closure makes only system calls. Each source is numbered above the
         // launch slots, so no dup2 overwrites another source.
         unsafe {
@@ -801,10 +828,18 @@ impl<I: Images> Launcher<I> {
                         return Err(io::Error::last_os_error());
                     }
                 }
+                // The serving shell needs the descriptor for its second exec.
+                // Native entry closes it before opening any grants.
+                if let Some(fd) = image_fd
+                    && libc::fcntl(fd, libc::F_SETFD, 0) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
         let mut child = command.spawn()?;
+        drop(executable);
         // Our copies of the child's descriptors close here: the report's write end
         // especially, so the report reads end once the child does.
         drop(slots);

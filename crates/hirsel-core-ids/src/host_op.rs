@@ -82,3 +82,5 @@ pub const DIR_READ_ONLY: u64 = 1 << 62;
 pub fn needs_writable_dir(op: u8, mode: u8) -> bool {
     matches!(op, MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | RENAME) || (op == OPEN && mode != 0)
 }
+
+pub const EXEC_NARROW: u8 = 75;

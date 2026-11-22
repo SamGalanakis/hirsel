@@ -162,8 +162,11 @@ The **policy digest** of a grant is the SHA-256 of `"hirsel.exec-policy.v1"` fol
 granted profiles in bytewise order of name. Each profile is encoded as its name, image path,
 pin, `argv0`, forms, fixed keys with their values, caller-settable keys and labels with their
 directories, sorted where they are sets. Every variable field carries a `u32` little-endian
-length, and every list carries a `u32` count. The digest covers everything a spawn can
-depend on. Printing it in place of the fixed values keeps those values off the approval line.
+length, and every list carries a `u32` little-endian count. The count of granted profiles
+follows the domain string. The pin is 32 raw bytes. Each form token starts with a byte
+(`0` for a literal, `1` for `Any`, `2` for `Rest`). Only a literal carries a length and
+bytes. The digest covers everything a spawn can depend on. Printing it in place of the
+fixed values keeps those values off the approval line.
 
 ```hirsel core
 pub opaque type Exec
@@ -221,7 +224,14 @@ with forms `[f]` and universal keys and labels, plus the universal remainder, an
 universal forms, keys or labels part counts 8 in place of its list. A host grant never has
 a remainder or a universal part. For example, `Form("git", [Lit("status")])` on a universal
 grant has size 32 + (8 + 3) + (8 + 8 + 6) + 8 + 8 + 8 = 89, rounded up to 96: the profile
-`git`, its one form, its universal keys, its universal labels and the remainder. The size is
+`git`, its one form, its universal keys, its universal labels and the remainder.
+
+When a narrowing drops a named profile and keeps the universal remainder, it retains the name
+with empty forms, keys and labels. The remainder excludes that name. This entry adds only
+8 plus the name's bytes to the formula. For example, `Dirs("git", "")` on a universal grant
+keeps every other name and denies `git`. Its size is 32 + 8 + (8 + 3) = 51, rounded up to 56.
+
+The size is
 a function of the logical grant alone, so equal logical grants charge the same on the host,
 on a served Exec and in a replay.
 

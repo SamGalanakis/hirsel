@@ -98,6 +98,7 @@ pub struct NativeOptions {
     pub net_rules: Vec<hirsel_core_net::GrantRule>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
     pub foreign_grants: BTreeSet<String>,
+    pub(crate) exec_grants: Vec<crate::exec_launch::Binding>,
     pub env_patterns: Option<hirsel_core_net::EnvPatterns>,
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
@@ -114,6 +115,12 @@ pub struct NativeOptions {
 pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
 
 impl NativeOptions {
+    pub(crate) fn bind_exec(&mut self) -> Result<(), NativeStop> {
+        self.exec_grants
+            .iter_mut()
+            .try_for_each(crate::exec_launch::Binding::seal_policy)
+    }
+
     /// A request's options before its flags: the development engine
     /// (Cranelift), unoptimised, without line tables or charge report. An
     /// installation prebuilds for exactly these.
@@ -143,6 +150,7 @@ impl NativeOptions {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: BTreeSet::new(),
+            exec_grants: vec![],
             env_patterns: None,
             logical_charge_report: None,
             observed: None,
@@ -813,6 +821,18 @@ impl CheckProduct {
         reached: &Reachable<'_>,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
+        let mut bound;
+        let options = if options
+            .exec_grants
+            .iter()
+            .any(|grant| grant.policy.is_none())
+        {
+            bound = options.clone();
+            bound.bind_exec()?;
+            &bound
+        } else {
+            options
+        };
         // An optimised LLVM build is assembled from its published recipe over
         // the separately lowered release std, like `build`.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
@@ -2039,6 +2059,7 @@ pub(crate) mod tests {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: BTreeSet::new(),
+            exec_grants: vec![],
             env_patterns: None,
             logical_charge_report: None,
             observed: None,

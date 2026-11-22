@@ -55,6 +55,7 @@ pub(crate) struct Plan<'a> {
     recording: bool,
     replay: Option<&'a crate::native::ReplayPlan>,
     foreign: Vec<foreign::Function<'a>>,
+    exec: Vec<(String, Vec<u8>, [u8; 32])>,
 }
 /// Every link-plan input the environment does not cover, canonically: the
 /// root limit, grant mask, explicit Net rules, ordered directories, charge-report
@@ -74,6 +75,7 @@ pub(crate) fn policy(
     Option<&hirsel_core_net::EnvPatterns>,
     &[String],
     &std::collections::BTreeSet<String>,
+    &[crate::exec_launch::Binding],
     Option<&[u8]>,
     bool,
     Option<&crate::native::ReplayPlan>,
@@ -86,6 +88,7 @@ pub(crate) fn policy(
         options.env_patterns.as_ref(),
         &options.directories,
         &options.foreign_grants,
+        &options.exec_grants,
         options
             .logical_charge_report
             .as_ref()
@@ -106,7 +109,7 @@ impl<'a> Plan<'a> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
             return Err(NativeStop::Entry("Result needs fixed layout".into()));
         };
-        let mut ordinals = [0u64; 13];
+        let mut ordinals = [0u64; 14];
         let mut grant_mask = options.grant_mask;
         let parameters = binding
             .parameters
@@ -151,6 +154,31 @@ impl<'a> Plan<'a> {
                 "Secret grants must name distinct Secret parameters".into(),
             ));
         }
+        if options.exec_grants.len() as u64 > ordinals[grant_kind("Exec").unwrap() as usize] {
+            return Err(NativeStop::Entry(
+                "Exec grant has no matching entry parameter".into(),
+            ));
+        }
+        if !options.exec_grants.is_empty() && (options.recording || options.replay.is_some()) {
+            return Err(NativeStop::Entry(
+                "Exec grants require native launch until Exec replay is available".into(),
+            ));
+        }
+        let exec = options
+            .exec_grants
+            .iter()
+            .map(|grant| {
+                Ok((
+                    grant.request.text(),
+                    grant
+                        .workdir
+                        .as_ref()
+                        .map(|path| path.as_os_str().as_bytes().to_vec())
+                        .unwrap_or_default(),
+                    grant.digest()?,
+                ))
+            })
+            .collect::<std::result::Result<_, NativeStop>>()?;
         Ok(Self {
             symbol,
             identity,
@@ -172,6 +200,7 @@ impl<'a> Plan<'a> {
             recording: options.recording,
             replay: options.replay.as_ref(),
             foreign: vec![],
+            exec,
             charge_report: options
                 .logical_charge_report
                 .as_ref()

@@ -115,8 +115,12 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
                     .filter(|&seconds| seconds != 0)
                     .ok_or("invalid tape retention")?;
             }
-            Opt::Grant if value.starts_with("Foreign=") => grants.grant(&value)?,
-            Opt::Grant => return Err("deploy takes only Foreign grants via --grant".into()),
+            Opt::Grant if value.starts_with("Foreign=") || value.starts_with("Exec=") => {
+                grants.grant(&value)?
+            }
+            Opt::Grant => {
+                return Err("deploy takes only Foreign and Exec grants via --grant".into());
+            }
             Opt::GrantAdded => added = true,
             Opt::MaxPause => max_pause = value.parse()?,
             Opt::MaxRecipeBytes => admission.recipe_bytes = value.parse()?,
@@ -146,9 +150,20 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
             eprintln!("deploy: refused: {reason}");
             return Ok(2);
         }
+        let exec: BTreeSet<_> = grants
+            .exec
+            .iter()
+            .map(|binding| binding.request.text())
+            .collect();
+        if let Some(reason) = crate::exec_launch::refuse_missing(&recipe, &exec) {
+            eprintln!("deploy: refused: {reason}");
+            return Ok(2);
+        }
         let mut peer = UnixStream::connect(socket)?;
         peer.set_write_timeout(admission.timeout)?;
-        peer.write_all(&[u8::from(added) | (u8::from(!grants.foreign.is_empty()) << 1)])?;
+        peer.write_all(&[u8::from(added)
+            | (u8::from(!grants.foreign.is_empty()) << 1)
+            | (u8::from(!exec.is_empty()) << 2)])?;
         if !grants.foreign.is_empty() {
             let names = grants
                 .foreign
@@ -158,8 +173,15 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
                 .join("\n");
             write_frame(&mut peer, names.as_bytes())?;
         }
+        if !exec.is_empty() {
+            write_frame(&mut peer, &serde_json::to_vec(&exec)?)?;
+        }
         match send_release(&mut peer, &source, root, &admission) {
-            Err(AdmissionError::Refused(reason)) if reason.starts_with("FFI-8: ") => {
+            Err(AdmissionError::Refused(reason))
+                if reason.starts_with("FFI-8: ")
+                    || reason.starts_with("Exec[")
+                    || reason.starts_with("Exec grants") =>
+            {
                 eprintln!("deploy: refused: {reason}");
                 return Ok(2);
             }
@@ -171,6 +193,13 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
             if report != deploy_foreign_lines(&recipe, root).as_bytes() {
                 return Err("the host reported different Foreign bindings".into());
             }
+            let mut out = io::stdout().lock();
+            out.write_all(&report)?;
+            out.flush()?;
+            peer.write_all(&[1])?;
+            report = read_frame(&mut peer, admission.recipe_bytes)?;
+        }
+        if report.starts_with(b"exec: ") {
             let mut out = io::stdout().lock();
             out.write_all(&report)?;
             out.flush()?;
@@ -521,6 +550,7 @@ impl Host {
                 &NativeSemantics,
                 self.recording.is_some(),
                 Some(&BTreeSet::new()),
+                Some((&BTreeSet::new(), &self.workdir)),
             );
             if let Err(AdmissionError::RecordingForeign(reason) | AdmissionError::Refused(reason)) =
                 &admitted
@@ -563,6 +593,9 @@ impl Host {
             }
             Ok(image)
         })?;
+        let args: Vec<_> = crate::exec_launch::arguments(recipe)
+            .chain(self.args.iter().cloned())
+            .collect();
         Ok(child::Place::start(
             &self.children,
             child::Launch {
@@ -572,7 +605,7 @@ impl Host {
                 listener: &self.listener,
                 activation: version,
                 n_place: recipe.launch.n_place,
-                args: &self.args,
+                args: &args,
                 recording: recording.as_ref(),
             },
         )?)
@@ -652,6 +685,9 @@ impl Host {
         }
         let source = source.ok_or("first launch requires --code-store DIR")?;
         let (assembly, recipe, lease) = self.initial(initial, source)?;
+        if let Some(reason) = crate::exec_launch::refuse_missing(&recipe, &BTreeSet::new()) {
+            return Err(reason.into());
+        }
         let attempt = attempt()?;
         self.pending(attempt, assembly.identity)?;
         drop(lease);
@@ -812,6 +848,7 @@ impl Host {
             START_TIMEOUT,
             old,
             Some(&self.workdir),
+            &crate::exec_launch::arguments(recipe).collect::<Vec<_>>(),
         )?;
         let mut wire = Reader {
             bytes: &bytes,
@@ -886,6 +923,7 @@ impl Host {
         let mut command = Command::new(&image);
         command
             .current_dir(&self.workdir)
+            .args(crate::exec_launch::arguments(recipe))
             .arg(format!("--hirsel-n-place={}", recipe.launch.n_place))
             .arg("--hirsel-prepare")
             .arg(&cleanup.0)
@@ -918,7 +956,7 @@ impl Host {
     ) -> Result<(Report, Option<Replacement>), Error> {
         let mut report = Report::default();
         let start = Instant::now();
-        let (added, approved) = match operator
+        let (added, approved, exec) = match operator
             .deploy_permission(self.limits.timeout.unwrap(), self.limits.recipe_bytes)
         {
             Ok(permission) => permission,
@@ -929,12 +967,13 @@ impl Host {
                 return Ok((report, None));
             }
         };
-        let admitted = match self.admission.admit_for_runtime(
+        let mut admitted = match self.admission.admit_for_runtime(
             operator,
             &self.limits,
             &NativeSemantics,
             self.recording.is_some(),
             Some(&approved),
+            Some((&exec, &self.workdir)),
         ) {
             Ok(admitted) => admitted,
             Err(error) => {
@@ -966,6 +1005,7 @@ impl Host {
             report.refused = Some("Refused(GrantAdded)".into());
             return Ok((report, None));
         }
+        let exec_lines = std::mem::take(&mut admitted.exec_lines);
         let (assembly, recipe, lease) = match self.assemble(admitted) {
             Ok(built) => built,
             Err(error) => {
@@ -979,6 +1019,12 @@ impl Host {
             && let Err(error) = operator.confirm_foreign(lines.as_bytes(), START_TIMEOUT)
         {
             report.refused = Some(format!("Refused(ForeignConfirmation({error}))"));
+            return Ok((report, None));
+        }
+        if !exec_lines.is_empty()
+            && let Err(error) = operator.confirm_foreign(exec_lines.as_bytes(), START_TIMEOUT)
+        {
+            report.refused = Some(format!("Refused(ExecConfirmation({error}))"));
             return Ok((report, None));
         }
         let mut record = Deploy {
@@ -1398,7 +1444,9 @@ fn deploy_foreign_lines(recipe: &Recipe, root: ContentHash) -> String {
 fn grants_added(old: &Recipe, new: &Recipe) -> bool {
     new.launch.grants.iter().any(|grant| {
         !old.launch.grants.iter().any(|current| {
-            current.kind == grant.kind && grant.values.iter().all(|v| current.values.contains(v))
+            current.kind == grant.kind
+                && current.policy == grant.policy
+                && grant.values.iter().all(|v| current.values.contains(v))
         })
     })
 }

@@ -36,13 +36,23 @@ pub(crate) struct Grants {
     pub net_rules: Vec<GrantRule>,
     pub secrets: Vec<SecretGrant>,
     pub foreign: std::collections::BTreeSet<String>,
+    pub exec: Vec<crate::exec_launch::Binding>,
     pub env: Option<EnvPatterns>,
 }
 
 impl Grants {
     /// Add one `--grant` value.
     pub fn grant(&mut self, value: &str) -> Result<(), Box<dyn Error>> {
-        if let Some(interface) = value.strip_prefix("Foreign=") {
+        if let Some(request) = value.strip_prefix("Exec=") {
+            let request = hirsel_core_net::exec::Request::parse(request)?;
+            self.exec.push(crate::exec_launch::Binding {
+                request,
+                policy: None,
+                workdir: None,
+            });
+        } else if value == "Exec" {
+            return Err(hirsel_core_net::exec::GRANT_SYNTAX.into());
+        } else if let Some(interface) = value.strip_prefix("Foreign=") {
             DefPath::from_full(interface)
                 .ok_or("expected Foreign=package@major/module/interface")?;
             if !self.foreign.insert(interface.to_owned()) {
@@ -88,6 +98,7 @@ impl Grants {
             && self.mask == 0
             && self.secrets.is_empty()
             && self.foreign.is_empty()
+            && self.exec.is_empty()
     }
 
     pub fn apply(&self, options: &mut NativeOptions) {
@@ -96,6 +107,7 @@ impl Grants {
         options.net_rules.clone_from(&self.net_rules);
         options.secret_grants.clone_from(&self.secrets);
         options.foreign_grants.clone_from(&self.foreign);
+        options.exec_grants.clone_from(&self.exec);
         options.env_patterns.clone_from(&self.env);
     }
 }

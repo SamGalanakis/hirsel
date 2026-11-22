@@ -299,6 +299,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
         kind: GrantKind::Foreign,
         values: vec!["ffi_laws@1/laws/Laws".into()],
         archive: Some(archive),
+        policy: None,
     });
     let admit = |fixture: &Fixture, archive_bytes: &[u8]| {
         harness.run(limits(), &NativeSemantics, |peer| {
@@ -334,6 +335,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
         kind: GrantKind::Foreign,
         values: vec!["app@1/main/I".into()],
         archive: Some(archive),
+        policy: None,
     };
     let header = "(core@1/core/Foreign[app@1/main/I])->()";
     let definition = DefPath::from_full("app@1/native/f").unwrap();

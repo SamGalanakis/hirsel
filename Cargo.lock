@@ -533,6 +533,8 @@ dependencies = [
  "serde",
  "stringprep",
  "subtle",
+ "tempfile",
+ "toml",
  "unicode-normalization",
 ]
 

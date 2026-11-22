@@ -112,6 +112,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
         net_rules,
         secret_grants,
         foreign_grants,
+        exec_grants,
         env_patterns,
         // An observation build writes a report besides its answer; it is
         // never recorded (`Request` is not made for one).
@@ -134,7 +135,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
             grant_mask,
             net_rules,
             secret_grants,
-            foreign_grants,
+            (foreign_grants, exec_grants),
             env_patterns,
             recording,
             replay,

@@ -124,6 +124,15 @@ pub(super) fn emit(
         } else {
             f.constant(0)
         };
+    let exec_ops = if plan.exec.is_empty() {
+        f.constant(0)
+    } else {
+        let operations = f
+            .object
+            .declare_data("hirsel_core_os_exec_ops", Linkage::Import, false, false)
+            .map_err(error)?;
+        f.address(operations)
+    };
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -153,6 +162,12 @@ pub(super) fn emit(
             f.constant(plan.env_patterns.as_ref().map_or(0, String::len) as u64),
         ),
         (abi::OS_CONFIG_ENV_OPS, env_ops),
+        (abi::OS_CONFIG_EXEC_BINDINGS, f.address(data.exec_bindings)),
+        (
+            abi::OS_CONFIG_EXEC_BINDINGS_LEN,
+            f.constant(plan.exec.len() as u64),
+        ),
+        (abi::OS_CONFIG_EXEC_OPS, exec_ops),
     ] {
         f.store(value, config, offset);
     }

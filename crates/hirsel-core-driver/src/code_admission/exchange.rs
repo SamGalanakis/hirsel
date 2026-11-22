@@ -31,13 +31,13 @@ impl ControlConnection {
         &mut self,
         timeout: std::time::Duration,
         max: usize,
-    ) -> Result<(bool, BTreeSet<String>), AdmissionError> {
+    ) -> Result<(bool, BTreeSet<String>, BTreeSet<String>), AdmissionError> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(AdmissionError::Limit(Limit::Deadline))?;
         let mut exchange = Exchange::on(&mut self.stream, deadline);
         let [flags] = exchange.read_array()?;
-        if flags > 3 {
+        if flags > 7 {
             return Err(AdmissionError::Malformed("deploy Foreign grants"));
         }
         let mut grants = BTreeSet::new();
@@ -56,7 +56,24 @@ impl ControlConnection {
                 }
             }
         }
-        Ok((flags & 1 != 0, grants))
+        let mut exec = BTreeSet::new();
+        if flags & 4 != 0 {
+            let len = u32::from_le_bytes(exchange.read_array()?) as usize;
+            if len > max || len == 0 {
+                return Err(AdmissionError::Malformed("deploy Exec grants"));
+            }
+            let mut bytes = vec![0; len];
+            exchange.read_exact(&mut bytes)?;
+            let requests: Vec<String> = serde_json::from_slice(&bytes)
+                .map_err(|_| AdmissionError::Malformed("deploy Exec grants"))?;
+            for request in requests {
+                if hirsel_core_net::exec::Request::parse(&request).is_err() || !exec.insert(request)
+                {
+                    return Err(AdmissionError::Malformed("deploy Exec grants"));
+                }
+            }
+        }
+        Ok((flags & 1 != 0, grants, exec))
     }
 
     /// Wait for the deploy client to print the admitted pins before running

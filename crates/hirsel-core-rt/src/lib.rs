@@ -16,6 +16,7 @@ pub mod counted;
 mod destination;
 pub mod entry;
 mod env;
+mod exec;
 mod fiber;
 pub mod flow;
 pub mod foreign;

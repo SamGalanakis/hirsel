@@ -23,7 +23,7 @@ use std::collections::btree_map::Entry;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -183,7 +183,7 @@ impl BackendSemantics for NativeSemantics {
             Backend::Cranelift | Backend::Llvm => match tag {
                 EngineTag::Instruction(tag) => tag <= 43,
                 EngineTag::Runtime(tag) => matches!(tag, 0..=15 | 17..=22 | 27..=46),
-                EngineTag::Host(tag) => tag <= 31,
+                EngineTag::Host(tag) => tag <= 31 || tag == 75,
                 EngineTag::Flow(tag) => tag <= 8,
                 EngineTag::Terminator(tag) => tag <= 6,
             },
@@ -282,6 +282,7 @@ impl VerifiedRelease {
 
 /// The verified inputs and their collection and staging leases.
 pub struct AdmittedRelease<'a> {
+    pub(crate) exec_lines: String,
     release: VerifiedRelease,
     lease: ReleaseLease<'a>,
 }
@@ -358,7 +359,7 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
-        self.admit_for_runtime(connection, limits, semantics, false, None)
+        self.admit_for_runtime(connection, limits, semantics, false, None, None)
     }
 
     pub(crate) fn admit_for_runtime(
@@ -368,6 +369,7 @@ impl AdmissionStore {
         semantics: &impl BackendSemantics,
         recording: bool,
         approved_foreign: Option<&std::collections::BTreeSet<String>>,
+        approved_exec: Option<(&std::collections::BTreeSet<String>, &Path)>,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
         let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
@@ -387,6 +389,19 @@ impl AdmissionStore {
         {
             return Err(AdmissionError::Refused(reason));
         }
+        let exec_lines = if let Some((approved, workdir)) = approved_exec {
+            if let Some(reason) = crate::exec_launch::refuse_missing(&recipe, approved) {
+                return Err(AdmissionError::Refused(reason));
+            }
+            if recording && crate::exec_launch::arguments(&recipe).next().is_some() {
+                return Err(AdmissionError::Refused(
+                    "Exec grants require native launch until Exec replay is available".into(),
+                ));
+            }
+            crate::exec_launch::approval_lines(&recipe, workdir).map_err(AdmissionError::Refused)?
+        } else {
+            String::new()
+        };
         let objects = listed_objects(&recipe, limits, &mut budget)?;
         let mut reservation = self.reserve(root, objects, limits.outstanding, &mut budget)?;
         transfer(
@@ -414,6 +429,7 @@ impl AdmissionStore {
             },
         )?;
         Ok(AdmittedRelease {
+            exec_lines,
             release,
             lease: ReleaseLease(reservation),
         })

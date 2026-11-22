@@ -68,10 +68,11 @@ pub enum GrantKind {
     Args = 10,
     Secret = 11,
     Foreign = 12,
+    Exec = 13,
 }
 
 impl GrantKind {
-    const KINDS: [Self; 13] = [
+    const KINDS: [Self; 14] = [
         Self::Dir,
         Self::Net,
         Self::Clock,
@@ -85,6 +86,7 @@ impl GrantKind {
         Self::Args,
         Self::Secret,
         Self::Foreign,
+        Self::Exec,
     ];
 
     pub fn from_tag(tag: u8) -> Option<Self> {
@@ -99,6 +101,8 @@ pub struct GrantBinding {
     pub values: Vec<String>,
     /// For a Foreign binding, its interface's archive for the recipe target.
     pub archive: Option<ObjectRef>,
+    /// For a configured Exec binding, the launch policy digest.
+    pub policy: Option<ContentHash>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,6 +306,9 @@ impl Recipe {
                     .expect("a Foreign grant selects an archive")
                     .encode(&mut bytes);
             }
+            if grant.kind == GrantKind::Exec && !grant.values.is_empty() {
+                bytes.extend_from_slice(&grant.policy.expect("an Exec grant pins its policy").0);
+            }
         }
         bytes
     }
@@ -389,11 +396,29 @@ impl Recipe {
             } else {
                 None
             };
+            let policy = if kind == GrantKind::Exec && !values.is_empty() {
+                let [file, names @ ..] = values.as_slice() else {
+                    return Err(invalid("invalid Exec launch request"));
+                };
+                if file.is_empty()
+                    || file.contains('\0')
+                    || names.is_empty()
+                    || names
+                        .iter()
+                        .any(|name| name.is_empty() || name.contains([' ', ',', '\0']))
+                {
+                    return Err(invalid("invalid Exec launch request"));
+                }
+                Some(ContentHash::read(input)?)
+            } else {
+                None
+            };
             Ok(GrantBinding {
                 ordinal,
                 kind,
                 values,
                 archive,
+                policy,
             })
         })?;
         input.end()?;
@@ -490,6 +515,7 @@ mod tests {
                         kind: GrantKind::Dir,
                         values: vec!["a".into(), "b".into()],
                         archive: None,
+                        policy: None,
                     },
                     GrantBinding {
                         ordinal: 3,
@@ -499,6 +525,7 @@ mod tests {
                             hash: ContentHash([8; 32]),
                             len: 12,
                         }),
+                        policy: None,
                     },
                 ],
             },

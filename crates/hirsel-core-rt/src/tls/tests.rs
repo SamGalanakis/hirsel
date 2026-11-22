@@ -70,6 +70,9 @@ impl Run {
             },
             secret_ops: std::ptr::null(),
             env_ops: std::ptr::null(),
+            exec_bindings: std::ptr::null(),
+            exec_bindings_len: 0,
+            exec_ops: std::ptr::null(),
             target: view(b"test-target"),
         };
         unsafe {

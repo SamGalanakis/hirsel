@@ -33,6 +33,7 @@ pub const TASKS: u8 = 9;
 pub const ARGS: u8 = 10;
 pub const SECRET: u8 = 11;
 pub const FOREIGN: u8 = 12;
+pub const EXEC: u8 = 13;
 /// Host metadata. Its index + 1 is the numeric provider handle. Source code
 /// cannot construct or inspect this metadata; copying a handle copies designation.
 #[repr(C)]
@@ -204,6 +205,9 @@ pub struct OsConfig {
     pub env_patterns: View,
     /// Installed by the native linker for a launch with an Env grant.
     pub env_ops: *const EnvOperations,
+    pub exec_bindings: *const crate::exec::Binding,
+    pub exec_bindings_len: usize,
+    pub exec_ops: *const crate::exec::Operations,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -228,6 +232,7 @@ pub struct OsProcess {
     _net_rules: Option<crate::net::RulesStorage>,
     secrets: Vec<crate::secret::Granted>,
     _env: Option<Box<crate::env::Env>>,
+    _exec: Option<crate::exec::Launch>,
     stdin: Option<Box<crate::stdin::Stream>>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
@@ -340,6 +345,7 @@ pub(crate) enum StartupError {
     EnvPatterns,
     EnvSecretOverlap(String),
     UnsupportedHostOpenat2(io::Error),
+    Exec(String),
 }
 impl From<io::Error> for StartupError {
     fn from(error: io::Error) -> Self {
@@ -352,6 +358,7 @@ impl StartupError {
             Self::Io(error) | Self::Directory(_, error) | Self::UnsupportedHostOpenat2(error) => {
                 error
             }
+            Self::Exec(reason) => io::Error::other(reason),
             Self::MissingGrant(_)
             | Self::MissingSecret(_)
             | Self::NetRules
@@ -411,8 +418,13 @@ impl OsProcess {
             let mut describe_mode = false;
             let mut preview_mode = false;
             let mut prefix = 0;
+            let mut exec_approvals = Vec::new();
             for argument in argv.clone() {
-                if argument == b"--hirsel-describe" || argument == b"--hirsel-preview" {
+                if let Some(approval) = argument.strip_prefix(b"--hirsel-exec=")
+                    && input.exec_bindings_len != 0
+                {
+                    exec_approvals.push(approval);
+                } else if argument == b"--hirsel-describe" || argument == b"--hirsel-preview" {
                     if describe_mode {
                         return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
                     }
@@ -480,6 +492,17 @@ impl OsProcess {
             if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
+            let exec = if input.exec_bindings_len != 0 {
+                let ops = input
+                    .exec_ops
+                    .as_ref()
+                    .ok_or_else(|| StartupError::Exec("no Exec startup operations".into()))?;
+                let bindings =
+                    std::slice::from_raw_parts(input.exec_bindings, input.exec_bindings_len);
+                Some((ops.load)(bindings, &exec_approvals, describe_mode)?)
+            } else {
+                None
+            };
             let terminal = [
                 (libc::STDIN_FILENO, STDIN),
                 (input.stdout_fd, STDOUT),
@@ -646,6 +669,14 @@ impl OsProcess {
                         });
                     }
                 }
+                if let Some(exec) = &exec {
+                    metadata.extend(exec.handles().map(|handle| Grant {
+                        kind: EXEC,
+                        provider: provider_pointer,
+                        handle,
+                        terminal: false,
+                    }));
+                }
                 if input.grant_mask & (1 << FOREIGN) != 0 {
                     metadata.extend(requirements.iter().filter(|r| r.kind == FOREIGN).map(|r| {
                         Grant {
@@ -705,6 +736,7 @@ impl OsProcess {
                 _net_rules: net_rules,
                 secrets,
                 _env: env,
+                _exec: exec,
                 stdin,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],
@@ -733,6 +765,16 @@ impl OsProcess {
             process.config.grants = process.grants.as_ptr();
             process.config.grants_len = process.grants.len();
             process.config.state = (&mut *process as *mut Self).cast();
+            if let Some(exec) = &process._exec {
+                for line in &exec.lines {
+                    let outcome = crate::os::write_all(input.stderr_fd, line.as_bytes());
+                    if outcome.error != IoError::OK {
+                        return Err(StartupError::Exec(
+                            "could not write Exec approval record".into(),
+                        ));
+                    }
+                }
+            }
             Ok(process)
         }
     }
@@ -1037,6 +1079,10 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
             line.extend_from_slice(
                 b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
             );
+        }
+        StartupError::Exec(reason) => {
+            line.extend_from_slice(reason.as_bytes());
+            line.push(b'\n');
         }
         StartupError::Io(error) => {
             line.extend_from_slice(

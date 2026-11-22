@@ -2073,10 +2073,10 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
                 let mut limits = crate::request::local_admission_limits();
                 limits.timeout = Some(Duration::from_secs(10));
                 limits.outstanding = 4096;
-                let (_, approved) = peer.deploy_permission(Duration::from_secs(10), 4096).unwrap();
+                let (_, approved, _) = peer.deploy_permission(Duration::from_secs(10), 4096).unwrap();
                 assert_eq!(approved, BTreeSet::from(["ffi_laws@1/laws/Laws".into()]));
                 let admission = AdmissionStore::open(&state.join("code"), 1 << 20).unwrap();
-                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved)) {
+                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None) {
                     Err(AdmissionError::RecordingForeign(reason)) => {
                         assert_eq!(reason, REFUSAL);
                         peer.refuse_before_need(&reason).unwrap();
@@ -2375,5 +2375,74 @@ fn prop_seeds(e: Env, tasks: Tasks) -> Result[(), ()] waits {
             .lines()
             .any(|line| line.starts_with("pass executed app@1/main/prop_seeds (seed 1)")),
         "{stdout}"
+    );
+}
+
+#[test]
+fn exec_test_and_deploy_require_the_exact_profile_approval() {
+    let law = PackageLaw::new();
+    law.app(
+        "app",
+        "[tests]\nlimit = 67108864\ngrants = [\"Exec=profiles.toml git\"]\n",
+    );
+    law.write(
+        "app/main.hirsel",
+        "pub fn main(e: Exec) -> Result[(), Exit] { Ok(()) }\n\
+         @test\nfn granted(e: Exec) -> Result[(), ()] { Ok(()) }\n\
+         @test\nfn ungranted() -> Result[(), ()] { Ok(()) }\n",
+    );
+    law.write(
+        "profiles.toml",
+        "[git]\nimage = \"/unused\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n\
+         argv0 = \"git\"\nargs = [[]]\nenv = {}\ndirs = { work = \"/unused\" }\n",
+    );
+    let (status, stdout, stderr) = law.run(&[
+        "test",
+        "app",
+        "--json",
+        "--grant",
+        "Exec=./profiles.toml git",
+    ]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tests = json["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2);
+    assert_eq!(tests[0]["definition"], "app@1/main/granted");
+    assert_eq!(tests[0]["passed"], false);
+    assert_eq!(tests[1]["definition"], "app@1/main/ungranted");
+    assert_eq!(tests[1]["passed"], true);
+    assert!(
+        stdout.contains(
+            "not granted: Exec[git]: pass --grant 'Exec=profiles.toml git' to hirsel test"
+        ),
+        "{stdout}"
+    );
+
+    let source = law.path("code-store");
+    let source = source.to_str().unwrap();
+    let root = PackageLaw::pass(law.run(&[
+        "publish",
+        "app",
+        "--grant",
+        "Exec=profiles.toml git",
+    ]));
+    let control = law.path("never-opened");
+    let args = [
+        "deploy",
+        root.trim(),
+        "--code-store",
+        source,
+        "--control",
+        control.to_str().unwrap(),
+        "--grant",
+        "Exec=./profiles.toml git",
+    ]
+    .map(str::to_owned);
+    let (status, stdout, stderr) = process::tape_request(&args, law.dir.path());
+    assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(
+        stderr,
+        "deploy: refused: the recipe grants Exec=profiles.toml git; pass --grant 'Exec=profiles.toml git'\n",
     );
 }

@@ -280,7 +280,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut cc = None;
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
-    let run_args = invocation.arguments;
+    let mut run_args = invocation.arguments;
     let mut recording_build = false;
     let mut recording_runtime = None;
     let mut record_path = None;
@@ -884,6 +884,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Some(runs) => {
                 let mut configured = grants.clone();
                 configured.foreign.clear();
+                configured.exec.clear();
                 if explicit_limit || !configured.is_empty() {
                     return Err("the package's manifest declares its tests' run configuration; test takes no --limit, --dir or --grant".into());
                 }
@@ -907,6 +908,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     } else {
         None
     };
+    if command == "run" {
+        run_args.splice(
+            ..0,
+            grants
+                .exec
+                .iter()
+                .map(crate::exec_launch::Binding::argument),
+        );
+    }
     if test_command && let Some(path) = &mut logical_charge_report {
         *path = std::path::absolute(&*path)?;
     }
@@ -988,6 +998,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
             options.root_limit = root_limit;
             grants.apply(&mut options);
+            if !test_command {
+                options.bind_exec()?;
+            }
             options.logical_charge_report = logical_charge_report;
             options.recording = needs_recording;
             options.replay = replay_plan;

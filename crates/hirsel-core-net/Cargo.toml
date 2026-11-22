@@ -7,6 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tempfile = "3"
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 libc = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ring = "=0.17.14"

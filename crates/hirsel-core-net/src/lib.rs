@@ -5,6 +5,8 @@ hirsel_guard::install!();
 use std::net::IpAddr;
 
 mod env;
+pub mod exec;
+pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
 
 /// The public grant spelling, also used in configuration diagnostics.
@@ -175,6 +177,138 @@ mod tests {
                 .permits(1, 0, 0, 0, 80)
         );
     }
+    #[test]
+    fn exec_narrowing_matches_both_grants_and_charges_the_result() {
+        use super::exec::{ArgToken, ExecRule, ExecRules, Form, Names, ProfileRules};
+        use ArgToken::{Any, Lit, Rest};
+        use std::collections::BTreeMap;
+
+        // Scan the original pattern, independently of prefix lengths and intersection.
+        fn admits(tokens: &[ArgToken], args: &[&[u8]]) -> bool {
+            match tokens.split_first() {
+                None => args.is_empty(),
+                Some((Rest, _)) => true,
+                Some((token, rest)) => args.split_first().is_some_and(|(arg, tail)| {
+                    (*token == Any || matches!(token, Lit(bytes) if bytes == arg))
+                        && admits(rest, tail)
+                }),
+            }
+        }
+
+        let a = Lit(b"a".to_vec());
+        let b = Lit(b"b".to_vec());
+        let c = Lit(b"c".to_vec());
+        let examples = [
+            (
+                vec![a.clone(), Rest],
+                vec![a.clone(), b.clone(), c.clone()],
+                Some(vec![a.clone(), b.clone(), c]),
+            ),
+            (vec![a.clone()], vec![a.clone(), b.clone(), Rest], None),
+            (vec![Any], vec![Any], Some(vec![Any])),
+            (vec![], vec![Rest], Some(vec![])),
+        ];
+        for (left, right, expected) in examples {
+            assert_eq!(
+                Form::new(left)
+                    .unwrap()
+                    .intersect(&Form::new(right).unwrap()),
+                expected.map(|tokens| Form::new(tokens).unwrap()),
+            );
+        }
+
+        let mut inputs = vec![vec![]];
+        for len in 1..=4 {
+            for word in 0..1 << len {
+                inputs.push(
+                    (0..len)
+                        .map(|i| {
+                            if word & (1 << i) == 0 {
+                                b"a".as_slice()
+                            } else {
+                                b"b".as_slice()
+                            }
+                        })
+                        .collect(),
+                );
+            }
+        }
+        let mut forms = vec![vec![], vec![Rest]];
+        for x in [a.clone(), b.clone(), Any] {
+            forms.push(vec![x.clone()]);
+            forms.push(vec![x.clone(), Rest]);
+            for y in [a.clone(), b.clone(), Any] {
+                forms.push(vec![x.clone(), y.clone()]);
+                forms.push(vec![x.clone(), y, Rest]);
+            }
+        }
+        let program = || "git".to_owned();
+        let names = |s| Names::parse(s).unwrap();
+        let host = |tokens: &[ArgToken]| {
+            ExecRules::host(BTreeMap::from([(
+                program(),
+                ProfileRules::host(
+                    vec![Form::new(tokens.to_vec()).unwrap()],
+                    ["CALLER".into()].into(),
+                    ["work".into()].into(),
+                    ["FIXED".into()].into(),
+                ),
+            )]))
+        };
+
+        for left in &forms {
+            let parent = host(left);
+            for right in &forms {
+                let narrowed = parent
+                    .narrow(&ExecRule::Form(
+                        program(),
+                        Form::new(right.clone()).unwrap(),
+                    ))
+                    .unwrap();
+                for args in &inputs {
+                    assert_eq!(
+                        narrowed.permits("git", args, &["CALLER"], "work"),
+                        admits(left, args) && admits(right, args),
+                        "{left:?} and {right:?} for {args:?}",
+                    );
+                }
+            }
+        }
+
+        let parent = ExecRules::universal();
+        let deny = parent
+            .narrow(&ExecRule::Dirs(program(), names("")))
+            .unwrap();
+        for name in ["git", "other"] {
+            for args in &inputs {
+                for label in ["work", "other"] {
+                    assert_eq!(deny.permits(name, args, &["CALLER"], label), name != "git");
+                }
+            }
+        }
+        assert!(
+            !deny
+                .narrow(&ExecRule::Programs(names("git")))
+                .unwrap()
+                .permits("git", &[], &[], "work")
+        );
+        assert_eq!(deny.charge(), Some(56)); // 32 + 8 remainder + 8 + 3, rounded.
+        let narrow = parent
+            .narrow(&ExecRule::Form(
+                program(),
+                Form::new(vec![Lit(b"status".to_vec())]).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(narrow.charge(), Some(96)); // EXEC-2's worked example.
+        let fixed = host(&[Rest])
+            .narrow(&ExecRule::EnvKeys(program(), names("")))
+            .unwrap();
+        assert!(fixed.permits("git", &[], &[], "work"));
+        assert!(!fixed.permits("git", &[], &["FIXED"], "work"));
+        assert!(!fixed.permits("git", &[], &["CALLER"], "work"));
+        assert_eq!(fixed.charge(), Some(80)); // 32 + 11 + 16 + 8 + 12, rounded.
+    }
+
     // TL4. The truth table follows TLS-3's label-suffix rule.
     #[test]
     fn tls_rule_intersections_match_the_name_and_port_sets() {

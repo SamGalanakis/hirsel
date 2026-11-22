@@ -80,6 +80,9 @@ fn net_laws_child() {
         },
         secret_ops: std::ptr::null(),
         env_ops: std::ptr::null(),
+        exec_bindings: std::ptr::null(),
+        exec_bindings_len: 0,
+        exec_ops: std::ptr::null(),
         target: crate::process::View {
             data: b"test-target".as_ptr(),
             len: 11,

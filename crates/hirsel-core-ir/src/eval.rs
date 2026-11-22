@@ -4117,6 +4117,7 @@ impl Machine<'_> {
             | HostOp::StreamTerminal => {
                 unreachable!()
             }
+            HostOp::ExecNarrow => panic!("Exec evaluation uses the native reference"),
             HostOp::Resolve => return self.network_resolve(t, a),
             HostOp::NetNarrowResolve => {
                 use hirsel_core_net::{GrantRule, ResolveRule};

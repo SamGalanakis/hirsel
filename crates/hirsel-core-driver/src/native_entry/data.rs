@@ -10,6 +10,7 @@ pub(super) struct Tables {
     pub net_rules: DataId,
     pub secret_grants: DataId,
     pub env_patterns: DataId,
+    pub exec_bindings: DataId,
     pub sources: DataId,
 }
 
@@ -142,6 +143,20 @@ pub(super) fn write(
             .to_vec(),
         1,
     )?;
+    let mut exec_rows = Vec::new();
+    let mut exec_pointers = Vec::new();
+    for (request, workdir, digest) in &plan.exec {
+        let text = bytes(object, None, request.as_bytes().to_vec(), 1)?;
+        exec_pointers.push((u32::try_from(exec_rows.len()).map_err(error)?, text));
+        exec_rows.extend_from_slice(&0u64.to_le_bytes());
+        exec_rows.extend_from_slice(&(request.len() as u64).to_le_bytes());
+        let base = bytes(object, None, workdir.clone(), 1)?;
+        exec_pointers.push((u32::try_from(exec_rows.len()).map_err(error)?, base));
+        exec_rows.extend_from_slice(&0u64.to_le_bytes());
+        exec_rows.extend_from_slice(&(workdir.len() as u64).to_le_bytes());
+        exec_rows.extend_from_slice(digest);
+    }
+    let exec_bindings = define(object, None, exec_rows, 8, &exec_pointers)?;
     let files = bytes(object, None, source_files(sources)?, 8)?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object
@@ -179,6 +194,7 @@ pub(super) fn write(
         net_rules,
         secret_grants,
         env_patterns,
+        exec_bindings,
         sources,
     })
 }

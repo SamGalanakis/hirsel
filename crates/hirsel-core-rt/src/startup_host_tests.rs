@@ -88,6 +88,9 @@ impl Fixture {
             },
             secret_ops: std::ptr::null(),
             env_ops: std::ptr::null(),
+            exec_bindings: std::ptr::null(),
+            exec_bindings_len: 0,
+            exec_ops: std::ptr::null(),
             target: crate::process::View {
                 data: std::ptr::null(),
                 len: 0,
@@ -258,4 +261,21 @@ fn exit_cannot_select_the_not_started_status() {
     let fixture = Fixture::new();
     assert_eq!(fixture.run(&[], 0, 4096, |_, _| panic!("no Dir"), entry), 1);
     assert!(fixture.stderr().is_empty());
+}
+
+#[test]
+fn exec_startup_uses_all_three_uids_and_both_capability_words() {
+    use crate::exec::unprivileged;
+    assert!(unprivileged([1000; 3], [0; 2], [0; 2]));
+    for index in 0..3 {
+        let mut uids = [1000; 3];
+        uids[index] = 0;
+        assert!(!unprivileged(uids, [0; 2], [0; 2]));
+    }
+    for index in 0..2 {
+        let mut caps = [0; 2];
+        caps[index] = 1;
+        assert!(!unprivileged([1000; 3], [0; 2], caps));
+        assert!(!unprivileged([1000; 3], caps, [0; 2]));
+    }
 }

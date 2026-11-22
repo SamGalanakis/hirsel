@@ -410,7 +410,7 @@ operations! {
     ("writer", "close", Lane::Language, "A", "core-check-895", false),
     ("writer", "completed", Lane::Language, "A", "core-check-895", false),
     ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
-    ("exec", "narrow", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("exec", "narrow", Lane::Runtime(Kernel::Net(HostOp::ExecNarrow)), "B", "exec-unix-impl-a-1619", false),
     ("exec", "spawn", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
     ("exec", "wait", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
     ("exec", "signal", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
@@ -3194,6 +3194,54 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ])
     }
 
+    fn runtime_exec_narrow(
+        &mut self,
+        exec: ValueId,
+        ty: TyId,
+        rule: ValueId,
+        n: NodeId,
+    ) -> Option<[ValueId; 8]> {
+        let (_, at) = self.runtime_place(ty, Some(rule), n)?;
+        let tag = self.net_case(at, n);
+        let op = RtOp::Host(HostOp::ExecNarrow);
+        let join = self.new_block(&op.signature().results);
+        for case in 0..4 {
+            let next = if case != 3 {
+                let matches = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, case, n)?;
+                let yes = self.new_block(&[]);
+                let no = self.new_block(&[]);
+                self.runtime_branch(matches, yes, no, n);
+                self.start(yes);
+                Some(no)
+            } else {
+                None
+            };
+            let name = self.net_read_case(ty, at, case as u32, 0, n)?;
+            let arg = if case == 0 {
+                name
+            } else {
+                self.net_read_case(ty, at, case as u32, 1, n)?
+            };
+            let values = self.runtime_row(op, &[exec, tag, name, arg].map(Arg::Value), n)?;
+            self.jump(join, &values, n);
+            if let Some(next) = next {
+                self.start(next);
+            }
+        }
+        self.start(join);
+        let v = self.block_params(join);
+        Some([
+            v[0],
+            v[1],
+            v[2],
+            v[3],
+            ValueId(0),
+            ValueId(0),
+            ValueId(0),
+            ValueId(0),
+        ])
+    }
+
     fn net_read_field(&mut self, ty: TyId, at: AddressId, i: usize, n: NodeId) -> Option<ValueId> {
         let (child, field) = self.net_field(ty, at, i, n)?;
         match self.rep(child).ok()? {
@@ -3392,7 +3440,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             vals[0]?
         };
         let mut operands = vec![key];
-        if op != HostOp::NetNarrow {
+        if !matches!(op, HostOp::NetNarrow | HostOp::ExecNarrow) {
             match op {
                 HostOp::Connect | HostOp::Listen => {
                     let ty = self.p.fns[f].params[1].ty;
@@ -3442,6 +3490,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let values = if op == HostOp::NetNarrow {
             self.runtime_narrow(key, self.p.fns[f].params[1].ty, vals[1]?, n)?
+        } else if op == HostOp::ExecNarrow {
+            self.runtime_exec_narrow(key, self.p.fns[f].params[1].ty, vals[1]?, n)?
         } else {
             let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
             self.runtime_outputs::<8>(RtOp::Host(op), &args, n)?
@@ -3499,7 +3549,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let policy_result = matches!(
             op,
-            HostOp::NetNarrow | HostOp::SecretSeal | HostOp::SecretNarrow | HostOp::EnvNarrow
+            HostOp::NetNarrow
+                | HostOp::ExecNarrow
+                | HostOp::SecretSeal
+                | HostOp::SecretNarrow
+                | HostOp::EnvNarrow
         );
         if policy_result {
             // Error 1 is `Invalid`; a larger one is a refusal, raised (MEM-21).

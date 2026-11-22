@@ -949,6 +949,9 @@ fn check_launch_replay_without_entropy() {
             },
             secret_ops: std::ptr::null(),
             env_ops: std::ptr::null(),
+            exec_bindings: std::ptr::null(),
+            exec_bindings_len: 0,
+            exec_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),

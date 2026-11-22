@@ -32,11 +32,13 @@ pub(crate) fn write(
     timeout: Duration,
 ) -> Result<(), Error> {
     // The value codec uses a fixed little-endian u32 list count.
-    let response = match crate::describe::preview_child(
+    let response = match crate::describe::preview_child_at(
         executable,
         recipe.launch.n_place,
         timeout,
         &0u32.to_le_bytes(),
+        None,
+        &crate::exec_launch::arguments(recipe).collect::<Vec<_>>(),
     ) {
         Ok(bytes) => bytes,
         Err(crate::describe::DescribeError::PlaceError(bytes)) => {

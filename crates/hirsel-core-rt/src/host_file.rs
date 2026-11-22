@@ -107,6 +107,7 @@ pub(crate) struct Registry {
 pub(crate) struct RunGrants {
     designations: Mutex<Designations>,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    pub(crate) exec_grants: Mutex<Vec<crate::exec::NarrowedGrant>>,
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) cells: crate::provide::Cells,

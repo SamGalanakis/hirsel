@@ -195,6 +195,9 @@ typedef struct {
     HirselCoreView env_patterns;
     /* Set to &hirsel_core_os_env_ops for a sourced launch with Env. */
     const HirselCoreEnvOperations *env_ops;
+    const void *exec_bindings;
+    size_t exec_bindings_len;
+    const void *exec_ops;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

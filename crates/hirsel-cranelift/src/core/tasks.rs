@@ -299,6 +299,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve
                     | HostOp::Resolve
@@ -347,6 +348,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve
                     | HostOp::Resolve

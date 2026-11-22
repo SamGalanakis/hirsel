@@ -121,6 +121,7 @@ fn core_operations(backend: Backend) {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: Default::default(),
+            exec_grants: vec![],
             env_patterns: None,
             observed: None,
         };
@@ -210,6 +211,7 @@ fn counted_operations(backend: Backend) {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: Default::default(),
+            exec_grants: vec![],
             env_patterns: None,
             observed: None,
         };
@@ -287,6 +289,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: Default::default(),
+            exec_grants: vec![],
             env_patterns: None,
             observed: None,
         };
@@ -372,6 +375,7 @@ fn stream_operations(backend: Backend) {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: Default::default(),
+            exec_grants: vec![],
             env_patterns: None,
             observed: None,
         };
@@ -452,6 +456,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         net_rules: vec![],
         secret_grants: vec![],
         foreign_grants: Default::default(),
+        exec_grants: vec![],
         env_patterns: None,
         observed: None,
     };
@@ -546,6 +551,7 @@ fn host_operations(backend: Backend) {
             net_rules: vec![],
             secret_grants: vec![],
             foreign_grants: Default::default(),
+            exec_grants: vec![],
             env_patterns: None,
             observed: None,
         };
@@ -656,6 +662,7 @@ pub fn proof_clone_run() -> u64 {
         net_rules: vec![],
         secret_grants: vec![],
         foreign_grants: Default::default(),
+        exec_grants: vec![],
         env_patterns: None,
         observed: None,
     };

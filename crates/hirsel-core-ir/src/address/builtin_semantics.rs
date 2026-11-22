@@ -57,6 +57,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("deque", "slots_view", 1),
     ("dest", "put", 1),
     ("ed25519", "verify", 1),
+    ("exec", "narrow", 1),
     ("float", "abs", 1),
     ("float", "ceil", 1),
     ("float", "eq", 1),

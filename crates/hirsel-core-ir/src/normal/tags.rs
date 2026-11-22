@@ -439,6 +439,7 @@ tags!(HostOp {
     67 => ScramVerify,
     68 => ProvideNet,
     69 => CallSecret,
+    75 => ExecNarrow,
 });
 
 tags!(RaiseCause {

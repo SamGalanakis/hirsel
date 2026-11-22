@@ -144,3 +144,129 @@ fn prog3_startup_refusals_cranelift() {
 fn prog3_startup_refusals_llvm() {
     startup_refusals(Backend::Llvm);
 }
+
+#[test]
+fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
+    use hirsel_core_net::exec::{PinnedImage, Request};
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::os::fd::AsFd;
+
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("image");
+    let profile = dir.path().join("profiles.toml");
+    let mut executable = [0u8; 192];
+    executable[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+    executable[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    let machine = if cfg!(target_arch = "x86_64") {
+        62u16
+    } else {
+        183
+    };
+    executable[18..20].copy_from_slice(&machine.to_le_bytes());
+    executable[20..24].copy_from_slice(&1u32.to_le_bytes());
+    executable[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // entry
+    executable[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+    executable[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+    executable[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+    executable[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
+    executable[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    executable[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+    executable[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
+    executable[96..104].copy_from_slice(&192u64.to_le_bytes());
+    executable[104..112].copy_from_slice(&192u64.to_le_bytes());
+    executable[120..124].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
+    executable[128..136].copy_from_slice(&176u64.to_le_bytes());
+    let interpreter = c"/oracle/loader";
+    let loader = interpreter.to_bytes_with_nul();
+    executable[152..160].copy_from_slice(&(loader.len() as u64).to_le_bytes());
+    executable[176..176 + loader.len()].copy_from_slice(loader);
+    std::fs::write(&image, executable).unwrap();
+    let policy = format!(
+        "[git]\nimage = {:?}\nsha256 = \"{:x}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
+        image.to_str().unwrap(),
+        Sha256::digest(executable),
+        dir.path().to_str().unwrap(),
+    );
+    std::fs::write(&profile, &policy).unwrap();
+    let request = Request::parse(&format!("{} git", profile.display())).unwrap();
+    let loaded = request.load().unwrap();
+    let expected = loaded.digest;
+    let (_, lines) = loaded.pin_images().unwrap();
+    assert_eq!(
+        lines,
+        [format!(
+            "exec: git: image {}, sha256 {:x}, interpreter /oracle/loader, policy {}\n",
+            image.display(),
+            Sha256::digest(executable),
+            hirsel_core_net::exec::hex(&expected),
+        )]
+    );
+    std::fs::write(&profile, format!("# comment\n{policy}")).unwrap();
+    let loaded = request.load().unwrap();
+    assert_eq!(loaded.digest, expected);
+
+    let app = "pub fn main(approved: Exec, out: Stdout) -> Result[(), Exit] waits {
+        let _ = exec.narrow(approved, Form(program: \"git\", form: list.new()))
+        result.unwrap(stdout.write(out, \"entered\\n\"))
+        Ok(())
+    }";
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut check = source_request(app, dir.path());
+    check.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(check, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{}",
+        serde_json::to_string(&(
+            product.machine_diagnostics().unwrap(),
+            product.machine_incomplete().unwrap(),
+        ))
+        .unwrap(),
+    );
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.output = dir.path().join("exec-launch");
+    options.grant_mask = 1 << 4;
+    options.exec_grants.push(crate::exec_launch::Binding {
+        request: request.clone(),
+        policy: Some(expected),
+        workdir: None,
+    });
+    let main = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&main, &options).unwrap();
+    std::fs::write(&profile, policy.replace("\"status\"", "\"diff\"")).unwrap();
+    assert_ne!(request.load().unwrap().digest, expected);
+    let mut command = Command::new(built.executable);
+    options.exec_grants[0].approve(&mut command);
+    assert_not_started(
+        &command.output().unwrap(),
+        "not started: Exec[git]: launch policy digest differs from the build binding\n",
+    );
+
+    let spec = &loaded.profiles["git"];
+    let pinned = PinnedImage::open(spec).unwrap();
+    std::fs::write(&image, b"#!/bin/sh\n").unwrap();
+    let mut file = std::fs::File::from(pinned.file.as_fd().try_clone_to_owned().unwrap());
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, executable);
+    assert_eq!(pinned.interpreter.as_deref(), Some(interpreter));
+    assert!(
+        matches!(PinnedImage::open(spec), Err(reason) if reason.contains("does not match the pin"))
+    );
+    std::fs::write(
+        &profile,
+        policy.replace(
+            &format!("{:x}", Sha256::digest(executable)),
+            &format!("{:x}", Sha256::digest(b"#!/bin/sh\n")),
+        ),
+    )
+    .unwrap();
+    let script = request.load().unwrap();
+    assert!(
+        matches!(PinnedImage::open(&script.profiles["git"]), Err(reason) if reason.contains("without a #! line"))
+    );
+}

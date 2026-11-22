@@ -159,14 +159,17 @@ fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
     let named = |name: &str| crate::grant_kind(name).unwrap();
     let mut taken = 0u64;
     let mut directories = 0;
+    let mut exec = 0;
     for parameter in &decl.parameters {
         if let Some(kind) = kind(&parameter.ty) {
             taken |= 1 << kind;
             directories += usize::from(kind == named("Dir"));
+            exec += usize::from(kind == named("Exec"));
         }
     }
     options.grant_mask &= taken;
     options.directories.truncate(directories);
+    options.exec_grants.truncate(exec);
     if taken & (1 << named("Net")) == 0 {
         options.net_rules.clear();
     }
@@ -387,6 +390,24 @@ impl TestBatch<'_> {
                 test_options.grant_mask |= 1 << crate::grant_kind("Env").unwrap();
             }
             if let Some(Ok(decl)) = product.test_entries.get(test) {
+                let exec = decl
+                    .parameters
+                    .iter()
+                    .filter(|p| p.ty == "core@1/core/Exec")
+                    .count();
+                if !self.replay {
+                    for grant in test_options.exec_grants.iter_mut().take(exec) {
+                        if !options
+                            .exec_grants
+                            .iter()
+                            .any(|approved| approved.request.text() == grant.request.text())
+                        {
+                            return Err(NativeStop::Entry(grant.refusal()));
+                        }
+                        grant.workdir = Some(std::env::current_dir()?);
+                        grant.seal_policy()?;
+                    }
+                }
                 for parameter in &decl.parameters {
                     if let Some(interface) = parameter
                         .ty
@@ -654,6 +675,9 @@ impl CheckProduct {
             built
         };
         let mut command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        for grant in &options.exec_grants {
+            grant.approve(&mut command);
+        }
         if let Some(seed) = seed {
             command.env(SEED_ENV, seed.to_string());
         }

@@ -27,6 +27,12 @@ fn published_entry_layout_matches_c_abi() {
         (offset_of!(OsConfig, secret_ops), OS_CONFIG_SECRET_OPS),
         (offset_of!(OsConfig, env_patterns), OS_CONFIG_ENV_PATTERNS),
         (offset_of!(OsConfig, env_ops), OS_CONFIG_ENV_OPS),
+        (offset_of!(OsConfig, exec_bindings), OS_CONFIG_EXEC_BINDINGS),
+        (
+            offset_of!(OsConfig, exec_bindings_len),
+            OS_CONFIG_EXEC_BINDINGS_LEN,
+        ),
+        (offset_of!(OsConfig, exec_ops), OS_CONFIG_EXEC_OPS),
         (
             offset_of!(OsConfig, parameters_len),
             OS_CONFIG_PARAMETERS_LEN,

@@ -140,9 +140,9 @@ pub struct Publication {
     link_archives: LinkArchives,
 }
 
-const GRANT_NAMES: [&str; 13] = [
+const GRANT_NAMES: [&str; 14] = [
     "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-    "Args", "Secret", "Foreign",
+    "Args", "Secret", "Foreign", "Exec",
 ];
 
 pub(super) fn kind(name: &str) -> Option<u8> {
@@ -602,6 +602,7 @@ fn bindings(
                 kind: GrantKind::Foreign,
                 values: vec![interface.to_owned()],
                 archive: Some(archive(interface)?),
+                policy: None,
             });
             continue;
         }
@@ -620,7 +621,17 @@ fn bindings(
         }
         let index = next[usize::from(tag)];
         next[usize::from(tag)] += 1;
+        let mut policy = None;
         let values = match kind {
+            GrantKind::Exec => match options.exec_grants.get(index) {
+                Some(grant) => {
+                    policy = Some(ContentHash(grant.digest()?));
+                    std::iter::once(grant.request.file.clone())
+                        .chain(grant.request.names.iter().cloned())
+                        .collect()
+                }
+                None => Vec::new(),
+            },
             GrantKind::Dir => options
                 .directories
                 .get(index)
@@ -651,9 +662,11 @@ fn bindings(
             kind,
             values,
             archive: None,
+            policy,
         });
     }
     if options.directories.len() > next[GrantKind::Dir as usize]
+        || options.exec_grants.len() > next[GrantKind::Exec as usize]
         || options.foreign_grants.len() != named.len()
         || (!options.net_rules.is_empty() && next[GrantKind::Net as usize] == 0)
         || GRANT_NAMES
@@ -678,6 +691,11 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     let mut grants = Vec::new();
     for grant in &recipe.launch.grants {
         match grant.kind {
+            GrantKind::Exec => {
+                if let [file, names @ ..] = grant.values.as_slice() {
+                    grants.push(format!("Exec={file} {}", names.join(",")));
+                }
+            }
             GrantKind::Dir | GrantKind::Net | GrantKind::Env | GrantKind::Foreign => grants.extend(
                 grant
                     .values
@@ -771,6 +789,7 @@ fn launch_options(
     options.net_rules.clear();
     options.secret_grants.clear();
     options.foreign_grants.clear();
+    let configured_exec = std::mem::take(&mut options.exec_grants);
     options.env_patterns = None;
     if names.len() != recipe.launch.grants.len() {
         return Err(NativeStop::Entry(
@@ -800,6 +819,28 @@ fn launch_options(
             continue;
         }
         match kind {
+            GrantKind::Exec => match values.as_slice() {
+                [] => {}
+                [file, names @ ..] if !names.is_empty() && options.exec_grants.len() == index => {
+                    options.exec_grants.push(crate::exec_launch::Binding {
+                        request: hirsel_core_net::exec::Request::parse(&format!(
+                            "{file} {}",
+                            names.join(",")
+                        ))
+                        .map_err(|_| invalid())?,
+                        policy: Some(binding.policy.ok_or_else(invalid)?.0),
+                        workdir: configured_exec
+                            .get(index)
+                            .filter(|configured| {
+                                configured.request.file == *file
+                                    && configured.request.names == names
+                                    && configured.policy == binding.policy.map(|policy| policy.0)
+                            })
+                            .and_then(|configured| configured.workdir.clone()),
+                    });
+                }
+                _ => return Err(invalid()),
+            },
             GrantKind::Dir => match values.as_slice() {
                 [] => {}
                 [path] if options.directories.len() == index => {

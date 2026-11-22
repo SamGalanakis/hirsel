@@ -126,6 +126,7 @@ impl FunctionEmitter<'_> {
             | HostOp::RecvBounded
             | HostOp::SendPair
             | HostOp::NetNarrow
+            | HostOp::ExecNarrow
             | HostOp::NetNarrowTls
             | HostOp::NetNarrowResolve
             | HostOp::Resolve

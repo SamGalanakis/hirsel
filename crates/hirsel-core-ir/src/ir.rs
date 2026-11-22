@@ -1083,6 +1083,7 @@ pub enum HostOp {
     StreamTerminal = 96,
     NetJoin = 97,
     ScramFinalLen = 98,
+    ExecNarrow = hirsel_core_ids::host_op::EXEC_NARROW as isize,
 }
 
 impl HostOp {
@@ -1167,6 +1168,7 @@ impl HostOp {
         HostOp::ScramFinalLen,
         HostOp::ScramVerify,
         HostOp::ProvideNet,
+        HostOp::ExecNarrow,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1208,6 +1210,7 @@ impl HostOp {
             HostOp::RecvBounded => "host_recv_bounded",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
+            HostOp::ExecNarrow => "exec_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
             HostOp::NetNarrowResolve => "net_narrow_resolve",
             HostOp::TlsConnect => "tls_connect",
@@ -1257,6 +1260,7 @@ impl HostOp {
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
+            Self::ExecNarrow => "hirsel_core_exec_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
             Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",
             Self::TlsConnect => "hirsel_core_tls_connect",
@@ -1304,6 +1308,7 @@ impl HostOp {
                 | HostOp::MonoNs
                 | HostOp::Random
                 | HostOp::NetNarrow
+                | HostOp::ExecNarrow
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
                 | HostOp::SecretSeal
@@ -1552,6 +1557,10 @@ impl RtOp {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
                     HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),
+                    HostOp::ExecNarrow => (
+                        vec![V(u64_), V(Ty::Scalar(Scalar::U32)), V(p), V(p)],
+                        outcome,
+                    ),
                     HostOp::SendPair => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }

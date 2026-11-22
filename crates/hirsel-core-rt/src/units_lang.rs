@@ -797,7 +797,14 @@ pub unsafe extern "C" fn hirsel_core_conn_send_rec(
     // SAFETY: by the contract.
     unsafe {
         let sent = conn_send::<true>(context, client, value, site, true, *word != 0);
-        tasks::returned(word, sent, SendOutcome { outcome: 0, status: 0 })
+        tasks::returned(
+            word,
+            sent,
+            SendOutcome {
+                outcome: 0,
+                status: 0,
+            },
+        )
     }
 }
 

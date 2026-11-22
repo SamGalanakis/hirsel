@@ -1067,9 +1067,15 @@ pub enum RtOp {
 pub enum Wait {
     /// An owned provider wait (one with [`HostOp::returnable_symbol`]).
     Host(HostOp),
-    Join { r: TypeId },
-    ConnSend { item: TypeId },
-    ConnReceive { item: TypeId },
+    Join {
+        r: TypeId,
+    },
+    ConnSend {
+        item: TypeId,
+    },
+    ConnReceive {
+        item: TypeId,
+    },
 }
 
 impl Wait {

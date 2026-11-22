@@ -73,6 +73,8 @@ use std::collections::{HashMap, VecDeque};
 mod conn;
 #[path = "units_returnable_check.rs"]
 mod returnable;
+#[path = "units_park_waits_check.rs"]
+mod park_waits;
 use std::fmt::Write as _;
 use std::panic::Location;
 use std::sync::atomic::Ordering;
@@ -1685,6 +1687,43 @@ pub(super) static CASES: &[Case] = &[
         params: |r| PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed),
         pct: None,
     },
+    // 18. A returnable client gives its stack back at a connection receive,
+    // a full connection's send, a task join and a helper join, against a real
+    // helper unit; what it observes equals the stackful client's
+    // (`units_park_waits_check.rs`).
+    Case {
+        name: "park_waits",
+        workers: 3,
+        units: 1,
+        body: park_waits::body,
+        producers: &[],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
+    // 19. The same, with the blocking-call hand-off at one of the waits whose
+    // wake comes from the helper: the client resumes on another thread.
+    Case {
+        name: "handoff_park_waits",
+        workers: 2,
+        units: 2,
+        body: |id| {
+            if id == 1 {
+                wait_flag(0);
+                return 0;
+            }
+            let status = park_waits::handoff_body(id);
+            wake_id(1);
+            status
+        },
+        producers: &[],
+        goals: 0b1,
+        params: |r| {
+            PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed);
+            PARAM[1].store(r(0, 3), Ordering::Relaxed);
+        },
+        pct: None,
+    },
     Case {
         name: "conn_flat_slot_reuse",
         workers: 3,
@@ -2173,6 +2212,14 @@ mod tests {
     #[test]
     fn handoff_returnable() {
         check("handoff_returnable");
+    }
+    #[test]
+    fn park_waits() {
+        check("park_waits");
+    }
+    #[test]
+    fn handoff_park_waits() {
+        check("handoff_park_waits");
     }
 
     #[test]

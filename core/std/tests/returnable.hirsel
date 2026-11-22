@@ -118,3 +118,87 @@ fn waits_through_wrappers_and_closures(n: Net, clock: Clock, tasks: Tasks) -> bo
     let rounds = result.unwrap(task.join(take h))
     whole && rounds == 4 && log == string.as_bytes("r0aaacxbbbr2ccccyddd")
 }
+
+// Connection and join waits with a borrowed buffer. `hold` borrows `buf`
+// from `work`'s frame across a send on a full connection (an owned item), two
+// receives and, in `work`, two joins. A sleeping child keeps the unit's timer
+// pending, so none of these parks keeps the stack as a lone task would: a
+// release build gives `work`'s stack back at each, the child's first run
+// takes and overwrites it, and `buf` and the items must still read as they
+// were written.
+type Echo: cross {
+    request: Client[Client[Bytes]],
+    reply: Client[Bytes],
+}
+
+fn echo(take job: Echo) -> u64 waits {
+    let Echo(request: request, reply: reply) = take job
+    let (send, receive): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes 64))
+    result.unwrap(conn.send(request, take send))
+    for _ in 0u64 .. 2 {
+        let mut b = result.unwrap(conn.receive(receive))
+        list.push(mut b, 33)
+        result.unwrap(conn.send(reply, take b))
+    }
+    2
+}
+
+// Frames enough to cover the stack a parked task gave back, which this
+// child's first run takes.
+fn deep(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    if n == 0 {
+        a + b + c
+    } else {
+        let r = deep(n - 1, b + 1, c + 2, a + 3)
+        r % 1000003 * 3 + a
+    }
+}
+
+fn nap(take clock: Clock) -> u64 waits {
+    let d = deep(40, 1, 2, 3)
+    host.sleep_until(clock, host.mono_ns(clock) + 20000000)
+    if d == 0 { 0 } else { 1 }
+}
+
+fn one(b: u64) -> Bytes {
+    let mut t: Bytes = list.with_capacity(1)
+    list.push(mut t, int.truncate(b))
+    t
+}
+
+fn hold(mut buf: Bytes, to: Client[Bytes], replies: Inbox[Bytes]) waits {
+    result.unwrap(conn.send(to, one(112)))
+    result.unwrap(conn.send(to, one(113)))
+    list.append(mut buf, result.unwrap(conn.receive(replies)))
+    list.append(mut buf, result.unwrap(conn.receive(replies)))
+}
+
+type Work: send {
+    tasks: Tasks,
+    clock: Clock,
+}
+
+fn work(take job: Work) -> u64 waits {
+    let Work(tasks: tasks, clock: clock) = take job
+    let (reply, replies): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(2, bytes 64))
+    let (request, requests): (Client[Client[Bytes]], Inbox[Client[Bytes]]) = result.unwrap(conn.new(1, bytes 0))
+    let helper = result.unwrap(task.spawn_unit(tasks, bytes 8192, Echo(request: take request, reply: take reply), echo))
+    let to = result.unwrap(conn.receive(requests))
+    let kid = task.spawn(tasks, bytes 65536, clock, nap)
+    let mut buf: Bytes = list.with_capacity(8)
+    list.push(mut buf, 98)
+    hold(mut buf, to, replies)
+    let napped = result.unwrap(task.join(take kid))
+    let echoed = result.unwrap(task.join(take helper))
+    if buf == string.as_bytes("bp!q!") {
+        napped + echoed + list.len(buf)
+    } else {
+        0
+    }
+}
+
+// expect: run waits_keep_borrowed_buffer(clock, tasks) = 8
+fn waits_keep_borrowed_buffer(clock: Clock, tasks: Tasks) -> u64 waits {
+    let h = task.spawn(tasks, bytes 262144, Work(tasks: tasks, clock: clock), work)
+    result.unwrap(task.join(take h))
+}

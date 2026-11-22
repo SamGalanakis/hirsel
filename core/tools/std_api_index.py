@@ -2,7 +2,8 @@
 """Render core/std/API-INDEX.md from `hirsel inspect --interface --json`.
 
 Set HIRSEL to select the compiler executable. Module contracts live in api/<module>.md.
---write owns the whole output; --check compares every byte, including its tail.
+--write owns the whole output and then refreshes the site copies with tools/site_sync.py;
+--check compares every byte, including its tail.
 """
 
 import json
@@ -59,7 +60,7 @@ def main() -> int:
         return 1
     if mode == "--write":
         API.write_text(want)
-        return 0
+        return subprocess.call([sys.executable, str(ROOT / "tools" / "site_sync.py"), "--write"])
     if mode == "--check":
         if not API.is_file() or API.read_bytes() != want.encode():
             sys.stderr.write("core/std/API-INDEX.md: operation index is stale; run core/tools/std_api_index.py --write\n")

@@ -440,3 +440,182 @@ a live session's `Placed` answers for the same list; `manifest_exact` (L35)
 checks the grants, the root limit and `release`; `confirm_identity` (L32);
 `place_run_bounded` also covers the preview child, which observes no store or
 listener.
+
+## Platform host and launcher (unbuilt)
+
+This section specifies how many programs from many authors are run on one machine. It was
+ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). Nothing in it is built. The
+cold-place wake contract it relies on is RUNNER-SPEC §14.
+
+### Authority groups
+
+An **authority group** is the unit a platform runs. One group is one program, one release
+recipe R, one set of grant bindings, one store, and while it is live, one process that holds
+that store. The group's name is its key in the platform catalog. It never changes, and no
+two groups share a store directory. A deploy replaces a group's recipe and keeps its name and
+store. Grants are approved per group, at each deploy, as the deploy preview shows them
+(above).
+
+- **One process while live.** At most one process holds the group's store (STORE's `LOCK`).
+  A hot deploy's prepare child opens only the export and the staged migration, never the
+  store. Preview and describe children open no store. So a cutover runs OLD's head, then
+  NEW's head, and never both. A second head is refused `Held` by the store itself.
+- **Tenants.** A **tenant** is a billing and quota owner. A tenant owns any number of groups,
+  and a group belongs to exactly one tenant. Groups of one tenant are separate by default. Two
+  agents that act for separately authorised principals are two groups, even when one tenant
+  pays for both, because one store and one process cannot keep their authority apart. Groups
+  share nothing: no store, no process, no grant and no listener. Where one group serves
+  another, it is a wire call between two places, under the callee's `Caller` policy
+  (RUNNER-SPEC rule 13).
+- **What an untrusted author submits.** An author whom the operator has not named a trusted
+  publisher submits source only. The platform publishes that source itself with the normal
+  checker, under its own compiler caches and package images and the limits of "Authority"
+  above. It never accepts a raw R, a code object or an image from such an author, because
+  admission does not check types or ownership again (step 8 above). Foreign code, an
+  `Exec` grant and a recording build are refused for a group whose author is untrusted
+  (FFI-1, EXEC-1).
+
+### The platform host
+
+The **platform host** is a Hirsel program. It is itself a place with its own store, and it
+runs under the launcher like a group, as the operator's group. Its catalog is ordinary
+tables of that store:
+
+- `groups`: per group name, its tenant, its working directory, its author class (trusted or
+  untrusted), its containment label (below), its current assembly record and activation
+  version, its retained activations' assembly records, and its listener address;
+- `wake`: per group name, the one wake row of RUNNER-SPEC §14 (`Dirty(gen)` or
+  `Clean(Option[next_due])`) and its generation counter;
+- `deploys`: each pending deploy attempt and its assembly record (the "pending record"
+  above);
+- `pins`: each recording pin and its expiry;
+- `quotas`: per tenant, its limits on groups, live groups, bytes and deploy rate;
+- `config`: the host's `max_places` and its other bounds.
+
+The host does routing, quotas, wake scheduling and deploy orchestration. It decides which
+group runs, when it starts and stops, which recipe a deploy installs, and which objects are
+still roots. It does not compile, assemble, confine or spawn. It asks the launcher for those
+over the launcher's control socket.
+
+**Bounded workers.** "10,000 listeners" means 10,000 groups that are durably registered and
+wakeable. It does not mean 10,000 processes. At most `max_places` groups are live at once
+(RUNNER-SPEC §14.2). A group that is not live costs a catalog row, a wake row and one
+listening socket that the launcher holds.
+
+**Routing.** Each group has one TCP listener, created by the launcher when the group is
+added and held by it for the group's whole life. A serving child receives it as its
+inherited listener ([net](net.md), `LISTEN_FDS`). Dropping it in the child closes only the
+child's descriptor, so the accept queue outlives the child. Cutover and a restart therefore
+lose no connection that is in the backlog. A connection to a group that is not live waits in
+that backlog. The launcher reports the first readable listener of a cold group to the host
+as `Arrived(group)`, and the host wakes the group (RUNNER-SPEC §14.3). Clients find a group's
+address from the host's routing table. The host never proxies bytes.
+
+**Quotas.** A start, a deploy or an added group that would exceed its tenant's quota is
+refused with the quota it exceeds. The host never evicts a live group to admit another
+(RUNNER-SPEC §13.4, "No eviction").
+
+### The launcher
+
+The **launcher** is a thin Rust program. It holds no record of its own that a decision reads
+again: every decision record is in the host's catalog. What it keeps on disk is
+content-addressed: the code store, the image store and the assembly records, each named by
+the hash of its own content (above). Such a file is either complete or absent after a crash,
+so keeping it is caching, not state. Its operations are these:
+
+- **Publish and assemble.** It admits recipes (steps 1-8 above), publishes source for
+  untrusted authors, and assembles images. It writes objects with the "Durable publication"
+  order above, steps 1-3. Step 4, the pending record, is a host catalog row, which the host
+  commits only after the launcher has answered that steps 1-3 are synced.
+- **Launch.** It starts a group's children: describe, preview, prepare and serving (below),
+  and the install launch of genesis. Each child runs a retained image by digest, from the
+  image store, in the group's working directory, with the group's grant bindings. It
+  reports each child's exit to the host, with the Clean report of RUNNER-SPEC §14.4 when the
+  child sends one.
+- **Collect.** It removes objects only when the host names the full root set: the union
+  that "Durable publication" lists, which the host reads from `groups`, `deploys` and `pins`.
+  A launcher that has no current root set from the host removes nothing.
+
+On a restart the launcher has nothing to recover. It removes staging, and it reports to the
+host that every child it had has ended. Under containment it has first emptied each child's
+container (below). The host then reconciles from its catalog: each pending deploy as "When
+the host starts" says above, and each `Dirty` wake row as RUNNER-SPEC §14.5 says.
+
+**One control socket.** The launcher's control socket is the platform's single
+authority boundary, as the control socket of "Authority" is. Its filesystem permission
+admits only the host's OS user. Operators and tenants reach the platform through the host,
+which decides and records each request before it asks the launcher. `hirsel host` is this
+pair: the launcher, plus the platform host it starts as its first group. `hirsel deploy`
+sends its request to the host.
+
+**Exec is not the launch path.** The host does not start groups through an `Exec` grant. An
+`Exec` profile pins one image at launch (EXEC-4), but a platform launches a new image at
+each deploy. The launcher, which the operator starts, is the only process that starts a
+group's children, and it owns their containers.
+
+### Containment (R27)
+
+Every child of a group carries one **containment label**, fixed in the group's catalog row:
+
+- **`contained`.** The launcher runs the child under R27's containment
+  ([reserved](reserved.md)). The child can reach only the group's working directory and
+  the files its `Dir` bindings name, only the network its `Net` bindings and its inherited
+  listener allow, and only its own descendants. Every descendant is in a container that the
+  child cannot leave, such as a delegated cgroup or a PID namespace. A stop or kill of the
+  child ends every process in it, and the launcher reports the child ended only after it
+  has seen that the container is empty. CPU and memory have OS limits from the group's
+  quota.
+- **`uncontained`.** The launcher runs the child as an ordinary process of its own OS user,
+  with OS CPU and memory limits from the group's quota and EXEC-6's best-effort death of
+  the direct child. Only a group whose author is the operator, or a first-party author the
+  operator names, may carry this label. Its program is compiled from source by the
+  platform, reaches no foreign code, and holds credentials only in connector groups.
+
+The label covers **every** child kind of the group: serving, describe, preview and
+prepare/migrate. Each of these runs code from the group's program (`place`, `migrate` and
+`handles` included), so a confined server with an unconfined preview would confine nothing.
+A launcher that cannot enforce `contained` on its host refuses at startup to admit any
+contained group, and it never runs such a group uncontained. A group whose author is not
+the operator or a named first-party author is `contained`, so no external or multi-customer
+tenant runs until R27 is built. Changing a group's label is an operator action, recorded in
+the catalog, and it takes effect at the group's next start.
+
+### Deploy preview of pending triggers
+
+The deploy preview (above) adds one more report: what NEW will do with the triggers already
+pending in the group's store. Only the prepare child can compute it, because only it has
+NEW's registry and the store's rows as NEW's migration leaves them. So the scan runs in the
+prepare child, after `migrate` is staged and both handle sets are open, and before
+`PREPARED` is synced. It writes the report as its own file, `TRIGGERS`, beside `PREPARED`
+in the export directory. The `PREPARED` format does not change.
+
+For each pending trigger row of the staged catalog (`store.triggers.pending`, branch 0), the
+child classifies it against NEW exactly as NEW's head will at dispatch (RUNNER-SPEC §14.6):
+
+- **`gone`**: NEW's trigger entry list does not allow its entry, or no registered entry of
+  NEW has its kind, path and argument schema. NEW's head will consume it with the terminal
+  `Gone` when it comes due.
+- **`held`**: a granted trigger whose attempt is at least 1. Its revision stamp is the
+  launch image digest of the code that started it, and NEW's digest differs. So NEW will
+  park it with a `Revision` hold at its next start, until a release on NEW's revision.
+- **`changed`**: an allowed entry whose `revision` (PROG-9) differs from OLD's. It runs
+  NEW's code when it comes due.
+- **`unchanged`**: every other row.
+
+The report is one row per (class, kind, entry path, argument schema): the count of
+triggers and the earliest due time. These are exact. A report that does not fit the prepare
+child's bound fails the preview with `Limit(triggers)`. It is never truncated. The deploy
+output prints the rows, `gone` and `held` first. Like the rest of the preview, it gates
+nothing. The image-digest guard on started granted runs stays as it is: `Exported.revision`
+does not cover a change of `handles` (a table name, a binding, a key codec), and the image
+digest does, so a revision-keyed guard would let a started run continue against changed
+handles.
+
+Laws (unbuilt): `group_one_head`, where a cutover's NEW head opens the store only after
+OLD's head has closed it, and an extra launch of the group is refused `Held`;
+`launcher_restart_stateless`, where a launcher killed at every step of a deploy and
+restarted gives the host's reconciliation the same result as the host's records alone;
+`contained_all_children`, where a describe, preview, prepare and serving child of a
+contained group each fail to read a file outside its bindings and leave no process after
+it ends; `contained_refused_uncontainable`, where a launcher on a host without the
+mechanism admits no contained group; and `trigger_scan_classes` (RUNNER-SPEC §14.7, L40).

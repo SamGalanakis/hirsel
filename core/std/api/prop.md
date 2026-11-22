@@ -299,6 +299,15 @@ site fault setup as the original law. One reported `prop.replay` token contains
 all the recorded choices for the script. The law can still use `case.world_seed`
 to start its virtual clock. See [scripted plans](sim/world.md#scripted-plans).
 
+`shrink_tasks_from(tasks, cfg, g, law, index, values)` starts from an
+explicit tape and case index. It checks that generation consumes exactly
+the supplied tape and that the generated case fails. Then it uses the same
+task shrinker as `check_tasks`. Keep the original `cfg.sim_seed` so that the
+case and every shrink trial have the original world seed. For a simulator
+`Script`, obtain `values` with `sim.world.script_tape` and use the matching
+`sim.world.script_gen`.
+
+
 ## Shrinking
 
 A failing run has a class:

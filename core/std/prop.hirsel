@@ -1487,6 +1487,22 @@ fn shrink_tasks_case[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take
     (take best, trials)
 }
 
+/// Shrinks a failing task case from an explicit tape at its original index.
+pub fn shrink_tasks_from[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, values: List[u64]) -> Found waits {
+    let prefix: List[u64] = clone(values)
+    let Some((take value, take s)) = generate(cfg, g, index, Some(take prefix)) else {
+        generation_failed(index)
+    }
+    if !consumed(s, values) {
+        fail("prop: fixed tape did not round trip")
+    }
+    let Some(take info) = task_failure(tasks, cfg, take value, index, law) else {
+        fail("prop: starting tape does not fail")
+    }
+    let (take smallest, n) = shrink_tasks_case(tasks, cfg, g, law, index, counterexample(take s, take info, None), None)
+    found(cfg, g, index, 1, n, take smallest)
+}
+
 fn replay_tasks_one[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, text: String) -> Outcome waits {
     let Replay(index, values: take values) = parse_token(text, cfg.max_choices)
     let prefix = Some(take values)
@@ -1655,6 +1671,18 @@ fn corpus_replay(input: String, active: Config, key: Corpus) -> (Config, Replay,
     (Config(seed, cases, max_choices, max_rejects, max_shrinks, gen_steps, case_steps, case_bytes, sim_seed, replay: None), take saved_tape, take bounds)
 }
 
+fn consumed(s: Source, values: List[u64]) -> bool {
+    if s.overrun || s.invalid || list.len(s.tape) != list.len(values) {
+        return false
+    }
+    for i in 0u64 .. list.len(s.tape) {
+        if s.tape[i].value != values[i] {
+            return false
+        }
+    }
+    true
+}
+
 // The ordinary shrinker can repair dependent choices. Corpus replay requires an
 // exact tape, including every draw bound, before the law runs.
 fn corpus_draw[T](cfg: Config, g: Gen[T], saved: Replay, bounds: String) -> (T, Source) {
@@ -1663,15 +1691,7 @@ fn corpus_draw[T](cfg: Config, g: Gen[T], saved: Replay, bounds: String) -> (T, 
     let Some((take value, take s)) = generate(cfg, g, saved.index, prefix) else {
         generation_failed(saved.index)
     }
-    if s.overrun || s.invalid || list.len(s.tape) != list.len(saved.values) {
-        corpus_stale()
-    }
-    for i in 0u64 .. list.len(s.tape) {
-        if s.tape[i].value != saved.values[i] {
-            corpus_stale()
-        }
-    }
-    if choice_bounds(s.tape) != bounds {
+    if !consumed(s, saved.values) || choice_bounds(s.tape) != bounds {
         corpus_stale()
     }
     (take value, take s)

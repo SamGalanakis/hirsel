@@ -37,3 +37,31 @@ Plans from `plan(seed)` and `detach` continue to use rejection sampling.
 Each plan starts with no faults. Use `script(mut plan, site, fault)` to set a
 one-shot fault for a provider's operation site. Draws leave the fault map
 untouched. See [property tests with scripted plans](../prop.md#scripted-simulation).
+
+## Script mutation pilot
+
+`campaign` accepts a seed-to-`Script` function and a law that consumes a
+`ScriptRun`. Choose `Sweep` for sequential seeds or `Mutate` to try changes
+derived from successful cases. Both modes use the same case limit, child
+step and byte limits, and world seed derivation from the campaign seed and
+case index.
+
+A law calls `pick_observed` on a scripted plan and returns the resulting
+`Feedback` with its verdict. Supply stable provider IDs and operation site
+numbers. If tasks deliver feedback independently, the law must order it
+deterministically before it reaches the campaign. The campaign counts
+distinct `(provider, site, outcome bucket)` features up to `max_features`.
+It keeps the first successful witness for a new draw location when the
+observation adds a feature. It tries replacements at that provider's draw
+slot, appending previously consumed words to the prefix when needed. For a
+target index `i` at arity `n`, it finds the least word `w` satisfying
+`floor(w * n / 2^64) >= i` using wide multiplication. A changed arity can
+therefore change a word's outcome.
+
+The first failure returns the concrete `Script`, original case index, and
+world seed. `script_tape` encodes a script's words and continuations for
+`script_gen` with the same provider count and prefix limit. Use that tape
+with [fixed-input task shrinking](../prop.md#scripted-simulation) and retain
+the campaign's simulation seed and failure index. The pilot explores only
+draws the law observes. Fixed faults and scheduler choices remain part of
+the law's own setup.

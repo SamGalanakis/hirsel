@@ -690,3 +690,69 @@ fn prop_tasks_script_shrink_replay_case(tasks: Tasks, seed: Option[u64]) -> bool
     }
     false
 }
+
+fn pilot_seed_script(seed: u64) -> sim.world.Script {
+    let mut random = rand.new(seed, 0)
+    let mut streams: List[List[u64]] = list.new()
+    for _ in 0u64 .. 2 {
+        let mut words: List[u64] = list.new()
+        list.push(mut words, rand.next(mut random))
+        list.push(mut streams, take words)
+    }
+    sim.world.Script(tail_seed: seed, streams: take streams)
+}
+
+fn pilot_rare(take run: sim.world.ScriptRun) -> (bool, sim.world.Feedback) {
+    let sim.world.ScriptRun(trial: take trial, feedback: take feedback, ..) = take run
+    let mut trace = take feedback
+    let mut first = sim.world.plan_from(trial.script, 0)
+    let mut second = sim.world.plan_from(trial.script, 1)
+    let hit = sim.world.pick_observed(mut first, mut trace, 0, 0, 16) == 15 && sim.world.pick_observed(mut second, mut trace, 1, 1, 16) == 15 && sim.world.pick_observed(mut first, mut trace, 0, 2, 16) == 15
+    (!hit, take trace)
+}
+
+fn pilot_fixed_rare(take trial: Case[sim.world.Script]) -> Result[(), String] {
+    // SplitMix64(0 ^ SplitMix64(48)), independently calculated.
+    if trial.index != 48 || trial.world_seed != 610569113502039870 {
+        return Ok(())
+    }
+    let mut first = sim.world.plan_from(trial.value, 0)
+    let mut second = sim.world.plan_from(trial.value, 1)
+    if sim.world.pick(mut first, 16) == 15 && sim.world.pick(mut second, 16) == 15 && sim.world.pick(mut first, 16) == 15 {
+        Error(string.from("three modeled transitions"))
+    } else {
+        Ok(())
+    }
+}
+
+// expect: run sim_script_campaign_fixed_replay(tasks) = true
+fn sim_script_campaign_fixed_replay(tasks: Tasks) -> bool waits {
+    let cfg = sim.world.CampaignConfig(seed: 0, cases: 128, providers: 2, max_draws: 2, max_features: 64, case_steps: 1000000, case_bytes: 1048576)
+    let run = sim.world.campaign(tasks, Mutate, cfg, pilot_seed_script, pilot_rare)
+    let sim.world.CampaignResult(failure: take failure, ..) = take run
+    let Some(take hit) = take failure else {
+        return false
+    }
+    let input = sim.world.script_tape(hit.script, 2, 2)
+    let g = sim.world.script_gen(2, 2)
+    let mut settings = config()
+    settings.sim_seed = Some(0)
+    let prefix: Option[List[u64]] = Some(clone(input))
+    let Some((round_trip, recorded)) = generate(settings, g, 48, prefix) else {
+        return false
+    }
+    let mut original = string.new()
+    sim.world.show_script(hit.script, mut original)
+    let mut decoded = string.new()
+    sim.world.show_script(round_trip, mut decoded)
+    if !consumed(recorded, input) || original != decoded {
+        return false
+    }
+    let minimized_case = shrink_tasks_from(tasks, settings, g, pilot_fixed_rare, 48, input)
+    let mut minimized = string.new()
+    token(minimized_case, mut minimized)
+    if let Falsified(replayed) = search_tasks(tasks, replay(take settings, minimized), g, pilot_fixed_rare) {
+        return replayed.index == 48 && replayed.message == "three modeled transitions"
+    }
+    false
+}

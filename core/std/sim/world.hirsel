@@ -68,7 +68,7 @@ fn show_word(word: u64, mut out: String) {
     string.push_u64(mut out, word)
 }
 
-fn show_script(s: Script, mut out: String) {
+pub fn show_script(s: Script, mut out: String) {
     string.push(mut out, "Script(")
     show_word(s.tail_seed, mut out)
     string.push(mut out, ", [")
@@ -99,18 +99,20 @@ pub fn script_gen(providers: u64, max_draws: u64) -> prop.Gen[Script] {
     }, show_script)
 }
 
+fn scripted_word(mut scripted: Draws, mut state: u64) -> u64 {
+    if scripted.next >= list.len(scripted.words) {
+        return draw(mut state)
+    }
+    let word = scripted.words[scripted.next]
+    scripted.next += 1
+    word
+}
+
 /// Chooses an index in [0, n) from the plan. n must be positive.
 pub fn pick(mut p: Plan, n: u64) -> u64 {
     let threshold = int.wrapping_neg(n) % n
     if let Some(mut scripted) = p.scripted {
-        let word = if scripted.next < list.len(scripted.words) {
-            let word = scripted.words[scripted.next]
-            scripted.next += 1
-            word
-        } else {
-            draw(mut p.state)
-        }
-        let (high, _) = int.mul_wide(word, n)
+        let (high, _) = int.mul_wide(scripted_word(mut scripted, mut p.state), n)
         return high
     }
     loop {
@@ -167,4 +169,205 @@ pub fn test_seed(e: Env) -> Option[u64] {
         },
         _ => None
     }
+}
+
+pub type CampaignMode: key = Sweep | Mutate
+
+pub type CampaignConfig {
+    seed: u64,
+    cases: u64,
+    providers: u64,
+    max_draws: u64,
+    max_features: u64,
+    case_steps: u64,
+    case_bytes: u64
+}
+
+pub type ScriptCase: send {
+    script: Script,
+    index: u64,
+    world_seed: u64
+}
+
+pub type CampaignResult {
+    cases: u64,
+    features: u64,
+    failure: Option[ScriptCase]
+}
+
+type DrawPoint: key + send {
+    provider: u64,
+    site: u64,
+    slot: u64,
+    arity: u64
+}
+
+type Observation: send {
+    point: DrawPoint,
+    word: u64,
+    outcome: u64
+}
+
+pub opaque type Feedback: send {
+    draws: List[Observation],
+    max_draws: u64
+}
+
+pub type ScriptRun: send {
+    trial: ScriptCase,
+    tasks: Tasks,
+    feedback: Feedback
+}
+
+/// Records the consumed word and modeled outcome of a observation from a scripted plan.
+pub fn pick_observed(mut p: Plan, mut feedback: Feedback, provider: u64, site: u64, arity: u64) -> u64 {
+    if arity == 0 {
+        fail("sim.world: a observation must have positive arity")
+    }
+    let word = if let Some(mut scripted) = p.scripted {
+        scripted_word(mut scripted, mut p.state)
+    } else {
+        fail("sim.world: observed draws require a scripted plan")
+    }
+    let (outcome, _) = int.mul_wide(word, arity)
+    if list.len(feedback.draws) < feedback.max_draws {
+        let mut slot: u64 = 0
+        for prior in feedback.draws {
+            if prior.point.provider == provider {
+                slot += 1
+            }
+        }
+        list.push(mut feedback.draws, Observation(point: DrawPoint(provider, site, slot, arity), word, outcome))
+    }
+    outcome
+}
+
+/// The first word whose multiply-high observation chooses index at the given arity.
+fn word_for(index: u64, arity: u64) -> u64 {
+    let mut lo: u64 = 0
+    let mut hi: u64 = 0xffffffffffffffff
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let (bucket, _) = int.mul_wide(mid, arity)
+        if bucket < index {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    lo
+}
+
+type Mutation {
+    script: Script,
+    point: DrawPoint,
+    next: u64
+}
+
+/// Save the exercised prefix so appending a word sees the same earlier draws.
+fn witness(s: Script, trace: Feedback, point: DrawPoint) -> Script {
+    let mut candidate: Script = clone(s)
+    let mut prefix: List[u64] = list.new()
+    for observation in trace.draws {
+        if observation.point.provider == point.provider && observation.point.slot <= point.slot {
+            list.push(mut prefix, observation.word)
+        }
+    }
+    for i in list.len(prefix) .. list.len(candidate.streams[point.provider]) {
+        list.push(mut prefix, candidate.streams[point.provider][i])
+    }
+    candidate.streams[point.provider] = take prefix
+    take candidate
+}
+
+fn feature(observation: Observation) -> (u64, u64, u64) {
+    let (bucket, _) = int.mul_wide(word_for(observation.outcome, observation.point.arity), 16)
+    (observation.point.provider, observation.point.site, bucket)
+}
+
+fn next_mutation(mut pending: List[Mutation]) -> Option[Script] {
+    let Some(take pending_edit) = list.pop(mut pending) else {
+        return None
+    }
+    let mut edit = take pending_edit
+    let point = edit.point
+    let count = order.min(point.arity, 16u64)
+    let index = (point.arity / count) * edit.next + (point.arity % count) * edit.next / count
+    let mut s: Script = clone(edit.script)
+    s.streams[point.provider][point.slot] = word_for(index, point.arity)
+    edit.next += 1
+    if edit.next < count {
+        list.push(mut pending, take edit)
+    }
+    Some(take s)
+}
+
+/// Runs the law with at most one candidate per case. The same seed source and
+/// case identities apply to both modes. The callback records draws in provider
+/// order and supplies the law's own verdict.
+pub fn campaign(tasks: Tasks, mode: CampaignMode, cfg: CampaignConfig, make: scoped fn(u64) -> Script, law: fn(take ScriptRun) -> (bool, Feedback) waits) -> CampaignResult waits {
+    let mut coverage: set.Set[(u64, u64, u64)] = set.new()
+    let mut locations: set.Set[DrawPoint] = set.new()
+    let mut pending: List[Mutation] = list.new()
+    let max_draws = cfg.providers * cfg.max_draws
+    for index in 0u64 .. cfg.cases {
+        let choice: Option[Script] = match mode {
+            Sweep => None,
+            Mutate => next_mutation(mut pending),
+        }
+        let s = match take choice {
+            Some(take candidate) => take candidate,
+            None => make(int.wrapping_add(cfg.seed, index)),
+        }
+        let sample = ScriptCase(script: take s, index, world_seed: prop.world_seed(cfg.seed, index))
+        let saved: ScriptCase = clone(sample)
+        let input = ScriptRun(trial: take sample, tasks, feedback: Feedback(draws: list.new(), max_draws))
+        let admitted = bound steps cfg.case_steps {
+            task.try_spawn(tasks, bytes cfg.case_bytes, take input, law)
+        }
+        let Ok(Ok(take started)) = take admitted else {
+            fail("sim.world: campaign case could not start within its resource limits")
+        }
+        let Ok((passed, take trace)) = task.join(take started) else {
+            fail("sim.world: campaign case failed outside its law verdict")
+        }
+        let trial = take saved
+        if !passed {
+            return CampaignResult(cases: index + 1, features: set.len(coverage), failure: Some(take trial))
+        }
+        for observation in trace.draws {
+            let key = feature(observation)
+            if set.len(coverage) >= cfg.max_features || set.contains(coverage, key) {
+                continue
+            }
+            set.insert(mut coverage, key)
+            if mode == Mutate && observation.point.provider < cfg.providers && observation.point.provider < list.len(trial.script.streams) && observation.point.slot < cfg.max_draws && !set.contains(locations, observation.point) {
+                set.insert(mut locations, observation.point)
+                list.push(mut pending, Mutation(script: witness(trial.script, trace, observation.point), point: observation.point, next: 0))
+            }
+        }
+    }
+    CampaignResult(cases: cfg.cases, features: set.len(coverage), failure: None)
+}
+
+/// Encodes the words and list continuations consumed by script_gen.
+pub fn script_tape(s: Script, providers: u64, max_draws: u64) -> List[u64] {
+    if list.len(s.streams) != providers {
+        fail("sim.world: script does not match the provider count")
+    }
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, s.tail_seed)
+    for stream in s.streams {
+        if list.len(stream) > max_draws {
+            fail("sim.world: script exceeds the generator's prefix limit")
+        }
+        for word in stream {
+            list.push(mut tape, 1)
+            list.push(mut tape, word)
+        }
+        if list.len(stream) < max_draws {
+            list.push(mut tape, 0)
+        }
+    }
+    take tape
 }

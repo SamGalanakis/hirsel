@@ -1677,11 +1677,15 @@ impl FunctionEmitter<'_> {
     }
     /// Address a byte within a place. At offset zero the base is the address.
     fn offset(&mut self, p: &Value, n: impl Into<i128>) -> Value {
+        self.offset_with_bounds(p, n, false)
+    }
+
+    fn offset_with_bounds(&mut self, p: &Value, n: impl Into<i128>, in_place: bool) -> Value {
         let n = n.into();
         if n == 0 {
             return p.clone();
         }
-        self.gep(&Type::I8, p, &int(n), false)
+        self.gep(&Type::I8, p, &int(n), in_place)
     }
     fn offset_by(&mut self, p: &Value, n: &Value) -> Value {
         self.gep(&Type::I8, p, n, false)
@@ -2164,7 +2168,7 @@ impl FunctionEmitter<'_> {
             } => {
                 let p = self.address(address);
                 let memory = Memory {
-                    align: 1,
+                    align: self.read_write_alignment(address, self.vty(result)),
                     range: self.seq_word_range(address),
                     scopes: self.access_facts(&[address]),
                     tbaa: self
@@ -2183,7 +2187,7 @@ impl FunctionEmitter<'_> {
                 let p = self.address(address);
                 let x = self.numeric(value);
                 let memory = Memory {
-                    align: 1,
+                    align: self.read_write_alignment(address, self.vty(value)),
                     scopes: self.access_facts(&[address]),
                     tbaa: self
                         .facts

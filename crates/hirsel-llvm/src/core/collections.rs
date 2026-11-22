@@ -218,7 +218,13 @@ pub(super) fn glue(
             let next = e.bin(Binary::Add, &i64, &cursor, &int(1));
             e.store(&i64, &next, &cursor_at, 0);
             let buffer = e.load(&Type::Ptr, &payload, 1);
-            let entry = e.gep(&Type::bytes(entries.stride), &buffer, &index, false);
+            // Only this edge has index < the allocated collection extent.
+            let entry = e.gep(
+                &Type::bytes(entries.stride),
+                &buffer,
+                &index,
+                facts && entries.stride != 0,
+            );
             if let Some(state) = entries.state {
                 let state = e.carrier_word(&entry, state);
                 let live = e.cmp(Predicate::Eq, &i64, &state, &int(1));

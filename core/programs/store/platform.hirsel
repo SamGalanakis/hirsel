@@ -45,6 +45,17 @@ pub type DeployRow: codec + send {
     outcome: DeployOutcome,
 }
 
+// A recording pin (launch.md "Host assembly"): the assembly record a recorded serving
+// process ran, kept as a root until `expires`, in Unix seconds. Keyed by the 16-byte
+// recording ID that the tape's Run routing block names.
+pub type Pin: codec + send {
+    assembly: Bytes,
+    expires: u64
+}
+
+// What a pin lookup finds. An absent pin and an expired one are both `Gone`.
+pub type Resolved: codec + send = Found(Bytes) | Gone
+
 pub type Quota: codec + send {
     groups: u64,
     live: u64
@@ -132,7 +143,7 @@ type Tables {
     dirty: store.Table[String, u64],
     due: store.Table[DueKey, u8],
     deploys: store.Table[String, DeployRow],
-    pins: store.Table[Bytes, u64],
+    pins: store.Table[Bytes, Pin],
     quotas: store.Table[String, Quota],
     usage: store.Table[String, Usage],
     config: store.Table[u64, Config],
@@ -226,12 +237,13 @@ fn make_tables(mut db: store.Db) -> Result[Tables, store.Error] waits {
     let config_codec: std.codec.Codec[Config] = std.codec.of()
     let meta: std.codec.Codec[Meta] = std.codec.of()
     let retired: std.codec.Codec[Retired] = std.codec.of()
+    let pins: std.codec.Codec[Pin] = std.codec.of()
     created(store.create_table(mut db, store.spec("platform.groups", std.codec.key_string(), groups)))?
     created(store.create_table(mut db, store.spec("platform.wake", std.codec.key_string(), wake_codec)))?
     created(store.create_table(mut db, store.spec("platform.dirty", std.codec.key_string(), std.codec.of_u64())))?
     created(store.create_table(mut db, store.spec("platform.due", due_key(), std.codec.of_u8())))?
     created(store.create_table(mut db, store.spec("platform.deploys", std.codec.key_string(), deploys)))?
-    created(store.create_table(mut db, store.spec("platform.pins", std.codec.key_bytes(), std.codec.of_u64())))?
+    created(store.create_table(mut db, store.spec("platform.pins", std.codec.key_bytes(), pins)))?
     created(store.create_table(mut db, store.spec("platform.quotas", std.codec.key_string(), quotas)))?
     created(store.create_table(mut db, store.spec("platform.usage", std.codec.key_string(), usage)))?
     created(store.create_table(mut db, store.spec("platform.config", std.codec.key_u64(), config_codec)))?
@@ -243,7 +255,7 @@ fn make_tables(mut db: store.Db) -> Result[Tables, store.Error] waits {
         dirty: store.table(mut db, "platform.dirty", std.codec.key_string(), std.codec.of_u64())?,
         due: store.table(mut db, "platform.due", due_key(), std.codec.of_u8())?,
         deploys: store.table(mut db, "platform.deploys", std.codec.key_string(), std.codec.of())?,
-        pins: store.table(mut db, "platform.pins", std.codec.key_bytes(), std.codec.of_u64())?,
+        pins: store.table(mut db, "platform.pins", std.codec.key_bytes(), std.codec.of())?,
         quotas: store.table(mut db, "platform.quotas", std.codec.key_string(), std.codec.of())?,
         usage: store.table(mut db, "platform.usage", std.codec.key_string(), std.codec.of())?,
         config: store.table(mut db, "platform.config", std.codec.key_u64(), std.codec.of())?,
@@ -1456,6 +1468,47 @@ fn finish_retire(mut h: Host, grp: launcher.Group, now: Now, mut out: List[launc
     let _ = map.remove(mut h.vol, name)
     list.push(mut out, Close(clone(grp)))
     retry_queue(mut h, now, mut out)
+}
+
+// Makes a recording pin durable. The host calls this before it starts the recorded
+// serving process, so a recording never runs without the pin that names its assembly.
+pub fn keep_pin(mut h: Host, id: Bytes, assembly: Bytes, expires: u64) -> Result[(), Refused] waits {
+    if list.len(id) != 16u64 {
+        return Error(Missing("recording id"))
+    }
+    if list.len(assembly) != 32u64 {
+        return Error(Missing("assembly"))
+    }
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            st(store.put(mut tx, t.pins, id, Pin(assembly: clone(assembly), expires: expires)))
+        })
+    }
+    decided(mut h.db, take made)
+}
+
+// An operator removes a recording pin. Replay of that recording then finds it `Gone`, even
+// while another root keeps its image.
+pub fn forget_pin(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let _ = st(store.delete(mut tx, t.pins, id))?
+            Ok(())
+        })
+    }
+    decided(mut h.db, take made)
+}
+
+// The pin lookup replay makes first (launch.md "Host assembly"): `Found(assembly)` while
+// `now` is before the expiry, in Unix seconds, and `Gone` from the expiry on or when no
+// pin exists. A store error is an error, never `Gone`.
+pub fn resolve_pin(h: Host, id: Bytes, now: u64) -> Result[Resolved, Refused] {
+    match st(store.get(store.snapshot(h.db), store.shape(h.t.pins), id))? {
+        Some(p) if now < p.expires => Ok(Found(clone(p.assembly))),
+        _ => Ok(Gone),
+    }
 }
 
 pub fn retirement(h: Host, name: String) -> Option[Retired] {

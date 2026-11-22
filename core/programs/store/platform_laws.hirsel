@@ -625,3 +625,46 @@ fn wake_probe_bound(c: Clock, rnd: Random) -> Result[(), ()] waits {
     }
     Ok(())
 }
+
+fn bytes_of(n: u64, b: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        list.push(mut out, b)
+    }
+    out
+}
+
+fn finds(h: Host, id: Bytes, now: u64, want: Bytes) -> bool {
+    match resolve_pin(h, id, now) {
+        Ok(Found(got)) => got == want,
+        _ => false,
+    }
+}
+
+fn pin_gone(h: Host, id: Bytes, now: u64) -> bool {
+    match resolve_pin(h, id, now) {
+        Ok(Gone) => true,
+        _ => false,
+    }
+}
+
+// `pin_expiry` (launch.md "Host assembly", docs/recording.md): a recording pin is durable
+// before its recorded process starts, survives a host restart, resolves to its assembly
+// strictly before its expiry, and is `Gone` from the expiry second on, when absent, and
+// after an operator removes it.
+@test
+fn pin_expiry(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    let id = bytes_of(16u64, 3u8)
+    let other = bytes_of(16u64, 4u8)
+    let expires = 1700000000u64 + 30u64 * 86400u64
+    expect(pin_gone(r.h, id, 0u64), "pin: an absent pin resolved")
+    must(keep_pin(mut r.h, id, image(), expires), "keep_pin")
+    let mut kept = restart(take r, 4u64)
+    expect(finds(kept.h, id, expires - 1u64, image()), "pin: the pin did not resolve one second before its expiry")
+    expect(pin_gone(kept.h, id, expires), "pin: the pin resolved at its expiry")
+    expect(pin_gone(kept.h, other, 0u64), "pin: another recording ID resolved")
+    must(forget_pin(mut kept.h, id), "forget_pin")
+    expect(pin_gone(kept.h, id, 0u64), "pin: a removed pin resolved")
+    Ok(())
+}

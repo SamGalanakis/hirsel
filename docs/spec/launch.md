@@ -495,7 +495,11 @@ tables of that store:
   `Clean(Option[next_due])`) and its generation counter;
 - `deploys`: each pending deploy attempt and its assembly record (the "pending record"
   above);
-- `pins`: each recording pin and its expiry;
+- `pins`: per 16-byte recording ID, the 32-byte name of the assembly record the recorded
+  process runs and its expiry in Unix seconds. The host makes the row durable before it
+  starts the recorded process. A lookup at time `now` finds the assembly only while
+  `now < expiry`; an absent row, an expired one and one an operator removed are all `Gone`.
+  A store error is an error, never `Gone`;
 - `quotas`: per tenant, its limits on groups, live groups, bytes and deploy rate;
 - `config`: the host's `max_places` and its other bounds.
 

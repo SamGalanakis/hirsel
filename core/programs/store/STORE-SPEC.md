@@ -2008,9 +2008,9 @@ OPENED means I opened the file at that revision. KNOWN means I know it but did n
 
 ---
 
-## 11. M1 format-3 store (built in M1-4)
+## 11. M1 format-3 store
 
-> **Status: M1-4, M1-6 and M1-7 built.** L38 and L40 qualify AP12's public scoped views. AP17–AP19's journaled fork remains planned. L43 and L44 qualify that slice. The writer uses the cut path for every fork. §11 governs format 3. Its rules supersede the format-2 node layout, checkpoint task, capacity results and open order in the earlier sections. The earlier API and journal rules still apply where §11 refers to them. See `store-wholehog/M1-DESIGN.md` for the slice plan and gates.
+> **Status: M1-4, M1-5, M1-6 and M1-7 built.** L38 and L40 qualify AP12's public scoped views. The writer journals live-head forks under AP17–AP19, qualified by L43 and L44. §11 governs format 3. Its rules supersede the format-2 node layout, checkpoint task, capacity results and open order in the earlier sections. The earlier API and journal rules still apply where §11 refers to them. See `store-wholehog/M1-DESIGN.md` for the slice plan and gates.
 
 Integers are little-endian unless marked BE, as in §2. "str" and "bytes" have §2's meanings. xxh3-64 always means seed 0 with the default secret (E1).
 

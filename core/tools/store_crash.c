@@ -22,6 +22,7 @@ extern void store_crash_free(void *);
 extern void store_crash_orphan_end(void *);
 extern uint8_t store_crash_crashed(void *);
 extern void store_crash_checkpoint_reopen(void *);
+extern void store_crash_journal_fork(void *, uint8_t);
 extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
 
@@ -108,7 +109,7 @@ static void schedule_event(void *state,HirselCoreEvent event) {
 /* journal-ack (L24 (iv)(a)): each Sync answers Until(now) twice, so it stays
  * parked across exactly one scheduler turn of the other tasks. Counted in
  * turns, not time: an expired Until re-runs wait at the next turn. */
-static struct { int enabled, schedule_probe; uint64_t token[64], calls[64]; } hold;
+static struct { int enabled, schedule_probe, child_probe; uint64_t token[64], calls[64]; } hold;
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
     (void)state;
     /* SleepUntil (the runner's deadline timers) waits on host time and never reaches the
@@ -116,11 +117,13 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
     if(request->operation==15) return (HirselCoreWait){1,UINT64_MAX};
     const int probe=hold.schedule_probe && request->operation==12 &&
         request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
-    if((hold.enabled && request->operation==16) || probe) {
+    const int child=hold.child_probe && request->operation==2 && request->buffer.len>=20 &&
+        !memcmp(request->buffer.data,"\x11\0",2) && !memcmp(request->buffer.data+16,"\x01\0\0\0",4);
+    if((hold.enabled && request->operation==16) || probe || child) {
         /* Tokens are unique per operation; concurrent syncs keep separate counts. */
         uint64_t *calls=&hold.calls[token%64];
         if(hold.token[token%64]!=token) {hold.token[token%64]=token; *calls=0;}
-        if((*calls)++<(probe?1u:2u)) {
+        if((*calls)++<(probe||child?1u:2u)) {
             struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
             return (HirselCoreWait){1,(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec};
         }
@@ -223,6 +226,12 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
     if(checkpoint_reopen) store_crash_checkpoint_reopen(state);
+    int fork_image=!strcmp(scenario,"journal-fork")?0:!strcmp(scenario,"journal-fork-ack-cut")?1:
+        !strcmp(scenario,"journal-fork-complete")?2:!strcmp(scenario,"journal-fork-torn")?3:
+        !strcmp(scenario,"journal-fork-bad-end")?4:!strcmp(scenario,"journal-fork-child-unwritten")?5:-1;
+    if(fork_image>=0) {
+        store_crash_journal_fork(state,(uint8_t)fork_image);
+    }
     HirselCoreProvider provider={state,ready,issue,resume,cancel,deliver};
     HirselCoreEntryGrant caps[16]; uint64_t grants[16];
     for(size_t i=0;i<input->parameters_len;i++) {
@@ -241,6 +250,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
         parked.phase=phase; parked.worker=0;
         hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
+        hold.child_probe=phase==1 && fork_image==5;
         hold.schedule_probe=seed && phase==1 &&
             (!strcmp(scenario,"journal-group") || !strcmp(scenario,"journal-rotate"));
         const char *expected=store_crash_acked(state)?"new":"prefix";

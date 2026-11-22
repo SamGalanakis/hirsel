@@ -163,13 +163,14 @@ every repair, and its Cover is that subscription's alone: no result is shared
 between subscriptions, so one Caller's result never reaches another.
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
-from)` makes a branch at a Snapshot of this open. Before making a cut, it
-counts the distinct row versions and collections reached by the proposed
-heads and named pins against `resident_limit` (AP15). A row version previously
-held only by a reader joins the account if the new head reaches it.
-If the account exceeds the limit, `fork` returns `Full(Resident(c))` with the exact requested
-bytes and the limit. It makes no cut and creates no branch. `branch(db, name)`
-finds a branch.
+from)` makes a branch at a Snapshot of this open. A live-head fork shares the
+parent's roots, adds zero to the logical account, and returns a durable ticket.
+On disk it syncs a FORK frame before returning the branch (AP17–AP19).
+A fork of an older Snapshot or of a deleted branch counts the proposed heads
+and pins against `resident_limit` before making a cut (AP15). A row version
+previously held only by a reader joins the account if the new head reaches it.
+If the account exceeds the limit, `fork` returns `Full(Resident(c))` with the
+exact requested bytes and the limit. `branch(db, name)` finds a branch.
 `adopt(mut db, b)` makes b's head main's head only when b is not main, b's parent
 is 0 and main's head is still b's fork point; otherwise, or when b is no longer
 live, it is `Diverged(b)`. `delete_branch` removes a branch. `pin(mut db, name,
@@ -207,13 +208,13 @@ a closed rotation sender poisons the Db and takes no Cut.
 
 ## Format 3
 
-STORE-SPEC §11 specifies the paged store. AP17–AP19 describe the planned journaled fork.
+STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
 
 - **Pages.** Trees use packed pages (`Arc[Page]`, 4 KiB target). A cut writes
   the canonical format. A published in-memory image may be unsealed, and readers find entries by slot
   (AP2, AP3).
 - **Format 3.** A format-2 directory is `Unsupported(format)`, with no migration.
-  The new kinds are PAGE, BLOB and MANIFEST 0x0031. NODE 0x0020 and
+  The new kinds are PAGE, BLOB, FORK 0x0013 and MANIFEST 0x0031. NODE 0x0020 and
   MANIFEST 0x0030 are retired and refused whatever their MUST bit (AP1). The
   MANIFEST's pack and retirement lists are page trees in their own packs, so
   the MANIFEST holds only fixed fields and branch and pin records, and no cut
@@ -281,10 +282,10 @@ STORE-SPEC §11 specifies the paged store. AP17–AP19 describe the planned jour
 - **Journal cap.** Until a cut succeeds the journal keeps growing, up to
   `journal_limit` (default 268,435,456 bytes; at least `checkpoint_bytes` +
   `FRAME_LIMIT`, or open is `Full(Journal(c))` before it takes the lock). The
-  journal counts accepted COMMIT bytes. A write whose frame would pass
+  journal counts accepted COMMIT and FORK bytes. A write whose frame would pass
   the limit is refused at once, never waiting, through each operation's own
   result: `run` and `run_on` return `Refused(Journal(c))`. A committing `admit`
-  returns `Full(Journal(c))`, `serve` returns
+  or a live-head `fork` returns `Full(Journal(c))`. `serve` returns
   `Before(Full(Journal(c)), None)`, and `conclude` returns
   `Before(Full(Journal(c)), Some(p))`, handing its Pending back so a retry after
   a checkpoint writes the original context. Here c is
@@ -292,8 +293,15 @@ STORE-SPEC §11 specifies the paged store. AP17–AP19 describe the planned jour
   A journal refusal is never `NoRoom`, so it never counts toward a claim's
   resident refusals or settle 2. A `checkpoint` or any other cut-made
   operation is the way out (AP15, AP16).
-- **Fork.** A disk `fork` makes a cut for any Snapshot of the open, including a
-  Snapshot at a live branch head. The empty name is allowed.
+- **Fork.** A Snapshot whose version and three root stamps match its live
+  branch head takes the journal path on disk. `fork` returns after the FORK
+  sync, with an already durable journal ticket. Memory stores issue the same
+  ticket kind without I/O. The fork leaves the logical account and its exact
+  flag unchanged. A FORK can trigger a threshold cut. If that cut is refused
+  for allocation or id space, the fork still succeeds. If cut I/O fails, the
+  Db is poisoned and recovery restores the durable fork. `recorded` skips
+  FORK frames and export recovery applies them in journal order.
+  The empty name is allowed on both paths.
   A fork past the id counter is `Limit(Ids)`. A fork or `pin` whose record
   would take the branch and pin records past 16 MiB is `Limit(Manifest)`; the
   pack lists never cause it (AP4).

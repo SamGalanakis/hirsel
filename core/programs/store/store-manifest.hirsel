@@ -1,4 +1,5 @@
 const MANIFEST_LIMIT: u64 = 16777368
+const META_LIMIT: u64 = 16777216
 
 const PAGE_LIMIT: u64 = 8384
 

@@ -613,6 +613,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ListPlan> {
         let logical = self.layout_size(item, true, n)?;
+        self.list_plan_with_logical(item, logical, count, extra, n)
+    }
+
+    pub(super) fn list_plan_with_logical(
+        &mut self,
+        item: TyId,
+        logical: ValueId,
+        count: ValueId,
+        extra: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ListPlan> {
         let stride = self.layout_size(item, false, n)?;
         let (raw_charge, mul_overflow) =
             self.list_arith(ArithOp::Mul, ArithMode::Checked, count, logical, n);

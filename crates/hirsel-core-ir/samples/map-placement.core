@@ -1,0 +1,45 @@
+; PROG-11 placement operations under run key 00 01 ... 0f.
+core v1
+type t0 = scoped "PlacementState" { words: array 5 u64 }
+static d0 = align 1 hex 6162636465666768696a6b6c6d6e6f7071
+sig g0 = (u64) -> (u64, u64)
+sig g1 = (u64) -> (u64)
+sig g2 = (ptr, u64) -> (u64)
+sig g3 = (ptr) -> ()
+sig g4 = (ptr, u64) -> ()
+sig g5 = (ptr) -> (u64)
+inst n0 = samples@0/map_placement/word [] []
+inst n1 = samples@0/map_placement/fast_bytes [] []
+inst n2 = samples@0/map_placement/strong_bytes [] []
+inst n3 = samples@0/map_placement/state [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = call rt.map_place_word g1 (v0)
+  v2: u64 = call rt.map_strong_word g1 (v0)
+  return v1, v2
+}
+fn f1 = n1 g1 {
+b0(v0: u64):
+  v1: ptr = static d0
+  v2: u64 = call rt.map_place_bytes g2 (v1, v0)
+  return v2
+}
+fn f2 = n2 g1 {
+b0(v0: u64):
+  v1: ptr = static d0
+  v2: u64 = call rt.map_strong_bytes g2 (v1, v0)
+  return v2
+}
+fn f3 = n3 g1 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+b0(v0: u64):
+  live s0
+  address a0
+  v1: ptr = pointer a0
+  call rt.map_strong_start g3 (v1)
+  call rt.map_hash_add_word g4 (v1, v0)
+  v2: u64 = call rt.map_hash_finish g5 (v1)
+  dead s0
+  return v2
+}

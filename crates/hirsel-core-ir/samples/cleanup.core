@@ -38,15 +38,15 @@
 ; provider and ignores the outcome, admitting nothing (core.md, MEM-24); the trace
 ; records the close by the handle.
 ; run: f6(7, 10) -> | used 0 | trace 10, 7            ; r, then f: reverse order
-; A Map carrier is {entries, slots, capacity}; an entry of Map[u64, Res] is hash (0), state
-; (8: 1 live, 0 removed), key (16), value (24), stride 32 (layout `map_entry`). f7 builds
+; A Map carrier is {entries, slots, capacity}; an entry of Map[u64, Res] has meta
+; (0: nonzero live, zero removed), key (8), value (16), stride 24 (layout `map_entry`). f7 builds
 ; the state after the inserts and the remove: three slots, the second removed (its key and
 ; value already cleaned by `map.remove`, its value word left 0). The drop cleans the live
 ; entries in insertion order, each key before its value, skips the removed one, then frees
 ; the entries (3 × 32 charged); an empty map (capacity 0) has no storage:
 ; run: f7(true) -> | used 0 | trace 10, 30
 ; run: f7(false) -> | used 0
-; Refused, the 96-byte entries block is never made: t is the empty map, mk never runs,
+; Refused, the 96-byte charge is never admitted: t is the empty map, mk never runs,
 ; and nothing is cleaned:
 ; run limit 64: f7(true) -> | used 0
 ; mk failing (FAIL-2's unwrap) after the block is made frees the block, and a failing
@@ -331,7 +331,8 @@ b0(v0: bool):
 b1:
   v4: u64 = const 96
   v5: u64 = const 3
-  v6: ptr, v7: u64 = alloc for map u64 t0 v4 align 8 charge v4
+  v26: u64 = const 184
+  v6: ptr, v7: u64 = alloc for map u64 t0 v26 align 8 charge v4
   v24: ptr = const 0x0
   v25: bool = ne v6, v24
   branch v25, b2, b3                   ; refused: t stays an empty map
@@ -339,18 +340,19 @@ b2:
   v8: u64 = const 1
   v12: u64 = const 10
   v13: ptr = call f0 g0 (v12) fail b5
-  v9: u64 = const 8                    ; entry 0: live, key 1, mk(10)
-  v10: u64 = const 16
-  v11: u64 = const 24
+  v27: u64 = const 72057594037927936
+  v9: u64 = const 0                    ; entry 0: live, key 1, mk(10)
+  v10: u64 = const 8
+  v11: u64 = const 16
   address a4
   address a5
   address a6
-  store a4, v8
+  store a4, v27
   store a5, v8
   store a6, v13
-  v14: u64 = const 40                  ; entry 1: removed, value word 0
-  v15: u64 = const 48
-  v16: u64 = const 56
+  v14: u64 = const 24                  ; entry 1: removed, value word 0
+  v15: u64 = const 32
+  v16: u64 = const 40
   v17: u64 = const 2
   address a7
   address a8
@@ -360,13 +362,13 @@ b2:
   store a9, v1
   v18: u64 = const 30
   v19: ptr = call f0 g0 (v18) fail b6
-  v20: u64 = const 72                  ; entry 2: live, key 3, mk(30)
-  v21: u64 = const 80
-  v22: u64 = const 88
+  v20: u64 = const 48                  ; entry 2: live, key 3, mk(30)
+  v21: u64 = const 56
+  v22: u64 = const 64
   address a10
   address a11
   address a12
-  store a10, v8
+  store a10, v27
   store a11, v5
   store a12, v19
   store a0, v6

@@ -22,6 +22,16 @@ pub extern "C" fn hirsel_core_test_context_new(bytes: u64) -> *mut hirsel_core_r
     context.set_test_available(bytes);
     Box::into_raw(Box::new(context))
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_test_context_new_map_vectors(
+    bytes: u64,
+) -> *mut hirsel_core_rt::Context {
+    let context = hirsel_core_test_context_new(bytes);
+    // SAFETY: the new context belongs to this test caller until it is returned.
+    unsafe { (*context).set_test_map_key(&std::array::from_fn(|i| i as u8)) };
+    context
+}
 /// # Safety
 /// Context is live and exclusively borrowed.
 #[unsafe(no_mangle)]

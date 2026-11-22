@@ -76,6 +76,25 @@ pub struct Checked {
     pub task_stack_peak: usize,
     /// Largest active evaluator activation chain in a spawned task.
     pub task_call_depth: usize,
+    #[cfg(feature = "map-observation")]
+    pub maps: Option<MapObservation>,
+}
+
+#[cfg(feature = "map-observation")]
+#[derive(Debug, Default, PartialEq)]
+pub struct MapObservation {
+    pub fast_peak: u64,
+    pub strong_peak: u64,
+    pub strong_searches: u64,
+    pub strong_groups: u64,
+    pub promotions: u64,
+    pub rebuilds: u64,
+    pub rebuild_promotions: u64,
+    pub resumed_installs: u64,
+    pub last_word_strong: bool,
+    groups: u64,
+    rebuilding: bool,
+    promoted_in_rebuild: bool,
 }
 
 /// The modelled provider (CAP-5), deterministic so runs can be derived by hand:
@@ -96,6 +115,10 @@ pub struct Checked {
 #[derive(Default)]
 struct World {
     map_hash_key: [u8; 16],
+    map_fast_salt: [u64; 2],
+    map_strong_key: [u8; 16],
+    #[cfg(feature = "map-observation")]
+    maps: Option<MapObservation>,
     launch_target: (u64, u64),
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
@@ -1216,6 +1239,29 @@ pub fn run_map_hash(
     );
     (report, checked.steps)
 }
+
+/// Observe the probe and rebuild paths of the emitted CoreIR in a fixed-key run.
+#[cfg(feature = "map-observation")]
+pub fn run_map_observed(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    key: [u8; 16],
+) -> (Report, Checked) {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            map_hash_key: key,
+            observe_maps: true,
+            events: true,
+            ..WorldInput::default()
+        },
+    )
+}
 /// Where a run's NaNs take their one observable pattern (FORM #97: only a `reinterpret`
 /// from a float observes the pattern, and it gives the canonical one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1496,6 +1542,8 @@ pub fn run_host_stdio(
 
 struct WorldInput<'a> {
     map_hash_key: [u8; 16],
+    #[cfg(feature = "map-observation")]
+    observe_maps: bool,
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
     launch: Option<&'a hirsel_core_ids::launch::Metadata>,
@@ -1523,6 +1571,8 @@ impl Default for WorldInput<'_> {
         Self {
             network: None,
             map_hash_key: [0; 16],
+            #[cfg(feature = "map-observation")]
+            observe_maps: false,
             network_out: None,
             launch: None,
             revisions: None,
@@ -1760,6 +1810,8 @@ fn run_world(
         copies: mach.copies,
         task_stack_peak: mach.task_stack_peak,
         task_call_depth: mach.task_call_depth,
+        #[cfg(feature = "map-observation")]
+        maps: mach.world.maps.take(),
     };
     let report = Report {
         outcome,
@@ -1963,6 +2015,7 @@ fn cause(r: RaiseCause) -> &'static str {
 
 impl<'m> Machine<'m> {
     fn new(m: &'m Module, recipes: Vec<Recipe>, limit: u64, input: &WorldInput<'_>) -> Self {
+        let (s0, s1, map_strong_key) = hirsel_core_layout::map_index::derive(&input.map_hash_key);
         Self {
             next_step_bound: 1,
             m,
@@ -1985,6 +2038,10 @@ impl<'m> Machine<'m> {
             injection: input.injection,
             world: World {
                 map_hash_key: input.map_hash_key,
+                map_fast_salt: [s0, s1],
+                map_strong_key,
+                #[cfg(feature = "map-observation")]
+                maps: input.observe_maps.then(MapObservation::default),
                 launch: Some(input.launch.cloned().unwrap_or_else(|| {
                     hirsel_core_ids::launch::Metadata::source(
                         "",
@@ -5654,7 +5711,7 @@ impl Machine<'_> {
                 let mut failed = false;
                 for i in 0..slots {
                     let entry = block + i * e.stride;
-                    if self.load(entry + e.state, 8) == 1 {
+                    if self.load(entry + e.meta, 8) != 0 {
                         failed |= self.drop_field(t, entry + e.key, k);
                         failed |= self.drop_field(t, entry + e.value, v);
                     }
@@ -6346,6 +6403,44 @@ impl Machine<'_> {
                 self.store_map_hash(a[0], state);
                 vec![]
             }
+            RtOp::MapPlaceWord => {
+                #[cfg(feature = "map-observation")]
+                if let Some(stats) = &mut self.world.maps {
+                    stats.last_word_strong = false;
+                }
+                vec![hirsel_core_layout::map_index::fast_word(
+                    a[0],
+                    self.world.map_fast_salt[0],
+                )]
+            }
+            RtOp::MapPlaceBytes | RtOp::MapStrongBytes => {
+                let bytes = if a[1] == 0 {
+                    &[]
+                } else {
+                    self.get(a[0], a[1] as usize)
+                };
+                let [s0, s1] = self.world.map_fast_salt;
+                vec![if op == RtOp::MapPlaceBytes {
+                    hirsel_core_layout::map_index::fast_bytes(bytes, s0, s1)
+                } else {
+                    hirsel_core_layout::map_hash::bytes(&self.world.map_strong_key, bytes)
+                }]
+            }
+            RtOp::MapStrongWord => {
+                #[cfg(feature = "map-observation")]
+                if let Some(stats) = &mut self.world.maps {
+                    stats.last_word_strong = true;
+                }
+                vec![hirsel_core_layout::map_hash::word(
+                    &self.world.map_strong_key,
+                    a[0],
+                )]
+            }
+            RtOp::MapStrongStart => {
+                let state = hirsel_core_layout::map_hash::State::new(&self.world.map_strong_key);
+                self.store_map_hash(a[0], state);
+                vec![]
+            }
             RtOp::MapHashAddWord => {
                 let mut state = self.load_map_hash(a[0]);
                 state.word(a[1]);
@@ -6687,7 +6782,47 @@ impl Machine<'_> {
             roles,
             spans: HashMap::new(),
         });
+        #[cfg(feature = "map-observation")]
+        let (probe, rebuild, promotes_rebuild, strong) = if let Some(stats) = &mut self.world.maps {
+            let definition = &m.instances[m.functions[f.index()].instance.index()].definition;
+            let probe = definition.is_core("map.probe");
+            let rebuild = definition.is_core("map.rebuild");
+            if probe {
+                stats.groups = 0;
+            }
+            if rebuild {
+                stats.rebuilding = true;
+                stats.rebuilds += 1;
+            }
+            (
+                probe,
+                rebuild,
+                stats.rebuilding && definition.is_core("map.promote"),
+                stats.last_word_strong,
+            )
+        } else {
+            (false, false, false, false)
+        };
         let r = self.activation(t, f, args);
+        #[cfg(feature = "map-observation")]
+        if let Some(stats) = &mut self.world.maps {
+            if probe {
+                if strong {
+                    stats.strong_searches += 1;
+                    stats.strong_groups += stats.groups;
+                    stats.strong_peak = stats.strong_peak.max(stats.groups);
+                } else {
+                    stats.fast_peak = stats.fast_peak.max(stats.groups);
+                }
+            }
+            if rebuild {
+                stats.rebuilding = false;
+                stats.promoted_in_rebuild = false;
+            }
+            if promotes_rebuild {
+                stats.promoted_in_rebuild = true;
+            }
+        }
         self.footprints.pop();
         r
     }
@@ -6815,6 +6950,19 @@ impl Machine<'_> {
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
                 if matches!(inst, Inst::BuiltinUse { .. }) {
+                    #[cfg(feature = "map-observation")]
+                    if let Inst::BuiltinUse { definition } = inst
+                        && let Some(stats) = &mut self.world.maps
+                    {
+                        if definition.is_core("map.group_match") {
+                            stats.groups += 1;
+                        } else if definition.is_core("map.set_strong") {
+                            stats.promotions += 1;
+                            stats.rebuild_promotions += u64::from(stats.rebuilding);
+                        } else if stats.promoted_in_rebuild && definition.is_core("map.install") {
+                            stats.resumed_installs += 1;
+                        }
+                    }
                     continue;
                 }
                 assert!(

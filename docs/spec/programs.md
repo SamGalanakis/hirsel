@@ -637,8 +637,9 @@ core.map functions:
 - `commit(m, r)` installs a Vacant result r for slot `used`, then calls `advance`.
 - `remove` erases. It is the only function that does.
 
-Nothing else writes a control byte, an entry index or a meta, except that `kill` and
-`take_entry` set a dead slot's meta to 0.
+Allocation and clearing initialize controls to EMPTY. `kill` and `take_entry` set a dead
+slot's meta to 0. Relocation and clone copy the existing meta as part of moving or copying
+the live entry. Only `install` publishes a live entry in the index.
 
 **Insertion.** `map.insert`, `update_or_insert` and the compiler's in-place insertion all follow
 these steps:
@@ -755,8 +756,9 @@ ordinary otherwise.
 
 Otherwise the clone allocates capacity = live, charging charge(live), and takes the source's
 mode. Then it walks the source's live entries in order. For each, it clones the key and then the
-value into the next slot, copies the source's meta (valid because the modes agree), and advances
-`used`. After the last entry it rebuilds once.
+value. `copy_entry` moves both fields into the next slot, copies the source's meta (valid
+because the modes agree), and advances `used` and the live count. This makes the complete pair
+available to cleanup before cloning the next one. After the last entry it rebuilds once.
 
 A fast clone's rebuild may promote. Promotion re-places every entry under the strong word, so a
 fast meta is never left in a strong Map. If a clone fails partway, the copy's cleanup cleans the
@@ -778,7 +780,7 @@ function's semantics number (PROG-10, Builtins) in normal form 3:
 |---|---|---|
 | `place(k)` | 1 (new) | The fast placement word: engine operation `MapPlaceWord` (runtime tag 60) for the word class, and `MapPlaceBytes` (61) for the byte class; never lowered for a composite type. The word form is a pure function of k and the salts, and may be hoisted over the mode test. The byte form reads b[0..n) and the salts: it may be reused across Maps only while no write can reach those bytes, and is not computed eagerly in strong mode. Only its salt loads are invariant for the task. |
 | `strong(k)` | 1 (new) | The strong placement word: `MapStrongWord` (62), `MapStrongBytes` (63), or for a composite key `MapStrongStart` (64) followed by the unchanged `MapHashAddWord` (44), `MapHashAddBytes` (45) and `MapHashFinish` (46). |
-| `fast_class[K]()` | 1 (new) | Whether K is in the word or byte class; a constant for each instance. |
+| `fast_class(m)` | 1 (new) | A constant from the Map's key type: 0 for composite, 1 for word, 2 for byte. This lets word placement precede the mode test while byte placement stays on the fast branch. |
 | `mode(m)`, `group_mask(m)` | 1 (new) | The header's strong bit and group mask. Not called when cap is 0. |
 | `strong_empty(m)`, `set_strong_empty(mut m)` | 1 (new) | Read and set the carrier's strong-empty mark (cap 0 only). |
 | `group_match(m, g, t)` | 1 (new) | A 16-bit mask whose bit j is set when group g's byte j equals t. |
@@ -794,6 +796,7 @@ function's semantics number (PROG-10, Builtins) in normal form 3:
 | `advance(mut m)` | 1 (new) | Add 1 to `used` and to the live count; called only by `commit`. |
 | `compact`, `kill`, `len`, `regrow`, `slot_key`, `slot_value`, `swap_value`, `take_entry`, `with_value` | 2 | Same names, new block layout. |
 | `push_entry(mut m, take k, take v)` | 2 | Move k and v into slot `used`; it no longer takes a hash, and does not change `used`. |
+| `copy_entry(mut m, meta, take k, take v)` | 1 (new) | Clone's completed pair and copied meta, appended to the initialized prefix before rebuilding. |
 | `try_regrow` | 2 | A first explicit entry. Under version 2 it had none, and so ran at 1. |
 
 The functions `slot_hash`, `slot_live`, `index_len`, `index_get` and `index_set` are gone.

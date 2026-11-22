@@ -26,12 +26,12 @@ impl<'a> Entries<'a> {
                 let layout = map_entry(&module.types, recipes, k, v);
                 let logical = field_size(&module.types, recipes, k).2
                     + field_size(&module.types, recipes, v).2
-                    + 16;
+                    + hirsel_core_layout::charge::MAP_ENTRY_EXTRA;
                 Self {
                     stride: layout.stride,
                     logical,
                     fields: vec![(layout.key, k), (layout.value, v)],
-                    state: Some(layout.state),
+                    state: Some(layout.meta),
                 }
             }
             _ => unreachable!(),
@@ -276,7 +276,7 @@ pub(super) fn glue(
             );
             if let Some(state) = entries.state {
                 let state = e.carrier_word(&entry, state);
-                let live = e.cmp(Predicate::Eq, &i64, &state, &int(1));
+                let live = e.cmp(Predicate::Ne, &i64, &state, &int(0));
                 let live_label = Label::plain("live");
                 let removed = Label::plain("removed");
                 e.cond(&live, live_label, removed);

@@ -182,7 +182,7 @@ impl BackendSemantics for NativeSemantics {
         match backend {
             Backend::Cranelift | Backend::Llvm => match tag {
                 EngineTag::Instruction(tag) => tag <= 43,
-                EngineTag::Runtime(tag) => matches!(tag, 0..=15 | 17..=22 | 27..=46),
+                EngineTag::Runtime(tag) => matches!(tag, 0..=15 | 17..=22 | 27..=46 | 60..=64),
                 EngineTag::Host(tag) => tag <= 31 || tag == 75,
                 EngineTag::Flow(tag) => tag <= 8,
                 EngineTag::Terminator(tag) => tag <= 6,

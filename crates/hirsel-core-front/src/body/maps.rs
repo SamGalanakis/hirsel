@@ -1,7 +1,8 @@
 //! Map carrier/kernel sequences. Probing belongs to core/map.hirsel.
 use super::*;
+use hirsel_core_layout::map_index as idx;
 
-/// The entry tuple uses exactly map_entry's hash/state/key/value layout. Keeping
+/// The entry tuple uses exactly map_entry's meta/key/value layout. Keeping
 /// field steps symbolic lets the ordinary template materializer relocate K and V.
 #[derive(Clone, Copy)]
 pub(super) struct MapEntry {
@@ -16,6 +17,7 @@ pub(super) struct MapInsertion {
     existing: ValueId,
     index: ValueId,
     hash: ValueId,
+    crowded: ValueId,
     pub(super) replacement: Option<patterns::SlotReplacement>,
 }
 
@@ -29,7 +31,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let ty = self.nonempty_aggregate(types[0])?;
         let (count, full) = self.map_room(header, n);
         self.choose_spare_slot(ty, full, n, |cx| {
-            cx.map_field(types, header, count, 2, PlaceTy::Declared(ty), n)
+            cx.map_field(types, header, count, 1, PlaceTy::Declared(ty), n)
         })
     }
 
@@ -44,25 +46,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let probe = self.p.core_fn("map", "probe_insert")?;
+        let probe = self.p.core_fn("map", "probe_staged")?;
         let probe_ty = self.t.mk(TyKind::Tuple(vec![
             scalar(Scalar::U64),
             scalar(Scalar::U64),
+            BOOL,
             BOOL,
         ]));
         let value = self.emit_call(probe, types, &[Some(header), key], probe_ty, n)?;
         let id = self.place_row(probe_ty, "a map probe requires a tuple", n)?;
         let at = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
         let (u, boolean) = (Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::Bool));
-        let [hash, index, existing] = [(0, u), (1, u), (2, boolean)].map(|(i, t)| {
-            let field = self.address(
-                AddressBase::Address(at),
-                &[Step::Field(i)],
-                PlaceTy::Value(t),
-                n,
-            );
-            self.read_bits(field, t, n)
-        });
+        let [hash, index, existing, crowded] =
+            [(0, u), (1, u), (2, boolean), (3, boolean)].map(|(i, t)| {
+                let field = self.address(
+                    AddressBase::Address(at),
+                    &[Step::Field(i)],
+                    PlaceTy::Value(t),
+                    n,
+                );
+                self.read_bits(field, t, n)
+            });
         let (count, full) = self.map_room(header, n);
         let replacement = if construct_value {
             self.prepare_map_value(types, header, count, full, existing, index, n)
@@ -74,6 +78,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             existing,
             index,
             hash,
+            crowded,
             replacement,
         })
     }
@@ -118,13 +123,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let chosen = self.new_block(&[Ty::Ptr]);
         self.list_branch(existing, old, absent, n);
         self.start(old);
-        let address = self.map_field(types, header, index, 3, place, n)?;
+        let address = self.map_field(types, header, index, 2, place, n)?;
         let pointer = self.pointer(address, n);
         self.copy_to(saved, pointer, ty, n);
         self.jump(chosen, &[pointer], n);
         self.start(absent);
         let address = self.choose_spare_slot(ty, full, n, |cx| {
-            cx.map_field(types, header, count, 3, place, n)
+            cx.map_field(types, header, count, 2, place, n)
         })?;
         let pointer = self.pointer(address, n);
         self.jump(chosen, &[pointer], n);
@@ -189,38 +194,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.start(spare);
         let (count, _) = self.map_room(header, n);
-        let hash = insertion.hash;
         self.map_append(
             types,
             header,
             count,
-            hash,
             [key, value],
             [direct_key, direct_value],
             n,
         )?;
-        let u = Ty::Scalar(Scalar::U64);
-        let one = self.konst(u, 1, n)?;
-        let next = self.map_binary(BinaryOp::Add, count, one, n);
-        let recipe = self.map_entry(types[0], types[1], n)?;
-        // core.map's index word: the hash's bits above the index mask over the
-        // one-based slot. A spare slot means a nonempty block, so the index
-        // length is stored.
-        let len_at = self.map_metadata_at(header, recipe, 1, n)?;
-        let len = self.read_bits(len_at, u, n);
-        let mask = self.map_binary(BinaryOp::Sub, len, one, n);
-        let high = self.konst(u, u64::MAX, n)?;
-        let high = self.map_binary(BinaryOp::BitXor, mask, high, n);
-        let tag = self.map_binary(BinaryOp::BitAnd, hash, high, n);
-        let word = self.map_binary(BinaryOp::BitOr, tag, next, n);
-        let index = self.map_index_at(header, recipe, insertion.index, n)?;
-        self.inst(
-            Inst::Store {
-                address: index,
-                value: word,
-            },
+        let vacant = self.new_block(&[]);
+        let crowded = self.new_block(&[]);
+        let committed = self.new_block(&[]);
+        self.list_branch(insertion.crowded, crowded, vacant, n);
+        self.start(crowded);
+        let commit = self.p.core_fn("map", "commit_crowded")?;
+        self.emit_call(commit, types, &[Some(header), key], UNIT, n);
+        self.jump(committed, &[], n);
+        self.start(vacant);
+        let commit = self.p.core_fn("map", "commit")?;
+        self.emit_call(
+            commit,
+            types,
+            &[Some(header), Some(insertion.index), Some(insertion.hash)],
+            UNIT,
             n,
         );
+        self.jump(committed, &[], n);
+        self.start(committed);
         let built = self.wrap_case(result, 0, UNIT, None, n);
         self.goto(join, result, built, n);
         for &(owner, state) in owners.iter().flatten() {
@@ -269,12 +269,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let header = vals[0]?;
                 let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
                 let cap = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
-                let plan = self.list_plan(entry.ty, cap, None, n)?;
-                let index_len = self.map_index_len(header, entry, n)?;
-                self.map_relocate(
-                    header, entry, data, cap, data, cap, index_len, plan, true, n,
-                )?;
+                let stride = self.layout_size(entry.ty, false, n)?;
+                self.map_relocate(header, entry, data, cap, data, cap, stride, stride, None, n)?;
                 Some(None)
+            }
+            "copy_entry" => {
+                let header = vals[0]?;
+                let entry = self.map_entry(types[0], types[1], n)?;
+                let index = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+                self.map_append(types, header, index, [vals[2], vals[3]], [false; 2], n)?;
+                let at = self.map_entry_meta(header, entry, index, n)?;
+                self.map_store(at, vals[1]?, n);
+                self.map_advance(header, entry, n)?;
+                Some(None)
+            }
+            "advance" => {
+                let entry = self.map_entry(types[0], types[1], n)?;
+                self.map_advance(vals[0]?, entry, n)?;
+                Some(None)
+            }
+            "strong_empty" | "set_strong_empty" => {
+                let carrier = vals[0]?;
+                let marker = self.konst(Ty::Ptr, idx::STRONG_EMPTY, n)?;
+                if name == "strong_empty" {
+                    let data = self.read_sequence_word(carrier, 0, Ty::Ptr, n);
+                    Some(Some(self.map_compare(CompareOp::Eq, data, marker, n)))
+                } else {
+                    self.sequence_word(carrier, 0, Ty::Ptr, marker, n);
+                    Some(None)
+                }
+            }
+            "mode" | "group_mask" | "set_strong" | "clear_index" | "group_match"
+            | "group_empty" | "group_vacant" | "bucket_entry" | "install" | "erase" => {
+                Some(self.map_index_value(name, types, vals, n))
             }
             "regrow" => Some(self.map_regrow(types, vals[0]?, vals[1]?, None, n)),
             "try_regrow" => Some(self.map_regrow(types, vals[0]?, vals[1]?, Some(result), n)),
@@ -282,7 +309,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let collection = self.map_type(types)?;
                 let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;
                 let place = self.place_ty(types[1], n)?;
-                let at = self.address(AddressBase::Address(entry), &[Step::Field(3)], place, n);
+                let at = self.address(AddressBase::Address(entry), &[Step::Field(2)], place, n);
                 let pointer = self.pointer(at, n);
                 let callable = self.t.mk(TyKind::Fn(
                     vec![(Mode::Mut, types[1])],
@@ -305,7 +332,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;
                 let value_ty = self.place_ty(types[1], n)?;
                 let value_at =
-                    self.address(AddressBase::Address(entry), &[Step::Field(3)], value_ty, n);
+                    self.address(AddressBase::Address(entry), &[Step::Field(2)], value_ty, n);
                 if name == "swap_value" {
                     let pointer = self.pointer(value_at, n);
                     Some(self.replace_value(types[1], Some(pointer), vals[2], n))
@@ -313,7 +340,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(self.map_kill(vals[0]?, entry, value_at, types, n))
                 }
             }
-            "hash" => Some(self.key_operation(key_glue::KeyOp::Hash, types[0], &[vals[0]], n)),
+            "hash" | "place" | "strong" | "fast_class" => {
+                use key_glue::KeyOp;
+                let (op, args) = match name {
+                    "place" => (KeyOp::Place, vals),
+                    "strong" => (KeyOp::Strong, vals),
+                    "fast_class" => (KeyOp::Class, &[][..]),
+                    _ => (KeyOp::Hash, vals),
+                };
+                Some(self.key_operation(op, types[0], args, n))
+            }
             "slots" | "capacity" => {
                 let word = if name == "slots" {
                     growth::FillWord::Used
@@ -322,47 +358,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 Some(Some(self.fill_word(vals[0]?, None, word, n)))
             }
-            "slot_hash" | "slot_live" | "slot_key" | "slot_value" => {
+            "slot_meta" | "slot_key" | "slot_value" => {
                 let collection = self.map_type(types)?;
                 let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;
                 let (field, ty) = match name {
-                    "slot_hash" => (0, PlaceTy::Value(Ty::Scalar(Scalar::U64))),
-                    "slot_live" => (1, PlaceTy::Value(Ty::Scalar(Scalar::U64))),
-                    "slot_key" => (2, self.place_ty(types[0], n)?),
-                    _ => (3, self.place_ty(types[1], n)?),
+                    "slot_meta" => (0, PlaceTy::Value(Ty::Scalar(Scalar::U64))),
+                    "slot_key" => (1, self.place_ty(types[0], n)?),
+                    _ => (2, self.place_ty(types[1], n)?),
                 };
                 let at = self.address(AddressBase::Address(entry), &[Step::Field(field)], ty, n);
-                Some(if name == "slot_key" || name == "slot_value" {
+                Some(if name == "slot_meta" {
+                    Some(self.read_bits(at, Ty::Scalar(Scalar::U64), n))
+                } else {
                     self.read_carried(at, types[usize::from(name == "slot_value")], n)
-                } else {
-                    let value = self.read_bits(at, Ty::Scalar(Scalar::U64), n);
-                    if name == "slot_live" {
-                        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-                        Some(self.map_compare(CompareOp::Eq, value, one, n))
-                    } else {
-                        Some(value)
-                    }
                 })
-            }
-            "index_len" => {
-                let entry = self.map_entry(types[0], types[1], n)?;
-                Some(self.map_index_len(vals[0]?, entry, n))
-            }
-            "index_get" | "index_set" => {
-                let entry = self.map_entry(types[0], types[1], n)?;
-                let at = self.map_index_at(vals[0]?, entry, vals[1]?, n)?;
-                if name == "index_get" {
-                    Some(Some(self.read_bits(at, Ty::Scalar(Scalar::U64), n)))
-                } else {
-                    self.inst(
-                        Inst::Store {
-                            address: at,
-                            value: vals[2]?,
-                        },
-                        n,
-                    );
-                    Some(None)
-                }
             }
             _ => None,
         }
@@ -396,7 +405,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let from = self.address(
                 AddressBase::Address(entry),
-                &[Step::Field(field as u32 + 2)],
+                &[Step::Field(field as u32 + 1)],
                 place,
                 n,
             );
@@ -413,7 +422,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let zero = self.konst(u, 0, n)?;
         let state = self.address(
             AddressBase::Address(entry),
-            &[Step::Field(1)],
+            &[Step::Field(0)],
             PlaceTy::Value(u),
             n,
         );
@@ -443,48 +452,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let header = vals[0]?;
         let u = Ty::Scalar(Scalar::U64);
         let count = self.read_sequence_word(header, 8, u, n);
-        self.map_append(
-            types,
-            header,
-            count,
-            vals[1]?,
-            [vals[2], vals[3]],
-            [false; 2],
-            n,
-        )?;
+        self.map_append(types, header, count, [vals[1], vals[2]], [false; 2], n)?;
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn map_append(
         &mut self,
         types: &[TyId],
         header: ValueId,
         count: ValueId,
-        hash: ValueId,
         values: [Option<ValueId>; 2],
         placed: [bool; 2],
         n: NodeId,
     ) -> Option<()> {
-        let u = Ty::Scalar(Scalar::U64);
         let collection = self.map_type(types)?;
         let entry = self.map_entry_at(header, collection, count, n)?;
-        let state = self.konst(u, 1, n)?;
-        for (field, value) in [(0, hash), (1, state)] {
-            let at = self.address(
-                AddressBase::Address(entry),
-                &[Step::Field(field)],
-                PlaceTy::Value(u),
-                n,
-            );
-            self.inst(Inst::Store { address: at, value }, n);
-        }
         for (i, (value, already_placed)) in values.into_iter().zip(placed).enumerate() {
             if already_placed {
                 self.consume(value, n);
                 continue;
             }
-            let field = i as u32 + 2;
+            let field = i as u32 + 1;
             let ty = types[i];
             let rep = match self.rep(ty) {
                 Ok(rep) => rep,
@@ -498,19 +486,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.install(at, rep, value, n);
             }
         }
-        let next = self.map_binary(BinaryOp::Add, count, state, n);
-        self.sequence_word(header, 8, u, next, n);
-        let layout = self.map_entry(types[0], types[1], n)?;
-        let at = self.map_live_at(header, layout, n)?;
-        let live = self.read_bits(at, u, n);
-        let live = self.map_binary(BinaryOp::Add, live, state, n);
-        self.inst(
-            Inst::Store {
-                address: at,
-                value: live,
-            },
-            n,
-        );
         Some(())
     }
 
@@ -526,45 +501,86 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u = Ty::Scalar(Scalar::U64);
         let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let old_cap = self.read_sequence_word(header, 16, u, n);
-        let mut plan = self.list_plan(entry.ty, cap, None, n)?;
+
+        let key = self.layout_size(types[0], true, n)?;
+        let value = self.layout_size(types[1], true, n)?;
+        let extra = self.map_u64(hirsel_core_layout::charge::MAP_ENTRY_EXTRA, n)?;
+        let (payload, _) = self.list_arith(ArithOp::Add, ArithMode::Saturating, key, value, n);
+        let (logical, _) = self.list_arith(ArithOp::Add, ArithMode::Saturating, payload, extra, n);
+        let mut plan = self.list_plan_with_logical(entry.ty, logical, cap, None, n)?;
         plan.edge = FieldTy::Map(
             Box::new(self.edge_field(types[0], n)?),
             Box::new(self.edge_field(types[1], n)?),
         );
-        let index_len = self.map_index_count(cap, n)?;
-        let eight = self.konst(u, 8, n)?;
-        let (index_bytes, _) =
-            self.list_arith(ArithOp::Mul, ArithMode::Saturating, index_len, eight, n);
-        let sixteen = self.konst(u, 16, n)?;
-        let (overhead, _) =
-            self.list_arith(ArithOp::Add, ArithMode::Saturating, index_bytes, sixteen, n);
+        let bound = self.map_u64(idx::MAX_CAPACITY, n)?;
+        let over_bound = self.map_compare(CompareOp::Gt, cap, bound, n);
+        plan.overflow = self.list_bool(BinaryOp::BitOr, plan.overflow, over_bound, n);
+        let bounded = self.map_binary(BinaryOp::Min, cap, bound, n);
+        let groups = self.map_group_count(bounded, n)?;
+        let wide = self.map_index_width(cap, n)?;
+        let stride = self.map_group_stride(wide, n)?;
+        let (group_bytes, _) =
+            self.list_arith(ArithOp::Mul, ArithMode::Saturating, groups, stride, n);
+        let header_bytes = self.map_u64(idx::HEADER_BYTES, n)?;
+        let (overhead, _) = self.list_arith(
+            ArithOp::Add,
+            ArithMode::Saturating,
+            group_bytes,
+            header_bytes,
+            n,
+        );
         let (physical, _) =
             self.list_arith(ArithOp::Add, ArithMode::Saturating, plan.size, overhead, n);
         plan.size = physical;
-        let zero = self.konst(u, 0, n)?;
+
+        let zero = self.map_u64(0, n)?;
         let empty = self.map_compare(CompareOp::Eq, old_cap, zero, n);
         let first = self.new_block(&[]);
         let growth = self.new_block(&[]);
-        let allocated = self.new_block(&[Ty::Ptr, u]);
+        let allocated = self.new_block(&[Ty::Ptr, u, Ty::Scalar(Scalar::Bool)]);
         self.map_branch(empty, first, growth, n);
         self.start(first);
+        let strong_empty = self.konst(Ty::Ptr, idx::STRONG_EMPTY, n)?;
+        let was_strong = self.map_compare(CompareOp::Eq, old_data, strong_empty, n);
+        let class = self.key_operation(key_glue::KeyOp::Class, types[0], &[], n)?;
+        let zero_class = self.konst(Ty::Scalar(Scalar::U8), 0, n)?;
+        let composite = self.map_compare(CompareOp::Eq, class, zero_class, n);
+        let strong = self.list_bool(BinaryOp::BitOr, was_strong, composite, n);
         let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
-        self.jump(allocated, &[block, available], n);
+        self.jump(allocated, &[block, available, strong], n);
         self.start(growth);
+        let old_header = self.map_header(header, entry, n)?;
+        let strong = self.map_mode_bit(old_header, idx::STRONG, n)?;
         let (block, available) = self.list_allocate(&plan, AllocPlace::Like(old_data), n);
-        self.jump(allocated, &[block, available], n);
+        self.jump(allocated, &[block, available, strong], n);
         self.start(allocated);
         let incoming = self.block_params(allocated);
-        let (block, available) = (incoming[0], incoming[1]);
+        let (block, available, strong) = (incoming[0], incoming[1], incoming[2]);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let ok = self.map_compare(CompareOp::Ne, block, null, n);
         let charge = plan.charge;
-        // `regrow` raises a refusal with the map unchanged; `try_regrow` returns it.
+        let strong_bit = self.map_u64(idx::STRONG, n)?;
+        let wide_bit = self.map_u64(idx::WIDE, n)?;
+        let strong_word = self.map_pick_u64(strong, strong_bit, zero, n);
+        let wide_word = self.map_pick_u64(wide, wide_bit, zero, n);
+        let mode = self.map_binary(BinaryOp::BitOr, strong_word, wide_word, n);
+        let allocate = |cx: &mut Self| {
+            cx.map_relocate(
+                header,
+                entry,
+                old_data,
+                old_cap,
+                block,
+                cap,
+                plan.stride,
+                plan.logical,
+                Some([groups, stride, mode]),
+                n,
+            )
+        };
         let Some(result) = result else {
             self.raise_unless(ok, charge, available, n);
-            self.map_relocate(
-                header, entry, old_data, old_cap, block, cap, index_len, plan, false, n,
-            );
+            allocate(self)?;
             return None;
         };
         self.runtime_result(
@@ -572,9 +588,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, _, _| {
-                cx.map_relocate(
-                    header, entry, old_data, old_cap, block, cap, index_len, plan, false, n,
-                );
+                let _ = allocate(cx);
             },
             |cx, to, capacity| {
                 if let Some(place) = cx.place_ty(capacity, n) {
@@ -599,11 +613,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         old_cap: ValueId,
         block: ValueId,
         cap: ValueId,
-        index_len: ValueId,
-        plan: lists::ListPlan,
-        in_place: bool,
+        stride: ValueId,
+        logical: ValueId,
+        index: Option<[ValueId; 3]>,
         n: NodeId,
     ) -> Option<()> {
+        let in_place = index.is_none();
         let u = Ty::Scalar(Scalar::U64);
         let slots = self.read_sequence_word(header, 8, u, n);
         let zero = self.konst(u, 0, n)?;
@@ -621,12 +636,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let source = self.map_entry_at(header, entry.collection, i, n)?;
         let at = self.address(
             AddressBase::Address(source),
-            &[Step::Field(1)],
+            &[Step::Field(0)],
             PlaceTy::Value(u),
             n,
         );
         let state = self.read_bits(at, u, n);
-        let active = self.map_compare(CompareOp::Eq, state, one, n);
+        let active = self.map_compare(CompareOp::Ne, state, zero, n);
         let keep = self.new_block(&[]);
         let skip = self.new_block(&[]);
         self.map_branch(active, keep, skip, n);
@@ -650,7 +665,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Inst::Copy {
                 to,
                 from: source,
-                bytes: plan.stride,
+                bytes: stride,
             },
             n,
         );
@@ -676,53 +691,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let index_len_at = self.map_metadata_at(header, entry, 1, n)?;
-        self.inst(
-            Inst::Store {
-                address: index_len_at,
-                value: index_len,
-            },
-            n,
-        );
-        // The new block and its index do not move during initialization. Compute
-        // the index base once so each store cannot invalidate a carrier reload.
-        let index_base = self.map_index_at(header, entry, zero, n)?;
-        let eight = self.konst(u, 8, n)?;
-        let zero_head = self.new_block(&[u]);
-        let zero_body = self.new_block(&[]);
-        let cleared = self.new_block(&[]);
-        self.jump(zero_head, &[zero], n);
-        self.start(zero_head);
-        let j = self.block_params(zero_head)[0];
-        let more = self.map_compare(CompareOp::Lt, j, index_len, n);
-        self.map_branch(more, zero_body, cleared, n);
-        self.start(zero_body);
-        let offset = self.map_binary(BinaryOp::Mul, j, eight, n);
-        let at = self.address(
-            AddressBase::Address(index_base),
-            &[Step::Byte(offset)],
-            PlaceTy::Value(u),
-            n,
-        );
-        self.inst(
-            Inst::Store {
-                address: at,
-                value: zero,
-            },
-            n,
-        );
-        let next = self.map_binary(BinaryOp::Add, j, one, n);
-        self.jump(zero_head, &[next], n);
-        self.start(cleared);
-        if in_place {
+        let Some([groups, group_stride, mode]) = index else {
             return Some(());
-        }
+        };
+        let index_header = self.map_header(header, entry, n)?;
+        let group_mask = self.map_binary(BinaryOp::Sub, groups, one, n);
+        let at = self.map_header_at(index_header, idx::GROUP_MASK, n);
+        self.map_store(at, group_mask, n);
+        let at = self.map_header_at(index_header, idx::MODE, n);
+        self.map_store(at, mode, n);
+        let at = self.map_header_at(index_header, 24, n);
+        self.map_store(at, zero, n);
+        self.map_clear(index_header, groups, group_stride, n)?;
         let has_old = self.map_compare(CompareOp::Ne, old_cap, zero, n);
         let free = self.new_block(&[]);
         let done = self.new_block(&[]);
         self.map_branch(has_old, free, done, n);
         self.start(free);
-        let (raw, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, old_cap, plan.logical, n);
+        let (raw, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, old_cap, logical, n);
         let seven = self.konst(u, 7, n)?;
         let rounded = self.map_binary(BinaryOp::Add, raw, seven, n);
         let mask = self.konst(u, !7, n)?;
@@ -745,13 +731,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
     }
 
-    // cap is positive in the only private caller (regrow); an admitted Map has
-    // logical stride >=16, so an index's power-of-two word count fits u64.
-    fn map_index_count(&mut self, cap: ValueId, n: NodeId) -> Option<ValueId> {
+    fn map_group_count(&mut self, cap: ValueId, n: NodeId) -> Option<ValueId> {
         let u = Ty::Scalar(Scalar::U64);
-        let two = self.konst(u, 2, n)?;
-        let (twice, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, two, n);
-        let one = self.konst(u, 1, n)?;
+        let min_cap = self.map_u64(idx::GROUP_WIDTH as u64 / 2, n)?;
+        let cap = self.map_binary(BinaryOp::Max, cap, min_cap, n);
+        let twice = self.map_binary(BinaryOp::Add, cap, cap, n);
+        let one = self.map_u64(1, n)?;
         let last = self.map_binary(BinaryOp::Sub, twice, one, n);
         let leading = self.value(u);
         self.inst(
@@ -762,7 +747,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let width = self.konst(u, 64, n)?;
+        let width = self.map_u64(60, n)?;
         let bits = self.map_binary(BinaryOp::Sub, width, leading, n);
         Some(self.map_binary(BinaryOp::Shl, one, bits, n))
     }
@@ -790,7 +775,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let zero = self.konst(u, 0, n)?;
         let state = self.address(
             AddressBase::Address(entry),
-            &[Step::Field(1)],
+            &[Step::Field(0)],
             PlaceTy::Value(u),
             n,
         );
@@ -814,7 +799,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         let key_ty = self.place_ty(types[0], n)?;
-        let key = self.address(AddressBase::Address(entry), &[Step::Field(2)], key_ty, n);
+        let key = self.address(AddressBase::Address(entry), &[Step::Field(1)], key_ty, n);
         self.drop_at(key, types[0], n);
         value
     }
@@ -883,67 +868,382 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         result
     }
-    fn map_index_len(&mut self, header: ValueId, entry: MapEntry, n: NodeId) -> Option<ValueId> {
-        let u = Ty::Scalar(Scalar::U64);
-        let cap = self.read_sequence_word(header, 16, u, n);
-        let zero = self.konst(u, 0, n)?;
-        let empty = self.map_compare(CompareOp::Eq, cap, zero, n);
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let done = self.new_block(&[u]);
-        let ye = self.edge(yes, &[]);
-        let ne = self.edge(no, &[]);
-        self.end(
-            Terminator::Branch {
-                condition: empty,
-                yes: ye,
-                no: ne,
+    fn map_cast(&mut self, to: Ty, operand: ValueId, mode: ConvertMode, n: NodeId) -> ValueId {
+        let result = self.value(to);
+        self.inst(
+            Inst::Convert {
+                result,
+                flag: None,
+                operand,
+                mode,
             },
-            Some(n),
+            n,
         );
-        self.start(yes);
-        self.jump(done, &[zero], n);
-        self.start(no);
-        let at = self.map_metadata_at(header, entry, 1, n)?;
-        let count = self.read_bits(at, u, n);
-        self.jump(done, &[count], n);
-        self.start(done);
-        Some(self.block_params(done)[0])
+        result
     }
-    fn map_index_at(
+
+    fn map_u64(&mut self, bits: u64, n: NodeId) -> Option<ValueId> {
+        self.konst(Ty::Scalar(Scalar::U64), bits, n)
+    }
+
+    fn map_store(&mut self, address: AddressId, value: ValueId, n: NodeId) {
+        self.inst(Inst::Store { address, value }, n);
+    }
+
+    fn map_header(&mut self, carrier: ValueId, entry: MapEntry, n: NodeId) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let data = self.read_sequence_word(carrier, 0, Ty::Ptr, n);
+        let cap = self.read_sequence_word(carrier, 16, u, n);
+        let stride = self.layout_size(entry.ty, false, n)?;
+        let (entries, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, stride, n);
+        let address = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(entries)],
+            PlaceTy::Value(u),
+            n,
+        );
+        Some(self.pointer(address, n))
+    }
+
+    fn map_header_at(&mut self, header: ValueId, bytes: u64, n: NodeId) -> AddressId {
+        let offset = self
+            .map_u64(bytes, n)
+            .expect("Map header offset in a live block");
+        self.address(
+            AddressBase::Value(header),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            n,
+        )
+    }
+
+    fn map_header_word(&mut self, header: ValueId, bytes: u64, n: NodeId) -> ValueId {
+        let address = self.map_header_at(header, bytes, n);
+        self.read_bits(address, Ty::Scalar(Scalar::U64), n)
+    }
+
+    fn map_mode_bit(&mut self, header: ValueId, bit: u64, n: NodeId) -> Option<ValueId> {
+        let mode = self.map_header_word(header, idx::MODE, n);
+        let bit = self.map_u64(bit, n)?;
+        let mode = self.map_binary(BinaryOp::BitAnd, mode, bit, n);
+        let zero = self.map_u64(0, n)?;
+        Some(self.map_compare(CompareOp::Ne, mode, zero, n))
+    }
+
+    fn map_index_width(&mut self, cap: ValueId, n: NodeId) -> Option<ValueId> {
+        let narrow_max = self.map_u64(idx::WIDE_CAPACITY, n)?;
+        Some(self.map_compare(CompareOp::Gt, cap, narrow_max, n))
+    }
+
+    fn map_pick_u64(&mut self, flag: ValueId, yes: ValueId, no: ValueId, n: NodeId) -> ValueId {
+        let yes_edge = self.new_block(&[]);
+        let no_edge = self.new_block(&[]);
+        let join = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+        self.map_branch(flag, yes_edge, no_edge, n);
+        self.start(yes_edge);
+        self.jump(join, &[yes], n);
+        self.start(no_edge);
+        self.jump(join, &[no], n);
+        self.start(join);
+        self.block_params(join)[0]
+    }
+
+    fn map_group_stride(&mut self, wide: ValueId, n: NodeId) -> Option<ValueId> {
+        let wide_bytes = self.map_u64(idx::WIDE_GROUP_BYTES, n)?;
+        let narrow_bytes = self.map_u64(idx::NARROW_GROUP_BYTES, n)?;
+        Some(self.map_pick_u64(wide, wide_bytes, narrow_bytes, n))
+    }
+
+    fn map_group(
         &mut self,
         header: ValueId,
+        group: ValueId,
+        stride: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let base = self.map_u64(idx::HEADER_BYTES, n)?;
+        let (bytes, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, group, stride, n);
+        let offset = self.map_binary(BinaryOp::Add, base, bytes, n);
+        let address = self.address(
+            AddressBase::Value(header),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        Some(self.pointer(address, n))
+    }
+
+    fn map_control_mask(&mut self, group: ValueId, tag: Option<ValueId>, n: NodeId) -> ValueId {
+        use hirsel_core_ir::{SimdOp, Vector};
+
+        let shape = Ty::Vector(Vector::U8x16);
+        let control = self.value(shape);
+        self.inst(
+            Inst::Simd {
+                result: control,
+                op: SimdOp::Lanes,
+                first: group,
+                second: None,
+                fail: None,
+            },
+            n,
+        );
+        let first = if let Some(tag) = tag {
+            let expected = self.value(shape);
+            self.inst(
+                Inst::Simd {
+                    result: expected,
+                    op: SimdOp::Splat,
+                    first: tag,
+                    second: None,
+                    fail: None,
+                },
+                n,
+            );
+            let matched = self.value(shape);
+            self.inst(
+                Inst::Simd {
+                    result: matched,
+                    op: SimdOp::Eq,
+                    first: control,
+                    second: Some(expected),
+                    fail: None,
+                },
+                n,
+            );
+            matched
+        } else {
+            control
+        };
+        let result = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Simd {
+                result,
+                op: SimdOp::Bitmask,
+                first,
+                second: None,
+                fail: None,
+            },
+            n,
+        );
+        result
+    }
+
+    fn map_bucket(
+        &mut self,
+        header: ValueId,
+        bucket: ValueId,
+        n: NodeId,
+    ) -> Option<(ValueId, ValueId, ValueId)> {
+        let wide = self.map_mode_bit(header, idx::WIDE, n)?;
+        let stride = self.map_group_stride(wide, n)?;
+        let four = self.map_u64(4, n)?;
+        let low = self.map_u64(idx::GROUP_WIDTH as u64 - 1, n)?;
+        let group = self.map_binary(BinaryOp::Shr, bucket, four, n);
+        let lane = self.map_binary(BinaryOp::BitAnd, bucket, low, n);
+        let group = self.map_group(header, group, stride, n)?;
+        Some((group, lane, wide))
+    }
+
+    fn map_bucket_entry(
+        &mut self,
+        group: ValueId,
+        lane: ValueId,
+        wide: ValueId,
+        store: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let word = Ty::Scalar(Scalar::U64);
+        let large = self.new_block(&[]);
+        let small = self.new_block(&[]);
+        let types = [word];
+        let join = self.new_block(if store.is_some() { &[] } else { &types });
+        self.map_branch(wide, large, small, n);
+        for (block, scalar) in [(large, Scalar::U64), (small, Scalar::U32)] {
+            self.start(block);
+            let ty = Ty::Scalar(scalar);
+            let bytes = self.map_u64(scalar.size(), n)?;
+            let width = self.map_u64(idx::GROUP_WIDTH as u64, n)?;
+            let (index, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, lane, bytes, n);
+            let offset = self.map_binary(BinaryOp::Add, width, index, n);
+            let at = self.address(
+                AddressBase::Value(group),
+                &[Step::Byte(offset)],
+                PlaceTy::Value(ty),
+                n,
+            );
+            if let Some(value) = store {
+                let value = if ty == word {
+                    value
+                } else {
+                    self.map_cast(ty, value, ConvertMode::Truncate, n)
+                };
+                self.map_store(at, value, n);
+                self.jump(join, &[], n);
+            } else {
+                let value = self.read_bits(at, ty, n);
+                let value = if ty == word {
+                    value
+                } else {
+                    self.map_cast(word, value, ConvertMode::Widen, n)
+                };
+                self.jump(join, &[value], n);
+            }
+        }
+        self.start(join);
+        self.block_params(join).first().copied()
+    }
+
+    fn map_advance(&mut self, carrier: ValueId, entry: MapEntry, n: NodeId) -> Option<()> {
+        let u = Ty::Scalar(Scalar::U64);
+        let count = self.read_sequence_word(carrier, 8, u, n);
+        let one = self.map_u64(1, n)?;
+        let next = self.map_binary(BinaryOp::Add, count, one, n);
+        let at = self.map_live_at(carrier, entry, n)?;
+        let live = self.read_bits(at, u, n);
+        let live = self.map_binary(BinaryOp::Add, live, one, n);
+        self.map_store(at, live, n);
+        self.sequence_word(carrier, 8, u, next, n);
+        Some(())
+    }
+
+    fn map_entry_meta(
+        &mut self,
+        carrier: ValueId,
         entry: MapEntry,
         index: ValueId,
         n: NodeId,
     ) -> Option<AddressId> {
-        let u = Ty::Scalar(Scalar::U64);
-        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
-        let cap = self.read_sequence_word(header, 16, u, n);
-        let stride = self.layout_size(entry.ty, false, n)?;
-        let (entries, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, stride, n);
-        let eight = self.konst(u, 8, n)?;
-        let (index, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, eight, n);
-        let sixteen = self.konst(u, 16, n)?;
-        let offset = self.map_binary(BinaryOp::Add, entries, sixteen, n);
-        let offset = self.map_binary(BinaryOp::Add, offset, index, n);
+        let entry = self.map_entry_at(carrier, entry.collection, index, n)?;
         Some(self.address(
-            AddressBase::Value(data),
-            &[Step::Byte(offset)],
-            PlaceTy::Value(u),
+            AddressBase::Address(entry),
+            &[Step::Field(0)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
             n,
         ))
     }
+
+    fn map_clear(
+        &mut self,
+        header: ValueId,
+        groups: ValueId,
+        stride: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let u = Ty::Scalar(Scalar::U64);
+        let zero = self.map_u64(0, n)?;
+        let one = self.map_u64(1, n)?;
+        let empty = self.map_u64(u64::MAX, n)?;
+        let head = self.new_block(&[u]);
+        let body = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.jump(head, &[zero], n);
+        self.start(head);
+        let index = self.block_params(head)[0];
+        let more = self.map_compare(CompareOp::Lt, index, groups, n);
+        self.map_branch(more, body, done, n);
+        self.start(body);
+        let group = self.map_group(header, index, stride, n)?;
+        let first = self.map_header_at(group, 0, n);
+        let second = self.map_header_at(group, 8, n);
+        self.map_store(first, empty, n);
+        self.map_store(second, empty, n);
+        let next = self.map_binary(BinaryOp::Add, index, one, n);
+        self.jump(head, &[next], n);
+        self.start(done);
+        Some(())
+    }
+
+    fn map_index_value(
+        &mut self,
+        name: &str,
+        types: &[TyId],
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let carrier = vals[0]?;
+        let entry = self.map_entry(types[0], types[1], n)?;
+        let header = self.map_header(carrier, entry, n)?;
+        match name {
+            "mode" => self.map_mode_bit(header, idx::STRONG, n),
+            "group_mask" => Some(self.map_header_word(header, idx::GROUP_MASK, n)),
+            "set_strong" => {
+                let mode_at = self.map_header_at(header, idx::MODE, n);
+                let mode = self.read_bits(mode_at, Ty::Scalar(Scalar::U64), n);
+                let bit = self.map_u64(idx::STRONG, n)?;
+                let mode = self.map_binary(BinaryOp::BitOr, mode, bit, n);
+                self.map_store(mode_at, mode, n);
+                None
+            }
+            "group_match" | "group_empty" | "group_vacant" => {
+                let wide = self.map_mode_bit(header, idx::WIDE, n)?;
+                let stride = self.map_group_stride(wide, n)?;
+                let group = self.map_group(header, vals[1]?, stride, n)?;
+                let byte = Ty::Scalar(Scalar::U8);
+                let tag = match name {
+                    "group_match" => Some(self.map_cast(byte, vals[2]?, ConvertMode::Truncate, n)),
+                    "group_empty" => Some(self.konst(byte, u64::from(idx::EMPTY), n)?),
+                    _ => None,
+                };
+                Some(self.map_control_mask(group, tag, n))
+            }
+            "clear_index" => {
+                let mask = self.map_header_word(header, idx::GROUP_MASK, n);
+                let one = self.map_u64(1, n)?;
+                let groups = self.map_binary(BinaryOp::Add, mask, one, n);
+                let wide = self.map_mode_bit(header, idx::WIDE, n)?;
+                let stride = self.map_group_stride(wide, n)?;
+                self.map_clear(header, groups, stride, n)?;
+                None
+            }
+            "bucket_entry" | "install" | "erase" => {
+                let (group, lane, wide) = self.map_bucket(header, vals[1]?, n)?;
+                if name == "bucket_entry" {
+                    return self.map_bucket_entry(group, lane, wide, None, n);
+                }
+                let byte = Ty::Scalar(Scalar::U8);
+                let control = self.address(
+                    AddressBase::Value(group),
+                    &[Step::Byte(lane)],
+                    PlaceTy::Value(byte),
+                    n,
+                );
+                if name == "install" {
+                    let p = vals[2]?;
+                    let i = vals[3]?;
+                    let shift = self.map_u64(u64::from(idx::TAG_SHIFT), n)?;
+                    let tag = self.map_binary(BinaryOp::Shr, p, shift, n);
+                    let tag = self.map_cast(byte, tag, ConvertMode::Truncate, n);
+                    let _ = self.map_bucket_entry(group, lane, wide, Some(i), n);
+                    let at = self.map_entry_meta(carrier, entry, i, n)?;
+                    let bit = self.map_u64(idx::LIVE_BIT, n)?;
+                    let meta = self.map_binary(BinaryOp::BitOr, p, bit, n);
+                    self.map_store(at, meta, n);
+                    self.map_store(control, tag, n);
+                } else {
+                    let empty = self.map_u64(u64::from(idx::EMPTY), n)?;
+                    let deleted = self.map_u64(u64::from(idx::DELETED), n)?;
+                    let zero = self.map_u64(0, n)?;
+                    let tag = self.map_cast(byte, empty, ConvertMode::Truncate, n);
+                    let mask = self.map_control_mask(group, Some(tag), n);
+                    let has_empty = self.map_compare(CompareOp::Ne, mask, zero, n);
+                    let tag = self.map_pick_u64(has_empty, empty, deleted, n);
+                    let tag = self.map_cast(byte, tag, ConvertMode::Truncate, n);
+                    self.map_store(control, tag, n);
+                }
+                None
+            }
+            _ => unreachable!("Map index operation"),
+        }
+    }
+
     fn map_entry(&mut self, key: TyId, value: TyId, n: NodeId) -> Option<MapEntry> {
         if let Some(entry) = self.map_entries.get(&(key, value)) {
             return Some(*entry);
         }
-        let ty = self.t.mk(TyKind::Tuple(vec![
-            scalar(Scalar::U64),
-            scalar(Scalar::U64),
-            key,
-            value,
-        ]));
+        let ty = self
+            .t
+            .mk(TyKind::Tuple(vec![scalar(Scalar::U64), key, value]));
         let place = self.place_row(ty, "a map entry without a place is not built", n)?;
         let collection = self.prelude("Map", n)?;
         let collection = self.t.mk(TyKind::Adt(collection, vec![key, value]));

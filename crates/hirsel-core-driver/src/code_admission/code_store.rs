@@ -659,7 +659,7 @@ fn m6_requires_canonical_object_frames() {
     });
     let mut uleb = fixture.recipe.encode();
     // The first identity text starts immediately after the recipe headers.
-    let len = b"HIRRECIP\0\x02\x00\x02\x00".len();
+    let len = b"HIRRECIP\0\x02\x00\x03\x00".len();
     uleb.splice(len..=len, [uleb[len] | 128, 0]);
     let mut trailing = fixture.recipe.encode();
     trailing.push(0);
@@ -758,6 +758,46 @@ fn m7_requires_exact_backend_semantics() {
         assert_eq!(fixture.recipe.bodies.len(), 1);
         let release = harness.admit(&fixture).unwrap();
         assert_eq!(release.release().recipe(), &fixture.recipe);
+
+        let mut fixture = Fixture::new("entry");
+        fixture.recipe.launch.backend = backend;
+        let body = fixture.body(
+            "entry",
+            "()",
+            "sig g1 = (u64) -> (u64)\nsig g2 = (ptr, u64) -> (u64)\nsig g3 = (ptr) -> ()",
+            "v0: u64 = const 0
+v1: ptr = const 0x0
+v2: u64 = call rt.map_place_word g1 (v0)
+v3: u64 = call rt.map_place_bytes g2 (v1, v0)
+v4: u64 = call rt.map_strong_word g1 (v0)
+v5: u64 = call rt.map_strong_bytes g2 (v1, v0)
+v6: u64 = const 40
+v7: ptr, v8: u64 = alloc for seq u8 v6 align 8 charge v6
+v9: bool = ne v7, v1
+branch v9, b1, b2
+b1:
+call rt.map_strong_start g3 (v7)
+free v7 charge v6
+return
+b2:
+return",
+        );
+        fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
+        let release = harness.admit(&fixture).unwrap();
+        assert_eq!(release.release().recipe(), &fixture.recipe);
+        for tag in 60..=64 {
+            let semantics = TestSemantics {
+                version: 1,
+                disabled: Some(EngineTag::Runtime(tag)),
+            };
+            assert!(
+                matches!(
+                    failure(harness.run(limits(), &semantics, |peer| fixture.send(peer))),
+                    AdmissionError::Unsupported("engine operation tag")
+                ),
+                "{backend:?} runtime tag {tag}"
+            );
+        }
     }
 }
 
@@ -773,7 +813,7 @@ fn a_current_recipe_cannot_admit_an_old_normal_form_body() {
             hash: callee.body.hash,
         })
         .unwrap();
-    old[..10].copy_from_slice(b"HIRBODY\0\x01\0");
+    old[..10].copy_from_slice(b"HIRBODY\0\x02\0");
     fixture.recipe.bodies.clear();
     let old = BodyRef {
         body: fixture.object(ObjectKind::Body, old),
@@ -791,7 +831,7 @@ fn a_current_recipe_cannot_admit_an_old_normal_form_body() {
     // A retained executable can still be launched with its admitted envelope.
     // The same old recipe version is refused at a new admission.
     let mut prior = fixture.recipe.encode();
-    prior[11..13].copy_from_slice(&1u16.to_le_bytes());
+    prior[11..13].copy_from_slice(&2u16.to_le_bytes());
     let error = failure(harness.run(limits(), &NativeSemantics, |peer| {
         request(peer, Recipe::hash(&prior), &prior);
         assert!(read_need(peer).is_none());

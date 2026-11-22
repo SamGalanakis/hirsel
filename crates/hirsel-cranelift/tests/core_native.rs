@@ -6,6 +6,48 @@ include!("support/native.rs");
 mod providers;
 
 #[test]
+fn map_placement_operations_match_prog_11() {
+    mod vectors {
+        include!("../../hirsel-core-ir/samples/map-placement-vectors.rs");
+    }
+    let module = text::parse(include_str!(
+        "../../hirsel-core-ir/samples/map-placement.core"
+    ))
+    .unwrap();
+    let arguments: Vec<_> = vectors::CASES.iter().map(|&(_, arg, _)| [arg]).collect();
+    let reports: Vec<_> = vectors::CASES
+        .iter()
+        .zip(&arguments)
+        .map(|(&(f, _, expected), args)| {
+            let key = std::array::from_fn(|i| i as u8);
+            let (report, _) = eval::run_map_hash(&module, FuncId(f), args, 0, key);
+            assert_eq!(report.outcome, Outcome::Returned(expected.to_vec()));
+            report
+        })
+        .collect();
+    let cases: Vec<_> = vectors::CASES
+        .iter()
+        .zip(&arguments)
+        .zip(&reports)
+        .map(|((&(f, _, _), args), report)| NativeCase {
+            function: FuncId(f),
+            args,
+            limit: 0,
+            injection: None,
+            report: Some(report),
+        })
+        .collect();
+    execute_cases_with_bindings(
+        &module,
+        true,
+        &cases,
+        false,
+        "#define hirsel_core_test_context_new hirsel_core_test_context_new_map_vectors\n",
+        false,
+    );
+}
+
+#[test]
 fn native_allocator_refusals_are_reported_run_stops() {
     host_memory::check_with_site(
         |module| {

@@ -299,7 +299,7 @@ impl Glue<'_, '_, '_> {
                         (entry.value, plan_field(self.tables, v)?),
                     ]),
                     entry.stride,
-                    Some(entry.state),
+                    Some(entry.meta),
                 )
             }
             _ => unreachable!(),

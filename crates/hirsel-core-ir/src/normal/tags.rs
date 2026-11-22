@@ -370,6 +370,11 @@ tags!(RtOp {
     57 => FrameRecord,
     58 => Returnable(part0),
     59 => ZeroBytes,
+    60 => MapPlaceWord,
+    61 => MapPlaceBytes,
+    62 => MapStrongWord,
+    63 => MapStrongBytes,
+    64 => MapStrongStart,
 });
 
 tags!(HostOp {

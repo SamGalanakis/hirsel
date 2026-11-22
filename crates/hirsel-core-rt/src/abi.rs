@@ -451,7 +451,39 @@ pub unsafe extern "C" fn hirsel_core_map_hash_word(context: *const Context, word
     state.finish()
 }
 
+/// # Safety
+/// Context belongs to this task and a non-empty input is readable for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_strong_bytes(
+    context: *const Context,
+    data: *const u8,
+    len: u64,
+) -> u64 {
+    let mut state = unsafe { (*context).map_strong_key.state() };
+    state.bytes(unsafe { map_hash_range(data, len) });
+    state.finish()
+}
+
+/// # Safety
+/// Context belongs to this task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_strong_word(context: *const Context, word: u64) -> u64 {
+    let mut state = unsafe { (*context).map_strong_key.state() };
+    state.word(word);
+    state.finish()
+}
+
 use hirsel_core_layout::map_hash::State as MapHashState;
+
+/// # Safety
+/// Context belongs to this task and state points to writable, aligned scratch.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_map_strong_start(
+    context: *const Context,
+    state: *mut MapHashState,
+) {
+    unsafe { state.write((*context).map_strong_key.state()) }
+}
 
 /// # Safety
 /// Context belongs to this task and state points to writable, aligned scratch.

@@ -950,8 +950,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => None,
         }
     }
-    /// Native Map slots retain insertion order; a removed slot has state 0.
-    /// The two metadata words precede the key/value at map_entry's offsets.
+    /// Native Map slots retain insertion order; a removed slot has meta 0.
     pub(super) fn map_pair(
         &mut self,
         header: ValueId,
@@ -964,19 +963,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let entry = self.map_entry_at(header, collection, index, n)?;
         let address = self.address(
             AddressBase::Address(entry),
-            &[Step::Field(1)],
+            &[Step::Field(0)],
             PlaceTy::Value(Ty::Scalar(Scalar::U64)),
             n,
         );
-        let state = self.read_bits(address, Ty::Scalar(Scalar::U64), n);
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let meta = self.read_bits(address, Ty::Scalar(Scalar::U64), n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let condition = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
                 result: condition,
-                op: CompareOp::Eq,
-                left: state,
-                right: one,
+                op: CompareOp::Ne,
+                left: meta,
+                right: zero,
             },
             n,
         );
@@ -1031,7 +1030,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         // Each half of the pair is a view: the entry's own bytes (FORM #56).
-        for (i, field) in [2, 3].into_iter().enumerate() {
+        for (i, field) in [1, 2].into_iter().enumerate() {
             let elem = match self.t.kind(views[i]) {
                 TyKind::View(x) => *x,
                 _ => views[i],

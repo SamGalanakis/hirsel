@@ -1240,7 +1240,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         u.waits += 1;
         let run = (*context).run;
         let foreign = (*context).foreign;
-        let map_hash_key = (*context).map_hash_key;
+        let map_keys = (*context).map_keys();
         let steps = crate::steps::remaining(&*context);
         let registry = (*context)
             .host_files
@@ -1258,7 +1258,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             rx.owned(),
             run,
             foreign,
-            map_hash_key,
+            map_keys,
             registry,
             body,
             layout,
@@ -1278,7 +1278,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 ro,
                 run,
                 foreign,
-                map_hash_key,
+                map_keys,
                 registry,
                 body,
                 layout,
@@ -1287,22 +1287,8 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 shared,
             ) = job.0;
             helper_main(
-                hctx,
-                data,
-                sockets,
-                xb,
-                xo,
-                rb,
-                ro,
-                run,
-                foreign,
-                map_hash_key,
-                registry,
-                body,
-                layout,
-                n,
-                steps,
-                shared,
+                hctx, data, sockets, xb, xo, rb, ro, run, foreign, map_keys, registry, body,
+                layout, n, steps, shared,
             );
         };
         // On the pool the helper is a unit beside its owner; without one it
@@ -1334,7 +1320,7 @@ fn helper_main(
     ro: Vec<[u64; 4]>,
     run: *const crate::process::Config,
     foreign: *const crate::foreign::Run,
-    map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
+    map_keys: crate::MapKeys,
     registry: crate::host_file::Registry,
     body: Body,
     layout: TaskLayout,
@@ -1349,7 +1335,7 @@ fn helper_main(
         crate::steps::install_inherited(&mut context, steps);
         context.run = run;
         context.foreign = foreign;
-        context.map_hash_key = map_hash_key;
+        context.set_map_keys(map_keys);
         let mut files = crate::host_file::Files::with_registry(registry);
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {

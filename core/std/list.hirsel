@@ -27,14 +27,16 @@ pub fn get_or[T: plain](xs: List[T], i: u64, x: T) -> T {
 }
 
 // ADAPTED from memchr 2.8.3 src/arch/generic/memchr.rs:143-230.
-// Long-span SIMD search: check the first 32-byte vector, scan 128-byte
-// four-vector groups, finish remaining 32-byte vectors, and guard the tail
-// with one in-range overlapping 32-byte load. Requires len(hay) - from >= 32.
-fn find_byte_lanes(hay: Bytes, from: u64, byte: u8) -> Option[u64] {
+// Scan 128-byte groups and finish with in-range 32-byte loads.
+// Requires len(hay) - from >= 32.
+fn find_byte_lanes(hay: Bytes, from: u64, n0: u8, n1: u8, n2: u8, n3: u8, multi: bool) -> Option[u64] {
     let end = list.len(hay)
-    let needle: Simd[u8, 32] = simd.splat(byte)
+    let v0: Simd[u8, 32] = simd.splat(n0)
+    let v1: Simd[u8, 32] = simd.splat(n1)
+    let v2: Simd[u8, 32] = simd.splat(n2)
+    let v3: Simd[u8, 32] = simd.splat(n3)
     let head: Simd[u8, 32] = list.lanes(hay, from)
-    let first_mask = simd.bitmask(simd.eq(head, needle))
+    let first_mask = byte_mask32(head, v0, v1, v2, v3, multi)
     if first_mask != 0 {
         let offset: u64 = int.widen(int.trailing_zeros(first_mask))
         return Some(from + offset)
@@ -48,10 +50,16 @@ fn find_byte_lanes(hay: Bytes, from: u64, byte: u8) -> Option[u64] {
             let b: Simd[u8, 32] = list.lanes(block, 32)
             let c: Simd[u8, 32] = list.lanes(block, 64)
             let d: Simd[u8, 32] = list.lanes(block, 96)
-            let ma = simd.eq(a, needle)
-            let mb = simd.eq(b, needle)
-            let mc = simd.eq(c, needle)
-            let md = simd.eq(d, needle)
+            let mut ma = simd.eq(a, v0)
+            let mut mb = simd.eq(b, v0)
+            let mut mc = simd.eq(c, v0)
+            let mut md = simd.eq(d, v0)
+            if multi {
+                ma = ma | other_byte_matches(a, v1, v2, v3);
+                mb = mb | other_byte_matches(b, v1, v2, v3);
+                mc = mc | other_byte_matches(c, v1, v2, v3);
+                md = md | other_byte_matches(d, v1, v2, v3);
+            }
             if simd.any((ma | mb) | (mc | md)) {
                 let low = simd.bitmask(ma) | (simd.bitmask(mb) << 32)
                 if low != 0 {
@@ -67,7 +75,7 @@ fn find_byte_lanes(hay: Bytes, from: u64, byte: u8) -> Option[u64] {
     }
     while end - i >= 32 {
         let block: Simd[u8, 32] = list.lanes(hay, i)
-        let mask = simd.bitmask(simd.eq(block, needle))
+        let mask = byte_mask32(block, v0, v1, v2, v3, multi)
         if mask != 0 {
             let offset: u64 = int.widen(int.trailing_zeros(mask))
             return Some(i + offset)
@@ -75,9 +83,10 @@ fn find_byte_lanes(hay: Bytes, from: u64, byte: u8) -> Option[u64] {
         i += 32
     }
     if i < end {
+        // The overlapping lanes were already checked, so a match is in the tail.
         let at = end - 32
         let tail: Simd[u8, 32] = list.lanes(hay, at)
-        let mask = simd.bitmask(simd.eq(tail, needle))
+        let mask = byte_mask32(tail, v0, v1, v2, v3, multi)
         if mask != 0 {
             let offset: u64 = int.widen(int.trailing_zeros(mask))
             return Some(at + offset)
@@ -86,66 +95,17 @@ fn find_byte_lanes(hay: Bytes, from: u64, byte: u8) -> Option[u64] {
     None
 }
 
-// ADAPTED from memchr 2.8.3 src/arch/generic/memchr.rs:143-230.
-// Shared long-span vector search for two to four delimiter bytes.
-// Requires len(hay) - from >= 32.
-fn find_byte4_lanes(hay: Bytes, from: u64, n0: u8, n1: u8, n2: u8, n3: u8) -> Option[u64] {
-    let end = list.len(hay)
-    let v0: Simd[u8, 32] = simd.splat(n0)
-    let v1: Simd[u8, 32] = simd.splat(n1)
-    let v2: Simd[u8, 32] = simd.splat(n2)
-    let v3: Simd[u8, 32] = simd.splat(n3)
-    let head: Simd[u8, 32] = list.lanes(hay, from)
-    let first_mask = simd.bitmask((simd.eq(head, v0) | simd.eq(head, v1)) | (simd.eq(head, v2) | simd.eq(head, v3)))
-    if first_mask != 0 {
-        let offset: u64 = int.widen(int.trailing_zeros(first_mask))
-        return Some(from + offset)
+fn byte_mask32(block: Simd[u8, 32], v0: Simd[u8, 32], v1: Simd[u8, 32], v2: Simd[u8, 32], v3: Simd[u8, 32], multi: bool) -> u64 {
+    let first_match = simd.eq(block, v0)
+    if multi {
+        simd.bitmask(first_match | other_byte_matches(block, v1, v2, v3))
+    } else {
+        simd.bitmask(first_match)
     }
-    let mut i = from + 32
-    if end - i >= 128 {
-        let last_group = end - 128
-        while i <= last_group {
-            let block = list.slice(hay, i, i + 128)
-            let a: Simd[u8, 32] = list.lanes(block, 0)
-            let b: Simd[u8, 32] = list.lanes(block, 32)
-            let c: Simd[u8, 32] = list.lanes(block, 64)
-            let d: Simd[u8, 32] = list.lanes(block, 96)
-            let ma = (simd.eq(a, v0) | simd.eq(a, v1)) | (simd.eq(a, v2) | simd.eq(a, v3))
-            let mb = (simd.eq(b, v0) | simd.eq(b, v1)) | (simd.eq(b, v2) | simd.eq(b, v3))
-            let mc = (simd.eq(c, v0) | simd.eq(c, v1)) | (simd.eq(c, v2) | simd.eq(c, v3))
-            let md = (simd.eq(d, v0) | simd.eq(d, v1)) | (simd.eq(d, v2) | simd.eq(d, v3))
-            if simd.any((ma | mb) | (mc | md)) {
-                let low = simd.bitmask(ma) | (simd.bitmask(mb) << 32)
-                if low != 0 {
-                    let offset: u64 = int.widen(int.trailing_zeros(low))
-                    return Some(i + offset)
-                }
-                let high = simd.bitmask(mc) | (simd.bitmask(md) << 32)
-                let offset: u64 = int.widen(int.trailing_zeros(high))
-                return Some(i + 64 + offset)
-            }
-            i += 128
-        }
-    }
-    while end - i >= 32 {
-        let block: Simd[u8, 32] = list.lanes(hay, i)
-        let mask = simd.bitmask((simd.eq(block, v0) | simd.eq(block, v1)) | (simd.eq(block, v2) | simd.eq(block, v3)))
-        if mask != 0 {
-            let offset: u64 = int.widen(int.trailing_zeros(mask))
-            return Some(i + offset)
-        }
-        i += 32
-    }
-    if i < end {
-        let at = end - 32
-        let tail: Simd[u8, 32] = list.lanes(hay, at)
-        let mask = simd.bitmask((simd.eq(tail, v0) | simd.eq(tail, v1)) | (simd.eq(tail, v2) | simd.eq(tail, v3)))
-        if mask != 0 {
-            let offset: u64 = int.widen(int.trailing_zeros(mask))
-            return Some(at + offset)
-        }
-    }
-    None
+}
+
+fn other_byte_matches(block: Simd[u8, 32], v1: Simd[u8, 32], v2: Simd[u8, 32], v3: Simd[u8, 32]) -> Simd[u8, 32] {
+    simd.eq(block, v1) | (simd.eq(block, v2) | simd.eq(block, v3))
 }
 
 // Short-span 16-byte SIMD search for two to four delimiter bytes (16 <= len < 32).
@@ -197,7 +157,7 @@ pub fn find_byte(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
             }
             at += 16
         }
-        return match find_byte_lanes(b, 32, byte) {
+        return match find_byte_lanes(b, 32, byte, byte, byte, byte, false) {
             Some(found) => Some(start + found),
             None => None,
         }
@@ -251,7 +211,7 @@ pub fn find_byte4(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8, d: u8) -
     let hay = list.slice(xs, start, end)
     let n = list.len(hay)
     if n >= 32 {
-        return match find_byte4_lanes(hay, 0, a, b, c, d) {
+        return match find_byte_lanes(hay, 0, a, b, c, d, true) {
             Some(found) => Some(start + found),
             None => None,
         }

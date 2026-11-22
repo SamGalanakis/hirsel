@@ -38,8 +38,7 @@ def main():
     # clang `-cc1` compile of the recorder it adds to the link.
     wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:]\n'
                        'if "--version" not in a:\n a += ' + repr([
-                           str(FIXTURES / 'recorder.c'), '-DSCRIPTED_SCHEDULER', '-I', str(ROOT / 'crates/hirsel-core-rt/include'),
-                           '-Wl,--wrap=hirsel_core_run']) + '\nos.execvp("clang",["clang",*a])\n')
+                           str(FIXTURES / 'recorder.c'), '-I', str(ROOT / 'crates/hirsel-core-rt/include')]) + '\nos.execvp("clang",["clang",*a])\n')
     wrapper.chmod(0o755)
     core = dict(name='core', version='1')
     template = dict(core=core, packages=[

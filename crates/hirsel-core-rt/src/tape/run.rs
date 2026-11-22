@@ -211,31 +211,6 @@ pub extern "C" fn hirsel_core_test_replay_provider_calls() -> usize {
     NO_HOST_CALLS.load(Ordering::Relaxed)
 }
 
-/// A test runtime's replacement for the recording launch's `hirsel_core_run`.
-#[cfg(feature = "testing")]
-type RecordLaunch = unsafe extern "C" fn(*const Config, Entry) -> u8;
-#[cfg(feature = "testing")]
-static RECORD_LAUNCH: std::sync::OnceLock<RecordLaunch> = std::sync::OnceLock::new();
-
-/// Route a test process's recording launch through `launch`, which receives the
-/// launch's Config and entry and runs them itself (with its own providers or
-/// chooser). Set once, before main; a second call is refused with false.
-#[cfg(feature = "testing")]
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_test_set_record_launch(launch: RecordLaunch) -> bool {
-    RECORD_LAUNCH.set(launch).is_ok()
-}
-
-unsafe fn record_launch(config: &Config, entry: Entry) -> u8 {
-    #[cfg(feature = "testing")]
-    if let Some(launch) = RECORD_LAUNCH.get() {
-        // SAFETY: the launch takes this call's pinned Config and entry.
-        return unsafe { launch(config, entry) };
-    }
-    // SAFETY: the caller pins the configuration and entry through the run.
-    unsafe { process::hirsel_core_run(config, entry) }
-}
-
 unsafe extern "C" fn refuse_wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
     #[cfg(feature = "testing")]
     NO_HOST_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -843,7 +818,7 @@ unsafe fn run_taped(
         config.close_grants = None;
         config.describe_output = Some(emit_describe);
         let status = if mode == 0 {
-            record_launch(&config, invoke)
+            process::launch(&config, invoke)
         } else {
             let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
                 Ok(place) => place,

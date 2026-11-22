@@ -281,6 +281,38 @@ pub unsafe extern "C" fn hirsel_core_test_run_last(config: *const Config, entry:
     script.install(|| unsafe { hirsel_core_run(config, entry) })
 }
 
+/// A test process's replacement for an OS launch's `hirsel_core_run`.
+#[cfg(feature = "testing")]
+type Launch = unsafe extern "C" fn(*const Config, Entry) -> u8;
+#[cfg(feature = "testing")]
+static LAUNCH: std::sync::OnceLock<Launch> = std::sync::OnceLock::new();
+
+/// Route a test process's OS launches (an ordinary run without a checked
+/// foreign interface, and a recording) through `launch`, which receives the
+/// launch's Config and entry and runs them itself, with its own providers,
+/// observers or chooser, through `hirsel_core_run`. A C test object registers
+/// it from a constructor: `--wrap=hirsel_core_run` cannot reach these calls,
+/// which the runtime archive resolves internally. Set once; a second call
+/// returns false.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_test_set_launch(launch: Launch) -> bool {
+    LAUNCH.set(launch).is_ok()
+}
+
+/// An OS launch's run: the registered test launch, else `hirsel_core_run`.
+/// # Safety
+/// As hirsel_core_run.
+pub(crate) unsafe fn launch(config: &Config, entry: Entry) -> u8 {
+    #[cfg(feature = "testing")]
+    if let Some(launch) = LAUNCH.get() {
+        // SAFETY: the launch takes this call's pinned Config and entry.
+        return unsafe { launch(config, entry) };
+    }
+    // SAFETY: forwarded caller contract.
+    unsafe { hirsel_core_run(config, entry) }
+}
+
 /// # Safety
 /// Config, entry and all borrowed grants/arguments remain live through the run.
 /// The generated entry thunk returns only after cleanup on every exit edge.

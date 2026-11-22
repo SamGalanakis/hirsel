@@ -155,7 +155,7 @@ def check_event_order(args, work):
                     '-o', str(recorder)], check=True)
     linker = work / 'cc'
     linker.write_text(f'#!/bin/sh\nexec {shlex.quote(str(args.cc))} "$@" {shlex.quote(str(recorder))} '
-                      '-Wl,--wrap=hirsel_core_run\n')
+                      '\n')
     linker.chmod(0o755)
     fixtures = sorted(p for p in FIXTURES.glob('*.hirsel') if not args.only or p.stem in args.only)
     assert fixtures, 'no fixture selected'
@@ -228,7 +228,7 @@ def check_event_order(args, work):
                 fixture_linker = folder / 'cc'
                 fixture_linker.write_text(f'#!/bin/sh\nexec {shlex.quote(str(args.cc))} "$@" '
                                           f'{shlex.quote(str(provider_recorder))} {shlex.quote(str(provider))} '
-                                          '-lpthread -Wl,--wrap=hirsel_core_run\n')
+                                          '-lpthread\n')
                 fixture_linker.chmod(0o755)
             for backend in args.backend or (('cranelift', 'llvm') if oracle else ('cranelift',)):
                 command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', 'app@1/main/main',

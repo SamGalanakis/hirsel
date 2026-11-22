@@ -812,7 +812,7 @@ def first_party(meta: dict) -> str:
                                   "--evaluator", "buck-out/tmp/cargo-bin-exe/core-event-order/hirsel-core-contract-eval"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-scripted-runtime-pic"},
                             data=Raw('glob(["core/core/**", "crates/hirsel-core-rt/fixtures/order/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/fixtures/polls/recorder.c", "core/tools/std_native.py"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-store-s1", script="core/tools/store_tests.py",
                             host=True,

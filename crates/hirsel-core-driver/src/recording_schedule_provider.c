@@ -1,6 +1,6 @@
 /* Engine-agreement oracle: scripted clock, deterministic ready notifications,
    and an adversarial chooser. Only the recording run links this provider; it
-   registers itself as the test runtime's recording launch before main. */
+   registers itself as the test runtime's launch before main. */
 #include "hirsel_core_rt_sites.h"
 #include <stdbool.h>
 #include <stdlib.h>
@@ -36,7 +36,7 @@ static HirselCoreHostOutcome script_deliver(void *s,HirselCoreHostRequest *r,Hir
     (void)s;(void)r;return o;
 }
 extern uint8_t hirsel_core_test_run_last(const HirselCoreProcessConfig *,HirselCoreEntry);
-extern bool hirsel_core_test_set_record_launch(uint8_t (*)(const HirselCoreProcessConfig *,HirselCoreEntry));
+extern bool hirsel_core_test_set_launch(uint8_t (*)(const HirselCoreProcessConfig *,HirselCoreEntry));
 static uint8_t scripted_launch(const HirselCoreProcessConfig *input,HirselCoreEntry entry) {
     HirselCoreProcessConfig cfg=*input;
     HirselCoreEntryGrant grants[16];
@@ -48,5 +48,5 @@ static uint8_t scripted_launch(const HirselCoreProcessConfig *input,HirselCoreEn
     return hirsel_core_test_run_last(&cfg,entry);
 }
 __attribute__((constructor)) static void install_scripted_launch(void) {
-    if(!hirsel_core_test_set_record_launch(scripted_launch))abort();
+    if(!hirsel_core_test_set_launch(scripted_launch))abort();
 }

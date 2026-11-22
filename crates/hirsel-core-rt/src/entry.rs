@@ -1056,7 +1056,7 @@ unsafe fn run_with_sources_and_probe(
                     Some(waits) => {
                         crate::process::hirsel_core_run_with_foreign(&process.config, entry, waits)
                     }
-                    None => crate::process::hirsel_core_run(&process.config, entry),
+                    None => crate::process::launch(&process.config, entry),
                 }
             }
         }

@@ -448,6 +448,69 @@ fn drive_sim_clock(take w: sim.world.World) waits {
     sim.world.run(mut world)
 }
 
+// For n = 3 the first two words are below 2^64/3, the third is above
+// it, and the largest word maps to 2. Rejecting zero would shift the prefix.
+// expect: run sim_script_monotone_pick() = true
+fn sim_script_monotone_pick() -> bool {
+    let mut words: List[u64] = list.new()
+    list.push(mut words, 0)
+    list.push(mut words, 0x5555555555555555)
+    list.push(mut words, 0x5555555555555556)
+    list.push(mut words, 0xffffffffffffffff)
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take words)
+    let s = sim.world.Script(tail_seed: 0, streams: take streams)
+    let mut plan = sim.world.plan_from(s, 0)
+    let expected: Inline[u64, 4] =[0, 0, 1, 2]
+    for index in expected {
+        if sim.world.pick(mut plan, 3) != index {
+            return false
+        }
+    }
+    true
+}
+
+type ScriptServer: send {
+    plan: sim.world.Plan,
+    clock: Clock,
+    start: u64
+}
+
+fn serve_script(take server: ScriptServer) -> (u64, u64, u64) waits {
+    let ScriptServer(plan: take input, clock: time, start) = take server
+    let mut plan = take input
+    host.sleep_until(time, start)
+    let prefix = sim.world.pick(mut plan, 8)
+    let tail = sim.world.pick(mut plan, 8)
+    (host.mono_ns(time), prefix, tail)
+}
+
+fn script_servers(tasks: Tasks, s: sim.world.Script, a: u64, b: u64) -> ((u64, u64, u64), (u64, u64, u64)) waits {
+    let (world, time) = sim.world.new(0, 0, 0)
+    let first = task.spawn(tasks, bytes 65536, ScriptServer(plan: sim.world.plan_from(s, 0), clock: time, start: a), serve_script)
+    let second = task.spawn(tasks, bytes 65536, ScriptServer(plan: sim.world.plan_from(s, 1), clock: time, start: b), serve_script)
+    let driver = task.spawn(tasks, bytes 65536, take world, drive_sim_clock)
+    let first_draws = result.unwrap(task.join(take first))
+    let second_draws = result.unwrap(task.join(take second))
+    result.unwrap(task.join(take driver))
+    (first_draws, second_draws)
+}
+
+// The prefixes 2^61 and 2^63 map to 1 and 4. For tail seed zero the
+// first tail words are 0xe220a8397b1dcdaf and 0xbfef8030ddc2d772.
+// expect: run sim_script_provider_isolation(tasks) = true
+fn sim_script_provider_isolation(tasks: Tasks) -> bool waits {
+    let mut first: List[u64] = list.new()
+    list.push(mut first, 0x2000000000000000)
+    let mut second: List[u64] = list.new()
+    list.push(mut second, 0x8000000000000000)
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take first)
+    list.push(mut streams, take second)
+    let s = sim.world.Script(tail_seed: 0, streams: take streams)
+    script_servers(tasks, s, 1, 2) == ((1, 1, 7), (2, 4, 5)) && script_servers(tasks, s, 2, 1) == ((2, 1, 7), (1, 4, 5))
+}
+
 type SimLink: send {
     clock: Clock,
     port: Served[NetOp]

@@ -284,6 +284,21 @@ fn world_matches_plan(e: Env, tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
+### Scripted simulation
+
+Pass `std.sim.world.script_gen(providers, max_draws)` to `check_tasks` to
+shrink simulation choices. The generator records the tail seed with `word`
+followed by one `list_of` of words per provider, with lengths from zero to
+`max_draws`. The provider count is fixed, so every generated script has the
+same provider IDs even when its prefixes shrink.
+
+Use `std.sim.world.plan_from(case.value, id)` to initialize each provider.
+The shrinker can remove prefix words, lower individual words, and change the
+tail seed. Replay uses the same generator arguments, stable provider IDs and
+site fault setup as the original law. One reported `prop.replay` token contains
+all the recorded choices for the script. The law can still use `case.world_seed`
+to start its virtual clock. See [scripted plans](sim/world.md#scripted-plans).
+
 ## Shrinking
 
 A failing run has a class:

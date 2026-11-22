@@ -628,3 +628,56 @@ fn prop_tasks_out_of_time(tasks: Tasks) -> bool waits {
     }
     false
 }
+
+fn drive_script_clock(take input: sim.world.World) waits {
+    let mut world = take input
+    sim.world.run(mut world)
+}
+
+fn script_wakes_at_wrong_tick(take trial: Case[sim.world.Script]) -> Result[(), String] waits {
+    let mut plan = sim.world.plan_from(trial.value, 0)
+    let at = sim.world.pick(mut plan, 0x100000000)
+    let (world, time) = sim.world.new(trial.world_seed, 0, 0)
+    let driver = task.spawn(trial.tasks, bytes 65536, take world, drive_script_clock)
+    host.sleep_until(time, at)
+    result.unwrap(task.join(take driver))
+    if host.mono_ns(time) == 0xb7219997 {
+        Error(string.from("woke at tick 0xb7219997"))
+    } else {
+        Ok(())
+    }
+}
+
+// PCG(1, 0) supplies three prefix words. The first is 0xb7219997bcc14af2,
+// so the first pick at bound 2^32 is 0xb7219997 and the other words can go.
+// expect: run prop_tasks_script_shrink_replay(tasks) = true
+fn prop_tasks_script_shrink_replay(tasks: Tasks) -> bool waits {
+    let mut c = config()
+    c.seed = 1
+    c.cases = 1
+    let g = sim.world.script_gen(1, 3)
+    let empty: Option[List[u64]] = None
+    let Some((take original, _)) = generate(c, g, 0, empty) else {
+        return false
+    }
+    if list.len(original.streams[0]) != 3 {
+        return false
+    }
+    let Falsified(smallest) = search_tasks(tasks, c, g, script_wakes_at_wrong_tick) else {
+        return false
+    }
+    let mut printed = string.new()
+    token(smallest, mut printed)
+    let Replay(index, values: take values) = parse_token(printed, c.max_choices)
+    let Some((take shrunk, _)) = generate(c, g, index, Some(take values)) else {
+        return false
+    }
+    if list.len(shrunk.streams[0]) != 1 || smallest.message != "woke at tick 0xb7219997" {
+        return false
+    }
+    c.seed = 2
+    if let Falsified(reproduced) = search_tasks(tasks, replay(take c, printed), g, script_wakes_at_wrong_tick) {
+        return reproduced.index == smallest.index && reproduced.rendered == smallest.rendered && reproduced.message == smallest.message && reproduced.shrinks == 0
+    }
+    false
+}

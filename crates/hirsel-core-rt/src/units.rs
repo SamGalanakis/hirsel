@@ -165,6 +165,33 @@ static UNTIED_ON: AtomicBool = AtomicBool::new(false);
 pub(crate) fn untied() -> bool {
     UNTIED_ON.load(Ordering::Relaxed)
 }
+
+struct PoolHooks {
+    memory: fn(bool) -> Option<&'static Memory>,
+    park: fn(Option<u64>),
+    maybe_yield: fn(),
+    wake: fn(u32),
+    blocking: fn(bool) -> Blocking,
+}
+
+static POOL_HOOKS: OnceLock<PoolHooks> = OnceLock::new();
+
+fn enable_pool() {
+    let _ = POOL_HOOKS.set(PoolHooks {
+        memory: pool_memory,
+        park: park_unit,
+        maybe_yield: yield_unit_if_needed,
+        wake: wake_unit_by_id,
+        blocking: mark_pool_blocking,
+    });
+    UNTIED_ON.store(true, Ordering::SeqCst);
+}
+
+// A launcher installs these callbacks before any worker starts. A tied
+// scheduler does not name the pool's records or queues through its wait path.
+fn pool_hooks() -> &'static PoolHooks {
+    POOL_HOOKS.get().unwrap()
+}
 /// `HIRSEL_UNTIED=W`: run the root unit, and every helper unit it makes, on W
 /// worker threads. Only executables that can spawn a helper unit read it.
 pub(crate) fn workers() -> Option<usize> {
@@ -376,19 +403,17 @@ fn pool() -> &'static Pool {
     POOL.get().unwrap()
 }
 pub(crate) fn memory() -> Option<&'static Memory> {
-    if !untied() {
-        return None;
-    }
-    let p = pool();
-    (!p.stop.load(Ordering::Acquire)).then_some(&p.memory)
+    untied().then(|| (pool_hooks().memory)(false)).flatten()
 }
 /// A spare must arm its signal stack even if the memory thread is blocked.
 pub(crate) fn signal_stack_memory() -> Option<&'static Memory> {
-    if !untied() {
-        return None;
-    }
+    untied().then(|| (pool_hooks().memory)(true)).flatten()
+}
+
+fn pool_memory(signal_stack: bool) -> Option<&'static Memory> {
     let p = pool();
-    (p.handoff_ticks == 0 && !p.stop.load(Ordering::Acquire)).then_some(&p.memory)
+    ((!signal_stack || p.handoff_ticks == 0) && !p.stop.load(Ordering::Acquire))
+        .then_some(&p.memory)
 }
 
 struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));
@@ -581,6 +606,10 @@ fn leave(u: &Unit, after: After) {
 
 /// The running unit has nothing runnable: park until a wake or `deadline`.
 pub(crate) fn park(deadline: Option<u64>) {
+    (pool_hooks().park)(deadline);
+}
+
+fn park_unit(deadline: Option<u64>) {
     bump(S_PARKS);
     // SAFETY: called on the unit's own stack while it runs.
     let u = unsafe { &*cur() };
@@ -693,8 +722,11 @@ pub(crate) fn lost_slot() -> bool {
 }
 
 /// Requeue the running unit when another unit waits and its slice is over.
-#[inline(always)]
 pub(crate) fn maybe_yield() {
+    (pool_hooks().maybe_yield)();
+}
+
+fn yield_unit_if_needed() {
     let p = pool();
     let ix = worker_ix();
     let Some(private) = p.lifo.get(ix) else {
@@ -743,6 +775,10 @@ pub(crate) fn wake(u: &Unit) {
     }
 }
 pub(crate) fn wake_id(id: u32) {
+    (pool_hooks().wake)(id);
+}
+
+fn wake_unit_by_id(id: u32) {
     if let Some(u) = unit_ref(id) {
         wake(u);
     }
@@ -849,6 +885,14 @@ pub(crate) fn blocking_file() -> Blocking {
 
 #[inline(always)]
 fn mark_blocking(publish_private: bool) -> Blocking {
+    if untied() {
+        (pool_hooks().blocking)(publish_private)
+    } else {
+        Blocking { call: None }
+    }
+}
+
+fn mark_pool_blocking(publish_private: bool) -> Blocking {
     if let Some(word) = HOST_CALL.get() {
         // A sole unit is the only thread that could admit a peer.
         if LIVE.load(Ordering::Acquire) > 1 {
@@ -861,7 +905,7 @@ fn mark_blocking(publish_private: bool) -> Blocking {
                 call: Some((word, stamp)),
             };
         }
-    } else if publish_private && untied() {
+    } else if publish_private {
         publish_before_unmonitored_call();
     }
     Blocking { call: None }
@@ -1631,7 +1675,7 @@ pub(crate) fn launch(
     let _ = RUN.set(RunFn(run));
     let _ = BASE.set(Base(*input));
     LIVE.store(k, Ordering::SeqCst);
-    UNTIED_ON.store(true, Ordering::SeqCst);
+    enable_pool();
     let p = pool();
     let memory_thread = p.memory.start();
     for i in 0..k {

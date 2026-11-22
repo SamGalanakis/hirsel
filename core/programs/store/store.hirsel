@@ -8413,28 +8413,33 @@ pub fn disk_law_frames() -> bool {
 }
 
 // L37: AP19's beta vector, with the outer checksum from libxxhash.
+fn fork_frame_bytes() -> Bytes {
+    let wire: Inline[u8, 38] = [
+        19, 0, 1, 0, 22, 0, 0, 0, 104, 100, 110, 15, 101, 85, 18, 178,
+        1, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 4, 0, 98, 101, 116, 97,
+    ]
+    let mut frame: Bytes = list.with_capacity(38)
+    for b in wire { list.push(mut frame, b) }
+    take frame
+}
+
+fn fork_frame_fields(read_fork: JournalFork) -> bool {
+    read_fork.id == 1 && read_fork.parent == 0 && read_fork.forked_at == 64 && read_fork.name == "beta"
+}
+
 fn fork_frame_vector(id: StoreId) -> bool {
     let beta = Head(id: 1, name: "beta", parent: 0, forked_at: 64, roots: empty_roots(), head: 64, at: 100, following: None)
     let journal_ctx = DiskContext(store: id, role: 2, seq: 7)
     let encoded = result.unwrap(encode_fork(journal_ctx, 114, beta))
-    let expected: Inline[u8, 38] = [
-        19, 0, 1, 0, 22, 0, 0, 0, 104, 100, 110, 15, 101, 85, 18, 178,
-        1, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 4, 0, 98, 101, 116, 97,
-    ]
+    let expected = fork_frame_bytes()
     if list.len(encoded) != 38 { return false }
-    let mut wire = result.unwrap(disk_header_bytes(journal_ctx, 0))
-    list.append(mut wire, journal_empty_commit(journal_ctx, 72, 64))
     for i in 0u64 .. 38 {
         if encoded[i] != expected[i] { return false }
-        list.push(mut wire, expected[i])
     }
-    let segment = result.unwrap(journal_segment("j-7", id, 7, wire, Some(152), true))
-    if segment.wire_bytes != 80 || list.len(segment.events) != 2 { return false }
-    let (Commit(previous), Fork(read_fork)) = (segment.events[0], segment.events[1]) else { return false }
-    if previous.version != 64 || read_fork.id != 1 || read_fork.parent != 0 || read_fork.forked_at != 64 || read_fork.name != "beta" {
-        return false
-    }
-    let mut trailing = result.unwrap(copied(list.slice(wire, 130, 152)))
+    let payload = list.slice(expected, 16, 38)
+    let Ok(Fork(read_fork)) = journal_decode("j-7", 0x0013, payload) else { return false }
+    if !fork_frame_fields(read_fork) { return false }
+    let mut trailing = result.unwrap(copied(payload))
     list.push(mut trailing, 0u8)
     if !disk_corrupt(journal_decode("j-7", 0x0013, trailing)) { return false }
     let _ = list.set(mut trailing, 18, 255u8)
@@ -11941,12 +11946,6 @@ fn journal_test_payload() -> Result[(), ()] {
     if journal_law_payload() { Ok(()) } else { Error(()) }
 }
 
-type JournalSegment {
-    end: u64,
-    wire_bytes: u64,
-    events: List[JournalEvent]
-}
-
 fn journal_torn(why: Why) -> bool {
     match why {
         Truncated => true,
@@ -11956,37 +11955,6 @@ fn journal_torn(why: Why) -> bool {
         Kind(0) => true,
         _ => false,
     }
-}
-
-// Middle segments stop at the next HEADER's prev_end. Only the last segment
-// reads beyond its durable boundary, stopping at the first physically bad frame.
-fn journal_segment(file: String, id: StoreId, seq: u64, raw: Bytes, boundary: Option[u64], last: bool) -> Result[JournalSegment, Error] {
-    let header = disk_read_header(file, raw, 2, Some(seq), Some(id))?
-    let durable_end = match boundary { Some(d) => d, None => 72u64 }
-    if durable_end < 72 || durable_end > list.len(raw) { return Error(disk_fault(file, list.len(raw), Truncated)) }
-    let stop = if last { list.len(raw) } else { durable_end }
-    let mut at = 72u64
-    let mut wire_bytes = 0u64
-    let mut events: List[JournalEvent] = list.new()
-    while at < stop {
-        let read_frame = disk_read_frame(file, header.context, raw, at)
-        let frame = match take read_frame {
-            Ok(f) => f,
-            Error(Corrupt(take fault)) => {
-                if !last || at < durable_end || !journal_torn(fault.why) { return Error(Corrupt(take fault)) }
-                break
-            },
-            Error(take e) => return Error(take e)
-        }
-        if at < durable_end && frame.end > durable_end { return Error(disk_fault(file, at, Truncated)) }
-        if journal_event_kind(frame.kind) {
-            let payload = list.slice(raw, frame.payload, frame.end)
-            list.push(mut events, journal_decode(file, frame.kind, payload)?)
-            wire_bytes += frame.end - at
-        }
-        at = frame.end
-    }
-    Ok(JournalSegment(end: at, wire_bytes: wire_bytes, events: take events))
 }
 
 type JournalInput {
@@ -12071,6 +12039,8 @@ fn disk_stream_payload(mut input: JournalInput, path: String, context: DiskConte
     Ok(take payload)
 }
 
+// Middle segments stop at the next HEADER's prev_end. Only the last segment
+// reads beyond its durable boundary, stopping at the first physically bad frame.
 fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, boundary: Option[u64], last: bool,
     mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 2, Some(seq), Some(id))?
@@ -12116,10 +12086,25 @@ fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
     result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
 }
 
-// L3/L10/L11/L12: the durable boundary is an independently calculated offset,
-// never the decoder's returned end. Every truncation of the second42-byte frame
-// is a valid torn last tail when d=114, and corruption when d=156.
-pub fn journal_law_segment() -> bool {
+fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], last: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
+    disk_write_synced(d, "j-7", raw)?
+    let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
+    let mut events: List[JournalEvent] = list.new()
+    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, last, mut events,
+        scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
+            list.push(mut observed, take event)
+            Ok(())
+        })
+    let JournalInput(file: take opened_file, ..) = take input
+    disk_io(host.close(take opened_file))?
+    let (end, accepted) = scanned?
+    Ok((end, accepted, take events))
+}
+
+// L3/L10/L11/L12: the fixture's two COMMIT frames are 42 bytes each.
+// Every short prefix of the second frame is a torn tail at d=114
+// and corruption at d=156.
+fn journal_law_segment_boundaries(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 2, seq: 7)
     let header = result.unwrap(disk_header_bytes(ctx, 0))
@@ -12129,51 +12114,56 @@ pub fn journal_law_segment() -> bool {
     list.append(mut raw, first)
     list.append(mut raw, second)
     if list.len(raw) != 156 { return false }
-    let got = result.unwrap(journal_segment("j-7", id, 7, raw, Some(114), true))
-    if got.end != 156 || list.len(got.events) != 2 { return false }
-    let (Commit(left), Commit(right)) = (got.events[0], got.events[1]) else { return false }
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), true))
+    if end != 156 || accepted != 84 || list.len(events) != 2 { return false }
+    let (Commit(left), Commit(right)) = (events[0], events[1]) else { return false }
     if left.version != 1 || right.version != 2 { return false }
-    let middle = result.unwrap(journal_segment("j-7", id, 7, raw, Some(114), false))
-    if middle.end != 114 || list.len(middle.events) != 1 { return false }
+    let (middle_end, middle_bytes, take middle) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), false))
+    if middle_end != 114 || middle_bytes != 42 || list.len(middle) != 1 { return false }
     for n in 114u64 .. 156 {
         let tail = list.slice(raw, 0, n)
-        let partial = result.unwrap(journal_segment("j-7", id, 7, tail, Some(114), true))
-        if partial.end != 114 || list.len(partial.events) != 1 { return false }
-        if !disk_corrupt(journal_segment("j-7", id, 7, tail, Some(156), true)) { return false }
+        let (partial_end, partial_bytes, take partial) = result.unwrap(journal_scan_fixture(d, id, tail, Some(114), true))
+        if partial_end != 114 || partial_bytes != 42 || list.len(partial) != 1 { return false }
+        if !disk_corrupt(journal_scan_fixture(d, id, tail, Some(156), true)) { return false }
     }
     for n in 72u64 .. 114 {
         let mut broken = result.unwrap(copied(raw))
         let changed = broken[n] ^ 1u8
         let _ = list.set(mut broken, n, changed)
-        if !disk_corrupt(journal_segment("j-7", id, 7, broken, Some(114), true)) { return false }
-        let torn = result.unwrap(journal_segment("j-7", id, 7, broken, None, true))
-        if torn.end != 72 || list.len(torn.events) != 0 { return false }
+        if !disk_corrupt(journal_scan_fixture(d, id, broken, Some(114), true)) { return false }
+        let (torn_end, torn_bytes, take torn) = result.unwrap(journal_scan_fixture(d, id, broken, None, true))
+        if torn_end != 72 || torn_bytes != 0 || list.len(torn) != 0 { return false }
     }
-    if !disk_corrupt(journal_segment("j-7", id, 7, raw, Some(115), true)) { return false }
+    if !disk_corrupt(journal_scan_fixture(d, id, raw, Some(115), true)) { return false }
     let empty: Bytes = list.new()
     let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
     let shifted = journal_empty_commit(ctx, 88, 1)
     let mut extended = result.unwrap(copied(header))
     list.append(mut extended, optional)
     list.append(mut extended, shifted)
-    let future = result.unwrap(journal_segment("j-7", id, 7, extended, None, true))
-    if future.end != 130 || list.len(future.events) != 1 { return false }
+    let (future_end, future_bytes, take future) = result.unwrap(journal_scan_fixture(d, id, extended, None, true))
+    if future_end != 130 || future_bytes != 42 || list.len(future) != 1 { return false }
     let required = result.unwrap(disk_seal(ctx, 156, 0x0040, 1, empty))
     list.append(mut raw, required)
-    match journal_segment("j-7", id, 7, raw, Some(114), true) {
+    match journal_scan_fixture(d, id, raw, Some(114), true) {
         Error(Unsupported(0x0040)) => true,
         _ => false
     }
 }
 
-@test
-fn journal_test_segment() -> Result[(), ()] {
-    if journal_law_segment() { Ok(()) } else { Error(()) }
+fn journal_law_segment_fork(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let mut raw = result.unwrap(disk_header_bytes(ctx, 0))
+    list.append(mut raw, journal_empty_commit(ctx, 72, 64))
+    list.append(mut raw, fork_frame_bytes())
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(152), true))
+    if end != 152 || accepted != 80 || list.len(events) != 2 { return false }
+    let (Commit(previous), Fork(read_fork)) = (events[0], events[1]) else { return false }
+    previous.version == 64 && fork_frame_fields(read_fork)
 }
 
-@test
-fn journal_test_chunked_segment(d: Dir) -> Result[(), ()] waits {
-    let child = disk_test_directory(d)
+fn journal_law_chunked_segment(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let context = DiskContext(store: id, role: 2, seq: 7)
     let mut raw = result.unwrap(disk_header_bytes(context, 0))
@@ -12202,20 +12192,20 @@ fn journal_test_chunked_segment(d: Dir) -> Result[(), ()] waits {
     result.unwrap(le(mut raw, 65536, 4))
     list.fill(mut raw, 65536, 17u8)
     list.fill(mut raw, 11, 0u8)
-    result.unwrap(disk_write_synced(child, "j-7", raw))
-    let mut input = result.unwrap(journal_input(result.unwrap(host.open(child, "j-7", Read)), false))
-    let mut versions: List[u64] = list.new()
-    let (valid_end, accepted) = result.unwrap(journal_scan(mut input, "j-7", id, 7, Some(131223), true, mut versions,
-        scoped fn(mut observed: List[u64], take event: JournalEvent) -> Result[(), Error] {
-            if let Commit(commit) = event { list.push(mut observed, commit.version) }
-            Ok(())
-        }))
-    let JournalInput(file: take opened_file, ..) = take input
-    result.unwrap(host.close(take opened_file))
-    if valid_end != 131223 || accepted != 65599 || list.len(versions) != 1 || versions[0] != 1 {
-        return Error(())
-    }
-    Ok(())
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131223), true))
+    if end != 131223 || accepted != 65599 || list.len(events) != 1 { return false }
+    let Commit(commit) = events[0] else { return false }
+    commit.version == 1
+}
+
+pub fn journal_law_segment(d: Dir) -> bool waits {
+    let child = disk_test_directory(d)
+    journal_law_segment_boundaries(child) && journal_law_segment_fork(child) && journal_law_chunked_segment(child)
+}
+
+@test
+fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
+    if journal_law_segment(d) { Ok(()) } else { Error(()) }
 }
 
 type JournalReplay {

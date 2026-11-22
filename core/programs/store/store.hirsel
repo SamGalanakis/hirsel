@@ -1069,6 +1069,7 @@ type Ran[R, A] {
     first_stamp: u64,
     prepared_roots: bool,
     live: u64,
+    exact: bool,
     admits_rows: bool,
     frame: Option[Bytes],
     info: CallInfo,
@@ -1230,7 +1231,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         }
     }
     Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits,
-        first_stamp: first_stamp, prepared_roots: prepared_roots, live: live, admits_rows: admits_rows,
+        first_stamp: first_stamp, prepared_roots: prepared_roots, live: live, exact: false, admits_rows: admits_rows,
         frame: take frame, info: ci, reads: take seen))
 }
 
@@ -1443,7 +1444,7 @@ fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R
 }
 
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
-    let Ran(value: take value, roots: take roots, live: live, frame: take frame, info: ci, reads: take seen, ..) = take ran
+    let Ran(value: take value, roots: take roots, live: live, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
     if let Some(_) = db.journal {
         let frame_size = match frame { Some(raw) => list.len(raw), None => 0u64 }
         db.file_end += frame_size
@@ -1460,6 +1461,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     db.heads[i].head += 1
     db.heads[i].at = ci.at
     db.changes += 1
+    if exact { db.settled = db.changes }
     publish(take publication)
     let sent_sequence = if list.len(db.disk) == 0 {
         db.changes
@@ -1473,9 +1475,20 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     }
 }
 
-// I4: past the bound with charges made since the last cut under a pin or a
-// branch, settle them by a cut and check again, so a refusal rests on the
-// exact figure. Rebind the existing frame to the new segment and offset.
+fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
+    disk_allocation(scoped fn() -> Result[u64, Error] {
+        let mut roots: List[Roots] = list.with_capacity(list.len(db.heads) + list.len(db.pins))
+        for slot in 0u64 .. list.len(db.heads) {
+            let root = if slot == i { share_roots(proposed) } else { share_roots(db.heads[slot].roots) }
+            list.push(mut roots, take root)
+        }
+        for held in db.pins { list.push(mut roots, share_roots(held.roots)) }
+        Ok(page_row_account(roots))
+    })
+}
+
+// AP15: an over-bound retained-root draft is admitted on its proposed union.
+// If settling old charges rotates the journal, rebind the staged frame.
 fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] waits {
     if list.len(db.disk) != 0 {
         let refusal = match ran.frame {
@@ -1486,7 +1499,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
             return Ok(OverLimit(take ran, Journal(overflow)))
         }
     }
-    if !over_bound(db, ran) || !retaining(db) || db.settled == db.changes {
+    if !over_bound(db, ran) || !retaining(db) {
         wait_for_frame_room(mut db, ran.frame)?
         return prepare_run_commit(mut db, i, take ran)
     }
@@ -1496,35 +1509,39 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
         Error(Full(problem)) => return Ok(OverLimit(take settled, problem)),
         Error(take problem) => return Error(take problem),
     }
-    let drafted_publication = disk_allocation(scoped fn() -> Result[Publication, Error] {
+    let counted = {
         let Some(roots) = view settled.roots else { fail("store: settled draft has no roots") }
-        capacity(prepare_publication(db, i, db.heads[i].head + 1, roots))
-    })
-    let publication = match take drafted_publication {
-        Ok(take plan) => take plan,
+        draft_row_account(db, i, roots)
+    }
+    let live = match take counted {
+        Ok(live) => live,
         Error(Full(problem)) => return Ok(OverLimit(take settled, problem)),
         Error(take problem) => return Error(take problem),
     }
-    let added = int.saturating_sub(settled.live, db.resident)
-    match cut_install(mut db, NoHolderChange) {
-        Ok(_) => {},
-        Error(Full(c)) => return Ok(OverLimit(take settled, c)),
-        Error(take e) => return Error(take e)
+    settled.live = live
+    settled.exact = true
+    let checked = prepare_run_commit(mut db, i, take settled)?
+    let (take admitted, take publication) = match take checked {
+        Ready(take ready, take plan) => (take ready, take plan),
+        OverLimit(take rejected, problem) => return Ok(OverLimit(take rejected, problem)),
     }
-    settled.live = int.saturating_add(db.resident, added)
-    if let Some(take frame) = replace(mut settled.frame, None) {
-        let mut raw = take frame
-        if let Error(c) = seal_frame(mut raw, DiskContext(store: db.store, role: 2, seq: db.file_seq), db.file_end) {
-            return Ok(OverLimit(take settled, Allocation(c)))
+    let mut draft = take admitted
+    if db.settled != db.changes {
+        match cut_install(mut db, NoHolderChange) {
+            Ok(_) => {},
+            Error(Full(c)) => return Ok(OverLimit(take draft, c)),
+            Error(take e) => return Error(take e)
         }
-        settled.frame = Some(take raw)
+        if let Some(take frame) = replace(mut draft.frame, None) {
+            let mut raw = take frame
+            if let Error(c) = seal_frame(mut raw, DiskContext(store: db.store, role: 2, seq: db.file_seq), db.file_end) {
+                return Ok(OverLimit(take draft, Allocation(c)))
+            }
+            draft.frame = Some(take raw)
+        }
     }
-    if over_bound(db, settled) {
-        let needed = settled.live
-        return Ok(OverLimit(take settled, Resident(Capacity(requested: needed, available: db.ceiling))))
-    }
-    wait_for_frame_room(mut db, settled.frame)?
-    Ok(Ready(take settled, take publication))
+    wait_for_frame_room(mut db, draft.frame)?
+    Ok(Ready(take draft, take publication))
 }
 
 fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R, A], Error] waits {
@@ -6858,9 +6875,9 @@ pub fn law_branches(c: Clock) -> bool waits {
     match branch(db, "b") { Some(found) => found.id == 1 && version(snapshot(db)) == 5, None => false }
 }
 
-// L27(b). The descriptor and catalog charge 260. With a pin, each
-// overwrite adds 94 until settlement reduces the count to the two live
-// versions at 448. A third version fits the 542-byte ceiling.
+// L27(b). The descriptor and catalog charge 260 and each row version 94.
+// A conservative overwrite reaches 542. The next overwrite settles the
+// proposed union to 448, for the pinned and proposed versions.
 pub fn law_pin_settle(c: Clock) -> bool waits {
     let mut options = defaults()
     options.resident_limit = 542
@@ -6873,13 +6890,73 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     if db.resident != 354 { return false }
     for step in 0u64 .. 100 {
         if !typed_put(mut db, t, 1, step + 2) { return false }
-        if db.resident != (if step == 0 { 448u64 } else { 542u64 }) { return false }
+        if db.resident != (if step % 2 == 0 { 448u64 } else { 542u64 }) { return false }
     }
     let _ = result.unwrap(checkpoint(mut db))
     if db.resident != 448 { return false }
     let _ = result.unwrap(unpin(mut db, "p"))
     if db.resident != 354 || !typed_put(mut db, t, 1, 7) || db.resident != 354 { return false }
     result.unwrap(get(snapshot(db), shape(t), 1)) == Some(7u64)
+}
+
+// AP15. The catalog and descriptor cost 260 and one row version costs 94.
+// Rewriting or restoring the pinned value keeps the union at 354. Adding a
+// second key costs 448 in total, even if the draft also rewrites the first.
+fn pinned_draft_at_bound(mut db: Db) -> Result[(), Error] waits {
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut db, rows, 1, 1) { return Error(Foreign) }
+    let base = snapshot(db)
+    let _ = pin(mut db, "p", base)?
+    if accounts(db).logical != 354 || !accounts(db).exact { return Error(Foreign) }
+    if !typed_put(mut db, rows, 1, 1) { return Error(Foreign) }
+    if accounts(db).logical != 354 || !accounts(db).exact { return Error(Foreign) }
+
+    let deleted = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] { delete(mut tx, rows, 1) })?
+    if let Committed(Done(value: true, ..)) = deleted {} else { return Error(Foreign) }
+    if accounts(db).logical != 354 || accounts(db).exact { return Error(Foreign) }
+    let cut = db.checkpointed
+    let restored = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 1, 1) })?
+    let Committed(done) = restored else { return Error(Foreign) }
+    if db.checkpointed != cut + 1 { return Error(Foreign) }
+    durable(mut db, done.ticket)?
+
+    let journal = accounts(db).journal
+    let refused = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 1)?
+        put(mut tx, rows, 2, 2)
+    })?
+    let Refused(Resident(cap)) = refused else { return Error(Foreign) }
+    let head = snapshot(db)
+    if cap.requested != 448 || cap.available != 354 || accounts(db).journal != journal ||
+        accounts(db).logical != 354 || !accounts(db).exact || version(head) != 5 ||
+        get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+@test
+fn test_pinned_draft_at_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = defaults()
+    options.resident_limit = 354
+    options.pack_bytes = 512
+    let mut mem = memory(c, r, options)
+    pinned_draft_at_bound(mut mem)?
+    close(take mem)?
+
+    let child = disk_test_directory(d)
+    let mut db = open(tasks, child, c, r, options)?
+    pinned_draft_at_bound(mut db)?
+    close(take db)?
+    let mut reopened = open(tasks, child, c, r, options)?
+    let rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let head = snapshot(reopened)
+    if accounts(reopened).logical != 354 || !accounts(reopened).exact || version(head) != 5 ||
+        get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+        return Error(Foreign)
+    }
+    close(take reopened)
 }
 
 // L27(c)(i) and L51(h). A live-head fork shares the 354-byte account.
@@ -10275,13 +10352,11 @@ fn disk_close_connection(take connection: DiskConnection) -> Result[(), Error] w
 // parent b at 2, and adopt(c) still Diverged. Wrong implementations caught: a
 // COMMIT that names main (replay puts k5 on main); a cut that writes only
 // main (b and c are lost, and b's frame is a Gap).
-// I4 on disk: law_pin_settle's figures, with the limit raised by 128 for the
-// frame in flight. One put's COMMIT is over 34 and under 128 bytes, so 510
-// plus it passes 544 and 416 plus it does not. Each settle is a cut that
-// rotates the segment, so the frame is encoded again for the new one. The
-// last value survives reopen, and open's exact account is 322. Wrong
-// implementation caught: a frame kept with the old segment's binding, which
-// reopen drops as a torn tail.
+// I4 on disk: law_pin_settle's 448 and 542 byte figures also alternate at a
+// 544 byte limit. Each settle is a cut that rotates the segment, so the
+// staged frame needs the new binding. Reopen recovers the last value and an
+// exact account of 448. With the old binding, reopen drops the frame as a
+// torn tail.
 pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut options = defaults()
 
@@ -10328,7 +10403,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     for step in 0u64 .. 20 {
         let committed = result.unwrap(run(mut sdb, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, st, 1, step + 2) }))
         match take committed { Committed(done) => result.unwrap(durable(mut sdb, done.ticket)), _ => return false }
-        if sdb.resident != (if step == 0 { 448u64 } else { 542u64 }) { return false }
+        if sdb.resident != (if step % 2 == 0 { 448u64 } else { 542u64 }) { return false }
     }
     result.unwrap(close(take sdb))
     let settled_open = result.unwrap(open(tasks, settle_dir, c, r, options))
@@ -14272,11 +14347,9 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let kept = match take aborted { Aborted(Undone(value: 5, ticket: Some(t))) => t, _ => return false }
     match result.unwrap(recorded(db, b, db.heads[0].head)) { Some(call) => if call.record.stream != s { return false }, None => return false }
     if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(2)))) { return false }
-    // I4 with a pin: main's data leaf holds keys 1 and 9, so the pinned leaf
-    // and main's copy cost four rows exactly. Three overwrites of key 9
-    // charge five, one row over. With nothing in flight, a ceiling one below
-    // this commit's figure sends it through the settle cut, which removes
-    // that row, and it is admitted.
+    // I4 with a pin: three overwrites of key 9 leave obsolete charges.
+    // Set the ceiling one byte below the conservative draft to force a
+    // settle and verify that the rebound data-and-reply frame replays.
     if !put_run(mut db, 9, 1) { return false }
     let held = snapshot(db)
     let _ = result.unwrap(pin(mut db, "p", held))
@@ -14291,10 +14364,11 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         Over(_) => return false
     }
     let ceiling = db.ceiling
+    let cut = db.checkpointed
     db.ceiling = figure - 1
     let settled = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] { settle_body(mut tx, s) }))
     match take settled { Committed(_) => {}, _ => return false }
-    if db.settled + 1 != db.changes { return false }
+    if !accounts(db).exact || db.checkpointed != cut + 1 { return false }
     db.ceiling = ceiling
     let committed_at = db.heads[0].head
     result.unwrap(close(take db))
@@ -15009,6 +15083,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     db.ceiling = db.resident
     let unsettled = db.changes
     if db.settled == unsettled { return false }
+    let cut = db.checkpointed
     let Some(grant) = call_reserves(plan) else { return false }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
@@ -15023,7 +15098,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     match serve(mut db, take complete, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         Ok(key_word(7))
     }) {
-        Ok(Committed(receipt)) => receipt.reply == key_word(7) && db.settled == unsettled,
+        Ok(Committed(receipt)) => receipt.reply == key_word(7) && accounts(db).exact && db.checkpointed == cut + 1,
         _ => false,
     }
 }

@@ -27,7 +27,6 @@ mod isa;
 pub mod isolate;
 pub mod latest;
 pub mod limit;
-pub mod model_net;
 pub mod net;
 pub mod os;
 mod os_net;

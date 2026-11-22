@@ -24,7 +24,7 @@ fn cap6_ambient_kernels_take_authority() {
 }
 
 #[test]
-fn wire_net_operations_lower_and_enforce_authority() {
+fn wire_net_operations_lower() {
     let (index, modules) = canonical(
         r#"
 fn denied(n: Net) -> u64 waits {
@@ -70,30 +70,6 @@ fn accepting(mut l: Listener) waits { let _ = host.accept(mut l, Never) }
                 hirsel_core_ir::text::print(&emitter.module)
             )
         });
-        if ["denied", "admitted", "listening", "narrow"].contains(&function.path.0.name.as_str()) {
-            let mut network = eval::Network::default();
-            network.grants.insert(
-                1,
-                vec![
-                    hirsel_core_net::GrantRule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
-                    hirsel_core_net::GrantRule::parse("Listen 127.0.0.0/8 1-65535").unwrap(),
-                ],
-            );
-            let report = eval::run_network(
-                &emitter.module,
-                checked.function.unwrap(),
-                &[1],
-                1 << 20,
-                network,
-            );
-            assert_eq!(
-                report.outcome,
-                eval::Outcome::Returned(vec![1]),
-                "{}",
-                function.path
-            );
-            assert_eq!(report.used, 0);
-        }
     }
 }
 

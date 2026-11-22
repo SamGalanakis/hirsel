@@ -127,7 +127,8 @@ pub use reactor::{Poller, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, share_poll
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 mod signature;
 pub use signature::{SignatureAlgorithm, verify_signature};
-pub mod model;
+mod split_mix;
+pub use split_mix::SplitMix64;
 pub mod scram;
 pub mod tls;
 mod tls_rule;

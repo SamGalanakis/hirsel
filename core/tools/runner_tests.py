@@ -22,6 +22,7 @@ import hashlib
 import json
 import shlex
 import os
+import re
 import socket
 import sys
 from pathlib import Path
@@ -32,7 +33,7 @@ import time
 from urllib.request import urlopen
 
 from case_progress import run_case
-from std_native import MODEL_NET_RULES, ROOT
+from std_native import ROOT, simulation_support
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
@@ -725,17 +726,55 @@ def manifest(root, work, name, runner=None, extra=()):
 EVENT_LAWS = {*(f'store@1/runner_calls/law_{name}' for name in COUNTS), 'store@1/runner/law_children_joined_on_close'}
 
 
+def simulation_entry(inputs_path, definition, scratch, window):
+    inputs = json.loads(inputs_path.read_text())
+    package, *modules, name = definition.split('/')
+    package_name, version = package.split('@')
+    sources = next(p['sources'] for p in inputs['packages']
+                   if p['package'] == {'name': package_name, 'version': version})
+    module = next(source for source in sources if source['modules'] == modules)
+    source = Path(module['file']).read_text()
+    signature = re.search(rf'^pub fn {re.escape(name)}\(([^)]*)\)\s*->\s*([a-zA-Z0-9_]+)\s+waits\s*{{', source, re.M)
+    if signature is None or not re.search(r':\s*Net\b', signature[1]):
+        return inputs_path, definition
+    parameters = [tuple(part.strip() for part in pair.split(':')) for pair in signature[1].split(',') if pair.strip()]
+    task_name = next((name for name, ty in parameters if ty == 'Tasks'), None)
+    others = [f'{name}: {ty}' for name, ty in parameters if ty not in ('Clock', 'Net')]
+    if task_name is None:
+        task_name = 'simulation_tasks'
+        others.append('simulation_tasks: Tasks')
+    replacements = {'Clock': 'simulation_time', 'Net': 'simulation_net'}
+    arguments = ', '.join(replacements.get(ty, name) for name, ty in parameters)
+    source += simulation_support('std.sim')
+    source += f"""
+pub fn run_simulation({', '.join(others)}) -> {signature[2]} waits {{
+    let (simulation_net, simulation_time, simulation_server, simulation_clock) =
+        start_contract_simulation({task_name}, {window})
+    let simulation_result = {name}({arguments})
+    result.unwrap(task.join(take simulation_server))
+    result.unwrap(task.join(take simulation_clock))
+    simulation_result
+}}
+"""
+    new_source = scratch / Path(module['file']).name
+    new_source.write_text(source)
+    module['file'] = str(new_source)
+    manifest = scratch / 'simulation-inputs.json'
+    manifest.write_text(json.dumps(inputs))
+    return manifest, '/'.join([package, *modules, 'run_simulation'])
+
+
 def evaluate(evaluator, inputs_path, definition, launch_image=None):
-    request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES,
-                   events=definition in EVENT_LAWS)
-    if launch_image is not None:
-        request['launch_image'] = str(launch_image)
-    if definition in WIRE_TEST_INSTRUCTIONS:
-        request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
-    if definition in WIDE_WINDOW_LAWS:
-        request['model_window'] = 8192
-    result = run_case(f'{definition} [{inputs_path.stem}]', 'evaluator', [str(evaluator)],
-                      input=json.dumps(request) + '\n', capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(prefix='runner-simulation-', dir=inputs_path.parent) as directory:
+        manifest, entry = simulation_entry(inputs_path, definition, Path(directory),
+                                           8192 if definition in WIDE_WINDOW_LAWS else 8)
+        request = dict(manifest=str(manifest), entry=entry, events=definition in EVENT_LAWS)
+        if launch_image is not None:
+            request['launch_image'] = str(launch_image)
+        if definition in WIRE_TEST_INSTRUCTIONS:
+            request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
+        result = run_case(f'{definition} [{inputs_path.stem}]', 'evaluator', [str(evaluator)],
+                          input=json.dumps(request) + '\n', capture_output=True, text=True)
     try:
         report = json.loads(result.stdout)
     except ValueError:

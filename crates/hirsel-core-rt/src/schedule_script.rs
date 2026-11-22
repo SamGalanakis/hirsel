@@ -1,5 +1,5 @@
 //! Generative choices for tests. The dispatcher still records ordinary commits.
-use hirsel_core_net::model::SplitMix64;
+use hirsel_core_net::SplitMix64;
 use std::{
     cell::RefCell,
     collections::BTreeMap,

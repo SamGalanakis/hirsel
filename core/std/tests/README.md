@@ -178,6 +178,6 @@ walker_generic and walker_sealed laws cover late generic instances and a
 later-defined word-carried enum callee respectively.
 
 A socket law uses `// expect: run law(network) = value`. Its parameters
-are Net, Clock and Tasks, in that order. The evaluator and both native
-engines use the deterministic network model with an explicit loopback
-grant. Pass `--model-runtime` to `std_native.py` for a direct native run.
+are Net, Clock and Tasks, in that order. The walker supplies `sim.net`
+and its virtual clock. The cross-unit socket laws and the native charge
+parity oracle use host loopback grants.

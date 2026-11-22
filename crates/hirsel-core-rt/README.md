@@ -245,10 +245,3 @@ with the other counter samples and the same CPU16 / 2 GiB envelope. This is an
 explicit performance qualification, not a wall-time test in the unit suite.
 The separate `grow-carrier-words.hirsel` oracle forces moving realloc and checks
 success, refusal and regrowth, including both data and capacity copy-back.
-
-`model_net::ModelProvider` selects core-net's deterministic network for native
-runs. Pin the adapter and its fallback through the run; use its Provider for
-Net, Clock and the run's owned-handle operations. Other capabilities forward
-to the fallback. The scheduler and direct ABI callers use the model clock for
-sleep, network deadlines and scheduled faults without host sleeping. Sharing a
-Model shares the network and clock with evaluator or native clients.

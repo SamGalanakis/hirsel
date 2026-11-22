@@ -800,12 +800,6 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         }
     }
 }
-fn publish_modeled_readiness(model: &hirsel_core_net::model::Model) {
-    for token in model.poll(None, false) {
-        crate::tasks::hirsel_core_ready(token);
-    }
-}
-
 /// Owns a socket or listener while it is in transit.
 pub(crate) struct CrossedSocket {
     carrier: Option<hirsel_core_net::SocketTransfer>,
@@ -855,20 +849,6 @@ impl CrossedSocket {
             files.connected.insert(key, connected);
         }
         key
-    }
-}
-
-impl Drop for CrossedSocket {
-    fn drop(&mut self) {
-        let model = self
-            .carrier
-            .as_ref()
-            .and_then(|carrier| carrier.model())
-            .cloned();
-        drop(self.carrier.take());
-        if let Some(model) = model {
-            publish_modeled_readiness(&model);
-        }
     }
 }
 
@@ -1007,9 +987,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             if (*files).sockets.release(source) {
                 (*files).connected.remove(&(key & !3));
                 (*files).tls.sessions.remove(&(source & !3));
-            }
-            if let Some(model) = (*files).sockets.model() {
-                publish_modeled_readiness(model);
             }
         } else {
             (*files).connected.remove(&(key & !3));

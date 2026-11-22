@@ -1804,7 +1804,9 @@ fn net_secret_spends_after_issue(tasks: Tasks) -> bool waits {
     let child = task.spawn(tasks, bytes 65536, Timed(n: n, v: v), timeout_then_spent)
     let dialed = net_connect(mut port, 11, 443)
     let secured = answer_handshake(mut port, 11)
-    let Some(take call) = provide.next(mut port) else { return false }
+    let Some(take call) = provide.next(mut port) else {
+        return false
+    }
     let shape = match provide.net_op(call) {
         SendSecret(socket, before, after) => socket == 11 && before == 1 && after == 1,
         _ => false
@@ -1820,4 +1822,64 @@ fn net_secret_spends_after_issue(tasks: Tasks) -> bool waits {
     let write = net_released(mut port, 11, 2)
     let client = result.unwrap(task.join(take child))
     dialed && secured && shape && hidden && envelope && failed && read && write && client
+}
+
+type HandshakeWait: send {
+    net: Net,
+    clock: Clock,
+    cancel: bool
+}
+
+fn pending_handshake(take input: HandshakeWait) -> bool waits {
+    let HandshakeWait(net: n, clock: c, cancel: cancel) = take input
+    let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 443), Never))
+    let protocols: List[String] = list.new()
+    let until: Until = if cancel {
+        Never
+    } else {
+        At(c, 75)
+    }
+    match tls.connect(n, take socket, "alpha.test", System, protocols, until) {
+        Error(TimedOut) => !cancel && host.mono_ns(c) == 75,
+        Error(Aborted) => cancel,
+        _ => false
+    }
+}
+
+fn settled_handshake(tasks: Tasks, cancel: bool) -> bool waits {
+    let (c, hand) = provide.clock(0, 0)
+    let mut h = take hand
+    let (n, s) = provide.net(bytes 128)
+    let mut port = take s
+    let mut client = task.spawn(tasks, bytes 65536, HandshakeWait(net: n, clock: c, cancel: cancel), pending_handshake)
+    let dialed = net_connect(mut port, 12, 443)
+    let Some(take call) = provide.next(mut port) else {
+        return false
+    }
+    let handshake = match provide.net_op(call) {
+        Handshake(socket: 12, ..) => true,
+        _ => false
+    }
+    let waiting = if cancel {
+        task.cancel(mut client)
+        true
+    } else {
+        let registered = clock.idle(mut h) == Some(75)
+        clock.advance_to(mut h, 75)
+        registered
+    }
+    let ended = result.unwrap(task.join(take client))
+    let rejected_reply = match provide.reply(mut port, take call, provide.net_reply(Failed(Tls(Certificate(NameMismatch))))) {
+        Error(Withdrawn()) => true,
+        _ => false
+    }
+    let socket_gone = net_released(mut port, 12, 0)
+    dialed && handshake && waiting && ended && rejected_reply && socket_gone
+}
+
+// TLS-1 and CONC-7. Deadline and cancellation both consume the pending
+// handshake's socket and withdraw the server's answer, with distinct errors.
+// expect: run net_tls_withdrawal(tasks) = true
+fn net_tls_withdrawal(tasks: Tasks) -> bool waits {
+    settled_handshake(tasks, false) && settled_handshake(tasks, true)
 }

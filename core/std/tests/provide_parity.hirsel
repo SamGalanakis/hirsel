@@ -462,24 +462,43 @@ fn serve_sim_link(take server: SimLink) waits {
 
 type LateRead: send {
     input: ReadHalf,
-    c: Clock
+    c: Clock,
+    cancel: bool
 }
 
 fn timed_read(take lag: LateRead) -> (bool, ReadHalf) waits {
-    let LateRead(input: take input, c) = take lag
+    let LateRead(input: take input, c, cancel) = take lag
     let mut r = take input
     let mut data: Bytes = list.with_capacity(2)
-    let expired = match host.recv_bounded(mut r, mut data, 2, At(c, 5)) {
-        Error(TimedOut) => list.len(data) == 0 && host.mono_ns(c) == 5,
+    let zero = result.unwrap(host.recv_bounded(mut r, mut data, 0, Never))
+    let until: Until = if cancel {
+        Never
+    } else {
+        At(c, 5)
+    }
+    let withdrawn = match host.recv_bounded(mut r, mut data, 2, until) {
+        Error(TimedOut) => !cancel && host.mono_ns(c) == 5,
+        Error(Aborted) => cancel && host.mono_ns(c) == 1,
         _ => false
     }
-    (expired, take r)
+    (zero == 0 && withdrawn && list.len(data) == 0, take r)
 }
 
 // The read is taken before time advances to 1. Its deadline passes at 5,
 // while the byte is in flight until 11. The next read must get that byte.
 // expect: run sim_withdrawn_read_keeps_byte(tasks) = true
 fn sim_withdrawn_read_keeps_byte(tasks: Tasks) -> bool waits {
+    sim_read_withdrawal(tasks, false)
+}
+
+// CONC-7. Cancellation after issue reports Aborted and leaves the half
+// usable by its next owner. The byte sent afterward is read exactly once.
+// expect: run sim_cancelled_read_keeps_byte(tasks) = true
+fn sim_cancelled_read_keeps_byte(tasks: Tasks) -> bool waits {
+    sim_read_withdrawal(tasks, true)
+}
+
+fn sim_read_withdrawal(tasks: Tasks, cancel: bool) -> bool waits {
     let (world, c) = sim.world.new(1, 0, 0)
     let (network, port) = provide.net(bytes 4096)
     let driver = task.spawn(tasks, bytes 65536, take world, drive_sim_clock)
@@ -487,16 +506,23 @@ fn sim_withdrawn_read_keeps_byte(tasks: Tasks) -> bool waits {
     let (listener, address) = result.unwrap(host.listen(network, Addr(ip: V4(2130706433), port: 0), 1))
     let mut l = take listener
     let client = result.unwrap(host.connect(network, address, Never))
-    let (accepted, _) = result.unwrap(host.accept(mut l, Never))
+    let (accepted, peer) = result.unwrap(host.accept(mut l, Never))
+    let peer_is_local = match peer.ip {
+        V4(2130706433) => true,
+        _ => false
+    }
     let (client_read, writer) = net.split(take client)
     let (reader, unused_writer) = net.split(take accepted)
     let _ = take client_read
     let _ = take unused_writer
-    let read = task.spawn(tasks, bytes 65536, LateRead(input: take reader, c: c), timed_read)
+    let mut read = task.spawn(tasks, bytes 65536, LateRead(input: take reader, c: c, cancel: cancel), timed_read)
     host.sleep_until(c, 1)
+    if cancel {
+        task.cancel(mut read)
+    }
     let mut w = take writer
     let sent = result.unwrap(host.send_pair(mut w, string.as_bytes("x"), string.as_bytes(""), Never))
-    let (expired, returned) = result.unwrap(task.join(take read))
+    let (withdrawn, returned) = result.unwrap(task.join(take read))
     let _ = take w
     let mut r = take returned
     let mut data: Bytes = list.with_capacity(2)
@@ -506,7 +532,7 @@ fn sim_withdrawn_read_keeps_byte(tasks: Tasks) -> bool waits {
     let _ = take l
     result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
-    expired && sent == 1 && received == 1 && eof == 0 && host.mono_ns(c) == 11 && list.len(data) == 1 && data[0] == b'x'
+    peer_is_local && peer.port != 0 && address.port != 0 && withdrawn && sent == 1 && received == 1 && eof == 0 && host.mono_ns(c) == 11 && list.len(data) == 1 && data[0] == b'x'
 }
 
 type WaitForStop: send {

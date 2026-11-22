@@ -143,10 +143,24 @@ pub(crate) enum Label {
     Uncontained,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Bindings {
+    pub(crate) store: String,
+    pub(crate) dirs: Vec<String>,
+    pub(crate) net: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) memory: Option<u64>,
+    pub(crate) cpu: Option<(u64, u64)>,
+    pub(crate) pids: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Request {
     Hello,
-    Bind(Group, String, Label),
+    Bind(Group, String, Label, Bindings, Limits),
     Close(Group),
     Start(Launch),
     Stop(Child),
@@ -255,6 +269,9 @@ impl<'a> Reader<'a> {
     fn string(&mut self) -> io::Result<String> {
         String::from_utf8(self.bytes()?).map_err(|_| malformed("session string"))
     }
+    fn strings(&mut self) -> io::Result<Vec<String>> {
+        (0..self.count(4)?).map(|_| self.string()).collect()
+    }
     fn count(&mut self, least: usize) -> io::Result<usize> {
         // A count can claim no more elements than the bytes left can hold.
         let n = self.u32()? as usize;
@@ -294,6 +311,12 @@ impl Writer {
     fn bytes(&mut self, x: &[u8]) {
         self.len(x.len());
         self.0.extend_from_slice(x);
+    }
+    fn strings(&mut self, strings: &[String]) {
+        self.len(strings.len());
+        for text in strings {
+            self.bytes(text.as_bytes());
+        }
     }
     fn option<T>(&mut self, x: &Option<T>, f: impl FnOnce(&mut Self, &T)) {
         match x {
@@ -448,18 +471,14 @@ impl Wire for Launch {
         self.group.put(w);
         w.bytes(&self.assembly);
         w.bytes(self.workdir.as_bytes());
-        w.len(self.args.len());
-        for arg in &self.args {
-            w.bytes(arg.as_bytes());
-        }
+        w.strings(&self.args);
         self.mode.put(w);
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         let group = Group::get(r)?;
         let assembly = r.bytes()?;
         let workdir = r.string()?;
-        let n = r.count(4)?;
-        let args = (0..n).map(|_| r.string()).collect::<io::Result<_>>()?;
+        let args = r.strings()?;
         Ok(Self {
             group,
             assembly,
@@ -568,7 +587,7 @@ impl Wire for Request {
     fn put(&self, w: &mut Writer) {
         match self {
             Self::Hello => w.u32(0),
-            Self::Bind(g, address, label) => {
+            Self::Bind(g, address, label, bindings, limits) => {
                 w.u32(1);
                 g.put(w);
                 w.bytes(address.as_bytes());
@@ -576,6 +595,15 @@ impl Wire for Request {
                     Label::Contained => 0,
                     Label::Uncontained => 1,
                 });
+                w.bytes(bindings.store.as_bytes());
+                w.strings(&bindings.dirs);
+                w.strings(&bindings.net);
+                w.option(&limits.memory, |w, &memory| w.u64(memory));
+                w.option(&limits.cpu, |w, &(quota, period)| {
+                    w.u64(quota);
+                    w.u64(period);
+                });
+                w.option(&limits.pids, |w, &pids| w.u64(pids));
             }
             Self::Close(g) => (w.u32(2), g.put(w)).1,
             Self::Start(launch) => (w.u32(3), launch.put(w)).1,
@@ -609,6 +637,16 @@ impl Wire for Request {
                     0 => Label::Contained,
                     1 => Label::Uncontained,
                     _ => return Err(malformed("label tag")),
+                },
+                Bindings {
+                    store: r.string()?,
+                    dirs: r.strings()?,
+                    net: r.strings()?,
+                },
+                Limits {
+                    memory: r.option(Reader::u64)?,
+                    cpu: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
+                    pids: r.option(Reader::u64)?,
                 },
             ),
             2 => Self::Close(Group::get(r)?),
@@ -847,8 +885,14 @@ mod tests {
         let requests = [
             (Request::Hello, "00000000".to_owned()),
             (
-                Request::Bind(group(), "127.0.0.1:9".into(), Label::Uncontained),
-                "01000000010000006703000000000000000b0000003132372e302e302e313a3901000000".into(),
+                Request::Bind(
+                    group(),
+                    "127.0.0.1:9".into(),
+                    Label::Contained,
+                    Bindings { store: "/store".into(), dirs: vec!["data".into()], net: vec!["rule".into()] },
+                    Limits { memory: Some(4096), cpu: Some((1000, 10000)), pids: None },
+                ),
+                "01000000010000006703000000000000000b0000003132372e302e302e313a3900000000060000002f73746f7265010000000400000064617461010000000400000072756c6501000000001000000000000001000000e803000000000000102700000000000000000000".into(),
             ),
             (
                 Request::Close(group()),

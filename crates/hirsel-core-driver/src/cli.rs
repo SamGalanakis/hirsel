@@ -93,6 +93,7 @@ pub enum OptionId {
     CallTimeout,
     Control,
     HostState,
+    CgroupRoot,
     Workdir,
     Listen,
     Scratch,
@@ -135,7 +136,7 @@ commands! {
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
     "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
-    "launcher", "launcher --control SOCKET --state DIR", "Hold the groups' listeners and start their children for the platform host.";
+    "launcher", "launcher --control SOCKET --state DIR [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
@@ -301,6 +302,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("DIR"),
         ["host", "replay", "launcher"],
         "Private host state directory."
+    ),
+    option!(
+        CgroupRoot,
+        ["--cgroup-root"],
+        Some("DIR"),
+        ["launcher"],
+        "Use an empty delegated cgroup v2 subtree for contained groups."
     ),
     option!(
         TapeRetention,

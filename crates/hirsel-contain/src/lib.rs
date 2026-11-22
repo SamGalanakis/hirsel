@@ -77,13 +77,11 @@ impl Mode {
     }
 
     /// The descriptors above 2 the mode's row lets the child inherit: the
-    /// serving child's listener (3), private endpoint (4) and wake report (5),
-    /// and the prepare child's private endpoint (4). Describe and preview
-    /// answer on standard output; install has none.
+    /// serving child's listener (3), private endpoint (4) and wake report (5).
+    /// Describe and preview answer on stdout. Prepare syncs PREPARED in its export.
     pub fn descriptors(self) -> &'static [RawFd] {
         match self {
-            Mode::Install | Mode::Describe | Mode::Preview => &[],
-            Mode::Prepare => &[4],
+            Mode::Install | Mode::Describe | Mode::Preview | Mode::Prepare => &[],
             Mode::Serving => &[3, 4, 5],
         }
     }
@@ -95,7 +93,7 @@ impl Mode {
 pub struct ChildId {
     pub group: String,
     pub incarnation: u64,
-    pub key: u64,
+    pub key: u128,
     pub role: Mode,
 }
 
@@ -182,6 +180,14 @@ impl Authority {
 
     pub fn dirs(&self) -> &[PathBuf] {
         &self.dirs
+    }
+
+    /// The launcher owns this per-group directory. Serving exchanges exports there.
+    pub fn with_serving_scratch(mut self, scratch: &Path) -> Self {
+        if self.mode == Mode::Serving {
+            self.dirs.push(scratch.to_path_buf());
+        }
+        self
     }
 }
 
@@ -309,7 +315,7 @@ impl Host {
         };
         host.empty(PROBE).map_err(Uncontainable::Io)?;
         let plan = host
-            .plan(PROBE, None, &[], &[], &[], Path::new("/"), &[], &[])
+            .plan(PROBE, None, &[], &[], &[], None, Path::new("/"), &[], &[])
             .map_err(Uncontainable::Io)?;
         let probe = host
             .start(PROBE, &Limits::default(), plan)
@@ -382,18 +388,34 @@ impl Host {
             .iter()
             .map(|(target, fd)| (fd.as_raw_fd(), *target))
             .collect();
+        let (writable, export) = if authority.mode == Mode::Prepare {
+            (&[][..], Some(dirs[0].as_path()))
+        } else {
+            (dirs.as_slice(), None)
+        };
         let plan = self.plan(
             &name,
             Some(launch.program),
             launch.args,
             launch.env,
-            &dirs,
+            writable,
+            export,
             &workdir,
             &read_only,
             &fds,
         )?;
-        let contained = self.start(&name, &launch.limits, plan)?;
+        let mut contained = self.start(&name, &launch.limits, plan)?;
         drop(launch.fds);
+        // The namespace init can only receive a stop once it has installed a handler.
+        // Retain the first byte if setup failed before the ready message.
+        if let Err(error) = (&mut contained.status)
+            .take(1)
+            .read_to_end(&mut contained.prefix)
+        {
+            let _ = contained.kill();
+            let _ = contained.wait();
+            return Err(error.into());
+        }
         Ok(contained)
     }
 
@@ -405,6 +427,7 @@ impl Host {
         args: &[OsString],
         env: &[(OsString, OsString)],
         writable: &[PathBuf],
+        export: Option<&Path>,
         workdir: &Path,
         read_only: &[PathBuf],
         fds: &[(RawFd, RawFd)],
@@ -414,6 +437,7 @@ impl Host {
         for dir in writable {
             layout.bind(dir, false)?;
         }
+        let export = export.map(|path| layout.export(path)).transpose()?;
         for path in read_only {
             layout.bind(path, true)?;
         }
@@ -447,6 +471,7 @@ impl Host {
             workdir: cstring(workdir.as_os_str())?,
             program: None,
             fds: fds.to_vec(),
+            _export: export,
         };
         for dir in &layout.dirs {
             plan.dirs.push(under(dir)?);
@@ -457,9 +482,14 @@ impl Host {
                 plan.files.push(target.clone());
             }
             plan.binds.push(BindPlan {
-                source: cstring(bind.target.as_os_str())?,
+                source: cstring(bind.source.as_os_str())?,
                 target,
                 remount: bind.read_only.then_some(bind.flags | libc::MS_RDONLY),
+                export: bind
+                    .export
+                    .as_ref()
+                    .map(|(path, slot)| Ok::<_, io::Error>((cstring(path.as_os_str())?, *slot)))
+                    .transpose()?,
             });
         }
         for (link, target) in &layout.links {
@@ -551,6 +581,7 @@ impl Host {
                 mount,
                 pidfd,
                 status: read,
+                prefix: Vec::new(),
                 pid: pid as i32,
             })
         })();
@@ -576,10 +607,16 @@ pub struct Contained {
     mount: PathBuf,
     pidfd: OwnedFd,
     status: File,
+    prefix: Vec<u8>,
     pid: i32,
 }
 
 impl Contained {
+    /// Becomes readable when the container's init exits. Call wait to reap and empty it.
+    pub fn pidfd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.pidfd)
+    }
+
     /// The host's PID of the container's init.
     pub fn pid(&self) -> i32 {
         self.pid
@@ -639,14 +676,23 @@ impl Contained {
                 return Err(error);
             }
         }
-        let mut report = Vec::new();
+        let mut report = self.prefix;
         self.status.read_to_end(&mut report)?;
         empty(&self.outer)?;
         match fs::remove_dir(&self.mount) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
-        Ok(match report.as_slice() {
+        // Ready (R) and a failed exec's report may arrive in either order.
+        let report = if report.len() == 6 {
+            report
+                .strip_prefix(b"R")
+                .or_else(|| report.strip_suffix(b"R"))
+                .unwrap_or(&report)
+        } else {
+            &report
+        };
+        Ok(match report {
             [b'S', a, b, c, d] => {
                 End::Exited(ExitStatus::from_raw(i32::from_ne_bytes([*a, *b, *c, *d])))
             }
@@ -730,13 +776,33 @@ struct Layout {
 }
 
 struct Bind {
+    source: PathBuf,
     target: PathBuf,
     directory: bool,
     read_only: bool,
     flags: libc::c_ulong,
+    export: Option<(PathBuf, RawFd)>,
 }
 
 impl Layout {
+    /// The serving child can change the export name in scratch. Bind the
+    /// directory we opened so a rename or a symlink cannot redirect prepare.
+    fn export(&mut self, path: &Path) -> io::Result<File> {
+        let parent = self.resolve(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+        let target = parent.join(path.file_name().ok_or(io::ErrorKind::InvalidInput)?);
+        let slot = File::open("/dev/null")?;
+        self.dir(&target);
+        self.binds.push(Bind {
+            source: PathBuf::from(format!("/proc/self/fd/{}", slot.as_raw_fd())),
+            export: Some((target.clone(), slot.as_raw_fd())),
+            target,
+            directory: true,
+            read_only: false,
+            flags: 0,
+        });
+        Ok(slot)
+    }
+
     fn dir(&mut self, path: &Path) {
         let mut prefix = PathBuf::from("/");
         for component in path.components().skip(1) {
@@ -812,10 +878,12 @@ impl Layout {
             return Ok(());
         }
         self.binds.push(Bind {
+            source: target.clone(),
             target,
             directory: meta.is_dir(),
             read_only,
             flags,
+            export: None,
         });
         Ok(())
     }
@@ -841,6 +909,7 @@ struct BindPlan {
     source: CString,
     target: CString,
     remount: Option<libc::c_ulong>,
+    export: Option<(CString, RawFd)>,
 }
 
 struct Exec {
@@ -882,6 +951,7 @@ struct Plan {
     workdir: CString,
     program: Option<Exec>,
     fds: Vec<(RawFd, RawFd)>,
+    _export: Option<File>,
 }
 
 const STEPS: [&str; 16] = [
@@ -1002,6 +1072,19 @@ fn init(plan: &Plan, status: RawFd) -> ! {
             libc::close(fd);
         }
         for bind in &plan.binds {
+            // Open the export in the new mount namespace. A descriptor opened
+            // by the launcher pins a mount in its old namespace and cannot
+            // serve as the bind source here.
+            if let Some((path, slot)) = &bind.export {
+                let fd = libc::open(
+                    path.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                );
+                if fd < 0 || libc::dup3(fd, *slot, libc::O_CLOEXEC) < 0 {
+                    fail(status, 7);
+                }
+                libc::close(fd);
+            }
             if libc::mount(
                 bind.source.as_ptr(),
                 bind.target.as_ptr(),
@@ -1131,6 +1214,7 @@ fn init(plan: &Plan, status: RawFd) -> ! {
             action.sa_flags = libc::SA_RESTART;
             libc::sigaction(signal, &action, std::ptr::null_mut());
         }
+        report(status, b"R");
         loop {
             let mut wait_status = 0;
             let reaped = libc::waitpid(-1, &mut wait_status, 0);

@@ -32,7 +32,11 @@ SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 CONTAIN_PATHS = ("crates/hirsel-contain", "crates/hirsel-core-driver",
                  "core/programs/store/launcher.hirsel")
 CONTAIN_TARGET = "root//:contain"
-CONTAIN_COMMAND = "./contain 'contain::' --skip contain::contained_helper --test-threads=1"
+LAUNCHER_TEST_TARGET = "root//:hirsel-core-driver-unittest-harness"
+CONTAIN_COMMAND = (
+    "./launcher launcher::laws::contained_group --exact --ignored --nocapture"
+    " && ./contain 'contain::' --skip contain::contained_helper --test-threads=1"
+)
 
 
 @dataclass(frozen=True)
@@ -227,9 +231,12 @@ def contain_job(checkout, since, record, stack, dry_run):
             raise ValueError(f"build the containment shard from a clean checkout: {checkout}")
         bundle = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="hirsel-contain-")))
         output = subprocess.check_output(
-            [".buck2/bin/buck2", "build", "-j4", "--show-json-output", CONTAIN_TARGET],
+            [".buck2/bin/buck2", "build", "-j4", "--show-json-output",
+             CONTAIN_TARGET, LAUNCHER_TEST_TARGET],
             cwd=checkout, text=True)
-        shutil.copy2(checkout / json.loads(output)[CONTAIN_TARGET], bundle / "contain")
+        outputs = json.loads(output)
+        shutil.copy2(checkout / outputs[CONTAIN_TARGET], bundle / "contain")
+        shutil.copy2(checkout / outputs[LAUNCHER_TEST_TARGET], bundle / "launcher")
     return Job("contain", Input(bundle, False), CONTAIN_COMMAND, 15, (),
                (record, head) if record is not None else None)
 

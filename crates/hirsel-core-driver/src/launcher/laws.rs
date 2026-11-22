@@ -33,6 +33,7 @@ impl Images for Scripts {
             .clone();
         Ok(Image {
             path,
+            digest: [assembly[0]; 32],
             n_place: 1 << 16,
             prefix: Vec::new(),
         })
@@ -78,7 +79,7 @@ fn rig(scripts: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     fs::create_dir_all(&state).unwrap();
-    let launcher = Launcher::new(&state, || Ok(images(dir.path(), scripts))).unwrap();
+    let launcher = Launcher::new(&state, None, || Ok(images(dir.path(), scripts))).unwrap();
     Rig { dir, launcher }
 }
 
@@ -151,7 +152,13 @@ impl Rig {
     }
 
     fn bind(&mut self) -> std::net::SocketAddr {
-        let bind = Request::Bind(group(), "127.0.0.1:0".into(), Label::Uncontained);
+        let bind = Request::Bind(
+            group(),
+            "127.0.0.1:0".into(),
+            Label::Uncontained,
+            Bindings::default(),
+            Limits::default(),
+        );
         assert_eq!(self.ask(bind), [Event::Bound(group())]);
         self.launcher.listeners[0].socket.local_addr().unwrap()
     }
@@ -313,7 +320,7 @@ fn launcher_restart_stateless() {
     let state = work.join("state");
     fs::create_dir_all(&state).unwrap();
     let socket = work.join("control");
-    let mut launcher = Launcher::new(&state, || Ok(images(&work, &[SINGLE]))).unwrap();
+    let mut launcher = Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))).unwrap();
     launcher
         .listen(UnixListener::bind(&socket).unwrap())
         .unwrap();
@@ -327,7 +334,13 @@ fn launcher_restart_stateless() {
         exchange(&mut launcher, &mut host, Request::Hello),
         Event::Inventory(vec![], vec![])
     );
-    let bind = Request::Bind(group(), "127.0.0.1:0".into(), Label::Uncontained);
+    let bind = Request::Bind(
+        group(),
+        "127.0.0.1:0".into(),
+        Label::Uncontained,
+        Bindings::default(),
+        Limits::default(),
+    );
     assert_eq!(
         exchange(&mut launcher, &mut host, bind),
         Event::Bound(group())
@@ -380,15 +393,17 @@ fn launcher_restart_stateless() {
     );
 
     // A second launcher on the same state is fenced by the lock while the first lives.
-    assert!(Launcher::new(&state, || Ok(images(&work, &[SINGLE]))).is_err());
+    assert!(Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))).is_err());
     drop(host);
     drop(launcher);
-    let mut successor = Launcher::new(&state, || Ok(images(&work, &[SINGLE]))).unwrap();
+    let mut successor = Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))).unwrap();
     successor.handle(Request::Hello);
     successor.handle(Request::Bind(
         group(),
         address.to_string(),
         Label::Uncontained,
+        Bindings::default(),
+        Limits::default(),
     ));
     assert_eq!(
         successor.take_events(),
@@ -501,9 +516,9 @@ fn child_mode_authority() {
     }
     let export = rig.launcher.scratch_of(&group()).join("export-1");
     let attempt_hex = "03".to_owned() + &"00".repeat(7) + "03" + &"00".repeat(7);
-    let assembly_hex = "03".to_owned() + &"00".repeat(31);
+    let image_hex = "03".repeat(32);
     assert!(held("prepare")[0].ends_with(&format!(
-        "--hirsel-prepare {} {attempt_hex} {assembly_hex}",
+        "--hirsel-prepare {} {attempt_hex} {image_hex}",
         export.display()
     )));
 
@@ -529,11 +544,128 @@ fn child_mode_authority() {
 #[test]
 fn contained_refused() {
     let mut rig = rig(&[SLEEP]);
-    let bind = Request::Bind(group(), "127.0.0.1:0".into(), Label::Contained);
+    let bind = Request::Bind(
+        group(),
+        "127.0.0.1:0".into(),
+        Label::Contained,
+        Bindings::default(),
+        Limits::default(),
+    );
     assert!(matches!(&rig.ask(bind)[..], [Event::BindFailed(g, _)] if *g == group()));
     let work = rig.work();
     assert_eq!(
         rig.ask(launch(0, &work, Mode::Serving(1, serve(1, None)))),
         [Event::Refused(serving(1), Refusal::UnknownGroup)]
     );
+}
+
+/// A contained serving launch applies the Bind's bindings and quotas. Check
+/// the program's cgroup from outside and its directory access from inside.
+#[test]
+#[ignore = "requires a delegated cgroup and user namespaces (Boat contain)"]
+fn contained_group() {
+    const IN_SCOPE: &str = "HIRSEL_LAUNCHER_LAW_SCOPE";
+    if std::env::var_os(IN_SCOPE).is_none() {
+        let status = std::process::Command::new("systemd-run")
+            .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "-E"])
+            .arg(format!("{IN_SCOPE}=1"))
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "launcher::laws::contained_group",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "contained launcher law: {status}");
+        return;
+    }
+    let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let path = cgroup.trim().strip_prefix("0::/").unwrap();
+    let scope = Path::new("/sys/fs/cgroup").join(path);
+    let launcher_group = scope.join("launcher");
+    fs::create_dir(&launcher_group).unwrap();
+    fs::write(launcher_group.join("cgroup.procs"), "0").unwrap();
+    fs::write(scope.join("cgroup.subtree_control"), "+cpu +memory +pids").unwrap();
+    let containers = scope.join("containers");
+    fs::create_dir(&containers).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let launcher = Launcher::new(&state, Some(&containers), || {
+        Ok(images(
+            dir.path(),
+            &[r#"
+set -eu
+test -r data/allowed
+test ! -e private/hidden
+test "$HIRSEL_HOST_PID" = 1
+printf 'ran' > store/result
+IFS= read -r unused <&4
+"#],
+        ))
+    })
+    .unwrap();
+    let mut rig = Rig { dir, launcher };
+    let work = rig.work();
+    for dir in ["store", "data", "private"] {
+        fs::create_dir(work.join(dir)).unwrap();
+    }
+    fs::write(work.join("data/allowed"), "bound").unwrap();
+    fs::write(work.join("private/hidden"), "outside bindings").unwrap();
+    let bind = Request::Bind(
+        group(),
+        "127.0.0.1:0".into(),
+        Label::Contained,
+        Bindings {
+            store: "store".into(),
+            dirs: vec!["data".into()],
+            net: Vec::new(),
+        },
+        Limits {
+            memory: Some(64 * 1024 * 1024),
+            cpu: Some((50_000, 100_000)),
+            pids: Some(16),
+        },
+    );
+    assert_eq!(rig.ask(bind), [Event::Bound(group())]);
+    let child = serving(1);
+    assert_eq!(
+        rig.ask(launch(0, &work, Mode::Serving(1, serve(1, None)))),
+        [Event::Launched(child.clone(), Phase::Started)]
+    );
+    let marker = work.join("store/result");
+    let output = rig.until(|events| marker.is_file() || ended(events, &child));
+    assert!(!ended(&output, &child), "{output:?}");
+    assert_eq!(fs::read_to_string(marker).unwrap(), "ran");
+
+    // Child identity names the container. Find the actual script process in its leaf.
+    let container = containers.join("c-67-1-1-serving");
+    let pids = fs::read_to_string(container.join("run/cgroup.procs")).unwrap();
+    assert!(
+        pids.lines().any(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
+                cmdline
+                    .split(|byte| *byte == 0)
+                    .any(|arg| arg.ends_with(b"/image-0"))
+            })
+        }),
+        "serving program missing from {pids:?}"
+    );
+    for (file, value) in [
+        ("memory.max", "67108864"),
+        ("cpu.max", "50000 100000"),
+        ("pids.max", "16"),
+    ] {
+        assert_eq!(
+            fs::read_to_string(container.join(file)).unwrap().trim(),
+            value
+        );
+    }
+    rig.ask(Request::Kill(child.clone()));
+    rig.until(|events| ended(events, &child));
+    assert!(!container.exists());
 }

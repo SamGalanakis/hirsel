@@ -59,10 +59,28 @@ pub type Launch: codec + send {
 // A group's containment label, fixed in its catalog row (launch.md "Containment (R27)").
 pub type Label: codec + send = Contained | Uncontained
 
+pub type Bindings: codec + send {
+    store: String,
+    dirs: List[String],
+    net: List[String]
+}
+
+// CPU quota and period are in microseconds.
+pub type CpuLimit: codec + send {
+    quota: u64,
+    period: u64
+}
+
+pub type Limits: codec + send {
+    memory: Option[u64],
+    cpu: Option[CpuLimit],
+    pids: Option[u64]
+}
+
 pub type Request: codec + send = Hello
 // Hold the group's listener at this address, or bind it again after a launcher loss. A
 // launcher that cannot contain refuses a `Contained` group here.
-    | Bind(Group, String, Label)
+    | Bind(Group, String, Label, Bindings, Limits)
 // Close a removed group's listener.
     | Close(Group) | Start(Launch)
 // Stop a child by identity: a drain for a serving child, an end for the others.
@@ -276,8 +294,8 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             }
             push_event(mut out, Inventory(take states, take readable))
         },
-        Bind(take g, _, Contained) => push_event(mut out, BindFailed(take g, "contained: R27 containment is unbuilt")),
-        Bind(take g, _, Uncontained) => {
+        Bind(take g, _, Contained, _, _) => push_event(mut out, BindFailed(take g, "contained: the fake has no containment host")),
+        Bind(take g, _, Uncontained, _, _) => {
             if let None = find_listener(f, g) {
                 list.push(mut f.listeners, Listener(group: clone(g), readable: false, reported: false, retiring: false))
             }

@@ -123,7 +123,8 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
     let expected = parent
         .to_str()
         .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-        .filter(|pid| *pid > 1)
+        // A contained serving child has the container init as parent.
+        .filter(|pid| *pid > 0)
         .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: these calls take no memory arguments and affect only this child.
     unsafe {

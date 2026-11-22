@@ -11,6 +11,7 @@ name = "hirsel"
 path = "src/main.rs"
 
 [dependencies]
+hirsel-contain = { path = "../hirsel-contain" }
 hirsel-prof = { path = "../hirsel-prof" }
 hirsel-tape-format = { path = "../hirsel-tape-format" }
 hirsel-core-net = { path = "../hirsel-core-net" }

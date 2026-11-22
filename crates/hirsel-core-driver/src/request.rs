@@ -442,6 +442,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::Url
             | Opt::Control
             | Opt::HostState
+            | Opt::CgroupRoot
             | Opt::Workdir
             | Opt::Listen
             | Opt::Scratch

@@ -406,16 +406,17 @@ fn child_mode_authority() {
             });
             started.map(|contained| contained.wait().unwrap())
         };
-        // A descriptor outside the mode's row is refused: only serving holds
-        // a listener, and no mode gives a slot for the control socket.
+        // launch.md gives slots 3, 4 and 5 to serving. Prepare syncs its export
+        // without an endpoint, and the other modes have stdio alone.
         for target in [3, 4, 5, 6] {
+            let allowed = mode == Mode::Serving && target != 6;
             let fd = OwnedFd::from(UnixStream::connect(&group.control).unwrap());
             let plain = Authority::of(mode, &group.bindings, export).unwrap();
             match launch(vec![(target, fd)], &plain) {
-                Ok(_) => assert!(mode.descriptors().contains(&target), "{mode:?} {target}"),
+                Ok(_) => assert!(allowed, "{mode:?} {target}"),
                 Err(LaunchError::Refused(Refused::Descriptor(t))) => {
                     assert_eq!(t, target);
-                    assert!(!mode.descriptors().contains(&target), "{mode:?} {target}");
+                    assert!(!allowed, "{mode:?} {target}");
                 }
                 Err(error) => panic!("{mode:?} {target}: {error:?}"),
             }

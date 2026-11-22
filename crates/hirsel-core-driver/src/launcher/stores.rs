@@ -43,6 +43,7 @@ impl Images for Stores {
             .map_err(|e| format!("image: {e}"))?;
         Ok(Image {
             path,
+            digest: record.digest.0,
             n_place: recipe.launch.n_place,
             prefix: crate::exec_launch::arguments(&recipe).collect(),
         })

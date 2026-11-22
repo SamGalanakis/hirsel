@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Build the session server on units and the Rust tools in a private measurement directory.
-# Usage: taskset -c 8-11 build_scale.sh SCRATCH DRIVER RUNTIME [SIDE]
+# Usage: taskset -c 8-11 build_scale.sh SCRATCH DRIVER RUNTIME [SIDE [hardware|software|hirsel]]
 # session_u lands in SCRATCH/bin (scale.py's untied sides) and in SCRATCH/SIDE
 # (light.py's side directory, default `lang`).
 set -euo pipefail
 
+stage=${5:-all}
+if [[ $stage == all ]]; then
+    for step in hardware software hirsel; do
+        "$0" "$1" "$2" "$3" "${4:-lang}" "$step"
+    done
+    exit
+fi
 if [[ ${UNITS_BUILD_UNDER_CAP:-0} != 1 ]]; then
     root=$(cd "$(dirname "$0")/../.." && pwd)
     export HIRSEL_JOBS=4 UNITS_BUILD_UNDER_CAP=1
@@ -23,19 +30,27 @@ case "$(taskset -pc $$ | awk '{print $NF}')" in
 esac
 mkdir -p "$scratch"/{bin,build,store,software,"$side"}
 
-rustup run 1.99.0 cargo build -j4 --manifest-path bench/units/rust/Cargo.toml \
-    --target-dir "$scratch/build/cargo" --locked --release --bin loadgen --bin toolsrv --bin twin
-cp "$scratch/build/cargo/release/"{loadgen,toolsrv,twin} "$scratch/bin/"
-for variant in drain detail churn; do
-    ln -sf loadgen "$scratch/bin/loadgen_$variant"
-done
-rustup run 1.99.0 cargo build -j4 --manifest-path bench/units/rust/Cargo.toml \
-    --target-dir "$scratch/build/cargo" --locked --release --features software-sha --bin twin
-cp "$scratch/build/cargo/release/twin" "$scratch/software/"
-
-# The partitions' log directory is the program's directory grant.
-UNITS_DIR="$scratch/store" UNITS_LIMIT=1073741824 \
-    python3 bench/units/build.py bench/units/session_u.hirsel "$scratch/build/live" "$driver" "$runtime"
-cp "$scratch/build/live/session_u" "$scratch/bin/"
-cp "$scratch/build/live/session_u" "$scratch/$side/"
-sha256sum "$driver" "$runtime" "$scratch/bin/"* "$scratch/software/twin"
+cargo_target=${UNITS_CARGO_TARGET:-$scratch/build/cargo}
+case "$stage" in
+    hardware)
+        rustup run 1.99.0 cargo build -j4 --manifest-path bench/units/rust/Cargo.toml \
+            --target-dir "$cargo_target" --locked --release --bin loadgen --bin toolsrv --bin twin
+        cp "$cargo_target/release/"{loadgen,toolsrv,twin} "$scratch/bin/"
+        for variant in drain detail churn; do
+            ln -sf loadgen "$scratch/bin/loadgen_$variant"
+        done
+        ;;
+    software)
+        rustup run 1.99.0 cargo build -j4 --manifest-path bench/units/rust/Cargo.toml \
+            --target-dir "$cargo_target" --locked --release --features software-sha --bin twin
+        cp "$cargo_target/release/twin" "$scratch/software/"
+        ;;
+    hirsel)
+        # The partitions' log directory is the program's directory grant.
+        UNITS_DIR="$scratch/store" UNITS_LIMIT=1073741824 \
+            python3 bench/units/build.py bench/units/session_u.hirsel "$scratch/build/live" "$driver" "$runtime"
+        cp "$scratch/build/live/session_u" "$scratch/bin/"
+        cp "$scratch/build/live/session_u" "$scratch/$side/"
+        ;;
+    *) echo "unknown session build stage $stage" >&2; exit 2 ;;
+esac

@@ -265,11 +265,16 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
     return succeeded
 
 
-def build_checkbox(out, compiler, runtime, *, prefix=(ROOT / "tools/capped",), jobs=2):
-    wire_target = out / "wire"
+def build_wire(out, *, prefix=(ROOT / "tools/capped",), jobs=2):
     env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
     run([*prefix, "cargo", "build", f"-j{jobs}", "--release", "--locked", "--bins",
-         "--manifest-path", ROOT / "bench/wire/Cargo.toml", "--target-dir", wire_target], env=env)
+         "--manifest-path", ROOT / "bench/wire/Cargo.toml", "--target-dir", out / "wire"], env=env)
+
+
+def build_checkbox(out, compiler, runtime, *, prefix=(ROOT / "tools/capped",), jobs=2, wire=True):
+    if wire:
+        build_wire(out, prefix=prefix, jobs=jobs)
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
     spec = importlib.util.spec_from_file_location(
         "checkbox_run", ROOT / "core/programs/checkbox/run.py")
     checkbox = importlib.util.module_from_spec(spec)

@@ -69,8 +69,8 @@ def mask(cpus):
     return ",".join(map(str, cpus))
 
 
-def build_command(arguments, *, local=False, **kwargs):
-    env = os.environ.copy()
+def build_command(arguments, *, local=False, env=None, **kwargs):
+    env = os.environ | (env or {})
     if local:
         env.update(HIRSEL_JOBS="4", UNITS_BUILD_UNDER_CAP="1")
         arguments = ("taskset", "-c", BUILD_CPUS, ROOT / "tools/capped",
@@ -142,17 +142,24 @@ def prepare(cache, commit, suites, cases):
         artifacts = toolchain(cache)
         compiler, runtime = (Path(artifacts[key]) for key in ("compiler", "runtime"))
         if family == "a1":
-            build_command([ROOT / "bench/units/build_scale.sh", cache / "a1", compiler, runtime], local=True)
+            for stage in ("hardware", "software", "hirsel"):
+                build_command([ROOT / "bench/units/build_scale.sh", cache / "a1",
+                               compiler, runtime, "lang", stage], local=True,
+                              env={"UNITS_CARGO_TARGET": str(cache.parent / "cargo-a1")})
         else:
             bins = cache / "regimes"
             bins.mkdir(exist_ok=True)
-            entry = ("b.build_checkbox(out, cc, rt, prefix=(), jobs=4)" if family == "checkbox" else
-                     "b.build_rust(out, None, False, regimes=True, prefix=(), jobs=4); "
-                     "sys.exit(not b.build_hirsel(out, cc, rt, 'llvm', regimes=True, prefix=(), jobs=4))")
-            build_command([sys.executable, "-c",
-                           "import sys; from pathlib import Path; from bench.multicore import build as b; "
-                           f"out, cc, rt = map(Path, sys.argv[1:]); {entry}",
-                           bins, compiler, runtime], local=True)
+            if family == "checkbox":
+                entries = ("b.build_wire(out, prefix=(), jobs=4)",
+                           "b.build_checkbox(out, cc, rt, prefix=(), jobs=4, wire=False)")
+            else:
+                entries = ("b.build_rust(out, None, False, regimes=True, prefix=(), jobs=4)",
+                           "sys.exit(not b.build_hirsel(out, cc, rt, 'llvm', regimes=True, prefix=(), jobs=4))")
+            for entry in entries:
+                build_command([sys.executable, "-c",
+                               "import sys; from pathlib import Path; from bench.multicore import build as b; "
+                               f"out, cc, rt = map(Path, sys.argv[1:]); {entry}",
+                               bins, compiler, runtime], local=True)
         recorded.update(hashes(cache, names))
         write(path, manifest)
     if "a1" in need:

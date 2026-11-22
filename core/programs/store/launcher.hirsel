@@ -56,9 +56,13 @@ pub type Launch: codec + send {
     mode: Mode
 }
 
+// A group's containment label, fixed in its catalog row (launch.md "Containment (R27)").
+pub type Label: codec + send = Contained | Uncontained
+
 pub type Request: codec + send = Hello
-// Hold the group's listener at this address, or bind it again after a launcher loss.
-    | Bind(Group, String)
+// Hold the group's listener at this address, or bind it again after a launcher loss. A
+// launcher that cannot contain refuses a `Contained` group here.
+    | Bind(Group, String, Label)
 // Close a removed group's listener.
     | Close(Group) | Start(Launch)
 // Stop a child by identity: a drain for a serving child, an end for the others.
@@ -99,6 +103,9 @@ Inventory(List[ChildState], List[Group])
     | Launched(Child, Phase) | Refused(Child, Refusal) | Ended(Child, End) | Arrived(Group) | Bound(Group) | BindFailed(Group, String) | Closed(Group) | Retired(Group)
 // A serving child's answer or notice on its private endpoint.
     | Placed(Child, runner.HostReply) | Fenced | Collected(u64)
+// A describe or preview child's answer, read from its standard output after it exited 0
+// and before its `Ended`.
+    | Answered(Child, Bytes)
 
 pub fn role_of(m: Mode) -> Role {
     match m {
@@ -211,6 +218,13 @@ fn group_live(f: Fake, g: Group) -> bool {
     false
 }
 
+fn is_install(m: Mode) -> bool {
+    match m {
+        InstallMode(_, _) => true,
+        _ => false,
+    }
+}
+
 // The one-launch rule of §14.3: a store-holding launch is refused while another lives,
 // unless it is the one candidate that names the live serving child's gen.
 fn one_launch(f: Fake, launch: Launch) -> bool {
@@ -262,7 +276,8 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             }
             push_event(mut out, Inventory(take states, take readable))
         },
-        Bind(take g, _) => {
+        Bind(take g, _, Contained) => push_event(mut out, BindFailed(take g, "contained: R27 containment is unbuilt")),
+        Bind(take g, _, Uncontained) => {
             if let None = find_listener(f, g) {
                 list.push(mut f.listeners, Listener(group: clone(g), readable: false, reported: false, retiring: false))
             }
@@ -286,6 +301,7 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
                 None => Some(UnknownGroup),
                 Some(i) if f.listeners[i].retiring => Some(Retiring),
                 Some(_) if list.len(launch.assembly) != 32u64 => Some(Mismatch),
+                Some(_) if is_install(launch.mode) => Some(Unbuilt("install child: the runtime has no install-only launch")),
                 Some(_) if !one_launch(f, launch) => Some(Held),
                 Some(_) => None,
             }

@@ -652,8 +652,17 @@ fn script_wakes_at_wrong_tick(take trial: Case[sim.world.Script]) -> Result[(), 
 // so the first pick at bound 2^32 is 0xb7219997 and the other words can go.
 // expect: run prop_tasks_script_shrink_replay(tasks) = true
 fn prop_tasks_script_shrink_replay(tasks: Tasks) -> bool waits {
+    prop_tasks_script_shrink_replay_case(tasks, None)
+}
+
+fn prop_tasks_script_shrink_replay_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    prop_tasks_script_shrink_replay_case(tasks, Some(seed))
+}
+
+fn prop_tasks_script_shrink_replay_case(tasks: Tasks, seed: Option[u64]) -> bool waits {
     let mut c = config()
     c.seed = 1
+    c.sim_seed = seed
     c.cases = 1
     let g = sim.world.script_gen(1, 3)
     let empty: Option[List[u64]] = None

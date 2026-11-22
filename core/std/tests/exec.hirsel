@@ -14,10 +14,17 @@ fn drain_bytes(s: String) -> Bytes {
 // SIGTERM at deadline 12, then is killed and reaped at 12 + 3.
 // expect: run run_until_escalates(tasks) = true
 fn run_until_escalates(tasks: Tasks) -> bool waits {
-    let (world, time) = sim.world.new(1, 0, 0)
+    run_until_escalates_seeded(tasks, 0)
+}
+
+fn run_until_escalates_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    let (world, time) = sim.world.new(seed, 0, 0)
+    let stop_at = 5 + seed % 11
+    let deadline = stop_at + 7
+    let grace = 3 + seed % 13
     let driver = task.spawn(tasks, bytes 0, take world, drive)
     let (parent, trigger) = provide.process()
-    let alarm = sim.io.stop_at(tasks, time, 5, take trigger)
+    let alarm = sim.io.stop_at(tasks, time, stop_at, take trigger)
     let (e, port) = provide.exec(bytes 32)
     let program = sim.exec.Program(name: "stubborn", exit: IgnoreTerm, stdout: list.new(), stderr: list.new())
     let server = task.spawn(tasks, bytes 4096, sim.exec.Server(program: take program, time: time, port: take port), sim.exec.serve)
@@ -25,9 +32,9 @@ fn run_until_escalates(tasks: Tasks) -> bool waits {
     let Spawned(take proc, _, _, _) = result.unwrap(exec.spawn(e, l))
     let mut child = take proc
     host.stopped(parent)
-    let stopped = match exec.run_until(mut child, time, 12, 3) {
+    let stopped = match exec.run_until(mut child, time, deadline, grace) {
         Ok(outcome) => match (outcome.stage, outcome.termination) {
-            (Killed, Signalled(9)) => host.mono_ns(time) == 15,
+            (Killed, Signalled(9)) => host.mono_ns(time) == deadline + grace,
             _ => false,
         },
         _ => false,
@@ -36,17 +43,18 @@ fn run_until_escalates(tasks: Tasks) -> bool waits {
     let report = result.unwrap(task.join(take server))
     result.unwrap(task.join(take alarm))
     result.unwrap(task.join(take driver))
-    stopped && report.terms == 1 && report.kills == 1 && report.term_at == Some(12) && report.killed_at == Some(15) && report.reaped_at == Some(15)
+    stopped && report.terms == 1 && report.kills == 1 && report.term_at == Some(deadline) && report.killed_at == Some(deadline + grace) && report.reaped_at == Some(deadline + grace)
 }
 
 type CloseAt: send {
     stdin: WriteHalf,
-    time: Clock
+    time: Clock,
+    at: u64,
 }
 
-fn close_at_eight(take job: CloseAt) waits {
-    let CloseAt(stdin: take input, time) = take job
-    host.sleep_until(time, 8)
+fn close_at(take job: CloseAt) waits {
+    let CloseAt(stdin: take input, time, at) = take job
+    host.sleep_until(time, at)
     let _ = take input
 }
 
@@ -54,7 +62,12 @@ fn close_at_eight(take job: CloseAt) waits {
 // run_until must return then and send neither signal.
 // expect: run run_until_exits_early(tasks) = true
 fn run_until_exits_early(tasks: Tasks) -> bool waits {
-    let (world, time) = sim.world.new(1, 0, 0)
+    run_until_exits_early_seeded(tasks, 0)
+}
+
+fn run_until_exits_early_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    let (world, time) = sim.world.new(seed, 0, 0)
+    let at = 8 + seed % 128
     let driver = task.spawn(tasks, bytes 0, take world, drive)
     let (e, port) = provide.exec(bytes 64)
     let program = sim.exec.Program(name: "input", exit: Input(list.new()), stdout: list.new(), stderr: list.new())
@@ -62,11 +75,11 @@ fn run_until_exits_early(tasks: Tasks) -> bool waits {
     let l = Launch(program: "input", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Piped, stdout: Discard, stderr: Discard)
     let Spawned(take proc, take stdin, _, _) = result.unwrap(exec.spawn(e, l))
     let input = option.unwrap(take stdin)
-    let closer = task.spawn(tasks, bytes 0, CloseAt(stdin: take input, time: time), close_at_eight)
+    let closer = task.spawn(tasks, bytes 0, CloseAt(stdin: take input, time, at), close_at)
     let mut child = take proc
-    let early = match exec.run_until(mut child, time, 12, 3) {
+    let early = match exec.run_until(mut child, time, at + 4, 3) {
         Ok(outcome) => match (outcome.stage, outcome.termination) {
-            (Exited, Exited(0)) => host.mono_ns(time) == 8,
+            (Exited, Exited(0)) => host.mono_ns(time) == at,
             _ => false,
         },
         _ => false,
@@ -75,7 +88,7 @@ fn run_until_exits_early(tasks: Tasks) -> bool waits {
     let report = result.unwrap(task.join(take server))
     result.unwrap(task.join(take closer))
     result.unwrap(task.join(take driver))
-    early && report.terms == 0 && report.kills == 0 && report.reaped_at == Some(8)
+    early && report.terms == 0 && report.kills == 0 && report.reaped_at == Some(at)
 }
 
 // The child waits for empty stdin before exiting. The collector must close

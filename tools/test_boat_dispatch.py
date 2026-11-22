@@ -44,6 +44,49 @@ class FakeBoat:
 
 
 class BoatDispatchTest(unittest.TestCase):
+    def test_campaign_batch_reports_seed_verdicts_and_keeps_ranges_disjoint(self):
+        script = SCRIPT.resolve().with_name("sim-campaign")
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            ledger = root / "seeds.sqlite"
+            backend = root / "dispatcher"
+            backend.write_text('''#!/usr/bin/env python3
+import json, sys, subprocess
+from pathlib import Path
+manifest = Path(sys.argv[-1])
+job, = json.loads(manifest.read_text())
+raise SystemExit(subprocess.call(job["command"], shell=True, cwd=manifest.parent / job["bundle"]))
+''')
+            backend.chmod(0o700)
+            manifest = root / "manifest.json"
+            entries = []
+            for name in ("startup", "socket"):
+                executable = root / name
+                executable.write_text("#!/bin/sh\nexit 0\n")
+                executable.chmod(0o700)
+                entries.append({"law": name, "executable": name, "seeds": 2})
+            manifest.write_text(json.dumps(entries))
+
+            for campaign, expected in (("green", 0), ("red", 1)):
+                if expected:
+                    (root / "socket").write_text('#!/bin/sh\ntest "$HIRSEL_TEST_SIM_SEED" != 8\n')
+                results = root / f"{campaign}.jsonl"
+                ran = subprocess.run([script, "batch", campaign, manifest, "--ledger", ledger,
+                                      "--results", results, "--dispatcher", backend],
+                                     cwd=root, capture_output=True, text=True)
+                self.assertEqual(ran.returncode, expected, ran.stderr)
+                rows = [json.loads(line) for line in results.read_text().splitlines()]
+                offset = 4 * expected
+                self.assertEqual([(row["law"], row["seed"], row["status"]) for row in rows],
+                                 [("startup", offset + 1, 0), ("startup", offset + 2, 0),
+                                  ("socket", offset + 3, 0), ("socket", offset + 4, expected)])
+                self.assertIn(str(root / "socket"), rows[-1]["replay"])
+            with sqlite3.connect(ledger) as db:
+                self.assertEqual(db.execute("""SELECT law, first_seed, stop_seed, executed, failed
+                    FROM shards JOIN shard_laws USING (campaign, shard) ORDER BY first_seed""").fetchall(),
+                    [("startup", 1, 3, 2, 0), ("socket", 3, 5, 2, 0),
+                     ("startup", 5, 7, 2, 0), ("socket", 7, 9, 2, 1)])
+
     def test_vopr_yields_to_laws_and_records_disjoint_seed_ranges(self):
         with tempfile.TemporaryDirectory() as scratch, redirect_stdout(io.StringIO()):
             root = Path(scratch)

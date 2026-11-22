@@ -412,18 +412,22 @@ fn recovered_file(d: Dir, name: String, absent: String) -> Result[bool, IoError]
     Ok(missing && read == 3 && b[0] == b'n' && b[1] == b'e' && b[2] == b'w')
 }
 
-fn rename_survival(tasks: Tasks, c: Clock, barrier: bool) -> bool waits {
+fn rename_survival(tasks: Tasks, c: Clock, barrier: bool, seed: u64, any_cut: bool) -> bool waits {
     let (dir, s) = provide.dir(bytes 4096)
     let first = task.spawn(tasks, bytes 65536, SimMount(fs: sim.fs.new(), port: take s, clock: c), serve_sim)
     result.unwrap(write_rename(dir, barrier))
     let mut fs = result.unwrap(task.join(take first))
     // SplitMix64(seed 1)'s first word is 0x910a2dec89025cc1. Multiplying by
     // four gives high word 2, so crash cuts the prefix before rename (op 3).
-    let mut plan = sim.world.plan(1)
+    let mut plan = sim.world.plan(seed)
     sim.fs.crash(mut fs, mut plan)
     let (recovered, sr) = provide.dir(bytes 4096)
     let second = task.spawn(tasks, bytes 65536, SimMount(fs: take fs, port: take sr, clock: c), serve_sim)
-    let recovered_bytes = if barrier {
+    let after_rename = barrier || (any_cut && match host.stat(recovered, "snap") {
+        Ok(_) => true,
+        Error(_) => false,
+    })
+    let recovered_bytes = if after_rename {
         recovered_file(recovered, "snap", "temp")
     } else {
         recovered_file(recovered, "temp", "snap")
@@ -436,11 +440,19 @@ fn rename_survival(tasks: Tasks, c: Clock, barrier: bool) -> bool waits {
 // sync. Both outcomes must keep the exact file bytes.
 // expect: run sim_rename_durability(tasks) = true
 fn sim_rename_durability(tasks: Tasks) -> bool waits {
-    let (w, c) = sim.world.new(1, 0, 0)
+    sim_rename_durability_case(tasks, 1, false)
+}
+
+fn sim_rename_durability_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    sim_rename_durability_case(tasks, seed, true)
+}
+
+fn sim_rename_durability_case(tasks: Tasks, seed: u64, any_cut: bool) -> bool waits {
+    let (w, c) = sim.world.new(seed, 0, 0)
     let driver = task.spawn(tasks, bytes 65536, take w, drive_sim_clock)
     host.sleep_until(c, 123)
     result.unwrap(task.join(take driver))
-    host.mono_ns(c) == 123 && rename_survival(tasks, c, false) && rename_survival(tasks, c, true)
+    host.mono_ns(c) == 123 && rename_survival(tasks, c, false, seed, any_cut) && rename_survival(tasks, c, true, seed, any_cut)
 }
 
 fn drive_sim_clock(take w: sim.world.World) waits {
@@ -452,6 +464,10 @@ fn drive_sim_clock(take w: sim.world.World) waits {
 // it, and the largest word maps to 2. Rejecting zero would shift the prefix.
 // expect: run sim_script_monotone_pick() = true
 fn sim_script_monotone_pick() -> bool {
+    sim_script_monotone_pick_seeded(0)
+}
+
+fn sim_script_monotone_pick_seeded(seed: u64) -> bool {
     let mut words: List[u64] = list.new()
     list.push(mut words, 0)
     list.push(mut words, 0x5555555555555555)
@@ -467,7 +483,13 @@ fn sim_script_monotone_pick() -> bool {
             return false
         }
     }
-    true
+    let mut stream: List[u64] = list.new()
+    let word = int.wrapping_mul(seed, 0x9e3779b97f4a7c15)
+    list.push(mut stream, word)
+    let mut draws: List[List[u64]] = list.new()
+    list.push(mut draws, take stream)
+    let mut generated = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take draws), 0)
+    sim.world.pick(mut generated, 8) == (word >> 61)
 }
 
 type ScriptServer: send {
@@ -511,15 +533,32 @@ fn sim_script_provider_isolation(tasks: Tasks) -> bool waits {
     script_servers(tasks, s, 1, 2) == ((1, 1, 7), (2, 4, 5)) && script_servers(tasks, s, 2, 1) == ((2, 1, 7), (1, 4, 5))
 }
 
+fn sim_script_provider_isolation_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    let mut first: List[u64] = list.new()
+    let a = int.wrapping_mul(seed, 0x9e3779b97f4a7c15)
+    list.push(mut first, a)
+    let mut second: List[u64] = list.new()
+    let b = a ^ 0xffffffffffffffff
+    list.push(mut second, b)
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take first)
+    list.push(mut streams, take second)
+    let s = sim.world.Script(tail_seed: seed, streams: take streams)
+    let ((t0, p0, tail0), (t1, p1, tail1)) = script_servers(tasks, s, 1, 2)
+    let reversed = script_servers(tasks, s, 2, 1)
+    t0 == 1 && t1 == 2 && p0 == (a >> 61) && p1 == (b >> 61) && reversed == ((2, p0, tail0), (1, p1, tail1))
+}
+
 type SimLink: send {
     clock: Clock,
-    port: Served[NetOp]
+    port: Served[NetOp],
+    seed: u64,
 }
 
 fn serve_sim_link(take server: SimLink) waits {
-    let SimLink(clock: time, port: take port) = take server
+    let SimLink(clock: time, port: take port, seed) = take server
     let config = sim.net.Config(queue_bytes: 2, fragment_bytes: 1, latency_ns: 10)
-    let mut plan = sim.world.plan(1)
+    let mut plan = sim.world.plan(seed)
     let _ = sim.net.serve(sim.net.new(config), mut plan, time, take port)
 }
 
@@ -551,21 +590,29 @@ fn timed_read(take lag: LateRead) -> (bool, ReadHalf) waits {
 // while the byte is in flight until 11. The next read must get that byte.
 // expect: run sim_withdrawn_read_keeps_byte(tasks) = true
 fn sim_withdrawn_read_keeps_byte(tasks: Tasks) -> bool waits {
-    sim_read_withdrawal(tasks, false)
+    sim_withdrawn_read_keeps_byte_seeded(tasks, 1)
+}
+
+fn sim_withdrawn_read_keeps_byte_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    sim_read_withdrawal(tasks, false, seed)
 }
 
 // CONC-7. Cancellation after issue reports Aborted and leaves the half
 // usable by its next owner. The byte sent afterward is read exactly once.
 // expect: run sim_cancelled_read_keeps_byte(tasks) = true
 fn sim_cancelled_read_keeps_byte(tasks: Tasks) -> bool waits {
-    sim_read_withdrawal(tasks, true)
+    sim_cancelled_read_keeps_byte_seeded(tasks, 1)
 }
 
-fn sim_read_withdrawal(tasks: Tasks, cancel: bool) -> bool waits {
-    let (world, c) = sim.world.new(1, 0, 0)
+fn sim_cancelled_read_keeps_byte_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    sim_read_withdrawal(tasks, true, seed)
+}
+
+fn sim_read_withdrawal(tasks: Tasks, cancel: bool, seed: u64) -> bool waits {
+    let (world, c) = sim.world.new(seed, 0, 0)
     let (network, port) = provide.net(bytes 4096)
     let driver = task.spawn(tasks, bytes 65536, take world, drive_sim_clock)
-    let server = task.spawn(tasks, bytes 65536, SimLink(clock: c, port: take port), serve_sim_link)
+    let server = task.spawn(tasks, bytes 65536, SimLink(clock: c, port: take port, seed), serve_sim_link)
     let (listener, address) = result.unwrap(host.listen(network, Addr(ip: V4(2130706433), port: 0), 1))
     let mut l = take listener
     let client = result.unwrap(host.connect(network, address, Never))
@@ -613,9 +660,14 @@ fn at_stop(take watch: WaitForStop) -> u64 waits {
 // keeps the exact bytes it received, with its own order and no cross-talk.
 // expect: run sim_captured_stop(tasks) = true
 fn sim_captured_stop(tasks: Tasks) -> bool waits {
-    let (world, c) = sim.world.new(0, 0, 0)
+    sim_captured_stop_seeded(tasks, 0)
+}
+
+fn sim_captured_stop_seeded(tasks: Tasks, seed: u64) -> bool waits {
+    let (world, c) = sim.world.new(seed, 0, 0)
+    let offset = seed % 128
     let (p, trigger) = provide.process()
-    let wake = sim.io.stop_at(tasks, c, 42, take trigger)
+    let wake = sim.io.stop_at(tasks, c, 42 + offset, take trigger)
     let watch = task.spawn(tasks, bytes 0, WaitForStop(p: p, c: c), at_stop)
     let driver = task.spawn(tasks, bytes 65536, take world, drive_sim_clock)
     let (out, output) = sim.io.capture(bytes 128, false)
@@ -624,7 +676,7 @@ fn sim_captured_stop(tasks: Tasks) -> bool waits {
     let out_task = task.spawn(tasks, bytes 65536, take output, sim.io.collect)
     let err_task = task.spawn(tasks, bytes 65536, take errors, sim.io.collect)
     result.unwrap(stdout.write(out, "alpha\n"))
-    host.sleep_until(c, 21)
+    host.sleep_until(c, 21 + offset)
     let before = host.mono_ns(c)
     result.unwrap(stderr.write(err, "error"))
     result.unwrap(stdout.write(out, "β"))
@@ -634,7 +686,7 @@ fn sim_captured_stop(tasks: Tasks) -> bool waits {
     let a = result.unwrap(task.join(take out_task))
     let b = result.unwrap(task.join(take err_task))
     result.unwrap(task.join(take driver))
-    terminals && before == 21 && stopped == 42 && list.len(a) == 8 && list.len(b) == 5 && list.starts_with(a, string.as_bytes("alpha\nβ")) && list.starts_with(b, string.as_bytes("error"))
+    terminals && before == 21 + offset && stopped == 42 + offset && list.len(a) == 8 && list.len(b) == 5 && list.starts_with(a, string.as_bytes("alpha\nβ")) && list.starts_with(b, string.as_bytes("error"))
 }
 
 type UnixAttempt: send {

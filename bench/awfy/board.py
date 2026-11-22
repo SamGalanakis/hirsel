@@ -813,7 +813,8 @@ def compile_verification(out, recipe, side, image, mode, args, env):
 
 
 def native_objects(package_store):
-    # The installed image keeps each newly emitted library object in its native store.
+    # Count writes to the published library store only. Recipe assembly also
+    # emits library units into the request's native store.
     objects = set()
     for directory in package_store.resolve().rglob("native"):
         for path in directory.iterdir():

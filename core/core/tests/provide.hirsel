@@ -1094,6 +1094,31 @@ fn answer_handshake(mut s: Served[NetOp], socket: u64) -> bool waits {
     }
 }
 
+// Malformed policy admits nothing and returns the original 24-byte carrier.
+// expect: run seal_invalid_returns_bytes() = true
+fn seal_invalid_returns_bytes() -> bool {
+    let checked = bound bytes 64 {
+        let mut b: Bytes = list.with_capacity(24)
+        list.append(mut b, string.as_bytes("pencil"))
+        let Error((Invalid, take returned)) = secret.seal(take b, "*bad") else {
+            return false
+        }
+        let intact = list.capacity(returned) == 24 && list.compare_bytes(returned, string.as_bytes("pencil")) == Equal
+        let before_drop = bound bytes 64 {
+            true
+        }
+        let _ = take returned
+        let after_drop = bound bytes 64 {
+            true
+        }
+        match (before_drop, after_drop) {
+            (Error(c), Ok(true)) => intact && c.requested == 64 && c.available == 40,
+            _ => false,
+        }
+    }
+    result.unwrap(checked)
+}
+
 fn sealed_pencil(to: String) -> Secret {
     let b = string.into_bytes(string.from("pencil"))
     result.unwrap(secret.seal(take b, to))

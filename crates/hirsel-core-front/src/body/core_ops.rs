@@ -855,7 +855,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(output)
             }
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
-            Kernel::SecretSeal => self.runtime_net(HostOp::SecretSeal, f, vals, result, n),
+            Kernel::SecretSeal => self.runtime_secret_seal(f, vals, result, n),
             Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
             Kernel::Spawn | Kernel::TrySpawn => self.runtime_spawn(
                 types[0],
@@ -3752,9 +3752,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend([vals[1]?, vals[2]?, vals[3]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
                 }
-                HostOp::SecretSeal | HostOp::SecretNarrow | HostOp::EnvNarrow => {
-                    operands.push(vals[1]?)
-                }
+                HostOp::SecretNarrow | HostOp::EnvNarrow => operands.push(vals[1]?),
                 HostOp::NetSplit => {}
                 HostOp::NetJoin => operands.push(self.runtime_key(vals[1]?, n)),
                 _ => unreachable!(),
@@ -3768,10 +3766,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
             self.runtime_outputs::<8>(RtOp::Host(op), &args, n)?
         };
-        if op == HostOp::SecretSeal {
-            self.consume(vals[0], n);
-            self.drop_field(vals[0], self.p.fns[f].params[0].ty, n);
-        }
         let (value, error, code, written) = (values[0], values[1], values[2], values[3]);
         if op == HostOp::NetSplit {
             self.consume(vals[0], n);
@@ -3821,11 +3815,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let policy_result = matches!(
             op,
-            HostOp::NetNarrow
-                | HostOp::ExecNarrow
-                | HostOp::SecretSeal
-                | HostOp::SecretNarrow
-                | HostOp::EnvNarrow
+            HostOp::NetNarrow | HostOp::ExecNarrow | HostOp::SecretNarrow | HostOp::EnvNarrow
         );
         if policy_result {
             // Error 1 is `Invalid`; a larger one is a refusal, raised (MEM-21).
@@ -4032,6 +4022,80 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         n,
                     );
                     cx.runtime_net_error(net, net_ty, tag, code, n);
+                }
+                cx.jump(join, &[], n);
+                cx.start(join);
+            },
+        )
+    }
+
+    fn runtime_secret_seal(
+        &mut self,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let bytes = self.p.fns[f].params[0].ty;
+        let rep = self.rep_at(bytes, n)?;
+        let source = vals[0]?;
+        let [value, tag, _, available] = self.runtime_row(
+            RtOp::Host(HostOp::SecretSeal),
+            &[Arg::Value(source), Arg::Value(vals[1]?)],
+            n,
+        )?;
+        let byte = Ty::Scalar(Scalar::U8);
+        let ok = self.runtime_compare(byte, tag, 0, n)?;
+        // Success drops the wiped source. The error arm moves its carrier.
+        self.consume(Some(source), n);
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                cx.drop_field(Some(source), bytes, n);
+                cx.runtime_case_payload(to, 0, ty, Some(value), n);
+            },
+            |cx, to, pair| {
+                let TyKind::Tuple(fields) = cx.t.kind(pair) else {
+                    unreachable!("secret.seal returns its error and source as a tuple");
+                };
+                let error_ty = fields[0];
+                let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
+                else {
+                    return;
+                };
+                let Some(returned) = cx.runtime_field(to, &[Step::Field(1)], bytes, n) else {
+                    return;
+                };
+                cx.install(returned, rep, Some(source), n);
+                let Some(error) = cx.runtime_field(to, &[Step::Field(0)], error_ty, n) else {
+                    return;
+                };
+                let Some(invalid) = cx.runtime_compare(byte, tag, 1, n) else {
+                    return;
+                };
+                let yes = cx.new_block(&[]);
+                let no = cx.new_block(&[]);
+                let join = cx.new_block(&[]);
+                cx.runtime_branch(invalid, yes, no, n);
+                cx.start(yes);
+                cx.runtime_case_payload(error, 0, UNIT, None, n);
+                cx.jump(join, &[], n);
+                cx.start(no);
+                cx.inst(
+                    Inst::SetCase {
+                        address: error,
+                        case: 1,
+                    },
+                    n,
+                );
+                let capacity = cx.capacity_ty(n);
+                if let Some(at) =
+                    cx.runtime_field(error, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
+                {
+                    cx.runtime_capacity(at, value, available, n);
                 }
                 cx.jump(join, &[], n);
                 cx.start(join);

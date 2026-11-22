@@ -6255,7 +6255,7 @@ type WireParsed: send { reader: std.wsock.Reader, packet: Result[Option[WirePack
 type WireAllocation[C: send]: send = Decode(std.wsock.Reader, u64, Sender[WireParsed]) | Encode(Frame, Sender[Result[Bytes, std.wsock.Error]]) | AllocateService(Box[Service[C]], ServiceAllocation, Sender[Option[AllocatedState[C]]])
 type WirePool[C: send]: send { inbox: Receiver[WireAllocation[C]], config: std.wsock.Config, clock: Clock, tasks: Tasks, service_bytes: u64 }
 pub type ServiceAllocation: send = AcceptHello(Option[Caller]) | PlanCall | ValidateSubscribe(u32, u32, Bytes, Option[Bytes]) | DeliverUpdate(DeliveryJob)
-pub opaque type DeliveryJob: send { update: Update, output: List[WireOutput], drain: Option[Latest[Option[DrainWindow]]] }
+pub opaque type DeliveryJob: send { updates: List[Update], output: List[WireOutput], drain: Option[Latest[Option[DrainWindow]]] }
 type AllocatedState[C: send]: send { service: Box[Service[C]], status: Result[Box[ServicePlan], u16] }
 type ServiceAllocationJob[C: send]: send { service: Box[Service[C]], plan: ServiceAllocation }
 
@@ -6582,7 +6582,7 @@ type WireLoop[C: send] {
     allocation_to: Sender[Option[AllocatedState[C]]], allocation_from: Receiver[Option[AllocatedState[C]]],
     encoder: std.wsock.Outbound, rh: Task[()], wh: Task[()], lease: Option[std.wsock.Pending],
     hello_at: Option[u64], hello_seen: bool, hello_alarm: Option[Task[()]],
-    run: u64, held_credit: bool, deferred: List[(Frame, u64)], busy: bool, control: Option[Bytes], closing: bool, alarm: Option[Task[()]],
+    run: u64, held: Option[WireEvent], held_credit: bool, deferred: List[(Frame, u64)], busy: bool, control: Option[Bytes], closing: bool, alarm: Option[Task[()]],
     read_back: Option[std.wsock.Reader], write_back: Option[std.wsock.Writer], read_closed: bool, write_closed: bool, close_at: Option[u64], expired: bool,
 }
 
@@ -6637,7 +6637,7 @@ fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C
         to: take to, inbox: take inbox, credit: take credit, write: take write,
         encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
         encoder: encoder, rh: take rh, wh: take wh, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm,
-        run: 0u64, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None,
+        run: 0u64, held: None, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None,
         read_back: None, write_back: None, read_closed: false, write_closed: false, close_at: None, expired: false)
     Ok((take st, take service))
 }
@@ -6762,6 +6762,8 @@ fn wire_owner_next[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -
     let event = if (service.ready)(service.context) && list.len(st.deferred) != 0u64 {
         let (take pending_frame, at) = list.remove(mut st.deferred, 0u64)
         wire_event(Input(take pending_frame, at))
+    } else if let Some(take e) = replace(mut st.held, None) {
+        take e
     } else {
         let e = match channel.try_receive(st.inbox) {
             Ok(take e) => take e,
@@ -6864,7 +6866,10 @@ fn wire_owner_runner[C: send](mut st: WireLoop[C], take held: Box[Service[C]], p
         let _ = (st.apply_input)(mut service.context, mut st.work, WPoll(false))
         let drain: Option[Latest[Option[DrainWindow]]] = match st.work.drain { Some(root) => Some(latest.handle(root)), None => None }
         let output = replace(mut st.work.output, list.new())
-        let job = DeliveryJob(update: take published, output: take output, drain: take drain)
+        let mut updates: List[Update] = list.new()
+        list.push(mut updates, take published)
+        wire_take_updates(mut st, mut service, mut updates)
+        let job = DeliveryJob(updates: take updates, output: take output, drain: take drain)
         let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take service, DeliverUpdate(take job)) {
             Some(take returned) => take returned,
             None => return None,
@@ -6881,6 +6886,73 @@ fn wire_owner_runner[C: send](mut st: WireLoop[C], take held: Box[Service[C]], p
         Ok(take f) => take f, Error(code) => { wire_owner_refuse(mut st, code); None },
     }
     Some((take service, take next))
+}
+
+// §3 "Repair": the publisher's Updates already queued behind this one are taken in the same
+// run, in inbox order, and staged by one delivery job, so an owner whose staging falls behind
+// the publisher's rounds takes its backlog at once instead of one job per round.
+fn wire_take_updates[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], mut updates: List[Update]) {
+    let wakes = wire_take_queued(st.inbox, mut st.run, 1u64 + st.c.q, mut updates, mut st.held)
+    if wakes != 0u64 { let _ = (st.apply_input)(mut service.context, mut st.work, WDrained) }
+}
+
+// Takes queued Updates into `updates` until it holds `capacity`, the inbox is empty, or an
+// event of another kind comes; that event is kept in `held` and handled next. Each take
+// counts toward the drain wake as any take does; returns the wakes due.
+fn wire_take_queued(inbox: Receiver[WireEvent], mut run: u64, capacity: u64, mut updates: List[Update], mut held: Option[WireEvent]) -> u64 {
+    let mut wakes = 0u64
+    while list.len(updates) < capacity {
+        let e = match channel.try_receive(inbox) { Ok(take e) => take e, _ => return wakes }
+        if wire_taken(mut run, capacity) { wakes += 1u64 }
+        match take e {
+            WireEvent(e: FromRunner(Notice(e: Updated(take more)))) => list.push(mut updates, take more),
+            take other => { held = Some(take other); return wakes },
+        }
+    }
+    wakes
+}
+
+fn queued_update(version: u64) -> WireEvent {
+    wire_event(FromRunner(Notice(e: Updated(Update(version: version, content: None, outcomes: list.new())))))
+}
+
+// Whether `updates` holds Updates 1 to n, in order.
+fn queued_versions(updates: List[Update], n: u64) -> bool {
+    if list.len(updates) != n { return false }
+    for i in 0u64 .. n { if updates[i].version != i + 1u64 { return false } }
+    true
+}
+
+// §3 "Repair", the owner's take: an owner that takes Update 1 also takes the Updates queued
+// behind it, in order, up to its inbox's capacity (1+q = 5) in one delivery job. The first
+// other event ends the run and is held, not lost, and every take counts once toward the
+// drain wake. Hand-derived: with the run at 3 of 5, taking Updates 2 and 3 and then `Sent`
+// is three takes, so the run wraps once (one wake) and ends at 1; Update 4 stays queued. A
+// full backlog takes four more Updates and leaves the fifth queued.
+pub fn law_owner_takes_queued() -> bool {
+    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
+    let _ = channel.try_send(to, queued_update(2u64))
+    let _ = channel.try_send(to, queued_update(3u64))
+    let _ = channel.try_send(to, wire_event(Sent))
+    let _ = channel.try_send(to, queued_update(4u64))
+    let mut updates: List[Update] = list.new()
+    list.push(mut updates, Update(version: 1u64, content: None, outcomes: list.new()))
+    let mut held: Option[WireEvent] = None
+    let mut run = 3u64
+    let wakes = wire_take_queued(inbox, mut run, 5u64, mut updates, mut held)
+    let held_sent = match take held { Some(WireEvent(e: Sent)) => true, _ => false }
+    let left = match channel.try_receive(inbox) { Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 4u64, _ => false }
+    let mixed = wakes == 1u64 && run == 1u64 && held_sent && left && queued_versions(updates, 3u64)
+
+    for v in 2u64 .. 7u64 { let _ = channel.try_send(to, queued_update(v)) }
+    let mut full: List[Update] = list.new()
+    list.push(mut full, Update(version: 1u64, content: None, outcomes: list.new()))
+    let mut kept: Option[WireEvent] = None
+    let mut at = 0u64
+    let _ = wire_take_queued(inbox, mut at, 5u64, mut full, mut kept)
+    let rest = match channel.try_receive(inbox) { Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 6u64, _ => false }
+    let capped = at == 4u64 && rest && (match kept { None => true, _ => false }) && queued_versions(full, 5u64)
+    mixed && capped
 }
 
 // Installs the Hello binding's result through the allocation pool.
@@ -7049,7 +7121,7 @@ fn wire_owner_lost[C: send](take st: WireLoop[C]) -> Result[(), std.wsock.Error]
     // when the loop was inline.
     let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, write: take write,
         encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
-        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, control: take control,
+        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, held: take held, control: take control,
         alarm: take alarm, read_back: take read_back, write_back: take write_back, clock: clock, close_at: close_at, expired: expired, ..) = take st
     wire_join(take rh, take wh)
     Error(Protocol(1013u16))
@@ -7060,7 +7132,7 @@ fn wire_owner_end[C: send](take st: WireLoop[C], mut service: Box[Service[C]], t
     // loop was inline; only copyable fields are left out.
     let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, write: take write,
         encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
-        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, control: take control,
+        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, held: take held, control: take control,
         alarm: take alarm, read_back: take read_back, write_back: take write_back, clock: clock, close_at: close_at, expired: expired, ..) = take st
     if let Some(take h) = take alarm {
         let mut timing = take h
@@ -8475,10 +8547,12 @@ fn wire_service_allocate[G: send, H: send](mut s: WireSession[G, H], take alloca
         },
         ValidateSubscribe(sub, slot, take arg, take resume) => wire_plan_subscribe(mut s, sub, slot, take arg, take resume),
         DeliverUpdate(take delivery) => {
-            let DeliveryJob(update: take published, output: take previous, drain: take drain) = take delivery
+            let DeliveryJob(updates: take published, output: take previous, drain: take drain) = take delivery
             let mut output = take previous
             let mut completed: List[u64] = list.new()
-            wire_stage_update(mut s, mut output, mut completed, drain, take published)?
+            for take upd in published {
+                wire_stage_update(mut s, mut output, mut completed, drain, take upd)?
+            }
             Ok(PlannedUpdate(take output, take completed))
         },
     }

@@ -185,6 +185,10 @@ fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome
     }
 }
 
+/// On success, copies the bytes into a run-owned secret and wipes owned
+/// source storage. On refusal, leaves the source and its charge untouched.
+/// The caller owns the carrier and is responsible for moving or dropping it.
+///
 /// # Safety
 /// The source is exclusively owned and both initialized carriers are pinned.
 #[unsafe(no_mangle)]

@@ -319,7 +319,16 @@ pub(crate) unsafe fn launch(config: &Config, entry: Entry) -> u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) -> u8 {
     // SAFETY: caller pins the configuration and entry through the run.
-    unsafe { run_config(&*config, entry, None) }
+    unsafe { run_config(&*config, entry, run_plain) }
+}
+
+type RunMain<'a> = dyn FnMut(&mut Context) -> (u8, i32) + 'a;
+
+pub(crate) fn run_plain(
+    context: &mut Context,
+    main: &mut RunMain<'_>,
+) -> std::io::Result<(u8, i32)> {
+    Ok(main(context))
 }
 
 /// Run a program with a checked foreign interface. A reachable waits entry
@@ -334,10 +343,34 @@ pub unsafe extern "C" fn hirsel_core_run_with_foreign(
     waits: bool,
 ) -> u8 {
     // SAFETY: caller pins the configuration and entry through the run.
-    unsafe { run_config(&*config, entry, Some(waits)) }
+    unsafe {
+        run_config(&*config, entry, |context, main| {
+            with_foreign(context, main, waits)
+        })
+    }
 }
 
-unsafe fn run_config(config: &Config, entry: Entry, foreign_helpers: Option<bool>) -> u8 {
+unsafe fn with_foreign(
+    context: &mut Context,
+    main: &mut RunMain<'_>,
+    waits: bool,
+) -> std::io::Result<(u8, i32)> {
+    let state = crate::foreign::Run::new(waits)?;
+    context.foreign = &raw const state;
+    let result = main(context);
+    // SAFETY: the main runner has joined the tasks and delivered their calls.
+    unsafe { state.finish(context) };
+    context.foreign = std::ptr::null();
+    Ok(result)
+}
+
+// Instantiate startup for each runner so the linker can discard unused
+// foreign setup from executables that use the ordinary entry.
+unsafe fn run_config(
+    config: &Config,
+    entry: Entry,
+    run: impl FnOnce(&mut Context, &mut RunMain<'_>) -> std::io::Result<(u8, i32)>,
+) -> u8 {
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
         let key = match map_hash_key() {
@@ -353,7 +386,7 @@ unsafe fn run_config(config: &Config, entry: Entry, foreign_helpers: Option<bool
                 return NOT_STARTED;
             }
         };
-        run_with_map_hash_key(config, entry, key, foreign_helpers)
+        run_with_map_hash_key(config, entry, key, run)
     }
 }
 
@@ -383,7 +416,7 @@ pub(crate) unsafe fn run_with_map_hash_key(
     config: &Config,
     entry: Entry,
     key: [u8; 16],
-    foreign_helpers: Option<bool>,
+    run: impl FnOnce(&mut Context, &mut RunMain<'_>) -> std::io::Result<(u8, i32)>,
 ) -> u8 {
     // SAFETY: the caller pins the same operands as hirsel_core_run.
     unsafe {
@@ -413,28 +446,6 @@ pub(crate) unsafe fn run_with_map_hash_key(
             }
             return NOT_STARTED;
         }
-        let foreign = if let Some(waits) = foreign_helpers {
-            match crate::foreign::Run::new(waits) {
-                Ok(state) => Some(state),
-                Err(error) => {
-                    diagnostic(
-                        config,
-                        format!("not started: foreign helpers: {error}\n").as_bytes(),
-                    );
-                    if let Some(close) = config.close_grants {
-                        close(config.state);
-                    }
-                    return NOT_STARTED;
-                }
-            }
-        } else {
-            None
-        };
-        context.foreign = foreign
-            .as_ref()
-            .map_or(std::ptr::null(), std::ptr::from_ref);
-        #[cfg(feature = "charge-observation")]
-        crate::peak::checkpoint("startup");
         let mut result = MainResult::default();
         struct Call {
             entry: Entry,
@@ -452,32 +463,45 @@ pub(crate) unsafe fn run_with_map_hash_key(
                 (call.entry)(context, call.config, result.cast())
             }
         }
-        let mut call = Call { entry, config };
-        let previous_fd = crate::fiber::set_stop_fd(if config.stop_fd == 0 {
-            2
-        } else {
-            config.stop_fd
-        });
-        // Installation: a provider missing a callback is refused here, before
-        // any operation could use it (REPLAY-SPEC section 3).
-        crate::provider::install(config.provider);
-        for n in 0..config.capabilities_len {
-            crate::provider::install((*config.capabilities.add(n)).provider);
-        }
-        let failed = crate::tasks::run_root(
-            &mut context,
-            invoke,
-            (&mut call as *mut Call).cast(),
-            (&mut result as *mut MainResult).cast(),
-            size_of::<Call>(),
-            size_of::<MainResult>(),
-            config.scheduler,
-        );
-        if let Some(foreign) = &foreign {
-            foreign.finish(&mut context);
-        }
-        context.foreign = std::ptr::null();
-        drop(foreign);
+        let mut main = |context: &mut Context| {
+            #[cfg(feature = "charge-observation")]
+            crate::peak::checkpoint("startup");
+            let mut call = Call { entry, config };
+            let previous_fd = crate::fiber::set_stop_fd(if config.stop_fd == 0 {
+                2
+            } else {
+                config.stop_fd
+            });
+            // Installation: a provider missing a callback is refused here, before
+            // any operation could use it (REPLAY-SPEC section 3).
+            crate::provider::install(config.provider);
+            for n in 0..config.capabilities_len {
+                crate::provider::install((*config.capabilities.add(n)).provider);
+            }
+            let failed = crate::tasks::run_root(
+                context,
+                invoke,
+                (&mut call as *mut Call).cast(),
+                (&raw mut result).cast(),
+                size_of::<Call>(),
+                size_of::<MainResult>(),
+                config.scheduler,
+            );
+            (failed, previous_fd)
+        };
+        let (failed, previous_fd) = match run(&mut context, &mut main) {
+            Ok(result) => result,
+            Err(error) => {
+                diagnostic(
+                    config,
+                    format!("not started: foreign helpers: {error}\n").as_bytes(),
+                );
+                if let Some(close) = config.close_grants {
+                    close(config.state);
+                }
+                return NOT_STARTED;
+            }
+        };
         #[cfg(feature = "charge-observation")]
         crate::peak::checkpoint("main");
         crate::fiber::set_stop_fd(previous_fd);

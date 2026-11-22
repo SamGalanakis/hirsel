@@ -375,20 +375,25 @@ fn a_resident_driver_builds_each_universe_like_a_fresh_one() {
     assert_eq!(snapshot(&b, "app@1/main/root"), fresh_b, "retained B");
 }
 
-const CODEC_TYPES: &str = "type Rec { a: u64, b: List[u8] }\n";
-const CODEC_BODIES: [&str; 4] = [
+const CODEC_TYPES: &str =
+    "type Rec { a: u64, b: List[u8] }\ntype In { a: u64 }\ntype Out { i: In, b: u64 }\n";
+const CODEC_BODIES: [&str; 7] = [
     "fn one(x: List[Rec]) -> u64 { 1u64 }\n",
     "fn two(m: Option[u8], x: List[Rec]) -> u64 { 2u64 }\n",
     "fn three(t: (u64, Rec), x: List[Rec], y: Option[Rec]) -> u64 { 3u64 }\n",
     "fn four(y: Option[Rec], x: List[Rec]) -> u64 { 4u64 }\n",
+    "fn five(o: Out) -> u64 { 5u64 }\n",
+    "fn six(o: Out) -> u64 { 6u64 }\n",
+    "fn seven(i: In, o: Out) -> u64 { 7u64 }\n",
 ];
 
 /// A row closure is built once per program and copied into later bodies
 /// (body/row_closures.rs). Law: every body's module, structural codec hooks
 /// included, is the module the body lowers to in a program holding it alone, where
 /// nothing is copied. Oracle: that program's fresh build. Bodies name `List[Rec]`
-/// after other rows, so a copy lands at an offset; red on a copy numbered or hooked
-/// apart from the build it stands for.
+/// after other rows, so a copy lands at an offset, and `seven` names hook-free `Out`
+/// after the `In` it holds, so only `Out` is copied, naming the body's `In`; red on a
+/// copy numbered or hooked apart from the build it stands for.
 #[test]
 fn a_copied_row_closure_is_the_fresh_build() {
     let all = format!("{CODEC_TYPES}{}", CODEC_BODIES.concat());

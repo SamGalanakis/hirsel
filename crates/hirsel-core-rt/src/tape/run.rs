@@ -833,7 +833,7 @@ unsafe fn run_taped(
             }
             let key = replay.stored.map_hash_key.0;
             run.replay = Some(replay);
-            process::run_with_map_hash_key(&config, invoke, key, None)
+            process::run_with_map_hash_key(&config, invoke, key, process::run_plain)
         };
         if let Some((at, err)) = run.record_truncated {
             report_truncation(run.stderr, at, err);

@@ -108,17 +108,23 @@ impl SourcePositions<'_> {
     pub fn position(&self, item: &DefPath, start: u32) -> Option<(&SourceFile, u32, u32)> {
         let binding = self.map.items.get(item)?;
         let index = binding.file as usize;
-        let file = &self.map.files[index];
         let offset = (binding.file_offset + start) as usize;
+        let (line, column) = self.file_position(index, offset)?;
+        Some((&self.map.files[index], line, column))
+    }
+
+    /// Resolve a file-relative byte offset or annex ordinal.
+    pub fn file_position(&self, index: usize, offset: usize) -> Option<(u32, u32)> {
         let (line, column) = match &self.files[index] {
             FilePositions::Ordinals(points) => *points.get(offset)?,
             FilePositions::LineStarts(starts) => {
+                let file = &self.map.files[index];
                 let line = starts.partition_point(|&start| start <= offset);
-                let column = file.text[starts[line - 1]..offset].chars().count() as u32 + 1;
+                let column = file.text.get(starts[line - 1]..offset)?.chars().count() as u32 + 1;
                 (line as u32, column)
             }
         };
-        Some((file, line, column))
+        Some((line, column))
     }
 }
 

@@ -5,7 +5,7 @@
 pub const TAG: u8 = 0xff;
 pub const POINTS_TAG: u8 = 0xfe;
 /// The linked entry checks the native runtime ABI through its source table decoder.
-pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v5";
+pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v6";
 pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v3";
 /// Every linked site word is below this bound, so code materialises it as a
 /// sign-extended 32-bit immediate. A word is the file's first site plus a
@@ -56,28 +56,38 @@ pub fn position(markers: &[u8], offset: usize) -> (usize, usize) {
     (line, offset - start - continuations + 1)
 }
 
-const POINTS_PER_BLOCK: usize = 64;
-const BLOCK_OFFSET_BYTES: usize = size_of::<u64>();
+const POINTS_PER_BLOCK: u32 = 64;
+const BLOCK_ROW_BYTES: usize = size_of::<u32>() + size_of::<u64>();
 const INLINE_COLUMNS: u64 = 64;
 
-/// Encode sorted, unique positions in site order. A directory gives the
-/// offset of each block relative to the byte after the tag. A byte from 1
+/// Encode coordinates ordered by their original, unique ordinals. The
+/// directory names only nonempty blocks of 64 ordinals. Each block's
+/// presence mask is followed by the coordinates for its set bits. A byte from 1
 /// through 63 advances the column on the same line. Bytes 64 through 255
 /// advance the line by the upper two bits and give the one-based column
 /// in the lower six bits plus one. Zero introduces a ULEB128 word whose low
 /// bit selects a column delta or a line delta with a following absolute column.
 /// Each block starts from line and column zero.
-pub fn encode_points(points: &[(u32, u32)]) -> Vec<u8> {
-    let directory = points.len().div_ceil(POINTS_PER_BLOCK) * BLOCK_OFFSET_BYTES;
-    let mut output = Vec::with_capacity(1 + directory + points.len());
-    output.resize(1 + directory, 0);
+pub fn encode_points(points: &[(u32, (u32, u32))]) -> Vec<u8> {
+    let blocks = points.chunk_by(|a, b| a.0 / POINTS_PER_BLOCK == b.0 / POINTS_PER_BLOCK);
+    let count = blocks.clone().count();
+    let header = 1 + size_of::<u32>();
+    let directory = count * BLOCK_ROW_BYTES;
+    let mut output = vec![0; header + directory];
     output[0] = POINTS_TAG;
-    for (block, points) in points.chunks(POINTS_PER_BLOCK).enumerate() {
+    output[1..header].copy_from_slice(&(count as u32).to_le_bytes());
+    for (row, points) in blocks.enumerate() {
+        let block = points[0].0 / POINTS_PER_BLOCK;
         let offset = (output.len() - 1) as u64;
-        let slot = 1 + block * BLOCK_OFFSET_BYTES;
-        output[slot..slot + BLOCK_OFFSET_BYTES].copy_from_slice(&offset.to_le_bytes());
+        let slot = header + row * BLOCK_ROW_BYTES;
+        output[slot..slot + 4].copy_from_slice(&block.to_le_bytes());
+        output[slot + 4..slot + BLOCK_ROW_BYTES].copy_from_slice(&offset.to_le_bytes());
+        let mask = points.iter().fold(0u64, |mask, (ordinal, _)| {
+            mask | (1 << (ordinal % POINTS_PER_BLOCK))
+        });
+        output.extend_from_slice(&mask.to_le_bytes());
         let (mut last_line, mut last_column) = (0, 0);
-        for &(line, column) in points {
+        for &(_, (line, column)) in points {
             let lines = u64::from(line - last_line);
             let column_value = u64::from(column);
             if lines == 0 {
@@ -102,12 +112,24 @@ pub fn encode_points(points: &[(u32, u32)]) -> Vec<u8> {
 }
 
 /// Resolve a linked site's ordinal in a generated point table after its tag.
-pub fn point_position(points: &[u8], ordinal: usize) -> (usize, usize) {
-    let slot = ordinal / POINTS_PER_BLOCK * BLOCK_OFFSET_BYTES;
-    let offset = u64::from_le_bytes(points[slot..slot + BLOCK_OFFSET_BYTES].try_into().unwrap());
-    let mut bytes = &points[offset as usize..];
+pub fn point_position(points: &[u8], ordinal: usize) -> Option<(usize, usize)> {
+    let ordinal = u32::try_from(ordinal).ok()?;
+    let count = u32::from_le_bytes(points[..4].try_into().unwrap()) as usize;
+    let (rows, _) = points[4..4 + count * BLOCK_ROW_BYTES].as_chunks::<BLOCK_ROW_BYTES>();
+    let row = rows
+        .binary_search_by_key(&(ordinal / POINTS_PER_BLOCK), |row| {
+            u32::from_le_bytes(row[..4].try_into().unwrap())
+        })
+        .ok()?;
+    let offset = u64::from_le_bytes(rows[row][4..].try_into().unwrap()) as usize;
+    let mask = u64::from_le_bytes(points[offset..offset + 8].try_into().unwrap());
+    let bit = 1u64 << (ordinal % POINTS_PER_BLOCK);
+    if mask & bit == 0 {
+        return None;
+    }
+    let mut bytes = &points[offset + 8..];
     let (mut line, mut column) = (0, 0);
-    for _ in 0..=ordinal % POINTS_PER_BLOCK {
+    for _ in 0..=(mask & (bit - 1)).count_ones() {
         let (&code, rest) = bytes.split_first().unwrap();
         bytes = rest;
         let code = u64::from(code);
@@ -127,7 +149,7 @@ pub fn point_position(points: &[u8], ordinal: usize) -> (usize, usize) {
             column = code % INLINE_COLUMNS + 1;
         }
     }
-    (line as usize, column as usize)
+    Some((line as usize, column as usize))
 }
 
 fn push_uleb(output: &mut Vec<u8>, mut value: u64) {
@@ -178,11 +200,17 @@ mod tests {
             &[(1, 128), (257, 1025)],
             &[(1, u32::MAX), (u32::MAX, 1), (u32::MAX, u32::MAX)],
         ] {
-            let encoded = encode_points(points);
-            for (ordinal, &(line, column)) in points.iter().enumerate().rev() {
+            let points = points
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(ordinal, point)| (ordinal as u32, point))
+                .collect::<Vec<_>>();
+            let encoded = encode_points(&points);
+            for &(ordinal, (line, column)) in points.iter().rev() {
                 assert_eq!(
-                    point_position(&encoded[1..], ordinal),
-                    (line as usize, column as usize)
+                    point_position(&encoded[1..], ordinal as usize),
+                    Some((line as usize, column as usize))
                 );
             }
         }

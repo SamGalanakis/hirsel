@@ -27,8 +27,9 @@ enough to write, check and test working programs.
 
 ## Docs
 
-- [Primer](/primer.md): the language, its rules and the command-line loop
+- [Primer](/primer.md): syntax, ownership, capabilities and the command-line loop
 - [Standard library index](/api-index.md): every std module and its operations
+- [Install script](/install.sh): Linux x86_64 release installer
 """
 
 

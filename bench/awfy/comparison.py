@@ -240,7 +240,11 @@ def markdown(report):
         for side, sample in row["samples"].items():
             if cache := sample.get("cache"):
                 library = sample.get("cranelift_library_objects_written")
-                observed = f" {library} Cranelift library objects written." if library is not None else ""
+                observed = ""
+                if library is not None and (parts := sample.get("compiled_parts")) is not None:
+                    unit = "unit" if parts == 1 else "units"
+                    observed = (f" Cranelift compiled {parts} {unit} across the app and libraries. "
+                                f"{library} native objects were added to the published library store.")
                 lines.append(f"- {row['goal']} / {row['row']} / {side}. {cache}.{observed} "
                              f"Command `{sample.get('command_line', '')}`.")
     lines.extend(f"- {where}. {reason}" for where, reason in report["failures"].items())

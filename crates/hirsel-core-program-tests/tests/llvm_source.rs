@@ -1830,6 +1830,94 @@ void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, ui
     }
 }
 
+/// Dead chains of up to a million boxes, released from a local and from a
+/// list's elements, are cleaned in place near their roots and each handed to
+/// the drain once below (LANG-19: constant stack), and every block is refunded.
+/// Hand-derived: `Link` is 8 + 8 (`Option[Box]`) plus 8, so each box charges 24
+/// (MEM-24); four roots in a list of capacity 4 add 4 × 16. Nothing is retained;
+/// each chain deeper than a few boxes traces one hand-over, a single box none.
+/// A million deep chain overflows any native recursion over its boxes.
+#[test]
+fn deep_box_chains_drop_with_one_drain_hand_over_each() {
+    let source = r#"
+type Link {
+    next: Option[Box[Link]],
+    value: u64
+}
+
+fn build(n: u64) -> Option[Box[Link]] {
+    let mut head: Option[Box[Link]] = None
+    let mut i = 0u64
+    while i < n {
+        let next = take head
+        head = Some(box.new(Link(next, value: i)))
+        i = i + 1
+    }
+    head
+}
+
+fn chain(n: u64) -> u64 {
+    let head = build(n)
+    n
+}
+
+fn forest(n: u64) -> u64 {
+    let mut roots: List[Option[Box[Link]]] = list.with_capacity(4)
+    let mut r = 0u64
+    while r < 4 {
+        list.push(mut roots, build(n))
+        r = r + 1
+    }
+    list.len(roots) * n
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // (function, length, roots, list bytes)
+    let shapes: Vec<(&str, u64, u64, u64)> = [1, 1_000, 1_000_000]
+        .into_iter()
+        .flat_map(|n| [("chain", n, 1, 0), ("forest", n, 4, 4 * 16)])
+        .collect();
+    let peak = |&(_, n, roots, list): &(&str, u64, u64, u64)| roots * n * 24 + list;
+    let cases: Vec<Case> = shapes
+        .iter()
+        .map(|shape| Case {
+            function: names[shape.0],
+            args: vec![shape.1],
+            limit: peak(shape),
+            injection: None,
+        })
+        .collect();
+    let bindings = r#"
+bool __real_hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t);
+bool __wrap_hirsel_core_release(HirselCoreContext *ctx, void *node, const HirselCoreFixedDescriptor *d, uint64_t site) {
+    hirsel_core_test_drop_trace(1);
+    return __real_hirsel_core_release(ctx, node, d, site);
+}
+"#;
+    let reports = execute_optimized(&module, &cases, bindings, "", Optimization::Speed);
+    for ((shape, case), report) in shapes.iter().zip(&cases).zip(reports) {
+        let &(_, n, roots, _) = shape;
+        // The evaluator's cleanup recurses natively, so it checks the shallow chains.
+        if n <= 1_000 {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(expected.outcome, report.outcome, "{shape:?}");
+            assert_eq!(expected.used, 0, "{shape:?}");
+            assert_eq!(expected.peak_reserved, peak(shape), "{shape:?}");
+        }
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![roots * n]),
+            "{shape:?}"
+        );
+        assert_eq!(report.used, 0, "{shape:?}");
+        if let Some(reserved) = report.peak_reserved {
+            assert_eq!(reserved, peak(shape), "{shape:?}");
+        }
+        let hand_overs = if n == 1 { 0 } else { roots as usize };
+        assert_eq!(report.trace, vec![1; hand_overs], "{shape:?}");
+    }
+}
+
 impl NativeInput for hirsel_core_program_tests::SourceProgram {
     fn module(&self) -> &Module {
         self

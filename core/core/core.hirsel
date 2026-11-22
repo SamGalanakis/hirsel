@@ -155,7 +155,7 @@ pub type ArgToken = Lit(Bytes) | Any | Rest
 
 pub type ExecRule = Programs(names: String) | Form(program: String, form: List[ArgToken]) | EnvKeys(program: String, keys: String) | Dirs(program: String, labels: String)
 
-pub type SecretError = Invalid()
+pub type SecretError = Invalid | Capacity(Capacity)
 
 pub type MacError = Denied()
 

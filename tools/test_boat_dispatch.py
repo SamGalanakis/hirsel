@@ -1,10 +1,12 @@
 """Dispatcher acceptance test. Run with python3 tools/test_boat_dispatch.py."""
 from contextlib import redirect_stdout
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
 import runpy
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -42,6 +44,49 @@ class FakeBoat:
 
 
 class BoatDispatchTest(unittest.TestCase):
+    def test_vopr_yields_to_laws_and_records_disjoint_seed_ranges(self):
+        with tempfile.TemporaryDirectory() as scratch, redirect_stdout(io.StringIO()):
+            root = Path(scratch)
+            job = dispatcher["Job"]("vopr", dispatcher["Input"](root, False), "true", 1, ())
+            backend = FakeBoat()
+            with (root / "laws.lock").open("a") as law:
+                fcntl.flock(law, fcntl.LOCK_SH)
+                with self.assertRaisesRegex(ValueError, "law shards are pending"):
+                    dispatch([[job]], 60, root, backend, dry_run=True, job_class="vopr")
+                self.assertEqual(backend.started, [])
+            self.assertEqual(dispatch([[job]] * 179, 60, root, backend, dry_run=True), 0)
+            self.assertEqual(dispatch([[job]], 60, root, backend, dry_run=True, job_class="vopr"), 0)
+            with self.assertRaisesRegex(ValueError, "preserve start capacity for laws"):
+                dispatch([[job]], 60, root, backend, dry_run=True, job_class="vopr")
+            self.assertEqual(len(backend.started), 180)
+            self.assertEqual(dispatch([[job]], 60, root, backend, dry_run=True), 0)
+            self.assertEqual(len(backend.started), 181)
+
+            script = SCRIPT.with_name("sim-campaign")
+            campaign = runpy.run_path(str(script))
+            fixture = root / "test-law"
+            fixture.write_text('#!/bin/sh\ntest "$HIRSEL_TEST_SIM_SEED" != 2\n')
+            fixture.chmod(0o700)
+            db = sqlite3.connect(":memory:")
+            try:
+                ranges = campaign["allocate"](db, "first", 2, 2)
+                self.assertEqual(ranges, [(1, 3), (3, 5)])
+                first = subprocess.check_output([script, "run", fixture, "1", "3"], text=True)
+                second = subprocess.check_output([script, "run", fixture, "3", "5"], text=True)
+                results = io.StringIO()
+                self.assertEqual(campaign["record"](db, "first", ranges,
+                                                   (second + first).splitlines(), results, fixture),
+                                 (True, 1))
+                rows = [json.loads(line) for line in results.getvalue().splitlines()]
+                self.assertEqual({row["seed"]: row["status"] for row in rows}, {1: 0, 2: 1, 3: 0, 4: 0})
+                self.assertEqual(db.execute("SELECT executed, failed FROM shards ORDER BY shard").fetchall(),
+                                 [(2, 1), (2, 0)])
+                with self.assertRaises(sqlite3.IntegrityError):
+                    campaign["allocate"](db, "first", 2, 2)
+                self.assertEqual(campaign["allocate"](db, "second", 1, 3), [(5, 8)])
+            finally:
+                db.close()
+
     def test_three_lanes_share_minimum_starts_and_stop_at_200(self):
         with tempfile.TemporaryDirectory() as scratch, redirect_stdout(io.StringIO()) as output:
             root = Path(scratch)

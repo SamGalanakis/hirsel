@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run locally built Hirsel artifacts on Boat."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -24,6 +24,7 @@ import uuid
 
 SNAPSHOT = "hirsel-runner-base"
 DAY_LIMIT = 200
+LAW_DAY_RESERVE = 20
 ACTIVE_LIMIT = 100
 SOURCE_PATHS = ("core/core", "core/std", "core/programs", "core/tools",
                 "bench/awfy/hirsel", "bench/awfy/*.py", "tools/capped")
@@ -256,30 +257,50 @@ class LocalBudget:
         self.db = sqlite3.connect(state / "starts.sqlite" if state else ":memory:")
         self.db.execute("CREATE TABLE IF NOT EXISTS days (utc TEXT PRIMARY KEY, starts INTEGER)")
 
-    def reserve(self, limits):
+    def reserve(self, limits, job_class):
         day = datetime.now(timezone.utc).date().isoformat()
         with self.db:
             count = self.db.execute("SELECT starts FROM days WHERE utc = ?", (day,)).fetchone()
             windows = limits["starts"]
+            active_limit = min(ACTIVE_LIMIT, limits["maxActiveSandboxes"])
             if ((count and count[0] >= DAY_LIMIT) or windows["day"]["used"] >= DAY_LIMIT
                     or windows["day"]["remaining"] <= 0):
                 raise ValueError(f"Boat daily start limit reached ({DAY_LIMIT}); run locally")
             for window in ("hour", "minute"):
                 if windows[window]["remaining"] <= 0:
                     raise ValueError(f"Boat {window} start limit reached; run locally")
-            if limits["activeSandboxes"] >= min(ACTIVE_LIMIT, limits["maxActiveSandboxes"]):
+            if limits["activeSandboxes"] >= active_limit:
                 raise ValueError("Boat active VM limit reached; run locally")
+            if job_class == "vopr" and (
+                max(count[0] if count else 0, windows["day"]["used"]) >= DAY_LIMIT - LAW_DAY_RESERVE
+                or windows["day"]["remaining"] <= LAW_DAY_RESERVE
+                or any(windows[window]["remaining"] <= 1 for window in ("hour", "minute"))
+                or limits["activeSandboxes"] >= active_limit - 1
+            ):
+                raise ValueError("Boat VOPR deferred to preserve start capacity for laws")
             # Count an attempt before contacting Boat. If creation is ambiguous, keep it charged.
             self.db.execute("INSERT INTO days VALUES (?, 1) "
                             "ON CONFLICT(utc) DO UPDATE SET starts = starts + 1", (day,))
 
     @contextmanager
-    def admission(self):
+    def admission(self, job_class):
         if self.state is None:
             yield
         else:
-            with exclusive(self.state / "start.lock"):
+            with exclusive(self.state / "start.lock"), self.vopr_turn(job_class):
                 yield
+
+    @contextmanager
+    def vopr_turn(self, job_class):
+        if job_class == "vopr":
+            with (self.state / "laws.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError("Boat VOPR deferred while law shards are pending") from None
+                yield
+        else:
+            yield
 
 
 def boat(*args, **kwargs):
@@ -351,7 +372,15 @@ def execute(invoke, vm, jobs, archives, log):
     return status
 
 
-def dispatch(groups, ttl, state, invoke, dry_run=False):
+def dispatch(groups, ttl, state, invoke, dry_run=False, job_class="law"):
+    lock = (state / "laws.lock").open("a") if state and job_class == "law" else nullcontext()
+    with lock as pending:
+        if pending is not None:
+            fcntl.flock(pending, fcntl.LOCK_SH)
+        return run_batches(groups, ttl, state, invoke, dry_run, job_class)
+
+
+def run_batches(groups, ttl, state, invoke, dry_run, job_class):
     archives = {}
     if not dry_run:
         cache = state / "bundles"
@@ -378,9 +407,9 @@ def dispatch(groups, ttl, state, invoke, dry_run=False):
             vm = []
             log = None
             try:
-                with budget.admission():
+                with budget.admission(job_class):
                     limits = invoke("--json", "limits", "--all", check=True, capture_output=True)
-                    budget.reserve(json.loads(limits.stdout))
+                    budget.reserve(json.loads(limits.stdout), job_class)
                     if not dry_run:
                         log = Path(tempfile.mkdtemp(prefix=f"boat-{group[0].lane}-", dir=Path.cwd()))
                     critical = True
@@ -450,6 +479,8 @@ def main():
     parser.add_argument("--worktree", action="store_true", help="stage a built Buck2 worktree")
     parser.add_argument("--fetch", action="append", default=[], metavar="REMOTE:LOCAL")
     parser.add_argument("--manifest", type=Path, help="JSON array of timed jobs")
+    parser.add_argument("--job-class", choices=("law", "vopr"), default="law",
+                        help="VOPR yields to law dispatches and uses spare starts only")
     parser.add_argument("--batch-seconds", type=positive, default=900, help="estimated runtime per VM")
     parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
     parser.add_argument("--dry-run", action="store_true", help="simulate VM starts without contacting Boat")
@@ -468,10 +499,11 @@ def main():
                         tuple(fetch_spec(value, Path.cwd()) for value in args.fetch))]
         groups = batches(jobs, args.batch_seconds)
         if args.dry_run:
-            return dispatch(groups, args.ttl, None, DryRunBoat(), dry_run=True)
+            return dispatch(groups, args.ttl, None, DryRunBoat(), dry_run=True,
+                            job_class=args.job_class)
         state = Path.home() / ".local/state/hirsel-boat"
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return dispatch(groups, args.ttl, state, boat)
+        return dispatch(groups, args.ttl, state, boat, job_class=args.job_class)
     except (OSError, TypeError, KeyError, ValueError, sqlite3.Error,
             subprocess.CalledProcessError) as error:
         print(f"boat-dispatch: {error}", file=sys.stderr)

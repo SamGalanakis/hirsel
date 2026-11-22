@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Run disjoint sim.world seed ranges on Boat using a prebuilt Hirsel test."""
+import argparse
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+
+def allocate(db, campaign, shards, count):
+    db.execute("""CREATE TABLE IF NOT EXISTS shards (
+        campaign TEXT, shard INTEGER, first_seed INTEGER, stop_seed INTEGER,
+        executed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (campaign, shard)
+    )""")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        first = db.execute("SELECT coalesce(max(stop_seed), 1) FROM shards").fetchone()[0]
+        ranges = [(first + shard * count, first + (shard + 1) * count) for shard in range(shards)]
+        db.executemany("INSERT INTO shards (campaign, shard, first_seed, stop_seed) VALUES (?, ?, ?, ?)",
+                       ((campaign, shard, start, stop) for shard, (start, stop) in enumerate(ranges)))
+    return ranges
+
+
+def run_shard(executable, start, stop):
+    for seed in range(start, stop):
+        with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
+            ran = subprocess.run([executable], cwd=directory, stdin=subprocess.DEVNULL,
+                                 env={"HIRSEL_TEST_SIM_SEED": str(seed)}, capture_output=True)
+        print(json.dumps({"seed": seed, "status": ran.returncode,
+                          "stdout": ran.stdout.decode(errors="replace"),
+                          "stderr": ran.stderr.decode(errors="replace"),
+                          "replay": shlex.join([sys.argv[0], "run", str(executable),
+                                                str(seed), str(seed + 1)])}), flush=True)
+
+
+def record(db, campaign, ranges, output, results, executable):
+    observed = {}
+    malformed = False
+    for line in output:
+        try:
+            row = json.loads(line)
+            seed, status = row["seed"], row["status"]
+            if (type(seed) is not int or type(status) is not int or seed in observed
+                    or not ranges[0][0] <= seed < ranges[-1][1]):
+                raise ValueError("unexpected seed result")
+        except (ValueError, KeyError, TypeError):
+            malformed = True
+            print(line, end="", file=sys.stderr)
+            continue
+        row["replay"] = shlex.join([str(Path(__file__).resolve()), "run", str(executable),
+                                    str(seed), str(seed + 1)])
+        print(json.dumps(row), file=results, flush=True)
+        observed[seed] = status
+    with db:
+        for shard, (start, stop) in enumerate(ranges):
+            statuses = [observed[seed] for seed in range(start, stop) if seed in observed]
+            db.execute("UPDATE shards SET executed = ?, failed = ? WHERE campaign = ? AND shard = ?",
+                       (len(statuses), sum(status != 0 for status in statuses), campaign, shard))
+    complete = not malformed and len(observed) == ranges[-1][1] - ranges[0][0]
+    return complete, sum(status != 0 for status in observed.values())
+
+
+def dispatch(args):
+    script = Path(__file__).resolve()
+    executable = args.executable.resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError("expected a locally built executable")
+    with (closing(sqlite3.connect(args.ledger)) as db,
+          tempfile.TemporaryDirectory(prefix="sim-campaign-", dir=Path.cwd()) as directory,
+          args.results.open("x") as results):
+        ranges = allocate(db, args.campaign, args.shards, args.seeds_per_shard)
+        root = Path(directory)
+        bundle = root / "bundle"
+        bundle.mkdir()
+        shutil.copy2(executable, bundle / "law")
+        shutil.copy2(script, bundle / "sim-campaign")
+        jobs = [{"lane": f"vopr-{args.campaign}-{shard}", "bundle": "bundle",
+                 "seconds": args.shard_seconds,
+                 "command": f"./sim-campaign run ./law {start} {stop}"}
+                for shard, (start, stop) in enumerate(ranges)]
+        manifest = root / "shards.json"
+        manifest.write_text(json.dumps(jobs))
+        command = [args.dispatcher, "--job-class", "vopr", "--manifest", manifest]
+        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as boat:
+            complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable)
+            status = boat.wait()
+    if status or not complete:
+        print("sim-campaign: dispatch did not deliver every reserved result", file=sys.stderr)
+        return 2
+    return int(failed > 0)
+
+
+def positive(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return number
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="run a half-open range on a prebuilt test")
+    run.add_argument("executable", type=Path)
+    run.add_argument("start", type=int)
+    run.add_argument("stop", type=int)
+    campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
+    campaign.add_argument("campaign")
+    campaign.add_argument("executable", type=Path)
+    campaign.add_argument("--ledger", type=Path, required=True)
+    campaign.add_argument("--results", type=Path, required=True)
+    campaign.add_argument("--dispatcher", type=Path, default=Path(__file__).with_name("boat-dispatch"))
+    campaign.add_argument("--shards", type=positive, required=True)
+    campaign.add_argument("--seeds-per-shard", type=positive, required=True)
+    campaign.add_argument("--shard-seconds", type=positive, required=True)
+    args = parser.parse_args()
+    try:
+        if args.command == "run":
+            if not 0 <= args.start < args.stop <= 2**64:
+                parser.error("expected a nonempty u64 seed range")
+            run_shard(args.executable.resolve(strict=True), args.start, args.stop)
+            return 0
+        return dispatch(args)
+    except (OSError, OverflowError, ValueError, sqlite3.Error) as error:
+        print(f"sim-campaign: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

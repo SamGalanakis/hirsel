@@ -22,7 +22,7 @@ from std_native import ROOT, library_sources
 
 BYTE_LAWS = ('refused_reply',
              'model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids',
-             'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
+             'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal', 'put_validation',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
              'look', 'look_faults', 'changes', 'shared_changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
              'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover', 'read_spans', 'published_value',

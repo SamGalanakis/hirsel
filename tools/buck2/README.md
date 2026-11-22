@@ -77,6 +77,8 @@ library, front-end case and program roots (`SOURCE_ROOTS`) with the candidate's
 selection includes branch commits since the merge-base with `origin/main`, staged
 and unstaged changes and untracked files. A Rust-only change needs no
 formatter build.
+The same command checks the core sources and spec fences with the editor
+parser via `editors/tree-sitter-hirsel/check-local`.
 
 ## Stale outputs
 

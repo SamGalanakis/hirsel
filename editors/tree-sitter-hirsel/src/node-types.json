@@ -7020,6 +7020,10 @@
     "named": false
   },
   {
+    "type": "cross",
+    "named": false
+  },
+  {
     "type": "drop",
     "named": false
   },

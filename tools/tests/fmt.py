@@ -50,6 +50,7 @@ else:
 '''.replace('FORMATTER', repr(formatter)).replace('COMPILER', repr(str(compiler))))
         self.write('tools/buck2/sync.py', '')
         self.write('tools/site_sync.py', '')
+        self.write('editors/tree-sitter-hirsel/check-local', '')
         self.write('core/std/API-INDEX.md', 'current')
         self.write('core/tools/std_api_index.py', '''import os, subprocess, sys
 from pathlib import Path

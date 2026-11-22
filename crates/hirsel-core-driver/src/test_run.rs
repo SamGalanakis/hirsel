@@ -22,6 +22,8 @@ pub enum Runner {
         sysroot: std::path::PathBuf,
     },
 }
+const SEED_ENV: &str = "HIRSEL_TEST_SIM_SEED";
+
 impl Runner {
     /// Validate the externally selected execution tools before compiling a run.
     pub fn qemu(
@@ -92,6 +94,7 @@ impl Runner {
             "LISTEN_PIDFDID",
             "HIRSEL_RECORD",
             "HIRSEL_RECORD_ID",
+            SEED_ENV,
         ] {
             command.env_remove(name);
         }
@@ -283,6 +286,15 @@ enum TestLaunch<'a> {
     Run(TestProcess<'a>),
 }
 
+impl TestLaunch<'_> {
+    fn finish(self, test: &DefPath, timeout: Option<Duration>) -> TestResult {
+        match self {
+            TestLaunch::Cached(outcome) => Ok((outcome, Source::Cached)),
+            TestLaunch::Run(process) => process.run(test, timeout),
+        }
+    }
+}
+
 struct TestProcess<'a> {
     command: Command,
     pass: Option<(&'a TestCache, ContentHash)>,
@@ -317,9 +329,28 @@ pub(crate) struct TestBatch<'a> {
     pub expect_verdict: Option<&'a str>,
     pub cache: Option<&'a TestCache>,
     pub rerun: bool,
+    pub seed: Option<u64>,
 }
 
 impl TestBatch<'_> {
+    fn run_one(
+        &self,
+        product: &CheckProduct,
+        test: &DefPath,
+        options: &NativeOptions,
+    ) -> TestResult {
+        product
+            .test_launch(
+                test,
+                options,
+                self.runner,
+                self.cache,
+                self.rerun,
+                self.seed,
+            )?
+            .finish(test, self.timeout)
+    }
+
     pub(crate) fn run(
         self,
         product: &CheckProduct,
@@ -330,6 +361,15 @@ impl TestBatch<'_> {
         // Each test's own run configuration; one test's never changes another's.
         let configure = |test: &DefPath| {
             let mut test_options = self.runs.options(test, options);
+            if self.seed.is_some() {
+                let env = test_options
+                    .env_patterns
+                    .get_or_insert_with(Default::default);
+                if !env.covers(SEED_ENV) {
+                    env.extend(hirsel_core_net::EnvPatterns::parse(SEED_ENV).unwrap());
+                }
+                test_options.grant_mask |= 1 << crate::grant_kind("Env").unwrap();
+            }
             if let Some(Ok(decl)) = product.test_entries.get(test) {
                 for parameter in &decl.parameters {
                     if let Some(interface) = parameter
@@ -380,14 +420,7 @@ impl TestBatch<'_> {
                         )
                         .map(|outcome| (outcome, Source::Executed))
                 } else {
-                    product.run_test_reusing(
-                        test,
-                        &test_options,
-                        self.timeout,
-                        self.runner,
-                        self.cache,
-                        self.rerun,
-                    )
+                    self.run_one(product, test, &test_options)
                 };
                 report(test, result);
             }
@@ -428,17 +461,7 @@ impl TestBatch<'_> {
                 }
 
                 if exclusive {
-                    complete(
-                        index,
-                        product.run_test_reusing(
-                            test,
-                            &test_options,
-                            self.timeout,
-                            self.runner,
-                            self.cache,
-                            self.rerun,
-                        ),
-                    );
+                    complete(index, self.run_one(product, test, &test_options));
                     continue;
                 }
                 let process = match product.test_launch(
@@ -447,6 +470,7 @@ impl TestBatch<'_> {
                     self.runner,
                     self.cache,
                     self.rerun,
+                    self.seed,
                 ) {
                     Ok(TestLaunch::Run(process)) => process,
                     Ok(TestLaunch::Cached(outcome)) => {
@@ -535,10 +559,8 @@ impl CheckProduct {
         cache: Option<&TestCache>,
         rerun: bool,
     ) -> Result<(TestOutcome, Source), NativeStop> {
-        match self.test_launch(test, options, runner, cache, rerun)? {
-            TestLaunch::Cached(outcome) => Ok((outcome, Source::Cached)),
-            TestLaunch::Run(process) => process.run(test, timeout),
-        }
+        self.test_launch(test, options, runner, cache, rerun, None)?
+            .finish(test, timeout)
     }
 
     fn test_launch<'a>(
@@ -548,6 +570,7 @@ impl CheckProduct {
         runner: &Runner,
         cache: Option<&'a TestCache>,
         rerun: bool,
+        seed: Option<u64>,
     ) -> Result<TestLaunch<'a>, NativeStop> {
         let Some(decl) = self.test_entries.get(test) else {
             return Err(NativeStop::Entry(format!(
@@ -615,6 +638,9 @@ impl CheckProduct {
             built
         };
         let mut command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        if let Some(seed) = seed {
+            command.env(SEED_ENV, seed.to_string());
+        }
         let directory = private_directory(&mut command)?;
         Ok(TestLaunch::Run(TestProcess {
             command,

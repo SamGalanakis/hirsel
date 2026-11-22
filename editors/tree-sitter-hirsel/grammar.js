@@ -7,7 +7,7 @@ const keywords = [
   'false', 'bytes',
 ];
 const bounds = [
-  'plain', 'shareable', 'send', 'key', 'ordered', 'integer', 'float',
+  'plain', 'shareable', 'send', 'cross', 'key', 'ordered', 'integer', 'float',
   'packed', 'streamable', 'codec', 'inert',
 ];
 const digits = /[0-9](_?[0-9])*/;

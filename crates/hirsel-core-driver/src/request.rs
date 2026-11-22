@@ -258,6 +258,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut test_filter = None;
     let mut test_jobs = None;
     let mut test_timeout = None;
+    let mut test_sim = false;
+    let mut test_seeds = None;
+    let mut test_seed = None;
     let mut explicit_limit = false;
     let mut backend = None;
     let mut release = false;
@@ -309,6 +312,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
             Opt::Rerun => test_rerun = true,
+            Opt::Sim => test_sim = true,
+            Opt::SimSeeds => {
+                test_seeds = Some(
+                    value
+                        .parse::<std::num::NonZeroU64>()
+                        .map_err(|_| "--seeds expects a positive count")?
+                        .get(),
+                );
+            }
+            Opt::SimSeed => {
+                test_seed = Some(value.parse::<u64>().map_err(|_| "--seed expects a u64")?);
+            }
             Opt::ExpectVerdict => expect_verdict = Some(value),
             Opt::Diagnose => diagnose = true,
             Opt::Install => install_root = Some(PathBuf::from(value)),
@@ -419,6 +434,16 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
+    }
+    test_sim |= test_seed.is_some();
+    if !test_sim && test_seeds.is_some() {
+        return Err("--seeds requires --sim".into());
+    }
+    if test_seed.is_some() && test_seeds.is_some() {
+        return Err("choose one of --seed and --seeds".into());
+    }
+    if test_sim && test_replay {
+        return Err("choose one of --sim and --replay".into());
     }
     let app_directory = dir.clone().or_else(|| {
         (manifest.is_none()
@@ -1121,25 +1146,34 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             })
             .cloned()
             .collect();
-        let cache = if !test_replay && matches!(runner, crate::Runner::Native) {
+        let cache = if !test_sim && !test_replay && matches!(runner, crate::Runner::Native) {
             TestCache::open(&TestCache::default_root())
         } else {
             None
         };
         let mut rows = Vec::new();
         let mut failed = false;
-        let batch = crate::test_run::TestBatch {
-            runs: &test_runs,
-            jobs: test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?,
-            timeout: test_timeout,
-            runner: &runner,
-            replay: test_replay,
-            expect_verdict: expect_verdict.as_deref(),
-            cache: cache.as_ref(),
-            rerun: test_rerun,
-        };
-        batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
-            let row = match result {
+        let jobs = test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?;
+        for index in 0..if tests.is_empty() {
+            0
+        } else {
+            test_seeds.unwrap_or(1)
+        } {
+            let seed = test_sim.then_some(test_seed.unwrap_or(index));
+            let batch = crate::test_run::TestBatch {
+                runs: &test_runs,
+                jobs,
+                timeout: test_timeout,
+                runner: &runner,
+                replay: test_replay,
+                expect_verdict: expect_verdict.as_deref(),
+                cache: cache.as_ref(),
+                rerun: test_rerun,
+                seed,
+            };
+            batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
+            let label = seed.map_or_else(|| test.to_string(), |seed| format!("{test} (seed {seed})"));
+            let mut row = match result {
                 Ok((outcome, source)) => {
                     let passed = outcome.passed();
                     let wall_ms = (source == Source::Executed)
@@ -1149,7 +1183,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     if !json {
                         if let Some(wall_ms) = wall_ms {
                             if passed {
-                                println!("pass {source} {test} ({wall_ms:.3} ms)");
+                                println!("pass {source} {label} ({wall_ms:.3} ms)");
                             } else {
                                 let reason = if outcome.timed_out {
                                     "execution timed out".to_owned()
@@ -1161,10 +1195,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                                         .collect::<Vec<_>>()
                                         .join(" | ")
                                 };
-                                println!("fail {source} {test}: {reason} ({wall_ms:.3} ms)");
+                                println!("fail {source} {label}: {reason} ({wall_ms:.3} ms)");
                             }
                         } else {
-                            println!("pass {source} {test}");
+                            println!("pass {source} {label}");
                         }
                     }
                     serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
@@ -1176,16 +1210,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         row["site"] = site.as_str().into();
                         if !json {
                             eprintln!("{site}: recording refusal site");
-                            println!("fail executed {test}: {error}");
+                            println!("fail executed {label}: {error}");
                         }
                     } else if !json {
-                        println!("fail executed {test}: {error} (time unavailable)");
+                        println!("fail executed {label}: {error} (time unavailable)");
                     }
                     row
                 }
             };
+            if let Some(seed) = seed {
+                row["seed"] = seed.into();
+            }
             rows.push(row);
         });
+        }
         let passed = !tests.is_empty() && !failed;
         if json {
             println!("{}", serde_json::json!({"passed":passed,"tests":rows}));

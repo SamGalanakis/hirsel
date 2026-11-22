@@ -3,6 +3,7 @@
 
 import argparse
 import ctypes
+import os
 import re
 import subprocess
 import sys
@@ -181,7 +182,9 @@ def main():
         return run(library.resolve())
     with tempfile.TemporaryDirectory(prefix="hirsel-tree-sitter-") as temp:
         library = Path(temp) / "hirsel.so"
-        subprocess.run(["tree-sitter", "build", "-o", str(library)], cwd=GRAMMAR, check=True)
+        # The CLI locks by grammar name, even when builds use different output paths.
+        env = dict(os.environ, XDG_CACHE_HOME=temp)
+        subprocess.run(["tree-sitter", "build", "-o", str(library)], cwd=GRAMMAR, env=env, check=True)
         return run(library)
 
 

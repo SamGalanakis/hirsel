@@ -98,10 +98,8 @@ class HotFiles(unittest.TestCase):
         query = {'example': {'crate_root': 'crates/example/tests/it/main.rs', 'edition': '2024'}}
         with patch.dict(fmt.__globals__, ROOT=self.root, check_std_index=lambda: 0, changed_cases=lambda: []), \
                 patch.object(sys, 'argv', ['fmt.py']), \
-                patch('subprocess.run', side_effect=[SimpleNamespace(stdout=json.dumps(query)),
-                                                     SimpleNamespace(returncode=0),
-                                                     SimpleNamespace(returncode=0),
-                                                     SimpleNamespace(returncode=0)]) as run:
+                patch('subprocess.run', return_value=SimpleNamespace(stdout=json.dumps(query),
+                                                                    returncode=0)) as run:
             self.assertEqual(fmt(), 0)
         command = run.call_args_list[1].args[0]
         self.assertIn('crates/example/tests/it/zed.rs', command)

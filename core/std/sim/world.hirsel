@@ -81,3 +81,17 @@ pub fn run(mut w: World) waits {
         }
     }
 }
+
+/// Reads the seed that `hirsel test --sim` provides to an Env parameter.
+pub fn test_seed(e: Env) -> Option[u64] {
+    match env.get(e, "HIRSEL_TEST_SIM_SEED") {
+        Ok(Some(text)) => {
+            let parsed: Result[u64, ParseError] = int.parse(text)
+            match parsed {
+                Ok(n) => Some(n),
+                Error(_) => None
+            }
+        },
+        _ => None
+    }
+}

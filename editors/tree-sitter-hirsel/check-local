@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Build the editor parser and check the corpus with the pinned tools."""
+
+import fcntl
+import gzip
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+from urllib.request import urlopen
+
+CLI_VERSION = "0.25.10"
+BINDING_VERSION = "0.25.2"
+GRAMMAR = Path(__file__).resolve().parent
+CACHE = Path.home() / ".cache" / "hirsel-tree-sitter"
+
+
+def install_cli(cli):
+    system = {"Linux": "linux", "Darwin": "macos"}.get(platform.system())
+    arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+    if not system or not arch:
+        raise SystemExit(f"No pinned Tree-sitter CLI for {platform.system()} {platform.machine()}")
+    url = (f"https://github.com/tree-sitter/tree-sitter/releases/download/v{CLI_VERSION}/"
+           f"tree-sitter-{system}-{arch}.gz")
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    download = cli.with_suffix(".part")
+    with urlopen(url, timeout=60) as response, gzip.GzipFile(fileobj=response) as archive:
+        with download.open("wb") as output:
+            shutil.copyfileobj(archive, output)
+    download.chmod(0o755)
+    download.replace(cli)
+
+
+def main():
+    cli = CACHE / CLI_VERSION / "tree-sitter"
+    binding = CACHE / f"binding-{BINDING_VERSION}-{sys.implementation.cache_tag}"
+    python = binding / "bin" / "python"
+    ready = binding / "ready"
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with (CACHE / "install.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not cli.is_file():
+            install_cli(cli)
+        if not ready.is_file():
+            subprocess.run([sys.executable, "-m", "venv", "--clear", str(binding)], check=True)
+            subprocess.run([str(python), "-m", "pip", "install", "--no-cache-dir",
+                            "--only-binary=:all:", f"tree-sitter=={BINDING_VERSION}"], check=True)
+            ready.touch()
+    env = dict(os.environ, PATH=os.pathsep.join([str(cli.parent), os.environ["PATH"]]))
+    return subprocess.run([str(python), str(GRAMMAR / "check-corpus")], env=env).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

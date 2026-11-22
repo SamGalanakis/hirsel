@@ -65,7 +65,7 @@
 //! for ever), or when the bound passes.
 use super::{
     BASE, Base, Memory, NONE, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur,
-    maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
+    enable_pool, maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -1814,7 +1814,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     let _ = RUN.set(RunFn(&DISPATCH));
     // SAFETY: an all-zero configuration: no arguments, grants or operations.
     let _ = BASE.set(Base(unsafe { std::mem::zeroed() }));
-    UNTIED_ON.store(true, Ordering::SeqCst);
+    enable_pool();
     let p = pool();
     std::mem::forget(p.memory.start());
     for id in 0..case.units {

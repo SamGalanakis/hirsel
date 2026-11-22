@@ -219,3 +219,51 @@ fn network_idle_returns_cached_stack_pages_and_keeps_the_reservations() {
     // SAFETY: the retained mapping still owns this writable page.
     assert_eq!(unsafe { bottom.read_volatile() }, 0);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn discarding_below_a_parked_stack_keeps_its_live_frames() {
+    if super::page() == super::COMMIT {
+        return;
+    }
+    struct Parked {
+        saved: *mut u8,
+        caller: *mut u8,
+        bottom: *mut u8,
+        result: u64,
+    }
+    unsafe extern "C" fn body(first: *mut u8, _: *mut u8) -> ! {
+        let state = first.cast::<Parked>();
+        let live = 23_u64;
+        // SAFETY: the pinned state and both stacks outlive these switches.
+        // The bottom byte is scratch. The local remains live across the park.
+        unsafe {
+            (*state).bottom.write_volatile(9);
+            hirsel_stack::switch(&raw mut (*state).saved, (*state).caller);
+            (*state).result = (&raw const live).read_volatile();
+            hirsel_stack::switch(&raw mut (*state).saved, (*state).caller);
+        }
+        unreachable!()
+    }
+
+    let stack = super::Stack::new();
+    // SAFETY: this address lies in the initial writable stack extent.
+    let bottom = unsafe { stack.base.as_ptr().add(stack.len - super::COMMIT) };
+    let mut state = Parked {
+        saved: std::ptr::null_mut(),
+        caller: std::ptr::null_mut(),
+        bottom,
+        result: 0,
+    };
+    // SAFETY: state lives until both switches return. Only one stack runs at
+    // a time. The first return owns a suspended frame above its saved SP.
+    unsafe {
+        let first = stack.prepare(body, (&raw mut state).cast(), std::ptr::null_mut());
+        hirsel_stack::switch(&raw mut state.caller, first);
+        assert_eq!(bottom.read_volatile(), 9);
+        stack.discard_below(state.saved.addr());
+        assert_eq!(bottom.read_volatile(), 0);
+        hirsel_stack::switch(&raw mut state.caller, state.saved);
+    }
+    assert_eq!(state.result, 23);
+}

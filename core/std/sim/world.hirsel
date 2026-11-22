@@ -9,7 +9,19 @@ pub opaque type World: send {
 /// so scheduling between servers cannot change which server consumes a draw.
 pub opaque type Plan: send {
     state: u64,
-    faults: Map[u64, Fault]
+    faults: Map[u64, Fault],
+    scripted: Option[Draws]
+}
+
+type Draws: send {
+    words: List[u64],
+    next: u64
+}
+
+/// Prefixes indexed by provider, followed by independent SplitMix64 tails.
+pub type Script: send {
+    tail_seed: u64,
+    streams: List[List[u64]]
 }
 
 /// A scripted I/O failure. SyncUnknown may commit a barrier before reporting EIO.
@@ -27,21 +39,82 @@ pub fn initial_seed(w: World) -> u64 {
 
 /// An independent decision stream beginning at seed.
 pub fn plan(seed: u64) -> Plan {
-    Plan(state: seed, faults: map.new())
+    Plan(state: seed, faults: map.new(), scripted: None)
 }
 
-fn draw(mut p: Plan) -> u64 {
-    p.state = int.wrapping_add(p.state, 0x9e3779b97f4a7c15)
-    let a = int.wrapping_mul(p.state ^ (p.state >> 30), 0xbf58476d1ce4e5b9)
+fn mix(state: u64) -> u64 {
+    let a = int.wrapping_mul(state ^ (state >> 30), 0xbf58476d1ce4e5b9)
     let b = int.wrapping_mul(a ^ (a >> 27), 0x94d049bb133111eb)
     b ^ (b >> 31)
 }
 
-/// Chooses an index in [0, n) from SplitMix64. n must be positive.
+fn draw(mut state: u64) -> u64 {
+    state = int.wrapping_add(state, 0x9e3779b97f4a7c15)
+    mix(state)
+}
+
+/// Gives a provider its own prefix and tail. A provider without a prefix
+/// starts directly at its tail. Use stable provider IDs at setup.
+pub fn plan_from(s: Script, provider: u64) -> Plan {
+    let words: List[u64] = if provider < list.len(s.streams) {
+        clone(s.streams[provider])
+    } else {
+        list.new()
+    }
+    Plan(state: mix(s.tail_seed ^ provider), faults: map.new(), scripted: Some(Draws(words: take words, next: 0)))
+}
+
+fn show_word(word: u64, mut out: String) {
+    string.push_u64(mut out, word)
+}
+
+fn show_script(s: Script, mut out: String) {
+    string.push(mut out, "Script(")
+    show_word(s.tail_seed, mut out)
+    string.push(mut out, ", [")
+    for i in 0u64 .. list.len(s.streams) {
+        if i != 0 {
+            string.push(mut out, ", ")
+        }
+        string.push(mut out, "[")
+        let words = s.streams[i]
+        for j in 0u64 .. list.len(words) {
+            if j != 0 {
+                string.push(mut out, ", ")
+            }
+            show_word(words[j], mut out)
+        }
+        string.push(mut out, "]")
+    }
+    string.push(mut out, "])")
+}
+
+/// Generates a tail seed and one shrinkable prefix per provider.
+pub fn script_gen(providers: u64, max_draws: u64) -> prop.Gen[Script] {
+    prop.make(fn(mut s: prop.Source) -> Script {
+        let tail_seed = prop.word(mut s)
+        let words = prop.list_of(prop.make(prop.word, show_word), 0, max_draws)
+        let streams = prop.list_of(take words, providers, providers)
+        Script(tail_seed, streams: prop.draw(mut s, streams))
+    }, show_script)
+}
+
+/// Chooses an index in [0, n) from the plan. n must be positive.
 pub fn pick(mut p: Plan, n: u64) -> u64 {
     let threshold = int.wrapping_neg(n) % n
+    if let Some(mut scripted) = p.scripted {
+        let word = if scripted.next < list.len(scripted.words) {
+            let word = scripted.words[scripted.next]
+            scripted.next += 1
+            word
+        } else {
+            draw(mut p.state)
+        }
+        let (high, _) = int.mul_wide(word, n)
+        return high
+    }
     loop {
-        let (high, low) = int.mul_wide(draw(mut p), n)
+        let (high, low) = int.mul_wide(draw(mut p.state), n)
         if low >= threshold {
             return high
         }
@@ -68,7 +141,7 @@ pub fn take_fault(mut p: Plan, site: u64) -> Option[Fault] {
 /// Moves the decision stream and its faults to a server. Future world draws
 /// start from a new stream derived from the current one.
 pub fn detach(mut w: World) -> Plan {
-    let next = draw(mut w.plan)
+    let next = draw(mut w.plan.state)
     replace(mut w.plan, plan(next))
 }
 

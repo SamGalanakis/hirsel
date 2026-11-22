@@ -1282,6 +1282,8 @@ struct Scheduler {
     timers: TimerHeap,
     all: *mut Task,
     next: u64,
+    /// Task IDs below this cursor have already been considered at network idle.
+    stack_cool_next: u64,
     provider: SchedulerProvider,
     #[cfg(any(test, feature = "testing"))]
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
@@ -1915,12 +1917,40 @@ impl Scheduler {
     }
 
     fn net_idle_wait(&self, timeout: i32) -> (i32, bool) {
-        crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept())
+        let new_stacks =
+            cfg!(target_os = "linux") && self.pool.is_none() && self.stack_cool_next != self.next;
+        crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept() || new_stacks)
     }
 
     fn release_net_idle(&mut self) {
         release_idle(self);
         self.stacks.cool_kept();
+        #[cfg(target_os = "linux")]
+        if self.pool.is_none() && self.stack_cool_next != self.next {
+            self.cool_new_waiters();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cool_new_waiters(&mut self) {
+        let mut task = self.all;
+        // SAFETY: the serial dispatcher has exclusive custody of these tasks.
+        // The list is newest-first. A waiting stack's saved SP begins the
+        // switch frame, below the caller's live frames and any caller red zone.
+        unsafe {
+            while let Some(waiter) = task.as_ref() {
+                if waiter.id < self.stack_cool_next {
+                    break;
+                }
+                if matches!(waiter.state, State::Waiting | State::Provider)
+                    && let Some(stack) = &waiter.stack
+                {
+                    stack.discard_below(waiter.sp.addr());
+                }
+                task = waiter.all;
+            }
+        }
+        self.stack_cool_next = self.next;
     }
 
     fn idle(&mut self, flow_pending: bool) {
@@ -4719,6 +4749,7 @@ pub(crate) unsafe fn run_root_with_unit(
         timers: TimerHeap::default(),
         all: ptr::null_mut(),
         next: 1,
+        stack_cool_next: 0,
         provider,
         #[cfg(any(test, feature = "testing"))]
         script: crate::schedule_script::installed(),
@@ -5913,6 +5944,7 @@ mod ready_routing_laws {
                 timers: TimerHeap::default(),
                 all: ptr::null_mut(),
                 next: 1,
+                stack_cool_next: 0,
                 provider: SchedulerProvider::default(),
                 script: None,
                 #[cfg(feature = "record")]

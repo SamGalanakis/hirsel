@@ -146,7 +146,7 @@ class ReportOnly(unittest.TestCase):
                      completion_forecast=dict(m1=dict(complete_bodies=1, bodies=1,
                          missing_check_lower_per_line=0, additional_publication_per_line=0)),
                      finished_budget_per_line=60000, policy='explain the rise')
-        def samples(*_):
+        def samples(*_, **__):
             return [('m1', 1, product, metrics, 120)]
         with patch.dict(run.__globals__, sample_sources=samples, ANCHOR_RESIDUAL={}):
             output = io.StringIO()
@@ -170,6 +170,19 @@ class ReportOnly(unittest.TestCase):
 
 
 class ProcessCeiling(unittest.TestCase):
+    def test_fixed_product_ceiling_uses_each_library_token_count(self):
+        import contextlib
+        import io
+
+        fixed = {'fixed std': dict(instructions=10000, tokens=200),
+                 'fixed core': dict(instructions=5001, tokens=100)}
+        limits = {'instructions_per_token': {'fixed std': 50, 'fixed core': 50}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            failures, proposed = GUARD['fixed_product_costs'](fixed, limits)
+        self.assertEqual(failures, ['product fixed core: 50.010000 instructions/token exceeds 50'])
+        # 10,000 + 2% = 10,200. 5,001 + 2% = 5,101.02, rounded up to 5,200.
+        self.assertEqual(proposed, {'fixed std': 51, 'fixed core': 52})
+
     def test_startup_regression_fails_when_driver_cost_is_unchanged(self):
         metrics = {'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}
         ceiling = {'code_lines': 1000, 'check_lower_per_line': 5,

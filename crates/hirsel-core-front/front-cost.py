@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import runpy
@@ -24,8 +23,9 @@ COUNTS = ('records_opened', 'bytes_read', 'digests', 'digest_bytes', 'index_call
 def front(metrics):
     if metrics.get('counter_refusal') or metrics['front_image_access'].get('counter_refusal'):
         raise ValueError('front instruction counter refused: ' + str(metrics.get('counter_refusal') or metrics['front_image_access']['counter_refusal']))
-    if metrics['source_bytes'] <= 0 or metrics['tokens'] <= 0:
-        raise ValueError('front has no source bytes or semantic tokens')
+    if metrics['source_bytes'] <= 0:
+        raise ValueError('front has no source bytes')
+    tokens = GUARD['semantic_tokens'](metrics)
     stages = {s['name']: s['instructions'] for s in metrics['stages']}
     sub = {s['name']: s['instructions'] for s in metrics['substages']}
     if any(stages.get(k) is None for k in ('parse', 'front/input counts', 'index', 'resolve', 'declarations/layout')):
@@ -47,7 +47,7 @@ def front(metrics):
     costs['image digest'] = image['digest_instructions']
     if min(costs.values()) < 0:
         raise ValueError('negative front stage')
-    return dict(source_bytes=metrics['source_bytes'], tokens=metrics['tokens'], costs=costs,
+    return dict(source_bytes=metrics['source_bytes'], tokens=tokens, costs=costs,
                 image_access=image)
 
 
@@ -72,7 +72,7 @@ def baseline(row):
     # the observation when that is larger than the percentage margin. Keep the
     # resulting count fractional until comparison; rounding it up would admit
     # two events for small observations and hide a two-event regression.
-    return dict(instructions_per_token={k: math.ceil(v * 1.02 / 100) * 100 / row['tokens']
+    return dict(instructions_per_token={k: GUARD['instruction_rate_ceiling'](v, row['tokens'])
                                         for k, v in row['costs'].items()},
                 image_per_token={k: max(row['image_access'][k] * 1.02,
                                        row['image_access'][k] + 1) / row['tokens']

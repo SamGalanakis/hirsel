@@ -24,6 +24,7 @@ unsafe impl Sync for File {}
 
 pub(crate) const DYNAMIC_GRANT: u64 = 1 << 63;
 /// A tape's Args vector, pinned for the lifetime of the run.
+#[cfg(feature = "record")]
 struct Vector {
     _bytes: Vec<Vec<u8>>,
     views: Vec<Buffer>,
@@ -31,6 +32,7 @@ struct Vector {
 
 // SAFETY: the views point into the vector's own heap allocations. Moving
 // the owning entry between workers leaves the bytes and views in place.
+#[cfg(feature = "record")]
 unsafe impl Send for Vector {}
 
 struct DynamicGrant {
@@ -54,6 +56,7 @@ struct Entries {
 struct Designations {
     next: u64,
     grants: BTreeMap<u64, Arc<DynamicGrant>>,
+    #[cfg(feature = "record")]
     vectors: BTreeMap<u64, Vector>,
 }
 /// Install cleanup together with the first owned resource. A run that never
@@ -149,6 +152,7 @@ impl Registry {
     }
 
     /// Pin a substitute Args vector and return its handle.
+    #[cfg(feature = "record")]
     pub(crate) fn vector(&self, bytes: Vec<Vec<u8>>) -> u64 {
         let views = bytes
             .iter()
@@ -169,6 +173,7 @@ impl Registry {
         );
         id
     }
+    #[cfg(feature = "record")]
     fn views(&self, key: u64) -> &[Buffer] {
         let views = &raw const self.run.designations.lock().unwrap().vectors[&key].views[..];
         // SAFETY: the slice points into a pinned Vec allocation never mutated
@@ -464,17 +469,19 @@ pub unsafe extern "C" fn hirsel_core_hostfile_drop(context: *mut Context, file: 
 /// # Safety
 /// A live run context; `args` is a live Args operand of the run.
 pub(crate) unsafe fn args<'a>(context: *const Context, args: u64) -> &'a [Buffer] {
+    #[cfg(not(feature = "record"))]
+    let _ = args;
     // SAFETY: the run pins its argument table and every substitute vector.
     unsafe {
+        #[cfg(feature = "record")]
         if args & DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).registry.views(args)
+            return (*(*context).host_files).registry.views(args);
+        }
+        let run = &*(*context).run;
+        if run.args_len == 0 {
+            &[]
         } else {
-            let run = &*(*context).run;
-            if run.args_len == 0 {
-                &[]
-            } else {
-                std::slice::from_raw_parts(run.args, run.args_len)
-            }
+            std::slice::from_raw_parts(run.args, run.args_len)
         }
     }
 }

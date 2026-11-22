@@ -2,10 +2,11 @@
 
 [API overview](../API.md). The design record is roadmap item 13a.
 
-`std.prop` checks a law against generated values. When the law fails, it shrinks
-the failing case to a minimal one. A generator draws its choices from an explicit
-choice source. Each case's randomness is a `std.rand.Pcg` made from the
-configuration's seed and the case index, so no randomness is global or ambient.
+`std.prop` checks a law against generated values. `search` samples cases and
+shrinks a failing case. `all` walks a bounded choice tree. A generator draws its
+choices from an explicit choice source. Each sampled case uses a `std.rand.Pcg`
+made from the configuration's seed and the case index, so no randomness is global
+or ambient.
 The engine records every choice on a tape. It shrinks by editing that tape and
 running the generator and the law again on the edit. No type has a shrink function.
 
@@ -214,6 +215,41 @@ Two things these bounds do not cover:
   `--test-timeout` or at a virtual deadline it sets on its world.
 - **Stack.** Stack exhaustion is a run stop. It loses the report.
 
+### Exhaustive checking
+
+```hirsel
+pub type AllOutcome = Held(u64, u64) | Truncated(u64, u64) | Unbounded(u64) | Falsified(Found)
+pub fn all[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> AllOutcome
+```
+
+`all` visits choice tapes in lexicographic order, starting with all zeros. After
+each leaf it advances the rightmost choice with a remaining value and starts the
+suffix at zero. The generator determines how many choices each path needs and
+the bound at each position. Different tapes can produce the same value. No
+choices come from the PCG.
+
+- `below(n)` visits `0 .. n` and `weighted(k, n)` visits the replay choices
+  `{0, 1}`, including when `k` is `0` or `n`.
+- `filter` tries one value per path and rejects the path if its predicate fails.
+  The law runs only on accepted paths.
+- `Held(run, discarded)` means the tree is exhausted. `run` counts paths that
+  passed the law, and `discarded` counts rejected paths.
+- `Truncated(run, discarded)` reports the same counts for completed paths when
+  choices remain at the `cases` limit, a generator attempts a draw past
+  `max_choices`, or it exhausts `gen_steps`. `cases` limits attempted paths,
+  including rejects.
+  Reaching the case limit on the final leaf still returns `Held`.
+- `Unbounded(at)` stops the walk at a `word()` draw. `at` is the zero-based
+  choice position on that path.
+- `Falsified(found)` preserves the first failing tape with zero shrinks. Pass
+  its token to `search` with `replay(c, token)` to reproduce that case. Its case
+  index counts attempted paths from zero, including rejects.
+
+The law runs under `case_bytes` and `case_steps` as in `search`. A generator
+failure other than a traversal or step limit fails as in `search`.
+`seed`, `max_rejects` and `max_shrinks` do not affect the walk. `all` refuses a
+configuration with a replay token.
+
 ### Sim seeds
 
 `Case.world_seed` is `world_seed(sim, index)`, which is `mix(sim ^ mix(index))`.
@@ -247,6 +283,21 @@ fn world_matches_plan(e: Env, tasks: Tasks) -> Result[(), ()] waits {
     })
 }
 ```
+
+### Scripted simulation
+
+Pass `std.sim.world.script_gen(providers, max_draws)` to `check_tasks` to
+shrink simulation choices. The generator records the tail seed with `word`
+followed by one `list_of` of words per provider, with lengths from zero to
+`max_draws`. The provider count is fixed, so every generated script has the
+same provider IDs even when its prefixes shrink.
+
+Use `std.sim.world.plan_from(case.value, id)` to initialize each provider.
+The shrinker can remove prefix words, lower individual words, and change the
+tail seed. Replay uses the same generator arguments, stable provider IDs and
+site fault setup as the original law. One reported `prop.replay` token contains
+all the recorded choices for the script. The law can still use `case.world_seed`
+to start its virtual clock. See [scripted plans](sim/world.md#scripted-plans).
 
 ## Shrinking
 

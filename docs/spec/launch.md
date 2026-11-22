@@ -225,9 +225,11 @@ nothing is assembled or launched from them.
 Its root is `R = H("hirsel.release-recipe.v2", recipe)`; the version is 2, and version 1, which
 had no foreign parts, is never read or written. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
-maps failures report, so a comment that moves lines changes R but no address. R does not
-cover the host's toolchain: one R can assemble to different bytes under another toolchain, and
-the assembly record (below) says which.
+maps failures report, so a comment that moves lines changes R but no address. The optimized
+native link stores coordinates for the site words its retained sections reference. Each
+surviving site word keeps its original value. R does not cover the host's toolchain: one R
+can assemble to different bytes under another toolchain, and the assembly record (below)
+says which.
 
 **Working directory.** A directory path in a recipe stays as given. A relative path is resolved
 when the executable starts, against the launch's working directory, which is an input of the

@@ -1270,7 +1270,7 @@ pub fn cancel_token(mut rows: Rows) -> Result[CancelToken, Error] {
                     list.put_word_be(mut raw, key_word)
                     match secret.seal(take raw, peer.hostname) {
                         Ok(secret_value) => secret_value,
-                        Error(_) => return Error(CancelUnavailable),
+                        Error((_, _)) => return Error(CancelUnavailable),
                     }
                 },
                 None => return Error(CancelUnavailable),

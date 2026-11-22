@@ -441,11 +441,14 @@ checks the grants, the root limit and `release`; `confirm_identity` (L32);
 `place_run_bounded` also covers the preview child, which observes no store or
 listener.
 
-## Platform host and launcher (unbuilt)
+## Platform host and launcher (partly built)
 
 This section specifies how many programs from many authors are run on one machine. It was
-ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). Nothing in it is built. The
-cold-place wake contract it relies on is RUNNER-SPEC §14.
+ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). The launcher is built as
+`hirsel launcher` ("The launcher" below says which of its parts); the platform host, the
+catalog and containment's use by the launcher are not. Until the platform host replaces it,
+`hirsel host` is the older single-place supervisor of "Authority" above, and the two run side
+by side. The cold-place wake contract they rely on is RUNNER-SPEC §14.
 
 ### Authority groups
 
@@ -523,6 +526,18 @@ again: every decision record is in the host's catalog. What it keeps on disk is
 content-addressed: the code store, the image store and the assembly records, each named by
 the hash of its own content (above). Such a file is either complete or absent after a crash,
 so keeping it is caching, not state. Its operations are these:
+
+Built: `hirsel launcher --control SOCKET --state DIR` (crates/hirsel-core-driver/src/launcher)
+serves the control session of RUNNER-SPEC §14.5 and does Launch and Collect below, with the
+launcher lock and the listeners; each group it binds is labelled uncontained, and a contained
+group's `Bind` fails until the launcher starts children through R27. Not built: publishing and
+assembling (the launcher reads the image store and assembly records, and admission reserves
+its objects through the launcher's in-process `reserve`, which no session request reaches
+yet), and the install child, which a `Launch` is refused as unbuilt because the runtime has no
+install-only start. A prepare child gets no control endpoint (descriptor 4), because the
+runtime refuses host control with `--hirsel-prepare`. An uncontained serving child's own
+descendants can keep its listener open after it ends, so the successor's bind can fail until
+they exit; R27's containers end them.
 
 - **Publish and assemble.** It admits recipes (steps 1-8 above), publishes source for
   untrusted authors, and assembles images. It writes objects with the "Durable publication"
@@ -642,7 +657,8 @@ tenant runs until R27 is built. Changing a group's label is an operator action, 
 the catalog, and it takes effect at the group's next start.
 
 *Built (2026-11-22):* the `contained` label's containment is the `hirsel-contain` crate,
-which the launcher calls for each contained child. A launcher host opens a delegated cgroup v2
+which the launcher is to call for each contained child; until it does, `hirsel launcher`
+fails a contained group's `Bind`. A launcher host opens a delegated cgroup v2
 subtree and is refused unless a trial container works: the `cpu`, `memory` and `pids`
 controllers, and an unprivileged user, PID, mount, network and cgroup namespace with its own
 root. Each child runs as its own container, named by its identity (RUNNER-SPEC §14.1), under
@@ -697,20 +713,24 @@ does not cover a change of `handles` (a table name, a binding, a key codec), and
 digest does, so a revision-keyed guard would let a started run continue against changed
 handles.
 
-Laws (unbuilt): `group_one_head`, where a cutover's NEW head opens the store only after
+Laws. Built for the launcher (crates/hirsel-core-driver/src/launcher/laws.rs), with the
+host's half unbuilt: `group_one_head`, where a cutover's NEW head opens the store only after
 OLD's head has closed it, and an extra launch of the group is refused `Held`;
 `launcher_restart_stateless`, where a launcher killed at every step of a deploy and
 restarted gives the host's reconciliation the same result as the host's records alone,
 and a host killed at every step adopts the live children and starts no second serving
-child of any group;
-`contained_all_children` (built, crates/hirsel-contain), where an install, describe, preview, prepare and serving child
+child of any group; `child_mode_authority`, for its descriptor and control socket parts;
+`collect_reservation_handoff`; and L46 (RUNNER-SPEC §14.3), where a child's end samples
+its listener before the watch resumes. Built in crates/hirsel-contain, which the launcher does
+not yet start children through: `contained_all_children`, where an install, describe,
+preview, prepare and serving child
 of a contained group, and a tool descendant of the serving child, each fail to read a
 file outside its mode's row and to connect outside its `Net` bindings (all connections,
 for every mode but serving), and leave no process after it ends, and where a launcher
 killed while they run is replaced by one that reports them ended only after their
-containers are empty; `child_mode_authority` (containment half built, crates/hirsel-contain), where a prepare child can write only its
-export directory and holds no listener, and no child holds the control socket;
-`collect_reservation_handoff`, where a deploy's reservation is released between the host's
-`CollectBegin` and its root read and the pending record's image can still be opened after
-collection; `contained_refused_uncontainable` (built, crates/hirsel-contain), where a launcher on a host without the
-mechanism admits no contained group; and `trigger_scan_classes` (RUNNER-SPEC §14.7, L40).
+containers are empty; `child_mode_authority`'s containment half, where a prepare child can
+write only its export directory; and `contained_refused_uncontainable`, where a launcher on
+a host without the mechanism admits no contained group. Unbuilt: the host's halves of the
+laws above, among them `collect_reservation_handoff`'s, where a deploy's reservation is
+released between the host's `CollectBegin` and its root read and the pending record's image
+can still be opened after collection; and `trigger_scan_classes` (RUNNER-SPEC §14.7, L40).

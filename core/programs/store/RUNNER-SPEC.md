@@ -1631,7 +1631,7 @@ Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-back
 
 ## 14. Cold places under the platform host (new in v2.26)
 
-A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. The runner's idle stop and child report are **built**. The platform host and launcher have separate implementation lanes. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
+A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. The runner's idle stop and child report are **built**, and so is the launcher's side of §14.3-§14.5 (`hirsel launcher`, launch.md "The launcher"); the platform host is not. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
 
 The rule in one line: a place that a commit has given a future trigger is woken for it, and the host can always tell, from one durable row per place, whether it knows the place's next due time or must start the place to find out.
 
@@ -1774,7 +1774,7 @@ Two recipes may differ in `n_place` alone and share one image digest, so NEW's d
 
 ### 14.7 Laws
 
-L40 runs in the runner's prepare harness and L44 in the runner's place harness, since each needs one place and no host. Every other law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited.
+L40 runs in the runner's prepare harness and L44 in the runner's place harness, since each needs one place and no host. Every other law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited. L46's launcher half, where a child's end is sent after its listener's exit sample and before the watch resumes, and an inventory repeats a readable listener, is built in the launcher's own harness (crates/hirsel-core-driver/src/launcher/laws.rs, `end_samples_listener_before_watch`).
 
 | Law | Wrong implementation it catches | Oracle |
 |---|---|---|

@@ -84,6 +84,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
     let command = invocation.command.name;
+    if command == "launcher" {
+        match crate::launcher::run(invocation)? {}
+    }
     if matches!(command, "host" | "deploy") {
         std::process::exit(crate::host::run(invocation)?);
     }

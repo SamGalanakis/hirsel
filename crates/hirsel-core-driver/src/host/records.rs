@@ -10,7 +10,7 @@ use twox_hash::XxHash3_64;
 
 pub(super) type Attempt = [u8; 16];
 
-pub(super) struct Records {
+pub(crate) struct Records {
     root: PathBuf,
     _owner: Option<File>,
 }
@@ -88,7 +88,7 @@ impl Deploy {
 }
 
 impl Records {
-    pub(super) fn open(root: &Path) -> io::Result<Self> {
+    pub(crate) fn open(root: &Path) -> io::Result<Self> {
         let root = root.canonicalize()?;
         let owner = File::options()
             .read(true)
@@ -131,7 +131,7 @@ impl Records {
         Ok(Deploy::decode(&bytes))
     }
 
-    pub(super) fn put_assembly(&self, record: &AssemblyRecord, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn put_assembly(&self, record: &AssemblyRecord, bytes: &[u8]) -> io::Result<()> {
         write_record(&self.image_path(record.digest), bytes, 0o500, true)?;
         let payload = [record.recipe.0, record.toolchain.0, record.digest.0].concat();
         write_record(
@@ -142,7 +142,7 @@ impl Records {
         )
     }
 
-    pub(super) fn assembly(&self, identity: ContentHash) -> io::Result<AssemblyRecord> {
+    pub(crate) fn assembly(&self, identity: ContentHash) -> io::Result<AssemblyRecord> {
         let [recipe, toolchain, digest] = read_hashes(&self.key("assemblies", identity))?;
         let payload = [recipe.0, toolchain.0, digest.0].concat();
         if ContentHash::of_parts("hirsel.assembly-record.v1", [payload.as_slice()]) != identity {
@@ -159,17 +159,17 @@ impl Records {
         })
     }
 
-    pub(super) fn image_path(&self, digest: ContentHash) -> PathBuf {
+    pub(crate) fn image_path(&self, digest: ContentHash) -> PathBuf {
         self.key("images", digest)
     }
 
-    pub(super) fn verify_image(&self, digest: ContentHash) -> io::Result<PathBuf> {
+    pub(crate) fn verify_image(&self, digest: ContentHash) -> io::Result<PathBuf> {
         let path = self.image_path(digest);
         let _ = self.open_image(digest)?;
         Ok(path)
     }
 
-    pub(super) fn open_image(&self, digest: ContentHash) -> io::Result<File> {
+    pub(crate) fn open_image(&self, digest: ContentHash) -> io::Result<File> {
         let mut file = File::open(self.image_path(digest))?;
         let mut hash = Sha256::new();
         io::copy(&mut file, &mut hash)?;
@@ -281,11 +281,12 @@ impl Records {
         Ok(roots)
     }
 
-    pub(super) fn collect(
+    pub(crate) fn collect(
         &self,
         assemblies: &BTreeSet<ContentHash>,
         images: &BTreeSet<ContentHash>,
-    ) -> io::Result<()> {
+    ) -> io::Result<u64> {
+        let mut removed = 0;
         for (name, keep) in [("assemblies", assemblies), ("images", images)] {
             let dir = self.root.join(name);
             for row in fs::read_dir(&dir)? {
@@ -299,11 +300,12 @@ impl Records {
                     && !keep.contains(&hash)
                 {
                     fs::remove_file(row.path())?;
+                    removed += 1;
                 }
             }
             sync_dir(&dir)?;
         }
-        Ok(())
+        Ok(removed)
     }
 
     pub(super) fn index(

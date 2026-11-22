@@ -17,6 +17,7 @@ mod image_index;
 mod image_unit;
 mod inspect;
 pub mod installation;
+pub(crate) mod launcher;
 mod product;
 pub mod sdk;
 pub mod sdk_command;

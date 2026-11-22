@@ -3,7 +3,7 @@ mod child;
 #[cfg(test)]
 pub(crate) use child::terminal_fixture;
 mod recording;
-mod records;
+pub(crate) mod records;
 
 pub(crate) use recording::replay;
 
@@ -44,7 +44,7 @@ type Error = Box<dyn std::error::Error>;
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 
-fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io::Result<Recipe> {
+pub(crate) fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io::Result<Recipe> {
     let max = max as u64;
     let mut bytes = Vec::new();
     code.open(ObjectKind::Recipe, root)?
@@ -62,7 +62,7 @@ fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io::Result<Re
     )?)
 }
 
-fn limits() -> AdmissionLimits {
+pub(crate) fn limits() -> AdmissionLimits {
     AdmissionLimits {
         recipe_bytes: 16 << 20,
         closure_objects: 196_608,
@@ -324,7 +324,7 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
     }
 }
 
-fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
+pub(crate) fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
     match DirBuilder::new().mode(0o700).create(&path) {
         Ok(()) => (),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -349,7 +349,7 @@ fn reset_staging(path: &Path) -> io::Result<()> {
     fs::create_dir(path)
 }
 
-fn bind_control(path: &Path) -> io::Result<UnixListener> {
+pub(crate) fn bind_control(path: &Path) -> io::Result<UnixListener> {
     use std::os::unix::fs::FileTypeExt;
     if let Ok(meta) = fs::symlink_metadata(path) {
         if !meta.file_type().is_socket() || UnixStream::connect(path).is_ok() {

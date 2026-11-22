@@ -742,7 +742,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     (self.t.mk(TyKind::Adt(cause, vec![])), None)
                 }
                 _ => {
-                    self.refuse("LANG-16", source, "this source is not iterable");
+                    let message = if matches!(self.t.kind(inner), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::String))
+                    {
+                        "Use string.next_scalar(s, at) to walk a String and carry the returned byte offset to the next iteration"
+                    } else {
+                        "this source is not iterable"
+                    };
+                    self.refuse("LANG-16", source, message);
                     return (ERROR, None);
                 }
             };

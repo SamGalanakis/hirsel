@@ -137,8 +137,9 @@ of them when its expected type gives them ([LANG-11](#lang-11-typing-is-local));
 result type may be omitted when the expected type gives it.
 
 `waits` says that a call may wait and may observe cancellation
-([CONC-7](tasks.md#conc-7-cancellation-points)). `main` is always `waits`
-([PROG-3](programs.md#prog-3-entry)), and a bodiless core function's or foreign function's
+([CONC-7](tasks.md#conc-7-cancellation-points)). The program entry `main` can wait
+with or without a written `waits` ([PROG-3](programs.md#prog-3-entry)). A bodiless core
+function's or foreign function's
 ([FFI-2](foreign.md#ffi-2-foreign-modules)) `waits` is as written.
 Every other function or closure is declared `waits`
 exactly when its body calls a function, or invokes a callable, whose type is `waits`; one
@@ -549,7 +550,9 @@ fn f(c: bool) { while c { break 5 } }                     // refused: LANG-15, w
 `for x in e` iterates exactly the sources of [SEM-6](semantics.md#sem-6-iteration), in its
 modes; `for take x in e` consumes an own `List` and `for take (k, v) in e` an own `Map`, and
 no other iteration consumes in v1. A `for` pattern is irrefutable. Bindings made by one iteration end with it
-([OWN-17](ownership.md#own-17-loops)).
+([OWN-17](ownership.md#own-17-loops)). To walk a String's UTF-8 scalars, start at byte
+offset zero and advance to the byte offset returned by `string.next_scalar` on
+each iteration.
 
 ```hirsel
 fn scalars(s: String) -> u64 {

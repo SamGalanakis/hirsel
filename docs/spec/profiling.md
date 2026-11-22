@@ -191,6 +191,10 @@ per event. Function grouping deduplicates the definition across all
 instances in a stack. A frame with a source location and no function name
 appears as `<file>:<line>` in hotspots.
 
+`annotate FILE:LINE` uses an exact stored path if present. Otherwise it accepts
+a unique path suffix on component boundaries. An ambiguous suffix reports the
+matching paths, even if only one contains observations for the requested line.
+
 `annotate` aggregates CPU events by source line and event. It aggregates
 compiler remarks by source line, kind, outcome and evidence level. It
 aggregates backing allocation totals by source line and allocation kind.

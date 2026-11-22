@@ -436,9 +436,18 @@ fn annotate(db: &Connection, target: &str, limit: usize) -> Result<Value> {
         },
         None => (target, None),
     };
+    let matched_file = if line.is_some() {
+        source_file(db, file)?
+    } else {
+        None
+    };
     register_totals(db)?;
     let mut stmt = db.prepare(include_str!("annotate.sql"))?;
-    let mut rows = stmt.query((file, line, bounded_limit(limit)?))?;
+    let mut rows = stmt.query((
+        matched_file.as_deref().unwrap_or(file),
+        line,
+        bounded_limit(limit)?,
+    ))?;
     let mut result = Vec::new();
     while result.len() < limit {
         let Some(row) = rows.next()? else { break };
@@ -453,6 +462,33 @@ fn annotate(db: &Connection, target: &str, limit: usize) -> Result<Value> {
     }
     Ok(json!({"rows": result, "limit": unsigned(limit as u64),
         "returned_rows": unsigned(result.len() as u64), "truncated": rows.next()?.is_some()}))
+}
+
+fn source_file(db: &Connection, file: &str) -> Result<Option<String>> {
+    if file.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = db.prepare(
+        "SELECT file FROM line_cpu_summary
+         UNION SELECT file FROM codegen_remark
+         UNION SELECT file FROM frame WHERE file IS NOT NULL
+         ORDER BY file",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next()? {
+        let candidate: String = row.get(0)?;
+        if candidate == file {
+            return Ok(Some(candidate));
+        }
+        if Path::new(&candidate).ends_with(file) {
+            candidates.push(candidate);
+        }
+    }
+    if candidates.len() > 1 {
+        return Err(format!("ambiguous source path {file:?}: {}", candidates.join(", ")).into());
+    }
+    Ok(candidates.pop())
 }
 
 fn related(
@@ -645,6 +681,45 @@ mod tests {
     use crate::{ProfileWriter, RunMeta};
 
     use super::*;
+
+    #[test]
+    fn annotate_matches_path_components_and_reports_ambiguous_suffixes() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute_batch(
+            "INSERT INTO function VALUES (1,'app/math/f','f','f','hirsel');
+             INSERT INTO line_cpu_summary VALUES
+                 ('/workspace/core/matmul.hirsel',95,1,'cycles',17,1),
+                 ('/workspace/core/othermatmul.hirsel',95,1,'cycles',23,1);",
+        )
+        .unwrap();
+        for target in ["matmul.hirsel:95", "core/matmul.hirsel:95"] {
+            let report = annotate(&db, target, 10).unwrap();
+            assert_eq!(report["returned_rows"], 1);
+            assert_eq!(report["rows"][0]["file"], "/workspace/core/matmul.hirsel");
+            assert_eq!(report["rows"][0]["line"], 95);
+            assert_eq!(report["rows"][0]["cpu"][0]["self_total"], 17);
+        }
+        db.execute(
+            "INSERT INTO codegen_remark VALUES
+                 (1,'/workspace/tests/matmul.hirsel',3,1,'step_sync','emitted','source_remark',1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            annotate(&db, "matmul.hirsel:95", 10)
+                .unwrap_err()
+                .to_string(),
+            "ambiguous source path \"matmul.hirsel\": /workspace/core/matmul.hirsel, /workspace/tests/matmul.hirsel"
+        );
+        db.execute(
+            "INSERT INTO line_cpu_summary VALUES ('matmul.hirsel',95,1,'cycles',8,1)",
+            [],
+        )
+        .unwrap();
+        let exact = annotate(&db, "matmul.hirsel:95", 10).unwrap();
+        assert_eq!(exact["rows"][0]["cpu"][0]["self_total"], 8);
+    }
 
     #[test]
     fn top_names_anonymous_frames_by_source_location() {

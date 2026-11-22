@@ -19,9 +19,9 @@ import signal
 import subprocess
 import time
 
-from blocks import BOARD, REGIMES, board_window_ok
+from blocks import BOARD, REGIMES, board_window_ok, cpuset
 from part3u import (
-    LOAD, PARTITIONS, RUN, SERVER, SYNCS, TOOL, TOOL_DELAY_US, complete_in_time, search_steps,
+    LOAD, PARTITIONS, RUN, SERVER, SYNCS, TOOL_DELAY_US, complete_in_time, search_steps,
 )
 
 
@@ -29,6 +29,8 @@ PORT = 28200
 # Session units behind the single listening port.
 SESSION_UNITS = 8
 TOOL_PORT = 28190
+TOOL = "24-25"
+CONTROLLER = "26-27"
 NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
 HOLDS_GAP_S = 15
@@ -179,7 +181,7 @@ def assert_ports_free(ports):
 
 
 class Runner:
-    def __init__(self, scratch, data, *, hold_guard=None):
+    def __init__(self, scratch, data, *, hold_guard=None, cpu_sets=None):
         self.scratch = scratch
         self.data = data
         self.bin = scratch / "bin"
@@ -189,6 +191,7 @@ class Runner:
         self.tapes.mkdir(exist_ok=True)
         self.active_hold = None
         self.hold_guard = hold_guard or timing_hold
+        self.cpu_sets = cpu_sets or {}
         self.hold = 0
 
     @contextmanager
@@ -196,7 +199,9 @@ class Runner:
         assert_ports_free([TOOL_PORT])
         pidfile = self.scratch / "tool.pid"
         with (self.scratch / "tool.err").open("w+") as err:
-            proc = launch(pinned(TOOL, [self.bin / "toolsrv", TOOL_PORT, TOOL_DELAY_US, 4, int(precise)]), pidfile, stderr=err)
+            cpus = self.cpu_sets.get("helper", TOOL)
+            proc = launch(pinned(cpus, [self.bin / "toolsrv", TOOL_PORT, TOOL_DELAY_US,
+                                        len(cpuset(cpus)), int(precise)]), pidfile, stderr=err)
             try:
                 for _ in range(50):
                     if f"toolsrv ready port={TOOL_PORT}" in (self.scratch / "tool.err").read_text() and proc.poll() is None:
@@ -234,7 +239,7 @@ class Runner:
         if side == "tokiow8" and cell.get("fair"):
             argv.append(1)
         env = {k: v for k, v in os.environ.items() if not k.startswith("HIRSEL_")} | env
-        return pinned(SERVER, argv), env
+        return pinned(self.cpu_sets.get("server", SERVER), argv), env
 
     def profile_setup(self, mode):
         event = ["-F", "999"] if mode == "cpu" else ["-e", "sched:sched_switch"]
@@ -263,7 +268,7 @@ class Runner:
                     masks_seen = masks(server_pid)
                 if profile and profile_proc is None and phase_ns is not None:
                     if time.monotonic_ns() >= phase_ns + offset:
-                        cmd = ["taskset", "-c", "6-7", "perf", "record", "-N", "--clockid", "mono",
+                        cmd = ["taskset", "-c", self.cpu_sets.get("controller", CONTROLLER), "perf", "record", "-N", "--clockid", "mono",
                                *events, "-o", str(profile["path"]), "-p", str(server_pid), "--", "sleep", duration]
                         profile["launch_ns"] = time.monotonic_ns()
                         with profile["path"].with_suffix(".log").open("w") as err:
@@ -301,10 +306,11 @@ class Runner:
             load_name = "loadgen_detail"
         else:
             load_name = "loadgen_drain" if profile_mode or "close_after_drain" in cell else "loadgen"
+        load_cpus = self.cpu_sets.get("load", LOAD)
         lg_argv = [
             self.bin / load_name, f"port={PORT}", f"sessions={cell['sessions']}",
             f"rate={rate:.0f}", f"f={int(cell['f'] * 1000)}", f"par={int(cell['par'])}",
-            f"seed={seed}", "threads=4", "grace=5", f"ready_ack={int(cell['ready_ack'])}",
+            f"seed={seed}", f"threads={len(cpuset(load_cpus))}", "grace=5", f"ready_ack={int(cell['ready_ack'])}",
             f"reserved_hot={int('hot' in cell and cell.get('skew_clients', 0) == 0)}",
             f"hot={int(cell.get('hot', False))}", f"skew_clients={cell.get('skew_clients', 0)}",
             f"close_after_drain={int(cell.get('close_after_drain', False))}",
@@ -325,7 +331,7 @@ class Runner:
         with (self.scratch / "server.err").open("w+") as err:
             server = launch(server_argv, server_pidfile, env=env, stderr=err)
             try:
-                load = launch(pinned(LOAD, lg_argv), load_pidfile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                load = launch(pinned(load_cpus, lg_argv), load_pidfile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 try:
                     out, load_err, samples, seen_masks, load_timeout = self.collect_load(load, load_pidfile, server.pid, profile)
                 finally:
@@ -498,8 +504,8 @@ def main():
     attrib.add_argument("--hot", type=int, choices=(0, 1), help="use the paired fairness workload")
     attrib.add_argument("--ready-ack", action="store_true", help="wait for session setup before offering load")
     args = parser.parse_args()
-    if os.sched_getaffinity(0) != {6, 7}:
-        parser.error("pin this controller with taskset -c 6-7")
+    if os.sched_getaffinity(0) != cpuset(CONTROLLER):
+        parser.error(f"pin this controller with taskset -c {CONTROLLER}")
     if time.time() >= args.deadline:
         raise SystemExit("measurement deadline reached")
     signal.signal(signal.SIGALRM, stop_at_deadline)

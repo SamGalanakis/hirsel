@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from functools import partial
 import hashlib
 from itertools import count
 import json
@@ -23,12 +24,18 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "core/tools"))
 sys.path.insert(0, str(ROOT / "bench/awfy"))
 from receipt import measurement_slot, read, release_tools, write
+from bench_cpus import cpu_list
 
 from bench.multicore import build, regimes, run
 
-CONTROLLER = {6, 7}
-SERVER = (0, 8, 1, 9, 2, 10, 3, 11)
-LOAD = (16, 17, 18, 19)
+CPU_DEFAULTS = {
+    "server": (0, 8, 1, 9, 2, 10, 3, 11),
+    "load": (16, 17, 18, 19),
+    "helper": (24, 25),
+    "controller": (26, 27),
+}
+MEASURE_CPUS = set().union(*CPU_DEFAULTS.values())
+BUILD_CPUS = "8-11"
 MATCHED_OFFER = 3000
 CONNECTIONS = (256, 2048, 8192)
 QUICK_REGIMES = ("fanin", "pipeline")
@@ -58,8 +65,17 @@ def hashes(cache, names):
     return {name: sha256(cache / name) for name in names}
 
 
-def build_command(arguments, **kwargs):
-    return subprocess.run(["taskset", "-c", "4-5", *map(str, arguments)], cwd=ROOT,
+def mask(cpus):
+    return ",".join(map(str, cpus))
+
+
+def build_command(arguments, *, local=False, **kwargs):
+    env = os.environ.copy()
+    if local:
+        env.update(HIRSEL_JOBS="4", UNITS_BUILD_UNDER_CAP="1")
+        arguments = ("taskset", "-c", BUILD_CPUS, ROOT / "tools/capped",
+                     "flock", scale.REGIMES, "timeout", "--kill-after=5s", "220s", *arguments)
+    return subprocess.run(list(map(str, arguments)), cwd=ROOT, env=env,
                           check=True, text=True, **kwargs)
 
 
@@ -70,9 +86,9 @@ def toolchain(cache):
         if all(Path(artifacts[name]).is_file() for name in ("compiler", "runtime")):
             release_tools(artifacts)
             return artifacts
-    build_command([ROOT / "tools/capped", sys.executable, "tools/buck2/prepare.py"])
+    build_command([sys.executable, "tools/buck2/prepare.py"], local=True)
     result = build_command(
-        [".buck2/bin/buck2", "build", "--remote-only", "-j2", "--target-platforms",
+        [".buck2/bin/buck2", "build", "--remote-only", "-j4", "--target-platforms",
          "//tools/buck2:release", "//:hirsel-core-driver-bin-hirsel",
          "//:hirsel-core-rt-archives", "--show-json-output"],
         stdout=subprocess.PIPE,
@@ -126,17 +142,17 @@ def prepare(cache, commit, suites, cases):
         artifacts = toolchain(cache)
         compiler, runtime = (Path(artifacts[key]) for key in ("compiler", "runtime"))
         if family == "a1":
-            build_command([ROOT / "bench/units/build_scale.sh", cache / "a1", compiler, runtime])
+            build_command([ROOT / "bench/units/build_scale.sh", cache / "a1", compiler, runtime], local=True)
         else:
             bins = cache / "regimes"
             bins.mkdir(exist_ok=True)
-            entry = ("b.build_checkbox(out, cc, rt)" if family == "checkbox" else
-                     "b.build_rust(out, None, False, regimes=True); "
-                     "sys.exit(not b.build_hirsel(out, cc, rt, 'llvm', regimes=True))")
+            entry = ("b.build_checkbox(out, cc, rt, prefix=(), jobs=4)" if family == "checkbox" else
+                     "b.build_rust(out, None, False, regimes=True, prefix=(), jobs=4); "
+                     "sys.exit(not b.build_hirsel(out, cc, rt, 'llvm', regimes=True, prefix=(), jobs=4))")
             build_command([sys.executable, "-c",
                            "import sys; from pathlib import Path; from bench.multicore import build as b; "
                            f"out, cc, rt = map(Path, sys.argv[1:]); {entry}",
-                           bins, compiler, runtime])
+                           bins, compiler, runtime], local=True)
         recorded.update(hashes(cache, names))
         write(path, manifest)
     if "a1" in need:
@@ -197,24 +213,23 @@ def scope(cpus, command, *, limit=55):
             "--", *map(str, command)]
 
 
-def measure_regime(directory, cpus, command, profile=False, cycles=False):
+def measure_regime(directory, cpus, command, profile=False, cycles=False, *, controller):
     events = "instructions:u,duration_time,cycles:u"
-    cpus = ",".join(map(str, cpus))
-    launcher = ["taskset", "-c", cpus, "/usr/bin/time", "-f", "%U %S\n%M",
+    launcher = ["taskset", "-c", mask(cpus), "/usr/bin/time", "-f", "%U %S\n%M",
                 "-o", directory / "rss.txt", *command]
     if profile:
-        return scope("6-7", ["perf", "record", "-N", "--clockid", "mono", "--sample-cpu",
+        return scope(mask(controller), ["perf", "record", "-N", "--clockid", "mono", "--sample-cpu",
                              "-e", "cycles:u,cycles:k,cpu-clock", "-F", "499",
                              "--call-graph", "dwarf,8192", "-o", directory / "perf.data", "--", *launcher])
-    return scope("6-7", ["perf", "stat", "-x", ";", "-e", events,
+    return scope(mask(controller), ["perf", "stat", "-x", ";", "-e", events,
                           "-o", directory / "perf.csv", "--", *launcher])
 
 
-def regime_pair(out, bins, case, grain, width, index, reverse, profile=False):
+def regime_pair(out, bins, case, grain, width, index, reverse, cpu_sets, profile=False):
     work = regimes.WORKLOADS[case]
     rounds = ROUNDS[grain]
     wanted = ("%d %d\n" % regimes.receipt(case, work.size, rounds)).encode()
-    cpus = SERVER[:width]
+    cpus = cpu_sets["server"][:width]
     parent = out / ("regime-profiles" if profile else "regime-samples")
     parent.mkdir(exist_ok=True)
     order = ARMS[::-1] if (index + reverse) % 2 else ARMS
@@ -229,8 +244,9 @@ def regime_pair(out, bins, case, grain, width, index, reverse, profile=False):
                     if "load_exceeded" in hold:
                         break
                     path, row = run.observe_regime(
-                        bins, point, case, arm.capitalize(), cpus, LOAD, work.size, rounds,
-                        wanted, profile=profile, launch_measurement=measure_regime, launch_loader=scope)
+                        bins, point, case, arm.capitalize(), cpus, cpu_sets["load"], work.size, rounds,
+                        wanted, profile=profile, launch_loader=scope,
+                        launch_measurement=partial(measure_regime, controller=cpu_sets["controller"]))
                     cpu = None
                     if (path / "rss.txt").is_file():
                         lines = (path / "rss.txt").read_text().splitlines()
@@ -425,9 +441,10 @@ def matched_a1(runner, raw, cell_name, cell, offer, repeats, phase, profile=None
     return result
 
 
-def run_a1(report, cache, full, repeats, reverse):
+def run_a1(report, cache, full, repeats, reverse, cpu_sets):
     scale.PORT, scale.TOOL_PORT = pick_ports()
-    runner = A1Runner(cache / "a1", report.out, hold_guard=guarded_hold)
+    runner = A1Runner(cache / "a1", report.out, hold_guard=guarded_hold,
+                      cpu_sets={role: mask(cpus) for role, cpus in cpu_sets.items()})
     for storage, software in ([("ext4", False), ("tmpfs", False), ("ext4", True)]
                               if full else [("ext4", False)]):
         found = {}
@@ -468,7 +485,7 @@ def run_a1(report, cache, full, repeats, reverse):
                              found[256], found[8192])
 
 
-def run_regimes(report, cache, cases, full, repeats, reverse):
+def run_regimes(report, cache, cases, full, repeats, reverse, cpu_sets):
     bins = cache / "regimes"
     index = 0
     for case in cases:
@@ -477,7 +494,7 @@ def run_regimes(report, cache, cases, full, repeats, reverse):
             for width in regime_widths(full):
                 samples = {arm: [] for arm in ARMS}
                 for _ in range(repeats):
-                    pair = regime_pair(report.out, bins, case, grain, width, index, reverse)
+                    pair = regime_pair(report.out, bins, case, grain, width, index, reverse, cpu_sets)
                     index += 1
                     for arm, value in pair.items():
                         samples[arm].append(value)
@@ -496,7 +513,7 @@ def run_regimes(report, cache, cases, full, repeats, reverse):
                            case=case, grain_ns=grain, width=width, kind="work_rate")
         if full:
             profile = regime_pair(report.out, bins, case, 0 if case == "checkbox" else 10_000,
-                                  8, index, reverse, profile=True)
+                                  8, index, reverse, cpu_sets, profile=True)
             index += 1
             report.data.setdefault("regime_profiles", {})[case] = profile
             report.save()
@@ -511,6 +528,9 @@ def main():
     parser.add_argument("--regimes", help="comma-separated workloads from the multicore suite")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--cache", type=Path)
+    for role, default in CPU_DEFAULTS.items():
+        parser.add_argument(f"--{role}-cpus", type=cpu_list, default=default,
+                            help=f"CPU list for {role}, default {mask(default)}")
     parser.add_argument("--repeats", type=int)
     parser.add_argument("--reverse", action="store_true", help="reverse the first paired arm")
     parser.add_argument("--deadline-seconds", type=int, help="limit time waiting and measuring after builds")
@@ -524,9 +544,16 @@ def main():
     if (args.repeats is not None and args.repeats < 1
             or args.deadline_seconds is not None and args.deadline_seconds < 1):
         parser.error("repeats and deadline must be positive")
-    if not CONTROLLER.issubset(os.sched_getaffinity(0)):
-        parser.error("CPUs 6 and 7 must be available to the controller")
-    os.sched_setaffinity(0, CONTROLLER)
+    cpu_sets = {role: getattr(args, f"{role}_cpus") for role in CPU_DEFAULTS}
+    assigned = [cpu for cpus in cpu_sets.values() for cpu in cpus]
+    if set(assigned) - MEASURE_CPUS or len(assigned) != len(set(assigned)):
+        parser.error("CPU sets must be disjoint and use only 0-3, 8-11, 16-19 and 24-27")
+    if len(cpu_sets["server"]) != 8:
+        parser.error("the server CPU set must contain eight CPUs")
+    controller = set(cpu_sets["controller"])
+    if not controller.issubset(os.sched_getaffinity(0)):
+        parser.error("pin the shell to the chosen controller CPUs")
+    os.sched_setaffinity(0, controller)
     commit = subprocess.check_output(["git", "-C", ROOT, "rev-parse", "HEAD"], text=True).strip()
     if subprocess.check_output(["git", "-C", ROOT, "status", "--porcelain"]):
         parser.error("use a clean checkout to attribute the binaries to a commit")
@@ -539,8 +566,8 @@ def main():
     repeats = args.repeats or (1 if args.full else 3)
     config = {"mode": "full" if args.full else "quick", "families": suites,
               "regimes": list(cases) if "regimes" in suites else [], "repeats": repeats,
-              "reverse": args.reverse, "server_cpus": SERVER, "load_cpus": LOAD,
-              "controller_cpus": sorted(CONTROLLER)}
+              "reverse": args.reverse,
+              **{f"{role}_cpus": cpus for role, cpus in cpu_sets.items()}}
     expected = expected_rows(suites, cases, args.full)
     report = Report(out, commit, config, expected)
     try:
@@ -552,9 +579,9 @@ def main():
             signal.setitimer(signal.ITIMER_REAL, args.deadline_seconds or (14400 if args.full else 1800))
             try:
                 if "a1" in suites:
-                    run_a1(report, cache, args.full, repeats, args.reverse)
+                    run_a1(report, cache, args.full, repeats, args.reverse, cpu_sets)
                 if "regimes" in suites:
-                    run_regimes(report, cache, cases, args.full, repeats, args.reverse)
+                    run_regimes(report, cache, cases, args.full, repeats, args.reverse, cpu_sets)
             finally:
                 signal.setitimer(signal.ITIMER_REAL, 0)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, scale.Deadline) as error:

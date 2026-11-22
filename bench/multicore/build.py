@@ -112,7 +112,8 @@ def time_rust_kernel(text, case):
 ''' + after)
 
 
-def build_rust(out, game, standard, s0=False, s8u=False, regimes=False):
+def build_rust(out, game, standard, s0=False, s8u=False, regimes=False, *,
+               prefix=(ROOT / "tools/capped",), jobs=2):
     path = out / "rust"
     path.mkdir(exist_ok=True)
     crate = BENCH / "rust"
@@ -125,10 +126,10 @@ def build_rust(out, game, standard, s0=False, s8u=False, regimes=False):
     else:
         binaries = ["--bin", "runtime"]
     cargo = subprocess.check_output(
-        [str(ROOT / "tools/capped"), "cargo", "build", "--release", "--locked", "-j2",
+        [*prefix, "cargo", "build", "--release", "--locked", f"-j{jobs}",
          "--manifest-path", str(crate / "Cargo.toml"), "--target-dir", str(out / "cargo"),
          *binaries, "--message-format=json"],
-        cwd=crate, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"},
+        cwd=crate, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)},
         text=True,
     )
     externs = {}
@@ -210,11 +211,12 @@ def hirsel_inputs(src):
     ]}
 
 
-def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False):
+def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False, *,
+                 prefix=(ROOT / "tools/capped",), jobs=1):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
-    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1"}
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
     env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [
         str(llvm / "lib"), os.environ.get("LD_LIBRARY_PATH")
     ]))
@@ -251,7 +253,7 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
         if regimes:
             grants += ["--grant", "Net=Listen 127.0.0.1/32 0-65535"]
         command = [
-            ROOT / "tools/capped", compiler, "build", *common, *grants,
+            *prefix, compiler, "build", *common, *grants,
             "--runtime", runtime, "--json", "-o", path / case,
         ]
         with log.open("wb") as file:
@@ -263,10 +265,10 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
     return succeeded
 
 
-def build_checkbox(out, compiler, runtime):
+def build_checkbox(out, compiler, runtime, *, prefix=(ROOT / "tools/capped",), jobs=2):
     wire_target = out / "wire"
-    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"}
-    run([ROOT / "tools/capped", "cargo", "build", "-j2", "--release", "--locked", "--bins",
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
+    run([*prefix, "cargo", "build", f"-j{jobs}", "--release", "--locked", "--bins",
          "--manifest-path", ROOT / "bench/wire/Cargo.toml", "--target-dir", wire_target], env=env)
     spec = importlib.util.spec_from_file_location(
         "checkbox_run", ROOT / "core/programs/checkbox/run.py")
@@ -282,11 +284,11 @@ def build_checkbox(out, compiler, runtime):
     clang = ROOT / "tools/buck2/toolchains/llvm-files/bin/clang"
     with (work / "build.log").open("wb") as log:
         binary = checkbox.build(
-            compiler, work, web, listen, prefix=(ROOT / "tools/capped",),
+            compiler, work, web, listen, prefix=prefix,
             flags=("--backend", "llvm", "--release", "--runtime", runtime, "--cc", clang, "--json"),
             stdout=log, env=env, entry="shipping_benchmark",
         )
-    run([ROOT / "tools/capped", compiler, "sdk", "ts", binary, "--out", web,
+    run([*prefix, compiler, "sdk", "ts", binary, "--out", web,
          "--n-place", checkbox.N_PLACE, "--runtime", runtime, "--cc", clang], env=env)
     run(["node", "--input-type=module", "-e", """
 import { writeFile } from 'node:fs/promises';

@@ -3,13 +3,15 @@
 Run from a clean checkout on the benchmark host.
 
 ```sh
-taskset -c 6-7 bench/units/fair.py --cells a1,regimes --quick --out "$results/quick-1"
-taskset -c 6-7 bench/units/fair.py --cells a1,regimes --quick --out "$results/quick-2" --reverse
-taskset -c 6-7 bench/units/fair.py --cells a1,regimes --full --out "$results/full"
+taskset -c 26-27 bench/units/fair.py --cells a1,regimes --quick --out "$results/quick-1"
+taskset -c 26-27 bench/units/fair.py --cells a1,regimes --quick --out "$results/quick-2" --reverse
+taskset -c 26-27 bench/units/fair.py --cells a1,regimes --full --out "$results/full"
 ```
 
 The runner builds the current commit with Buck2 and the capped benchmark
-recipes on CPUs 4–5. It verifies cached executable hashes before use.
+recipes on CPUs 8–11 at four jobs. Local builds take the regime lock in
+holds of at most about four minutes. The runner verifies cached executable
+hashes before use.
 `--cache` defaults to `fair-bin-cache` beside the output directory. Use
 the same parent directory for both quick runs to share the cache. Each
 output directory must be new and outside the checkout.
@@ -36,6 +38,10 @@ output directory must be new and outside the checkout.
   The runner alternates arm order and waits at least 15 seconds between
   holds. It pins the server, load generator and helper to their assigned CPU
   sets. The receipt records the observed host checks for every attempted hold.
+- Use `--server-cpus`, `--load-cpus`, `--helper-cpus` and
+  `--controller-cpus` to select disjoint masks. The defaults are server
+  0–3 and 8–11 in interleaved order, load generator 16–19, helper 24–25 and
+  controller 26–27. CPUs 4–7, 12–15, 20–23 and 28–31 are excluded.
 
 A1 clients schedule requests independently of replies. An A1 pass requires
 intended-arrival p99 at most 5 ms, an independently correct reply for every

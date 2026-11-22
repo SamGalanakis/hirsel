@@ -2469,6 +2469,11 @@ impl Program<'_> {
                         format!("field `{}` is not {b}", f.name),
                     )
                     .with_comparison(canonical(&self.decls, &self.types, f.ty), b);
+                    if missing & SHAREABLE != 0 {
+                        r.message.push_str(
+                            ". For shared handler state, use shareable values such as immutable data or a granted Dir. Keep move-only handles with their owning task",
+                        );
+                    }
                     if missing & CODEC != 0 {
                         for (site, explanation) in
                             missing_codec_declarations(&self.decls, &self.types, f.ty, &params)

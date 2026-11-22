@@ -393,6 +393,10 @@ A handler returns `Outcome = Response(Response) | Stream(StreamSpec) | Upgrade(U
 
 ### HTTP-11: Router and raw handlers
 
+Handler state can hold immutable shareable data and granted capabilities such as
+`Dir`. Move-only resources such as `Listener` and `Latest` stay with the task that
+owns them. Channel `Sender` is sendable, and a shared state field requires shareability.
+
 **Routes**
 - `Router[S]` is an immutable value built by `router.add(mut b, method, pattern, route)` and closed by `router.build(b) -> Result[Router[S], RouteConflict]`.
 - A pattern is literal segments, `{name}` captures of one whole segment, and an optional final `{name...}` that captures the rest. Patterns match HTTP-4 rule 9's decoded segments.

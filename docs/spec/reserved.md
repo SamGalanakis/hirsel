@@ -244,7 +244,9 @@ allocator chunk size becomes a logical capacity (MEM-28).
 host confines to the profile's files, network and descendants and that is refused where the
 host cannot enforce it. It would also tear down every descendant, through containment the run
 owns and a child cannot leave, such as a delegated cgroup or a PID namespace, and confirm that
-the containment is empty before reporting completion. *v1:* no profile is contained, and an `Exec` grant confers what its
+the containment is empty before reporting completion. That containment would also make each
+child's death certain when the host kills the run, which v1 gives only on a best-effort basis
+([EXEC-6](exec.md#exec-6-dropping-a-proc-kills-its-child)). *v1:* no profile is contained, and an `Exec` grant confers what its
 programs can do ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them));
 a contained kind adds a profile kind and changes nothing EXEC-1 to EXEC-8 specify.
 

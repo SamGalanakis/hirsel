@@ -1069,3 +1069,64 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+// Equal bounds, inverted bounds, gaps, and exact separator keys all appear
+// among the generated limits. The expected keys come from the sorted input.
+fn reverse_bound(kind: u64, key: u64) -> omap.Bound[u64] {
+    match kind {
+        0 => Unbounded,
+        1 => Included(key),
+        _ => Excluded(key)
+    }
+}
+
+fn reverse_matches_reference(m: omap.OMap[u64, u64], keys: List[u64], lower: u64, upper: u64, lower_kind: u64, upper_kind: u64) -> bool {
+    let lo = reverse_bound(lower_kind, lower)
+    let hi = reverse_bound(upper_kind, upper)
+    let mut rows = omap.range_reverse(m, lo, hi)
+    let mut expected: u64 = 0
+    let mut at = list.len(keys)
+    while at > 0 {
+        at -= 1
+        let k = keys[at]
+        let in_lower = lower_kind == 0 || k > lower || (lower_kind == 1 && k == lower)
+        let in_upper = upper_kind == 0 || k < upper || (upper_kind == 1 && k == upper)
+        if in_lower && in_upper {
+            expected += 1
+            if omap.next(mut rows) != Some((k, k + 5)) {
+                return false
+            }
+        }
+    }
+    omap.next(mut rows) == None && omap.next(mut rows) == None && omap.count(m, lo, hi) == expected
+}
+
+// expect: run reverse_ranges_and_counts_match_sorted_keys() = true
+fn reverse_ranges_and_counts_match_sorted_keys() -> bool {
+    let mut keys: List[u64] = list.with_capacity(1200)
+    let mut values: List[u64] = list.with_capacity(1200)
+    for i in 0u64 .. 1200 {
+        let k = i * 2 + i % 2
+        list.push(mut keys, k)
+        list.push(mut values, k + 5)
+    }
+    let empty: omap.OMap[u64, u64] = omap.new()
+    let empty_keys: List[u64] = list.new()
+    if !reverse_matches_reference(empty, empty_keys, 0, 0, 0, 0) {
+        return false
+    }
+    let ordered: List[u64] = clone(keys)
+    let mut ids: u64 = 0
+    let m = omap.from_sorted(mut ids, take keys, take values)
+    let limits: Inline[(u64, u64), 8] =[(0, 1), (63, 64), (63, 63), (65, 63), (31, 1167), (1203, 1207), (2397, 2500), (2500, 2600)]
+    for (low, high) in limits {
+        for lower_kind in 0u64 .. 3 {
+            for upper_kind in 0u64 .. 3 {
+                if !reverse_matches_reference(m, ordered, low, high, lower_kind, upper_kind) {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}

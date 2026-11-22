@@ -42,15 +42,19 @@ contribute changes. Node visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage
 for w keys whose values differ, with w <= k.
 
-A range records its requested span when it is created and retains that version's
-roots. Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over physical data-tree
-keys, including the table or index id prefix, with half-open span bounds.
+Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over physical data-tree keys,
+including the table or index id prefix, with half-open span bounds.
+`range` and `range_reverse` return `RangeRows` scoped to the Tx. Each
+`next_range` records the gap it inspected, including the row it finds, before
+decoding the row. A probe that returns None records the rest of the requested
+interval. Constructing a cursor records nothing.
 `lookup` returns `IndexRows` scoped to its Tx. It records an index Span when
 created and a primary-key Point for each row returned by `next_indexed`.
 The checker refuses an escaping IndexRows or a write through its Tx while it
 lives; bodies collect results before writing. An unchanged encoded index key
-causes no index write. `range`, `scan` and `find` return sendable `Rows`, which
-can outlive the transaction and move to another task. `Shape` and
+causes no index write. Snapshot `scan`, `scan_reverse` and `find` return
+sendable `Rows` advanced by `next`. `count(snapshot, shape, lower, upper)`
+returns the number of table rows in that interval in O(log N) tree work. `Shape` and
 `Index` share Readers and let snapshots be queried on reader tasks. `follow`
 returns a Latest root; publication follows the admitted head swap. A refused
 snapshot-record allocation leaves the follower behind until a later publication.

@@ -215,7 +215,9 @@ A `Foreign` binding then holds the SHA-256 and byte length of the selected archi
 names, and its binding then holds the grant's policy digest
 ([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)). That digest covers each image pin
 and every launch constraint, so replacing the profile file changes what the binding
-approves.
+approves. Every launch with an `Exec` grant, `hirsel run` included, loads the policy once,
+compares its digest with this binding and builds the grant from that same loaded policy
+(EXEC-1).
 So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.

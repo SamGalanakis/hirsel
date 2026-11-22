@@ -111,22 +111,22 @@ fn pages_match(s: Snapshot, sh: Shape[u64, u64], ix: Index[u64, u64, u64], index
     }
     let mut offset = 0u64
     for _ in 0u64 .. 5 {
-        let mut count = 0u64
-        while offset + count < 5 && count < limits.rows {
-            if count > 0 && (count + 1) * 22 > limits.byte_limit {
+        let mut page_rows = 0u64
+        while offset + page_rows < 5 && page_rows < limits.rows {
+            if page_rows > 0 && (page_rows + 1) * 22 > limits.byte_limit {
                 break
             }
-            count += 1
+            page_rows += 1
         }
-        if list.len(page.rows) != count || page.byte_count != count * 22 {
+        if list.len(page.rows) != page_rows || page.byte_count != page_rows * 22 {
             return false
         }
-        for position in 0u64 .. count {
+        for position in 0u64 .. page_rows {
             if page.rows[position] != expected[offset + position] {
                 return false
             }
         }
-        offset += count
+        offset += page_rows
         let Page(rows: _, byte_count: _, next: take resume) = take page
         match take resume {
             None => return offset == 5,

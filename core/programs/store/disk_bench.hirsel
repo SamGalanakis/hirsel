@@ -177,9 +177,9 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         result.unwrap(durable(mut holder[0], cut))
     }
     let elapsed = host.mono_ns(c) - started
-    let count = std.omap.len(holder[0].heads[0].roots.data)
+    let stored_rows = std.omap.len(holder[0].heads[0].roots.data)
     let expected_count = if indexed { 2 * n } else { n }
-    if count != expected_count { fail("disk bench row count") }
+    if stored_rows != expected_count { fail("disk bench row count") }
     let mut rendered = string.new()
     string.push(mut rendered, "DONE ")
     string.push_u64(mut rendered, n)

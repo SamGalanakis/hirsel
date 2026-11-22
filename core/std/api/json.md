@@ -7,6 +7,12 @@
 key index (`ObjectIndex`: `index`, `get`, `shown`). Walking and positional access use core's
 `match`, `seq.len` and `indexed.get`. A key or a Str is read through `text.as_string`.
 
+`has_duplicates` checks the index for repeated decoded keys. `as_i64` and
+`as_u64` read canonical decimal integer nodes in range. `as_f64` reads a
+numeric node as a finite binary64. `pointer` resolves an RFC 6901 JSON Pointer
+to a view of the selected node. The empty pointer selects the root. Invalid
+pointers, missing paths and ambiguous duplicate keys return None.
+
 ## JSON for codec types
 
 Use `json.typed()` with a result type of `Result[json.Format[T], json.TypedError]`

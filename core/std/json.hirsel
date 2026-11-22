@@ -619,6 +619,18 @@ pub fn index[in a](ms: IndexedSpan[Member] in a) -> ObjectIndex[in a] {
     ObjectIndex(members: ms, ordinals: take ordinals)
 }
 
+/// Reports whether any decoded key occurs more than once in the indexed object.
+pub fn has_duplicates[in a](x: ObjectIndex[in a]) -> bool {
+    for i in 1u64 .. list.len(x.ordinals) {
+        let previous = member(x.members, x.ordinals[i - 1])
+        let current = member(x.members, x.ordinals[i])
+        if previous.key == current.key {
+            return true
+        }
+    }
+    false
+}
+
 /// The value of key k: the value of k's last member (the last-value rule; RFC 8259 leaves
 /// duplicates open, and Python's json.loads keeps the last). None when no member has k.
 /// Cost: O(log m) key comparisons (an upper-bound search).
@@ -706,6 +718,130 @@ fn member[in a](ms: IndexedSpan[Member] in a, o: u32) -> View[Member] in ms {
         Some(m) => m,
         None => fail("json: an ordinal past the members"),
     }
+}
+
+/// Reads a numeric node as an exact canonical i64.
+pub fn as_i64(x: Json) -> Option[i64] {
+    let Some(s) = integer_spelling(x) else {
+        return None
+    }
+    let parsed: Result[i64, ParseError] = int.parse(s)
+    match parsed {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
+}
+
+/// Reads a numeric node as an exact canonical u64.
+pub fn as_u64(x: Json) -> Option[u64] {
+    let Some(s) = integer_spelling(x) else {
+        return None
+    }
+    let parsed: Result[u64, ParseError] = int.parse(s)
+    match parsed {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
+}
+
+fn integer_spelling(x: Json) -> Option[View[String]] in x {
+    let Num(spelling) = x else {
+        return None
+    }
+    let s = text.as_string(spelling)
+    if canonical_decimal(s) {
+        Some(s)
+    } else {
+        None
+    }
+}
+
+/// Reads a numeric node as a finite binary64.
+pub fn as_f64(x: Json) -> Option[f64] {
+    let Num(spelling) = x else {
+        return None
+    }
+    match float.parse64(text.as_string(spelling)) {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
+}
+
+/// Resolves an RFC 6901 JSON Pointer and borrows the selected node from x.
+pub fn pointer(x: Json, p: String) -> Option[View[Json]] in x {
+    if string.byte_len(p) == 0 {
+        return Some(view x)
+    }
+    if at(p, 0) != b'/' {
+        return None
+    }
+    pointer_at(x, p, 1)
+}
+
+fn pointer_at(x: Json, p: String, start: u64) -> Option[View[Json]] in x {
+    let length = string.byte_len(p)
+    let end = match string.find(p, start, "/") {
+        Some(i) => i,
+        None => length,
+    }
+    let token = string.slice(p, start, end)
+    let selected: Option[View[Json]] in x = match x {
+        Obj(ms) => if let Some(_) = string.find(token, 0, "~") {
+            let Some(key) = pointer_unescape(token) else {
+                return None
+            }
+            pointer_member(ms, key)
+        } else {
+            pointer_member(ms, token)
+        },
+        Arr(xs) => {
+            if !int.is_ascii_digit(at(token, 0)) || !canonical_decimal(token) {
+                return None
+            }
+            let i: Result[u64, ParseError] = int.parse(token)
+            let Ok(ordinal) = i else {
+                return None
+            }
+            indexed.get(xs, ordinal)
+        },
+        _ => None,
+    }
+    if end == length {
+        return selected
+    }
+    let Some(child) = selected else {
+        return None
+    }
+    pointer_at(child, p, end + 1)
+}
+
+fn pointer_member[in a](ms: IndexedSpan[Member] in a, key: String) -> Option[View[Json]] in ms {
+    let mut found: Option[View[Json]] in ms = None
+    for m in ms {
+        if text.as_string(m.key) == key {
+            if let Some(_) = found {
+                return None
+            }
+            found = Some(m.value)
+        }
+    }
+    found
+}
+
+fn pointer_unescape(token: String) -> Option[String] {
+    let mut key = string.new()
+    let mut start: u64 = 0
+    while let Some(i) = string.find(token, start, "~") {
+        string.push(mut key, string.slice(token, start, i))
+        match at(token, i + 1) {
+            b'0' => string.push(mut key, "~"),
+            b'1' => string.push(mut key, "/"),
+            _ => return None,
+        }
+        start = i + 2
+    }
+    string.push(mut key, string.slice(token, start, string.byte_len(token)))
+    Some(take key)
 }
 
 fn literal(s: String, mut i: u64, word: String) -> Result[(), Error] {

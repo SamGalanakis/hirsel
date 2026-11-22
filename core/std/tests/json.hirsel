@@ -1012,6 +1012,55 @@ fn json_streaming_contract() -> bool {
     cursor_integers() && cursor_writer()
 }
 
+fn missing_pointer(doc: json.Json, path: String) -> bool {
+    match json.pointer(doc, path) {
+        None => true,
+        Some(_) => false,
+    }
+}
+
+fn dom_numbers(doc: json.Json) -> bool {
+    let Some(low) = json.pointer(doc, "/a~1b/~01/0") else {
+        return false
+    }
+    let Some(high) = json.pointer(doc, "/a~1b/~01/1") else {
+        return false
+    }
+    let Some(zero) = json.pointer(doc, "/a~1b/~01/2") else {
+        return false
+    }
+    let Some(fraction) = json.pointer(doc, "/a~1b/~01/3") else {
+        return false
+    }
+    let Some(text) = json.pointer(doc, "/a~1b/~01/4") else {
+        return false
+    }
+    match (json.as_i64(low), json.as_u64(high), json.as_f64(zero), json.as_i64(high), json.as_u64(low), json.as_i64(fraction), json.as_f64(text)) {
+        (Some(i), Some(u), Some(f), None, None, None, None) => i == -9223372036854775808 && u == 18446744073709551615 && float.to_bits64(f) == 0x8000000000000000,
+        _ => false,
+    }
+}
+
+// expect: run json_compact_helpers() = true
+fn json_compact_helpers() -> bool {
+    region r {
+        let doc = result.unwrap(json.parse(r, "{\"\":true,\"a/b\":{\"~1\":[-9223372036854775808,18446744073709551615,-0,1.0,\"2\"]},\"copy\":0,\"a~2b\":null,\"\\u0063opy\":1}"))
+        let duplicates = match json.pointer(doc, "") {
+            Some(Obj(ms)) => json.has_duplicates(json.index(ms)),
+            _ => false,
+        }
+        let unique = match json.pointer(doc, "/a~1b") {
+            Some(Obj(ms)) => !json.has_duplicates(json.index(ms)),
+            _ => false,
+        }
+        let empty = match json.pointer(doc, "/") {
+            Some(True) => true,
+            _ => false,
+        }
+        duplicates && unique && empty && dom_numbers(doc) && missing_pointer(doc, "/copy") && missing_pointer(doc, "/a~2b") && missing_pointer(doc, "copy") && missing_pointer(doc, "/a~1b/~01/00") && missing_pointer(doc, "/a~1b/~01/-") && missing_pointer(doc, "/a~1b/~01/5")
+    }
+}
+
 // The primary cause of a caught failure, when it is a refused admission.
 fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {

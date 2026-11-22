@@ -28,7 +28,7 @@ pub enum MemMode {
 }
 
 impl MemMode {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Exact => "exact",
             Self::Sampled => "sampled",
@@ -79,6 +79,12 @@ pub fn run(
     options: &CaptureOptions<'_>,
     resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
 ) -> Result<ExitStatus> {
+    if launch
+        .observation
+        .is_some_and(|options| options.mem.is_some())
+    {
+        return Err("record a tape and use 'hirsel prof replay --mem' to profile memory".into());
+    }
     perf::validate_settings(options.freq, options.stack_bytes)?;
     let path = launch.executable.canonicalize()?;
     let mut executable = File::open(&path)?;
@@ -203,19 +209,25 @@ pub fn replay(
     }
     let end = perf::monotonic_ns()?;
     let profile = ProfileWriter::create(out)?;
+    let mut import = Import::new(
+        profile.connection(),
+        pid,
+        launch.source_root.to_owned(),
+        provenance.main.clone(),
+        provenance.identity,
+    );
+    import.source_remarks()?;
     if let Some(options) = launch.observation {
         let observations = Observation::read(options.path)?;
-        let mut import = Import::new(
-            profile.connection(),
-            pid,
-            launch.source_root.to_owned(),
-            provenance.main.clone(),
-            provenance.identity,
-        );
-        seed_mappings(&mut import, &observations)?;
-        import.close(end)?;
+        if let Some(mode) = options.mem {
+            import.store_memory(&observations, mode)?;
+        } else {
+            seed_mappings(&mut import, &observations)?;
+        }
         observations.store(profile.connection())?;
     }
+    import.close(end)?;
+    drop(import);
     let cmdline = serde_json::to_string(
         &std::iter::once(path.to_string_lossy())
             .chain(launch.arguments.iter().map(|arg| arg.as_str().into()))

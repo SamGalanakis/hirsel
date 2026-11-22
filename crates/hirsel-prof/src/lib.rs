@@ -1,5 +1,7 @@
 //! Portable CPU profiles for Hirsel.
 
+#[cfg(target_os = "linux")]
+mod memory;
 mod observation;
 mod pprof;
 mod profile;

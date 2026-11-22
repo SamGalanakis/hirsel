@@ -15,12 +15,13 @@ The native unwind records mark where a stack walk ends at a fiber boundary.
 
 ```text
 hirsel prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
-hirsel prof replay [package-dir] --tape TAPE [--tasks] [--out FILE.hprof]
+hirsel prof replay [package-dir] --tape TAPE [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]
 hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
 hirsel prof summary <FILE.hprof> [--json]
 hirsel prof schema <FILE.hprof> [--json]
 hirsel prof top <FILE.hprof> [--by self|inclusive] [--event NAME] [--group def_path|instance] [--filter GLOB] [--limit 20] [--json]
 hirsel prof annotate <FILE.hprof> <DEF_PATH|FILE:LINE> [--json]
+hirsel prof peak-mem <FILE.hprof> [--limit 20] [--json]
 hirsel prof callers <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]
 hirsel prof callees <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]
 hirsel prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]
@@ -53,6 +54,14 @@ stopping it. It ends the capture after `--duration`, at process exit, or on
 Ctrl+C. `--debug` selects a detached DWARF file to verify when the executable
 has no embedded DWARF.
 
+For `prof replay`, use `--mem=exact` for exact peak counters and backing
+lifetimes, or `--mem=sampled` for weighted allocation estimates. A bare
+`--mem` selects sampled mode. `prof peak-mem` reads the memory results and
+budget scopes from a profile. Both `prof run --mem` and `prof attach --mem`
+ask you to record a tape and use `prof replay --mem`. Live workers can change
+region tails and payer balances concurrently. Serializing a live run would
+change its scheduling.
+
 Start with `prof summary` for data quality and the five hottest functions
 per event. Use `prof schema` for tables and columns, and `prof sql` for
 read-only queries. Query commands accept `--limit` and `--json`. The default
@@ -66,8 +75,8 @@ cannot be compared with replay. A single cycle or wall-time comparison
 reports possible sampling noise.
 
 `prof annotate` returns one row per source line, with saved source text and
-separate `cpu` and `remarks` arrays. It sums CPU periods and sample counts per
-event across the selected functions on each line.
+separate `cpu`, `remarks` and `allocations` arrays. It sums CPU periods and
+sample counts per event across the selected functions on each line.
 
 `prof sql` accepts one read-only statement that returns rows. An SQLite
 authorizer denies writes, ATTACH, and connection-changing statements.

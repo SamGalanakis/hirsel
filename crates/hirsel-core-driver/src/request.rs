@@ -453,6 +453,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::CallTimeout
             | Opt::ProfOut
             | Opt::ProfTasks
+            | Opt::ProfMem
             | Opt::ProfFrequency
             | Opt::ProfPmu
             | Opt::ProfStackBytes

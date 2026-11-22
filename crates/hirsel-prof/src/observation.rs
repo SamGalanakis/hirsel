@@ -100,7 +100,9 @@ impl Observation {
     pub(crate) fn store(&self, db: &Connection) -> Result<()> {
         let mut import = Import::new(db);
         for record in &self.records {
-            import.record(record)?;
+            if !crate::memory::MemoryImport::accepts(record.kind) {
+                import.record(record)?;
+            }
         }
         for (token, timing) in std::mem::take(&mut import.io) {
             import.io_timing(token, timing)?;

@@ -28,15 +28,38 @@ WITH matching_functions AS (
                       THEN CAST(total AS TEXT) ELSE total END
     ) ORDER BY kind, outcome, evidence_level) AS remarks
     FROM remark_counts GROUP BY file, line
+), allocation_counts AS (
+    SELECT f.file, f.line, a.allocation_kind,
+        u64_sum(a.observed_count) AS count, u64_sum(a.observed_bytes) AS bytes,
+        sum(a.estimated_count) AS estimated_count, sum(a.estimated_bytes) AS estimated_bytes
+    FROM mem_alloc_agg a JOIN callsite c ON c.id=a.callsite_id
+    JOIN frame f ON f.id=c.frame_id
+    WHERE (?2 IS NOT NULL AND f.file=?1 AND f.line=?2)
+       OR (?2 IS NULL AND f.function_id IN matching_functions AND f.file IS NOT NULL AND f.line IS NOT NULL)
+    GROUP BY f.file, f.line, a.allocation_kind
+), allocation_lines AS (
+    SELECT file, line, json_group_array(json_object(
+        'allocation_kind', allocation_kind,
+        'observed_count', CASE WHEN typeof(count)='text' OR count>9007199254740992
+                               THEN CAST(count AS TEXT) ELSE count END,
+        'observed_bytes', CASE WHEN typeof(bytes)='text' OR bytes>9007199254740992
+                               THEN CAST(bytes AS TEXT) ELSE bytes END,
+        'estimated_count', estimated_count, 'estimated_bytes', estimated_bytes
+    ) ORDER BY allocation_kind) AS allocations
+    FROM allocation_counts GROUP BY file, line
 ), lines AS (
-    SELECT file, line FROM cpu_lines UNION SELECT file, line FROM remark_lines
+    SELECT file, line FROM cpu_lines
+    UNION SELECT file, line FROM remark_lines
+    UNION SELECT file, line FROM allocation_lines
 )
 SELECT file, line,
        (SELECT sn.text FROM source_snippet sn
         WHERE sn.file=lines.file AND sn.start_line<=lines.line AND sn.end_line>=lines.line
         ORDER BY sn.end_line-sn.start_line, sn.start_line LIMIT 1),
-       coalesce(cpu_lines.events, '[]'), coalesce(remark_lines.remarks, '[]')
+       coalesce(cpu_lines.events, '[]'), coalesce(remark_lines.remarks, '[]'),
+       coalesce(allocation_lines.allocations, '[]')
 FROM lines
 LEFT JOIN cpu_lines USING(file, line)
 LEFT JOIN remark_lines USING(file, line)
+LEFT JOIN allocation_lines USING(file, line)
 ORDER BY file, line LIMIT ?3;

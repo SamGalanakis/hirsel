@@ -351,3 +351,168 @@ fn profiler_times_provider_callbacks_separately_from_pending() {
         .unwrap();
     assert_eq!(timer, 1);
 }
+
+#[test]
+fn profiler_replay_memory_peaks_match_the_runtime_metrics() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        r#"
+@compact(u32)
+type Stamp {
+    n: u64
+}
+
+fn stamp(r: Region) -> Result[Stamp in r, Capacity] {
+    match build_in(r, bytes 8, fn(mut d: Dest[Stamp]) -> Result[Child[Stamp], BuildError] {
+        dest.put(mut d, Stamp(n: 11))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Overflow) => fail("fixed document size"),
+    }
+}
+
+fn reserve(n: u64) -> u64 {
+    let b: Bytes = list.with_capacity(n)
+    list.capacity(b)
+}
+
+pub fn main() -> Result[(), Exit] {
+    let first = result.unwrap(bound bytes 160 { reserve(136) })
+    let second = result.unwrap(bound bytes 160 { reserve(120) })
+    let refused = bound bytes 160 {
+        bound bytes 300 { reserve(8) }
+    }
+    if let Ok(_) = result.unwrap(refused) { return Error(Exit(status: 4)) }
+    if first != 136 || second != 120 { return Error(Exit(status: 2)) }
+    let field = region r { result.unwrap(stamp(r)).n }
+    if field != 11 { return Error(Exit(status: 3)) }
+    Ok(())
+}
+"#,
+    )
+    .unwrap();
+
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let recording = root.join(std::env::var_os("HIRSEL_CORE_RT_RECORD_ARCHIVE").unwrap());
+    let observe = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE").unwrap());
+    let tape = dir.path().join("run.tape");
+    let profile = dir.path().join("memory.hprof");
+    let args = |command: &[&str], runtime: &Path, options: &[&str]| {
+        command
+            .iter()
+            .copied()
+            .chain([
+                app.to_str().unwrap(),
+                "--backend",
+                "cranelift",
+                "--source-core",
+                "--libraries",
+                root.join("core").to_str().unwrap(),
+                "--cc",
+                llvm.join("bin/clang").to_str().unwrap(),
+                "--runtime",
+                runtime.to_str().unwrap(),
+                "--store",
+                dir.path().join("store").to_str().unwrap(),
+            ])
+            .chain(options.iter().copied())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (code, _, err) = process::tape_request(
+        &args(&["run"], &recording, &["--record", tape.to_str().unwrap()]),
+        dir.path(),
+    );
+    assert_eq!(code, Some(0), "record: {err}");
+    let before = std::fs::read(&tape).unwrap();
+    let out = process::tape_request_command(
+        &args(
+            &["prof", "replay"],
+            &observe,
+            &[
+                "--tape",
+                tape.to_str().unwrap(),
+                "--mem=exact",
+                "--out",
+                profile.to_str().unwrap(),
+            ],
+        ),
+        dir.path(),
+    )
+    .env("HIRSEL_PROFILE_CHUNK_BYTES", "4194304")
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "replay: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(tape).unwrap(), before);
+
+    let quality = hirsel_prof::query(&profile, hirsel_prof::Query::PeakMem, 20).unwrap();
+    assert_eq!(quality.quality["capture_mode"], "replay");
+    assert_eq!(quality.quality["mem_records_lost"], 0);
+    assert_eq!(quality.quality["mem_callsites_exact"], true);
+    let profile = hirsel_prof::Profile::open(&profile).unwrap();
+    let db = profile.connection();
+    let peaks = db
+        .prepare(
+            "SELECT metric,total_bytes,sum(live_bytes) FROM peak_snapshot
+         JOIN peak_callsite ON snapshot_id=id WHERE scope_id IS NULL
+         GROUP BY id ORDER BY metric",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    // Charged: root startup (256 + 32) plus the full 160-byte scope.
+    // Retained at the region allocation: startup slot, cause cell, inputs,
+    // main result, root Task, Region header and one 4 KiB backing request.
+    let retained = 16 + 56 + 16 + 24 + 656 + 272 + 4096;
+    // The Stamp takes one 24-byte native slot in the first chunk.
+    assert_eq!(
+        peaks,
+        [
+            ("charged_bytes".into(), 448, 448),
+            ("retained_bytes".into(), retained, retained),
+            ("slack_bytes".into(), 4096 - 24, 4096 - 24),
+        ]
+    );
+    let budgets = db
+        .prepare(
+            "SELECT limit_val,peak_val,refused,exit_ts IS NULL FROM budget_scope_summary
+         WHERE scope_kind='bytes' ORDER BY refused",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(budgets, [(160, 136, false, false), (300, 0, true, true)]);
+    let task_bytes: i64 = db.query_row(
+        "SELECT sum(observed_count-freed_count) FROM mem_alloc_agg WHERE allocation_kind='task_storage'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(task_bytes, 0, "the root Task and both stores close");
+}

@@ -62,6 +62,7 @@ pub enum OptionId {
     ProfileFront,
     ProfOut,
     ProfTasks,
+    ProfMem,
     ProfFrequency,
     ProfPmu,
     ProfStackBytes,
@@ -137,12 +138,13 @@ commands! {
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
-    "prof replay", "prof replay [package-dir] --tape TAPE [--tasks] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
+    "prof replay", "prof replay [package-dir] --tape TAPE [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
     "prof summary", "prof summary <FILE.hprof> [--json]", "Report capture quality and the five hottest functions per event.";
     "prof schema", "prof schema <FILE.hprof> [--json]", "List the profile's tables and columns.";
     "prof top", "prof top <FILE.hprof> [--by self|inclusive] [--event NAME] [--group def_path|instance] [--filter GLOB] [--limit 20] [--json]", "Rank functions by attributed event periods.";
     "prof annotate", "prof annotate <FILE.hprof> <DEF_PATH|FILE:LINE> [--json]", "Show attributed periods and compiler remarks by source line.";
+    "prof peak-mem", "prof peak-mem <FILE.hprof> [--limit 20] [--json]", "Report memory peaks, allocation attribution and budget refusals.";
     "prof callers", "prof callers <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]", "Show sampled callers of a function.";
     "prof callees", "prof callees <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]", "Show sampled callees of a function.";
     "prof diff", "prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]", "Compare compatible captures and report changed and unmatched functions.";
@@ -544,6 +546,13 @@ static OPTIONS: &[OptionSpec] = &[
         "Capture runtime task, wake, host-stack and I/O observations."
     ),
     option!(
+        ProfMem,
+        ["--mem"],
+        Some("[exact|sampled]"),
+        ["prof replay"],
+        "Capture memory and budgets. A bare --mem selects sampled mode."
+    ),
+    option!(
         ProfOut,
         ["--out"],
         Some("PATH"),
@@ -622,6 +631,7 @@ static OPTIONS: &[OptionSpec] = &[
             "prof schema",
             "prof top",
             "prof annotate",
+            "prof peak-mem",
             "prof callers",
             "prof callees",
             "prof diff",
@@ -1048,7 +1058,7 @@ fn is_help(name: &str) -> bool {
         .any(|option| option.id == OptionId::Help && option.names.contains(&name))
 }
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
-    let mut arguments = arguments.into_iter();
+    let mut arguments = arguments.into_iter().peekable();
     let Some(mut name) = arguments.next() else {
         return Ok(Action::Help(help(None)));
     };
@@ -1114,6 +1124,30 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         arguments: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
+        if matches!(name.as_str(), "prof run" | "prof attach")
+            && (argument == "--mem" || argument.starts_with("--mem="))
+        {
+            return Err(
+                "record a tape and use 'hirsel prof replay --mem' to profile memory".into(),
+            );
+        }
+        if name == "prof replay" && (argument == "--mem" || argument.starts_with("--mem=")) {
+            let value = if let Some((_, value)) = argument.split_once('=') {
+                value.to_owned()
+            } else if arguments
+                .peek()
+                .is_some_and(|v| matches!(v.as_str(), "exact" | "sampled"))
+            {
+                arguments.next().unwrap()
+            } else {
+                "sampled".to_owned()
+            };
+            if !matches!(value.as_str(), "exact" | "sampled") {
+                return Err("--mem requires exact or sampled".into());
+            }
+            invocation.options.push((OptionId::ProfMem, Some(value)));
+            continue;
+        }
         if argument == "--" && matches!(name.as_str(), "run" | "prof run" | "call" | "host") {
             invocation.arguments.extend(arguments);
             break;

@@ -9,6 +9,9 @@ use super::image::{self, Function, Image, Symbolized};
 use super::perf::{Kind, Mapping, Record, Sample};
 use super::procfs::{self, Identity};
 use super::unwind::{Registers, Stack, Step};
+use crate::MemMode;
+use crate::memory::MemoryImport;
+use crate::observation::{MAPPING, Observation};
 use crate::profile::{Result, Unsigned};
 
 struct ActiveMapping {
@@ -108,6 +111,43 @@ impl<'a> Import<'a> {
             )?;
         }
         Ok(())
+    }
+
+    pub(crate) fn store_memory(&mut self, observations: &Observation, mode: MemMode) -> Result<()> {
+        let mut memory = MemoryImport::default();
+        let unknown = self.unknown_callsite()?;
+        let mut records = observations.records.iter().peekable();
+        let mut maps = Vec::new();
+        while let Some(record) = records.next() {
+            if record.kind == MAPPING {
+                maps.extend_from_slice(&record.bytes);
+                maps.push(b'\n');
+                if !records
+                    .peek()
+                    .is_some_and(|next| next.kind == MAPPING && next.ts == record.ts)
+                {
+                    self.close_mappings(record.ts)?;
+                    self.initialize(Vec::new(), procfs::parse_mappings(&maps)?, record.ts)?;
+                    maps.clear();
+                }
+            } else if MemoryImport::accepts(record.kind) {
+                let site = if record.bytes.is_empty() {
+                    None
+                } else {
+                    let (site, status) = self.memory_callsite(&record.bytes)?;
+                    memory.stack(status);
+                    Some(site)
+                };
+                memory.record(record.ts, record.kind, &record.words, site)?;
+            }
+        }
+        memory.finish(
+            self.db,
+            mode.as_str(),
+            observations.lost,
+            observations.complete,
+            unknown,
+        )
     }
 
     pub(crate) fn record(&mut self, record: Record) -> Result<()> {
@@ -313,7 +353,56 @@ impl<'a> Import<'a> {
 
     fn sample(&mut self, tid: u32, time: u64, sample: Sample) -> Result<()> {
         let thread = self.thread(tid, "", time)?;
-        let (frames, root, status) = self.stack(&sample)?;
+        let (frames, root, status) = self.stack(sample.pc, sample.registers, &sample.stack)?;
+        let site = self.callsite(frames)?;
+        self.db.execute(
+            "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,period,stack_root,unwind_status)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            (Unsigned(time), thread, sample.cpu, site,
+             format!("{:#x}", sample.pc), Unsigned(sample.period), root, status),
+        )?;
+        let sample_id = self.db.last_insert_rowid();
+        self.db.execute(
+            "INSERT INTO sample_counter VALUES (?1,?2,?3)",
+            (sample_id, sample.event.name, Unsigned(sample.period)),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn memory_callsite(&mut self, bytes: &[u8]) -> Result<(i64, &'static str)> {
+        let (registers, bytes) = bytes
+            .split_first_chunk::<32>()
+            .ok_or("truncated memory snapshot registers")?;
+        let mut words = registers
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().unwrap()));
+        let pc = words.next().unwrap();
+        let regs = Some((
+            words.next().unwrap(),
+            words.next().unwrap(),
+            words.next().unwrap(),
+        ));
+        let (mut frames, _, status) = self.stack(pc, regs, bytes)?;
+        if let Some(source) = frames.iter().position(|f| {
+            f.symbol
+                .function
+                .as_ref()
+                .is_some_and(|f| f.kind == "hirsel")
+        }) {
+            frames.drain(..source);
+        }
+        Ok((self.callsite(frames)?, status))
+    }
+
+    pub(crate) fn unknown_callsite(&mut self) -> Result<i64> {
+        self.callsite(vec![FrameKey {
+            mapping: None,
+            rel_pc: None,
+            symbol: Symbolized::default(),
+        }])
+    }
+
+    fn callsite(&mut self, frames: Vec<FrameKey>) -> Result<i64> {
         let mut parent = None;
         for (depth, key) in frames.into_iter().rev().enumerate() {
             let frame = self.frame(key)?;
@@ -331,29 +420,20 @@ impl<'a> Import<'a> {
             };
             parent = Some(id);
         }
-        self.db.execute(
-            "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,period,stack_root,unwind_status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            (Unsigned(time), thread, sample.cpu, parent,
-             format!("{:#x}", sample.pc), Unsigned(sample.period), root, status),
-        )?;
-        let sample_id = self.db.last_insert_rowid();
-        self.db.execute(
-            "INSERT INTO sample_counter VALUES (?1,?2,?3)",
-            (sample_id, sample.event.name, Unsigned(sample.period)),
-        )?;
-        Ok(())
+        parent.ok_or_else(|| "a stack must have a leaf".into())
     }
 
-    fn stack(&mut self, sample: &Sample) -> Result<(Vec<FrameKey>, &'static str, &'static str)> {
+    fn stack(
+        &mut self,
+        mut pc: u64,
+        captured: Option<(u64, u64, u64)>,
+        bytes: &[u8],
+    ) -> Result<(Vec<FrameKey>, &'static str, &'static str)> {
         let mut frames = Vec::new();
-        let mut pc = sample.pc;
-        let mut registers = sample
-            .registers
-            .map(|(sp, bp, link)| Registers::new(pc, sp, bp, link));
+        let mut registers = captured.map(|(sp, bp, link)| Registers::new(pc, sp, bp, link));
         let stack = Stack {
             base: registers.map_or(0, |r| r.sp),
-            bytes: &sample.stack,
+            bytes,
         };
         let mut host = false;
         let mut fallback = false;

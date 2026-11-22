@@ -75,6 +75,10 @@ The database has the following tables and columns.
 | `fn_cpu_summary` | `function_id, event, self_total, inclusive_total, sample_count` |
 | `line_cpu_summary` | `file, line, function_id, event, self_total, sample_count` |
 | `codegen_remark` | `function_id, file, line, col, kind, outcome, evidence_level, count` |
+| `peak_snapshot` | `id, metric, scope_id, ts_ns, total_bytes` |
+| `peak_callsite` | `snapshot_id, callsite_id, live_bytes, live_count` |
+| `mem_alloc_agg` | `callsite_id, allocation_kind, observed_count, observed_bytes, estimated_count, estimated_bytes, freed_count, lifetime_ns` |
+| `budget_scope_summary` | `scope_id, parent_id, scope_kind, task_id, callsite_id, enter_ts, exit_ts, limit_val, peak_val, refused` |
 
 `run_meta` has the keys `hprof_version`, `capture_mode`, `target`, `cmdline`,
 `build_id`, `image_digest`, `symbol_tier`, `clock`, `primary_event`,
@@ -131,6 +135,51 @@ The profiler opens per-CPU events until the CPU count times the target's
 thread count plus one reaches 1000, when it uses one set of events per thread
 that follows the thread across CPUs.
 
+## Replay memory and budgets
+
+`prof replay --mem` observes a serial replay using the recorded tape's
+divergence check. `--mem=sampled` samples backing allocations with a 512 KiB
+mean geometric byte interval. An allocation of `n` bytes is included with
+probability `1 - (1 - 1/524288)^n`. The estimate weights its count and bytes
+by the inverse of that probability. `--mem=exact` records every observed
+backing lifetime and tracks the peak membership in bounded runtime storage.
+The offline importer unwinds the captured registers and stack bytes with
+the same CFI evaluator as CPU profiles, then aggregates by callsite.
+
+Memory uses metric version 2. `charged_bytes` counts MEM-19 reservations
+from the root, including bounds, tasks, grants and startup. `retained_bytes`
+counts live backing requests. `slack_bytes` counts unassigned region chunk
+tails. The metrics have separate snapshots because their peaks can occur
+at different times. Bytes that cannot be assigned to an allocation site,
+including root reservations, appear under an unattributed callsite.
+
+Before any runtime credit increases a payer's available balance, the
+observer samples the balance. It also samples at scope exit. This captures
+the peak after inline debits without emitting `observe_charge`. Attribution
+of those debits is at refill or scope granularity. An elided bound shares
+the Capacity raise with other operations. Such raises can appear as
+`capacity_unattributed`, with a raise stack and null parent and limit.
+Exact source-scope coverage requires the separate `--mem=exact-logical`
+observation mode, which is reserved for future work.
+
+Budget rows retain all observed refusals and the 20 highest near-misses
+at or above 80% of their limit. An unopened or still-open scope has a null
+exit timestamp. A recorded parent may fall below the reporting threshold.
+
+Exact capture can generate a stack snapshot for each allocation. Set
+`HIRSEL_PROFILE_CHUNK_BYTES` to size the two per-worker chunks that all
+runtime streams share. The default is 65536 bytes per chunk. A full chunk
+can cause event loss, reported in `mem_records_lost`. Runtime state uses at
+most 65536 entries per collection by default. `HIRSEL_PROFILE_MEM_ENTRIES`
+can raise that limit up to 1048576. State loss is reported separately.
+Dropping allocation or free events marks callsite aggregation inexact.
+The final runtime peak counters are independent of those transport losses.
+
+The memory observer depends on one replay worker owning region tails and
+observing the order of payer credits. Live workers can change both
+concurrently, and forcing them to run serially would change scheduling.
+`prof run --mem` and `prof attach --mem` ask for a tape and a replay capture.
+
 ## Query results
 
 Every JSON query includes `quality` and `result`. `quality` contains the
@@ -142,10 +191,11 @@ per event. Function grouping deduplicates the definition across all
 instances in a stack.
 
 `annotate` aggregates CPU events by source line and event. It aggregates
-compiler remarks by source line, kind, outcome and evidence level before
-joining them to the CPU results. A line with multiple remarks still reports
-each sample period once. Lines carrying only remarks have an empty `cpu`
-array.
+compiler remarks by source line, kind, outcome and evidence level. It
+aggregates backing allocation totals by source line and allocation kind.
+The join reports each CPU sample period once even when the line has several
+remarks or kinds of allocation. Lines with no CPU observations have an empty
+`cpu` array.
 
 LLVM release builds record source remarks when `CounterRangePass` folds a
 proven overflow flag or a branch to a known Bounds cause, or when the cold

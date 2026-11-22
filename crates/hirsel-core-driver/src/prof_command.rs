@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use hirsel_prof::{CaptureOptions, Launch, ObservationOptions, SymbolSource};
+use hirsel_prof::{CaptureOptions, Launch, MemMode, ObservationOptions, SymbolSource};
 
 use crate::cli::{Invocation, OptionId};
 
@@ -55,6 +55,7 @@ pub(crate) struct Run {
     sampling: Sampling,
     source_root: PathBuf,
     tasks: bool,
+    mem: Option<MemMode>,
     replay: bool,
     replay_executable: Cell<Option<tempfile::TempDir>>,
 }
@@ -65,6 +66,7 @@ impl Run {
             sampling: Sampling::default(),
             source_root: invocation.positional.as_deref().unwrap_or(".").into(),
             tasks: false,
+            mem: None,
             replay: invocation.command.name == "prof replay",
             replay_executable: Cell::new(None),
         };
@@ -72,17 +74,25 @@ impl Run {
             matches!(
                 option,
                 OptionId::ProfTasks
+                    | OptionId::ProfMem
                     | OptionId::ProfOut
                     | OptionId::ProfFrequency
                     | OptionId::ProfPmu
                     | OptionId::ProfStackBytes
             )
         }) {
-            if id == OptionId::ProfTasks {
-                run.tasks = true;
-            } else {
-                run.sampling
-                    .apply(id, value.expect("profile option takes a value"))?;
+            match id {
+                OptionId::ProfTasks => run.tasks = true,
+                OptionId::ProfMem => {
+                    run.mem = Some(match value.as_deref() {
+                        Some("exact") => MemMode::Exact,
+                        Some("sampled") => MemMode::Sampled,
+                        _ => return Err("--mem requires exact or sampled".into()),
+                    });
+                }
+                _ => run
+                    .sampling
+                    .apply(id, value.expect("profile option takes a value"))?,
             }
         }
         if run.replay {
@@ -123,7 +133,9 @@ impl Run {
         arguments: &[String],
         record: Option<&str>,
     ) -> Result<ExitStatus> {
-        let raw = self.tasks.then(tempfile::NamedTempFile::new).transpose()?;
+        let raw = (self.tasks || self.mem.is_some())
+            .then(tempfile::NamedTempFile::new)
+            .transpose()?;
         let launch = Launch {
             executable,
             arguments,
@@ -131,7 +143,7 @@ impl Run {
             observation: raw.as_ref().map(|file| ObservationOptions {
                 path: file.path(),
                 tasks: self.tasks,
-                mem: None,
+                mem: self.mem,
             }),
             source_root: &self.source_root,
         };
@@ -254,6 +266,7 @@ pub(crate) fn query(invocation: Invocation) -> Result<()> {
             filter: filter.as_deref(),
         },
         "prof annotate" => Query::Annotate { target: operand()? },
+        "prof peak-mem" => Query::PeakMem,
         "prof callers" => Query::Callers {
             target: operand()?,
             depth,

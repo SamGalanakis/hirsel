@@ -59,6 +59,7 @@ pub enum Group {
 pub enum Query<'a> {
     Summary,
     Schema,
+    PeakMem,
     Top {
         by: By,
         event: Option<&'a str>,
@@ -99,8 +100,9 @@ pub fn query(path: &Path, query: Query<'_>, limit: usize) -> Result<QueryResult>
         .as_str()
         .ok_or("profile primary event has invalid type")?;
     let result = match query {
-        Query::Summary => summary(db, primary, limit.min(5))?,
+        Query::Summary => summary(db, &quality, primary, limit.min(5))?,
         Query::Schema => schema(db, limit)?,
+        Query::PeakMem => peak_mem(db, &quality, limit)?,
         Query::Top {
             by,
             event,
@@ -169,6 +171,23 @@ fn quality(db: &Connection) -> Result<Value> {
         warnings.push("unpaired_runtime_events");
     }
     let has_runtime = header.get("runtime_events").is_some() && count("runtime_events")? != 0;
+    if header.contains_key("mem_mode") {
+        for (key, label) in [
+            ("mem_state_lost", "lost_memory_state"),
+            ("mem_unmatched", "unmatched_memory_events"),
+            ("mem_stacks_truncated", "truncated_memory_stacks"),
+            ("mem_unwind_failed", "memory_unwind_failures"),
+        ] {
+            if count(key)? != 0 {
+                warnings.push(label);
+            }
+        }
+        let exact = count("mem_callsites_exact")? != 0;
+        if !exact && header["mem_mode"] == "exact" {
+            warnings.push("inexact_memory_callsites");
+        }
+        header.insert("mem_callsites_exact".into(), json!(exact));
+    }
     header.insert("unresolved_pct".into(), fraction(unresolved, total, 100.0));
     header.insert("host_stack_share".into(), fraction(host, total, 1.0));
     header.insert(
@@ -209,13 +228,62 @@ fn validate_event(db: &Connection, primary: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn summary(db: &Connection, primary: &str, limit: usize) -> Result<Value> {
+const INLINE_DEBITS: &str = "Inline debits have refill or scope attribution. A Capacity raise from an elided bound may appear as capacity_unattributed with no parent or limit. Exact source-scope coverage requires exact-logical observation.";
+
+fn summary(db: &Connection, quality: &Value, primary: &str, limit: usize) -> Result<Value> {
     let mut hotspots = Map::new();
     for event in events(db, primary)? {
         let rows = totals(db, &event, By::SelfCost, Group::DefPath, "*", Some(limit))?;
         hotspots.insert(event, Value::Array(rows.iter().map(Total::json).collect()));
     }
-    Ok(json!({"hotspots": hotspots}))
+    let mut result = json!({"hotspots": hotspots});
+    if !quality["mem_mode"].is_null() {
+        result["memory"] = peak_mem(db, quality, limit)?;
+    }
+    Ok(result)
+}
+
+fn peak_mem(db: &Connection, quality: &Value, limit: usize) -> Result<Value> {
+    let mode = quality["mem_mode"]
+        .as_str()
+        .ok_or("profile has no memory capture")?;
+    let limit_sql = bounded_limit(limit)?;
+    let peaks = select_result(
+        db,
+        "SELECT id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NULL ORDER BY metric",
+        [],
+        3,
+    )?;
+    let scopes = select_result(
+        db,
+        "SELECT id,scope_id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NOT NULL
+         ORDER BY length(CAST(total_bytes AS TEXT)) DESC,total_bytes DESC,scope_id,metric LIMIT ?1",
+        [limit_sql],
+        limit,
+    )?;
+    let callsites = select_result(db,
+        "SELECT p.metric,p.id AS snapshot_id,c.callsite_id,c.live_bytes,c.live_count,f.def_path,fr.file,fr.line
+         FROM peak_snapshot p JOIN peak_callsite c ON c.snapshot_id=p.id
+         JOIN callsite s ON s.id=c.callsite_id JOIN frame fr ON fr.id=s.frame_id
+         LEFT JOIN function f ON f.id=fr.function_id
+         WHERE p.scope_id IS NULL
+         ORDER BY length(CAST(c.live_bytes AS TEXT)) DESC,c.live_bytes DESC,p.id,c.callsite_id LIMIT ?1",
+         [limit_sql], limit)?;
+    let allocations = select_result(db,
+        "SELECT a.callsite_id,a.allocation_kind,a.observed_count,a.observed_bytes,
+                a.estimated_count,a.estimated_bytes,a.freed_count,a.lifetime_ns,f.def_path,fr.file,fr.line
+         FROM mem_alloc_agg a JOIN callsite s ON s.id=a.callsite_id JOIN frame fr ON fr.id=s.frame_id
+         LEFT JOIN function f ON f.id=fr.function_id
+         ORDER BY a.estimated_bytes DESC,a.callsite_id,a.allocation_kind LIMIT ?1", [limit_sql], limit)?;
+    let budgets = select_result(db,
+        "SELECT scope_id,parent_id,scope_kind,task_id,callsite_id,enter_ts,exit_ts,limit_val,peak_val,refused
+         FROM budget_scope_summary ORDER BY refused DESC,
+             CAST(peak_val AS REAL)/NULLIF(CAST(limit_val AS REAL),0) DESC,scope_id LIMIT ?1", [limit_sql], limit)?;
+    Ok(
+        json!({"mode":mode,"metric_version":quality["metric_version"],"inline_debit_caveat":INLINE_DEBITS,
+        "callsites_exact":quality["mem_callsites_exact"],
+        "peaks":peaks,"scope_peaks":scopes,"peak_callsites":callsites,"allocations":allocations,"budgets":budgets}),
+    )
 }
 
 const TABLES: &[&str] = &[
@@ -236,6 +304,10 @@ const TABLES: &[&str] = &[
     "causal_edge",
     "host_stack_interval",
     "io_op",
+    "peak_snapshot",
+    "peak_callsite",
+    "mem_alloc_agg",
+    "budget_scope_summary",
 ];
 
 fn schema(db: &Connection, limit: usize) -> Result<Value> {
@@ -370,6 +442,7 @@ fn annotate(db: &Connection, target: &str, limit: usize) -> Result<Value> {
             "source": row.get::<_, Option<String>>(2)?,
             "cpu": serde_json::from_str::<Value>(row.get_ref(3)?.as_str()?)?,
             "remarks": serde_json::from_str::<Value>(row.get_ref(4)?.as_str()?)?,
+            "allocations": serde_json::from_str::<Value>(row.get_ref(5)?.as_str()?)?,
         }));
     }
     Ok(json!({"rows": result, "limit": unsigned(limit as u64),
@@ -568,7 +641,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn annotate_aggregates_cpu_and_remarks_before_joining_lines() {
+    fn annotate_aggregates_cpu_remarks_and_allocations_before_joining_lines() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("schema.sql")).unwrap();
         db.execute_batch(
@@ -578,6 +651,11 @@ mod tests {
              INSERT INTO line_cpu_summary VALUES ('math.hirsel',7,1,'instructions',20,2),
                                                 ('math.hirsel',7,2,'instructions',15,1),
                                                 ('math.hirsel',7,3,'instructions',90,9);
+             INSERT INTO frame(id,function_id,file,line,inlined) VALUES
+                (1,1,'math.hirsel',7,0),(2,2,'math.hirsel',7,0);
+             INSERT INTO callsite VALUES (1,NULL,1,0),(2,NULL,2,0);
+             INSERT INTO mem_alloc_agg VALUES
+                (1,'region',1,16,1.0,16.0,0,0),(2,'region',1,24,2.0,48.0,0,0);
              INSERT INTO codegen_remark VALUES
                 (1,'math.hirsel',7,3,'bounds_check','elided','source_remark',1),
                 (2,'math.hirsel',7,3,'bounds_check','elided','source_remark',2),
@@ -593,6 +671,8 @@ mod tests {
             json!({
                 "file": "math.hirsel", "line": 7, "source": null,
                 "cpu": [{"event": "instructions", "self_total": 35, "sample_count": 3}],
+            "allocations": [{"allocation_kind": "region", "observed_count": 2, "observed_bytes": 40,
+                             "estimated_count": 3.0, "estimated_bytes": 64.0}],
                 "remarks": [
                     {"kind": "bounds_check", "outcome": "elided", "evidence_level": "source_remark", "count": 3},
                     {"kind": "step_sync", "outcome": "emitted", "evidence_level": "source_remark", "count": 1},

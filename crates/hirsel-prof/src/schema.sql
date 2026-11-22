@@ -115,6 +115,47 @@ CREATE TABLE codegen_remark (
     PRIMARY KEY (file, line, function_id, col, kind, outcome, evidence_level)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE peak_snapshot (
+    id INTEGER PRIMARY KEY,
+    metric TEXT NOT NULL CHECK (metric IN ('charged_bytes', 'retained_bytes', 'slack_bytes')),
+    scope_id INTEGER,
+    ts_ns ANY NOT NULL,
+    total_bytes ANY NOT NULL
+) STRICT;
+
+CREATE TABLE peak_callsite (
+    snapshot_id INTEGER NOT NULL REFERENCES peak_snapshot,
+    callsite_id INTEGER NOT NULL REFERENCES callsite,
+    live_bytes ANY NOT NULL,
+    live_count ANY NOT NULL,
+    PRIMARY KEY (snapshot_id, callsite_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE mem_alloc_agg (
+    callsite_id INTEGER NOT NULL REFERENCES callsite,
+    allocation_kind TEXT NOT NULL CHECK (allocation_kind IN ('block', 'task_heap', 'region', 'task_storage', 'channel', 'cause_cell')),
+    observed_count ANY NOT NULL,
+    observed_bytes ANY NOT NULL,
+    estimated_count REAL NOT NULL,
+    estimated_bytes REAL NOT NULL,
+    freed_count ANY NOT NULL,
+    lifetime_ns ANY NOT NULL,
+    PRIMARY KEY (callsite_id, allocation_kind)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE budget_scope_summary (
+    scope_id INTEGER PRIMARY KEY,
+    parent_id INTEGER,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('bytes', 'steps', 'capacity_unattributed')),
+    task_id INTEGER NOT NULL,
+    callsite_id INTEGER NOT NULL REFERENCES callsite,
+    enter_ts ANY NOT NULL,
+    exit_ts ANY,
+    limit_val ANY,
+    peak_val ANY,
+    refused INTEGER NOT NULL CHECK (refused IN (0, 1))
+) STRICT;
+
 CREATE INDEX cpu_sample_callsite ON cpu_sample(callsite_id);
 CREATE INDEX fn_cpu_summary_event ON fn_cpu_summary(event);
 
@@ -178,3 +219,4 @@ CREATE TABLE io_op (
     error_code INTEGER,
     status INTEGER
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX peak_snapshot_scope ON peak_snapshot(scope_id, metric);

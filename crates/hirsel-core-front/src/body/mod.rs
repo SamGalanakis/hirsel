@@ -1257,6 +1257,7 @@ struct Cx<'c, 'a, 'e> {
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
+    diagnostic_callee: Option<calls::DiagnosticCallee>,
     /// Completed array elements still owned separately during construction.
     array_parts: Vec<ValueId>,
     instance_rows: hashbrown::HashTable<BodyInstance>,
@@ -1421,6 +1422,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             key_metadata_builds: 0,
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
+            diagnostic_callee: None,
             array_parts: vec![],
             instance_rows: hashbrown::HashTable::new(),
             instance_args: vec![],
@@ -1504,14 +1506,18 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     /// `ty` as a refusal shows it, each region root by its source name (PROG-7).
     fn shown(&self, ty: TyId) -> String {
+        self.shown_in(ty, &self.fd)
+    }
+
+    fn shown_in(&self, ty: TyId, function: &FnDecl) -> String {
         let symbols = &self.p.index.symbols;
         let binders = &self.p.items[self.at.module as usize][self.at.item as usize]
             .resolution
             .binders;
         let root = |r: &Root, s: &mut String| {
             let name = match *r {
-                Root::Parameter(i) => self.fd.params.get(i as usize).map(|q| q.name),
-                Root::Generic(i) => self.fd.generics.get(i as usize).map(|g| g.name),
+                Root::Parameter(i) => function.params.get(i as usize).map(|q| q.name),
+                Root::Generic(i) => function.generics.get(i as usize).map(|g| g.name),
                 Root::Local(b) => binders.get(b as usize).map(|b| b.name),
                 // A callable type's parameters are unnamed: its root is a position.
                 Root::CallableParameter { index, .. } => {
@@ -1628,8 +1634,14 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let required = field.map_or("positional".to_owned(), |f| format!("{f}:"));
         self.refuse_compared("LANG-9", a, written, required, message);
     }
-    fn push_refusal(&mut self, r: Refusal) {
+    fn push_refusal(&mut self, mut r: Refusal) {
         crate::cost_scope!("phase", "diagnostics/gaps");
+        if r.rule == "LANG-11"
+            && let Some(callee) = self.diagnostic_callee
+        {
+            r.message.push_str(". Expected signature: ");
+            r.message.push_str(&self.shown_callee(callee));
+        }
         self.out.refusals.push(r);
         self.halt();
     }
@@ -1756,7 +1768,14 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         {
             let (a, b) = (self.shown(w.ty), self.shown(t));
             let message = format!("expected `{a}`, found `{b}`");
+            let previous = self.diagnostic_callee;
+            if self.kind(n) == NodeKind::Call
+                && let Some(callee) = self.named_callee(self.kids(n)[0])
+            {
+                self.diagnostic_callee = Some(calls::DiagnosticCallee::Named(callee));
+            }
             self.refuse_compared("LANG-11", n, b, a, message);
+            self.diagnostic_callee = previous;
         }
     }
 

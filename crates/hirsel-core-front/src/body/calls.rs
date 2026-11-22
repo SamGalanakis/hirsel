@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum DiagnosticCallee {
+    Named(usize),
+    Value(TyId),
+}
+
 #[derive(Default)]
 pub(super) struct CallScratch {
     pub(super) found: Vec<Option<TyId>>,
@@ -147,7 +153,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 "a writer call's Result is the operand of a `?` or the returned tail",
             );
         }
+        let previous = self.diagnostic_callee.take();
         let result = self.call_inner(n, c[0], &c[1..], want, &mut scratch);
+        self.diagnostic_callee = previous;
         self.call_scratch.push(scratch);
         result
     }
@@ -165,7 +173,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let destination = self.destination.take();
         self.mapped_error = Some((n, error, value));
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        let previous = self.diagnostic_callee.take();
         let result = self.call_inner(n, mapper, &[n], expect(mapped), &mut scratch);
+        self.diagnostic_callee = previous;
         self.call_scratch.push(scratch);
         // A refused mapper leaves its argument unread; it is not owned here.
         self.mapped_error = None;
@@ -199,6 +209,51 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         Some(&resolved.target)
+    }
+
+    pub(super) fn named_callee(&self, callee: NodeId) -> Option<usize> {
+        let Target::Definition(id) = self.call_target(callee)? else {
+            return None;
+        };
+        match self.p.by_definition[id.0 as usize] {
+            Some(Def::Fn(f)) => Some(f as usize),
+            _ => None,
+        }
+    }
+
+    pub(super) fn shown_callee(&self, callee: DiagnosticCallee) -> String {
+        use std::fmt::Write;
+        let DiagnosticCallee::Named(index) = callee else {
+            let DiagnosticCallee::Value(ty) = callee else {
+                unreachable!()
+            };
+            return self.shown(ty);
+        };
+        let function = &self.p.fns[index];
+        let symbols = &self.p.index.symbols;
+        let mut text = format!("{}(", function.path);
+        for (i, parameter) in function.params.iter().enumerate() {
+            if i != 0 {
+                text.push_str(", ");
+            }
+            if parameter.bytes {
+                text.push_str("bytes ");
+            } else if parameter.mode != Mode::View {
+                write!(text, "{} ", parameter.mode.keyword()).unwrap();
+            }
+            write!(
+                text,
+                "{}: {}",
+                symbols.text(parameter.name),
+                self.shown_in(parameter.ty, function)
+            )
+            .unwrap();
+        }
+        write!(text, ") -> {}", self.shown_in(function.result, function)).unwrap();
+        if function.waits {
+            text.push_str(" waits");
+        }
+        text
     }
 
     fn lend_direct_argument(&self, call: u32, at: At) -> bool {
@@ -247,6 +302,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => return self.call_value(n, callee, args, want, scratch),
         };
         let g = &p.fns[f];
+        self.diagnostic_callee = Some(DiagnosticCallee::Named(f));
         if mentions_error(&self.t, g.callable) {
             // The callee's signature owns the diagnostic.
             self.inherited_refusal = true;

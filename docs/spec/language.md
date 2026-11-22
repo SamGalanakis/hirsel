@@ -352,6 +352,10 @@ fn f(x: u8) -> u8 { x }
 fn g() -> u8 { f(1, 2) }                                  // refused: LANG-11, at 2: f takes one argument
 ```
 
+A call's argument-count or type refusal names the expected signature. Types in the
+diagnostic use their defining package and module paths, so `std@1/upgrade/Socket`
+and `core@1/core/Socket` remain distinct even though both are named `Socket`.
+
 ### LANG-12: Generics
 
 A definition may take type parameters with bounds, `[T: key + send]`. A generic body is

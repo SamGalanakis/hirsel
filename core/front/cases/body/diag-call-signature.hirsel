@@ -1,0 +1,10 @@
+fn port(value: u16) -> u16 { value }
+fn missing() -> u16 { port() }
+fn wrong() -> u16 { port(true) }
+fn indirect(f: fn(u64) -> u64) -> u64 { f() }
+// expect: refuse LANG-11 at 2:28
+// expect: message LANG-11 at 2:28 | Expected signature: app@1/main/port(value: u16) -> u16
+// expect: refuse LANG-11 at 3:26
+// expect: message LANG-11 at 3:26 | Expected signature: app@1/main/port(value: u16) -> u16
+// expect: refuse LANG-11 at 4:43
+// expect: message LANG-11 at 4:43 | Expected signature: fn(u64) -> u64

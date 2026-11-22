@@ -400,6 +400,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             }
         };
+        self.diagnostic_callee = Some(calls::DiagnosticCallee::Value(ty));
         if args.len() < scratch.params.len() {
             let message = "a callable needs one argument per parameter".to_owned();
             self.refuse_arity_at(

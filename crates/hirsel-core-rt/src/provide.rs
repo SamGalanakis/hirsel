@@ -20,6 +20,7 @@ use hirsel_core_layout::charge::PROVIDE_CELL;
 use hirsel_core_net::exec::{ExecRules, served as exec};
 use std::{
     collections::BTreeMap,
+    mem::ManuallyDrop,
     ptr,
     sync::{Mutex, MutexGuard, OnceLock},
 };
@@ -664,12 +665,20 @@ static SERVERS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
 /// The run's cells, each with the payer of its charge and the amount. Boxed
 /// so each provider's state pointer stays put.
 #[derive(Default)]
-pub(crate) struct Cells(Mutex<Vec<(Box<Cell>, crate::limit::Payer, u64)>>);
+pub(crate) struct Cells(Mutex<ManuallyDrop<Vec<(Box<Cell>, crate::limit::Payer, u64)>>>);
 // SAFETY: a payer designates a limit record the run pins until teardown,
 // which refunds it under the run's ownership.
 unsafe impl Send for Cells {}
 // SAFETY: as Send; every access goes through the mutex.
 unsafe impl Sync for Cells {}
+
+impl Drop for Cells {
+    fn drop(&mut self) {
+        if let Some(hooks) = SCHEDULER_HOOKS.get() {
+            (hooks.drop_cells)(self);
+        }
+    }
+}
 
 /// `clock.idle` tokens waiting anywhere in the process, with their cell. A
 /// quiescent run wakes only the ones among its own parked operations.
@@ -697,6 +706,7 @@ struct SchedulerHooks {
     wait: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait,
     quiesce: fn(&dyn Fn(u64) -> bool) -> bool,
     forget: fn(&mut Cells),
+    drop_cells: fn(&mut Cells),
 }
 
 // A ordinary provider run has no cell callbacks. The first cell installs the
@@ -1184,13 +1194,14 @@ impl Cells {
                 ..Outcome::default()
             });
         }
-        let mut cells = lock(&self.0);
-        cells.push((Box::new(cell), payer, charge));
         SCHEDULER_HOOKS.get_or_init(|| SchedulerHooks {
             wait: PROVIDER.wait,
             quiesce: wake_quiescent,
             forget: forget_cells,
+            drop_cells,
         });
+        let mut cells = lock(&self.0);
+        cells.push((Box::new(cell), payer, charge));
         Ok(Provider {
             state: (&raw const *cells.last().unwrap().0).cast_mut().cast(),
             ..PROVIDER
@@ -2253,7 +2264,7 @@ pub(crate) fn forget(cells: &mut Cells) {
 }
 
 fn forget_cells(cells: &mut Cells) {
-    let cells = std::mem::take(cells.0.get_mut().unwrap_or_else(|e| e.into_inner()));
+    let cells = std::mem::take(&mut **cells.0.get_mut().unwrap_or_else(|e| e.into_inner()));
     let states: Vec<usize> = cells
         .iter()
         .map(|(c, _, _)| &raw const **c as usize)
@@ -2263,6 +2274,12 @@ fn forget_cells(cells: &mut Cells) {
     for (_, payer, charge) in cells {
         payer.refund(charge);
     }
+}
+
+fn drop_cells(cells: &mut Cells) {
+    // SAFETY: Cells owns the vector. Its Drop runs once, and its constructor
+    // installs this callback before putting any cell in the vector.
+    unsafe { ManuallyDrop::drop(cells.0.get_mut().unwrap_or_else(|e| e.into_inner())) };
 }
 
 #[cfg(test)]

@@ -11342,6 +11342,7 @@ type DiskConnection {
     open: u64,
     options: Options,
     lease: Option[Arc[ExportLease]],
+    scrubs: List[Arc[ScrubLease]],
     imported: Option[Imported],
     reserving: Option[Inline[u8, 32]],
     target: Option[TargetLimits],
@@ -11512,7 +11513,7 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     db.uncovered = uncovered
     db.checkpointed = generation
     capacity(list.try_reserve(mut db.disk, 1))?
-    list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, lease: None, imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages))
+    list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages))
     let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
         Ok(journal_channels(int.widen(options.group_commits)))
     })?
@@ -11681,12 +11682,12 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     seal(mut raw, context, db.fence)
 }
 
-fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
+fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], scrubs: List[Arc[ScrubLease]], first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
     let mut locations = share_page_locations(layout.locations)
     let mut packs: List[u64] = list.new()
     let mut carried: List[u64] = list.new()
     for seq in layout.lists.removals {
-        if pack_leased(lease, seq) {
+        if pack_leased(lease, seq) || scrub_leased(scrubs, seq) {
             list.push(mut carried, seq)
         } else {
             let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
@@ -11769,6 +11770,7 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
     db.file_seq = seq
     db.file_end = 72
     prepare_holder_slot(mut db, delta)?
+    prune_scrubs(mut db.disk[0u64].scrubs)
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
         cut_participants(db, delta)
     })?
@@ -11794,7 +11796,7 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
             let PackBuffers(out: take out, ..) = take reserved
             let mut manifest = take out
             let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
-                cut_retirement(layout, holders, db.disk[0u64].lease, prev_first, seq)
+                cut_retirement(layout, holders, db.disk[0u64].lease, db.disk[0u64].scrubs, prev_first, seq)
             })?
             fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, seal)?
             Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))

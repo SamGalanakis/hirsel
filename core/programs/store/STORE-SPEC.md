@@ -1,4 +1,6 @@
-# STORE-SPEC v2.41: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.42: the M4 store library (lane store-spec-1001)
+
+v2.42 (lane store-scrub-1786, store durability round 2 item 4): **built.** §11.17 adds an online scrub. `begin_scrub` leases the packs the current generation lists, and `scrub_step` rereads them from disk under a byte budget, apart from every resident page. It checks each frame's envelope, and each reachable frame against the pointer the generation holds to it. It reports faults with their generation, file, offset and kind. It never repairs and never writes. See CHANGES-v2.42.
 
 v2.41 (Store M1-4). The store opens and writes format 3. The format-3 contract is §11. M1-7 is part of this slice after R1 failed Guard B on the page-copy candidate. AP9 stages row and stream writes on immutable heads, and AP10 applies the staged operations on the writer. The journaled fork (AP17–AP19) is planned. M1-6 adds the public scoped-view API (AP12).
 
@@ -106,7 +108,14 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
 
-## CHANGES-v2.40 (store-c-review-1692: §11 and store.md, not yet built)
+## CHANGES-v2.42 (store-scrub-1786: §11.17, built)
+
+| # | Item | Verdict | What v2.42 does | Where |
+|---|---|---|---|---|
+| SC1 | An open Store answered from resident pages after its pack bytes went bad, and nothing reread them until the next open | **built** | `begin_scrub` and `scrub_step`, an operator-requested tour under a byte budget | §11.17, §11.16 |
+| SC2 | A cut could unlink a retired pack while a tour still had to read it | **built** | The tour's lease names the packs it listed. A cut carries a leased retirement, as it does for an export lease (§3.5a). The first cut after the tour is dropped unlinks the pack | §11.17 |
+| SC3 | Envelope checks alone accept a stale frame that was correctly sealed for the same place, for example a lost write over a leftover of the same pack number | **built** | A reachable frame must also match the length and plain xxh3 of the generation's pointer to it | §11.17 |
+
 
 | # | Item | Verdict | What v2.40 does | Where |
 |---|---|---|---|---|
@@ -2902,6 +2911,10 @@ pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | N
 pub type ServeError = Before(Error, Option[Pending]) | After(Error)   // Some(p) only from conclude refused before publication
 pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
 pub type DeployError = … | FullNew(StoreCapacity)                  // §3.5a; its other cases unchanged
+pub opaque type Scrub                                              // v2.42, §11.17: one tour; dropping it ends its lease
+pub type ScrubReport { generation: u64, checked: u64, next: Option[u64], faults: List[Fault] }
+pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error]            // NotFound on a memory store, Poisoned(e) on a poisoned Db
+pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] waits
 ```
 
 - `fork`'s signature is unchanged. A live-head fork returns after its FORK frame is synced, with a journal-mark ticket that is already durable, and is never refused by admission; the journal cap returns `Full(Journal(c))` and an allocator refusal during its preparation `Full(Allocation(c))`, before anything is sent (AP17).
@@ -2916,3 +2929,43 @@ pub type DeployError = … | FullNew(StoreCapacity)                  // §3.5a; 
 
   The type is used in `Error.Full`, `Outcome.Refused`, `Looked.Refused`, `Served.NoRoom` and `DeployError.FullNew`. Core `Capacity { requested, available }` keeps its fields, and the core allocator keeps reporting it. `Stop.OutOfBytes(Capacity)` stays core: it is the body's own byte bound, not a store resource, and `conclude`'s `Failed(OutOfBytes(Room{…}))` keeps its fields. Neither the COMMIT format nor CALL replay identity changes: a cause is never written to a frame, and settle 2 means a resident admission refusal, as before.
 - **Each operation keeps its own result shape (v2.40, ruling (a)).** `run` and `run_on` return `Refused(cause)`. A committing `admit` and a live-head `fork` return `Error(Full(cause))`. `serve` and `conclude` return `Error(Before(Full(cause), …))` before publication and `After(e)` after it (AP15's producer table). A `look` returns `Refused(cause)`. Cut-made operations return `Error(Full(cause))`, and install returns `FullNew(cause)`.
+
+### 11.17 Scrub (v2.42)
+
+Open checks every listed pack once. After that, the Store answers from resident pages, so damage to the on-disk copy stays hidden until the next open. A scrub rereads that copy while the Store stays open. An operator requests it and paces it. It is a diagnostic: it detects damage and does not repair it. Repair needs a separately verified copy. TigerBeetle's grid scrubber (`src/vsr/grid_scrubber.zig`) also bypasses the block cache and tracks blocks that a concurrent checkpoint releases.
+
+**Begin.** `begin_scrub(mut db)` captures the current generation: `generation` (the cut count), the listed pack inventory with each pack's class, frame count and payload bytes, the next stamp, and a share of the generation's frame records. The share is a persistent-index share, so capturing it copies nothing. The tour holds `Dir`. It reads files by name and uses no resident page body. A memory store returns `NotFound`, and a poisoned Db returns `Poisoned(e)`. Any number of tours may run at once, and each holds its own lease.
+
+**Lease.** The Db and the tour each hold a share of the tour's lease, which lists the captured packs. A cut that retires a leased pack keeps the file and carries the retirement, as §3.5a does for an export lease. Every cut first drops each lease that only the Db still holds, because its tour has been dropped. The first cut after a tour ends unlinks the packs that tour held back. While a tour lives, disk holds at most its generation's packs plus whatever later cuts write. The tour does not lease journal segments, because it does not read them. A tour that outlives `close` has no lease. The next opener may then remove a retired pack, and the step that would read it returns `Io(NotFound)`.
+
+**Step.** `scrub_step(mut tour, budget)` reads at least one unit and stops once it has read `budget` bytes in this step. A unit is a pack's HEADER (72 bytes), one frame (16 + its length), or a pack's end. So a step reads less than `budget` + 16 + 16,711,688 bytes, the largest frame (BLOB). A step holds one 65,536-byte chunk, a 16-byte head and a stamp prefix of at most 16 bytes. Each byte is hashed twice, once for the bound check and once for the plain xxh3. Each frame costs one lookup in the record index. A full tour reads each listed pack byte once. The tour's own memory is one inventory entry (sequence, class, frame count, payload bytes) and one 8-byte lease entry per listed pack, plus the record versions its share keeps alive after later cuts replace them, at most the size of the index at begin. The step makes only `open`, `stat`, `read_at` and `close` host calls. It never writes, renames, removes or syncs.
+
+**Checks, per listed pack in ascending sequence:**
+- The HEADER: role 3, the pack's sequence and the store identity, as at open.
+- Every frame, live or dead:
+  - the head (kind, flags and length limits) and the bound check over its identity, file and offset (§2.8);
+  - the kind the pack's class requires: 0x0021 for classes 0 and 2, 0x0022 for class 1;
+  - unknown non-required kinds within `UNKNOWN_ROOM`;
+  - the stamp, nonzero and below the next stamp captured at begin.
+- **Every reachable frame.** When the generation's record for the frame's stamp places it at this pack and offset, the frame's length must equal the pointer's length, and the plain xxh3 must equal the pointer's checksum. That xxh3 covers a PAGE's whole payload or a BLOB's body. The check catches a stale frame that a lost write left at its own place, which the bound check accepts. A dead copy has no record at its place, so it gets the envelope checks alone.
+- At the pack's end, the frame count and payload bytes must equal the generation's pack record.
+
+**Report.** `ScrubReport { generation, checked, next, faults }`:
+- `checked` is the bytes the tour has read so far.
+- `next` is the oldest pack not yet finished, or `None` when the tour is done.
+- `faults` holds the faults this step found, each a `Fault { file, offset, why }`.
+- A fault ends that pack's tour, because the next frame boundary past a bad head is unknown. A pack therefore reports at most one fault.
+- A required kind that the opener does not support is reported as `Kind(k)`.
+- Any other failure ends the step with that `Error`: `Io`, or `Full(Allocation(c))`.
+
+**Not checked, and why (reversible):**
+- Page body decode and the order of outgoing edges. Open checks them. A reachable frame whose bytes match its parent's pointer is the frame our writer placed there, and §2.8's host rule forbids guarding against our own writer.
+- The MANIFEST and journal segments. Open rereads them whole.
+
+A later version may add these, and a periodic tour with an I/O budget, without a format change.
+
+**Laws** (`store-scrub.hirsel`):
+- **Misdirected write, seen from both sides.** In TigerBeetle's fault model, pack A's first frame lands at offset 72 of pack B, and A's slot keeps its old sector (zeros). A tour over the damaged generation reports exactly (A, 72, `Kind(0)`) and (B, 72, `Checksum`). B's frame has a well-formed head, but its check binds A's sequence. The Db still answers reads.
+- **Stale frame at its own place.** A frame resealed for pack C at 72, with its last byte changed, gives (C, 72, `Checksum`), from the pointer check alone.
+- **Clean control.** Before the damage, the same generation reads with no fault, and `checked` equals the sum of the listed packs' file sizes.
+- **A scrub racing compaction.** A tour is begun, then a cut retires every data pack it holds. Each held file still exists, and the tour finishes clean. After the tour is dropped, the next cut leaves exactly the still-listed packs on disk.

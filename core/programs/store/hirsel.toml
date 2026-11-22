@@ -12,6 +12,7 @@ std = { major = 1 }
 "store-manifest.hirsel" = "store"
 "store-locations.hirsel" = "store"
 "store-packs.hirsel" = "store"
+"store-scrub.hirsel" = "store"
 "main.hirsel" = "main"
 "ingress.hirsel" = "ingress"
 "triggers.hirsel" = "triggers"

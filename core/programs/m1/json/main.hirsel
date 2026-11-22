@@ -15,7 +15,9 @@ fn make(take node: std.json.TreeValue[Json]) -> Json {
 fn parse_error(e: std.json.Error, n: u64) -> Result[m1.support.Error, m1.support.Error] {
     let prefix = match e {
         Syntax(_) => "Syntax",
+        WrongKind(_) => "Syntax",
         NotFinite(_) => "InvalidNumber",
+        IntegerRange(_) => "InvalidNumber",
         Depth => "Depth",
         Build(Overflow) => "Build",
     }

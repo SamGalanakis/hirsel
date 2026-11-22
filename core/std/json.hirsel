@@ -37,8 +37,10 @@ pub type Member {
 /// byte in a string, a lone surrogate, a leading zero, trailing bytes, or the end of the
 /// input. NotFinite(i): the number at i rounds to an infinity (`1e999`). Build(e): the
 /// document did not fit (Capacity) or exceeds W's blob cap (Overflow). Depth means
-/// the sizing pass encountered a 129th nested array or object.
-pub type Error = Syntax(u64) | NotFinite(u64) | Build(BuildError) | Depth
+/// the sizing pass encountered a 129th nested array or object. WrongKind(i)
+/// means a cursor reader expected another kind at i. IntegerRange(i) means
+/// the integer at i does not fit the requested width.
+pub type Error = Syntax(u64) | NotFinite(u64) | Build(BuildError) | Depth | WrongKind(u64) | IntegerRange(u64)
 
 const MAX_DEPTH: u64 = 128
 
@@ -81,6 +83,9 @@ pub fn parse(r: Region, s: String) -> Result[Json in r, Error] {
 pub opaque type Cursor {
     at: u64
 }
+
+/// The six JSON value kinds.
+pub type ValueKind: key = JsonNull | JsonBool | JsonNumber | JsonString | JsonArray | JsonObject
 
 /// Decodes one whole JSON value, allowing leading and trailing JSON whitespace.
 /// The reader composes record_of, list_of and the scalar readers for its type.
@@ -203,6 +208,95 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
     Ok(make(take node))
 }
 
+/// Identifies the next value's kind without advancing the cursor.
+pub fn peek(s: String, c: Cursor) -> Result[ValueKind, Error] {
+    let mut pos = c.at
+    skip(s, mut pos)
+    value_start(s, mut pos)
+}
+
+/// Reads one JSON boolean.
+pub fn read_bool(s: String, mut c: Cursor) -> Result[bool, Error] {
+    let (start, end) = expect_kind(s, c.at, JsonBool)?
+    c.at = end
+    Ok(at(s, start) == b't')
+}
+
+/// Reads one JSON string, decoding its escapes.
+pub fn read_string(s: String, mut c: Cursor) -> Result[String, Error] {
+    let (start, quote) = expect_kind(s, c.at, JsonString)?
+    let mut end = quote
+    let _ = string_size(s, mut end)?
+    let value = decode_string(s, start + 1)?
+    c.at = end
+    Ok(take value)
+}
+
+/// Reads one canonical signed decimal integer with an exact range check.
+pub fn read_i64(s: String, mut c: Cursor) -> Result[i64, Error] {
+    let (start, end) = integer_span(s, c.at)?
+    let value: i64 = int.parse(string.slice(s, start, end)) ?=> |e| integer_error(e, start)
+    c.at = end
+    Ok(value)
+}
+
+/// Reads one canonical unsigned decimal integer with an exact range check.
+pub fn read_u64(s: String, mut c: Cursor) -> Result[u64, Error] {
+    let (start, end) = integer_span(s, c.at)?
+    let value: u64 = int.parse(string.slice(s, start, end)) ?=> |e| integer_error(e, start)
+    c.at = end
+    Ok(value)
+}
+
+fn integer_span(s: String, from: u64) -> Result[(u64, u64), Error] {
+    let (start, _) = expect_kind(s, from, JsonNumber)?
+    let end = number_end(s, start)
+    if !canonical_decimal(string.slice(s, start, end)) {
+        return Error(Syntax(start))
+    }
+    Ok((start, end))
+}
+
+fn integer_error(e: ParseError, start: u64) -> Error {
+    match e {
+        OutOfRange => IntegerRange(start),
+        Invalid(offset) => Syntax(start + offset),
+        Empty => Syntax(start),
+    }
+}
+
+fn expect_kind(s: String, from: u64, expected: ValueKind) -> Result[(u64, u64), Error] {
+    let mut pos = from
+    skip(s, mut pos)
+    let start = pos
+    if value_start(s, mut pos)? != expected {
+        return Error(WrongKind(start))
+    }
+    Ok((start, pos))
+}
+
+/// Consumes null as None. Calls read_some for any other value.
+pub fn read_option[T](s: String, mut c: Cursor, read_some: scoped fn(String, mut Cursor) -> Result[T, Error]) -> Result[Option[T], Error] {
+    let mut pos = c.at
+    skip(s, mut pos)
+    if at(s, pos) == b'n' {
+        literal(s, mut pos, "null")?
+        c.at = pos
+        return Ok(None)
+    }
+    let value = read_some(s, mut c)?
+    Ok(Some(take value))
+}
+
+/// Checks and consumes one value, returning its original bytes without surrounding whitespace.
+pub fn read_raw(s: String, mut c: Cursor) -> Result[View[String], Error] in s {
+    let mut start = c.at
+    skip(s, mut start)
+    let (_, end) = sized_value(s, start)?
+    c.at = end
+    Ok(string.slice(s, start, end))
+}
+
 /// Reads one finite JSON number, with the same grammar as parse.
 pub fn read_f64(s: String, mut c: Cursor) -> Result[f64, Error] {
     skip(s, mut c.at)
@@ -253,7 +347,7 @@ fn decode_string(s: String, start: u64) -> Result[String, Error] {
     Ok(take key)
 }
 
-type EmitKind = Raw | Quoted | Key | Signed(i64) | Double(f64)
+type EmitKind = Raw | Quoted | Key | Signed(i64) | Unsigned(u64) | Double(f64)
 
 /// A scoped serializer that appends directly to the caller's String.
 pub scoped type Writer {
@@ -284,13 +378,14 @@ pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer)) {
                 })
             },
             Signed(n) => string.push_i64(mut out, n),
+            Unsigned(n) => string.push_u64(mut out, n),
             Double(n) => float.push_json_f64(mut out, n),
         }
     }, pretty)
     build(w)
 }
 
-fn raw(w: json.Writer, s: String) {
+fn append_raw(w: json.Writer, s: String) {
     (w.emit)(Raw, s)
 }
 
@@ -301,12 +396,25 @@ pub fn write_string_value(w: json.Writer, s: String) {
 
 /// Appends the original spelling of a number accepted by the JSON reader.
 pub fn write_number_spelling(w: json.Writer, spelling: String) {
-    raw(w, spelling)
+    append_raw(w, spelling)
 }
 
 /// Appends a signed integer as JSON.
 pub fn write_i64(w: json.Writer, n: i64) {
     (w.emit)(Signed(n), "")
+}
+
+/// Appends an unsigned integer as JSON.
+pub fn write_u64(w: json.Writer, value: u64) -> Result[(), Error] {
+    (w.emit)(Unsigned(value), "")
+    Ok(())
+}
+
+/// Appends raw only after checking that it contains one complete JSON value.
+pub fn write_raw(w: json.Writer, raw: String) -> Result[(), Error] {
+    let _ = size(raw)?
+    (w.emit)(Raw, raw)
+    Ok(())
 }
 
 /// Appends a binary64 using float.push_json_f64, including null for nonfinite.
@@ -316,7 +424,7 @@ pub fn write_f64(w: json.Writer, n: f64) {
 
 /// Appends the JSON spelling of a boolean.
 pub fn write_bool(w: json.Writer, b: bool) {
-    raw(w, if b {
+    append_raw(w, if b {
         "true"
     } else {
         "false"
@@ -325,24 +433,24 @@ pub fn write_bool(w: json.Writer, b: bool) {
 
 /// Appends JSON null.
 pub fn write_null(w: json.Writer) {
-    raw(w, "null")
+    append_raw(w, "null")
 }
 
 fn indent_line(w: json.Writer, depth: u64) {
-    raw(w, "\n")
+    append_raw(w, "\n")
     for _ in 0u64 .. depth {
-        raw(w, "  ")
+        append_raw(w, "  ")
     }
 }
 
 fn container(w: json.Writer, depth: u64, open: String, close: String, body: scoped fn(json.Writer, mut Items)) {
-    raw(w, open)
+    append_raw(w, open)
     let mut items = Items(depth: depth + 1, first: true)
     body(w, mut items)
     if w.pretty && !items.first {
         indent_line(w, depth)
     }
-    raw(w, close)
+    append_raw(w, close)
 }
 
 /// Appends an array. The root depth is zero. The body calls element
@@ -360,7 +468,7 @@ pub fn object(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items
 /// Writes the separator and any indentation before the next array value.
 pub fn element(w: json.Writer, mut items: Items) {
     if !items.first {
-        raw(w, ",")
+        append_raw(w, ",")
     }
     if w.pretty {
         indent_line(w, items.depth)
@@ -600,10 +708,6 @@ fn member[in a](ms: IndexedSpan[Member] in a, o: u32) -> View[Member] in ms {
     }
 }
 
-// Sizing pass. Each function starts at byte i, checks one item, leaves i just after it,
-// and returns the item's size in the document.
-type ValueStart: key = ReadNull | ReadTrue | ReadFalse | ReadNumber | ReadString | ReadArray | ReadObject
-
 fn literal(s: String, mut i: u64, word: String) -> Result[(), Error] {
     if !list.starts_with_at(string.as_bytes(s), i, string.as_bytes(word)) {
         return Error(Syntax(i))
@@ -612,33 +716,32 @@ fn literal(s: String, mut i: u64, word: String) -> Result[(), Error] {
     Ok(())
 }
 
-fn value_start(s: String, mut i: u64) -> Result[ValueStart, Error] {
-    skip(s, mut i)
+fn value_start(s: String, mut i: u64) -> Result[ValueKind, Error] {
     let c = at(s, i)
     match c {
         b'n' => {
             literal(s, mut i, "null")?
-            Ok(ReadNull)
+            Ok(JsonNull)
         },
         b't' => {
             literal(s, mut i, "true")?
-            Ok(ReadTrue)
+            Ok(JsonBool)
         },
         b'f' => {
             literal(s, mut i, "false")?
-            Ok(ReadFalse)
+            Ok(JsonBool)
         },
-        b'"' => Ok(ReadString),
+        b'"' => Ok(JsonString),
         b'[' => {
             i += 1
-            Ok(ReadArray)
+            Ok(JsonArray)
         },
         b'{' => {
             i += 1
-            Ok(ReadObject)
+            Ok(JsonObject)
         },
         _ => if c == b'-' || int.is_ascii_digit(c) {
-            Ok(ReadNumber)
+            Ok(JsonNumber)
         } else {
             Error(Syntax(i))
         },
@@ -664,29 +767,26 @@ fn sized_value(s: String, from: u64) -> Result[(u64, u64), Error] {
     let mut low: u64 = 0
     let mut high: u64 = 0
     loop {
+        skip(s, mut i)
         let opened: u8 = match value_start(s, mut i)? {
-            ReadNull => {
+            JsonNull => {
                 n += 1
                 0
             },
-            ReadTrue => {
+            JsonBool => {
                 n += 1
                 0
             },
-            ReadFalse => {
-                n += 1
-                0
-            },
-            ReadString => {
+            JsonString => {
                 n += 5 + string_size(s, mut i)?
                 0
             },
-            ReadNumber => {
+            JsonNumber => {
                 n += 5 + number_size(s, mut i)?
                 0
             },
-            ReadArray => b']',
-            ReadObject => b'}',
+            JsonArray => b']',
+            JsonObject => b'}',
         }
         if opened != 0 {
             if depth == MAX_DEPTH {
@@ -1505,14 +1605,14 @@ fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError]
     let start = d.pos
     let head = value_start(s, mut d.pos)
     let close: u8 = match read_error(take head, mut d)? {
-        ReadArray => b']',
-        ReadObject => b'}',
-        ReadString => {
+        JsonArray => b']',
+        JsonObject => b'}',
+        JsonString => {
             let measured = string_size(s, mut d.pos)
             let _ = read_error(take measured, mut d)?
             return Ok(())
         },
-        ReadNumber => {
+        JsonNumber => {
             let measured = number_size(s, mut d.pos)
             let _ = read_error(take measured, mut d)?
             return Ok(())

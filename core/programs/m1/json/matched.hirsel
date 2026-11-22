@@ -1,7 +1,9 @@
 fn problem(e: std.json.Error, number: u64) -> Result[m1.support.Error, m1.support.Error] {
     let label = match e {
         Syntax(_) => m1.support.name("Syntax@document", number, ""),
+        WrongKind(_) => m1.support.name("Syntax@document", number, ""),
         NotFinite(_) => m1.support.name("InvalidNumber@document", number, ""),
+        IntegerRange(_) => m1.support.name("InvalidNumber@document", number, ""),
         Depth => m1.support.name("Depth@document", number, ""),
         Build(Overflow) => m1.support.name("Build@document", number, ""),
     }

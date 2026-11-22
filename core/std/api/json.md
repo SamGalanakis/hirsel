@@ -61,8 +61,17 @@ duplicate names. Floats must be finite. Measurement returns
 ## Documents, callback readers and writers
 
 Use `decode` to read one complete value into an owned type. Compose
-`record_of` for object members, `list_of` for arrays, and `read_f64` for
-numbers. A record reader receives decoded keys in their input order and
+`record_of` for object members and `list_of` for arrays. `peek` reports the
+next `ValueKind` without advancing the cursor. `read_bool` and `read_string`
+read booleans and decoded strings. `read_i64` and `read_u64` require canonical
+decimal integers in range. These readers report `WrongKind` at a different
+value kind, and the integer readers report `IntegerRange` on overflow.
+`read_f64` reads finite floating-point numbers. `read_option` consumes null as
+None and calls the supplied reader for other values. `read_raw` consumes one
+value and returns its exact spelling as a view of the input, excluding
+surrounding whitespace.
+
+A record reader receives decoded keys in their input order and
 chooses which fields to keep. It calls `skip_value` for unknown fields to
 check their syntax without building a DOM.
 
@@ -76,6 +85,10 @@ Use `write` to serialize one value directly into a caller-owned `String`.
 The scoped callback writes scalars or opens an object or array. Call
 `write_member` before each object value and `element` before each array
 value. Pretty mode indents two spaces for each level.
+
+`write_u64` appends an unsigned decimal. `write_raw` checks that its input
+contains one complete JSON value under the same checks as `size`, then
+appends it verbatim. A validation error leaves the output intact.
 
 Each completed append stays in the output if a later append refuses
 Capacity. A quoted string appends its opening quote, each unescaped run

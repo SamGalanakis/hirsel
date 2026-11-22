@@ -900,6 +900,118 @@ fn typed_json_interop_contract() -> bool {
     interop_ignored_members(format) && interop_record_commas(format) && interop_numbers_and_maps() && interop_closed()
 }
 
+fn cursor_item(s: String, mut c: json.Cursor) -> Result[u64, json.Error] {
+    match json.peek(s, c)? {
+        JsonBool => if json.read_bool(s, mut c)? {
+            Ok(2)
+        } else {
+            Ok(1)
+        },
+        JsonNull => {
+            let mut called = false
+            let item = json.read_option(s, mut c, scoped fn(input: String, mut cursor: json.Cursor) -> Result[u64, json.Error] {
+                called = true
+                json.read_u64(input, mut cursor)
+            })?
+            match item {
+                None => Ok(if called {
+                    0
+                } else {
+                    3
+                }),
+                Some(_) => Ok(0),
+            }
+        },
+        JsonNumber => match json.read_option(s, mut c, json.read_u64)? {
+            Some(18446744073709551615) => Ok(4),
+            _ => Ok(0),
+        },
+        JsonString => Ok(if json.read_string(s, mut c)? == "😀" {
+            5
+        } else {
+            0
+        }),
+        JsonArray => {
+            let raw = json.read_raw(s, mut c)?
+            Ok(if raw == "[null]" {
+                6
+            } else {
+                0
+            })
+        },
+        JsonObject => {
+            let raw = json.read_raw(s, mut c)?
+            Ok(if raw == "{\"\\u0061\": 1 }" {
+                7
+            } else {
+                0
+            })
+        },
+    }
+}
+
+fn cursor_integers() -> bool {
+    let signed = match json.decode(" -9223372036854775808 ", json.read_i64) {
+        Ok(value) => value == -9223372036854775808,
+        _ => false,
+    }
+    let large = match json.decode(" 18446744073709551616", json.read_u64) {
+        Error(IntegerRange(1)) => true,
+        _ => false,
+    }
+    let small = match json.decode("-9223372036854775809", json.read_i64) {
+        Error(IntegerRange(0)) => true,
+        _ => false,
+    }
+    let fraction = match json.decode("1e0", json.read_i64) {
+        Error(Syntax(1)) => true,
+        _ => false,
+    }
+    let noncanonical = match json.decode("01", json.read_u64) {
+        Error(Syntax(0)) => true,
+        _ => false,
+    }
+    let wrong_kind = match json.decode(" null", json.read_bool) {
+        Error(WrongKind(1)) => true,
+        _ => false,
+    }
+    signed && large && small && fraction && noncanonical && wrong_kind
+}
+
+fn cursor_writer() -> bool {
+    let mut out = string.from("prefix")
+    let mut refused = false
+    json.write(mut out, false, scoped fn(w: json.Writer) {
+        refused = match json.write_raw(w, "1,2") {
+            Error(Syntax(1)) => true,
+            _ => false,
+        }
+        json.array(w, 0, fn(array: json.Writer, mut items: json.Items) {
+            json.element(array, mut items)
+            result.unwrap(json.write_u64(array, 18446744073709551615))
+            json.element(array, mut items)
+            result.unwrap(json.write_raw(array, " {\"x\":true} "))
+        })
+    })
+    refused && out == "prefix[18446744073709551615, {\"x\":true} ]"
+}
+
+// expect: run json_streaming_contract() = true
+fn json_streaming_contract() -> bool {
+    let items = result.unwrap(json.decode("[false,true, null,18446744073709551615, \"\\ud83d\\ude00\", [null], {\"\\u0061\": 1 } ]", fn(s: String, mut c: json.Cursor) -> Result[List[u64], json.Error] {
+        json.list_of(s, mut c, cursor_item)
+    }))
+    if list.len(items) != 7 {
+        return false
+    }
+    for i in 0u64 .. 7 {
+        if items[i] != i + 1 {
+            return false
+        }
+    }
+    cursor_integers() && cursor_writer()
+}
+
 // The primary cause of a caught failure, when it is a refused admission.
 fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {
